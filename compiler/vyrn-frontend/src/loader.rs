@@ -594,7 +594,38 @@ pub const RT_MODULES: &[RtModule] = &[
             ("slice", "strpred$sliceV"),
         ],
     },
+    // RFC-0081 M2: the six decimal places. Listed as DESUGARED rather than routed
+    // for the same reason `toJson` is — `@str` is type-directed and only its float
+    // case is a call; an `Int64` still renders with `%lld` and a `Bool` with a
+    // `select`, neither of which a `(builtin, function)` row can express. `print`
+    // is here because it formats a float without going through `@str`, and a
+    // program that says `print(1.5)` and never interpolates would otherwise reach
+    // a formatter that is not in its link.
+    //
+    // Which means nearly every program in the repo now links this module, and the
+    // measured price of that is the reason it is affordable: the direct backend
+    // sweeps unreached functions (`Module::sweep`), so a program that formats no
+    // float carries none of it, and a `vyrn check` pays ~2 ms for the parse the
+    // loader memoizes anyway.
+    RtModule {
+        spec: "std/num",
+        prefix: "num$",
+        desugared: &["@str", "print"],
+        routes: &[],
+    },
 ];
+
+/// The reserved spelling of `std/num`'s float formatter — the ONE float formatter
+/// the two compiled backends have (RFC-0081 M2), reached from `@str` and from
+/// `print`. Spelled here rather than in each backend for the reason a route is:
+/// the prefix and the name have to agree with the table above, and
+/// `the_float_formatter_is_std_nums` is what keeps that honest.
+///
+/// Not a `routes` row, because a route is a whole-builtin rename and this is one
+/// CASE of one: `@str` on an `Int64` still renders with `%lld`, on a `Bool` with a
+/// `select`, and only a float becomes a call. That is the same reason `toJson` is
+/// a desugar (see [`RtModule::desugared`]).
+pub const F64_STR: &str = "num$f64Str";
 
 /// The reserved spelling a routed builtin's call becomes, or `None` for a name no
 /// runtime module implements.
@@ -1200,6 +1231,16 @@ fn load_modules(
         let Ok(target) = resolve_spec(rt.spec, &root_key, opts) else {
             continue;
         };
+        // The same rule one step further in, and RFC-0081 M2 is what made it
+        // necessary: a spec can RESOLVE against a root that has no such file, and
+        // `@str`/`print` mean nearly every program now reaches this loop. A
+        // resolver serving a partial std tree (an in-memory one, an editor's) would
+        // otherwise fail to load programs that never format a float. A module that
+        // is present but broken still fails the load below — this skips only what
+        // cannot be read at all.
+        if !states.contains_key(&target) && resolver.read(&target).is_err() {
+            continue;
+        }
         if !states.contains_key(&target) {
             if let Err(mut diags) = visit(
                 &target,
@@ -3835,6 +3876,20 @@ mod tests {
             Some("strpred$sliceV"),
             "`slice` returns its failure now; RFC-0079 M3 routed it"
         );
+    }
+
+    /// RFC-0081 M2: [`F64_STR`] is a name two backends emit a call to, so the
+    /// module it names has to be in the table and its prefix has to be the one it
+    /// is spelled with. Neither backend can check that for itself — a mismatch is
+    /// a link error in a program that formats a float, which is most of them.
+    #[test]
+    fn the_float_formatter_is_std_nums() {
+        let num = RT_MODULES.iter().find(|rt| rt.spec == "std/num").expect("std/num is linked");
+        assert!(F64_STR.starts_with(num.prefix), "`{F64_STR}` vs `{}`", num.prefix);
+        // Both spellings that reach it, and neither is a route: the float case is
+        // one case of a type-directed builtin.
+        assert!(num.desugared.contains(&"@str") && num.desugared.contains(&"print"));
+        assert!(routed_builtin(F64_STR).is_none());
     }
 
     pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {

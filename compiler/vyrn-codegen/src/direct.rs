@@ -510,21 +510,15 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // memory, so the JS caller has to allocate inside it before it can call in —
     // which is the whole reason an export's String ABI differs from an import's
     // (one `ptr`, not a `(ptr, len)` pair). On the LLVM path this is
-    // `-Wl,--export=__vyrn_malloc`, under exactly the same condition. The wrapper
-    // exists because the boundary's `__vyrn_malloc` takes an `unsigned long long`
-    // and the emitted one takes an `i32`: `wasi-min.js` passes a BigInt, so the
-    // exported signature has to be the C one or every call traps on the argument
-    // type. Without this, every DOM handler in `web/domdemo.html` throws.
+    // `-Wl,--export=__vyrn_malloc`, under exactly the same condition. The emitted
+    // `malloc` IS the boundary's signature — `unsigned long long`, so `i64`, the
+    // BigInt `wasi-min.js` passes — so it is exported as itself. It used to go
+    // out through an `i32.wrap` wrapper, which was the one place a JS caller
+    // could ask for 5 GiB and be handed a pointer to 1.
     if user.iter().any(|f| {
         f.is_export_extern && f.params.iter().any(|p| matches!(p.ty, Type::Str))
     }) {
-        let malloc = cx.rt.malloc;
-        let wrap = m.func(&[ValType::I64], &[ValType::I32], &[], 0, |b| {
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::Call(malloc));
-        });
-        m.export("__vyrn_malloc", wrap);
+        m.export("__vyrn_malloc", cx.rt.malloc);
     }
     // Keep only what those exports reach (M2p). Everything above emits eagerly —
     // 39 runtime helpers, 12 WASI imports, every function of every linked module —
@@ -1107,6 +1101,16 @@ struct Fn_<'a> {
     /// calling a `fn` parameter a lookup here rather than a value on the stack,
     /// and why no function table exists.
     fn_binds: HashMap<String, FnBinding>,
+    /// The local `String` accumulators `s = s + …` may grow in place, from
+    /// [`crate::append_candidates`] — the SAME whitelist the textual backend
+    /// clears, not a second one. Two copies of that rule would be two answers to
+    /// "may this buffer move", and one of them a use-after-free.
+    append_ok: std::collections::HashSet<String>,
+    /// wasm local holding the accumulator's pointer → the frame slot holding its
+    /// `(len, cap)` shadow. Keyed by local index rather than by name because the
+    /// local IS the binding: two `let out`s in one body are two accumulators, and
+    /// a global (a `Place::Static`) never gets an entry at all.
+    str_append: HashMap<u32, u32>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -1127,6 +1131,8 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
         drops: HashMap::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
+        append_ok: std::collections::HashSet::new(),
+        str_append: HashMap::new(),
     }
 }
 
@@ -1204,6 +1210,8 @@ fn lower_body(
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
         expect: Vec::new(),
         fn_binds: binds,
+        append_ok: crate::append_candidates(&f.body),
+        str_append: HashMap::new(),
     };
 
     // By-value parameter semantics: an aggregate arrives as the caller's
@@ -1638,6 +1646,15 @@ impl Fn_<'_> {
                         (place, got)
                     }
                 };
+                // A String accumulator gets its append shadow here, at the one
+                // declaration site — the same place, under the same whitelist, as
+                // the textual backend's.
+                if let Place::Local(l) = place {
+                    if self.cx.resolve(&bound) == Type::Str && self.append_ok.contains(name.as_str())
+                    {
+                        self.str_append_shadow(b, l);
+                    }
+                }
                 self.scope.push((name.clone(), place, bound));
                 // A non-escaping `cell(..)` is released when this block exits.
                 // The key is the statement's node address, which is `own`'s own
@@ -1651,7 +1668,36 @@ impl Fn_<'_> {
             Stmt::Assign { name, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
                 let r = self.cx.repr(&ty, *line)?;
+                // `s = s + a + b` on an eligible local String: grow the buffer
+                // instead of building a new one. `concat` allocates and copies
+                // both halves every time, which makes the shape every writer is
+                // written in quadratic — `toJson` of 40k `Int64` did not merely
+                // take 1.4 s here, it exhausted linear memory and trapped.
+                //
+                // Only outside a `region` (arena memory is not the bump heap the
+                // helper grows out of) and only for a local that owns a shadow,
+                // which is exactly a `let`-declared one the whitelist cleared. The
+                // spine is [`crate::self_append_spine`], shared with the textual
+                // backend: what counts as a self-append is one rule, so the two
+                // backends cannot recognize different sets of writers and diverge
+                // on which one still copies.
+                if let Place::Local(l) = place {
+                    if self.region_depth == 0 && self.str_append.contains_key(&l) {
+                        if let Some(parts) = crate::self_append_spine(name, value) {
+                            let slot = self.str_append[&l];
+                            for p in parts {
+                                b.slot(slot).ins(&Instruction::LocalGet(l));
+                                self.expr_as(m, b, p, &Type::Str)?;
+                                self.emit_str_append(b, l);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
                 self.store_into(m, b, place, &r, value, &ty.clone())?;
+                if let Place::Local(l) = place {
+                    self.str_append_reset(b, l);
+                }
             }
             Stmt::SetField { name, field, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
@@ -1962,6 +2008,43 @@ impl Fn_<'_> {
             Repr::Agg(l) => Place::Slot(b.alloc(l.size, l.align)),
             Repr::Unit => return unsupported("a binding of a Unit value", line),
         })
+    }
+
+    /// Give the accumulator in wasm local `l` its `(len, cap)` shadow, and start
+    /// it unowned.
+    ///
+    /// A Vyrn `String` is a bare NUL-terminated pointer with no header, so growing
+    /// one in place needs its length and capacity kept beside it. They go in the
+    /// frame rather than in two more wasm locals because the runtime helper writes
+    /// them back and wasm has no way to pass a local by reference — eight bytes of
+    /// shadow stack against a three-result function type, and the frame is already
+    /// per-invocation, so a recursive writer (`emitArr` calling `emit`) gets its
+    /// own without anything being said about recursion.
+    ///
+    /// `cap == 0` means "this pointer was not allocated by the append path" — a
+    /// literal in a data segment, a `concat` result, a call result — so it may not
+    /// be grown and `len` says nothing. Emitted at the `let`, so the second trip
+    /// through an enclosing loop starts unowned again.
+    fn str_append_shadow(&mut self, b: &mut Frame, l: u32) {
+        let at = *self.str_append.entry(l).or_insert_with(|| b.alloc(8, 4));
+        b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(cap_at()));
+    }
+
+    /// Append the `String` on top of the stack to the accumulator in local `l`,
+    /// in place. The helper takes the shadow's address, the current pointer and
+    /// the operand, and gives back the pointer to store — which is the whole
+    /// convention, and why the call site is five instructions.
+    fn emit_str_append(&mut self, b: &mut Frame, l: u32) {
+        b.ins(&Instruction::Call(self.cx.rt.str_append));
+        b.ins(&Instruction::LocalSet(l));
+    }
+
+    /// Invalidate the shadow after any other write to the accumulator: the local
+    /// now holds a pointer this path did not allocate.
+    fn str_append_reset(&mut self, b: &mut Frame, l: u32) {
+        if let Some(&at) = self.str_append.get(&l) {
+            b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(cap_at()));
+        }
     }
 
     /// Evaluate `value` into an existing place of known type.
@@ -3651,21 +3734,52 @@ impl Fn_<'_> {
     /// host stashes and answers with a length precisely so it never writes into
     /// guest memory the guest did not hand it.
     fn fetch_str(&mut self, b: &mut Frame, g: Gen) {
-        let len = b.local(ValType::I32);
+        // The length stays 64-bit all the way into `malloc`, which is the only
+        // thing here that can judge it — the host names the size, so this is the
+        // one length in the module that is not bounded by the memory it has to
+        // fit in.
+        let len = b.local(ValType::I64);
         let buf = b.local(ValType::I32);
-        b.ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::LocalTee(len))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
+        b.ins(&Instruction::LocalTee(len))
+            .ins(&Instruction::I64Const(1))
+            .ins(&Instruction::I64Add)
             .ins(&Instruction::Call(self.cx.rt.malloc))
             .ins(&Instruction::LocalTee(buf))
             .ins(&Instruction::Call(g.fetch))
             .ins(&Instruction::LocalGet(buf))
             .ins(&Instruction::LocalGet(len))
+            .ins(&Instruction::I32WrapI64)
             .ins(&Instruction::I32Add)
             .ins(&Instruction::I32Const(0))
             .ins(&Instruction::I32Store8(byte()))
             .ins(&Instruction::LocalGet(buf));
+    }
+
+    /// Format the `Float64` on the stack with `std/num`'s `f64Str`, leaving the
+    /// String — the six decimal places, and since RFC-0081 M2 the only float
+    /// formatter this backend has. `print` and `@str` both come here, so the two
+    /// cannot drift apart.
+    ///
+    /// A `Float32` promotes first, because the interpreter formats `*f as f64`.
+    ///
+    /// A call by INDEX rather than by name through [`Fn_::call`]: the value is
+    /// already on the stack, which is the whole of a wasm call's argument passing,
+    /// and `f64Str` takes one scalar and returns one. The 511 hand-written lines
+    /// this replaced are the reason — they were the largest single thing in this
+    /// backend and they were the third of three implementations of `%f` that had
+    /// to agree byte for byte.
+    fn f64_str(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<(), String> {
+        if *ty == Type::Float32 {
+            b.ins(&Instruction::F64PromoteF32);
+        }
+        let f = vyrn_frontend::loader::F64_STR;
+        let Some(sig) = self.cx.sigs.get(f) else {
+            // `std/num` is injected into any program that mentions `print` or
+            // `@str`, so reaching this means a program built without a std root.
+            return unsupported("formatting a `Float64` with no `std/num` in the link", line);
+        };
+        b.ins(&Instruction::Call(sig.index));
+        Ok(())
     }
 
     fn call(
@@ -3751,13 +3865,9 @@ impl Fn_<'_> {
                         b.ins(&Instruction::I32Const(n.signed as i32));
                         b.ins(&Instruction::Call(self.cx.rt.print_i64));
                     }
-                    // Fixed six decimals, which `f64_str` owns; a `Float32`
-                    // promotes first because the interpreter formats `*f as f64`.
+                    // Fixed six decimals, which `std/num`'s `f64Str` owns.
                     ref f if matches!(f, Type::Float | Type::Float32) => {
-                        if *f == Type::Float32 {
-                            b.ins(&Instruction::F64PromoteF32);
-                        }
-                        b.ins(&Instruction::Call(self.cx.rt.f64_str));
+                        self.f64_str(b, f, line)?;
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
                     }
                     Type::Str => {
@@ -3823,10 +3933,7 @@ impl Fn_<'_> {
                         b.ins(&Instruction::Call(self.cx.rt.int_str));
                     }
                     ref f if matches!(f, Type::Float | Type::Float32) => {
-                        if *f == Type::Float32 {
-                            b.ins(&Instruction::F64PromoteF32);
-                        }
-                        b.ins(&Instruction::Call(self.cx.rt.f64_str));
+                        self.f64_str(b, f, line)?;
                     }
                     Type::Bool => {
                         b.ins(&Instruction::Call(self.cx.rt.bool_str));
@@ -3953,6 +4060,7 @@ impl Fn_<'_> {
                 // is never null — `push` reallocs from it either way.
                 b.ins(&Instruction::I32Const(1));
                 b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::I64ExtendI32U);
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(buf));
                 b.ins(&Instruction::LocalGet(s));
@@ -5152,7 +5260,7 @@ impl Fn_<'_> {
         } else {
             let bl = self.cap_block(&cap_tys)?;
             let p = b.local(ValType::I32);
-            b.ins(&Instruction::I32Const(bl.size as i32));
+            b.ins(&Instruction::I64Const(bl.size as i64));
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalSet(p));
             for (i, (name, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
@@ -5428,7 +5536,7 @@ impl Fn_<'_> {
                 let l = self.layout_of(&ret, line)?;
                 let held = b.local(v);
                 b.ins(&Instruction::LocalSet(held));
-                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::I64Const(l.size as i64));
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalTee(boxed));
                 b.ins(&Instruction::LocalGet(held));
@@ -5437,7 +5545,7 @@ impl Fn_<'_> {
             Repr::Agg(l) => {
                 let src = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::I64Const(l.size as i64));
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalTee(boxed));
                 b.ins(&Instruction::LocalGet(src));
@@ -5447,7 +5555,7 @@ impl Fn_<'_> {
             // A `Task<Unit>` still has to be a value: one word, so `join` has a
             // pointer to drop rather than a `Task` with no representation.
             Repr::Unit => {
-                b.ins(&Instruction::I32Const(8));
+                b.ins(&Instruction::I64Const(8));
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalSet(boxed));
             }
@@ -5693,7 +5801,7 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalSet(src));
         let bytes = (self.stride(from, line)? * n as u32) as i32;
         let buf = b.local(ValType::I32);
-        b.ins(&Instruction::I32Const(bytes.max(1)));
+        b.ins(&Instruction::I64Const(bytes.max(1) as i64));
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(buf));
         b.ins(&Instruction::LocalGet(src));
@@ -5774,10 +5882,14 @@ impl Fn_<'_> {
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalSet(cap));
         let grown = b.local(ValType::I32);
+        // `cap * stride` in 64 bits, which is the width `cap` already is. Wrapping
+        // first is what made this the worst of the truncations: doubling a 2 GiB
+        // buffer asks for 4 GiB, wrapped to 0, and the copy below is `len *
+        // stride` — the OLD size, which does NOT wrap and does fit — so 2 GiB
+        // went into a zero-byte allocation without tripping a bounds check.
         b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(grown));
         b.ins(&Instruction::LocalGet(data));
@@ -6167,7 +6279,7 @@ impl Fn_<'_> {
                 let val = self.scratch(b, v, 2);
                 let p = self.scratch(b, ValType::I32, 3);
                 b.ins(&Instruction::LocalSet(val));
-                b.ins(&Instruction::I32Const(size as i32));
+                b.ins(&Instruction::I64Const(size as i64));
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(val));
@@ -6178,7 +6290,7 @@ impl Fn_<'_> {
                 let src = self.scratch(b, ValType::I32, 1);
                 let p = self.scratch(b, ValType::I32, 2);
                 b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::I64Const(l.size as i64));
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(src));
@@ -6957,9 +7069,13 @@ impl Fn_<'_> {
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalSet(nc));
         for (field, stride, into) in [(l.fields[0], 4i32, nk), (l.fields[1], esz, nv)] {
+            // The count is safe in 32 bits — an entry costs at least twelve bytes,
+            // so a wasm32 memory holds well under 2^31 of them — but `nc * stride`
+            // is not, so the product is 64-bit and `malloc` decides.
             b.ins(&Instruction::LocalGet(nc));
-            b.ins(&Instruction::I32Const(stride));
-            b.ins(&Instruction::I32Mul);
+            b.ins(&Instruction::I64ExtendI32U);
+            b.ins(&Instruction::I64Const(stride as i64));
+            b.ins(&Instruction::I64Mul);
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalTee(into));
             b.ins(&Instruction::LocalGet(hdr));
@@ -7096,6 +7212,7 @@ impl Fn_<'_> {
             b.ins(&Instruction::I32Add);
             b.ins(&Instruction::I32Const(4));
             b.ins(&Instruction::I32Mul);
+            b.ins(&Instruction::I64ExtendI32U);
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalTee(buf));
             b.ins(&Instruction::LocalGet(hdr));
@@ -7315,9 +7432,8 @@ impl Fn_<'_> {
         b.ins(&Instruction::I64Const(2));
         b.ins(&Instruction::I64Mul);
         b.ins(&Instruction::LocalTee(nc));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(nb));
         // From the live buffer, whichever it was: this is the one place the two
@@ -7402,11 +7518,10 @@ impl Fn_<'_> {
                 let al = self.layout_of(&want, line)?;
                 let buf = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::I32Mul);
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::I64Const(stride as i64));
+                b.ins(&Instruction::I64Mul);
+                b.ins(&Instruction::I64Const(1));
+                b.ins(&Instruction::I64Add);
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalTee(buf));
                 b.ins(&Instruction::LocalGet(base));
@@ -7754,10 +7869,13 @@ struct Rt {
     int_str: u32,
     bool_str: u32,
     concat: u32,
+    /// Grow a `String` accumulator in place (RFC-0081). A function rather than an
+    /// inline sequence at every `s = s + …`: the body is forty instructions with
+    /// two `if`s in it, and `std/json` alone has six append sites.
+    str_append: u32,
     trap_idx: u32,
     utf8valid: u32,
     str_from_bytes: u32,
-    f64_str: u32,
     // RFC-0014 input I/O and RFC-0043's host boundary, served straight from WASI
     // (M2j) rather than through the shim — a standalone module has no shim, and
     // `clock_time_get`/`random_get`/`args_get`/`fd_read`/`path_open` are the same
@@ -7850,7 +7968,7 @@ impl Rt {
     /// pointing at the wrong function only failed loudly where the two signatures
     /// differed. Two helpers with the same wasm signature swapped silently, and
     /// there are several such sets here: `read_file` and `read_file_bytes` are both
-    /// `(i32, i32) -> ()`, and `malloc` and `strlen` are both `(i32) -> i32`.
+    /// `(i32, i32) -> ()`, and `strlen` and `utf8valid` are both `(i32) -> i32`.
     ///
     /// The hazard was paid off rather than argued about: retiring `charcount`
     /// (RFC-0078's census) is the first REMOVAL this table has seen, and it was one
@@ -7878,10 +7996,10 @@ impl Rt {
             int_str: slot("int_str"),
             bool_str: slot("bool_str"),
             concat: slot("concat"),
+            str_append: slot("str_append"),
             trap_idx: slot("trap_idx"),
             utf8valid: slot("utf8valid"),
             str_from_bytes: slot("str_from_bytes"),
-            f64_str: slot("f64_str"),
             starts: slot("starts"),
             env_get: slot("env_get"),
             str_i64: slot("str_i64"),
@@ -7953,6 +8071,13 @@ fn word() -> MemArg {
     MemArg { offset: 0, align: 2, memory_index: 0 }
 }
 
+/// The second word of a String accumulator's `(len, cap)` shadow. Named because
+/// the two halves are addressed from the same base in four places and an offset
+/// of 0 where 4 was meant is a silent wrong length.
+fn cap_at() -> MemArg {
+    MemArg { offset: 4, align: 2, memory_index: 0 }
+}
+
 fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
     let base = m.n_imports();
@@ -7964,10 +8089,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt.msg_rem0 = rt.intern(m, "error: remainder by zero\n");
     rt.msg_divovf = rt.intern(m, "error: integer overflow in division\n");
     rt.msg_shift = rt.intern(m, "error: shift amount out of range\n");
-    // The three spellings `{:.6}` gives a non-finite double. The native build
-    // selects them on an `fcmp uno` rather than letting UCRT's `%f` say
-    // `-nan(ind)`, and `f64_str` picks them for the same reason.
-    let (nan, inf, ninf) = (rt.intern(m, "NaN"), rt.intern(m, "inf"), rt.intern(m, "-inf"));
+    // (The three spellings `{:.6}` gives a non-finite double were interned here
+    // for `float_str`. `std/num`'s `f64Str` builds them out of bytes, in Vyrn —
+    // RFC-0081 M2.)
     // The bounds message has the offending index in the MIDDLE, so it is three
     // pieces rather than one interned string — see `trap_idx` below.
     rt.msg_aoob = rt.intern(m, "error: array index ");
@@ -8023,21 +8147,59 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
 
     // malloc(n) — a bump pointer over `HEAP`.
     //
+    // `n` is an `i64`, not the `i32` a wasm32 pointer is, and that is the native
+    // shim's signature (`__vyrn_malloc(unsigned long long)`, `toolchain.rs`) for
+    // the native shim's stated reason. Every interesting caller computes
+    // `count * stride` out of a Vyrn length, which IS an `i64`; taking an `i32`
+    // put the truncation at the call site where nothing could see it. `push`
+    // doubling a 2 GiB buffer wrapped `cap * stride` to a handful of bytes,
+    // allocated those, and then copied 2 GiB into them — heap corruption out of
+    // an allocation that reported success.
+    //
     // ponytail: it never frees. Vyrn's ownership analysis knows exactly where every
     // value dies (`Stmt::Drop` is already in the AST), so a real allocator belongs
     // here eventually; nothing observable depends on it, because a free is not a
     // thing a program can print.
-    let p = 2;
+    let (p, end) = (2, 3);
+    let trap = rt.trap;
+    let oom = rt.intern(m, "error: out of memory\n");
     rt.next_is(m, rt.malloc);
-    m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
+    m.func(&[ValType::I64], &[ValType::I32], &[ValType::I32, ValType::I64], 0, |b| {
+        // The width check, BEFORE the rounding — the native shim puts it before
+        // the `(size_t)` cast for the same reason, and here `n + 7` is the cast:
+        // a request of 2^64-1 rounds to 0 and would bump the heap by nothing,
+        // handing back a pointer for sixteen exabytes.
+        b.ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I64Const(0xFFFF_FFFF))
+            .ins(&Instruction::I64GtU)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(oom as i32))
+            .ins(&Instruction::Call(trap))
+            .ins(&Instruction::End);
+        // The bump itself, in 64 bits so the SUM cannot wrap either: a 3 GiB heap
+        // plus a 2 GiB request is 5 GiB, which as an `i32` was a small pointer
+        // that then passed the `memory.size` test below. A wasm32 memory stops at
+        // 4 GiB, so a top past it is a request that can never be served —
+        // reported with the words `memory.grow` failing reports, since it is the
+        // same failure reached one step earlier.
         b.ins(&Instruction::GlobalGet(HEAP))
             .ins(&Instruction::LocalTee(p))
+            .ins(&Instruction::I64ExtendI32U)
             .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(-8))
-            .ins(&Instruction::I32And)
-            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I64Const(7))
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::I64Const(-8))
+            .ins(&Instruction::I64And)
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::LocalTee(end))
+            .ins(&Instruction::I64Const(0xFFFF_FFFF))
+            .ins(&Instruction::I64GtU)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(oom as i32))
+            .ins(&Instruction::Call(trap))
+            .ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(end))
+            .ins(&Instruction::I32WrapI64)
             .ins(&Instruction::GlobalSet(HEAP))
             .ins(&Instruction::Block(BlockType::Empty))
             .ins(&Instruction::Loop(BlockType::Empty))
@@ -8049,7 +8211,24 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             .ins(&Instruction::BrIf(1))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::MemoryGrow(0))
-            .ins(&Instruction::Drop)
+            // A grow that fails returns -1 and leaves `memory.size` where it was,
+            // so dropping the result re-tests the same condition and grows again
+            // — forever, with no output. Not academic: a browser
+            // `WebAssembly.Memory` is routinely constructed with a `maximum`, and
+            // the browser is a first-class target, so the capped memory is the
+            // normal case and the hang is what a user would see. Uncapped it was
+            // masked, badly: growth ran to the 4 GiB ceiling and the wrapped bump
+            // pointer trapped out of bounds instead.
+            //
+            // The wording is the native shim's `__vyrn_alloc_check`
+            // (`toolchain.rs`), not new words, because parity compares stderr byte
+            // for byte across the three engines.
+            .ins(&Instruction::I32Const(-1))
+            .ins(&Instruction::I32Eq)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(oom as i32))
+            .ins(&Instruction::Call(trap))
+            .ins(&Instruction::End)
             .ins(&Instruction::Br(0))
             .ins(&Instruction::End)
             .ins(&Instruction::End)
@@ -8170,7 +8349,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         &[ValType::I32, ValType::I32],
         0,
         |b| {
-            b.ins(&Instruction::I32Const(24))
+            b.ins(&Instruction::I64Const(24))
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::I32Const(23))
                 .ins(&Instruction::I32Add)
@@ -8253,6 +8432,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(r))
                 .ins(&Instruction::LocalGet(r))
@@ -8268,6 +8448,128 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
                 .ins(&Instruction::LocalGet(r));
+        },
+    );
+
+    // str_append(st, p, v) -> p' — append `v` to the accumulator `p`, in place,
+    // growing geometrically. `st` addresses its `(len, cap)` shadow in the
+    // caller's frame; the new pointer comes back as the result because a wasm
+    // local has no address to write through (RFC-0081).
+    //
+    // The grow is `malloc` and copy, not a `realloc`, because this backend's
+    // allocator IS a bump pointer with no free (see `malloc` above) — so there is
+    // nothing to hand a block back to, and nothing to extend it into once the
+    // next element's string has been bumped past it. That is not the quadratic
+    // part: doubling makes N appends copy O(N) bytes in total and bump O(N) of
+    // heap, where `concat` per element copied and bumped O(N²) — which is why 40k
+    // `Int64` did not merely take 1.4 s, it walked the bump pointer past 4 GiB
+    // and trapped out of bounds on 229 KB of JSON.
+    //
+    // ponytail: a bump allocator can extend its own top allocation in place
+    // (`HEAP == p + cap`), which would make an accumulator with nothing allocated
+    // after it grow for free. Not taken — the writers that matter allocate each
+    // element's string BETWEEN appends, so the accumulator is never on top and
+    // the fast path would never fire in the case this exists for.
+    let (st, p, v) = (0, 1, 2);
+    let (vlen, cap, len, need, nc, nb) = (4, 5, 6, 7, 8, 9);
+    rt.next_is(m, rt.str_append);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32; 6],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(v))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(vlen));
+            // `cap == 0`: the pointer is not ours (a literal, a `concat` result,
+            // a call result), so copy it into a buffer that is. 32 bytes minimum,
+            // matching the textual backend's floor so the two grow in step.
+            b.ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Load(cap_at()))
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I32Const(32))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(32))
+                .ins(&Instruction::LocalSet(cap))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(nb))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(nb))
+                .ins(&Instruction::LocalSet(p))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Store(cap_at()))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::End);
+            // Reserve `len + vlen + 1`, doubling so N appends are O(N).
+            b.ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(need))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalTee(nc))
+                .ins(&Instruction::LocalGet(need))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(need))
+                .ins(&Instruction::LocalSet(nc))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(nc))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(nb))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(nb))
+                .ins(&Instruction::LocalSet(p))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::LocalGet(nc))
+                .ins(&Instruction::I32Store(cap_at()))
+                .ins(&Instruction::End);
+            // Copy the operand's bytes AND its NUL over the old terminator.
+            b.ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(v))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::LocalGet(p));
         },
     );
 
@@ -8380,6 +8682,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             b.ins(&Instruction::LocalGet(1))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(buf));
             b.ins(&Instruction::Block(BlockType::Empty)) // fin
@@ -8458,8 +8761,11 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // table hands indices out in field order — the second removal it has seen,
     // after `charcount`.)
 
-    rt.next_is(m, rt.f64_str);
-    float_str(m, malloc, nan, inf, ninf);
+    // (`float_str` was emitted here — see the note where its 511 lines stood.
+    // RFC-0081 M2 routed `%f` to `std/num`'s `f64Str`; removing its slot is a
+    // one-line deletion in `slots` because the table hands indices out in field
+    // order — the third removal it has seen, after `charcount` and `slice`.)
+
     io_runtime(m, &rt, wasi, gen);
     cell_runtime(m, &rt);
 
@@ -8876,7 +9182,7 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
             .ins(&Instruction::I32Eqz)
             .ins(&Instruction::If(BlockType::Empty))
             .ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Const(CELL_SLAB as i32))
+            .ins(&Instruction::I64Const(CELL_SLAB as i64))
             .ins(&Instruction::Call(malloc))
             .ins(&Instruction::I32Store(word()))
             .ins(&Instruction::End);
@@ -9139,6 +9445,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::I32Const(8))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(ptrs))
                 .ins(&Instruction::LocalGet(ptrs));
@@ -9146,6 +9453,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::Call(env_get_i))
                 .ins(&Instruction::Drop);
@@ -9382,6 +9690,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             // when there are no arguments at all and it is never read.
             .ins(&Instruction::I32Const(8))
             .ins(&Instruction::I32Add)
+            .ins(&Instruction::I64ExtendI32U)
             .ins(&Instruction::Call(malloc))
             .ins(&Instruction::LocalSet(ptrs))
             .ins(&Instruction::LocalGet(ptrs));
@@ -9389,6 +9698,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         b.ins(&Instruction::I32Load(word()))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32Add)
+            .ins(&Instruction::I64ExtendI32U)
             .ins(&Instruction::Call(malloc))
             .ins(&Instruction::Call(args_get))
             .ins(&Instruction::Drop);
@@ -9472,6 +9782,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::BrIf(0))
                 .ins(&Instruction::I32Const(64))
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::Block(BlockType::Empty)) // 0: eol
@@ -9502,6 +9813,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(buf))
@@ -9643,6 +9955,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             let (buf, cap, len, nb, got) = (3, 4, 5, 6, 7);
             b.ins(&Instruction::I32Const(1024))
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::Block(BlockType::Empty))
@@ -9657,6 +9970,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(buf))
@@ -9890,7 +10204,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)); // 0: err
             slurp(b, 0, fd, buf, len, emsg, 0, crate::GEN_MODE_READ_BYTES);
-            b.ins(&Instruction::I32Const(triple.size as i32))
+            b.ins(&Instruction::I64Const(triple.size as i64))
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(boxed))
                 .ins(&Instruction::LocalGet(buf))
@@ -10145,8 +10459,9 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::Else)
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::End)
-                .ins(&Instruction::I32Const(stride))
-                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Const(stride as i64))
+                .ins(&Instruction::I64Mul)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(names))
                 .ins(&Instruction::LocalGet(buf))
@@ -10205,7 +10520,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::If(BlockType::Empty));
             elem(b);
             b.ins(&Instruction::End)
-                .ins(&Instruction::I32Const(triple.size as i32))
+                .ins(&Instruction::I64Const(triple.size as i64))
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(boxed))
                 .ins(&Instruction::LocalGet(names))
@@ -10278,12 +10593,15 @@ fn gen_slurp(
         .ins(&Instruction::LocalSet(err_msg))
         .ins(&Instruction::Br(err_depth + 1))
         .ins(&Instruction::End)
-        // The low half is the length; `i32.wrap` IS the mask.
+        // The low half is the length; `i32.wrap` IS the mask. The NUL is added
+        // back in 64 bits, so a host answering 4 GiB minus one gets an out of
+        // memory rather than a one-byte buffer.
         .ins(&Instruction::LocalGet(packed))
         .ins(&Instruction::I32WrapI64)
         .ins(&Instruction::LocalTee(len))
-        .ins(&Instruction::I32Const(1))
-        .ins(&Instruction::I32Add)
+        .ins(&Instruction::I64ExtendI32U)
+        .ins(&Instruction::I64Const(1))
+        .ins(&Instruction::I64Add)
         .ins(&Instruction::Call(malloc))
         .ins(&Instruction::LocalTee(buf))
         .ins(&Instruction::Call(g.fetch))
@@ -10330,517 +10648,14 @@ fn sum2_write_to(b: &mut Frame, dest: u32, l: &Layout, tag: i32, word: Option<u3
         .ins(&Instruction::I64Store(at(l.fields[2])));
 }
 
-/// `f64_str(x)` — a `Float64` as its fixed six-decimal spelling, exactly.
-///
-/// This is the one runtime function in this backend that is an algorithm rather
-/// than a loop, and the reason is that `%f` has no shortcut. The interpreter
-/// formats with `{:.6}` and the native build with `printf("%f")`; both convert
-/// the double's **exact** decimal value and round half-to-even at the sixth
-/// place, so `0.0078125` is `0.007812` (the kept `2` is even) and `1e300` is 301
-/// integer digits. Anything that computes six decimals in floating point is
-/// wrong somewhere, and wrong here is a different digit rather than a crash.
-///
-/// So: a double is `M × 2^E` with `M < 2^53`, and `x × 10^6` is an exact
-/// rational whose numerator is `M × 10^6 × 2^E`. Written in base 10^6 limbs that
-/// becomes one loop with two parameters:
-///
-/// - `E >= 0`: the numerator is `M × 10^6 × 2^E`, an integer — multiply by 2,
-///   `E` times, and no digit is dropped.
-/// - `E < 0`: `M × 10^6 × 5^k / 10^k` with `k = -E` — multiply by 5, `k` times,
-///   and the last `k` digits are the fraction to round away.
-///
-/// Base 10^6 rather than 10^9 for one reason: the `× 10^6` the six places need
-/// is then a shift by one whole limb, i.e. a zero limb at the bottom, so there
-/// is a single multiply loop instead of a scaling pass and a power pass. Every
-/// limb operation stays inside an `i32` (`999999 × 5 + 5` is small), so no part
-/// of this needs 64-bit arithmetic after the mantissa is unpacked.
-///
-/// `k` reaches 1074 for a subnormal, which is why the digit buffer is left-padded
-/// to `k + 1`: after that there is always at least one kept digit, and the
-/// rounding, the carry and the point insertion have no edge case of their own.
-fn float_str(m: &mut Module, malloc: u32, nan: u32, inf: u32, ninf: u32) -> u32 {
-    // The limbs at frame offset 0 — the multiply loop indexes `base + 4j` and
-    // says so by not adding anything — for 160 of them, i.e. 960 digits against
-    // the 773 the worst case (`M × 10^6 × 5^1074`) produces. The digit buffer is
-    // the rest, right-aligned at `DIG_END`, with room for max(6·limbs, k + 1)
-    // plus the byte a rounding carry may claim.
-    const DIG_END: u32 = 1744;
-
-    let (bits, mant, e, reps) = (2u32, 3u32, 4u32, 5u32);
-    let (n, j, limb, carry, t) = (6u32, 7u32, 8u32, 9u32, 10u32);
-    let (k, st, ke, p, q) = (11u32, 12u32, 13u32, 14u32, 15u32);
-    let (up, out, mul, d, neg) = (16u32, 17u32, 18u32, 19u32, 20u32);
-    let locals = [
-        ValType::I64,
-        ValType::I64,
-        ValType::I64,
-        ValType::I64,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-    ];
-    m.func(&[ValType::F64], &[ValType::I32], &locals, DIG_END, |b| {
-        let bs = b.base();
-        let dig_end = |b: &mut Frame| {
-            b.ins(&Instruction::LocalGet(bs))
-                .ins(&Instruction::I32Const(DIG_END as i32))
-                .ins(&Instruction::I32Add);
-        };
-        // One exit, because a body must not `return` past the epilogue (M1).
-        b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
-
-        // Unpack: sign, the 11-bit exponent field (parked in `e`), the fraction.
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I64ReinterpretF64)
-            .ins(&Instruction::LocalTee(bits))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::I64LtS)
-            .ins(&Instruction::LocalSet(neg));
-        b.ins(&Instruction::LocalGet(bits))
-            .ins(&Instruction::I64Const(0x000F_FFFF_FFFF_FFFF))
-            .ins(&Instruction::I64And)
-            .ins(&Instruction::LocalSet(mant));
-        b.ins(&Instruction::LocalGet(bits))
-            .ins(&Instruction::I64Const(52))
-            .ins(&Instruction::I64ShrU)
-            .ins(&Instruction::I64Const(0x7FF))
-            .ins(&Instruction::I64And)
-            .ins(&Instruction::LocalSet(e));
-
-        // Non-finite: interned words, because `{:.6}` prints `NaN`/`inf`/`-inf`
-        // and UCRT's `%f` would say `-nan(ind)` — which is why the native build
-        // selects a format string on `fcmp uno` rather than trusting printf.
-        b.ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Const(0x7FF))
-            .ins(&Instruction::I64Eq)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Eqz)
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-            .ins(&Instruction::LocalGet(neg))
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-            .ins(&Instruction::I32Const(ninf as i32))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(inf as i32))
-            .ins(&Instruction::End)
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(nan as i32))
-            .ins(&Instruction::End)
-            .ins(&Instruction::Br(1))
-            .ins(&Instruction::End);
-
-        // `M × 2^E`: a subnormal has no implicit bit and a fixed exponent.
-        b.ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I64Const(-1074))
-            .ins(&Instruction::LocalSet(e))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1i64 << 52))
-            .ins(&Instruction::I64Or)
-            .ins(&Instruction::LocalSet(mant))
-            .ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Const(1075))
-            .ins(&Instruction::I64Sub)
-            .ins(&Instruction::LocalSet(e))
-            .ins(&Instruction::End);
-        // Zero would otherwise multiply nothing by 5 a thousand times. It also
-        // keeps its sign: `{:.6}` of `-0.0` is `-0.000000`, and so is `%f`'s.
-        b.ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::LocalSet(e))
-            .ins(&Instruction::End);
-
-        // Which direction the exponent goes decides the multiplier and how many
-        // digits end up on the far side of the point.
-        b.ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::I64LtS)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Sub)
-            .ins(&Instruction::LocalTee(reps))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::LocalSet(k))
-            .ins(&Instruction::I32Const(5))
-            .ins(&Instruction::LocalSet(mul))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::LocalSet(reps))
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::LocalSet(k))
-            .ins(&Instruction::I32Const(2))
-            .ins(&Instruction::LocalSet(mul))
-            .ins(&Instruction::End);
-
-        // The limbs: a zero at the bottom, which IS the `× 10^6`, then the
-        // mantissa in base 10^6 (three limbs hold its sixteen digits).
-        b.slot(0).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
-        b.slot(4)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64RemU)
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Store(word()));
-        b.slot(8)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64DivU)
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64RemU)
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Store(word()));
-        b.slot(12)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1_000_000_000_000))
-            .ins(&Instruction::I64DivU)
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::I32Const(4)).ins(&Instruction::LocalSet(n));
-
-        // `reps` multiplications by `mul`. The carry out is at most 5, so one
-        // extra limb always absorbs it.
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(reps)).ins(&Instruction::I64Eqz).ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(carry));
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(j));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(bs))
-            .ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalGet(mul))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::LocalGet(carry))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(t));
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(1_000_000))
-            .ins(&Instruction::I32RemU)
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(1_000_000))
-            .ins(&Instruction::I32DivU)
-            .ins(&Instruction::LocalSet(carry));
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(j))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(carry)).ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(bs))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(carry))
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(n))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(reps))
-            .ins(&Instruction::I64Const(1))
-            .ins(&Instruction::I64Sub)
-            .ins(&Instruction::LocalSet(reps))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-
-        // Six digits per limb, most significant limb first, right-aligned at the
-        // end of the buffer — so leading zeros cost nothing and nothing is
-        // stripped until the very end.
-        dig_end(b);
-        b.ins(&Instruction::LocalSet(p));
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(j));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(bs))
-            .ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalSet(limb));
-        b.ins(&Instruction::I32Const(6)).ins(&Instruction::LocalSet(d));
-        b.ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::LocalGet(limb))
-            .ins(&Instruction::I32Const(10))
-            .ins(&Instruction::I32RemU)
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(limb))
-            .ins(&Instruction::I32Const(10))
-            .ins(&Instruction::I32DivU)
-            .ins(&Instruction::LocalSet(limb));
-        b.ins(&Instruction::LocalGet(d))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(d))
-            .ins(&Instruction::BrIf(0))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(j))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(p)).ins(&Instruction::LocalSet(st));
-
-        // Left-pad to `k + 1` digits. That is what removes every edge case from
-        // what follows: there is always a kept digit to round, a digit before the
-        // one being examined, and a spare byte in front for a carry.
-        dig_end(b);
-        b.ins(&Instruction::LocalGet(k))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(q));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32GtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::MemoryFill(0))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalSet(st))
-            .ins(&Instruction::End);
-        dig_end(b);
-        b.ins(&Instruction::LocalGet(k)).ins(&Instruction::I32Sub).ins(&Instruction::LocalSet(ke));
-
-        // Round half to EVEN at `ke`, which is what both references do: greater
-        // than five rounds up, less rounds down, and an exact half goes to the
-        // even kept digit. `0.0078125` is the case that tells the two apart.
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(up));
-        b.ins(&Instruction::LocalGet(k)).ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::LocalSet(t));
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(b'5' as i32))
-            .ins(&Instruction::I32GtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::LocalSet(up))
-            .ins(&Instruction::Else);
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(b'5' as i32))
-            .ins(&Instruction::I32Eq)
-            .ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(q));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(q));
-        dig_end(b);
-        b.ins(&Instruction::I32GeU).ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Ne)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::LocalSet(up))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(q))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(up))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32And)
-            .ins(&Instruction::LocalSet(up))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::End).ins(&Instruction::End).ins(&Instruction::End);
-
-        // Carry it in, digit by digit, growing the string by one if it escapes.
-        b.ins(&Instruction::LocalGet(up)).ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(q));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32LtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(st))
-            .ins(&Instruction::I32Const(b'1' as i32))
-            .ins(&Instruction::I32Store8(byte()))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::LocalTee(t))
-            .ins(&Instruction::I32Const(b'9' as i32))
-            .ins(&Instruction::I32Ne)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Store8(byte()))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(q))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-
-        // Seven digits minimum, so the point always has an integer digit in front
-        // of it, and then the integer part's leading zeros go.
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32LtS)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(q))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::MemoryFill(0))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalSet(st))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Ne)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(st))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-
-        // The string: an optional sign, the integer digits, the point, six more.
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(t));
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(8))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(neg))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::Call(malloc))
-            .ins(&Instruction::LocalTee(out))
-            .ins(&Instruction::LocalSet(p));
-        b.ins(&Instruction::LocalGet(neg))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(b'-' as i32))
-            .ins(&Instruction::I32Store8(byte()))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(p))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::I32Const(b'.' as i32))
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(out));
-        b.ins(&Instruction::End);
-    })
-}
+// (`float_str` — 511 lines — stood here: `%f`'s six decimal places computed
+// exactly, in base-10^6 limbs, because wasm has no `printf` to defer to. It was
+// the one runtime function in this backend that was an algorithm rather than a
+// loop, and RFC-0081 M2 replaced it with a call to `std/num`'s `f64Str` — the
+// same expansion, written once in Vyrn, where the interpreter's `{:.6}` stays as
+// the oracle a differential test compares it against. The measurement that
+// bought it: 330 ns hand-written here against 721 ns compiled, and no difference
+// a program could observe.)
 
 /// `print(n: Int64)`: the decimal digits and a newline, straight to fd 1.
 ///

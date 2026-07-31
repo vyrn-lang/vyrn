@@ -39,7 +39,90 @@ fn number_conversion_pins_hold() {
 
 #[test]
 fn std_num_unit_tests_run_green() {
-    unit_tests_green("std/num.vyrn", "5 passed, 0 failed");
+    unit_tests_green("std/num.vyrn", "7 passed, 0 failed");
+}
+
+/// `std/num`'s `f64Str` against Rust's own `{:.6}`, byte for byte, over bit
+/// patterns rather than literals (RFC-0081 M1).
+///
+/// The inverse of the test below it, and it needs a stronger oracle for the same
+/// reason: `%f`'s six places are the exact decimal value of a binary fraction,
+/// which is up to 1074 digits long, and every implementation that computes them
+/// in floating point is wrong somewhere. The three that exist agree because
+/// someone made them agree.
+///
+/// The corpus is bit patterns, so it reaches values no literal in the language
+/// can name — every exponent, both zeros, subnormals at the bottom of the range,
+/// and the three non-finite spellings — and the comparison is against the
+/// interpreter's own formatter, which IS `{:.6}`. The parity suite runs the same
+/// comparison on native and wasm, where the other two implementations live.
+#[test]
+fn f64str_is_byte_identical_to_rusts_own_formatter() {
+    let mut corpus: Vec<u64> = vec![
+        0.0f64, -0.0, 1.0, -1.0, 1.5, -1.5, 0.1, 0.2, 0.3, 2.0, 10.0, 100.0,
+        // The two exact ties at the sixth place: half-to-even keeps the even
+        // digit in one and rounds the odd one up.
+        0.0078125, 0.0234375, 0.5, 0.05, 0.005, 0.0005, 0.00005, 0.000005, 0.0000005, 0.00000005,
+        // A carry that runs out of the top of the number.
+        0.9999999, -0.9999999, 0.99999949999, 9.9999995, 1e300, 1e-300, 1e22, 1e23, 1e100,
+        123456789.123456789, 3.141592653589793, 2.718281828459045, 9007199254740992.0,
+        9007199254740993.0, 4503599627370495.5, f64::MAX, f64::MIN, f64::MIN_POSITIVE,
+        f64::INFINITY, f64::NEG_INFINITY, f64::NAN, f64::EPSILON, 2.2250738585072011e-308,
+    ]
+    .into_iter()
+    .map(f64::to_bits)
+    .collect();
+    // The bottom of the subnormal range and the top of the finite one, by bits —
+    // there is no literal for either end.
+    corpus.extend([1u64, 2, 3, 0x000F_FFFF_FFFF_FFFF, 0x0010_0000_0000_0000, 0x7FEF_FFFF_FFFF_FFFF]);
+    corpus.extend([0x8000_0000_0000_0001u64, 0xFFF0_0000_0000_0000, 0xFFF8_0000_0000_0000]);
+
+    // Deterministic pseudorandom, a fixed LCG so a failure reproduces. Whole
+    // random bit patterns reach every exponent including the extremes; the
+    // scaled half concentrates on the range programs actually print, which is
+    // where a rounding bug would be seen rather than merely present.
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed
+    };
+    for _ in 0..400 {
+        corpus.push(next());
+    }
+    for _ in 0..400 {
+        let m = (next() >> 11) as f64 / (1u64 << 53) as f64;
+        let e = (next() % 61) as i32 - 30;
+        corpus.push((m * 10f64.powi(e)).to_bits());
+    }
+
+    let calls: String =
+        corpus.iter().map(|b| format!("    print(f64Str(floatFromBits({b})))\n")).collect();
+    let src = format!(
+        "import {{ f64Str }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
+    );
+    let dir = std::env::temp_dir().join("vyrn-m1-f64str");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("f64str.vyrn");
+    std::fs::write(&file, &src).unwrap();
+    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+    assert!(
+        out.status.success(),
+        "differential program failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got: Vec<String> =
+        String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim_end().to_string()).collect();
+    assert_eq!(got.len(), corpus.len(), "one line per input");
+
+    let mut bad: Vec<String> = Vec::new();
+    for (bits, mine) in corpus.iter().zip(&got) {
+        let x = f64::from_bits(*bits);
+        let oracle = format!("{x:.6}");
+        if *mine != oracle {
+            bad.push(format!("{bits} ({x:e}): f64Str {mine}, Rust {oracle}"));
+        }
+    }
+    assert!(bad.is_empty(), "{} of {} disagree:\n{}", bad.len(), corpus.len(), bad.join("\n"));
 }
 
 /// `std/num`'s `parseFloat64` against Rust's own `str::parse::<f64>()`, bit for

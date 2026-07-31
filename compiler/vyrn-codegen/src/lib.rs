@@ -849,13 +849,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("@.fmt.d = private unnamed_addr constant [6 x i8] c\"%lld\\0A\\00\"\n");
     // `%llu\n` for printing unsigned sized ints (UInt8..64) — zero-extended to u64.
     out.push_str("@.fmt.u = private unnamed_addr constant [6 x i8] c\"%llu\\0A\\00\"\n");
-    // `%f\n` for printing Float64 (printf's default precision is 6, matching interp).
-    out.push_str("@.fmt.f = private unnamed_addr constant [4 x i8] c\"%f\\0A\\00\"\n");
+    // (`@.fmt.f` and `@.fmt.lf` — `"%f\n"` and `"%f"` — went with RFC-0081 M2:
+    // a float prints and interpolates through `std/num`'s `f64Str` now, so this
+    // module names no float format at all.)
     // No-newline variants used by `str(..)` (interpolation renders without \n):
-    // %lld for signed ints, %llu for unsigned, %f for Float (6-decimal, matches interp).
+    // %lld for signed ints, %llu for unsigned.
     out.push_str("@.fmt.ld = private unnamed_addr constant [5 x i8] c\"%lld\\00\"\n");
     out.push_str("@.fmt.lu = private unnamed_addr constant [5 x i8] c\"%llu\\00\"\n");
-    out.push_str("@.fmt.lf = private unnamed_addr constant [3 x i8] c\"%f\\00\"\n");
     out.push_str("@.fmt.s = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\"\n");
     out.push_str("@.fmt.true = private unnamed_addr constant [6 x i8] c\"true\\0A\\00\"\n");
     out.push_str("@.fmt.false = private unnamed_addr constant [7 x i8] c\"false\\0A\\00\"\n");
@@ -901,10 +901,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
         "@.trap.shift = private unnamed_addr constant [34 x i8] \
          c\"error: shift amount out of range\\0A\\00\"\n",
     );
-    // NaN renders as `NaN` (the interpreter's Rust formatting); UCRT's %f
-    // would print `-nan(ind)`.
-    out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
-    out.push_str("@.str.nan = private unnamed_addr constant [4 x i8] c\"NaN\\00\"\n");
+    // (`@.fmt.nan`\`@.str.nan` — the literal `NaN` this build selected on an
+    // `fcmp uno` because UCRT's `%f` says `-nan(ind)` — went with RFC-0081 M2.
+    // `f64Str` spells the three non-finite words itself, in Vyrn, once.)
 
     // Input-I/O error wording (RFC-0014), from the one list both backends read.
     // These are payload strings (no trailing newline — unlike the trap globals).
@@ -1864,6 +1863,44 @@ impl<'a> Gen<'a> {
         self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {a})"));
         self.emit(format!("call ptr @strcat(ptr {buf}, ptr {b})"));
         buf
+    }
+
+    /// `std/num`'s `f64Str` on an already-lowered float — the fixed six decimal
+    /// places, and since RFC-0081 M2 the only float formatter this backend has.
+    /// Both `print` and `@str` come here, so the two cannot drift apart.
+    ///
+    /// A `Float32` promotes first: the interpreter formats `*f as f64`, and single
+    /// precision having a path of its own would be a second thing to keep in step.
+    ///
+    /// The call is emitted rather than built as an `Expr` and handed to `gen_call`
+    /// because the value is already lowered — the arm has to see the static type
+    /// before it can pick a case, and this emitter has no type-only peek. (The
+    /// symbol rule is `call_parts`'s `vyrn_{name}`; getting it wrong is an
+    /// undefined symbol at link, not a wrong answer at runtime.) The result is a
+    /// fresh allocation — `f64Str` guarantees that, including for the three
+    /// non-finite words — so the ownership analysis may free it like any `@str`.
+    fn gen_f64_str(&mut self, v: &str, ty: &Type) -> Result<String, String> {
+        let d = if matches!(self.resolve(ty), Type::Float32) {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = fpext float {v} to double"));
+            t
+        } else {
+            v.to_string()
+        };
+        let f = vyrn_frontend::loader::F64_STR;
+        if !self.funcs.contains_key(f) {
+            // The refusal `toJson` makes when its serializer is not in the link:
+            // `std/num` is injected into any program that mentions `print` or
+            // `@str`, so reaching this means a program built without a std root.
+            return Err(format!(
+                "formatting a `Float64` needs `{f}`, which is not in the link — it is \
+                 injected into any program that prints or interpolates (RFC-0081 M2), \
+                 so this is a program built without a std root"
+            ));
+        }
+        let t = self.fresh_tmp();
+        self.emit(format!("{t} = call ptr @vyrn_{f}(double {d})"));
+        Ok(t)
     }
 
     /// The `(len, cap)` shadow slots of a local String accumulator, created on
@@ -5529,28 +5566,15 @@ impl<'a> Gen<'a> {
                 Type::Str => {
                     self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr {v})"));
                 }
-                // Float: 6-decimal `%f\n`, matching the interpreter's `{:.6}`.
-                // NaN is special-cased: UCRT's %f renders it `-nan(ind)` while
-                // the interpreter prints `NaN` — select the literal instead
-                // (`fcmp uno x, x` is true exactly for NaN; printf ignores the
-                // unused vararg).
-                Type::Float => {
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {v}, {v}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.fmt.nan, ptr @.fmt.f"));
-                    self.emit(format!("call i32 (ptr, ...) @printf(ptr {fmt}, double {v})"));
-                }
-                // Float32 promotes to `double` for printf's varargs (C default
-                // argument promotion), then prints with the same `%f\n`.
-                Type::Float32 => {
-                    let d = self.fresh_tmp();
-                    self.emit(format!("{d} = fpext float {v} to double"));
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {d}, {d}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.fmt.nan, ptr @.fmt.f"));
-                    self.emit(format!("call i32 (ptr, ...) @printf(ptr {fmt}, double {d})"));
+                // A float prints as its `@str` and a `%s\n`, because `print` and
+                // interpolation must spell one value one way and there is now one
+                // implementation to spell it with (RFC-0081 M2). The `malloc` this
+                // costs that `printf("%f")` did not is real and was measured: on
+                // 200,000 `print`s of a float it is inside run-to-run noise, the
+                // write being what that program is actually doing.
+                ref f @ (Type::Float | Type::Float32) => {
+                    let s = self.gen_f64_str(&v, f)?;
+                    self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr {s})"));
                 }
                 // A signed sized int sign-extends to i64 and prints with `%lld`;
                 // an unsigned one zero-extends and prints with `%llu` — same digits
@@ -6119,34 +6143,16 @@ impl<'a> Gen<'a> {
                     ));
                     return Ok((buf, Type::Str));
                 }
-                // Float renders with %f (6 decimals). A 512-byte buffer covers the
-                // widest magnitude (~1e308 → ~320 chars). NaN selects a literal
-                // "NaN" format (UCRT %f would render `-nan(ind)`; the interp
-                // prints `NaN`) — snprintf ignores the unused vararg.
-                Type::Float => {
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {v}, {v}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
-                    let buf = self.heap_alloc("512");
-                    self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {v})"
-                    ));
-                    return Ok((buf, Type::Str));
-                }
-                // Float32 promotes to `double` (varargs), then renders like Float.
-                Type::Float32 => {
-                    let d = self.fresh_tmp();
-                    self.emit(format!("{d} = fpext float {v} to double"));
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {d}, {d}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
-                    let buf = self.heap_alloc("512");
-                    self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {d})"
-                    ));
-                    return Ok((buf, Type::Str));
+                // (`%f` was selected here — a `select` on `fcmp uno` between the
+                // literal `NaN` and the format string, because UCRT's `%f` says
+                // `-nan(ind)` and the interpreter says `NaN`. RFC-0081 M2 routed
+                // the float case to `std/num`'s `f64Str`: the six places were
+                // three algorithms that had to agree byte for byte, and `printf`
+                // was measured at 240 ns against the Vyrn version's 750 — a 3x on
+                // a microbenchmark and nothing observable in a program.)
+                ref f @ (Type::Float | Type::Float32) => {
+                    let s = self.gen_f64_str(&v, f)?;
+                    return Ok((s, Type::Str));
                 }
                 Type::Bool => {
                     // Copy "true"/"false" into a fresh buffer so the result owns
@@ -7677,6 +7683,54 @@ fn ban_append_read(e: &Expr, banned: &mut std::collections::HashSet<String>, str
     }
 }
 
+/// Does `op` leave one of its operands holding a String pointer it did not
+/// copy? If so, an accumulator there could be left pointing at a buffer a later
+/// in-place append `realloc`'d away, and the name must be banned.
+///
+/// Today the answer is no for all nineteen, so the guard in `ban_append_expr`
+/// looks vacuous — it is not, and this function is why it may not be deleted:
+/// the match is exhaustive so a new operator cannot be added without deciding,
+/// and a String-borrowing operator (a `slice`-like `..`, say) would flip its
+/// arm and re-ban its operands with no other change. Getting this wrong is a
+/// use-after-free, so the decision is recorded per operator with its lowering:
+///
+/// - `+` on two Strings — `emit_str_concat`: `malloc(la+lb+1)` then
+///   `strcpy`/`strcat`. A fresh buffer, which is exactly why `@concat` (what
+///   `"\{out}]"` desugars to) is already whitelisted above. `Code + Code` takes
+///   two arena handles, not pointers, and a `Code` name never owns a shadow.
+/// - `== != < <= > >=` on two Strings — one `strcmp` and an `icmp`, result `i1`.
+/// - `=~` — `@__vyrn_regex_run(ptr s, …)`, result `i1`; the right operand must
+///   be a literal pattern, so only the left can even be an accumulator.
+/// - `- * / % && || & | ^ << >>` — `binop_type` refuses a `String` operand
+///   outright (arithmetic and bitwise need matching numerics, `&&`/`||` need
+///   `Bool`), so no String reaches these lowerings at all.
+///
+/// A `<T: Ord>` operand monomorphized to `String` reaches the same lowerings
+/// through the same operators, so the list covers generics too.
+fn binop_retains_str(op: BinOp) -> bool {
+    match op {
+        BinOp::Add
+        | BinOp::Eq
+        | BinOp::NotEq
+        | BinOp::Lt
+        | BinOp::LtEq
+        | BinOp::Gt
+        | BinOp::GtEq
+        | BinOp::Match => false,
+        BinOp::Sub
+        | BinOp::Mul
+        | BinOp::Div
+        | BinOp::Rem
+        | BinOp::And
+        | BinOp::Or
+        | BinOp::BitAnd
+        | BinOp::BitOr
+        | BinOp::BitXor
+        | BinOp::Shl
+        | BinOp::Shr => false,
+    }
+}
+
 /// Ban every variable `e` mentions in a position that might retain it. The
 /// match is exhaustive on purpose: a new `Expr` variant must be classified
 /// rather than silently fall into a permissive default.
@@ -7709,9 +7763,24 @@ fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, str
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } => {
             ban_append_expr(expr, banned, strict)
         }
-        Expr::Binary { lhs, rhs, .. } => {
-            ban_append_expr(lhs, banned, strict);
-            ban_append_expr(rhs, banned, strict);
+        // An operator's operands are a retaining position only if the LOWERING
+        // keeps the pointer. `binop_retains_str` is the decision, exhaustive on
+        // `BinOp` so a new operator cannot be added without making one.
+        //
+        // Banning every operand was the whole of `toJson`'s O(N²): `return out +
+        // "]"` at the end of `std/json`'s `emitArr` disqualified `out`, so every
+        // element re-`malloc`'d and re-copied the entire result so far (and
+        // leaked the previous buffer, which is why 50k records OOM'd on 2.5 MB
+        // of output). 80k `Int64` natively: 23.5 s before, 12 ms after. Forty
+        // more `return acc + "…"` sites across `std/` were in the same trap.
+        Expr::Binary { op, lhs, rhs, .. } => {
+            if binop_retains_str(*op) {
+                ban_append_expr(lhs, banned, strict);
+                ban_append_expr(rhs, banned, strict);
+            } else {
+                ban_append_read(lhs, banned, strict);
+                ban_append_read(rhs, banned, strict);
+            }
         }
         Expr::Match { scrutinee, arms, .. } => {
             ban_append_expr(scrutinee, banned, strict);
@@ -8944,13 +9013,16 @@ mod tests {
     }
 
     #[test]
-    fn float_print_selects_nan_literal() {
-        // NaN prints as `NaN` (interp's Rust formatting), not UCRT's -nan(ind):
-        // the format string is selected on `fcmp uno`.
+    fn a_float_with_no_formatter_in_the_link_refuses_by_name() {
+        // This test used to pin the `fcmp uno` that selected a literal `NaN` over
+        // UCRT's `-nan(ind)`. RFC-0081 M2 took that selection out: a float prints
+        // through `std/num`'s `f64Str`, which spells the three non-finite words
+        // itself. `check` links no module, so what is left to pin here is the
+        // refusal — which names the function rather than leaving an undefined
+        // symbol for the linker to report.
         let program = check("fn main() -> Int64 { print(0.0 / 0.0); return 0; }").unwrap();
-        let ir = emit(&program).unwrap();
-        assert!(ir.contains("fcmp uno double"), "NaN test: {ir}");
-        assert!(ir.contains("@.fmt.nan"), "NaN format: {ir}");
+        let err = emit(&program).unwrap_err();
+        assert!(err.contains("num$f64Str"), "names the formatter: {err}");
     }
 
     #[test]
@@ -9123,6 +9195,86 @@ mod tests {
         assert!(!ir.contains("app.own"), "region accumulator stays copying: {ir}");
     }
 
+    /// The `emitArr` shape — accumulate in a loop, then `return out + "]"`.
+    /// Banning both operands of every `+` disqualified `out` on that last line,
+    /// which is where `toJson`'s O(N²) came from: each iteration re-copied the
+    /// whole result. The pin is the COUNT of copying concats, not a duration:
+    /// exactly one, the tail, so the copying work cannot scale with the loop.
+    #[test]
+    fn accumulator_returned_through_a_concat_still_appends_in_place() {
+        let src = "fn build(n: Int64) -> String { let mut out = \"[\"; let mut i = 0; \
+                   while i < n { out = out + \",\"; i = i + 1; } return out + \"]\"; } \
+                   fn main() -> Int64 { return build(3).byteLength; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("app.own"), "the loop must take the append path: {ir}");
+        assert_eq!(
+            ir.matches("call ptr @strcat(").count(),
+            1,
+            "only the tail `out + \"]\"` may copy; a second means the loop is \
+             copying again and the complexity class regressed: {ir}"
+        );
+    }
+
+    /// Every operator `binop_retains_str` calls non-retaining, in the position
+    /// that matters — reading the accumulator — must leave it eligible. The
+    /// exhaustive match in that function is what forces a NEW operator to be
+    /// classified; this is what stops an existing one being reclassified by
+    /// accident. `=~` takes the accumulator on the left only (its right operand
+    /// must be a literal pattern).
+    #[test]
+    fn non_retaining_operators_do_not_disqualify_an_accumulator() {
+        for read in [
+            "out + \"]\"",
+            "if out == \"x\" { 1 } else { 0 }",
+            "if out != \"x\" { 1 } else { 0 }",
+            "if out < \"x\" { 1 } else { 0 }",
+            "if out <= \"x\" { 1 } else { 0 }",
+            "if out > \"x\" { 1 } else { 0 }",
+            "if out >= \"x\" { 1 } else { 0 }",
+            "if out =~ \"a*\" { 1 } else { 0 }",
+        ] {
+            let ret = if read.starts_with("out +") {
+                format!("return ({read}).byteLength;")
+            } else {
+                format!("return {read};")
+            };
+            let src = format!(
+                "fn main() -> Int64 {{ let mut out = \"a\"; let mut i = 0; \
+                 while i < 3 {{ out = out + \"x\"; i = i + 1; }} {ret} }}"
+            );
+            let ir = emit(&check(&src).unwrap()).unwrap();
+            assert!(ir.contains("app.own"), "`{read}` must stay eligible: {ir}");
+        }
+    }
+
+    /// The in-place path now runs where it never did, so the reclamation has to
+    /// be unchanged by it: an accumulator returned through a concat frees
+    /// exactly what the identical function frees when the append is disabled
+    /// (here by aliasing it, the disqualifier `string_accumulator_not_appended…`
+    /// already pins). Equality is the assertion — an absolute count would just
+    /// re-pin the ownership analysis.
+    #[test]
+    fn the_append_path_frees_exactly_what_the_copying_path_frees() {
+        let body = |extra: &str| {
+            format!(
+                "fn build(n: Int64) -> String {{ let mut out = \"[\"; let mut i = 0; \
+                 {extra} while i < n {{ out = out + \",\"; i = i + 1; }} return out + \"]\"; }} \
+                 fn main() -> Int64 {{ let a = \"x\"; let b = \"y\"; let s = a + b; \
+                 return build(s.byteLength).byteLength; }}"
+            )
+        };
+        let appending = emit(&check(&body("")).unwrap()).unwrap();
+        // `let alias = out` is the whitelist's own ban, so this is the same
+        // function lowered the old way.
+        let copying = emit(&check(&body("let alias = out; print(alias);")).unwrap()).unwrap();
+        assert!(appending.contains("app.own") && !copying.contains("app.own"), "setup");
+        assert_eq!(
+            free_calls(&appending),
+            free_calls(&copying),
+            "growing the accumulator must not add or lose a free:\n{appending}"
+        );
+    }
+
     #[test]
     fn contextual_array_literal_lowers_to_heap_triple() {
         // A literal in an `Array<T>` slot is malloc'd into the `{ptr,len,cap}`
@@ -9135,9 +9287,11 @@ mod tests {
 
     #[test]
     fn numeric_conversions_lower_to_casts() {
+        // No `print` of a float: since RFC-0081 M2 that is a call into `std/num`,
+        // which a bare `check` does not link. The conversions are what this pins.
         let src = "fn main() -> Int64 { let f = 3.5; let n = Int64(f); \
                    let g = Float64(n); let s = Int32(5000000000); \
-                   print(g); return Int64(s); }";
+                   if g > 0.0 { return Int64(s); } return Int64(s); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // Saturating, not bare: a plain `fptosi` is poison out of range, and the
         // interpreter's `as` saturates (RFC-0078 M4a).
@@ -9194,13 +9348,16 @@ mod tests {
     #[test]
     fn float32_lowers_to_single_precision_ops() {
         let src = "fn main() -> Int64 { let a: Float32 = 1.5; let b: Float32 = 2.5; \
-                   let c = a + b; print(c); if c > 0.0 { return 1; } return 0; }";
+                   let c = a + b; let w = Float64(c); if c > 0.0 { return 1; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("fadd float"), "f32 add: {ir}");
         assert!(ir.contains("fcmp ogt float"), "f32 compare: {ir}");
-        // Literals round into f32 slots via fptrunc, and print promotes back.
+        // Literals round into f32 slots via fptrunc, and widening goes back the
+        // other way. (`print(c)` used to be the widening here; it is a call into
+        // `std/num` since RFC-0081 M2 and a bare `check` links no module, so the
+        // explicit `Float64(c)` — the same `fpext` — stands in for it.)
         assert!(ir.contains("fptrunc double") && ir.contains("to float"), "literal→f32: {ir}");
-        assert!(ir.contains("fpext float") && ir.contains("to double"), "print fpext: {ir}");
+        assert!(ir.contains("fpext float") && ir.contains("to double"), "widening fpext: {ir}");
     }
 
     #[test]

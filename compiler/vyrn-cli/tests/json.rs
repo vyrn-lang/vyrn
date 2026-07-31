@@ -102,6 +102,56 @@ fn tojson_byte_pins_hold() {
     assert!(combined.contains("7 passed, 0 failed"), "expected 7 green pins:\n{combined}");
 }
 
+/// `toJson` was O(N²) in array length — 40k `Int64` took 2.5 s, 80k took 23.5 s,
+/// and 50k three-float records ran the machine out of memory producing 2.5 MB of
+/// JSON. All of it was in `std/json`'s writer: `emitArr`/`emitObj` end with
+/// `return out + "]"`, and codegen's in-place String append banned any name that
+/// appeared under a `+`, so every element re-`malloc`'d and re-copied the whole
+/// result so far and leaked the previous buffer.
+///
+/// The pin is structural — a COUNT of copying concatenations, not a duration, so
+/// it cannot go flaky on a loaded machine. Each writer may copy exactly once, in
+/// its tail; a second `strcat` means the per-element append went back to
+/// allocating, which is the complexity class regressing. (`vyrn-codegen`'s
+/// `accumulator_returned_through_a_concat_still_appends_in_place` pins the
+/// compiler rule; this pins that `std/json` is actually written in the shape the
+/// rule recognizes, which is the half a library edit could silently undo.)
+#[test]
+fn the_json_writer_does_not_copy_once_per_element() {
+    let dir = std::env::temp_dir().join("vyrn-json-linear");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("linear.vyrn");
+    std::fs::write(
+        &file,
+        "fn main() -> Int64 {\n\
+         let mut a: Array<Int64> = []\n\
+         a.push(1)\n\
+         print(toJson(a).byteLength)\n\
+         return 0\n\
+         }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("emit-ir").arg(&file).output().expect("vyrn emit-ir");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let ir = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    for writer in ["vyrn_json$emitArr", "vyrn_json$emitObj"] {
+        let start = ir
+            .find(&format!("define ptr @{writer}("))
+            .unwrap_or_else(|| panic!("no `{writer}` in the emitted IR"));
+        let body = &ir[start..start + ir[start..].find("\n}\n").expect("unterminated body")];
+        assert!(
+            body.contains("call ptr @__vyrn_realloc"),
+            "`{writer}` must grow its accumulator in place:\n{body}"
+        );
+        assert_eq!(
+            body.matches("call ptr @strcat(").count(),
+            1,
+            "`{writer}` may copy only in its tail — a second copy is one per \
+             element, which is the O(N²) `toJson` had:\n{body}"
+        );
+    }
+}
+
 /// The same, for the other direction (RFC-0078 M3): `examples/jsondecbytes.vyrn`
 /// pins what `fromJson` produces — weighted towards the accumulated `Issue`s,
 /// their order, and the parse-error wording, which is where two READERS differ and

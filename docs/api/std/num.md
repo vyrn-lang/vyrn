@@ -80,3 +80,44 @@ fn parseUInt64(s: String) -> Option<UInt64>
 Decimal text as an exact `UInt64` — the case `parse` cannot serve at all,
 since its `Option<Int64>` has no room for a value above `Int64.max`. No sign
 is accepted, not even `+`.
+
+## f64Str
+
+```vyrn
+fn f64Str(x: Float64) -> String
+```
+
+A `Float64` as the fixed six decimal places every engine prints — `%f`, and
+exactly `%f`, computed rather than approximated (RFC-0081 M1).
+
+This is `parseFloat64` run backwards, and it is here for the reason that
+direction is: the same six places used to be produced three times, by Rust's
+`{:.6}`, by C's `printf("%f")` and by 511 hand-written lines of wasm, and
+those three were not one algorithm written three times but three algorithms
+that had to agree byte for byte. RFC-0081 M2 deleted the second and the third:
+`@str` and `print` on a float come here on both compiled backends. The first
+is kept on purpose — it is the ORACLE a differential test compares this
+function against, because an exact decimal expansion rounded half-to-even
+cannot be pinned exhaustively over 2^64 inputs.
+
+The value is `M × 2^E` with `M < 2^53`, so `x × 10^6` is the exact integer
+`M × 10^6 × 2^E` when `E >= 0`, and `M × 10^6 × 5^k / 10^k` with `k = -E` when
+it is not — one multiply loop with two parameters, and in the second case the
+last `k` digits are the fraction to round away. Nothing computes with a
+`Float64`: `floatBits` is the only place one is touched, which is what makes
+the six places exact rather than plausible.
+
+Base 10^6 limbs, which is the wasm backend's choice and for its reason: the
+`× 10^6` the six places need is then a zero limb at the bottom rather than a
+second pass. What is NOT its choice is the chunking — it multiplies by two or
+by five `reps` times, and `reps` reaches 1074 for a subnormal. Here a whole
+chunk of the power goes in per pass, the largest that keeps
+`limb × mul + carry` inside an `Int64`. That is the same trick `halveBy` plays
+in the other direction and worth the same: it is what makes the loop's cost
+the size of the ANSWER rather than of the exponent.
+
+**Every answer is a fresh allocation**, including the three non-finite words,
+which is why they are built as bytes rather than returned as literals. Since
+RFC-0081 M2 this is what `@str` on a float lowers to, and the ownership
+analysis frees an `@str` result (`own.rs`, `DropKind::FreeStr`) — a `.rodata`
+pointer reaching `free` is not a bug that shows up where it was made.

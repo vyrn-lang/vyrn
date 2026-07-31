@@ -1247,6 +1247,12 @@ fn main() -> Int64 {
 /// multiplication — which is better than a literal would have been: both engines
 /// compute the same double by the same IEEE steps, and the mantissa that comes
 /// out is messy rather than round.
+///
+/// Since RFC-0081 M2 the wasm column is `std/num`'s `f64Str` rather than 511
+/// hand-written lines, so what this pins there is the same six places produced by
+/// a different implementation — and the `want` string, which is neither engine's
+/// output but a value someone wrote down, is what makes that a check rather than
+/// a comparison of two copies.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
 fn six_decimals_of_a_float_are_the_exact_ones() {
@@ -1347,6 +1353,101 @@ fn main() -> Int64 {
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
     assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
     assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// `std/num:f64Str` against the builtin `@str` on every engine (RFC-0081 M1).
+///
+/// The test above pins the six places on values someone chose. This one is the
+/// differential: 400 doubles from a fixed generator, each formatted twice —
+/// once by the Vyrn function and once by whatever that engine's `@str` is — and
+/// compared inside the program, so each engine's answer is checked against ITS
+/// OWN reference. That matters here more than anywhere else in this file,
+/// because the three references are not one implementation compiled three ways:
+/// they are Rust's `{:.6}`, C's `printf("%f")` and 511 lines of hand-written
+/// wasm, and M1 exists to find out whether one Vyrn function can replace all
+/// three.
+///
+/// Raw bit patterns for half of it, which is how the corpus reaches subnormals,
+/// both zeros, every exponent and the three non-finite spellings — none of which
+/// a literal in this language can name. The other half forces the exponent into
+/// the range programs actually print, because a rounding bug in the everyday
+/// magnitudes is the one that would be seen.
+///
+/// The mismatch count is printed rather than asserted so a disagreement arrives
+/// as a diff naming the value, and so an engine that produced nothing at all
+/// fails rather than passing quietly.
+///
+/// **M2 changed what two of the three columns mean, and the test is worth more
+/// for it.** `@str` on a float IS `f64Str` now on native and on wasm, so their
+/// in-program comparison is a function against itself — the differential that
+/// remains is the interpreter's, where `@str` is still `format!("{f:.6}")`. That
+/// is the arrangement M2 chose deliberately: one implementation and one oracle,
+/// with a test enforcing the relation, rather than three peers with no reference
+/// among them. The `all_agree` at the end is what still checks the two compiled
+/// engines — against the interpreter's bytes, which are the oracle's.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_vyrn_float_formatter_agrees_with_every_engines_own() {
+    let rows = three_engines(
+        "f64str",
+        "f64str",
+        r#"
+import { f64Str } from "std/num"
+
+fn main() -> Int64 {
+    let mut s: UInt64 = 11400714819323198485
+    let mut bad = 0
+    let mut n = 0
+    while n < 200 {
+        s = s * 6364136223846793005 + 1442695040888963407
+        let x = floatFromBits(s)
+        let a = f64Str(x)
+        let b = x.toString()
+        if a != b {
+            print("MISMATCH raw \{n} builtin=\{b} f64Str=\{a}")
+            bad = bad + 1
+        }
+        // The same bits with the exponent field replaced: an everyday magnitude,
+        // sign and mantissa still arbitrary.
+        let e2: UInt64 = 990 + (s >> 40) % 64
+        let y = floatFromBits((s & 4503599627370495) | (e2 << 52) | ((s >> 63) << 63))
+        let c = f64Str(y)
+        let d = y.toString()
+        if c != d {
+            print("MISMATCH scaled \{n} builtin=\{d} f64Str=\{c}")
+            bad = bad + 1
+        }
+        n = n + 1
+    }
+    print("\{bad} mismatches of \{n * 2}")
+    // Printed as bytes as well, so the engines are compared against each other
+    // and not only each against its own reference.
+    print(f64Str(0.0078125))
+    print(f64Str(0.0234375))
+    print(f64Str(floatFromBits(9223372036854775808)))
+    print(f64Str(floatFromBits(1)))
+    // The four spelled values, by bits — the random half above reaches an
+    // exponent field of 2047 only about a fifth of the time, and a NEGATIVE NaN
+    // is the row where the two references disagree about what to say.
+    print(f64Str(floatFromBits(9218868437227405312)))
+    print(f64Str(floatFromBits(18442240474082181120)))
+    print(f64Str(floatFromBits(9221120237041090560)))
+    print(f64Str(floatFromBits(18444492273895866368)))
+    return 0
+}
+"#,
+    );
+    assert!(
+        rows.iter().any(|(e, _, _, _)| *e == "wasm"),
+        "no wasm column: wasmtime did not resolve, so this proved nothing about the 511 lines"
+    );
+    for (eng, out, _, _) in &rows {
+        assert!(
+            out.contains("0 mismatches of 400"),
+            "{eng} disagrees with its own `@str`:\n{out}"
+        );
+    }
+    all_agree(&rows, "f64str");
 }
 
 /// The RFC-0014 semantics the corpus cannot reach, over raw WASI (RFC-0077 M2j).
@@ -3350,4 +3451,365 @@ fn main() -> Int64 {
         "the only text on stderr is the reason the caller wrote"
     );
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
+}
+
+/// A `String` accumulator grown IN PLACE says the same bytes as one copied
+/// (RFC-0081).
+///
+/// `d4d96aa` gave the textual backend the append that `return out + "]"` had been
+/// banning, and pinned the rule where the rule lives — `binop_retains_str` and
+/// `append_candidates` are one whitelist in `vyrn-codegen`, and the direct wasm
+/// backend now calls the SAME two functions rather than restating them. So what is
+/// left to pin here is not the policy, it is the half each backend owns: whether
+/// its own lowering of the whitelisted shape still computes the same string.
+///
+/// The four functions are the four ways the shadow `(len, cap)` beside the
+/// accumulator can go stale, which is the only way an in-place append can be
+/// wrong:
+///
+/// - `build` — the ordinary loop, plus the tail concat that used to disqualify it.
+/// - `reassigned` — a whole-value store between appends. The pointer is a data
+///   segment literal afterwards, so `cap` must go back to 0 or the next append
+///   writes into read-only-by-convention bytes it never allocated.
+/// - `perTurn` — a `let` INSIDE the loop, so the accumulator is a fresh unowned
+///   pointer every turn while the wasm local and its frame slot are the same two
+///   words. The second turn is the one that catches a shadow that is not reset.
+/// - `aliased` — `let copy = out` is exactly what the whitelist bans, so this one
+///   must still take the copying path on every engine; it is the negative that
+///   keeps the other three from passing by accident.
+///
+/// Byte equality across all three engines is the assertion, because a wrong
+/// `(len, cap)` does not trap — it prints a truncated or doubled string, which is
+/// the failure mode no amount of "it ran" would have caught.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_string_accumulator_grown_in_place_says_the_same_bytes_on_all_three_engines() {
+    let rows = three_engines(
+        "strappend",
+        "accum",
+        r#"
+fn build(n: Int64) -> String {
+    let mut out = "["
+    let mut i = 0
+    while i < n {
+        out = out + i.toString() + ","
+        i = i + 1
+    }
+    return out + "]"
+}
+
+fn reassigned() -> String {
+    let mut out = "a"
+    out = out + "b"
+    out = "c"
+    out = out + "d"
+    return out + "!"
+}
+
+fn perTurn(n: Int64) -> String {
+    let mut all = ""
+    let mut i = 0
+    while i < n {
+        let mut row = "<"
+        row = row + i.toString()
+        all = all + row + ">"
+        i = i + 1
+    }
+    return all
+}
+
+fn aliased(n: Int64) -> String {
+    let mut out = "["
+    let mut i = 0
+    while i < n {
+        out = out + "x"
+        let copy = out
+        print(copy)
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    print(build(0))
+    print(build(1))
+    print(build(4))
+    print(reassigned())
+    print(perTurn(3))
+    print(aliased(3))
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        rows.len(),
+        3,
+        "wasmtime did not resolve, so wasm was never tested: {:?}",
+        rows.iter().map(|r| r.0).collect::<Vec<_>>()
+    );
+    all_agree(&rows, "accum");
+    assert_eq!(
+        rows[0].1,
+        "[]\n[0,]\n[0,1,2,3,]\ncd!\n<0><1><2>\n[x\n[xx\n[xxx\n[xxx\n",
+        "an empty loop, one turn, four turns, a reset mid-way, a per-turn `let`, \
+         and the aliased accumulator that still copies"
+    );
+}
+
+/// `toJson` of a large array is LINEAR on all three engines, pinned by the wasm
+/// address space rather than by a clock (RFC-0081).
+///
+/// The copying lowering re-`malloc`s and re-copies the whole result per element,
+/// so the bytes it allocates go as N·L/2 — at 100k `Int64` that is about 34 GB,
+/// and wasm32 has 4 GiB. The direct backend's allocator is a bump pointer that
+/// never frees (see `direct::runtime`'s `malloc`), so those bytes are not
+/// reclaimed and the run does not get slow, it walks off the end of linear memory:
+/// 40k elements producing 229 KB of JSON trapped with `out of bounds memory
+/// access` in 1.4 s. The in-place append allocates about 4L in total, which is
+/// 2.7 MB here.
+///
+/// So this test cannot pass by being fast on a fast machine and cannot go flaky on
+/// a loaded one — the ceiling it asserts against is a property of the target, not
+/// of the host. That is why it is a size and not a duration. The alternative was
+/// counting `call` instructions in the emitted code section, the way the textual
+/// backend's pins count `strcat`; rejected because `wasm::Module::sweep` renumbers
+/// every function index at `finish`, so the count would be over indices no source
+/// of truth outside the finished bytes could name.
+///
+/// The full JSON is compared, not its length: a wrong `(len, cap)` shadow is a
+/// truncation somewhere in the middle, and 684 KB of it is the shape most likely
+/// to catch one.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn to_json_of_a_large_array_stays_within_the_wasm_address_space() {
+    let rows = three_engines(
+        "jsonbig",
+        "big",
+        r#"
+fn main() -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < 100000 {
+        a.push(i * 7 - 3)
+        i = i + 1
+    }
+    let s = toJson(a)
+    print(s.byteLength)
+    print(s)
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        rows.len(),
+        3,
+        "wasmtime did not resolve, so wasm was never tested: {:?}",
+        rows.iter().map(|r| r.0).collect::<Vec<_>>()
+    );
+    all_agree(&rows, "big");
+    assert!(
+        rows[0].1.starts_with("684125\n[-3,4,11,"),
+        "the length and the first elements, so a passing run is one that produced \
+         the JSON rather than one that produced nothing"
+    );
+}
+
+/// A `malloc` that cannot grow linear memory TRAPS, in the native shim's words
+/// (RFC-0081).
+///
+/// `memory.grow` returns the previous page count, or -1. The growth loop dropped
+/// that result, so a refused grow left `memory.size` unchanged, the loop condition
+/// still failed, and it asked again — forever, with nothing on either channel.
+/// Uncapped that never showed: growth ran to the 4 GiB ceiling and the wrapped
+/// bump pointer trapped `out of bounds memory access` instead, which is the trap
+/// the test above was reading. A browser `WebAssembly.Memory` is routinely
+/// constructed with a `maximum`, and the browser is a first-class target, so the
+/// capped memory is the case that matters and the hang is what a user would see.
+///
+/// Capping it from the CLI is the awkward part: `-O memory-reservation` sets the
+/// initial reservation and growth past it still succeeds, and
+/// `-O pooling-max-memory-size` is ignored unless the pooling allocator is the one
+/// allocating — hence both flags. The alternative was emitting a `maximum` on the
+/// memory declaration, rejected because it would change what every module says in
+/// order to test one of them.
+///
+/// `-W timeout` is what keeps a regression from *hanging* the suite: without it a
+/// returned `drop` blocks `output()` and the run reads as stuck rather than as
+/// broken. It cannot make this test pass, either — a timed-out run is wasmtime's
+/// own `wasm trap: interrupt` on exit 3, and the assertions below are an exact
+/// message on exit 1.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_malloc_that_cannot_grow_memory_traps_instead_of_growing_forever() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-oom");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Doubling, so the cap is reached in ~25 allocations rather than by a loop
+    // whose trip count would have to be tuned to the cap.
+    let src = "\
+fn main() -> Int64 {
+    let mut s = \"x\"
+    let mut i = 0
+    while i < 40 {
+        s = s + s
+        i = i + 1
+    }
+    print(i)
+    return 0
+}
+";
+    let path = dir.join("oom.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("oom.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let out = Command::new(&wasmtime)
+        .arg("run")
+        .arg("-W")
+        .arg("timeout=20s")
+        .arg("-O")
+        .arg("pooling-allocator=y")
+        .arg("-O")
+        .arg("pooling-max-memory-size=16777216")
+        .arg(&module)
+        .output()
+        .expect("run wasmtime");
+
+    assert_eq!(
+        norm(&out.stderr),
+        "error: out of memory\n",
+        "a refused grow must trap; `wasm trap: interrupt` here means the loop is \
+         spinning again"
+    );
+    assert_eq!(out.status.code(), Some(1), "exit 1, like every trap");
+    assert!(out.stdout.is_empty(), "the loop never completes, so nothing is printed");
+    // Parity compares stderr byte for byte, so the wasm wording is not a spelling
+    // chosen here — it is the one `__vyrn_alloc_check` already prints for the same
+    // failure on native.
+    assert!(
+        vyrn_codegen::toolchain::RUNTIME_SHIM.contains("\"error: out of memory\\n\""),
+        "the native shim no longer prints what this asserts"
+    );
+}
+
+/// A `malloc` whose bump pointer would WRAP traps instead of handing back a
+/// pointer to memory it never reserved (RFC-0081).
+///
+/// The native shim checks the size before the `(size_t)` cast and says why:
+/// "a huge size could wrap to a tiny allocation - a buffer overflow, not an
+/// error". The direct backend's `malloc` took an `i32`, so that cast had already
+/// happened at the call site and there was nothing left for it to check —
+/// `HEAP + align8(n)` simply wrapped, the `memory.size` test below it passed
+/// because the wrapped top is small, and the caller got a valid-looking pointer
+/// for an allocation it then wrote far past.
+///
+/// The size is now an `i64` — the signature `__vyrn_malloc` has had on native all
+/// along — and the two requests here are the two ways it can fail:
+///
+///   - 5 GiB does not fit in a wasm32 address space at all. This is the width
+///     check, and it must come BEFORE the rounding, because `n + 7` is this
+///     backend's version of the cast: 2^64-1 rounds to 0, bumps the heap by
+///     nothing, and returns a pointer for sixteen exabytes.
+///   - 4294967280 fits in 32 bits but `HEAP + it` does not. Pre-fix this was the
+///     nastier one, because NO allocation was attempted: the sum wrapped, the
+///     heap moved BACKWARD by sixteen bytes, and `malloc` returned success
+///     without touching `memory.grow` — which is why this pin cannot be
+///     satisfied by an allocation merely succeeding, and why it needs no memory
+///     cap the way the `memory.grow` pin above does.
+///
+/// The third call is the control: 64 bytes still allocates and still returns a
+/// pointer, so a `malloc` that traps unconditionally does not pass either.
+///
+/// `--invoke` is the only way to reach `malloc` with a size no Vyrn program can
+/// name — a program can only ask for what it could hold — and it is exactly the
+/// path a JS caller takes: `wasi-min.js` calls the exported `__vyrn_malloc` with
+/// a BigInt before passing a String in. That export used to go out through an
+/// `i32.wrap` wrapper, so the browser boundary was where an oversized request
+/// was silently narrowed.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_malloc_whose_bump_pointer_would_wrap_traps_instead_of_lying() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-wrap");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A `String` parameter on an `export extern fn` is the condition under which
+    // `__vyrn_malloc` is exported at all (asserted separately by
+    // `the_wasm_module_exports_what_the_llvm_path_exports`).
+    let src = "\
+export extern fn greet(name: String) -> String {
+    return name
+}
+
+fn main() -> Int64 {
+    print(greet(\"hi\"))
+    return 0
+}
+";
+    let path = dir.join("wrap.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("wrap.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let call = |n: &str| {
+        Command::new(&wasmtime)
+            .arg("run")
+            .arg("-W")
+            .arg("timeout=20s")
+            .arg("--invoke")
+            .arg("__vyrn_malloc")
+            .arg(&module)
+            .arg(n)
+            .output()
+            .expect("run wasmtime")
+    };
+
+    for n in ["5000000000", "4294967280"] {
+        let out = call(n);
+        // `ends_with`, not equality: wasmtime prints its own `--invoke is
+        // experimental` warning on the same channel, and that is its wording to
+        // change, not ours.
+        assert!(
+            norm(&out.stderr).ends_with("error: out of memory\n"),
+            "malloc({n}) must trap, got:\n{}",
+            norm(&out.stderr)
+        );
+        assert_eq!(out.status.code(), Some(1), "malloc({n}): exit 1, like every trap");
+        assert!(out.stdout.is_empty(), "malloc({n}) returned a pointer: {:?}", norm(&out.stdout));
+    }
+
+    let ok = call("64");
+    assert_eq!(ok.status.code(), Some(0), "64 bytes is an ordinary allocation");
+    assert!(
+        !norm(&ok.stdout).trim().is_empty(),
+        "64 bytes must still come back as a pointer, or the check is just a trap"
+    );
+    // Same single-sourcing as the pin above: the wording is the native shim's.
+    assert!(
+        vyrn_codegen::toolchain::RUNTIME_SHIM.contains("\"error: out of memory\\n\""),
+        "the native shim no longer prints what this asserts"
+    );
 }
