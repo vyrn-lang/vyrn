@@ -14,9 +14,16 @@
 `Show` cannot be implemented for `Option<T>`.
 
 ```vyrn
-impl Show for Option<Int64> { ... }    // legal, and useless
+impl Show for Option<Int64> { ... }    // rejected
 impl<T> Show for Option<T> { ... }     // does not parse
 ```
+
+(This block originally called the first line "legal, and useless". It was
+neither — `ok_target` in `checker.rs` admitted `Int | Bool | Str` and a named
+enum, and `Option` fell through to `false`, so a protocol could not be
+implemented for `Option` at *any* instantiation. M1 therefore adds a capability
+rather than generalising one, which makes the M1 pin the first program in the
+repo to dispatch a protocol on an `Option` at all.)
 
 [`impl_block`](../compiler/vyrn-frontend/src/parser.rs) reads
 `impl <ident> for <type>`. There is nowhere to bind a type variable, so a
@@ -48,6 +55,19 @@ opportunity. Rust allows the latter only behind an unstable feature and has for
 years; there is no reason to import that problem to get `Show` on `Option<T>`.
 One impl per `(protocol, type constructor)` pair, checked when the impl is
 declared rather than when it is used, so the error names both impls.
+
+**That rule is wider than overlap, and this paragraph originally conflated the
+two.** `impl P for Option<Int64>` beside `impl P for Option<String>` names
+*disjoint* types that can never both match a receiver — no ambiguity exists —
+and it is refused too, because dispatch keys on the constructor. So the honest
+statement is one impl per constructor, of which rejecting true overlap is a
+consequence rather than the reason. Rust permits the disjoint pair; Vyrn is
+narrower here, and the cost is real for a case like `Array<UInt8>` serialising
+differently from `Array<Int64>`. Lifting it means keying a *list* per
+constructor and refusing only heads that actually unify — tractable, not done,
+and not needed for anything M1 exists to deliver. The diagnostic says
+"collides", never "overlaps", so it does not describe an ambiguity that is not
+there.
 
 ### 2. Associated types
 

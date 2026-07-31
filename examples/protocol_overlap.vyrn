@@ -12,6 +12,13 @@
 // the second impl is DECLARED rather than when a call turns out ambiguous —
 // which is the only time both impls are in hand to name.
 //
+// One case the rule catches is NOT an overlap, and the diagnostic is careful not
+// to call it one: `impl Show for Option<Int64>` beside `impl Show for
+// Option<String>` names two disjoint types that can never both match a receiver.
+// They are refused anyway, because dispatch keys on the constructor — so the
+// limit is one impl per constructor rather than a coherence rule, and the
+// generic form is the answer to both shapes.
+//
 // This file is an INTENTIONAL compile error. It is meant to FAIL `vyrn check`,
 // so the parity harness lists it under EXPECTED_CHECK_FAILURE rather than
 // running it. Observe the diagnostic with:

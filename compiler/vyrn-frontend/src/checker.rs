@@ -484,12 +484,22 @@ fn check_accum_inner(
             Some(key) if ok_target => {
                 let head = render_impl_head(imp);
                 match impl_heads.get(&(imp.protocol.clone(), key.clone())) {
+                    // Deliberately does NOT say "overlaps". Two *concrete* heads
+                    // for one constructor — `Option<Int64>` and `Option<String>`
+                    // — are disjoint types that can never both match a receiver,
+                    // so calling them overlapping would be false and would send
+                    // the reader looking for an ambiguity that is not there. The
+                    // real reason is narrower and worth saying out loud: dispatch
+                    // keys on the constructor (see `types::type_key`), so the
+                    // constructor is what admits one impl. The generic form is
+                    // the answer in both cases, so the message names it.
                     Some((prev_line, prev)) => out.push(Diagnostic::from_rendered(
                         format!(
-                            "line {}: `{head}` overlaps `{prev}` (line {prev_line}) — there may be \
-                             only one impl of `{}` for `{key}`, and overlapping impls are rejected \
-                             rather than ranked",
-                            imp.line, imp.protocol
+                            "line {}: `{head}` collides with `{prev}` (line {prev_line}) — Vyrn \
+                             dispatches on the type constructor, so `{key}` may have only one \
+                             impl of `{}`; write one generic impl (`impl<T> {} for {key}<T>`) to \
+                             cover every instantiation",
+                            imp.line, imp.protocol, imp.protocol
                         ),
                         "check",
                     )),

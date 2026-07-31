@@ -39,7 +39,7 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     (
         "protocol_overlap.vyrn",
         "two impls of one protocol for one type constructor (RFC-0080 M1)",
-        "overlaps `impl<T> Show for Option<T>` (line",
+        "collides with `impl<T> Show for Option<T>` (line",
     ),
 ];
 
