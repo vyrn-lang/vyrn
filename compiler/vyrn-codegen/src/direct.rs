@@ -510,21 +510,15 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // memory, so the JS caller has to allocate inside it before it can call in —
     // which is the whole reason an export's String ABI differs from an import's
     // (one `ptr`, not a `(ptr, len)` pair). On the LLVM path this is
-    // `-Wl,--export=__vyrn_malloc`, under exactly the same condition. The wrapper
-    // exists because the boundary's `__vyrn_malloc` takes an `unsigned long long`
-    // and the emitted one takes an `i32`: `wasi-min.js` passes a BigInt, so the
-    // exported signature has to be the C one or every call traps on the argument
-    // type. Without this, every DOM handler in `web/domdemo.html` throws.
+    // `-Wl,--export=__vyrn_malloc`, under exactly the same condition. The emitted
+    // `malloc` IS the boundary's signature — `unsigned long long`, so `i64`, the
+    // BigInt `wasi-min.js` passes — so it is exported as itself. It used to go
+    // out through an `i32.wrap` wrapper, which was the one place a JS caller
+    // could ask for 5 GiB and be handed a pointer to 1.
     if user.iter().any(|f| {
         f.is_export_extern && f.params.iter().any(|p| matches!(p.ty, Type::Str))
     }) {
-        let malloc = cx.rt.malloc;
-        let wrap = m.func(&[ValType::I64], &[ValType::I32], &[], 0, |b| {
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::Call(malloc));
-        });
-        m.export("__vyrn_malloc", wrap);
+        m.export("__vyrn_malloc", cx.rt.malloc);
     }
     // Keep only what those exports reach (M2p). Everything above emits eagerly —
     // 39 runtime helpers, 12 WASI imports, every function of every linked module —
@@ -3740,17 +3734,21 @@ impl Fn_<'_> {
     /// host stashes and answers with a length precisely so it never writes into
     /// guest memory the guest did not hand it.
     fn fetch_str(&mut self, b: &mut Frame, g: Gen) {
-        let len = b.local(ValType::I32);
+        // The length stays 64-bit all the way into `malloc`, which is the only
+        // thing here that can judge it — the host names the size, so this is the
+        // one length in the module that is not bounded by the memory it has to
+        // fit in.
+        let len = b.local(ValType::I64);
         let buf = b.local(ValType::I32);
-        b.ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::LocalTee(len))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
+        b.ins(&Instruction::LocalTee(len))
+            .ins(&Instruction::I64Const(1))
+            .ins(&Instruction::I64Add)
             .ins(&Instruction::Call(self.cx.rt.malloc))
             .ins(&Instruction::LocalTee(buf))
             .ins(&Instruction::Call(g.fetch))
             .ins(&Instruction::LocalGet(buf))
             .ins(&Instruction::LocalGet(len))
+            .ins(&Instruction::I32WrapI64)
             .ins(&Instruction::I32Add)
             .ins(&Instruction::I32Const(0))
             .ins(&Instruction::I32Store8(byte()))
@@ -4062,6 +4060,7 @@ impl Fn_<'_> {
                 // is never null — `push` reallocs from it either way.
                 b.ins(&Instruction::I32Const(1));
                 b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::I64ExtendI32U);
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(buf));
                 b.ins(&Instruction::LocalGet(s));
@@ -5261,7 +5260,7 @@ impl Fn_<'_> {
         } else {
             let bl = self.cap_block(&cap_tys)?;
             let p = b.local(ValType::I32);
-            b.ins(&Instruction::I32Const(bl.size as i32));
+            b.ins(&Instruction::I64Const(bl.size as i64));
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalSet(p));
             for (i, (name, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
@@ -5537,7 +5536,7 @@ impl Fn_<'_> {
                 let l = self.layout_of(&ret, line)?;
                 let held = b.local(v);
                 b.ins(&Instruction::LocalSet(held));
-                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::I64Const(l.size as i64));
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalTee(boxed));
                 b.ins(&Instruction::LocalGet(held));
@@ -5546,7 +5545,7 @@ impl Fn_<'_> {
             Repr::Agg(l) => {
                 let src = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::I64Const(l.size as i64));
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalTee(boxed));
                 b.ins(&Instruction::LocalGet(src));
@@ -5556,7 +5555,7 @@ impl Fn_<'_> {
             // A `Task<Unit>` still has to be a value: one word, so `join` has a
             // pointer to drop rather than a `Task` with no representation.
             Repr::Unit => {
-                b.ins(&Instruction::I32Const(8));
+                b.ins(&Instruction::I64Const(8));
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalSet(boxed));
             }
@@ -5802,7 +5801,7 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalSet(src));
         let bytes = (self.stride(from, line)? * n as u32) as i32;
         let buf = b.local(ValType::I32);
-        b.ins(&Instruction::I32Const(bytes.max(1)));
+        b.ins(&Instruction::I64Const(bytes.max(1) as i64));
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(buf));
         b.ins(&Instruction::LocalGet(src));
@@ -5883,10 +5882,14 @@ impl Fn_<'_> {
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalSet(cap));
         let grown = b.local(ValType::I32);
+        // `cap * stride` in 64 bits, which is the width `cap` already is. Wrapping
+        // first is what made this the worst of the truncations: doubling a 2 GiB
+        // buffer asks for 4 GiB, wrapped to 0, and the copy below is `len *
+        // stride` — the OLD size, which does NOT wrap and does fit — so 2 GiB
+        // went into a zero-byte allocation without tripping a bounds check.
         b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(grown));
         b.ins(&Instruction::LocalGet(data));
@@ -6276,7 +6279,7 @@ impl Fn_<'_> {
                 let val = self.scratch(b, v, 2);
                 let p = self.scratch(b, ValType::I32, 3);
                 b.ins(&Instruction::LocalSet(val));
-                b.ins(&Instruction::I32Const(size as i32));
+                b.ins(&Instruction::I64Const(size as i64));
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(val));
@@ -6287,7 +6290,7 @@ impl Fn_<'_> {
                 let src = self.scratch(b, ValType::I32, 1);
                 let p = self.scratch(b, ValType::I32, 2);
                 b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::I64Const(l.size as i64));
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(src));
@@ -7066,9 +7069,13 @@ impl Fn_<'_> {
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalSet(nc));
         for (field, stride, into) in [(l.fields[0], 4i32, nk), (l.fields[1], esz, nv)] {
+            // The count is safe in 32 bits — an entry costs at least twelve bytes,
+            // so a wasm32 memory holds well under 2^31 of them — but `nc * stride`
+            // is not, so the product is 64-bit and `malloc` decides.
             b.ins(&Instruction::LocalGet(nc));
-            b.ins(&Instruction::I32Const(stride));
-            b.ins(&Instruction::I32Mul);
+            b.ins(&Instruction::I64ExtendI32U);
+            b.ins(&Instruction::I64Const(stride as i64));
+            b.ins(&Instruction::I64Mul);
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalTee(into));
             b.ins(&Instruction::LocalGet(hdr));
@@ -7205,6 +7212,7 @@ impl Fn_<'_> {
             b.ins(&Instruction::I32Add);
             b.ins(&Instruction::I32Const(4));
             b.ins(&Instruction::I32Mul);
+            b.ins(&Instruction::I64ExtendI32U);
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalTee(buf));
             b.ins(&Instruction::LocalGet(hdr));
@@ -7424,9 +7432,8 @@ impl Fn_<'_> {
         b.ins(&Instruction::I64Const(2));
         b.ins(&Instruction::I64Mul);
         b.ins(&Instruction::LocalTee(nc));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalTee(nb));
         // From the live buffer, whichever it was: this is the one place the two
@@ -7511,11 +7518,10 @@ impl Fn_<'_> {
                 let al = self.layout_of(&want, line)?;
                 let buf = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(len));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::I32Const(stride as i32));
-                b.ins(&Instruction::I32Mul);
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::I64Const(stride as i64));
+                b.ins(&Instruction::I64Mul);
+                b.ins(&Instruction::I64Const(1));
+                b.ins(&Instruction::I64Add);
                 b.ins(&Instruction::Call(self.cx.rt.malloc));
                 b.ins(&Instruction::LocalTee(buf));
                 b.ins(&Instruction::LocalGet(base));
@@ -7962,7 +7968,7 @@ impl Rt {
     /// pointing at the wrong function only failed loudly where the two signatures
     /// differed. Two helpers with the same wasm signature swapped silently, and
     /// there are several such sets here: `read_file` and `read_file_bytes` are both
-    /// `(i32, i32) -> ()`, and `malloc` and `strlen` are both `(i32) -> i32`.
+    /// `(i32, i32) -> ()`, and `strlen` and `utf8valid` are both `(i32) -> i32`.
     ///
     /// The hazard was paid off rather than argued about: retiring `charcount`
     /// (RFC-0078's census) is the first REMOVAL this table has seen, and it was one
@@ -8141,23 +8147,59 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
 
     // malloc(n) — a bump pointer over `HEAP`.
     //
+    // `n` is an `i64`, not the `i32` a wasm32 pointer is, and that is the native
+    // shim's signature (`__vyrn_malloc(unsigned long long)`, `toolchain.rs`) for
+    // the native shim's stated reason. Every interesting caller computes
+    // `count * stride` out of a Vyrn length, which IS an `i64`; taking an `i32`
+    // put the truncation at the call site where nothing could see it. `push`
+    // doubling a 2 GiB buffer wrapped `cap * stride` to a handful of bytes,
+    // allocated those, and then copied 2 GiB into them — heap corruption out of
+    // an allocation that reported success.
+    //
     // ponytail: it never frees. Vyrn's ownership analysis knows exactly where every
     // value dies (`Stmt::Drop` is already in the AST), so a real allocator belongs
     // here eventually; nothing observable depends on it, because a free is not a
     // thing a program can print.
-    let p = 2;
+    let (p, end) = (2, 3);
     let trap = rt.trap;
     let oom = rt.intern(m, "error: out of memory\n");
     rt.next_is(m, rt.malloc);
-    m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
+    m.func(&[ValType::I64], &[ValType::I32], &[ValType::I32, ValType::I64], 0, |b| {
+        // The width check, BEFORE the rounding — the native shim puts it before
+        // the `(size_t)` cast for the same reason, and here `n + 7` is the cast:
+        // a request of 2^64-1 rounds to 0 and would bump the heap by nothing,
+        // handing back a pointer for sixteen exabytes.
+        b.ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I64Const(0xFFFF_FFFF))
+            .ins(&Instruction::I64GtU)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(oom as i32))
+            .ins(&Instruction::Call(trap))
+            .ins(&Instruction::End);
+        // The bump itself, in 64 bits so the SUM cannot wrap either: a 3 GiB heap
+        // plus a 2 GiB request is 5 GiB, which as an `i32` was a small pointer
+        // that then passed the `memory.size` test below. A wasm32 memory stops at
+        // 4 GiB, so a top past it is a request that can never be served —
+        // reported with the words `memory.grow` failing reports, since it is the
+        // same failure reached one step earlier.
         b.ins(&Instruction::GlobalGet(HEAP))
             .ins(&Instruction::LocalTee(p))
+            .ins(&Instruction::I64ExtendI32U)
             .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(-8))
-            .ins(&Instruction::I32And)
-            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I64Const(7))
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::I64Const(-8))
+            .ins(&Instruction::I64And)
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::LocalTee(end))
+            .ins(&Instruction::I64Const(0xFFFF_FFFF))
+            .ins(&Instruction::I64GtU)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(oom as i32))
+            .ins(&Instruction::Call(trap))
+            .ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(end))
+            .ins(&Instruction::I32WrapI64)
             .ins(&Instruction::GlobalSet(HEAP))
             .ins(&Instruction::Block(BlockType::Empty))
             .ins(&Instruction::Loop(BlockType::Empty))
@@ -8307,7 +8349,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         &[ValType::I32, ValType::I32],
         0,
         |b| {
-            b.ins(&Instruction::I32Const(24))
+            b.ins(&Instruction::I64Const(24))
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::I32Const(23))
                 .ins(&Instruction::I32Add)
@@ -8390,6 +8432,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(r))
                 .ins(&Instruction::LocalGet(r))
@@ -8463,6 +8506,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::LocalSet(cap))
                 .ins(&Instruction::End)
                 .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(p))
@@ -8499,6 +8543,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::LocalSet(nc))
                 .ins(&Instruction::End)
                 .ins(&Instruction::LocalGet(nc))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(p))
@@ -8637,6 +8682,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             b.ins(&Instruction::LocalGet(1))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(buf));
             b.ins(&Instruction::Block(BlockType::Empty)) // fin
@@ -9136,7 +9182,7 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
             .ins(&Instruction::I32Eqz)
             .ins(&Instruction::If(BlockType::Empty))
             .ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Const(CELL_SLAB as i32))
+            .ins(&Instruction::I64Const(CELL_SLAB as i64))
             .ins(&Instruction::Call(malloc))
             .ins(&Instruction::I32Store(word()))
             .ins(&Instruction::End);
@@ -9399,6 +9445,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::I32Const(8))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(ptrs))
                 .ins(&Instruction::LocalGet(ptrs));
@@ -9406,6 +9453,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::Call(env_get_i))
                 .ins(&Instruction::Drop);
@@ -9642,6 +9690,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             // when there are no arguments at all and it is never read.
             .ins(&Instruction::I32Const(8))
             .ins(&Instruction::I32Add)
+            .ins(&Instruction::I64ExtendI32U)
             .ins(&Instruction::Call(malloc))
             .ins(&Instruction::LocalSet(ptrs))
             .ins(&Instruction::LocalGet(ptrs));
@@ -9649,6 +9698,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         b.ins(&Instruction::I32Load(word()))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32Add)
+            .ins(&Instruction::I64ExtendI32U)
             .ins(&Instruction::Call(malloc))
             .ins(&Instruction::Call(args_get))
             .ins(&Instruction::Drop);
@@ -9732,6 +9782,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::BrIf(0))
                 .ins(&Instruction::I32Const(64))
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::Block(BlockType::Empty)) // 0: eol
@@ -9762,6 +9813,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(buf))
@@ -9903,6 +9955,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             let (buf, cap, len, nb, got) = (3, 4, 5, 6, 7);
             b.ins(&Instruction::I32Const(1024))
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::Block(BlockType::Empty))
@@ -9917,6 +9970,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(buf))
@@ -10150,7 +10204,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)); // 0: err
             slurp(b, 0, fd, buf, len, emsg, 0, crate::GEN_MODE_READ_BYTES);
-            b.ins(&Instruction::I32Const(triple.size as i32))
+            b.ins(&Instruction::I64Const(triple.size as i64))
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(boxed))
                 .ins(&Instruction::LocalGet(buf))
@@ -10405,8 +10459,9 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::Else)
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::End)
-                .ins(&Instruction::I32Const(stride))
-                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Const(stride as i64))
+                .ins(&Instruction::I64Mul)
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalSet(names))
                 .ins(&Instruction::LocalGet(buf))
@@ -10465,7 +10520,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::If(BlockType::Empty));
             elem(b);
             b.ins(&Instruction::End)
-                .ins(&Instruction::I32Const(triple.size as i32))
+                .ins(&Instruction::I64Const(triple.size as i64))
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(boxed))
                 .ins(&Instruction::LocalGet(names))
@@ -10538,12 +10593,15 @@ fn gen_slurp(
         .ins(&Instruction::LocalSet(err_msg))
         .ins(&Instruction::Br(err_depth + 1))
         .ins(&Instruction::End)
-        // The low half is the length; `i32.wrap` IS the mask.
+        // The low half is the length; `i32.wrap` IS the mask. The NUL is added
+        // back in 64 bits, so a host answering 4 GiB minus one gets an out of
+        // memory rather than a one-byte buffer.
         .ins(&Instruction::LocalGet(packed))
         .ins(&Instruction::I32WrapI64)
         .ins(&Instruction::LocalTee(len))
-        .ins(&Instruction::I32Const(1))
-        .ins(&Instruction::I32Add)
+        .ins(&Instruction::I64ExtendI32U)
+        .ins(&Instruction::I64Const(1))
+        .ins(&Instruction::I64Add)
         .ins(&Instruction::Call(malloc))
         .ins(&Instruction::LocalTee(buf))
         .ins(&Instruction::Call(g.fetch))

@@ -3703,3 +3703,113 @@ fn main() -> Int64 {
         "the native shim no longer prints what this asserts"
     );
 }
+
+/// A `malloc` whose bump pointer would WRAP traps instead of handing back a
+/// pointer to memory it never reserved (RFC-0081).
+///
+/// The native shim checks the size before the `(size_t)` cast and says why:
+/// "a huge size could wrap to a tiny allocation - a buffer overflow, not an
+/// error". The direct backend's `malloc` took an `i32`, so that cast had already
+/// happened at the call site and there was nothing left for it to check —
+/// `HEAP + align8(n)` simply wrapped, the `memory.size` test below it passed
+/// because the wrapped top is small, and the caller got a valid-looking pointer
+/// for an allocation it then wrote far past.
+///
+/// The size is now an `i64` — the signature `__vyrn_malloc` has had on native all
+/// along — and the two requests here are the two ways it can fail:
+///
+///   - 5 GiB does not fit in a wasm32 address space at all. This is the width
+///     check, and it must come BEFORE the rounding, because `n + 7` is this
+///     backend's version of the cast: 2^64-1 rounds to 0, bumps the heap by
+///     nothing, and returns a pointer for sixteen exabytes.
+///   - 4294967280 fits in 32 bits but `HEAP + it` does not. Pre-fix this was the
+///     nastier one, because NO allocation was attempted: the sum wrapped, the
+///     heap moved BACKWARD by sixteen bytes, and `malloc` returned success
+///     without touching `memory.grow` — which is why this pin cannot be
+///     satisfied by an allocation merely succeeding, and why it needs no memory
+///     cap the way the `memory.grow` pin above does.
+///
+/// The third call is the control: 64 bytes still allocates and still returns a
+/// pointer, so a `malloc` that traps unconditionally does not pass either.
+///
+/// `--invoke` is the only way to reach `malloc` with a size no Vyrn program can
+/// name — a program can only ask for what it could hold — and it is exactly the
+/// path a JS caller takes: `wasi-min.js` calls the exported `__vyrn_malloc` with
+/// a BigInt before passing a String in. That export used to go out through an
+/// `i32.wrap` wrapper, so the browser boundary was where an oversized request
+/// was silently narrowed.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_malloc_whose_bump_pointer_would_wrap_traps_instead_of_lying() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-wrap");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A `String` parameter on an `export extern fn` is the condition under which
+    // `__vyrn_malloc` is exported at all (asserted separately by
+    // `the_wasm_module_exports_what_the_llvm_path_exports`).
+    let src = "\
+export extern fn greet(name: String) -> String {
+    return name
+}
+
+fn main() -> Int64 {
+    print(greet(\"hi\"))
+    return 0
+}
+";
+    let path = dir.join("wrap.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("wrap.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let call = |n: &str| {
+        Command::new(&wasmtime)
+            .arg("run")
+            .arg("-W")
+            .arg("timeout=20s")
+            .arg("--invoke")
+            .arg("__vyrn_malloc")
+            .arg(&module)
+            .arg(n)
+            .output()
+            .expect("run wasmtime")
+    };
+
+    for n in ["5000000000", "4294967280"] {
+        let out = call(n);
+        // `ends_with`, not equality: wasmtime prints its own `--invoke is
+        // experimental` warning on the same channel, and that is its wording to
+        // change, not ours.
+        assert!(
+            norm(&out.stderr).ends_with("error: out of memory\n"),
+            "malloc({n}) must trap, got:\n{}",
+            norm(&out.stderr)
+        );
+        assert_eq!(out.status.code(), Some(1), "malloc({n}): exit 1, like every trap");
+        assert!(out.stdout.is_empty(), "malloc({n}) returned a pointer: {:?}", norm(&out.stdout));
+    }
+
+    let ok = call("64");
+    assert_eq!(ok.status.code(), Some(0), "64 bytes is an ordinary allocation");
+    assert!(
+        !norm(&ok.stdout).trim().is_empty(),
+        "64 bytes must still come back as a pointer, or the check is just a trap"
+    );
+    // Same single-sourcing as the pin above: the wording is the native shim's.
+    assert!(
+        vyrn_codegen::toolchain::RUNTIME_SHIM.contains("\"error: out of memory\\n\""),
+        "the native shim no longer prints what this asserts"
+    );
+}
