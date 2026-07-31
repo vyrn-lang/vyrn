@@ -326,3 +326,27 @@ an algorithm, and only the float case is written three ways.
 
 **`@concat`**, the other `Measured` row. Same category, different question, and
 its cost has not been re-measured.
+
+## A divergence this suite cannot catch, recorded rather than fixed
+
+Fixing the wasm `malloc` exposed that the three engines disagree about genuine
+host memory exhaustion, measured on `s = s + s` forty times:
+
+| engine | exit | stderr |
+|---|---|---|
+| interpreter | 127 | `memory allocation of 68719476736 bytes failed` — Rust's own allocator abort, plus its `RUST_BACKTRACE` note |
+| native | — | no output; still thrashing when killed at 90 s |
+| direct wasm | 1 | `error: out of memory` |
+
+Wasm is the only one that is right, and it is right *because* its address space
+is bounded: a wasm32 memory cannot grow past 4 GiB, so the failure is a value the
+compiler can check. The other two ask a host allocator that lazily commits, so
+`malloc` does not return NULL — native's shim has the correct wording and never
+reaches it, and the interpreter has no handling at all and leaks a Rust
+implementation detail to the user.
+
+This is unreferenced multiplicity of exactly the kind this RFC is about, and the
+parity suite **structurally cannot** catch it: a test cannot reproducibly exhaust
+host memory, which is why it drifted unnoticed. Recorded here so the next person
+to touch allocation failure knows the wording exists, which engine honours it,
+and why the harness stayed green throughout.
