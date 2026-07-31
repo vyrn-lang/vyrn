@@ -1,7 +1,7 @@
 # RFC-0080 — Associated Types and Generic Impls
 
-- **Status:** **Draft.** Designed, not started. Whether to build it is a separate
-  decision from whether the design is right.
+- **Status:** **M1 shipped**; M2 and M3 designed, not started. Whether to build
+  them is a separate decision from whether the design is right.
 - **Depends on:** RFC-0002 §5 (protocols, static monomorphized dispatch),
   RFC-0023 (monomorphized function values — the unification machinery this
   extends), RFC-0079 (`?`/`??`, the motivating consumers)
@@ -14,9 +14,16 @@
 `Show` cannot be implemented for `Option<T>`.
 
 ```vyrn
-impl Show for Option<Int64> { ... }    // legal, and useless
+impl Show for Option<Int64> { ... }    // rejected
 impl<T> Show for Option<T> { ... }     // does not parse
 ```
+
+(This block originally called the first line "legal, and useless". It was
+neither — `ok_target` in `checker.rs` admitted `Int | Bool | Str` and a named
+enum, and `Option` fell through to `false`, so a protocol could not be
+implemented for `Option` at *any* instantiation. M1 therefore adds a capability
+rather than generalising one, which makes the M1 pin the first program in the
+repo to dispatch a protocol on an `Option` at all.)
 
 [`impl_block`](../compiler/vyrn-frontend/src/parser.rs) reads
 `impl <ident> for <type>`. There is nowhere to bind a type variable, so a
@@ -48,6 +55,19 @@ opportunity. Rust allows the latter only behind an unstable feature and has for
 years; there is no reason to import that problem to get `Show` on `Option<T>`.
 One impl per `(protocol, type constructor)` pair, checked when the impl is
 declared rather than when it is used, so the error names both impls.
+
+**That rule is wider than overlap, and this paragraph originally conflated the
+two.** `impl P for Option<Int64>` beside `impl P for Option<String>` names
+*disjoint* types that can never both match a receiver — no ambiguity exists —
+and it is refused too, because dispatch keys on the constructor. So the honest
+statement is one impl per constructor, of which rejecting true overlap is a
+consequence rather than the reason. Rust permits the disjoint pair; Vyrn is
+narrower here, and the cost is real for a case like `Array<UInt8>` serialising
+differently from `Array<Int64>`. Lifting it means keying a *list* per
+constructor and refusing only heads that actually unify — tractable, not done,
+and not needed for anything M1 exists to deliver. The diagnostic says
+"collides", never "overlaps", so it does not describe an ambiguity that is not
+there.
 
 ### 2. Associated types
 
@@ -151,7 +171,7 @@ operator generalization as a payoff that arrives later rather than a deadline.
 
 ## Milestones
 
-### M1 — Generic impls
+### M1 — Generic impls — **SHIPPED**
 
 `impl<T> P for C<T>`: parse the binder, unify the receiver against the impl head
 during selection, reject overlap at declaration with both impls named. Pin:
@@ -161,6 +181,56 @@ overlapping pair whose diagnostic names both.
 
 M1 is independently useful and ships alone. If M2 never happens, `Show` on
 `Option<T>` still works.
+
+**As landed.** Both pins hold — `examples/protocol.vyrn` carries the generic
+impl through the three-engine sweep, `examples/protocol_overlap.vyrn` is the
+refusal. What the plan above got wrong or left out:
+
+- **"a new selection step over machinery that exists" overstated the new
+  step.** There is no selection *step*. Selection was already
+  `type_key(receiver) → mangled impl function → call`, and `call` already had
+  the RFC-0023 generic path. Widening `type_key` so a generic type keys on its
+  **constructor alone** (`Option<Int64>` and `Option<String>` both key
+  `Option`) makes the existing call path do the unification — the receiver
+  `Option<Int64>` meets the impl method's `self: Option<T>` as an ordinary
+  argument, and `T` binds the way it always has. Three backends dispatch
+  through that one key function, so all three followed without being touched.
+  The interpreter needed two lines: its runtime key is computed from a `Val`,
+  and `Val::Option`/`Val::Result` had no key at all.
+
+- **Bounds on the binder were not optional.** The RFC writes `impl<T> Show for
+  Option<T>`, but the body of that impl cannot show its payload without
+  `T: Show`, so the useful spelling is the bounded one. The `fn f<T: Ord>`
+  binder parser was extracted and shared rather than a second one written.
+
+- **Overlap keys on the constructor, so it also rejects two concrete impls for
+  one constructor** — `impl Show for Box<Int64>` beside `impl Show for
+  Box<String>`. That is the stated "one impl per (protocol, type constructor)"
+  rule, but the RFC only ever illustrated generic-versus-concrete, and the
+  concrete-versus-concrete case is the one a user is more likely to write by
+  accident.
+
+- **A worse diagnostic had to be suppressed to let the good one through.**
+  Impl methods flatten to mangled top-level functions, so two overlapping impls
+  produced ``function `Show__Option__show` defined twice`` — naming a symbol
+  nobody wrote — *before* the overlap error. The flattener now keeps the first
+  and lets the checker speak.
+
+- **The formatter had a matching gap.** Its generic-angle rule required the
+  token before `<` to be a name, so `impl<T>` reformatted to `impl < T >`. This
+  is the second milestone in a row to find a fmt rule that assumed the syntax
+  it was written against; `vyrn fmt --check` over the corpus is what caught it.
+
+- **Legal impl targets widened beyond what the pin needed:** `Option`,
+  `Result`, and an application of a user generic enum (`Box<T>`). All three
+  keep a distinct runtime shape, which is the existing rule for what may carry
+  an impl. `Array`/`Map` were left out — not because they cannot dispatch, but
+  because their builtin methods would collide and nothing needed it.
+
+- **Not reached, and not a blocker:** nested `Option<Option<T>>` still hits the
+  pre-existing "nested Option/Result is not supported in v0.1" rejection, so a
+  generic impl cannot be exercised at two levels. Unrelated to this RFC and
+  unchanged by it.
 
 ### M2 — Associated types
 

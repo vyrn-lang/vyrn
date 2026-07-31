@@ -134,6 +134,26 @@ fn check_accum_full(
     check_accum_inner(program, None)
 }
 
+/// An impl head as the user wrote it (`impl<T> Show for Option<T>`), for the
+/// overlap diagnostic — which has to quote both impls to be actionable, and
+/// they differ only in the head.
+fn render_impl_head(imp: &crate::ast::ImplBlock) -> String {
+    let binder = if imp.type_params.is_empty() {
+        String::new()
+    } else {
+        let ps: Vec<String> = imp
+            .type_params
+            .iter()
+            .map(|p| match imp.type_bounds.get(p) {
+                Some(bs) => format!("{p}: {}", bs.join(" + ")),
+                None => p.clone(),
+            })
+            .collect();
+        format!("<{}>", ps.join(", "))
+    };
+    format!("impl{binder} {} for {}", imp.protocol, imp.ty)
+}
+
 fn check_accum_inner(
     program: &Program,
     reuse: Option<&std::collections::HashMap<String, String>>,
@@ -442,18 +462,52 @@ fn check_accum_inner(
         }
     }
     let mut impls: std::collections::HashSet<(String, String)> = Default::default();
+    // The impl already declared for each (protocol, type-constructor) key, so a
+    // second one is rejected where it is WRITTEN rather than where it is called
+    // (RFC-0080 M1: overlap is an error, not a specialization opportunity, and
+    // the error can only name both impls if it fires at declaration).
+    let mut impl_heads: HashMap<(String, String), (usize, String)> = HashMap::new();
     for imp in &program.impls {
         // A named target must be an enum: validated/nominal scalars erase to their
         // base at runtime, so the interpreter could not dispatch them (it would
         // diverge from native). Records have no runtime identity either.
+        // `Option`/`Result` and a generic enum application keep a distinct runtime
+        // shape, so they dispatch (RFC-0080 M1).
         let ok_target = match &imp.ty {
-            Type::Int | Type::Bool | Type::Str => true,
-            Type::Named(n) => matches!(types.get(n).map(|d| &d.base), Some(Type::Enum(_))),
+            Type::Int | Type::Bool | Type::Str | Type::Option(_) | Type::Result(..) => true,
+            Type::Named(n) | Type::App(n, _) => {
+                matches!(types.get(n).map(|d| &d.base), Some(Type::Enum(_)))
+            }
             _ => false,
         };
         match crate::types::type_key(&imp.ty) {
             Some(key) if ok_target => {
-                impls.insert((imp.protocol.clone(), key));
+                let head = render_impl_head(imp);
+                match impl_heads.get(&(imp.protocol.clone(), key.clone())) {
+                    // Deliberately does NOT say "overlaps". Two *concrete* heads
+                    // for one constructor — `Option<Int64>` and `Option<String>`
+                    // — are disjoint types that can never both match a receiver,
+                    // so calling them overlapping would be false and would send
+                    // the reader looking for an ambiguity that is not there. The
+                    // real reason is narrower and worth saying out loud: dispatch
+                    // keys on the constructor (see `types::type_key`), so the
+                    // constructor is what admits one impl. The generic form is
+                    // the answer in both cases, so the message names it.
+                    Some((prev_line, prev)) => out.push(Diagnostic::from_rendered(
+                        format!(
+                            "line {}: `{head}` collides with `{prev}` (line {prev_line}) — Vyrn \
+                             dispatches on the type constructor, so `{key}` may have only one \
+                             impl of `{}`; write one generic impl (`impl<T> {} for {key}<T>`) to \
+                             cover every instantiation",
+                            imp.line, imp.protocol, imp.protocol
+                        ),
+                        "check",
+                    )),
+                    None => {
+                        impl_heads.insert((imp.protocol.clone(), key.clone()), (imp.line, head));
+                        impls.insert((imp.protocol.clone(), key));
+                    }
+                }
             }
             _ => out.push(Diagnostic::from_rendered(
                 format!(

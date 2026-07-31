@@ -3957,6 +3957,12 @@ impl<'a> Interp<'a> {
             Val::Bool(_) => Some("Bool".to_string()),
             Val::Str(_) => Some("String".to_string()),
             Val::Enum(variant, _) => self.variant_enum.get(variant).cloned(),
+            // A generic impl keys on the constructor alone (RFC-0080 M1), which
+            // is all a runtime value can offer: `Some(1)` and `Some("a")` are
+            // the same `Val::Option`. The impl body is generic over the payload,
+            // so the type arguments the key drops are ones it never needed.
+            Val::Option(_) => Some("Option".to_string()),
+            Val::Result(..) => Some("Result".to_string()),
             _ => None,
         }
     }
