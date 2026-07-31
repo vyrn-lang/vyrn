@@ -558,15 +558,19 @@ pub const RT_MODULES: &[RtModule] = &[
             ("urlDecode", "codecs$urlDecodeV"),
         ],
     },
-    // RFC-0078 M4b(2)/M4c: `chars`. `lineAt`/`colAt` are deliberately NOT here —
-    // see the M4c note in RFC-0078: the interpreter memoizes a line-start table
-    // that a Vyrn library cannot, and retiring them is a decision about that cache
-    // (M5) rather than about capability.
+    // RFC-0078 M4b(2)/M4c: `chars`, and `@charCount` — the census's one builtin with
+    // no justification for being one, added on an existing row rather than a new
+    // one. It is spelled with the `@` because that is what the parser produces:
+    // `s.charCount()` is method-only, so the AST call name is `@charCount` and that
+    // is the string every engine looks up. `lineAt`/`colAt` are deliberately NOT
+    // here — see the M4c note in RFC-0078: the interpreter memoizes a line-start
+    // table that a Vyrn library cannot, and retiring them is a decision about that
+    // cache (M5) rather than about capability.
     RtModule {
         spec: "std/text",
         prefix: "text$",
         desugared: &[],
-        routes: &[("chars", "text$charsV")],
+        routes: &[("chars", "text$charsV"), ("@charCount", "text$charCountV")],
     },
     // RFC-0078 M4b(3)/M4c: the three string predicates. `slice` is not here — it
     // TRAPS, and Vyrn has no expression that aborts, so `sliceV` returns

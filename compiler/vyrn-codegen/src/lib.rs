@@ -690,7 +690,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Heap + string runtime (dynamic strings). Allocations are not yet freed —
     // the reclamation strategy is RFC-0004's open question.
     out.push_str("declare i64 @__vyrn_strlen(ptr)\n");
-    out.push_str("declare i64 @__vyrn_charcount(ptr)\n");
+    // (`declare i64 @__vyrn_charcount` went with `charCount` — RFC-0078's census
+    // called it the one builtin with no justification, and `std/text`'s
+    // `charCountV` is the same byte scan in Vyrn.)
     out.push_str("declare i64 @__vyrn_line_at(ptr, i64, i64)\n");
     out.push_str("declare i64 @__vyrn_col_at(ptr, i64, i64)\n");
     out.push_str("declare ptr @__vyrn_malloc(i64)\n");
@@ -6040,18 +6042,11 @@ impl<'a> Gen<'a> {
             ));
             return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
         }
-        // `@charCount` (from `s.charCount()`, RFC-0058): the number of Unicode
-        // scalar values = the count of non-continuation bytes, via the runtime
-        // shim `__vyrn_charcount` (byte-identical to the interpreter).
-        if name == "@charCount" {
-            let (s, _) = self.gen_expr(&args[0])?;
-            let n = self.fresh_tmp();
-            self.emit(format!("{n} = call i64 @__vyrn_charcount(ptr {s})"));
-            return Ok((n, Type::Int));
-        }
         // (`contains`, `startsWith` and `endsWith` are `std/strpred` — RFC-0078
         // M4c. They were `strstr` and two `strncmp` shapes here, ~50 lines with a
-        // `phi` in one of them, and are now routed at the top of `gen_call`.)
+        // `phi` in one of them, and are now routed at the top of `gen_call`.
+        // `@charCount` is `std/text`'s `charCountV` for the same reason and by the
+        // same mechanism — it was one `call i64 @__vyrn_charcount` here.)
         // slice(s, start, end) -> String (RFC-0046): the byte-range substring.
         // Validated O(1) — no whole-slice UTF-8 revalidation: bounds are checked,
         // then the single byte at each cut point must not be a UTF-8 continuation
@@ -9374,15 +9369,13 @@ mod tests {
         assert!(ir.contains("call i64 @__vyrn_strlen"), "str .byteLength → strlen: {ir}");
     }
 
-    #[test]
-    fn string_char_count_lowers_to_charcount_shim() {
-        let src = "fn main() -> Int64 { let s = \"hi\"; return s.charCount(); }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(
-            ir.contains("call i64 @__vyrn_charcount"),
-            "str .charCount() → charcount shim: {ir}"
-        );
-    }
+    // (`string_char_count_lowers_to_charcount_shim` pinned
+    // `call i64 @__vyrn_charcount`, which is no longer emitted: RFC-0078's census
+    // found `charCount` the one builtin with no justification for being one, and it
+    // is `std/text`'s `charCountV`. Its witness moved to
+    // `a_routed_builtin_without_its_module_refuses_by_name` with the other ten.
+    // `string_byte_length_lowers_to_strlen` above is the contrast that matters:
+    // `byteLength` is a VIEW and stays.)
 
     #[test]
     fn string_index_lowers_to_byte_load() {
@@ -9443,6 +9436,14 @@ mod tests {
                  fn main() -> Int64 { return 0 }",
                 "endsWith",
                 "strpred$endsWithV",
+            ),
+            // `@charCount` is spelled with the `@` because the parser produces it:
+            // `s.charCount()` is method-only, so the AST call name — and the string
+            // every engine routes on — is the internal one.
+            (
+                "fn main() -> Int64 { return \"hi\".charCount() }",
+                "@charCount",
+                "text$charCountV",
             ),
         ] {
             let e = emit(&check(src).unwrap()).unwrap_err();

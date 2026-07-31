@@ -16,7 +16,14 @@
 //!    did not move. This is the half that matters: a decoder that waves through an
 //!    overlong form still decodes every valid string correctly, so a corpus of
 //!    valid text proves almost nothing about it;
-//! 4. `lineAtV`/`colAtV` against `lineAt`/`colAt` at every offset — **also still a
+//! 4. `charCount` against `chars` over ~900 buffers — a live oracle WITHOUT a
+//!    digest, and the one place the x-equals-x hazard was dodged rather than
+//!    accepted. `charCountV` is a byte scan for non-continuation bytes and `charsV`
+//!    is a full first-byte-dispatch decode, so the two are independent
+//!    implementations of one fact; and the chain is not closed, because `chars`'s
+//!    answers over these buffers are what item 2's digest pins to the C and Rust
+//!    that existed before anything moved;
+//! 5. `lineAtV`/`colAtV` against `lineAt`/`colAt` at every offset — **also still a
 //!    live oracle**, because those two builtins did not move either (the
 //!    interpreter's memoized line-start table is why, and retiring it is M5's
 //!    question). Every offset rather than a chosen few precisely because the two
@@ -53,7 +60,7 @@ fn text_pins_hold() {
 
 #[test]
 fn std_text_unit_tests_run_green() {
-    unit_tests_green("std/text.vyrn", "3 passed, 0 failed");
+    unit_tests_green("std/text.vyrn", "4 passed, 0 failed");
 }
 
 /// A Vyrn byte-array literal (`['\x41', '\x00']`). Byte literals rather than a
@@ -369,4 +376,95 @@ fn row(b: Array<UInt8>, off: Int64) -> String {
         .map(|(l, _)| l.clone())
         .expect("the offset after the first é");
     assert_eq!(three, "ok 1:3", "a column is a byte offset, not a character index");
+}
+
+/// `charCount` — the census's one `Unjustified` builtin — against `chars`, over the
+/// same codepoint corpus.
+///
+/// M4c's hazard, stated in this file's module doc, is that a converted builtin's
+/// oracle becomes `x == x`. That is what happened to `chars`: `charsV` IS `chars`
+/// now, so its half is a digest pinned before the swap. `charCount` avoids the
+/// hazard WITHOUT a new digest, and the reason is worth stating: `charCountV` is a
+/// byte scan for non-continuation bytes and `charsV` is a full first-byte-dispatch
+/// decode, so `s.charCount() == chars(s).length` compares two independent Vyrn
+/// implementations of the same fact. And it is not a closed loop, because `chars`'s
+/// answers over these buffers are the ones `CODEPOINT_DIGEST` pins against the C
+/// and Rust implementations that existed before any of this moved.
+///
+/// A wrong `charCountV` fails here in either direction: counting a continuation byte
+/// over-counts a multi-byte buffer, and skipping a lead byte under-counts one. The
+/// corpus is ~900 buffers, most of them multi-byte, several of them mixed-width, so
+/// neither survives.
+///
+/// The literal rows are `examples/bytecount.vyrn`'s, captured from the interpreter,
+/// the native build and wasm BEFORE the swap and identical on all three after it.
+#[test]
+fn charcount_agrees_with_chars_over_the_codepoint_corpus() {
+    let mut cps: Vec<u32> = (0x20..0x800).step_by(3).collect();
+    cps.extend((0x800..0x10000).step_by(97));
+    cps.extend((0x10000..0x110000).step_by(521));
+    cps.extend([0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xfffd, 0xffff, 0x10000, 0x10ffff]);
+    cps.retain(|c| !(0xD800..=0xDFFF).contains(c));
+    cps.sort_unstable();
+    cps.dedup();
+
+    // Multi-codepoint buffers as well as single ones: a scan that mishandles the
+    // TRANSITION between two sequences is invisible on one codepoint at a time.
+    let mut buffers: Vec<Vec<u8>> = Vec::new();
+    buffers.push(Vec::new());
+    for w in cps.chunks(7) {
+        buffers.push(w.iter().flat_map(|c| utf8_of(*c)).collect());
+    }
+
+    let harness = r#"
+/// `charCount` beside `chars(s).length` and `byteLength`, so a mismatch says which
+/// of the three disagreed rather than just that something did.
+fn cmp(s: String) -> String {
+    let scan = s.charCount()
+    let decode = chars(s).length
+    if scan == decode {
+        return "ok " + scan.toString() + " of " + s.byteLength.toString()
+    }
+    return "MISMATCH scan=" + scan.toString() + " decode=" + decode.toString()
+}
+
+fn row(b: Array<UInt8>) -> String {
+    return match stringFromBytes(b) {
+        Ok(s) => cmp(s),
+        Err(e) => "reject",
+    }
+}
+"#;
+    let calls: String =
+        buffers.iter().map(|b| format!("    print(row({}))\n", byte_array(b))).collect();
+    let src = format!("{harness}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
+    let lines = run_lines("vyrn-charcount-oracle", &src);
+    assert_eq!(lines.len(), buffers.len(), "one line per buffer");
+    assert!(!lines.iter().any(|l| l.starts_with("MISMATCH")), "{:?}", lines.iter().find(|l| l.starts_with("MISMATCH")));
+    assert!(!lines.iter().any(|l| l == "reject"), "a valid buffer was refused");
+    // Not vacuous: the corpus has to contain buffers where the two answers COULD
+    // differ, i.e. where the byte count exceeds the scalar count.
+    let multibyte = lines
+        .iter()
+        .filter_map(|l| {
+            let mut it = l.strip_prefix("ok ")?.split(" of ");
+            let n: usize = it.next()?.parse().ok()?;
+            let b: usize = it.next()?.parse().ok()?;
+            Some((n, b))
+        })
+        .filter(|(n, b)| b > n)
+        .count();
+    assert!(multibyte > 100, "only {multibyte} buffers had more bytes than scalars");
+
+    // The `examples/bytecount.vyrn` rows, spelled out. Captured on all three engines
+    // before `charCount` was routed and unchanged after.
+    let rows = run_lines(
+        "vyrn-charcount-oracle",
+        "fn show(s: String) -> String {\n    \
+         return s.byteLength.toString() + \"/\" + s.charCount().toString()\n}\n\
+         fn main() -> Int64 {\n    \
+         print(show(\"\"))\n    print(show(\"hello\"))\n    print(show(\"héllo\"))\n    \
+         print(show(\"☕\"))\n    print(show(\"😀\"))\n    return 0\n}\n",
+    );
+    assert_eq!(rows, ["0/0", "5/5", "6/5", "3/1", "4/1"], "bytecount.vyrn's pinned rows");
 }

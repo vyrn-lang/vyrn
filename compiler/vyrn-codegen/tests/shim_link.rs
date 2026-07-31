@@ -124,7 +124,6 @@ fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
     }
     let n = at.len();
     let (malloc, strlen) = (at["__vyrn_malloc"], at["__vyrn_strlen"]);
-    let charcount = at["__vyrn_charcount"];
 
     // iovec at 0, the written count at 8; `p` and `s` in locals.
     let (p, s) = (1u32, 2u32);
@@ -151,14 +150,14 @@ fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
                 .ins(&Instruction::I32Store8(MemArg { offset: off, align: 0, memory_index: 0 }));
         }
         // The bytes we compare are the ones the guest just wrote into the shim's
-        // allocation, read back through the shim's own UTF-8 counter. This used to be
-        // `__vyrn_vj_bool(true)` through `__vyrn_vj_encode` — M0's one widening
-        // feeding the shim's JSON writer — until RFC-0078 M2b retired both, JSON
-        // being Vyrn now. Same property, two fewer C functions: only a shared
-        // address space makes a pointer the guest filled mean anything over there.
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::Call(charcount))
-            .ins(&Instruction::Drop);
+        // allocation, read back through C. This used to be `__vyrn_vj_bool(true)`
+        // through `__vyrn_vj_encode` — M0's one widening feeding the shim's JSON
+        // writer — then `__vyrn_charcount` after RFC-0078 M2b retired both, and now
+        // `__vyrn_strlen` below, after the census routed `charCount` into `std/text`
+        // as well. Same property each time, and fewer C functions each time: only a
+        // shared address space makes a pointer the guest filled mean anything over
+        // there. `strlen` is the one that cannot leave, because `byteLength` is a
+        // view rather than an operation.
         b.ins(&Instruction::LocalGet(p)).ins(&Instruction::LocalSet(s));
         b.slot(0).ins(&Instruction::LocalGet(s)).ins(&i32_store(0));
         b.slot(0)
@@ -235,7 +234,10 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
     // the whole Issue accumulator left the boundary together — twenty-two declares
     // and forty-seven C definitions. A boundary that shrinks because a milestone
     // deleted C is the point; one that shrinks quietly is not.
-    assert!(n >= 33, "only {n} of the boundary was importable — the census shrank");
+    // 33 -> 32 when the census retired `charCount`: one declare, one C definition,
+    // and the smallest drop this RFC has produced, which is what a builtin with one
+    // caller and no justification is worth.
+    assert!(n >= 32, "only {n} of the boundary was importable — the census shrank");
     eprintln!("shim link: {n} boundary signatures instantiated against the module that defines them");
 }
 
@@ -250,8 +252,10 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
 /// wasm's own type checker rejects the module. That is `abi` being load-bearing at
 /// emission time rather than at link time. M0 demonstrated it on
 /// `declare ptr @__vyrn_vj_bool(i1)`, the boundary's only sub-i32 argument until
-/// RFC-0078 M2b retired the DOM builders; `__vyrn_charcount(ptr)` is the same
-/// crossing one width up.
+/// RFC-0078 M2b retired the DOM builders; `__vyrn_strlen(ptr)` is the same crossing
+/// one width up. (It was `__vyrn_charcount(ptr)` until the census routed `charCount`
+/// into `std/text` — the two have the same signature, and `strlen` is the one no
+/// milestone can take, because `byteLength` is a view.)
 ///
 /// **The one only a shim can catch.** A mismatch on an import nothing in this
 /// body calls validates perfectly and fails when the two modules are put
@@ -266,7 +270,7 @@ fn a_boundary_signature_that_does_not_match_is_refused() {
     };
     let exports = exported_funcs(&std::fs::read(&shim).unwrap());
 
-    let widening = Some(("__vyrn_charcount", vec![ValType::I64], vec![ValType::I64]));
+    let widening = Some(("__vyrn_strlen", vec![ValType::I64], vec![ValType::I64]));
     let (wasm, _) = guest(&exports, widening);
     let (code, _, err) = run(&wasmtime, &shim, "narrowed", &wasm);
     assert_ne!(code, 24, "a mismatched signature must not run");

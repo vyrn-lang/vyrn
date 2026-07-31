@@ -3,21 +3,27 @@
 std/text — UTF-8 decoding and byte-offset line/column, written in Vyrn
 (RFC-0078 M4b).
 
-Three builtins live here as ordinary Vyrn: `chars` (a `String`'s codepoints),
-`lineAt` and `colAt` (the 1-based line and column of a byte offset). **`chars`
-is retired** — RFC-0078 M4c routed the builtin into `charsV`, deleting Rust's
-`str::chars` from the interpreter and 82 lines of two-pass decoder from the
-textual emitter, and handing the direct wasm backend a row it never had to
-lower. `lineAt` and `colAt` are NOT: the interpreter memoizes a line-start table
-per buffer and a Vyrn library cannot (a generator may not touch module state —
-comptime purity), so retiring them is a decision about that cache, which is M5's
-question rather than this milestone's. They stay builtins and `lineAtV`/`colAtV`
-stay the thing they are proved against.
+Four builtins live here as ordinary Vyrn: `chars` (a `String`'s codepoints),
+`charCount` (how many of them there are), `lineAt` and `colAt` (the 1-based line
+and column of a byte offset). **`chars` and `charCount` are retired** — RFC-0078
+M4c routed `chars` into `charsV`, deleting Rust's `str::chars` from the
+interpreter and 82 lines of two-pass decoder from the textual emitter, and the
+census that followed routed `charCount` into `charCountV`, deleting a Rust arm,
+a C shim function, a line of emitted IR and ~30 lines of hand-written
+`wasm-encoder`. `lineAt` and `colAt` are NOT: the interpreter memoizes a
+line-start table per buffer and a Vyrn library cannot (a generator may not touch
+module state — comptime purity), so retiring them is a decision about that cache,
+which is M5's question rather than this milestone's. They stay builtins and
+`lineAtV`/`colAtV` stay the thing they are proved against.
 
 `tests/text.rs` is what proves it: the `chars` half is now a pinned digest over
 ~2,000 codepoints (a comparison against the builtin would compare `charsV` with
 itself), while the malformed table and the line/column table are still live
 oracles against `stringFromBytes` and `lineAt`/`colAt`, neither of which moved.
+`charCount` needed no new digest and that is the interesting part: `charCountV`
+is a byte scan and `charsV` is a full decode, so the two are independent
+implementations of one fact, and `chars`'s side of that comparison is already
+pinned to the pre-swap C and Rust.
 
 **M4a's question, asked again.** The finding worth carrying from the number
 tier was that the irreducible primitive is a missing VIEW rather than a
@@ -73,6 +79,25 @@ than an assumption: a `String` is validated UTF-8 at every boundary that can
 build one, and `stringFromBytes` is the only route from arbitrary bytes. So
 `chars` never sees a malformed input, which is why the malformed table below
 is pinned against `stringFromBytes` instead.
+
+## charCountV
+
+```vyrn
+fn charCountV(s: String) -> Int64
+```
+
+The number of Unicode scalar values in `s` — the `charCount` builtin, in Vyrn.
+
+A UTF-8 continuation byte is exactly `0b10xxxxxx`, so every OTHER byte starts a
+scalar and the count is a byte scan with no allocation. `examples/encoding.vyrn`
+proved the same answer as `chars(s).length`, which is a shorter body and a worse
+one: it builds an `Array<Int64>` the caller throws away.
+
+RFC-0078's census found this the only builtin with no justification for being
+one — no primitive (`byteLength` and `s[i]` are the whole substrate, the same
+substrate `std/strpred` is built on), no trap, no `consteval` fold, and one
+caller in the repository. It had four implementations: a Rust arm, a C shim
+function, a line of emitted IR and ~30 lines of hand-written `wasm-encoder`.
 
 ## lineAtV
 
