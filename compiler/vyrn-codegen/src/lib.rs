@@ -7683,6 +7683,54 @@ fn ban_append_read(e: &Expr, banned: &mut std::collections::HashSet<String>, str
     }
 }
 
+/// Does `op` leave one of its operands holding a String pointer it did not
+/// copy? If so, an accumulator there could be left pointing at a buffer a later
+/// in-place append `realloc`'d away, and the name must be banned.
+///
+/// Today the answer is no for all nineteen, so the guard in `ban_append_expr`
+/// looks vacuous — it is not, and this function is why it may not be deleted:
+/// the match is exhaustive so a new operator cannot be added without deciding,
+/// and a String-borrowing operator (a `slice`-like `..`, say) would flip its
+/// arm and re-ban its operands with no other change. Getting this wrong is a
+/// use-after-free, so the decision is recorded per operator with its lowering:
+///
+/// - `+` on two Strings — `emit_str_concat`: `malloc(la+lb+1)` then
+///   `strcpy`/`strcat`. A fresh buffer, which is exactly why `@concat` (what
+///   `"\{out}]"` desugars to) is already whitelisted above. `Code + Code` takes
+///   two arena handles, not pointers, and a `Code` name never owns a shadow.
+/// - `== != < <= > >=` on two Strings — one `strcmp` and an `icmp`, result `i1`.
+/// - `=~` — `@__vyrn_regex_run(ptr s, …)`, result `i1`; the right operand must
+///   be a literal pattern, so only the left can even be an accumulator.
+/// - `- * / % && || & | ^ << >>` — `binop_type` refuses a `String` operand
+///   outright (arithmetic and bitwise need matching numerics, `&&`/`||` need
+///   `Bool`), so no String reaches these lowerings at all.
+///
+/// A `<T: Ord>` operand monomorphized to `String` reaches the same lowerings
+/// through the same operators, so the list covers generics too.
+fn binop_retains_str(op: BinOp) -> bool {
+    match op {
+        BinOp::Add
+        | BinOp::Eq
+        | BinOp::NotEq
+        | BinOp::Lt
+        | BinOp::LtEq
+        | BinOp::Gt
+        | BinOp::GtEq
+        | BinOp::Match => false,
+        BinOp::Sub
+        | BinOp::Mul
+        | BinOp::Div
+        | BinOp::Rem
+        | BinOp::And
+        | BinOp::Or
+        | BinOp::BitAnd
+        | BinOp::BitOr
+        | BinOp::BitXor
+        | BinOp::Shl
+        | BinOp::Shr => false,
+    }
+}
+
 /// Ban every variable `e` mentions in a position that might retain it. The
 /// match is exhaustive on purpose: a new `Expr` variant must be classified
 /// rather than silently fall into a permissive default.
@@ -7715,9 +7763,24 @@ fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, str
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } => {
             ban_append_expr(expr, banned, strict)
         }
-        Expr::Binary { lhs, rhs, .. } => {
-            ban_append_expr(lhs, banned, strict);
-            ban_append_expr(rhs, banned, strict);
+        // An operator's operands are a retaining position only if the LOWERING
+        // keeps the pointer. `binop_retains_str` is the decision, exhaustive on
+        // `BinOp` so a new operator cannot be added without making one.
+        //
+        // Banning every operand was the whole of `toJson`'s O(N²): `return out +
+        // "]"` at the end of `std/json`'s `emitArr` disqualified `out`, so every
+        // element re-`malloc`'d and re-copied the entire result so far (and
+        // leaked the previous buffer, which is why 50k records OOM'd on 2.5 MB
+        // of output). 80k `Int64` natively: 23.5 s before, 12 ms after. Forty
+        // more `return acc + "…"` sites across `std/` were in the same trap.
+        Expr::Binary { op, lhs, rhs, .. } => {
+            if binop_retains_str(*op) {
+                ban_append_expr(lhs, banned, strict);
+                ban_append_expr(rhs, banned, strict);
+            } else {
+                ban_append_read(lhs, banned, strict);
+                ban_append_read(rhs, banned, strict);
+            }
         }
         Expr::Match { scrutinee, arms, .. } => {
             ban_append_expr(scrutinee, banned, strict);
@@ -9130,6 +9193,86 @@ mod tests {
                         out = out + \"b\"; print(\"\\{out}\"); } return 0; }";
         let ir = emit(&check(regioned).unwrap()).unwrap();
         assert!(!ir.contains("app.own"), "region accumulator stays copying: {ir}");
+    }
+
+    /// The `emitArr` shape — accumulate in a loop, then `return out + "]"`.
+    /// Banning both operands of every `+` disqualified `out` on that last line,
+    /// which is where `toJson`'s O(N²) came from: each iteration re-copied the
+    /// whole result. The pin is the COUNT of copying concats, not a duration:
+    /// exactly one, the tail, so the copying work cannot scale with the loop.
+    #[test]
+    fn accumulator_returned_through_a_concat_still_appends_in_place() {
+        let src = "fn build(n: Int64) -> String { let mut out = \"[\"; let mut i = 0; \
+                   while i < n { out = out + \",\"; i = i + 1; } return out + \"]\"; } \
+                   fn main() -> Int64 { return build(3).byteLength; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("app.own"), "the loop must take the append path: {ir}");
+        assert_eq!(
+            ir.matches("call ptr @strcat(").count(),
+            1,
+            "only the tail `out + \"]\"` may copy; a second means the loop is \
+             copying again and the complexity class regressed: {ir}"
+        );
+    }
+
+    /// Every operator `binop_retains_str` calls non-retaining, in the position
+    /// that matters — reading the accumulator — must leave it eligible. The
+    /// exhaustive match in that function is what forces a NEW operator to be
+    /// classified; this is what stops an existing one being reclassified by
+    /// accident. `=~` takes the accumulator on the left only (its right operand
+    /// must be a literal pattern).
+    #[test]
+    fn non_retaining_operators_do_not_disqualify_an_accumulator() {
+        for read in [
+            "out + \"]\"",
+            "if out == \"x\" { 1 } else { 0 }",
+            "if out != \"x\" { 1 } else { 0 }",
+            "if out < \"x\" { 1 } else { 0 }",
+            "if out <= \"x\" { 1 } else { 0 }",
+            "if out > \"x\" { 1 } else { 0 }",
+            "if out >= \"x\" { 1 } else { 0 }",
+            "if out =~ \"a*\" { 1 } else { 0 }",
+        ] {
+            let ret = if read.starts_with("out +") {
+                format!("return ({read}).byteLength;")
+            } else {
+                format!("return {read};")
+            };
+            let src = format!(
+                "fn main() -> Int64 {{ let mut out = \"a\"; let mut i = 0; \
+                 while i < 3 {{ out = out + \"x\"; i = i + 1; }} {ret} }}"
+            );
+            let ir = emit(&check(&src).unwrap()).unwrap();
+            assert!(ir.contains("app.own"), "`{read}` must stay eligible: {ir}");
+        }
+    }
+
+    /// The in-place path now runs where it never did, so the reclamation has to
+    /// be unchanged by it: an accumulator returned through a concat frees
+    /// exactly what the identical function frees when the append is disabled
+    /// (here by aliasing it, the disqualifier `string_accumulator_not_appended…`
+    /// already pins). Equality is the assertion — an absolute count would just
+    /// re-pin the ownership analysis.
+    #[test]
+    fn the_append_path_frees_exactly_what_the_copying_path_frees() {
+        let body = |extra: &str| {
+            format!(
+                "fn build(n: Int64) -> String {{ let mut out = \"[\"; let mut i = 0; \
+                 {extra} while i < n {{ out = out + \",\"; i = i + 1; }} return out + \"]\"; }} \
+                 fn main() -> Int64 {{ let a = \"x\"; let b = \"y\"; let s = a + b; \
+                 return build(s.byteLength).byteLength; }}"
+            )
+        };
+        let appending = emit(&check(&body("")).unwrap()).unwrap();
+        // `let alias = out` is the whitelist's own ban, so this is the same
+        // function lowered the old way.
+        let copying = emit(&check(&body("let alias = out; print(alias);")).unwrap()).unwrap();
+        assert!(appending.contains("app.own") && !copying.contains("app.own"), "setup");
+        assert_eq!(
+            free_calls(&appending),
+            free_calls(&copying),
+            "growing the accumulator must not add or lose a free:\n{appending}"
+        );
     }
 
     #[test]
