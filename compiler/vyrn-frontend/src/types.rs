@@ -59,12 +59,24 @@ pub fn numeric_conv_target(name: &str) -> Option<Type> {
 /// Only the types whose runtime value carries enough to dispatch on are
 /// supported in v1: the scalars and named types (validated scalars, enums).
 /// Records and other structural types return `None` (no runtime identity).
+///
+/// A generic type keys on its **constructor alone** (RFC-0080 M1):
+/// `Option<Int64>` and `Option<String>` both key `Option`, so one
+/// `impl<T> Show for Option<T>` serves every instantiation and the receiver's
+/// type arguments are recovered by unification at the call site instead of by
+/// the key. That is also what makes overlap a declaration-time question — two
+/// impls for the same constructor collide on the key whether or not their
+/// arguments differ, which is exactly the "one impl per (protocol, type
+/// constructor)" rule.
 pub fn type_key(ty: &Type) -> Option<String> {
     match ty {
         Type::Int => Some("Int64".to_string()),
         Type::Bool => Some("Bool".to_string()),
         Type::Str => Some("String".to_string()),
         Type::Named(n) => Some(n.clone()),
+        Type::Option(_) => Some("Option".to_string()),
+        Type::Result(..) => Some("Result".to_string()),
+        Type::App(n, _) => Some(n.clone()),
         _ => None,
     }
 }
