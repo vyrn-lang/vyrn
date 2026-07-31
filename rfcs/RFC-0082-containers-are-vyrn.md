@@ -574,6 +574,28 @@ Finding 5 is still open and still quadratic — 206 / 402 / 1,648 ms at
 N = 4,000 → 16,000, down from 275 / 735 / 3,307 because the short-circuit removes
 the coerce but not the `push` builtin's clone, which is what makes it quadratic.
 
+7. **The audit found a second, unrelated validation divergence, and this one is
+   the textual backend's.** A validated payload inside an `Option` or a `Result`
+   is never checked natively: `let a: Option<Age> = Some(rt(6))` prints and exits
+   0 under `vyrn build`, and traps under `vyrn run` and under wasm. One engine
+   against two, so native is the wrong one — the mirror image of finding 6, found
+   only because the field audit asked what else a value can flow into. It reaches
+   through every spelling tried: a `let`, a return, a record literal, a field
+   store, and `Ok(..)` as well as `Some(..)`.
+
+   The seam is exact and small. `Some`/`Ok`/`Err` push the expected payload type
+   so the payload is *typed* by it (RFC-0037), and then never coerce into it; the
+   outer `coerce` cannot make up the difference because `validation_required`
+   looks at the `Option` and not through it. Four lines at each constructor fix
+   every case above — and were tried, and are not in this commit.
+   `result_array_payload_rematerializes_on_coerce` fails with them: coercing the
+   payload at construction reshapes an `ArrayN` literal into the growable
+   `Array` at the source, so the outer tag-branch `rebox_sum` it pins no longer
+   fires for that shape. That is plausibly an improvement and it is certainly a
+   change to what a *correct* program compiles to, which is not a thing to do at
+   the end of somebody else's milestone. Whoever takes it should decide first
+   whether `rebox_sum` still has a caller, because the answer may be no.
+
 ### M3 — `Map` over `Array` — **withdrawn**
 
 Three rows. `Map<String, V>` is `String`-keyed, and `std/hash` already exists, so
