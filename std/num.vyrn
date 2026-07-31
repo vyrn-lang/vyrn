@@ -507,22 +507,35 @@ export fn parseUInt64(s: String) -> Option<UInt64> {
 /// `limb × mul + carry` inside an `Int64`. That is the same trick `halveBy` plays
 /// in the other direction and worth the same: it is what makes the loop's cost
 /// the size of the ANSWER rather than of the exponent.
+///
+/// **Every answer is a fresh allocation**, including the three non-finite words,
+/// which is why they are built as bytes rather than returned as literals. Since
+/// RFC-0081 M2 this is what `@str` on a float lowers to, and the ownership
+/// analysis frees an `@str` result (`own.rs`, `DropKind::FreeStr`) — a `.rodata`
+/// pointer reaching `free` is not a bug that shows up where it was made.
 export fn f64Str(x: Float64) -> String {
     let bits = floatBits(x)
     let neg = (bits >> 63) != 0
     let mut mant = Int64(bits & 4503599627370495) // 2^52 - 1: the fraction field
     let ef = Int64((bits >> 52) & 2047)
     if ef == 2047 {
-        // Interned words rather than whatever the platform says: `{:.6}` prints
-        // these three and UCRT's `%f` would say `-nan(ind)`, which is why the
-        // native build selects a format string on `fcmp uno`.
+        // These three words rather than whatever the platform says: `{:.6}` prints
+        // them and UCRT's `%f` would say `-nan(ind)`, which is why the native build
+        // used to select a format string on `fcmp uno`.
+        let mut w: Array<UInt8> = []
         if mant != 0 {
-            return "NaN"
+            w.push('N')
+            w.push('a')
+            w.push('N')
+        } else {
+            if neg {
+                w.push('-')
+            }
+            w.push('i')
+            w.push('n')
+            w.push('f')
         }
-        if neg {
-            return "-inf"
-        }
-        return "inf"
+        return asciiStr(w)
     }
     // `M × 2^E`: a subnormal has no implicit bit and a fixed exponent.
     let mut e = -1074
@@ -670,11 +683,21 @@ export fn f64Str(x: Float64) -> String {
         out.push(UInt8(48 + d[c]))
         c = c + 1
     }
-    // ASCII by construction, so the `Err` arm is unreachable (`std/codecs:ascii`,
-    // inlined rather than imported so this module keeps importing nothing).
+    return asciiStr(out)
+}
+
+/// The bytes as a String, for a caller that built them out of digits and
+/// punctuation.
+///
+/// The `Err` arm is unreachable — every byte `f64Str` pushes is ASCII — and says
+/// so with a `panic` rather than an empty literal, because the empty literal
+/// would be the one `.rodata` pointer this file can hand back (see `f64Str`'s
+/// note on freshness). (`std/codecs` has this same three lines under the name
+/// `ascii`; inlined rather than imported so this module keeps importing nothing.)
+fn asciiStr(out: Array<UInt8>) -> String {
     return match stringFromBytes(out) {
         Ok(s) => s,
-        Err(e) => "",
+        Err(e) => panic("f64Str: the bytes it builds are ASCII digits and punctuation"),
     }
 }
 

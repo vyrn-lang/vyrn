@@ -849,13 +849,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("@.fmt.d = private unnamed_addr constant [6 x i8] c\"%lld\\0A\\00\"\n");
     // `%llu\n` for printing unsigned sized ints (UInt8..64) — zero-extended to u64.
     out.push_str("@.fmt.u = private unnamed_addr constant [6 x i8] c\"%llu\\0A\\00\"\n");
-    // `%f\n` for printing Float64 (printf's default precision is 6, matching interp).
-    out.push_str("@.fmt.f = private unnamed_addr constant [4 x i8] c\"%f\\0A\\00\"\n");
+    // (`@.fmt.f` and `@.fmt.lf` — `"%f\n"` and `"%f"` — went with RFC-0081 M2:
+    // a float prints and interpolates through `std/num`'s `f64Str` now, so this
+    // module names no float format at all.)
     // No-newline variants used by `str(..)` (interpolation renders without \n):
-    // %lld for signed ints, %llu for unsigned, %f for Float (6-decimal, matches interp).
+    // %lld for signed ints, %llu for unsigned.
     out.push_str("@.fmt.ld = private unnamed_addr constant [5 x i8] c\"%lld\\00\"\n");
     out.push_str("@.fmt.lu = private unnamed_addr constant [5 x i8] c\"%llu\\00\"\n");
-    out.push_str("@.fmt.lf = private unnamed_addr constant [3 x i8] c\"%f\\00\"\n");
     out.push_str("@.fmt.s = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\"\n");
     out.push_str("@.fmt.true = private unnamed_addr constant [6 x i8] c\"true\\0A\\00\"\n");
     out.push_str("@.fmt.false = private unnamed_addr constant [7 x i8] c\"false\\0A\\00\"\n");
@@ -901,10 +901,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
         "@.trap.shift = private unnamed_addr constant [34 x i8] \
          c\"error: shift amount out of range\\0A\\00\"\n",
     );
-    // NaN renders as `NaN` (the interpreter's Rust formatting); UCRT's %f
-    // would print `-nan(ind)`.
-    out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
-    out.push_str("@.str.nan = private unnamed_addr constant [4 x i8] c\"NaN\\00\"\n");
+    // (`@.fmt.nan`\`@.str.nan` — the literal `NaN` this build selected on an
+    // `fcmp uno` because UCRT's `%f` says `-nan(ind)` — went with RFC-0081 M2.
+    // `f64Str` spells the three non-finite words itself, in Vyrn, once.)
 
     // Input-I/O error wording (RFC-0014), from the one list both backends read.
     // These are payload strings (no trailing newline — unlike the trap globals).
@@ -1864,6 +1863,44 @@ impl<'a> Gen<'a> {
         self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {a})"));
         self.emit(format!("call ptr @strcat(ptr {buf}, ptr {b})"));
         buf
+    }
+
+    /// `std/num`'s `f64Str` on an already-lowered float — the fixed six decimal
+    /// places, and since RFC-0081 M2 the only float formatter this backend has.
+    /// Both `print` and `@str` come here, so the two cannot drift apart.
+    ///
+    /// A `Float32` promotes first: the interpreter formats `*f as f64`, and single
+    /// precision having a path of its own would be a second thing to keep in step.
+    ///
+    /// The call is emitted rather than built as an `Expr` and handed to `gen_call`
+    /// because the value is already lowered — the arm has to see the static type
+    /// before it can pick a case, and this emitter has no type-only peek. (The
+    /// symbol rule is `call_parts`'s `vyrn_{name}`; getting it wrong is an
+    /// undefined symbol at link, not a wrong answer at runtime.) The result is a
+    /// fresh allocation — `f64Str` guarantees that, including for the three
+    /// non-finite words — so the ownership analysis may free it like any `@str`.
+    fn gen_f64_str(&mut self, v: &str, ty: &Type) -> Result<String, String> {
+        let d = if matches!(self.resolve(ty), Type::Float32) {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = fpext float {v} to double"));
+            t
+        } else {
+            v.to_string()
+        };
+        let f = vyrn_frontend::loader::F64_STR;
+        if !self.funcs.contains_key(f) {
+            // The refusal `toJson` makes when its serializer is not in the link:
+            // `std/num` is injected into any program that mentions `print` or
+            // `@str`, so reaching this means a program built without a std root.
+            return Err(format!(
+                "formatting a `Float64` needs `{f}`, which is not in the link — it is \
+                 injected into any program that prints or interpolates (RFC-0081 M2), \
+                 so this is a program built without a std root"
+            ));
+        }
+        let t = self.fresh_tmp();
+        self.emit(format!("{t} = call ptr @vyrn_{f}(double {d})"));
+        Ok(t)
     }
 
     /// The `(len, cap)` shadow slots of a local String accumulator, created on
@@ -5529,28 +5566,15 @@ impl<'a> Gen<'a> {
                 Type::Str => {
                     self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr {v})"));
                 }
-                // Float: 6-decimal `%f\n`, matching the interpreter's `{:.6}`.
-                // NaN is special-cased: UCRT's %f renders it `-nan(ind)` while
-                // the interpreter prints `NaN` — select the literal instead
-                // (`fcmp uno x, x` is true exactly for NaN; printf ignores the
-                // unused vararg).
-                Type::Float => {
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {v}, {v}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.fmt.nan, ptr @.fmt.f"));
-                    self.emit(format!("call i32 (ptr, ...) @printf(ptr {fmt}, double {v})"));
-                }
-                // Float32 promotes to `double` for printf's varargs (C default
-                // argument promotion), then prints with the same `%f\n`.
-                Type::Float32 => {
-                    let d = self.fresh_tmp();
-                    self.emit(format!("{d} = fpext float {v} to double"));
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {d}, {d}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.fmt.nan, ptr @.fmt.f"));
-                    self.emit(format!("call i32 (ptr, ...) @printf(ptr {fmt}, double {d})"));
+                // A float prints as its `@str` and a `%s\n`, because `print` and
+                // interpolation must spell one value one way and there is now one
+                // implementation to spell it with (RFC-0081 M2). The `malloc` this
+                // costs that `printf("%f")` did not is real and was measured: on
+                // 200,000 `print`s of a float it is inside run-to-run noise, the
+                // write being what that program is actually doing.
+                ref f @ (Type::Float | Type::Float32) => {
+                    let s = self.gen_f64_str(&v, f)?;
+                    self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr {s})"));
                 }
                 // A signed sized int sign-extends to i64 and prints with `%lld`;
                 // an unsigned one zero-extends and prints with `%llu` — same digits
@@ -6119,34 +6143,16 @@ impl<'a> Gen<'a> {
                     ));
                     return Ok((buf, Type::Str));
                 }
-                // Float renders with %f (6 decimals). A 512-byte buffer covers the
-                // widest magnitude (~1e308 → ~320 chars). NaN selects a literal
-                // "NaN" format (UCRT %f would render `-nan(ind)`; the interp
-                // prints `NaN`) — snprintf ignores the unused vararg.
-                Type::Float => {
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {v}, {v}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
-                    let buf = self.heap_alloc("512");
-                    self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {v})"
-                    ));
-                    return Ok((buf, Type::Str));
-                }
-                // Float32 promotes to `double` (varargs), then renders like Float.
-                Type::Float32 => {
-                    let d = self.fresh_tmp();
-                    self.emit(format!("{d} = fpext float {v} to double"));
-                    let nan = self.fresh_tmp();
-                    let fmt = self.fresh_tmp();
-                    self.emit(format!("{nan} = fcmp uno double {d}, {d}"));
-                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
-                    let buf = self.heap_alloc("512");
-                    self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {d})"
-                    ));
-                    return Ok((buf, Type::Str));
+                // (`%f` was selected here — a `select` on `fcmp uno` between the
+                // literal `NaN` and the format string, because UCRT's `%f` says
+                // `-nan(ind)` and the interpreter says `NaN`. RFC-0081 M2 routed
+                // the float case to `std/num`'s `f64Str`: the six places were
+                // three algorithms that had to agree byte for byte, and `printf`
+                // was measured at 240 ns against the Vyrn version's 750 — a 3x on
+                // a microbenchmark and nothing observable in a program.)
+                ref f @ (Type::Float | Type::Float32) => {
+                    let s = self.gen_f64_str(&v, f)?;
+                    return Ok((s, Type::Str));
                 }
                 Type::Bool => {
                     // Copy "true"/"false" into a fresh buffer so the result owns
@@ -8944,13 +8950,16 @@ mod tests {
     }
 
     #[test]
-    fn float_print_selects_nan_literal() {
-        // NaN prints as `NaN` (interp's Rust formatting), not UCRT's -nan(ind):
-        // the format string is selected on `fcmp uno`.
+    fn a_float_with_no_formatter_in_the_link_refuses_by_name() {
+        // This test used to pin the `fcmp uno` that selected a literal `NaN` over
+        // UCRT's `-nan(ind)`. RFC-0081 M2 took that selection out: a float prints
+        // through `std/num`'s `f64Str`, which spells the three non-finite words
+        // itself. `check` links no module, so what is left to pin here is the
+        // refusal — which names the function rather than leaving an undefined
+        // symbol for the linker to report.
         let program = check("fn main() -> Int64 { print(0.0 / 0.0); return 0; }").unwrap();
-        let ir = emit(&program).unwrap();
-        assert!(ir.contains("fcmp uno double"), "NaN test: {ir}");
-        assert!(ir.contains("@.fmt.nan"), "NaN format: {ir}");
+        let err = emit(&program).unwrap_err();
+        assert!(err.contains("num$f64Str"), "names the formatter: {err}");
     }
 
     #[test]
@@ -9135,9 +9144,11 @@ mod tests {
 
     #[test]
     fn numeric_conversions_lower_to_casts() {
+        // No `print` of a float: since RFC-0081 M2 that is a call into `std/num`,
+        // which a bare `check` does not link. The conversions are what this pins.
         let src = "fn main() -> Int64 { let f = 3.5; let n = Int64(f); \
                    let g = Float64(n); let s = Int32(5000000000); \
-                   print(g); return Int64(s); }";
+                   if g > 0.0 { return Int64(s); } return Int64(s); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // Saturating, not bare: a plain `fptosi` is poison out of range, and the
         // interpreter's `as` saturates (RFC-0078 M4a).
@@ -9194,13 +9205,16 @@ mod tests {
     #[test]
     fn float32_lowers_to_single_precision_ops() {
         let src = "fn main() -> Int64 { let a: Float32 = 1.5; let b: Float32 = 2.5; \
-                   let c = a + b; print(c); if c > 0.0 { return 1; } return 0; }";
+                   let c = a + b; let w = Float64(c); if c > 0.0 { return 1; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("fadd float"), "f32 add: {ir}");
         assert!(ir.contains("fcmp ogt float"), "f32 compare: {ir}");
-        // Literals round into f32 slots via fptrunc, and print promotes back.
+        // Literals round into f32 slots via fptrunc, and widening goes back the
+        // other way. (`print(c)` used to be the widening here; it is a call into
+        // `std/num` since RFC-0081 M2 and a bare `check` links no module, so the
+        // explicit `Float64(c)` — the same `fpext` — stands in for it.)
         assert!(ir.contains("fptrunc double") && ir.contains("to float"), "literal→f32: {ir}");
-        assert!(ir.contains("fpext float") && ir.contains("to double"), "print fpext: {ir}");
+        assert!(ir.contains("fpext float") && ir.contains("to double"), "widening fpext: {ir}");
     }
 
     #[test]

@@ -3668,6 +3668,33 @@ impl Fn_<'_> {
             .ins(&Instruction::LocalGet(buf));
     }
 
+    /// Format the `Float64` on the stack with `std/num`'s `f64Str`, leaving the
+    /// String — the six decimal places, and since RFC-0081 M2 the only float
+    /// formatter this backend has. `print` and `@str` both come here, so the two
+    /// cannot drift apart.
+    ///
+    /// A `Float32` promotes first, because the interpreter formats `*f as f64`.
+    ///
+    /// A call by INDEX rather than by name through [`Fn_::call`]: the value is
+    /// already on the stack, which is the whole of a wasm call's argument passing,
+    /// and `f64Str` takes one scalar and returns one. The 511 hand-written lines
+    /// this replaced are the reason — they were the largest single thing in this
+    /// backend and they were the third of three implementations of `%f` that had
+    /// to agree byte for byte.
+    fn f64_str(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<(), String> {
+        if *ty == Type::Float32 {
+            b.ins(&Instruction::F64PromoteF32);
+        }
+        let f = vyrn_frontend::loader::F64_STR;
+        let Some(sig) = self.cx.sigs.get(f) else {
+            // `std/num` is injected into any program that mentions `print` or
+            // `@str`, so reaching this means a program built without a std root.
+            return unsupported("formatting a `Float64` with no `std/num` in the link", line);
+        };
+        b.ins(&Instruction::Call(sig.index));
+        Ok(())
+    }
+
     fn call(
         &mut self,
         m: &mut Module,
@@ -3751,13 +3778,9 @@ impl Fn_<'_> {
                         b.ins(&Instruction::I32Const(n.signed as i32));
                         b.ins(&Instruction::Call(self.cx.rt.print_i64));
                     }
-                    // Fixed six decimals, which `f64_str` owns; a `Float32`
-                    // promotes first because the interpreter formats `*f as f64`.
+                    // Fixed six decimals, which `std/num`'s `f64Str` owns.
                     ref f if matches!(f, Type::Float | Type::Float32) => {
-                        if *f == Type::Float32 {
-                            b.ins(&Instruction::F64PromoteF32);
-                        }
-                        b.ins(&Instruction::Call(self.cx.rt.f64_str));
+                        self.f64_str(b, f, line)?;
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
                     }
                     Type::Str => {
@@ -3823,10 +3846,7 @@ impl Fn_<'_> {
                         b.ins(&Instruction::Call(self.cx.rt.int_str));
                     }
                     ref f if matches!(f, Type::Float | Type::Float32) => {
-                        if *f == Type::Float32 {
-                            b.ins(&Instruction::F64PromoteF32);
-                        }
-                        b.ins(&Instruction::Call(self.cx.rt.f64_str));
+                        self.f64_str(b, f, line)?;
                     }
                     Type::Bool => {
                         b.ins(&Instruction::Call(self.cx.rt.bool_str));
@@ -7757,7 +7777,6 @@ struct Rt {
     trap_idx: u32,
     utf8valid: u32,
     str_from_bytes: u32,
-    f64_str: u32,
     // RFC-0014 input I/O and RFC-0043's host boundary, served straight from WASI
     // (M2j) rather than through the shim — a standalone module has no shim, and
     // `clock_time_get`/`random_get`/`args_get`/`fd_read`/`path_open` are the same
@@ -7881,7 +7900,6 @@ impl Rt {
             trap_idx: slot("trap_idx"),
             utf8valid: slot("utf8valid"),
             str_from_bytes: slot("str_from_bytes"),
-            f64_str: slot("f64_str"),
             starts: slot("starts"),
             env_get: slot("env_get"),
             str_i64: slot("str_i64"),
@@ -7964,10 +7982,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt.msg_rem0 = rt.intern(m, "error: remainder by zero\n");
     rt.msg_divovf = rt.intern(m, "error: integer overflow in division\n");
     rt.msg_shift = rt.intern(m, "error: shift amount out of range\n");
-    // The three spellings `{:.6}` gives a non-finite double. The native build
-    // selects them on an `fcmp uno` rather than letting UCRT's `%f` say
-    // `-nan(ind)`, and `f64_str` picks them for the same reason.
-    let (nan, inf, ninf) = (rt.intern(m, "NaN"), rt.intern(m, "inf"), rt.intern(m, "-inf"));
+    // (The three spellings `{:.6}` gives a non-finite double were interned here
+    // for `float_str`. `std/num`'s `f64Str` builds them out of bytes, in Vyrn —
+    // RFC-0081 M2.)
     // The bounds message has the offending index in the MIDDLE, so it is three
     // pieces rather than one interned string — see `trap_idx` below.
     rt.msg_aoob = rt.intern(m, "error: array index ");
@@ -8458,8 +8475,11 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // table hands indices out in field order — the second removal it has seen,
     // after `charcount`.)
 
-    rt.next_is(m, rt.f64_str);
-    float_str(m, malloc, nan, inf, ninf);
+    // (`float_str` was emitted here — see the note where its 511 lines stood.
+    // RFC-0081 M2 routed `%f` to `std/num`'s `f64Str`; removing its slot is a
+    // one-line deletion in `slots` because the table hands indices out in field
+    // order — the third removal it has seen, after `charcount` and `slice`.)
+
     io_runtime(m, &rt, wasi, gen);
     cell_runtime(m, &rt);
 
@@ -10330,517 +10350,14 @@ fn sum2_write_to(b: &mut Frame, dest: u32, l: &Layout, tag: i32, word: Option<u3
         .ins(&Instruction::I64Store(at(l.fields[2])));
 }
 
-/// `f64_str(x)` — a `Float64` as its fixed six-decimal spelling, exactly.
-///
-/// This is the one runtime function in this backend that is an algorithm rather
-/// than a loop, and the reason is that `%f` has no shortcut. The interpreter
-/// formats with `{:.6}` and the native build with `printf("%f")`; both convert
-/// the double's **exact** decimal value and round half-to-even at the sixth
-/// place, so `0.0078125` is `0.007812` (the kept `2` is even) and `1e300` is 301
-/// integer digits. Anything that computes six decimals in floating point is
-/// wrong somewhere, and wrong here is a different digit rather than a crash.
-///
-/// So: a double is `M × 2^E` with `M < 2^53`, and `x × 10^6` is an exact
-/// rational whose numerator is `M × 10^6 × 2^E`. Written in base 10^6 limbs that
-/// becomes one loop with two parameters:
-///
-/// - `E >= 0`: the numerator is `M × 10^6 × 2^E`, an integer — multiply by 2,
-///   `E` times, and no digit is dropped.
-/// - `E < 0`: `M × 10^6 × 5^k / 10^k` with `k = -E` — multiply by 5, `k` times,
-///   and the last `k` digits are the fraction to round away.
-///
-/// Base 10^6 rather than 10^9 for one reason: the `× 10^6` the six places need
-/// is then a shift by one whole limb, i.e. a zero limb at the bottom, so there
-/// is a single multiply loop instead of a scaling pass and a power pass. Every
-/// limb operation stays inside an `i32` (`999999 × 5 + 5` is small), so no part
-/// of this needs 64-bit arithmetic after the mantissa is unpacked.
-///
-/// `k` reaches 1074 for a subnormal, which is why the digit buffer is left-padded
-/// to `k + 1`: after that there is always at least one kept digit, and the
-/// rounding, the carry and the point insertion have no edge case of their own.
-fn float_str(m: &mut Module, malloc: u32, nan: u32, inf: u32, ninf: u32) -> u32 {
-    // The limbs at frame offset 0 — the multiply loop indexes `base + 4j` and
-    // says so by not adding anything — for 160 of them, i.e. 960 digits against
-    // the 773 the worst case (`M × 10^6 × 5^1074`) produces. The digit buffer is
-    // the rest, right-aligned at `DIG_END`, with room for max(6·limbs, k + 1)
-    // plus the byte a rounding carry may claim.
-    const DIG_END: u32 = 1744;
-
-    let (bits, mant, e, reps) = (2u32, 3u32, 4u32, 5u32);
-    let (n, j, limb, carry, t) = (6u32, 7u32, 8u32, 9u32, 10u32);
-    let (k, st, ke, p, q) = (11u32, 12u32, 13u32, 14u32, 15u32);
-    let (up, out, mul, d, neg) = (16u32, 17u32, 18u32, 19u32, 20u32);
-    let locals = [
-        ValType::I64,
-        ValType::I64,
-        ValType::I64,
-        ValType::I64,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-        ValType::I32,
-    ];
-    m.func(&[ValType::F64], &[ValType::I32], &locals, DIG_END, |b| {
-        let bs = b.base();
-        let dig_end = |b: &mut Frame| {
-            b.ins(&Instruction::LocalGet(bs))
-                .ins(&Instruction::I32Const(DIG_END as i32))
-                .ins(&Instruction::I32Add);
-        };
-        // One exit, because a body must not `return` past the epilogue (M1).
-        b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
-
-        // Unpack: sign, the 11-bit exponent field (parked in `e`), the fraction.
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I64ReinterpretF64)
-            .ins(&Instruction::LocalTee(bits))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::I64LtS)
-            .ins(&Instruction::LocalSet(neg));
-        b.ins(&Instruction::LocalGet(bits))
-            .ins(&Instruction::I64Const(0x000F_FFFF_FFFF_FFFF))
-            .ins(&Instruction::I64And)
-            .ins(&Instruction::LocalSet(mant));
-        b.ins(&Instruction::LocalGet(bits))
-            .ins(&Instruction::I64Const(52))
-            .ins(&Instruction::I64ShrU)
-            .ins(&Instruction::I64Const(0x7FF))
-            .ins(&Instruction::I64And)
-            .ins(&Instruction::LocalSet(e));
-
-        // Non-finite: interned words, because `{:.6}` prints `NaN`/`inf`/`-inf`
-        // and UCRT's `%f` would say `-nan(ind)` — which is why the native build
-        // selects a format string on `fcmp uno` rather than trusting printf.
-        b.ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Const(0x7FF))
-            .ins(&Instruction::I64Eq)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Eqz)
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-            .ins(&Instruction::LocalGet(neg))
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-            .ins(&Instruction::I32Const(ninf as i32))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(inf as i32))
-            .ins(&Instruction::End)
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(nan as i32))
-            .ins(&Instruction::End)
-            .ins(&Instruction::Br(1))
-            .ins(&Instruction::End);
-
-        // `M × 2^E`: a subnormal has no implicit bit and a fixed exponent.
-        b.ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I64Const(-1074))
-            .ins(&Instruction::LocalSet(e))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1i64 << 52))
-            .ins(&Instruction::I64Or)
-            .ins(&Instruction::LocalSet(mant))
-            .ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Const(1075))
-            .ins(&Instruction::I64Sub)
-            .ins(&Instruction::LocalSet(e))
-            .ins(&Instruction::End);
-        // Zero would otherwise multiply nothing by 5 a thousand times. It also
-        // keeps its sign: `{:.6}` of `-0.0` is `-0.000000`, and so is `%f`'s.
-        b.ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::LocalSet(e))
-            .ins(&Instruction::End);
-
-        // Which direction the exponent goes decides the multiplier and how many
-        // digits end up on the far side of the point.
-        b.ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::I64LtS)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::I64Sub)
-            .ins(&Instruction::LocalTee(reps))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::LocalSet(k))
-            .ins(&Instruction::I32Const(5))
-            .ins(&Instruction::LocalSet(mul))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::LocalSet(reps))
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::LocalSet(k))
-            .ins(&Instruction::I32Const(2))
-            .ins(&Instruction::LocalSet(mul))
-            .ins(&Instruction::End);
-
-        // The limbs: a zero at the bottom, which IS the `× 10^6`, then the
-        // mantissa in base 10^6 (three limbs hold its sixteen digits).
-        b.slot(0).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
-        b.slot(4)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64RemU)
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Store(word()));
-        b.slot(8)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64DivU)
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64RemU)
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Store(word()));
-        b.slot(12)
-            .ins(&Instruction::LocalGet(mant))
-            .ins(&Instruction::I64Const(1_000_000_000_000))
-            .ins(&Instruction::I64DivU)
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::I32Const(4)).ins(&Instruction::LocalSet(n));
-
-        // `reps` multiplications by `mul`. The carry out is at most 5, so one
-        // extra limb always absorbs it.
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(reps)).ins(&Instruction::I64Eqz).ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(carry));
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(j));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(bs))
-            .ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalGet(mul))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::LocalGet(carry))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(t));
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(1_000_000))
-            .ins(&Instruction::I32RemU)
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(1_000_000))
-            .ins(&Instruction::I32DivU)
-            .ins(&Instruction::LocalSet(carry));
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(j))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(carry)).ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(bs))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(carry))
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(n))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(reps))
-            .ins(&Instruction::I64Const(1))
-            .ins(&Instruction::I64Sub)
-            .ins(&Instruction::LocalSet(reps))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-
-        // Six digits per limb, most significant limb first, right-aligned at the
-        // end of the buffer — so leading zeros cost nothing and nothing is
-        // stripped until the very end.
-        dig_end(b);
-        b.ins(&Instruction::LocalSet(p));
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(j));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(bs))
-            .ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalSet(limb));
-        b.ins(&Instruction::I32Const(6)).ins(&Instruction::LocalSet(d));
-        b.ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::LocalGet(limb))
-            .ins(&Instruction::I32Const(10))
-            .ins(&Instruction::I32RemU)
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(limb))
-            .ins(&Instruction::I32Const(10))
-            .ins(&Instruction::I32DivU)
-            .ins(&Instruction::LocalSet(limb));
-        b.ins(&Instruction::LocalGet(d))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(d))
-            .ins(&Instruction::BrIf(0))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(j))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(j))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(p)).ins(&Instruction::LocalSet(st));
-
-        // Left-pad to `k + 1` digits. That is what removes every edge case from
-        // what follows: there is always a kept digit to round, a digit before the
-        // one being examined, and a spare byte in front for a carry.
-        dig_end(b);
-        b.ins(&Instruction::LocalGet(k))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(q));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32GtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::MemoryFill(0))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalSet(st))
-            .ins(&Instruction::End);
-        dig_end(b);
-        b.ins(&Instruction::LocalGet(k)).ins(&Instruction::I32Sub).ins(&Instruction::LocalSet(ke));
-
-        // Round half to EVEN at `ke`, which is what both references do: greater
-        // than five rounds up, less rounds down, and an exact half goes to the
-        // even kept digit. `0.0078125` is the case that tells the two apart.
-        b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(up));
-        b.ins(&Instruction::LocalGet(k)).ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::LocalSet(t));
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(b'5' as i32))
-            .ins(&Instruction::I32GtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::LocalSet(up))
-            .ins(&Instruction::Else);
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(b'5' as i32))
-            .ins(&Instruction::I32Eq)
-            .ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(q));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(q));
-        dig_end(b);
-        b.ins(&Instruction::I32GeU).ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Ne)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::LocalSet(up))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(q))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(up))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32And)
-            .ins(&Instruction::LocalSet(up))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::End).ins(&Instruction::End).ins(&Instruction::End);
-
-        // Carry it in, digit by digit, growing the string by one if it escapes.
-        b.ins(&Instruction::LocalGet(up)).ins(&Instruction::If(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(q));
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32LtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(st))
-            .ins(&Instruction::I32Const(b'1' as i32))
-            .ins(&Instruction::I32Store8(byte()))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::LocalTee(t))
-            .ins(&Instruction::I32Const(b'9' as i32))
-            .ins(&Instruction::I32Ne)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Store8(byte()))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(q))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-
-        // Seven digits minimum, so the point always has an integer digit in front
-        // of it, and then the integer part's leading zeros go.
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32LtS)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalTee(q))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::MemoryFill(0))
-            .ins(&Instruction::LocalGet(q))
-            .ins(&Instruction::LocalSet(st))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(7))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Const(b'0' as i32))
-            .ins(&Instruction::I32Ne)
-            .ins(&Instruction::BrIf(1));
-        b.ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(st))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-
-        // The string: an optional sign, the integer digits, the point, six more.
-        b.ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(t));
-        b.ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Const(8))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(neg))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::Call(malloc))
-            .ins(&Instruction::LocalTee(out))
-            .ins(&Instruction::LocalSet(p));
-        b.ins(&Instruction::LocalGet(neg))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(b'-' as i32))
-            .ins(&Instruction::I32Store8(byte()))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(p))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(t))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::I32Const(b'.' as i32))
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::LocalGet(ke))
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(6))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32Store8(byte()));
-        b.ins(&Instruction::LocalGet(out));
-        b.ins(&Instruction::End);
-    })
-}
+// (`float_str` — 511 lines — stood here: `%f`'s six decimal places computed
+// exactly, in base-10^6 limbs, because wasm has no `printf` to defer to. It was
+// the one runtime function in this backend that was an algorithm rather than a
+// loop, and RFC-0081 M2 replaced it with a call to `std/num`'s `f64Str` — the
+// same expansion, written once in Vyrn, where the interpreter's `{:.6}` stays as
+// the oracle a differential test compares it against. The measurement that
+// bought it: 330 ns hand-written here against 721 ns compiled, and no difference
+// a program could observe.)
 
 /// `print(n: Int64)`: the decimal digits and a newline, straight to fd 1.
 ///
