@@ -3018,6 +3018,18 @@ This backend frees nothing, so it cannot dangle, so it simply matches the
 interpreter — which is the rule the ladder is written to, and the same call M2h
 made about `NaN != NaN` diverging from native for free.
 
+**Both divergences this section reports are closed now**, and the resolution was
+the first of the two options: a pop that does not free. The textual backend pops
+the region counter on `return`, `break`, `continue` and `?` without freeing the
+arena, which is exactly what the other two engines do, so the escape guard did not
+have to grow. `NaN != NaN` was native being wrong rather than a divergence to
+tolerate — `fcmp one` never answers true for a NaN operand, and it is `une` now.
+The witness is
+`a_return_out_of_a_region_balances_the_region_stack_on_every_engine`, whose
+`viaTry` arm caught one more instance of the same defect *in this backend*: `?`
+lowers its own early exit here and was skipping both unwinds, so the 65th `?` out
+of a region aborted where the interpreter kept going.
+
 ### Both link shapes, trivially
 
 The counter touches no allocator, so M2i's split is irrelevant: `region.vyrn`

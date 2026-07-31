@@ -2098,16 +2098,18 @@ genuinely still open from M4b is `f64_str`, and it is row 8's.
 ### The one arm that fits no category
 
 **`@charCount`.** `s.charCount()` (RFC-0058) counts Unicode scalar values as the
-bytes where `(b & 0xC0) != 0x80`. It is implemented **three times**: a Rust arm in
+bytes where `(b & 0xC0) != 0x80`. It was implemented **three times**: a Rust arm in
 `interp.rs`, `__vyrn_charcount` in the C shim, and ~30 lines of hand-emitted
 `wasm-encoder` in `direct.rs`. It needs no primitive (`s.byteLength` and `s[i]`
 are the whole substrate — the same substrate `std/strpred` is built on), it does
 not trap, it is not folded by `consteval` the way `byteLength` is, and it is not
 hot: **there is exactly one caller in the repository**, `examples/bytecount.vyrn`.
 
-It is not moved here, and the reason is scope rather than difficulty — a census
-that swaps a builtin is two milestones in one, and this one's job was to draw the
-boundary. Priced, so whoever takes it does not have to:
+It was not moved *here*, and the reason was scope rather than difficulty — a
+census that swaps a builtin is two milestones in one, and this one's job was to
+draw the boundary. It was priced instead, and then taken: `@charCount` routes to
+`std/text`'s `charCountV` today, and every line below happened as written. Kept
+as written because the estimate holding is the point.
 
 - `std/text` gains a `charCountV` (five lines) and `RT_MODULES` gains one route
   pair on `std/text`, which is already injected for `chars`.

@@ -6448,6 +6448,13 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalGet(addr));
         b.ins(&Instruction::I32Const(rl.size as i32));
         b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        // `?` is `Stmt::Return` minus the keyword, so it owes the same two
+        // unwinds. It did not pay them: a `?` out of a `region` left the counter
+        // raised, and the 65th such call aborted where the interpreter kept
+        // going. The value is already copied through `dest`, so neither of these
+        // can disturb it — the same reason the `return` arm does them here.
+        self.emit_releases_above(b, 0)?;
+        self.exit_regions_above(b, 0);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
         b.ins(&Instruction::End);
