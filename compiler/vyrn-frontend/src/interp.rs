@@ -2320,9 +2320,29 @@ impl<'a> Interp<'a> {
                     Some(v) => v,
                     None => {
                         let v = self.expr(value, scope)?;
+                        // A plain variable ALREADY of the field's type holds
+                        // values that passed their own boundary, so re-proving
+                        // them is pure cost — and it is the write-back every
+                        // place desugar ends with (`t.xs[i] = v` becomes
+                        // `.. t.xs = t.xs[]`), so it lands once per store:
+                        // 8,000 writes into an `Array<Age>` field measured
+                        // 13,467 ms re-validating against 76 ms not. This is
+                        // the compiled backends' own rule, not a shortcut of
+                        // the interpreter's — `validation_required` returns
+                        // `None` when `from == to`, so they emit nothing here
+                        // either. Deliberately variables only: `push(t.xs, v)`
+                        // is ALSO statically `Array<Age>` and its element has
+                        // been validated by nothing at this point (the
+                        // backends validate it inside `push`; the fast path
+                        // above does, for a local).
+                        let known = matches!(value, Expr::Var { name: n, .. }
+                            if scope.iter().rev().find_map(|f| f.get(n).map(|s| s.ty.clone()))
+                                .unwrap_or_else(|| self.globals.borrow().get(n)
+                                    .and_then(|s| s.ty.clone()))
+                                .as_ref() == fty.as_ref());
                         match &fty {
-                            Some(t) => self.coerce(v, t)?,
-                            None => v,
+                            Some(t) if !known => self.coerce(v, t)?,
+                            _ => v,
                         }
                     }
                 };
