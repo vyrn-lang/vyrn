@@ -1247,6 +1247,12 @@ fn main() -> Int64 {
 /// multiplication — which is better than a literal would have been: both engines
 /// compute the same double by the same IEEE steps, and the mantissa that comes
 /// out is messy rather than round.
+///
+/// Since RFC-0081 M2 the wasm column is `std/num`'s `f64Str` rather than 511
+/// hand-written lines, so what this pins there is the same six places produced by
+/// a different implementation — and the `want` string, which is neither engine's
+/// output but a value someone wrote down, is what makes that a check rather than
+/// a comparison of two copies.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
 fn six_decimals_of_a_float_are_the_exact_ones() {
@@ -1370,6 +1376,15 @@ fn main() -> Int64 {
 /// The mismatch count is printed rather than asserted so a disagreement arrives
 /// as a diff naming the value, and so an engine that produced nothing at all
 /// fails rather than passing quietly.
+///
+/// **M2 changed what two of the three columns mean, and the test is worth more
+/// for it.** `@str` on a float IS `f64Str` now on native and on wasm, so their
+/// in-program comparison is a function against itself — the differential that
+/// remains is the interpreter's, where `@str` is still `format!("{f:.6}")`. That
+/// is the arrangement M2 chose deliberately: one implementation and one oracle,
+/// with a test enforcing the relation, rather than three peers with no reference
+/// among them. The `all_agree` at the end is what still checks the two compiled
+/// engines — against the interpreter's bytes, which are the oracle's.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
 fn the_vyrn_float_formatter_agrees_with_every_engines_own() {

@@ -1,7 +1,7 @@
 # RFC-0081 — Float Formatting in Vyrn
 
-- **Status:** **Accepted, with a measurement gate.** M1 is a spike whose number
-  decides whether M2 happens at all.
+- **Status:** **Shipped** (M1, M2). Two of the three implementations are gone;
+  the interpreter's is kept on purpose, as the oracle — see the closing section.
 - **Depends on:** RFC-0078 (the census, and the `Measured` refusal this
   reopens), RFC-0077 (the direct backend, which is why the 511 lines exist),
   RFC-0059 (`std/num`, which already carries the arithmetic)
@@ -189,6 +189,111 @@ The `Rt` slot removal is the one real hazard and it is known: every runtime
 function in `direct.rs` is `base + n` and the emission order must match, so
 removing a slot renumbers the table. RFC-0078 flagged this same hazard for
 `charCount` and it was survivable there.
+
+### As landed
+
+Two deletions and one deliberate non-deletion, exactly as the section above
+amends it. `@str`'s float case and `print`'s both call `num$f64Str` on the
+textual emitter and on the direct backend; the interpreter's
+`format!("{f:.6}")` is untouched and is now the oracle rather than one of three
+peers.
+
+**Gone:** the native `printf("%f")` selection (four sites — `print` and `@str`,
+each times `Float64`/`Float32` — with `@.fmt.f`, `@.fmt.lf`, `@.fmt.nan`,
+`@.str.nan` and the `fcmp uno` that chose `NaN` over UCRT's `-nan(ind)`), and
+`direct.rs`'s 511-line `float_str` with its `Rt` slot and the three interned
+words it took. 608 lines deleted against 217 added.
+
+**The `Rt` hazard did not bite, and the reason is worth recording**: the table
+already checks itself. Every helper is emitted behind `rt.next_is(m, rt.<slot>)`
+and `next_is` asserts the reservation against `Module::next_func`, so a
+misnumbering is a panic at the helper rather than a wrong call at runtime — the
+silent case the RFC feared was engineered out three milestones ago.
+
+**What the RFC got wrong, and it is the whole shape of the milestone:** "route
+`@str`" is not enough. `print` formats a float without going through `@str`, so
+routing only `@str` would have left the native build with two float formatters
+(one of them `%f` again) and the direct backend calling a function it no longer
+had. Both spellings route, which means `std/num` is injected into nearly every
+program in the repo — the loader's gate is a mention of `@str` **or** `print`.
+Two consequences that were measured rather than assumed:
+
+- **The direct backend sweeps** (`Module::sweep`, RFC-0077), so a program that
+  formats no float carries none of it: hello-world wasm went 1263 → 1264 bytes.
+  A program that does pay for what it uses (+4.5 KB).
+- **The textual emitter does not sweep** — it emits every function of every
+  linked module and leaves dead-code removal to clang — so every native binary
+  grows by ~25 KB whether or not it formats anything (173 → 199 KB on
+  hello-world). That is dead weight in the `.exe` and the knob for it is
+  `-ffunction-sections -Wl,--gc-sections` on the link, deliberately not pulled
+  here: it changes every native build and this milestone is about deleting an
+  algorithm, not about the linker.
+
+Two smaller things the RFC did not anticipate:
+
+- **A `.rodata` pointer must never reach `free`.** `own.rs` frees an `@str`
+  result (`DropKind::FreeStr`), which was sound while `@str` always `malloc`'d —
+  and `f64Str` returned `"NaN"`, `"inf"` and `"-inf"` as literals. So `f64Str`
+  now builds those three out of bytes like every other answer, and says in its
+  doc comment that every return is a fresh allocation. This is the one place the
+  two directions of RFC-0078's thesis collide: a Vyrn function reached by a
+  builtin's desugar inherits the builtin's ownership contract.
+- **A runtime module that cannot be READ is now skipped rather than failing the
+  load.** The loader already treated an unresolvable std root that way ("the
+  diagnostic belongs to whoever needs it"); with `print` in the gate, every
+  program with a partial resolver — six in-memory generator tests, and any
+  editor serving a subset of the tree — reached it. A module that is present but
+  broken still fails the load.
+
+**Verification.** `cargo test --workspace` green; `vyrn-lsp` green separately
+(56). Full parity serially: 31 passed, 0 failed, 0 skipped, and the wasm column
+is proven rather than assumed three ways — `three_engines`'s assertion that a
+`wasm` row exists (M1 put it there for exactly this milestone) passed, the
+example harness printed no `no wasmtime` note over its 86 programs, and
+`f64str.wasm` is sitting in the parity temp directory. M1's differential tests
+pass unchanged; their doc comments now say what two of the three columns mean
+after M2, which is that they compare `f64Str` against itself and the interpreter
+is the only differential left in that file. `tests/numbers.rs` is unaffected and
+is the stronger of the two: 850 bit patterns against Rust's `{:.6}` in Rust,
+under the interpreter.
+
+**The numbers, re-measured.** 200,000 formats, an identical loop without the
+format subtracted, minimum of five runs, per call:
+
+| engine | before (M1's builtin) | after | |
+|---|---|---|---|
+| interpreter | 385 ns | 430 ns | unchanged by design (noise + one more module in the link) |
+| native | 170 ns | 860 ns | **5.1x** |
+| direct wasm | 380 ns | 830 ns | **2.2x** |
+
+The native ratio is worse than M1's 3.1x and the wasm ratio better than its
+2.9x, for the same reason in both directions: this is `x.toString()` against
+UCRT's `%f` at `-O2` on ordinary magnitudes, where `printf` is at its best and
+the 511 hand-written lines were not.
+
+**And the workload M1 could not show, because M1's print benchmark was dominated
+by the write** — 50,000 `toJson` of a three-`Float64` record, 150,000 formats,
+one line of output:
+
+| engine | before | after | |
+|---|---|---|---|
+| native | 109 ms | 205 ms | **1.9x** |
+| direct wasm | 119 ms | 188 ms | **1.6x** |
+| interpreter | 1227 ms | 1297 ms | +6% |
+
+**That is a regression a real program could notice, and it is stated plainly
+rather than filed under noise.** A service serialising float-heavy JSON pays
+about 640 ns per float on native where it paid 170. In absolute terms a response
+carrying a hundred floats moves from 17 µs to 86 µs, which is why this landed
+rather than stopping — but it is a real number and the split decision is
+revisitable on it. What is *not* revisitable by this number is the direct
+backend: its alternative is 511 hand-written lines, and it is the engine that
+got 40% of the regression the native one did.
+
+One operational consequence: a `vyrn` binary that cannot find a std root can no
+longer compile a program that prints a float. That is the same failure `toJson`
+has had since RFC-0078 M2b, and both backends name the missing function rather
+than leaving an undefined symbol for the linker.
 
 ### The thesis, corrected by its own measurement
 

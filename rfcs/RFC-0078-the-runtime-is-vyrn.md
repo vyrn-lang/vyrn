@@ -188,7 +188,9 @@ at any time.
   deliberate cache (`lineAt`/`colAt`), it is documented as one, and parity proves
   it agrees with `std/text`'s `lineAtV`/`colAtV` at every offset of twelve buffers.
   Two builtins are refused on a measured cost (`@str`, `@concat`) and one is
-  refused for no reason at all, which is the finding.
+  refused for no reason at all, which is the finding. (`@str`'s measurement was
+  the one worth re-taking: RFC-0081 found the cost was 2% and moved its float
+  case.)
 
 ## Acceptance
 
@@ -2045,7 +2047,15 @@ interpreter that does not optimize); `raw` `rawAt` `render` `lex` `@codeText`
 
 **7. Semantics (1).** `parse`.
 
-**8. Measured (2).** `@str` `@concat`.
+**8. Measured (1).** `@concat`. (`@str` was the other and **RFC-0081 took it**:
+re-measured, the cost that refused it was 2%, not a fast path — the
+expensive-looking implementation was already the one running. Its float case is
+`std/num`'s `f64Str` on both compiled backends now. It is not a whole row moved,
+and deliberately: `@str` is type-directed, so `Int64` still renders with `%lld`
+here, and the interpreter keeps `format!("{f:.6}")` as the ORACLE a differential
+test compares `f64Str` against. Which corrected this census's unit of objection —
+the problem was never "more than one implementation", it was "N peers with no
+reference among them".)
 
 **9. Unjustified (1).** `@charCount`.
 

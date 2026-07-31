@@ -487,10 +487,14 @@ export fn parseUInt64(s: String) -> Option<UInt64> {
 /// exactly `%f`, computed rather than approximated (RFC-0081 M1).
 ///
 /// This is `parseFloat64` run backwards, and it is here for the reason that
-/// direction is: today the same six places are produced three times, by Rust's
+/// direction is: the same six places used to be produced three times, by Rust's
 /// `{:.6}`, by C's `printf("%f")` and by 511 hand-written lines of wasm, and
-/// those three are not one algorithm written three times but three algorithms
-/// that must agree byte for byte. Nothing structural holds them together.
+/// those three were not one algorithm written three times but three algorithms
+/// that had to agree byte for byte. RFC-0081 M2 deleted the second and the third:
+/// `@str` and `print` on a float come here on both compiled backends. The first
+/// is kept on purpose — it is the ORACLE a differential test compares this
+/// function against, because an exact decimal expansion rounded half-to-even
+/// cannot be pinned exhaustively over 2^64 inputs.
 ///
 /// The value is `M × 2^E` with `M < 2^53`, so `x × 10^6` is the exact integer
 /// `M × 10^6 × 2^E` when `E >= 0`, and `M × 10^6 × 5^k / 10^k` with `k = -E` when
