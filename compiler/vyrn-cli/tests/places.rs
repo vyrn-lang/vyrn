@@ -131,6 +131,100 @@ fn a_nested_field_chain_allocates_nothing_either() {
     assert!(calls.is_empty(), "{}\nin:\n{body}", calls.join("\n"));
 }
 
+/// The interpreter's half, which this file could not see at all until RFC-0082
+/// M2 — and that is precisely why a quadratic shipped: the IR assertions above
+/// are true, the compiled backends really do write through one buffer, and the
+/// interpreter was copying the whole vector on every write anyway.
+///
+/// There is no emitted code to count here, so the pin is a RATIO between two
+/// programs that differ in one token: whether the array lives in a record field
+/// or in a local. Both do N writes. Same machine, same interpreter, same
+/// process floor, so a loaded box slows both and the ratio holds; what does not
+/// hold is a copy per write, which measured 660x at this N before the fix
+/// against 1.4x after. The threshold is deliberately far from both.
+#[test]
+fn the_interpreter_does_not_copy_the_array_once_per_write() {
+    const N: usize = 32_000;
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The array is built as a local in BOTH, then handed to the record: `push`
+    // through a field is a separate quadratic (RFC-0082 M2's "as landed") and
+    // measuring it here would hide the one this test is for.
+    let build = format!(
+        "let mut xs: Array<Int64> = []\n\
+         let mut i = 0\n\
+         while i < {N} {{ xs.push(0)  i = i + 1 }}\n\
+         let mut k = 0\n"
+    );
+    let plain = format!(
+        "fn main() -> Int64 {{\n{build}\
+         while k < {N} {{ xs[k] = k  k = k + 1 }}\n\
+         print(xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let field = format!(
+        "type T = {{ xs: Array<Int64> }}\n\
+         fn main() -> Int64 {{\n{build}\
+         let mut t = T {{ xs: xs }}\n\
+         while k < {N} {{ t.xs[k] = k  k = k + 1 }}\n\
+         print(t.xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+
+    let best_of_3 = |name: &str, src: &str| {
+        let file = dir.join(format!("{name}.vyrn"));
+        std::fs::write(&file, src).unwrap();
+        (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+                assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+                assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "31999");
+                t.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let plain = best_of_3("interp-plain", &plain);
+    let field = best_of_3("interp-field", &field);
+    assert!(
+        field.as_secs_f64() < 4.0 * plain.as_secs_f64(),
+        "an index assignment through a field is copying the array: \
+         {field:?} against {plain:?} for the same {N} writes on a local"
+    );
+}
+
+/// `vyrn test` is a RECOVERABLE trap: a trapping test is reported and the next
+/// one runs. M1 recorded that its stale field was unobservable "because traps
+/// abort" and that a recoverable trap would have to revisit the desugar — this
+/// is that trap, and it was already there. Taking the container out of MODULE
+/// state would leave a `Val::Unit` behind that outlives the failed test, and the
+/// next one reads `at of non-Array/Int64`: a value no program can otherwise
+/// produce. So globals keep the copy, and this is the test that says so.
+#[test]
+fn a_trapping_test_does_not_leave_a_hole_in_module_state() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("trap-hole.vyrn");
+    std::fs::write(
+        &file,
+        "type T = { xs: Array<Int64> }\n\
+         let mut gt: T = T { xs: [1, 2, 3] }\n\
+         fn main() -> Int64 { print(gt.xs[0])  return 0 }\n\
+         test \"traps mid-write\" { gt.xs[99] = 7 }\n\
+         test \"still sees an array\" { assertEq(gt.xs[0], 1) }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("test").arg(&file).output().expect("vyrn test");
+    let all = String::from_utf8_lossy(&out.stdout).to_string()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        all.contains("still sees an array\" ... ok"),
+        "the field must survive the trapped test as an array:\n{all}"
+    );
+}
+
 /// The receiver forms that have no place to write back to keep failing, and say
 /// which ones do work. A call result is not a place: there is nowhere to put the
 /// container back, so a desugar cannot rescue it and silently dropping the write

@@ -1900,6 +1900,98 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
+    /// The move-out half of a place desugar (RFC-0082): TAKE the container out
+    /// of its home rather than copying it, leaving `Val::Unit` behind until the
+    /// write-back at the end of the same statement group restores it.
+    ///
+    /// `t.xs[k] = v` desugars to `let mut t.xs[] = t.xs` / `t.xs[][k] = v` /
+    /// `t.xs = t.xs[]`. Reading the field the ordinary way CLONES the
+    /// `Rc<Vec<Val>>` to refcount 2, so the `Rc::make_mut` in `Stmt::IndexSet`
+    /// deep-copies the whole vector on every write: measured 23.9 s at
+    /// N = 32,000 against 0.05 s for the same loop on a plain array variable —
+    /// quadratic. Both compiled backends were always fine, because there the
+    /// same three statements copy a `{ptr,len,cap}` header into an alloca and
+    /// write through the *same* buffer, so this fix is interpreter-only.
+    ///
+    /// Sound only because the desugar hoists every operand that could read a
+    /// place ahead of the move (`place_receiver` and its callers): before that,
+    /// `t.xs[t.xs.length - 1] = 99` read the field while it was out and only
+    /// got the right answer because the copy was still there. Once hoisted, the
+    /// only thing that can happen between take and write-back is a trap.
+    ///
+    /// **Locals only, and that restriction is load-bearing.** M1 recorded that
+    /// its equivalent hole was unobservable because every trap aborts, and that
+    /// a recoverable trap would have to revisit it. Vyrn already has one:
+    /// `vyrn test` catches a trapping test and runs the next, so a hole left in
+    /// MODULE state outlives it, and a later test reads `Val::Unit` where an
+    /// array should be — `at of non-Array/Int64`, a value no program can
+    /// otherwise produce. A local cannot outlive that boundary: its frame is
+    /// popped on the way out and never read again, and a `modify` parameter's
+    /// write-back does not run on the error path either (checked: the caller's
+    /// record is intact). So a global keeps the copy — and stays quadratic,
+    /// like `store.xs.push(v)` already is.
+    ///
+    /// Returns `Ok(None)` for any shape it does not recognise, having mutated
+    /// nothing, so the general path produces the usual value or the usual error.
+    fn take_place(
+        &self,
+        name: &str,
+        value: &Expr,
+        scope: &mut Vec<Frame>,
+    ) -> Result<Option<Val>, Ctrl> {
+        if !is_place_temp(name) {
+            return Ok(None);
+        }
+        // The two place shapes: a record field (`r.a`) and an array element
+        // (`rows[i]`). Both bases are plain variables by construction — the
+        // desugar is recursive, so an outer level has already moved its own
+        // container into a temp.
+        let (parent, taken): (&String, Box<dyn FnOnce(&mut Slot) -> Option<Val>>) = match value {
+            Expr::Field { expr, field, .. } => {
+                let Expr::Var { name: parent, .. } = expr.as_ref() else {
+                    return Ok(None);
+                };
+                (
+                    parent,
+                    Box::new(move |s: &mut Slot| match &mut s.v {
+                        Val::Record(map) => map
+                            .get_mut(field)
+                            .map(|slot| std::mem::replace(slot, Val::Unit)),
+                        _ => None,
+                    }),
+                )
+            }
+            Expr::Call { name: f, args, .. } if f == "at" && args.len() == 2 => {
+                let Expr::Var { name: parent, .. } = &args[0] else {
+                    return Ok(None);
+                };
+                // The index is itself a hoisted temp, a literal or a variable,
+                // so evaluating it here cannot reach the place being taken.
+                let Val::Int(idx) = self.expr(&args[1], scope)? else {
+                    return Ok(None);
+                };
+                (
+                    parent,
+                    Box::new(move |s: &mut Slot| match &mut s.v {
+                        // Out of bounds falls through so `at`'s own wording traps.
+                        Val::Array(items) if idx >= 0 && (idx as usize) < items.len() => {
+                            let items = std::rc::Rc::make_mut(items);
+                            Some(std::mem::replace(&mut items[idx as usize], Val::Unit))
+                        }
+                        _ => None,
+                    }),
+                )
+            }
+            _ => return Ok(None),
+        };
+        for frame in scope.iter_mut().rev() {
+            if let Some(s) = frame.get_mut(parent) {
+                return Ok(taken(s));
+            }
+        }
+        Ok(None) // a global: not in any frame, so leave it to the copying path
+    }
+
     fn stmt(&self, stmt: &Stmt, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
         // Generation step budget (RFC-0021): a runaway generator fails loudly
         // instead of hanging the build. Only active inside a generation run.
@@ -1914,7 +2006,10 @@ impl<'a> Interp<'a> {
             Stmt::Let {
                 name, value, ty, ..
             } => {
-                let mut v = self.expr(value, scope)?;
+                let mut v = match self.take_place(name, value, scope)? {
+                    Some(taken) => taken,
+                    None => self.expr(value, scope)?,
+                };
                 // An annotation coerces the initializer (sized-int wrapping,
                 // automatic validation) and is remembered so reassignments run
                 // through the same coercion.

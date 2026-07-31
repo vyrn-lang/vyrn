@@ -2,9 +2,10 @@
 
 - **Status:** **Accepted**, **M1 shipped** (see "As landed"), **M2 stopped at its
   own gate** — the port is blocked twice over and the gate failed anyway; M3 and
-  M4 are **withdrawn**. Milestones are gated on measurement the way RFC-0081's
-  were: nothing is deleted until a number says it should be, and here a number
-  said stop.
+  M4 are **withdrawn**. The quadratic M2 found instead of the port is **fixed**
+  (M2's "As landed", item 5). Milestones are gated on measurement the way
+  RFC-0081's were: nothing is deleted until a number says it should be, and here
+  a number said stop.
 - **Depends on:** RFC-0078 (the census, and question **A**, which this
   reframes), RFC-0011 (`a[i] = v` element store, and the `a[i].field = v`
   desugar this extends), RFC-0028 (`Map<String, V>`), RFC-0056 (`SmallArray`),
@@ -349,6 +350,76 @@ because the field still holds a copy. Making the interpreter's move a real move
 requires the desugar to rewrite reads of the field inside the index and value
 expressions to read the temp — which is a change to the desugar in all three
 engines, not an interpreter patch, and it is its own RFC.
+
+##### As landed — the take, and two more quadratics underneath it
+
+Two parts, in this order. **The desugar hoists** every operand that can reach a
+place — the index, the value, a nested index, a mutating call's arguments — into
+its own temp *before* the move-out, so nothing reads the container while it is
+gone. **The interpreter then takes**: `let mut t.xs[] = t.xs` replaces the field
+with `Val::Unit` and hands over the `Rc`, so `Rc::make_mut` in `IndexSet` sees
+refcount 1 and writes through. Neither compiled backend changed, and that was
+checked rather than assumed: `places.rs`'s IR assertions are byte-for-byte the
+same before and after, because hoisting adds statements that lower to the same
+loads and both backends already wrote through one buffer.
+
+Isolated `t.xs[k] = v`, best of 3, milliseconds, three engines (process floor
+~35 ms):
+
+| N | interp before | interp after | native | wasm |
+|---|---|---|---|---|
+| 4,000 | 95 | 42 | 27 → 33 | 39 → 42 |
+| 8,000 | 276 | 46 | 30 → 31 | 40 → 41 |
+| 16,000 | 981 | 58 | 28 → 34 | 37 → 42 |
+| 32,000 | 9,942 | 75 | 28 → 39 | 39 → 41 |
+| 64,000 | 39,116 | 114 | 30 → 34 | 42 → 44 |
+
+The after column matches `xs[k] = v` on a plain local (38 / 43 / 45 / 57 / 71) to
+within noise. That is the complexity class changing, not a constant.
+
+**The self-referential cases are the pin, and the M2 spec was right about them**:
+`examples/placeorder.vyrn` runs `99`, `8`, `f`/`g` once each left to right, a
+nested index evaluated once, a two-deep place and a call reaching module state —
+byte-identical on three engines. The complexity class is pinned in `places.rs` by
+a *ratio*: the same N writes, once on a local and once through a field, must land
+within 4x of each other. Before, that ratio was 503x. There is no IR to count for
+the interpreter, which is exactly why this shipped.
+
+Four things this milestone found that the diagnosis above did not:
+
+1. **Vyrn already has the recoverable trap the M1 note said would force a
+   revisit.** `vyrn test` catches a trapping test and runs the next one, so a
+   hole left in *module state* outlives the trap and the next test reads
+   `at of non-Array/Int64` — a value no program can otherwise produce. The take
+   is therefore **locals only**: a local's frame is popped on the error path and
+   never read again, and a `modify` parameter's write-back does not run either
+   (checked). A global keeps the copy and stays quadratic. Pinned by
+   `a_trapping_test_does_not_leave_a_hole_in_module_state`.
+2. **The measurement above was two quadratics, not one.** M2's program built its
+   array with `t.xs.push(0)` in a loop, and `push` through a field is its own
+   quadratic — 138 / 481 / 1,582 / 8,186 ms at N = 4,000 → 32,000, untouched by
+   this fix. `Stmt::Assign` has an in-place fast path for `xs.push(v)` on a local;
+   `Stmt::SetField` has none, and the `push` builtin clones its argument
+   unconditionally so the take alone would not help. That is the non-monotonic
+   998 / 886 ms at N = 2,000 / 8,000 in the table at the top of this RFC: at those
+   sizes both programs were mostly compile floor.
+3. **`rows[i][j] = v` is still quadratic, for a third reason.** The write-back
+   `rows[i] = rows[]` coerces into the declared element type, and `coerce` on an
+   array **rebuilds the whole vector** even when the element type cannot change a
+   value. Confirmed by probe: short-circuiting `coerce` for `Array<Int64>` takes
+   the nested loop from 786 / 2,613 / 16,633 / 65,304 ms to 44 / 50 / 67 / 99 at
+   N = 8,000 → 64,000. Not fixed here — a general `coercion_free` predicate
+   decides when automatic validation may be skipped, and that is a validation
+   change, not a places change.
+4. **A nested index was evaluated twice.** `place_receiver` cloned the index
+   expression into both the load and the write-back, so `rows[f()][0] = 1` called
+   `f` twice — visible in the baseline binary, and fixed by the hoist that
+   soundness needed anyway.
+
+The trap caveat is unchanged in shape and narrower in scope: between the take and
+the write-back only a trap can escape (every `?` and every call now runs during
+the hoists), the field is `Val::Unit` for that instant, and no locals survive the
+one boundary that recovers.
 
 ### M3 — `Map` over `Array` — **withdrawn**
 
