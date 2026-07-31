@@ -96,6 +96,19 @@ pub enum LogSink {
     File(String),
 }
 
+/// Is this binding a place desugar's move-out temp (RFC-0082)?
+///
+/// `t.xs[k] = v` becomes `let mut t.xs[] = t.xs` / `t.xs[][k] = v` /
+/// `t.xs = t.xs[]`. The name is unspellable — `[` cannot appear in an identifier
+/// — and by convention ONLY the container that is moved out and written back
+/// ends in `[]`; the operand temps the desugar hoists ahead of the move carry a
+/// further suffix (`[]i`, `[]v`) so they do not match. The interpreter keys its
+/// take on this (`Interp::take_place`); `symbols.rs` filters all of them out of
+/// the completion index on the looser `contains('[')`.
+pub fn is_place_temp(name: &str) -> bool {
+    name.ends_with("[]")
+}
+
 /// The default logging threshold — `Info`: `trace`/`debug` are suppressed unless
 /// a `logging { level: .. }` block lowers it.
 pub const DEFAULT_LOG_LEVEL: usize = 2;

@@ -1,0 +1,120 @@
+/// What an index assignment through a place is allowed to observe (RFC-0082 M2).
+///
+/// `t.xs[k] = v` desugars to move the array out of the field, store, and move it
+/// back. M1 shipped that as three statements and it was correct — but only in
+/// the interpreter, and only by accident: reading a field there COPIES the
+/// `Rc<Vec<Val>>`, so the field still held the array while the temp was being
+/// written, and `Rc::make_mut` deep-copied the whole vector on every write. That
+/// was quadratic (23.9 s for 32,000 writes against 0.05 s for the same loop on a
+/// plain array) and invisible to `vyrn-cli/tests/places.rs`, which reads emitted
+/// IR and so only ever saw the two compiled backends — where the same three
+/// statements copy a `{ptr,len,cap}` header and write through one buffer.
+///
+/// The fix takes the field instead of copying it. That makes the container
+/// genuinely absent between the move and the write-back, so the desugar now
+/// evaluates every operand that could reach a place BEFORE the move. The first
+/// two lines below are the ones that would answer wrongly without it, and the
+/// rest pin the evaluation order the hoisting must not disturb: left to right,
+/// each subexpression exactly once.
+
+type T = { xs: Array<Int64> }
+
+type Grid = { rows: Array<Array<Int64>> }
+
+/// Module state, so the "reads a place the statement is mutating" case is
+/// available to a callee as well as to a subexpression.
+let mut gt: T = T { xs: [5, 6, 7] }
+
+fn f() -> Int64 {
+    print("f")
+    return 1
+}
+
+fn g() -> Int64 {
+    print("g")
+    return 20
+}
+
+/// Reads the very field the caller's statement has moved out. Only reachable
+/// through module state — a local cannot be seen from here — which is why a
+/// call counts as reaching a place and gets hoisted like a field read.
+fn peek() -> Int64 {
+    return gt.xs[0]
+}
+
+fn main() -> Int64 {
+    // ---- the index reads the field it is indexing ---------------------------
+    let mut t: T = T { xs: [1, 2, 3] }
+    t.xs[t.xs.length - 1] = 99
+    print(t.xs[2]) // 99
+
+    // ---- the value reads the field it is storing into ------------------------
+    let mut u: T = T { xs: [1, 2, 3] }
+    u.xs[0] = u.xs[2] + 5
+    print(u.xs[0]) // 8
+
+    // ---- both at once, plus the field's own length ---------------------------
+    let mut w: T = T { xs: [4, 5, 6] }
+    w.xs[w.xs[0] - 4] = w.xs[1] + w.xs[2]
+    print(w.xs[0]) // 11
+
+    // ---- evaluation order: index then value, once each ------------------------
+    let mut o: T = T { xs: [0, 0] }
+    o.xs[f()] = g()
+    print(o.xs[1]) // 20 — and "f" printed before "g", both exactly once
+
+    // ---- a nested index: the outer index is needed by the load AND the
+    // write-back, so it must still run once ------------------------------------
+    let mut rows: Array<Array<Int64>> = [[0, 0], [0, 0]]
+    rows[f()][g() - 20] = 42
+    print(rows[1][0]) // 42
+
+    // ---- a place two records deep, with a hoisted operand --------------------
+    let mut grid: Grid = Grid { rows: [[0], [0]] }
+    grid.rows[grid.rows.length - 1][0] = grid.rows[0].length + 6
+    print(grid.rows[1][0]) // 7
+
+    // ---- a CALL in the value, reaching the module state being mutated --------
+    gt.xs[1] = peek() + 100
+    print(gt.xs[1]) // 105
+
+    // ---- write-through to a field of an element, same rules ------------------
+    let mut ps: Array<T> = [T { xs: [1] }, T { xs: [2] }]
+    ps[f()].xs = ps[0].xs
+    print(ps[1].xs[0]) // 1
+
+    return 0
+}
+
+test "an index reading its own field sees the value that is there" {
+    let mut t: T = T { xs: [1, 2, 3] }
+    t.xs[t.xs.length - 1] = 99
+    assertEq(t.xs[2], 99)
+    assertEq(t.xs[0], 1)
+}
+
+test "a value reading its own field sees the value that is there" {
+    let mut u: T = T { xs: [1, 2, 3] }
+    u.xs[0] = u.xs[2] + 5
+    assertEq(u.xs[0], 8)
+    assertEq(u.xs[2], 3)
+}
+
+test "a nested place still writes back through every level" {
+    let mut grid: Grid = Grid { rows: [[1, 2], [3, 4]] }
+    grid.rows[1][0] = grid.rows[0][1] + 10
+    assertEq(grid.rows[1][0], 12)
+    assertEq(grid.rows[0][1], 2)
+    assertEq(grid.rows[1][1], 4)
+}
+
+test "a field write does not disturb an alias taken before it" {
+    // The move-out is a take, but the array is still shared with `before`, so
+    // the element store must copy — the take removes the desugar's OWN extra
+    // reference, never a user's.
+    let mut t: T = T { xs: [1, 2, 3] }
+    let before = t.xs
+    t.xs[0] = 99
+    assertEq(t.xs[0], 99)
+    assertEq(before[0], 1)
+}
