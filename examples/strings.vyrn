@@ -79,8 +79,19 @@ fn main() -> Int64 {
     print("repeat: \{repeat("ab", 3)}") // ababab
     print("hex: \{toHex(255)}") // 00000000000000ff
 
-    // ---- the mid-codepoint trap (canonical wording) --------------------------
-    // Byte 2 is inside `é` (bytes 1..2) — this cut splits a UTF-8 character.
+    // ---- a cut inside a codepoint, both ways ---------------------------------
+    // Byte 2 is inside `é` (bytes 1..2). `slice` RETURNS that failure since
+    // RFC-0079 M3 (the `Err` carries which cut and at which byte — see
+    // `examples/strpredbytes.vyrn`, which renders both), so this row prints
+    // rather than ending the run, which is what lets three engines be compared
+    // on it at all.
+    print(match slice(s, 0, 2) {
+            Ok(v) => v,
+            Err(e) => "slice declined: the cut is inside a character",
+        })
+    // `substring` is the trapping form, and it is the last line for that reason.
+    // The wording is its own now, not the compiler's `error: slice splits a
+    // UTF-8 character`: the message names the function and the byte.
     print("about to split a codepoint...")
     print(substring(s, 0, 2))
     return 0

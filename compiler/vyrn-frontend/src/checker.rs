@@ -7853,13 +7853,16 @@ mod tests {
         assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
     }
 
+    /// `slice`'s ARGUMENT diagnostics, which stayed in the checker when RFC-0079
+    /// M3 routed the builtin: the three-argument shape is fixed, and saying so by
+    /// name is better than "no function `strpred$sliceV`".
+    ///
+    /// Its RESULT is not checked here and cannot be — see
+    /// `slice_without_its_module_refuses_at_the_check` below. The return type is
+    /// `std/strpred`'s, so a bare source has nothing to read it from;
+    /// `examples/strpredbytes.vyrn` is where the type is exercised.
     #[test]
     fn slice_builtin_signature() {
-        // slice(String, Int64, Int64) -> String (RFC-0046).
-        assert!(check_src(
-            "fn main() -> Int64 { let x: String = slice(\"hello\", 1, 3) return x.byteLength }"
-        )
-        .is_ok());
         let e = check_src("fn main() -> Int64 { let x = slice(\"hi\") return 0 }").unwrap_err();
         assert!(e.contains("`slice` takes 3 arguments"), "{e}");
         let e = check_src("fn main() -> Int64 { let x = slice(42, 0, 1) return 0 }").unwrap_err();
@@ -7867,6 +7870,25 @@ mod tests {
         let e =
             check_src("fn main() -> Int64 { let x = slice(\"hi\", \"a\", 1) return 0 }").unwrap_err();
         assert!(e.contains("`slice` needs Int64 offsets"), "{e}");
+    }
+
+    /// The seam every routed builtin has, and `slice` is the first one to reach it
+    /// at CHECK time rather than at emit (RFC-0079 M3).
+    ///
+    /// The other eleven are typed by a fixed answer the checker can write down —
+    /// `Bool`, `Result<String, String>` — so a bare source with no resolver checks
+    /// clean and each engine refuses by name when it lowers the call. `slice`
+    /// answers `Result<String, SliceError>`, and `SliceError` is a `std/strpred`
+    /// declaration: there is no type to invent, so the refusal moves one phase
+    /// earlier and gains a line number. Loudly rather than silently, which is the
+    /// same requirement `a_routed_builtin_without_its_module_refuses_by_name`
+    /// states for the rest.
+    #[test]
+    fn slice_without_its_module_refuses_at_the_check() {
+        let e =
+            check_src("fn main() -> Int64 { let x = slice(\"hi\", 0, 1) return 0 }").unwrap_err();
+        assert!(e.contains("`slice` is implemented in Vyrn"), "{e}");
+        assert!(e.contains("a std root is needed"), "{e}");
     }
 
     #[test]

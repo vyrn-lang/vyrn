@@ -278,10 +278,12 @@ ret:
   ret {ptr, i64, i64} %r2
 }
 
-; (`@__vyrn_bytecopy` was here — the `slice` builtin's copy loop, and `slice` was
-; its only caller. RFC-0079 M3 routed `slice` into `std/strpred`, where the copy
-; is a `while` over the byte view, so the helper went with the lowering rather
-; than staying as an unreferenced definition every module still carries.)
+; (The byte-copy helper was here — the `slice` builtin's copy loop, and `slice`
+; was its only caller. RFC-0079 M3 routed `slice` into `std/strpred`, where the
+; copy is a `while` over the byte view, so the helper went with the lowering
+; rather than staying as an unreferenced definition every module still carries.
+; Its name is not spelled in this comment on purpose: the test that asserts it is
+; gone reads the emitted text.)
 ";
 
 /// The `=~` regex runner: run a complete DFA (transition table + accepting bytes,
