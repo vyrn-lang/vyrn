@@ -184,8 +184,13 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // ---- Movable, refused on a measured cost --------------------------------
     ("@str", Measured, "float formatting: 511 lines in direct.rs, three engines, every print"),
     ("@concat", Measured, "every string concatenation and every interpolation in the repo"),
-    // ---- The one finding -----------------------------------------------------
-    ("@charCount", Unjustified, "three implementations of a four-line loop, for ONE caller"),
+    // ---- The one finding, and it is CLOSED -----------------------------------
+    // (`@charCount` was here, as `Unjustified`: "three implementations of a
+    // four-line loop, for ONE caller". It is `std/text`'s `charCountV` now, so the
+    // row is gone rather than annotated — a builtin with a reason to exist is what
+    // this table lists, and it no longer is one. `Unjustified` stays as a variant
+    // because a census whose one interesting category is unrepresentable cannot
+    // report the next finding.)
 ];
 
 /// The two regions of `interp.rs` the census covers, extracted by the method the
@@ -280,8 +285,10 @@ fn the_census_is_the_code() {
     );
     // The count at the commit that landed this, by the stated method: 62 names,
     // 51 in 46 arms plus 11 guards. It is here so a change to the boundary is a
-    // visible edit rather than a silently different census.
-    assert_eq!(found.len(), 62, "the primitive core changed size");
+    // visible edit rather than a silently different census. 62 -> 61 when
+    // `@charCount` — the census's one `Unjustified` row — became `std/text`'s
+    // `charCountV`.
+    assert_eq!(found.len(), 61, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."
@@ -335,14 +342,16 @@ fn the_refusals_keep_their_reasons() {
              that reason stopped being true"
         );
     }
-    // The census's own shape: exactly one arm has no reason to be a primitive,
-    // and the two `Measured` rows are refusals rather than justifications. If a
-    // second `Unjustified` row appears, RFC-0078's boundary claim is weaker than
-    // it says.
+    // The census's own shape: EVERY remaining arm has a stated reason to be a
+    // primitive, and the two `Measured` rows are refusals rather than
+    // justifications. The one `Unjustified` row the census found was `@charCount`,
+    // and it is `std/text`'s `charCountV` now — so the assertion inverted from
+    // "exactly one" to "none", which is the strongest form RFC-0078's boundary
+    // claim can take. A row appearing here is a finding, not a row to invent.
     let unjustified: Vec<&str> = CENSUS
         .iter()
         .filter(|(_, w, _)| *w == Unjustified)
         .map(|(n, ..)| *n)
         .collect();
-    assert_eq!(unjustified, ["@charCount"]);
+    assert!(unjustified.is_empty(), "{unjustified:?} is in the interpreter with no reason given");
 }

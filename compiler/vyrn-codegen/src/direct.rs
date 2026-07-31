@@ -2879,7 +2879,6 @@ impl Fn_<'_> {
                     self.gen_peek(n, args).expect("guarded above")
                 }
                 "@str" | "@concat" | "jsonSchema" | "slice" | "toJson" => Type::Str,
-                "@charCount" => Type::Int,
                 "floatBits" => Type::IntN { bits: 64, signed: false },
                 "floatFromBits" => Type::Float,
                 "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
@@ -3941,11 +3940,6 @@ impl Fn_<'_> {
                 }));
                 b.slot(off);
                 return Ok(ty);
-            }
-            "@charCount" if args.len() == 1 => {
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                b.ins(&Instruction::Call(self.cx.rt.charcount));
-                return Ok(Type::Int);
             }
             // The two builtins RFC-0078 refused to route, and therefore the two
             // this backend owes a loop. `text_runtime` is where those loops are and
@@ -7657,7 +7651,6 @@ struct Rt {
     bool_str: u32,
     concat: u32,
     trap_idx: u32,
-    charcount: u32,
     utf8valid: u32,
     str_from_bytes: u32,
     slice: u32,
@@ -7754,8 +7747,11 @@ impl Rt {
     /// pointing at the wrong function only failed loudly where the two signatures
     /// differed. Two helpers with the same wasm signature swapped silently, and
     /// there are several such sets here: `read_file` and `read_file_bytes` are both
-    /// `(i32, i32) -> ()`, `malloc`, `strlen` and `charcount` are all
-    /// `(i32) -> i32`.
+    /// `(i32, i32) -> ()`, and `malloc` and `strlen` are both `(i32) -> i32`.
+    ///
+    /// The hazard was paid off rather than argued about: retiring `charcount`
+    /// (RFC-0078's census) is the first REMOVAL this table has seen, and it was one
+    /// deleted line here and one deleted body below, with nothing to renumber.
     ///
     /// The returned table is that record: name beside index, which is what the
     /// consistency test checks and what a reader wanting the emission order reads.
@@ -7780,7 +7776,6 @@ impl Rt {
             bool_str: slot("bool_str"),
             concat: slot("concat"),
             trap_idx: slot("trap_idx"),
-            charcount: slot("charcount"),
             utf8valid: slot("utf8valid"),
             str_from_bytes: slot("str_from_bytes"),
             slice: slot("slice"),
@@ -8199,41 +8194,12 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         b.ins(&Instruction::I32Const(1)).ins(&Instruction::Call(proc_exit));
     });
 
-    // charcount(s) — Unicode scalar values, i.e. bytes that are not UTF-8
-    // continuation bytes (RFC-0058). The interpreter counts the same thing the
-    // same way; the shim's `__vyrn_charcount` is this loop in C.
-    //
-    // A String is NUL-terminated and an interior NUL is rejected at construction,
-    // so scanning to the zero is exact — the same argument `strlen` rests on.
-    let n = 3;
-    rt.next_is(m, rt.charcount);
-    m.func(&[ValType::I32], &[ValType::I64], &[ValType::I32, ValType::I32], 0, |b| {
-        b.ins(&Instruction::Block(BlockType::Empty))
-            .ins(&Instruction::Loop(BlockType::Empty))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::BrIf(1))
-            // n += (b & 0xC0) != 0x80
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(0xC0))
-            .ins(&Instruction::I32And)
-            .ins(&Instruction::I32Const(0x80))
-            .ins(&Instruction::I32Ne)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(n))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(0))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End)
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::I64ExtendI32U);
-    });
+    // (`charcount(s)` was here — ~30 lines of scan for the bytes that are not UTF-8
+    // continuation bytes. RFC-0078's census found `charCount` the one builtin with
+    // no justification for being one, and `std/text`'s `charCountV` is the same scan
+    // written in Vyrn, so this backend has a row it no longer has to lower. It is
+    // the first runtime function this table has LOST, which is what made the
+    // self-registering `next_is` worth doing in 5d6a857.)
 
     // utf8valid(s, len) — Björn Höhrmann's DFA, over the SAME table the textual
     // backend emits (`crate::utf8d_table`). Sharing the bytes is the point: two

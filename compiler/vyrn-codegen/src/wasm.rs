@@ -792,7 +792,13 @@ mod tests {
         // the rest of the DOM, so the census has no JSON row at all — pinned as an
         // absence, since a returning row would mean a second reader appeared.
         assert!(!b.keys().any(|k| k.starts_with("__vyrn_vj_")), "the DOM is gone");
-        assert_eq!(b["__vyrn_charcount"], Some((vec![Some(ValType::I32)], Some(ValType::I64))));
+        // A `ptr -> i64` crossing, which is where a pointer's widening to `i32` and
+        // a 64-bit return meet. This used to be `__vyrn_charcount`; RFC-0078's census
+        // called that the one builtin with no justification for being one and it is
+        // `std/text`'s `charCountV` now, so the witness is `__vyrn_strlen` — the same
+        // signature, and one that CANNOT move, because `byteLength` is a view.
+        assert_eq!(b["__vyrn_strlen"], Some((vec![Some(ValType::I32)], Some(ValType::I64))));
+        assert!(!b.contains_key("__vyrn_charcount"), "`charCount` is Vyrn, not a crossing");
         assert_eq!(b["__vyrn_malloc"], Some((vec![Some(ValType::I64)], Some(ValType::I32))));
         assert_eq!(b["__vyrn_now_millis"], Some((vec![], Some(ValType::I64))));
         assert_eq!(b["free"], Some((vec![Some(ValType::I32)], None)), "void is None");

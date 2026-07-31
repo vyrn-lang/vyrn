@@ -2685,3 +2685,446 @@ fn the_rfc_0012_host_boundary_is_named_in_the_module() {
         "the allocator is exported by a module with no String-taking export"
     );
 }
+
+/// Run one ad-hoc source under every engine and return `(interp, native, wasm)`
+/// as `(stdout, stderr, exit)` triples, normalized the way the corpus loop above
+/// normalizes.
+///
+/// The three pins that follow are all NATIVE defects, which the pins written for
+/// RFC-0077 M2 could not have caught: those compared the interpreter against the
+/// direct wasm backend, and on each of these three the two of them AGREED and
+/// native was alone. So this helper exists rather than a fourth copy of the
+/// build-and-compare block, and the wasm column comes along because it is free
+/// and because a pin that names only two engines is how a third drifts.
+#[allow(clippy::type_complexity)]
+fn three_engines(
+    tag: &str,
+    what: &str,
+    src: &str,
+) -> Vec<(&'static str, String, String, Option<i32>)> {
+    let dir = std::env::temp_dir().join(format!("vyrn-parity-{tag}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{what}.vyrn"));
+    std::fs::write(&path, src).unwrap();
+    let no_stdin = dir.join("no.stdin");
+
+    let mut out = Vec::new();
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let i = run_io(interp_cmd, &dir, &no_stdin);
+    out.push(("interp", norm(&i.stdout), runtime_err(&i.stderr), i.status.code()));
+
+    let exe = dir.join(format!("{what}.exe"));
+    let b = vyrn().arg("build").arg(&path).arg("-o").arg(&exe).output().expect("build native");
+    assert!(
+        b.status.success(),
+        "{what}: NATIVE BUILD FAILED\n{}{}",
+        norm(&b.stdout),
+        norm(&b.stderr)
+    );
+    let n = run_io(Command::new(&exe), &dir, &no_stdin);
+    out.push(("native", norm(&n.stdout), runtime_err(&n.stderr), n.status.code()));
+
+    if let Some(wasmtime) = wasmtime() {
+        let module = dir.join(format!("{what}.wasm"));
+        let b = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(b.status.success(), "{what}: wasm build: {}", norm(&b.stderr));
+        let mut c = Command::new(&wasmtime);
+        c.arg("run").arg(&module);
+        let w = run_io(c, &dir, &no_stdin);
+        out.push(("wasm", norm(&w.stdout), runtime_err(&w.stderr), w.status.code()));
+    }
+    out
+}
+
+/// Assert every engine agrees with the INTERPRETER, and that the interpreter said
+/// what is expected — two backends can be confidently wrong together, and on all
+/// three of the defects below exactly two were.
+fn all_agree(rows: &[(&str, String, String, Option<i32>)], what: &str) {
+    let (_, out, err, code) = &rows[0];
+    assert!(!out.is_empty() || !err.is_empty(), "{what}: no engine printed anything");
+    for (eng, o, e, c) in &rows[1..] {
+        assert_eq!(o, out, "{what}: {eng} stdout");
+        assert_eq!(e, err, "{what}: {eng} stderr");
+        assert_eq!(c, code, "{what}: {eng} exit");
+    }
+}
+
+
+/// `NaN != NaN` is TRUE, and native was the one engine that said otherwise.
+///
+/// IEEE 754 makes `!=` the UNORDERED comparison — the only one of the six whose
+/// answer is `true` when an operand is a NaN — and the interpreter (Rust's `f64`
+/// `!=`) and the direct wasm backend (`f64.ne`) both implement it. The textual
+/// emitter spelled it `fcmp one`, "ordered AND not equal", which is `false` for a
+/// NaN operand: `nan != nan` printed `1` under `vyrn run` and under wasmtime and
+/// `0` natively.
+///
+/// The other five arms are here because the same class could have hidden in any of
+/// them and no example compares against a NaN, so nothing would have said. They
+/// are all ordered on all three engines and all print `0` — which is what makes
+/// the `!=` rows load-bearing: they are the only two that are not `0`.
+///
+/// `zero / zero` rather than a NaN literal: the language has no NaN literal, and a
+/// runtime division is also what stops `consteval` folding the comparison away and
+/// answering with the compiler's arithmetic instead of the backend's.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_nan_is_not_equal_to_itself_on_every_engine() {
+    let rows = three_engines(
+        "nan",
+        "nancmp",
+        r#"
+fn main() -> Int64 {
+    let zero = 0.0
+    let nan = zero / zero
+    let one = 1.0
+    print(if nan != nan { 1 } else { 0 })
+    print(if nan == nan { 1 } else { 0 })
+    print(if nan < one { 1 } else { 0 })
+    print(if nan <= one { 1 } else { 0 })
+    print(if nan > one { 1 } else { 0 })
+    print(if nan >= one { 1 } else { 0 })
+    print(if one != nan { 1 } else { 0 })
+    // A NaN comparison must not poison an ordinary one, and `!=` on two ordinary
+    // floats must still be `!=`.
+    print(if one != 2.0 { 1 } else { 0 })
+    print(if one != 1.0 { 1 } else { 0 })
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "nancmp");
+    // Spelled out as well as compared, because "all three engines say 0" is what
+    // the bug looked like: the interpreter is the reference, so its answer is
+    // asserted against IEEE 754 rather than against the other two.
+    assert_eq!(rows[0].1, "1\n0\n0\n0\n0\n0\n1\n1\n0\n", "IEEE 754: only `!=` is unordered");
+}
+
+/// A contextual array literal is built at the element type its slot DECLARES.
+///
+/// Inferring it from `elems[0]` instead made a bare integer literal an `Int`, so
+/// `Array<UInt8> = [65, 66]` emitted a `[2 x i64]` aggregate and the consumer then
+/// read it at the declared width. Three separate failures, and only the first was
+/// loud:
+///
+/// - `Array<T>` stored the aggregate into the `{ ptr, i64, i64 }` triple — a clang
+///   error, so native did not build while `vyrn run` and wasm printed `65`.
+/// - `SmallArray<T, N>` did `extractvalue [2 x i8]` off it — the same clang error,
+///   found by looking rather than by a report.
+/// - `Array<Age>` (RFC-0020) went SILENT instead: the `ArrayN -> Array` step
+///   reshapes whenever `llt` matches, `Age`'s `llt` IS `i64`, so no `where`
+///   predicate ran at all. `[20, 5]` into an `Array<Age>` trapped under the
+///   interpreter and under wasm and printed `20` and `5` natively.
+///
+/// `Array<Int64>` and an empty literal plus `push` always worked, which is why the
+/// corpus had nothing: `examples/textbytes.vyrn` carried a `buf(Array<Int64>) ->
+/// Array<UInt8>` helper for exactly this, documented as a workaround, and it is
+/// deleted now — its malformed table is spelled with byte literals in `main`.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_sized_integer_array_literal_is_built_at_its_declared_width() {
+    let rows = three_engines(
+        "sizedlit",
+        "widths",
+        r#"
+fn take(b: Array<UInt8>) -> Int64 {
+    let mut s = 0
+    for x in b {
+        s = s + Int64(x)
+    }
+    return s
+}
+
+/// A RUNTIME wrap, so the truncation is the backend's and not `consteval`'s. Two
+/// things the checker settles rather than this backend, both found by writing the
+/// row: an out-of-range LITERAL element is a compile error (`300` is not a `UInt8`),
+/// and a bare `Int64` element is not one either — `[n, n + 1]` is rejected with
+/// "array elements must share a type", so the conversion is written out.
+fn wrap(n: Int64) -> Array<UInt8> {
+    return [UInt8(n), UInt8(n + 1)]
+}
+
+fn main() -> Int64 {
+    // The reported shape: a `let` annotation.
+    let b: Array<UInt8> = [65, 66]
+    print(Int64(b[0]))
+    print(Int64(b[1]))
+    print(b.length)
+    // Sized-int elements narrower AND wider than a byte, signed and not. Each
+    // element is a bare literal, which is the whole bug: it inferred `Int`.
+    let i32s: Array<Int32> = [1, 2, 3]
+    print(Int64(i32s[1]))
+    let i8s: Array<Int8> = [127, 1]
+    print(Int64(i8s[0]) + Int64(i8s[1]))
+    let u16s: Array<UInt16> = [65535, 1]
+    print(Int64(u16s[0]))
+    // The wrap a sized slot performs is the wrap the interpreter performs.
+    let wrapped = wrap(300)
+    print(Int64(wrapped[0]))
+    print(Int64(wrapped[1]))
+    // An ARGUMENT position, not just a `let`.
+    print(take([1, 2, 3]))
+    // A `SmallArray` slot (RFC-0056), whose lowering read the same aggregate at
+    // the declared width from a different place.
+    let sa: SmallArray<UInt8, 4> = [65, 66]
+    print(Int64(sa[0]) + Int64(sa[1]))
+    print(sa.length)
+    // `Array<Int64>` and empty-plus-push always worked; here so a regression in
+    // the path that DID work is caught by the same test.
+    let plain: Array<Int64> = [7, 8]
+    print(plain[0] + plain[1])
+    let mut grown: Array<UInt8> = []
+    grown.push(9)
+    print(Int64(grown[0]))
+    // Nested growable elements — the one case the old code got right, because it
+    // was the one case that used the declared element type.
+    let nested: Array<Array<Int64>> = [[1], [2, 3]]
+    print(nested[1][1])
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "widths");
+    assert_eq!(
+        rows[0].1, "65\n66\n2\n2\n128\n65535\n44\n45\n6\n131\n2\n15\n9\n3\n",
+        "the interpreter's widths"
+    );
+
+    // The silent half: a validated element type, where the reshape skipped the
+    // predicate because the representation matched. Its own program because the
+    // expected outcome is a TRAP, and a trap ends the run.
+    let rows = three_engines(
+        "sizedlit",
+        "validated",
+        r#"
+type Age = Int64 where value >= 18
+
+fn mkAges(a: Int64, b: Int64) -> Array<Age> {
+    return [a, b]
+}
+
+fn main() -> Int64 {
+    let ok = mkAges(20, 30)
+    print(ok[0] + ok[1])
+    let bad = mkAges(20, 5)
+    print(bad[0])
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "validated");
+    assert_eq!(rows[0].1, "50\n", "the valid pair prints before the trap");
+    assert_eq!(rows[0].2, "error: validation failed for `Age`\n", "5 is not an `Age`");
+    assert_eq!(rows[0].3, Some(1), "a failed validation exits 1");
+}
+
+/// Every edge that leaves a `region` balances the region stack NATIVELY, taken
+/// more often than the stack is deep.
+///
+/// RFC-0077 M2m's `every_exit_out_of_a_region_balances_and_the_65th_traps` is this
+/// test's shape and it measured the direct backend; this one measures the textual
+/// one, where `return` popped nothing at all. `Stmt::Region` emitted
+/// `@__vyrn_region_exit` on the fall-through path only, so a function returning out
+/// of a region consumed a slot per call: 70 calls printed `4900` under the
+/// interpreter and `error: region nesting exceeds 64`, exit 1, natively.
+///
+/// The fix is a pop that does NOT free (`@__vyrn_region_pop`), and the reason is in
+/// `REGION_RUNTIME`: `return a + b` can hand back a pointer into the frame it is
+/// leaving and RFC-0004's escape guard examines stores into named bindings, not
+/// return values. So reclamation on the return edge is deferred rather than
+/// attempted — it needs an escape analysis that does not exist, and this backend
+/// already frees nothing for `push`, for a cell payload or for `Stmt::Drop`.
+///
+/// `break` and `continue` were checked for the same hole and do not have it:
+/// `emit_loop_exit_cleanup` has unwound the regions opened inside a loop body since
+/// RFC-0060, and it can keep FREEING because `region_store_guard` does cover the
+/// stores those edges can make. `?` propagation did have it, and is covered here
+/// because it shares `emit_all_drops` with `return`.
+///
+/// Measured by sabotage, M2m's method: with the pop removed from `emit_all_drops`
+/// this traps at `error: region nesting exceeds 64` and prints nothing after the
+/// first two numbers, where the interpreter prints six.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_return_out_of_a_region_balances_the_region_stack_on_every_engine() {
+    let rows = three_engines(
+        "regionret",
+        "balance",
+        r#"
+fn viaReturn(n: Int64) -> Int64 {
+    region {
+        let a = n * 2
+        return a + 1
+    }
+    return 0
+}
+
+/// A region left by `return` from INSIDE a loop inside the region, so the return
+/// unwinds a loop and a region together.
+fn viaLoop(n: Int64) -> Int64 {
+    region {
+        let mut i = 0
+        while i < 10 {
+            if i == n % 10 {
+                return i
+            }
+            i = i + 1
+        }
+    }
+    return -1
+}
+
+/// Two regions open at the return, so one pop would not be enough.
+fn viaNested(n: Int64) -> Int64 {
+    region {
+        region {
+            return n + 1
+        }
+    }
+    return 0
+}
+
+/// `?` propagation out of a region: the same early-return edge, reached by an
+/// operator rather than by the keyword.
+fn viaTry(n: Int64) -> Option<Int64> {
+    region {
+        let half = if n % 2 == 0 { Some(n / 2) } else { None }
+        let h = half?
+        return Some(h + 1)
+    }
+    return None
+}
+
+/// A String built inside the region and returned out of it — the case that forbids
+/// the free. It must print, not crash.
+fn viaString(n: Int64) -> String {
+    region {
+        return "n=" + n.toString()
+    }
+    return ""
+}
+
+fn main() -> Int64 {
+    let mut a = 0
+    let mut i = 0
+    while i < 70 {
+        a = a + viaReturn(i)
+        i = i + 1
+    }
+    print(a)
+
+    let mut b = 0
+    let mut j = 0
+    while j < 200 {
+        b = b + viaLoop(j)
+        j = j + 1
+    }
+    print(b)
+
+    let mut c = 0
+    let mut k = 0
+    while k < 200 {
+        c = c + viaNested(k)
+        k = k + 1
+    }
+    print(c)
+
+    let mut d = 0
+    let mut m = 0
+    while m < 200 {
+        d = d + match viaTry(m) {
+            Some(v) => v,
+            None => 0,
+        }
+        m = m + 1
+    }
+    print(d)
+
+    let mut last = ""
+    let mut p = 0
+    while p < 200 {
+        last = viaString(p)
+        p = p + 1
+    }
+    print(last)
+
+    // `break` and `continue` out of a region, 200 turns each — the edges that
+    // already unwound, so a regression there fails here too.
+    let mut e = 0
+    let mut q = 0
+    while q < 200 {
+        q = q + 1
+        region {
+            if q % 2 == 0 {
+                continue
+            }
+            e = e + 1
+        }
+    }
+    print(e)
+
+    let mut f = 0
+    let mut r = 0
+    while r < 200 {
+        r = r + 1
+        let mut n = 0
+        while n < 5 {
+            region {
+                if n == 2 {
+                    break
+                }
+                f = f + 1
+            }
+            n = n + 1
+        }
+    }
+    print(f)
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "balance");
+    // The interpreter's own numbers, and every one of them requires the run to
+    // have got past 64 regions: 4900 is 70 returns, and the rest are 200 turns.
+    assert_eq!(rows[0].1, "4900\n900\n20100\n5050\nn=199\n100\n400\n", "the balanced answers");
+    assert_eq!(rows[0].2, "", "nothing traps once the stack balances");
+    assert_eq!(rows[0].3, Some(0), "exit 0");
+
+    // The depth bound itself still refuses at the same place, so the pop did not
+    // just disable the check. Recursive, because the depth is dynamic.
+    let rows = three_engines(
+        "regionret",
+        "deep",
+        r#"
+fn deep(n: Int64) -> Int64 {
+    if n == 0 {
+        return 0
+    }
+    let mut r = 0
+    region {
+        r = deep(n - 1) + 1
+    }
+    return r
+}
+
+fn main() -> Int64 {
+    print(deep(63))
+    print(deep(70))
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "deep");
+    assert_eq!(rows[0].1, "63\n", "63 nested regions are fine");
+    assert_eq!(rows[0].2, "error: region nesting exceeds 64\n", "the 65th is not");
+    assert_eq!(rows[0].3, Some(1));
+}

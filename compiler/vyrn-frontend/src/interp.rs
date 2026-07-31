@@ -3176,15 +3176,6 @@ impl<'a> Interp<'a> {
                         | Val::Str(_) => Ok(Val::Str(std::rc::Rc::new(scalar_to_string(&vals[0])))),
                         other => Err(format!("str of unsupported value {other:?}").into()),
                     },
-                    // `@charCount` (from `s.charCount()`, RFC-0058): the number of
-                    // Unicode scalar values = the count of non-continuation bytes
-                    // (`b & 0xC0 != 0x80`) of the validated UTF-8 string.
-                    "@charCount" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Int(
-                            s.as_bytes().iter().filter(|b| (*b & 0xC0) != 0x80).count() as i64,
-                        )),
-                        other => Err(format!("charCount of non-String {other:?}").into()),
-                    },
                     "parse" => match &vals[0] {
                         Val::Str(s) => Ok(Val::Option(parse_int(s).map(|n| Box::new(Val::Int(n))))),
                         other => Err(format!("parse of non-String {other:?}").into()),

@@ -26,6 +26,18 @@ use vyrn_frontend::own::DropKind;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
 ///
+/// Two ways out of a region and the difference is the free. `__vyrn_region_exit`
+/// pops the frame AND releases its chain, which is what a fall-through (and a
+/// `break`/`continue`, whose escapes RFC-0004's `region_store_guard` covers) wants.
+/// `__vyrn_region_pop` only pops, and it exists because a `return` out of a region
+/// can hand back a pointer INTO the frame it is leaving — the escape guard examines
+/// stores into named bindings, not return values, so `return a + b` is not covered
+/// by anything. Popping without freeing leaks that frame and cannot dangle, which
+/// is the trade RFC-0004's escape analysis has to be written before it can be
+/// improved on. Before this existed, `return` emitted neither call: the frame was
+/// never popped, so the 65th call to a function returning out of a region printed
+/// `error: region nesting exceeds 64` where every other engine printed an answer.
+///
 /// The arena stack is `thread_local` (RFC-0025): `region { .. }` is memory
 /// management, not an effect, so an isolated task may use it — and with tasks
 /// on real OS threads a shared stack would race. Per-thread stacks keep every
@@ -67,6 +79,14 @@ entry:
   store ptr %raw, ptr %slot
   %user = getelementptr i8, ptr %raw, i64 8
   ret ptr %user
+}
+
+define void @__vyrn_region_pop() {
+entry:
+  %sp = load i64, ptr @__vyrn_region_sp
+  %idx = sub i64 %sp, 1
+  store i64 %idx, ptr @__vyrn_region_sp
+  ret void
 }
 
 define void @__vyrn_region_exit() {
@@ -670,7 +690,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Heap + string runtime (dynamic strings). Allocations are not yet freed —
     // the reclamation strategy is RFC-0004's open question.
     out.push_str("declare i64 @__vyrn_strlen(ptr)\n");
-    out.push_str("declare i64 @__vyrn_charcount(ptr)\n");
+    // (`declare i64 @__vyrn_charcount` went with `charCount` — RFC-0078's census
+    // called it the one builtin with no justification, and `std/text`'s
+    // `charCountV` is the same byte scan in Vyrn.)
     out.push_str("declare i64 @__vyrn_line_at(ptr, i64, i64)\n");
     out.push_str("declare i64 @__vyrn_col_at(ptr, i64, i64)\n");
     out.push_str("declare ptr @__vyrn_malloc(i64)\n");
@@ -2376,12 +2398,20 @@ impl<'a> Gen<'a> {
     /// first), without popping the drop frames — used before an early `return`.
     /// The frames stay in place so the unwinding `gen_block`s see `terminated`
     /// and skip their own fall-through frees, so nothing is freed twice.
+    ///
+    /// Also balances the region stack, because every caller of this is a function
+    /// exit and a `return` (or a `?` propagation) can leave a region the same way
+    /// it leaves a block. `__vyrn_region_pop` and not `__vyrn_region_exit`: see
+    /// [`REGION_RUNTIME`] for why the returned value forbids the free.
     fn emit_all_drops(&mut self) {
         let frames: Vec<Vec<(String, DropKind)>> = self.drop_stack.iter().rev().cloned().collect();
         for frame in frames {
             for (slot, kind) in frame.iter().rev() {
                 self.emit_drop(slot, *kind);
             }
+        }
+        for _ in 0..self.region_depth {
+            self.emit("call void @__vyrn_region_pop()".into());
         }
     }
 
@@ -3175,23 +3205,36 @@ impl<'a> Gen<'a> {
                 if let Some(t) = &elem_expect {
                     self.expect.push(t.clone());
                 }
-                // When the enclosing storage boundary expects a GROWABLE element
-                // (an `Array<T>` or `Map<K,V>` — e.g. an `Array<Array<Int64>>`),
-                // every element literal must be lowered to that heap representation
-                // BEFORE it enters the outer aggregate. Otherwise a nested literal
-                // like `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x
-                // i64]]`, which is the wrong repr AND fails to build the moment two
-                // inner literals differ in length. Build the aggregate at the
-                // declared element type and coerce each element into it — the same
-                // declared-type coercion the enum-payload path uses. (A flat/scalar
-                // element type keeps the inferred-from-`elems[0]` path unchanged.)
-                let growable_elem = matches!(
-                    elem_expect.as_ref().map(|t| self.resolve(t)),
-                    Some(Type::Array(_)) | Some(Type::Map(_, _))
-                );
+                // When the enclosing storage boundary names the element type, the
+                // aggregate is built AT that type and every element is coerced into
+                // it. Inferring the element type from `elems[0]` instead is wrong in
+                // three separate ways, and each one was measured:
+                //
+                // - A GROWABLE element (an `Array<T>` or `Map<K,V>` — e.g. an
+                //   `Array<Array<Int64>>`) must reach its heap representation BEFORE
+                //   it enters the outer aggregate, or a nested literal like
+                //   `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x i64]]`,
+                //   which is the wrong repr AND fails to build the moment two inner
+                //   literals differ in length.
+                // - A SIZED-INTEGER element (`Array<UInt8> = [65, 66]`) inferred
+                //   `Int` from the literal and emitted `[2 x i64]`, which the
+                //   consumer then read at the declared width: `store { ptr, i64,
+                //   i64 } %t1` against an `[2 x i64]` for `Array<T>`, and
+                //   `extractvalue [2 x i8] %t1` for `SmallArray<T, N>`. Both are
+                //   clang errors — `vyrn run` and the direct wasm backend printed
+                //   `65`, native did not build at all.
+                // - A VALIDATED element (`Array<Age>`, RFC-0020) inferred `Int` too,
+                //   and there the failure was SILENT rather than loud: the reshape
+                //   below reinterprets the buffer whenever `llt` matches, and
+                //   `Age`'s `llt` IS `i64`, so no `where` predicate ran. `[20, 5]`
+                //   into an `Array<Age>` trapped under the interpreter and under
+                //   wasm and printed `20`/`5` natively.
+                //
+                // One expected type, coerced element-wise, answers all three: the
+                // outer `ArrayN -> Array`/`SmallArray` step then has `fi == ti` and
+                // is the pure reshape its comment already claims to be.
                 let build = (|| -> Result<(String, Type), String> {
-                    let (ety, first) = if growable_elem {
-                        let ety = elem_expect.clone().unwrap();
+                    let (ety, first) = if let Some(ety) = elem_expect.clone() {
                         let (v0, v0t) = self.gen_expr(&elems[0])?;
                         let (v0, _) = self.coerce(v0, &v0t, &ety)?;
                         (ety, v0)
@@ -4032,12 +4075,19 @@ impl<'a> Gen<'a> {
                 BinOp::Sub => format!("{t} = fsub {f} {l}, {r}"),
                 BinOp::Mul => format!("{t} = fmul {f} {l}, {r}"),
                 BinOp::Div => format!("{t} = fdiv {f} {l}, {r}"),
+                // The ordered/unordered choice is IEEE 754's, and it is the same
+                // choice wasm's `f64.lt`..`f64.ne` and Rust's `f64` operators make,
+                // so all three engines agree arm for arm: the four relational ops
+                // and `==` are ORDERED (a NaN operand makes them false), and `!=`
+                // is UNORDERED — `NaN != NaN` is TRUE. `one` here read
+                // "ordered AND not equal", which made native the only engine
+                // printing `0` for `nan != nan` (RFC-0077 M2h measured it).
                 BinOp::Lt => format!("{t} = fcmp olt {f} {l}, {r}"),
                 BinOp::LtEq => format!("{t} = fcmp ole {f} {l}, {r}"),
                 BinOp::Gt => format!("{t} = fcmp ogt {f} {l}, {r}"),
                 BinOp::GtEq => format!("{t} = fcmp oge {f} {l}, {r}"),
                 BinOp::Eq => format!("{t} = fcmp oeq {f} {l}, {r}"),
-                BinOp::NotEq => format!("{t} = fcmp one {f} {l}, {r}"),
+                BinOp::NotEq => format!("{t} = fcmp une {f} {l}, {r}"),
                 BinOp::Rem
                 | BinOp::And
                 | BinOp::Or
@@ -5992,18 +6042,11 @@ impl<'a> Gen<'a> {
             ));
             return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
         }
-        // `@charCount` (from `s.charCount()`, RFC-0058): the number of Unicode
-        // scalar values = the count of non-continuation bytes, via the runtime
-        // shim `__vyrn_charcount` (byte-identical to the interpreter).
-        if name == "@charCount" {
-            let (s, _) = self.gen_expr(&args[0])?;
-            let n = self.fresh_tmp();
-            self.emit(format!("{n} = call i64 @__vyrn_charcount(ptr {s})"));
-            return Ok((n, Type::Int));
-        }
         // (`contains`, `startsWith` and `endsWith` are `std/strpred` — RFC-0078
         // M4c. They were `strstr` and two `strncmp` shapes here, ~50 lines with a
-        // `phi` in one of them, and are now routed at the top of `gen_call`.)
+        // `phi` in one of them, and are now routed at the top of `gen_call`.
+        // `@charCount` is `std/text`'s `charCountV` for the same reason and by the
+        // same mechanism — it was one `call i64 @__vyrn_charcount` here.)
         // slice(s, start, end) -> String (RFC-0046): the byte-range substring.
         // Validated O(1) — no whole-slice UTF-8 revalidation: bounds are checked,
         // then the single byte at each cut point must not be a UTF-8 continuation
@@ -9326,15 +9369,13 @@ mod tests {
         assert!(ir.contains("call i64 @__vyrn_strlen"), "str .byteLength → strlen: {ir}");
     }
 
-    #[test]
-    fn string_char_count_lowers_to_charcount_shim() {
-        let src = "fn main() -> Int64 { let s = \"hi\"; return s.charCount(); }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(
-            ir.contains("call i64 @__vyrn_charcount"),
-            "str .charCount() → charcount shim: {ir}"
-        );
-    }
+    // (`string_char_count_lowers_to_charcount_shim` pinned
+    // `call i64 @__vyrn_charcount`, which is no longer emitted: RFC-0078's census
+    // found `charCount` the one builtin with no justification for being one, and it
+    // is `std/text`'s `charCountV`. Its witness moved to
+    // `a_routed_builtin_without_its_module_refuses_by_name` with the other ten.
+    // `string_byte_length_lowers_to_strlen` above is the contrast that matters:
+    // `byteLength` is a VIEW and stays.)
 
     #[test]
     fn string_index_lowers_to_byte_load() {
@@ -9395,6 +9436,14 @@ mod tests {
                  fn main() -> Int64 { return 0 }",
                 "endsWith",
                 "strpred$endsWithV",
+            ),
+            // `@charCount` is spelled with the `@` because the parser produces it:
+            // `s.charCount()` is method-only, so the AST call name — and the string
+            // every engine routes on — is the internal one.
+            (
+                "fn main() -> Int64 { return \"hi\".charCount() }",
+                "@charCount",
+                "text$charCountV",
             ),
         ] {
             let e = emit(&check(src).unwrap()).unwrap_err();

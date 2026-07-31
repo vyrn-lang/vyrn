@@ -76,17 +76,10 @@ long long __vyrn_col_at(const unsigned char* d, long long len, long long off) {
     return col;
 }
 
-/* charCount (RFC-0058): the number of Unicode scalar values in a validated UTF-8
-   string = the count of non-continuation bytes (those where (b & 0xC0) != 0x80).
-   Byte-identical to the interpreter's loop. Strings are NUL-terminated (interior
-   NUL is rejected at construction), so `strlen`-style iteration is exact. */
-unsigned long long __vyrn_charcount(const char* s) {
-    unsigned long long n = 0;
-    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
-        if ((*p & 0xC0) != 0x80) n++;
-    }
-    return n;
-}
+/* (`__vyrn_charcount` was here. RFC-0078's census found `charCount` the one
+   builtin with no justification for being one — no primitive, no trap, no
+   consteval fold, one caller — and it is `std/text`'s `charCountV` now, the same
+   non-continuation-byte scan written in Vyrn. This shim went 47 exports to 46.) */
 
 /* Allocation failure is a trap, not a null dereference: the emitted IR never
    null-checks (every alloc site would need a branch), so the single choke
