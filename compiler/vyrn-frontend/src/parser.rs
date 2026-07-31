@@ -3028,29 +3028,45 @@ impl Parser {
             Tok::LtEq => (BinOp::LtEq, 4),
             Tok::Gt => (BinOp::Gt, 4),
             Tok::GtEq => (BinOp::GtEq, 4),
-            Tok::Pipe => (BinOp::BitOr, 5),
-            Tok::Caret => (BinOp::BitXor, 6),
-            Tok::Amp => (BinOp::BitAnd, 7),
-            Tok::Shl => (BinOp::Shl, 8),
-            Tok::Shr => (BinOp::Shr, 8),
-            Tok::Plus => (BinOp::Add, 9),
-            Tok::Minus => (BinOp::Sub, 9),
-            Tok::Star => (BinOp::Mul, 10),
-            Tok::Slash => (BinOp::Div, 10),
-            Tok::Percent => (BinOp::Rem, 10),
+            // 5 is `??` — see `NULLISH_BP`, which is not a `BinOp` and so does
+            // not appear in this table. Every tier below is shifted up one to
+            // leave it that slot.
+            Tok::Pipe => (BinOp::BitOr, 6),
+            Tok::Caret => (BinOp::BitXor, 7),
+            Tok::Amp => (BinOp::BitAnd, 8),
+            Tok::Shl => (BinOp::Shl, 9),
+            Tok::Shr => (BinOp::Shr, 9),
+            Tok::Plus => (BinOp::Add, 10),
+            Tok::Minus => (BinOp::Sub, 10),
+            Tok::Star => (BinOp::Mul, 11),
+            Tok::Slash => (BinOp::Div, 11),
+            Tok::Percent => (BinOp::Rem, 11),
             _ => return None,
         })
     }
 
-    /// `??`'s binding power: tighter than `&&`/`||`, looser than comparison.
+    /// `??`'s binding power: tighter than comparison, looser than the bitwise
+    /// and arithmetic tiers. Swift's placement, and it is placement rather than
+    /// taste — both neighbours were measured.
     ///
-    /// It shares the number with `EqEq` rather than displacing every tier from 3
-    /// up, because `??` is *not* a `BinOp` — it is handled by hand in [`binary`]
-    /// and recurses at its own binding power (right associativity), so a tighter
-    /// operator on its right is absorbed either way. Shifting the table would
-    /// have edited seventeen rows and changed no parse; this was checked case by
-    /// case against `min_bp` before the rows were left alone.
-    const NULLISH_BP: u8 = 3;
+    /// **Looser than arithmetic** so `opt ?? x + 1` is `opt ?? (x + 1)`: the
+    /// right side is the fallback *value*, and a fallback that stops before its
+    /// own `+ 1` would be surprising.
+    ///
+    /// **Tighter than comparison** so `flag ?? b == c` is `(flag ?? b) == c`.
+    /// This one is load-bearing rather than cosmetic. It first shipped at `3`,
+    /// tied with `EqEq`, on the argument that the unwanted reading fails at the
+    /// type check — and that argument is false whenever the types happen to
+    /// agree. Measured, with `flag: Option<Bool>` and `b`/`c` both `Bool`, both
+    /// readings typecheck and disagree: `(flag ?? b) == c` prints 1 where
+    /// `flag ?? (b == c)` prints 0. A silently-wrong parse is not a diagnostic.
+    ///
+    /// Its slot is 5, which is why the table below starts the bitwise family at
+    /// 6. `??` is not a `BinOp` — it is handled by hand in [`binary`] and
+    /// recurses at its own binding power for right associativity — but sharing a
+    /// number with `BitOr` would make it bind asymmetrically against `|`, since
+    /// the table's left-associative arm recurses at `bp + 1`.
+    const NULLISH_BP: u8 = 5;
 
     fn binary(&mut self, min_bp: u8) -> Result<Expr, Diagnostic> {
         let mut lhs = self.unary()?;

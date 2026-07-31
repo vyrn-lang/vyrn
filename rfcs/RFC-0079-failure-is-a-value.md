@@ -249,8 +249,18 @@ Three details that are easy to miss:
 - **`vyrn fmt` costs one row** in the token-to-text table, which is what keeps
   RFC-0017's re-lex-equality invariant intact.
 
-Precedence: binds tighter than `||` and `&&`, looser than comparison, so
-`a ?? 0 == c` parses as `(a ?? 0) == c`. The binding-power table in `binop` is
+Precedence: binds tighter than `||`, `&&` **and comparison**, and looser than the
+bitwise and arithmetic tiers — Swift's placement. So `a ?? 0 == c` parses as
+`(a ?? 0) == c`, and `opt ?? x + 1` parses as `opt ?? (x + 1)`.
+
+This paragraph originally stated the rule as "looser than comparison" beside an
+example showing `(a ?? 0) == c`, which are contradictory; M2 landed on the rule,
+and the example was the correct half. The argument for the looser reading was
+that a wrong parse fails at the type check — and that is false whenever the types
+agree. Measured, with `flag: Option<Bool>` and `b`/`c` both `Bool`, **both
+readings typecheck and disagree**: `(flag ?? b) == c` prints 1 where
+`flag ?? (b == c)` prints 0. A silently-wrong parse is not a diagnostic, so the
+tier moved to 5 and the bitwise family shifted up one to make room. The binding-power table in `binop` is
 flat and contiguous — `OrOr = 1`, `AndAnd = 2`, `EqEq = 3` — so there is **no
 room** between `&&` and `==`, and every tier from 3 up shifts by one. That is
 mechanical but it is not the one-line table insert this section originally

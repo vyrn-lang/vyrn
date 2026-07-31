@@ -124,17 +124,23 @@ fn nullish_binds_tighter_than_the_logical_operators() {
 /// (RFC-0079's M2 section asserted the second in one clause while specifying the
 /// first in two others; the two won. See the as-landed note there.)
 #[test]
-fn nullish_binds_looser_than_comparison() {
-    // Only the `x ?? (1 == 1)` grouping typechecks here — the Bool option makes
-    // the intended reading the compiling one.
-    assert_eq!(prints("cmp", &["flag(false) ?? 1 == 1"]), "false\n");
-    // …and on an Int64 option the same shape is a type error rather than a
-    // silently different answer, which is what makes the choice safe.
-    rejects(
-        "cmp_int",
-        "    print(half(7) ?? 0 == 5)",
-        "`match` arms have differing types",
-    );
+fn nullish_binds_tighter_than_comparison_and_looser_than_arithmetic() {
+    // The case that decided the binding power. Both readings typecheck when the
+    // option is a `Bool`, so the parse is not protected by the type checker:
+    //   (flag(false) ?? true) == false  ->  false == false  ->  true
+    //    flag(false) ?? (true == false) ->  Some(false)     ->  false
+    // `??` first shipped tied with `==`, which took the second reading silently.
+    assert_eq!(prints("cmp_bool", &["flag(false) ?? true == false"]), "true\n");
+
+    // The same shape on an `Int64` option, which is the spelling a reader
+    // actually writes: default it, *then* compare.
+    assert_eq!(prints("cmp_int", &["half(7) ?? 0 == 5"]), "false\n");
+    assert_eq!(prints("cmp_some", &["half(10) ?? 0 == 5"]), "true\n");
+
+    // The other neighbour, unchanged and deliberately so: the right-hand side is
+    // the fallback *value*, so it takes its own arithmetic with it.
+    assert_eq!(prints("arith_none", &["half(7) ?? 1 + 1"]), "2\n");
+    assert_eq!(prints("arith_some", &["half(10) ?? 1 + 1"]), "5\n");
 }
 
 /// The point of the whole design: the right-hand side is not evaluated when the
