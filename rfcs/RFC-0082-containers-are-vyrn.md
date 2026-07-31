@@ -2,8 +2,9 @@
 
 - **Status:** **Accepted**, **M1 shipped** (see "As landed"), **M2 stopped at its
   own gate** — the port is blocked twice over and the gate failed anyway; M3 and
-  M4 are **withdrawn**. The quadratic M2 found instead of the port is **fixed**
-  (M2's "As landed", item 5). Milestones are gated on measurement the way
+  M4 are **withdrawn**. The two interpreter quadratics M2 found instead of the
+  port — the write `t.xs[k] = v` and the append `t.xs.push(v)` — are both
+  **fixed** (M2's "As landed"). Milestones are gated on measurement the way
   RFC-0081's were: nothing is deleted until a number says it should be, and here
   a number said stop.
 - **Depends on:** RFC-0078 (the census, and question **A**, which this
@@ -398,7 +399,8 @@ Four things this milestone found that the diagnosis above did not:
 2. **The measurement above was two quadratics, not one.** M2's program built its
    array with `t.xs.push(0)` in a loop, and `push` through a field is its own
    quadratic — 138 / 481 / 1,582 / 8,186 ms at N = 4,000 → 32,000, untouched by
-   this fix. `Stmt::Assign` has an in-place fast path for `xs.push(v)` on a local;
+   this fix and fixed by the next one (below).
+   `Stmt::Assign` has an in-place fast path for `xs.push(v)` on a local;
    `Stmt::SetField` has none, and the `push` builtin clones its argument
    unconditionally so the take alone would not help. That is the non-monotonic
    998 / 886 ms at N = 2,000 / 8,000 in the table at the top of this RFC: at those
@@ -420,6 +422,79 @@ The trap caveat is unchanged in shape and narrower in scope: between the take an
 the write-back only a trap can escape (every `?` and every call now runs during
 the hoists), the field is `Val::Unit` for that instant, and no locals survive the
 one boundary that recovers.
+
+##### As landed — the append, which needed the take's rule and not its take
+
+Finding 2 above, fixed. `t.xs.push(v)` desugars to `t.xs = push(t.xs, v)`, so the
+general path read the field into a *second* `Rc` while the field still held the
+first, and the `push` builtin's `Rc::make_mut` copied the whole vector on every
+append. Isolated, best of 3, milliseconds, three engines (process floor ~45):
+
+| N | interp before | interp after | native | wasm |
+|---|---|---|---|---|
+| 4,000 | 135 | 44 | 44 → 40 | 49 → 50 |
+| 8,000 | 310 | 48 | 44 → 39 | 49 → 54 |
+| 16,000 | 1,705 | 55 | 44 → 46 | 49 → 49 |
+| 32,000 | 10,704 | 57 | 47 → 47 | 55 → 51 |
+
+`xs.push(i)` on a plain local is 45 / 44 / 49 / 49 before and 45 / 45 / 52 / 52
+after — the same numbers as the field column now is, which is the point: process
+floor either side, and the class changed. Both compiled backends were flat at
+every N before *and* after, so the whole cliff was the interpreter's, again.
+
+That the backends did not change was checked and not assumed, and the check needed
+a correction: the `.exe` embeds a timestamp and the direct wasm backend's DATA
+section is not reproducible across compiler builds — a dead `panic` string from
+`std/num` is interned or not depending on the compiler binary's own layout, which
+reproduces from adding an unused function to `interp.rs` and has nothing to do
+with this change. The emitted LLVM IR is byte-identical, and so is the wasm
+**code** section (10) along with every other section but the pool and the
+heap-base global derived from its length.
+
+**The take was the wrong tool here, and that is the finding.** `take_place`
+exists because the index-store desugar had already split the statement in three,
+so the container HAD to live in a temp and the move-out has to leave `Val::Unit`
+behind it. An append is one statement, so the array never has to leave the
+record: the fast path clones the field's `Rc` *before* the item is evaluated,
+drops the field's own reference *after*, and grows the now-unshared snapshot.
+Dropping that reference is what makes the append O(1); cloning it first is what
+keeps the general path's evaluation order, and that is not academic —
+`t.xs.push(f(t))` with `f` taking `t: modify T` reaches the same field
+mid-statement, and its write is discarded by all three engines both before and
+after. Taking early would have made that program trap on `push of non-Array
+Unit`; appending in place without the snapshot would have made it print `2`
+where every engine prints `1`.
+
+**The locals-only rule is reused, not re-derived, and it is weaker here on
+purpose.** The only escape between dropping the field's reference and storing the
+grown array back is an out-of-memory `reserve`, and locals are the exact scope in
+which `vyrn test`'s recovery cannot observe a hole (finding 1). A global keeps the
+copy and stays quadratic — the same sentence as the take, and the same
+`store.xs.push(v)` it already named.
+
+Pinned by `the_interpreter_does_not_copy_the_array_once_per_append` in
+`places.rs`, the sibling of the write ratio and deliberately the same shape: N
+appends onto a local against N appends through a field, within 4x. On the pre-fix
+binary that ratio is 449x (8.90 s against 19.8 ms) and the test fails; after, it
+is 1.1x. The two ratios now share one `best_of_3`.
+
+Two more things this found, neither fixed here:
+
+5. **`rows[i].push(v)` — an append through an array ELEMENT — is the same
+   quadratic and is still there**: 275 / 735 / 3,307 ms at N = 4,000 → 16,000.
+   It desugars to `Stmt::IndexSet` rather than `SetField`, so it is a third
+   receiver form and a third copy of the same twenty lines. Left until something
+   measures it in a real program: `t.xs.push(v)` is what the corpus writes.
+6. **The interpreter does not validate an append through a field at all**, and
+   both compiled backends do. `type Age = Int64 where value >= 18` with
+   `t.xs: Array<Age>` and `t.xs.push(5)` prints `5` under `vyrn run` and traps
+   with `validation failed for `Age`` under native and wasm — two engines against
+   one, so the interpreter is the wrong one. This predates the fix above and
+   survives it unchanged (`Stmt::SetField`'s general path never coerced, and the
+   fast path was written to match it rather than to quietly change it): the
+   element type would have to be resolved through the record's declared type,
+   which is the same `coerce`-and-validation question finding 3 is, and it is not
+   a places change either. No example reaches it, which is why parity is green.
 
 ### M3 — `Map` over `Array` — **withdrawn**
 
