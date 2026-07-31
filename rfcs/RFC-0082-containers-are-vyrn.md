@@ -412,7 +412,8 @@ Four things this milestone found that the diagnosis above did not:
    the nested loop from 786 / 2,613 / 16,633 / 65,304 ms to 44 / 50 / 67 / 99 at
    N = 8,000 → 64,000. Not fixed here — a general `coercion_free` predicate
    decides when automatic validation may be skipped, and that is a validation
-   change, not a places change.
+   change, not a places change. (Fixed below, with finding 6: it turned out to
+   be the same change, because a field store that validates cannot afford it.)
 4. **A nested index was evaluated twice.** `place_receiver` cloned the index
    expression into both the load and the write-back, so `rows[f()][0] = 1` called
    `f` twice — visible in the baseline binary, and fixed by the hoist that
@@ -478,7 +479,8 @@ appends onto a local against N appends through a field, within 4x. On the pre-fi
 binary that ratio is 449x (8.90 s against 19.8 ms) and the test fails; after, it
 is 1.1x. The two ratios now share one `best_of_3`.
 
-Two more things this found, neither fixed here:
+Two more things this found, neither fixed here (finding 6 is fixed in the section
+after this one; finding 5 is still open):
 
 5. **`rows[i].push(v)` — an append through an array ELEMENT — is the same
    quadratic and is still there**: 275 / 735 / 3,307 ms at N = 4,000 → 16,000.
@@ -495,6 +497,82 @@ Two more things this found, neither fixed here:
    element type would have to be resolved through the record's declared type,
    which is the same `coerce`-and-validation question finding 3 is, and it is not
    a places change either. No example reaches it, which is why parity is green.
+
+##### As landed — findings 6 and 3, which really were one change
+
+Finding 6 was the more serious of the two by a wide margin: the interpreter
+accepted a value that failed its own predicate, so RFC-0078 M3's "a Vyrn program
+cannot even spell a value that failed its own predicate" was false as written for
+a whole class of program. `Stmt::SetField` was the only typed boundary in the
+interpreter with no coercion behind it, and coercion is where automatic
+validation lives.
+
+The fix is the field's declared type, resolved the way the checker's own
+`SetField` resolves it (the binding's type, then that record's field). The append
+fast path coerces just the pushed element; the general path coerces the value.
+Module state needed one more thing: an unannotated global kept `ty: None`, unlike
+an unannotated local, whose `Stmt::Let` has inferred its type since RFC-0018 so
+`toJson` can order fields. A global record therefore had no field types to check
+against at all, and `g.xs.push(v)` was the last spelling still diverging after
+the local and `modify` ones were fixed. Globals now infer the same way.
+
+The audit around it mattered more than the fix. Five sibling spellings, three of
+which nobody had reason to believe were correct:
+
+| spelling | before |
+|---|---|
+| `t.xs.push(v)` on a local | **diverged** — interp printed 5 |
+| `t.xs.push(v)` through a `modify` parameter | **diverged** |
+| `g.xs.push(v)` on module state | **diverged** |
+| `t.xs[i] = v` | correct — the desugar's temp is typed by inference, and `IndexSet` coerces its element |
+| `xs.push(v)` on a local | correct — `Stmt::Assign` coerces through the binding's declared type |
+| `rows[i].push(v)` | correct — `IndexSet` coerces into the element type |
+| `t.m[k] = v` on a `Map` field | correct — the map path coerces into `V` |
+
+Finding 3 is closed by the same change, and not as a bonus — as a prerequisite.
+A field store that coerces lands on the write-back every place desugar ends with
+(`t.xs[i] = v` is `let mut t.xs[] = t.xs .. t.xs = t.xs[]`), so the container
+would be re-walked once per store. `coerce` now returns the value untouched when
+coercing into a type can neither change it nor reject it — no width to wrap to,
+no predicate to run, nothing nested with either. Measured on 160,000 element
+stores, varying only the row length so the number of writes is constant:
+
+| grid | before | after |
+|---|---|---|
+| 1600 x 100 | 457 | 268 |
+| 400 x 400 | 964 | 265 |
+| 100 x 1600 | 2,902 | 269 |
+| 40 x 4,000 | 6,950 | 272 |
+
+The before column is the row length; the after column is not. Pinned by
+`the_interpreter_does_not_rebuild_a_row_per_element_store` in `places.rs`, a
+ratio between the first and last rows for the reason the other two ratios there
+are ratios.
+
+That leaves the case the short-circuit cannot help, which is the one the
+validation is FOR: `t.xs[i] = v` where the elements really are validated. 8,000
+stores through an `Array<Age>` field measured **13,467 ms** with the whole-array
+coerce on the write-back, against 76 for `Array<Int64>`. So a plain variable
+already OF the field's type is skipped — its values passed their own boundary on
+the way in, and this is the compiled backends' own rule rather than an
+interpreter shortcut: `validation_required` answers `None` when `from == to`,
+which is why native emits no element loop at a field store at all. Variables
+only, deliberately — `push(t.xs, v)` is statically `Array<Age>` too, and its
+element has been validated by nothing at that point. 13,467 → 79 ms, and
+`a_validated_element_type_costs_a_constant_per_store` says so.
+
+The validation itself is cheap where it now runs: 32,000 appends through a field
+cost 88 ms into `Array<Age>` against 79 into `Array<Int64>`.
+
+`examples/validate_store.vyrn` is the corpus's half — a local, a `modify`
+parameter and module state, valid stores printing before an invalid one traps.
+Its absence is exactly why this survived: no example pushed a runtime value into
+a validated array through a field, and a literal is folded by `consteval` before
+any engine runs.
+
+Finding 5 is still open and still quadratic — 206 / 402 / 1,648 ms at
+N = 4,000 → 16,000, down from 275 / 735 / 3,307 because the short-circuit removes
+the coerce but not the `push` builtin's clone, which is what makes it quadratic.
 
 ### M3 — `Map` over `Array` — **withdrawn**
 

@@ -2186,7 +2186,9 @@ memory view is the last one. The evidence against it is the pitch. Vyrn's claim 
 that ownership, drops and validation are *checked* — refinement types are
 trustworthy precisely because validation happens at every value boundary
 (M3 measured that a Vyrn program cannot even spell a value that failed its own
-predicate, which is why the accumulating decoder needed a different shape). A raw
+predicate, which is why the accumulating decoder needed a different shape —
+though see the correction below; the sentence was true of every boundary M3
+measured and false of one it did not). A raw
 pointer view is an escape hatch from all three at once, and the `stringFromBytes`
 refusal above is the same question in miniature: an unchecked
 `Array<UInt8> -> String` would move one builtin and would also make invalid UTF-8
@@ -2245,3 +2247,29 @@ over 87 examples, the RFC-0077 ladder unchanged at **54/87**, genwasm green,
 whole milestone is a test, a status line and this note, which is the correct
 footprint for a milestone whose product is a statement about the code rather than
 a change to it.
+
+## Correction: M3's validation claim was true of every boundary it measured
+
+M3 said, and the open question above repeats, that a Vyrn program cannot spell a
+value that failed its own predicate. RFC-0082 M2 found one that could. The
+interpreter's `Stmt::SetField` never coerced, and coercion is where automatic
+validation happens, so a runtime value written into a record field — `t.xs.push(n)`
+on an `xs: Array<Age>` — was accepted and printed under `vyrn run` while both
+compiled backends trapped. Two engines against one, so the interpreter was the
+wrong one; it is fixed, with `examples/validate_store.vyrn` in the corpus and the
+sibling spellings audited rather than assumed.
+
+The claim was not idly made and the correction is narrow: M3 enumerated the
+boundaries — `let`, assignment, argument, return, record construction, array
+element, map value — and each of those validated then and validates now. The one
+it did not enumerate is a field *store*, which is a different statement from
+record construction and shares no code with it. A constant is still folded by
+`consteval` before any engine runs, which is why the hole needed a value the
+compiler could not fold and why nothing in the corpus reached it.
+
+What this changes about question A is the framing and not the answer. The
+argument against a raw-memory view was that validation is checked at every value
+boundary; the accurate version is that it is checked at every boundary the
+compiler *knows is a boundary*, and one was missing for as long as the feature has
+existed without a single test or example noticing. That is a weaker sentence, and
+an escape hatch is a worse bargain against a weaker sentence, not a better one.
