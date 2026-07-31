@@ -467,6 +467,44 @@ impl From<&str> for Ctrl {
     }
 }
 
+/// Reserve room the way the compiled backends allocate: a refusal is a Vyrn
+/// trap, in the words the other two engines already print.
+///
+/// `Vec` and `String` ABORT the process when the allocator says no — that is
+/// Rust's contract, not this language's, and it is what made `s = s + s` print
+/// `memory allocation of 68719476736 bytes failed` and exit 127 where the same
+/// program under the direct backend printed `error: out of memory` and exited 1.
+/// `try_reserve` is the whole mechanism: after a successful reserve the
+/// `push_str`/`push` that follows cannot allocate again.
+///
+/// Applied at the sites where the AMOUNT IS A VALUE THE PROGRAM COMPUTED —
+/// string concatenation, the concat accumulator, and `push` — and deliberately
+/// nowhere else. The interpreter allocates on nearly every node; a fallible
+/// reserve for a two-field record would be ceremony around a size no program can
+/// drive, and it would still not make the interpreter allocation-safe, because
+/// `Val::clone` is `Clone` and cannot fail. What is guaranteed here is the
+/// growth a program names, and RFC-0081 records that boundary rather than
+/// implying a stronger one.
+fn reserve_str(s: &mut String, more: usize) -> Result<(), Ctrl> {
+    s.try_reserve(more).map_err(|_| Ctrl::Err("out of memory".into()))
+}
+
+fn reserve_vec<T>(v: &mut Vec<T>, more: usize) -> Result<(), Ctrl> {
+    v.try_reserve(more).map_err(|_| Ctrl::Err("out of memory".into()))
+}
+
+/// `a + b` for strings, allocated once and fallibly.
+///
+/// `format!("{a}{b}")` was two infallible allocations in a row (the `String`,
+/// then its growth); this is one reserve of the exact answer.
+fn concat_str(a: &str, b: &str) -> Result<Val, Ctrl> {
+    let mut s = String::new();
+    reserve_str(&mut s, a.len() + b.len())?;
+    s.push_str(a);
+    s.push_str(b);
+    Ok(Val::Str(std::rc::Rc::new(s)))
+}
+
 /// Statement/block control flow (distinct from the `Ctrl` error channel).
 enum Flow {
     Normal,
@@ -1949,7 +1987,9 @@ impl<'a> Interp<'a> {
                             for frame in scope.iter_mut().rev() {
                                 if let Some(slot) = frame.get_mut(name) {
                                     if let Val::Array(elems) = &mut slot.v {
-                                        std::rc::Rc::make_mut(elems).push(item);
+                                        let elems = std::rc::Rc::make_mut(elems);
+                                        reserve_vec(elems, 1)?;
+                                        elems.push(item);
                                         return Ok(Flow::Normal);
                                     }
                                     break;
@@ -1999,7 +2039,16 @@ impl<'a> Interp<'a> {
                         let mut parts: Vec<String> = Vec::with_capacity(spine.len());
                         for e in spine {
                             match self.expr(e, scope)? {
-                                Val::Str(t) => parts.push((*t).clone()),
+                                // The copy is fallible for the same reason the
+                                // append below is: in `s = s + s` the operand IS
+                                // the accumulator, so this is the larger of the
+                                // two allocations for half the loop.
+                                Val::Str(t) => {
+                                    let mut c = String::new();
+                                    reserve_str(&mut c, t.len())?;
+                                    c.push_str(&t);
+                                    parts.push(c);
+                                }
                                 // Not a String after all — rebuild through the
                                 // general path rather than guess.
                                 _ => {
@@ -2017,6 +2066,7 @@ impl<'a> Interp<'a> {
                                         // whole point of `Rc<String>` over `Rc<str>`.
                                         let head = std::rc::Rc::make_mut(head);
                                         for t in &parts {
+                                            reserve_str(head, t.len())?;
                                             head.push_str(t);
                                         }
                                         return Ok(Flow::Normal);
@@ -2798,7 +2848,7 @@ impl<'a> Interp<'a> {
                     // `@concat` — internal spelling produced by interpolation
                     // (the surface form is `a + b`, handled in `binop`).
                     "@concat" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Str(std::rc::Rc::new(format!("{a}{b}")))),
+                        (Val::Str(a), Val::Str(b)) => concat_str(a, b),
                         _ => Err("@concat of non-Strings".into()),
                     },
                     // RFC-0054 code quotes. `@codeText`/`@codeSplice` are the
@@ -3252,7 +3302,9 @@ impl<'a> Interp<'a> {
                     "push" => match &vals[0] {
                         Val::Array(elems) => {
                             let mut next = elems.clone();
-                            std::rc::Rc::make_mut(&mut next).push(vals[1].clone());
+                            let v = std::rc::Rc::make_mut(&mut next);
+                            reserve_vec(v, 1)?;
+                            v.push(vals[1].clone());
                             Ok(Val::Array(next))
                         }
                         other => Err(format!("push of non-Array {other:?}").into()),
@@ -3870,7 +3922,7 @@ impl<'a> Interp<'a> {
             },
             (Val::Str(a), Val::Str(b)) => match op {
                 // `a + b` concatenates (replacing `concat`) — a fresh String.
-                Add => Ok(Val::Str(std::rc::Rc::new(format!("{a}{b}")))),
+                Add => concat_str(a.as_str(), b.as_str()),
                 Eq => Ok(Val::Bool(a == b)),
                 NotEq => Ok(Val::Bool(a != b)),
                 // Ordering is byte-wise lexicographic (UTF-8 byte order — Rust's
@@ -4200,7 +4252,9 @@ impl<'a> Interp<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{code_splice, lex_tokens, render_code, CodePiece, Ctrl, Val};
+    use super::{
+        code_splice, lex_tokens, render_code, reserve_str, reserve_vec, CodePiece, Ctrl, Val,
+    };
     use crate::run;
 
     /// Run a single-source program that uses `toJson`, with `std/json` reachable.
@@ -6699,5 +6753,40 @@ mod tests {
              let xs: Array<Int64> = [if n == 2 { 100 } else { 0 }, 5]\n\
              return xs[0] + xs[1] }";
         assert_eq!(run(src).unwrap(), 105);
+    }
+    /// Allocation failure is a Vyrn trap in the wording the other two engines
+    /// print, not Rust's own abort (RFC-0081).
+    ///
+    /// The end-to-end measurement is `s = s + s` forty times: `error: out of
+    /// memory` on exit 1, where it used to print `memory allocation of
+    /// 68719476736 bytes failed` on exit 127. That run cannot BE the test.
+    /// Whether a 64 GiB request is refused or lazily promised is the host's
+    /// decision — the same reason the parity suite never saw this — and a test
+    /// that got far enough to be refused would have committed several GiB first,
+    /// which on a CI runner is an OOM kill rather than a trap.
+    ///
+    /// `try_reserve` past `isize::MAX` is refused by the allocation layer itself
+    /// without the allocator being asked, so it is the same answer on every
+    /// machine, and it is the same `Err` a refusal produces.
+    ///
+    /// This fails in both directions: with `reserve` in place of `try_reserve`
+    /// these calls PANIC with `capacity overflow` rather than returning, which is
+    /// a failed test — and is exactly the abort the trap replaced.
+    #[test]
+    fn an_allocation_that_cannot_be_served_is_a_trap_not_an_abort() {
+        let mut s = String::from("x");
+        match reserve_str(&mut s, usize::MAX) {
+            Err(Ctrl::Err(m)) => assert_eq!(m, "out of memory"),
+            other => panic!("expected a trap, got {other:?}"),
+        }
+        let mut v: Vec<Val> = Vec::new();
+        match reserve_vec(&mut v, usize::MAX) {
+            Err(Ctrl::Err(m)) => assert_eq!(m, "out of memory"),
+            other => panic!("expected a trap, got {other:?}"),
+        }
+        // The CLI renders a trap as `error: {msg}` on stderr and exits 1, so
+        // these four words ARE the line the direct backend's `malloc` traps
+        // with, which is in turn the native shim's. Asserting against the shim's
+        // constant is not possible in the direction the crates depend.
     }
 }

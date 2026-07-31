@@ -327,26 +327,88 @@ an algorithm, and only the float case is written three ways.
 **`@concat`**, the other `Measured` row. Same category, different question, and
 its cost has not been re-measured.
 
-## A divergence this suite cannot catch, recorded rather than fixed
+## Allocation failure, made to agree — and where it still cannot
 
-Fixing the wasm `malloc` exposed that the three engines disagree about genuine
-host memory exhaustion, measured on `s = s + s` forty times:
+Fixing the wasm `malloc` exposed that the three engines disagreed about genuine
+host memory exhaustion. The measurement is `s = s + s` forty times, on one
+Windows box with 32 GB of RAM:
 
-| engine | exit | stderr |
+| engine | before | after |
 |---|---|---|
-| interpreter | 127 | `memory allocation of 68719476736 bytes failed` — Rust's own allocator abort, plus its `RUST_BACKTRACE` note |
-| native | — | no output; still thrashing when killed at 90 s |
-| direct wasm | 1 | `error: out of memory` |
+| interpreter | exit 127, `memory allocation of 68719476736 bytes failed` — Rust's own allocator abort, plus its `RUST_BACKTRACE` note | exit 1, `error: out of memory`, after 110 s |
+| native | exit 1, `error: out of memory`, after 109 s | unchanged |
+| direct wasm | exit 1, `error: out of memory`, after 1 s | unchanged |
 
-Wasm is the only one that is right, and it is right *because* its address space
-is bounded: a wasm32 memory cannot grow past 4 GiB, so the failure is a value the
-compiler can check. The other two ask a host allocator that lazily commits, so
-`malloc` does not return NULL — native's shim has the correct wording and never
-reaches it, and the interpreter has no handling at all and leaks a Rust
-implementation detail to the user.
+**Two of the three rows are corrections to what this section said before**, and
+the corrections point in opposite directions.
 
-This is unreferenced multiplicity of exactly the kind this RFC is about, and the
-parity suite **structurally cannot** catch it: a test cannot reproducibly exhaust
-host memory, which is why it drifted unnoticed. Recorded here so the next person
-to touch allocation failure knows the wording exists, which engine honours it,
-and why the harness stayed green throughout.
+**Native was already right.** The earlier note recorded "no output, still
+thrashing when killed at 90 s" and inferred that `__vyrn_alloc_check` never
+fires because a lazily-committing host does not return NULL. The first half was
+a measurement, the second was a guess made from it, and the guess was wrong: the
+run was killed twenty seconds before it finished. The shim's NULL check does
+fire, with the right words and the right exit code. Nothing was changed here, and
+the reason to write it down is that the wrong version of it was an argument for
+capping native — which would have been a fabricated invariant defended by a
+measurement that had been stopped too early.
+
+**The interpreter is fixed.** It allocated through `Vec` and `String`, which
+abort the process when the allocator refuses — Rust's contract, not this
+language's. `try_reserve` is the whole mechanism, and it is applied at the sites
+where *the amount is a value the program computed*: string concatenation (`a +
+b` and the interpolation builtin), the concat accumulator's copy and append, and
+`push`. A refusal is now an ordinary Vyrn trap, so the CLI renders it as
+`error: out of memory` and exits 1, which is byte-for-byte what the other two
+print.
+
+### What is deliberately not covered, and why that is not a half-measure
+
+The interpreter is **not** allocation-safe in general, and no amount of
+`try_reserve` would make it so: `Val` is `Clone`, every scope push is a `Vec`
+growth, and a fallible reserve at each of those would be ceremony around sizes a
+program cannot drive. The four sites above are the ones it can — a program can
+ask for a string twice as long or an array one longer, and nothing else in the
+interpreter scales with a number the program chose. That is the guarantee, stated
+as itself rather than implied to be stronger.
+
+The gap this leaves is narrow and real: `Rc::make_mut` on a shared `Val::Array`
+copies the whole vector infallibly, so a `push` on an array with two live
+references can still abort where the same `push` on an unshared one traps.
+Closing it means a fallible clone of an arbitrary `Val`, which is a different and
+much larger change than this one.
+
+### The divergence that remains, which is inherent
+
+The three engines now agree on *what* allocation failure is. They cannot agree on
+*when*, and pretending otherwise would be the fabricated invariant:
+
+- A wasm32 memory cannot exceed 4 GiB, so the direct backend fails at a bound
+  the compiler knows and can check — one second, deterministically, on any host.
+- Native and the interpreter ask the host, and the host answers with its commit
+  limit — RAM plus pagefile here, something else on the next machine. Both took
+  about 110 s, most of it paging on the copies that succeeded first.
+
+A program that allocates more than 4 GiB therefore *cannot* behave identically
+across the three, and capping native or the interpreter to make it look like it
+does would trade a true statement about a real limit for a false one about an
+invented cap.
+
+### Why this is still not in the parity suite
+
+The wording and exit code are pinned where they can be pinned deterministically:
+
+- The wasm side has two pins in `parity.rs` — one for a refused `memory.grow`
+  under a capped memory, one for a `malloc` whose bump pointer would wrap, driven
+  through `__vyrn_malloc` with `--invoke` because no Vyrn program can name a size
+  larger than the memory it would have to fit in. Both assert the message against
+  `RUNTIME_SHIM` itself, so the wasm spelling and the native one cannot drift.
+- The interpreter's is a unit test that asks `try_reserve` for more than
+  `isize::MAX`, which is refused without the allocator being consulted and is
+  therefore the same answer on every machine.
+
+What stays out of the suite is the end-to-end run, and the reason is stronger
+than "a test cannot reproducibly exhaust host memory". It also *should not*: a
+test that got far enough to be refused would have committed several GiB and
+touched them, which takes 110 s here and is an OOM kill rather than a trap on a
+CI runner. The bound the compiler owns is tested; the bound the host owns is
+measured and written down.
