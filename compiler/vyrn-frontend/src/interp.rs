@@ -1487,13 +1487,18 @@ impl<'a> Interp<'a> {
             if let Some(t) = &g.ty {
                 v = self.coerce(v, t)?;
             }
-            self.globals.borrow_mut().insert(
-                g.name.clone(),
-                Slot {
-                    v,
-                    ty: g.ty.clone(),
-                },
-            );
+            // Infer the type when there is no annotation, exactly as `Stmt::Let`
+            // does for a local: an unannotated `let mut g = T { xs: [] }` is a
+            // record whose field types are the only hook a later `g.xs.push(v)`
+            // has to validate against, and without this the interpreter accepted
+            // a value both compiled backends trapped on (RFC-0082 M3).
+            let ty = match &g.ty {
+                Some(t) => Some(t.clone()),
+                None => self.type_of(&g.init, &scope),
+            };
+            self.globals
+                .borrow_mut()
+                .insert(g.name.clone(), Slot { v, ty });
         }
         Ok(())
     }
@@ -2234,6 +2239,16 @@ impl<'a> Interp<'a> {
                 //
                 // The slot is inspected BEFORE the item is evaluated, so a shape
                 // this cannot handle falls through having evaluated nothing.
+                //
+                // The field's declared type is what the value is coerced — and
+                // therefore VALIDATED — into, on both paths. This statement had
+                // no coercion at all until RFC-0082 M3: `t.xs.push(n)` on an
+                // `xs: Array<Age>` accepted a runtime 5 under the interpreter
+                // while both compiled backends trapped, because they coerce at
+                // this store (`emit_validation` inside codegen's own `coerce`)
+                // and nothing here did. `None` when the record binding's type is
+                // unknown — there is then nothing to check against.
+                let fty = self.field_ty(name, field, scope);
                 let mut pushed = None;
                 if let Expr::Call { name: fname, args, .. } = value {
                     if fname == "push"
@@ -2242,19 +2257,43 @@ impl<'a> Interp<'a> {
                             if f == field
                                 && matches!(expr.as_ref(), Expr::Var { name: n, .. } if n == name))
                     {
-                        let snap = scope
-                            .iter()
-                            .rev()
-                            .find_map(|fr| fr.get(name))
-                            .and_then(|s| match &s.v {
-                                Val::Record(map) => match map.get(field) {
-                                    Some(Val::Array(elems)) => Some(elems.clone()),
-                                    _ => None,
-                                },
+                        // Appending one element only requires THAT element to be
+                        // validated, so the fast path coerces the item and leaves
+                        // the rest alone — the general path's whole-array coerce
+                        // would re-prove every element on every push. A fixed or
+                        // small array carries a capacity only the general path
+                        // enforces, so those fall through, exactly as the local
+                        // `xs.push(v)` path above bails on them.
+                        let elem_ty = match &fty {
+                            None => Some(None),
+                            Some(t) => match crate::types::resolve(t, &self.type_map) {
+                                Type::Array(i) => Some(Some(*i)),
                                 _ => None,
-                            });
-                        if let Some(mut arr) = snap {
+                            },
+                        };
+                        let snap = elem_ty.and_then(|e| {
+                            scope
+                                .iter()
+                                .rev()
+                                .find_map(|fr| fr.get(name))
+                                .and_then(|s| match &s.v {
+                                    Val::Record(map) => match map.get(field) {
+                                        Some(Val::Array(elems)) => Some((elems.clone(), e)),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                })
+                        });
+                        if let Some((mut arr, elem_ty)) = snap {
                             let item = self.expr(&args[1], scope)?;
+                            // Validate before anything is disturbed: a trap here
+                            // must leave the record exactly as it was, which is
+                            // what the backends do (they check the pushed element
+                            // before the field store).
+                            let item = match &elem_ty {
+                                Some(t) => self.coerce(item, t)?,
+                                None => item,
+                            };
                             // Drop the field's own reference to the array. What
                             // it holds now is discarded either way: unchanged it
                             // is the snapshot, and changed it is a mid-statement
@@ -2276,10 +2315,16 @@ impl<'a> Interp<'a> {
                     }
                 }
                 // The write-back is the ordinary one: the fast path only decided
-                // what value the field gets.
+                // what value the field gets (and already coerced its element).
                 let v = match pushed {
                     Some(v) => v,
-                    None => self.expr(value, scope)?,
+                    None => {
+                        let v = self.expr(value, scope)?;
+                        match &fty {
+                            Some(t) => self.coerce(v, t)?,
+                            None => v,
+                        }
+                    }
                 };
                 for frame in scope.iter_mut().rev() {
                     if let Some(Slot {
@@ -4154,6 +4199,16 @@ impl<'a> Interp<'a> {
     /// is exhaustive — record fields, Option/Result payloads, and array
     /// elements are coerced (and therefore validated) recursively.
     fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
+        // A container whose element type can neither change a value nor reject
+        // one is rebuilt for nothing, and every typed boundary rebuilds it
+        // again: `rows[i][j] = v` on an `Array<Array<Int64>>` desugars to a
+        // move-out and a move-back, so the field/element write-backs re-walked
+        // the whole grid per store — 65,304 ms for a 400x400 fill against 99 ms
+        // with this short-circuit (RFC-0082 M2, finding 3). Values are handed
+        // back untouched, so this is not an optimization the semantics can see.
+        if self.coercion_is_identity(ty, 0) {
+            return Ok(v);
+        }
         match (ty, v) {
             (Type::IntN { bits, signed }, Val::Int(n)) => Ok(Val::IntN {
                 v: wrap_intn(n, *bits, *signed),
@@ -4268,6 +4323,57 @@ impl<'a> Interp<'a> {
                 named => named,
             }))),
             (_, v) => Ok(v),
+        }
+    }
+
+    /// The declared type of `name.field`, resolved the same way the checker's
+    /// `Stmt::SetField` resolves it (the record binding's type, then that
+    /// record's field). `None` when the binding has no remembered type — a
+    /// record value is otherwise type-erased, so there is no other hook.
+    fn field_ty(&self, name: &str, field: &str, scope: &[Frame]) -> Option<Type> {
+        let ty = scope
+            .iter()
+            .rev()
+            .find_map(|f| f.get(name).map(|s| s.ty.clone()))
+            .unwrap_or_else(|| self.globals.borrow().get(name).and_then(|s| s.ty.clone()))?;
+        crate::types::record_fields(&ty, &self.type_map)?
+            .into_iter()
+            .find(|f| f.name == field)
+            .map(|f| f.ty)
+    }
+
+    /// Whether coercing INTO `ty` is the identity: no width to wrap to, no
+    /// predicate to run, and nothing nested that has either. Conservative —
+    /// anything unrecognized (a type transformer, a generic application, a
+    /// `Param`) answers `false` and takes the ordinary walk, which is only
+    /// slower, never wrong.
+    ///
+    /// `depth` guards a self-referential named type (`type Tree = { kids:
+    /// Array<Tree> }`): the value walk in `coerce` terminates because values are
+    /// finite, but a type walk does not. `crate::types::resolve` bounds itself
+    /// the same way.
+    fn coercion_is_identity(&self, ty: &Type, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let d = depth + 1;
+        match ty {
+            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit => true,
+            Type::Named(n) => match self.types.get(n.as_str()) {
+                // An unknown name coerces to itself in the walk below.
+                None => true,
+                Some(decl) => decl.predicate.is_none() && self.coercion_is_identity(&decl.base, d),
+            },
+            Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
+                self.coercion_is_identity(i, d)
+            }
+            Type::Result(ok, err) => {
+                self.coercion_is_identity(ok, d) && self.coercion_is_identity(err, d)
+            }
+            Type::Map(_, val) => self.coercion_is_identity(val, d),
+            Type::Record(fields) => fields.iter().all(|f| self.coercion_is_identity(&f.ty, d)),
+            // `IntN` wraps, `Float32` rounds, `Fn` adopts a signature.
+            _ => false,
         }
     }
 
@@ -5781,6 +5887,48 @@ mod tests {
             run(xf).unwrap_err(),
             "validation failed: `Range` violates its `where` clause"
         );
+    }
+
+    /// The boundary that was NOT validated: a field STORE (RFC-0082 M3).
+    ///
+    /// `Stmt::SetField` never coerced, so every spelling that writes through a
+    /// record field let a runtime value into a validated element type while both
+    /// compiled backends trapped — the one hole in "a Vyrn program cannot even
+    /// spell a value that failed its own predicate". A literal is folded by
+    /// `consteval` at compile time on all three engines, which is why only a
+    /// runtime value reaches it and why nothing said for so long.
+    #[test]
+    fn a_field_store_validates_like_every_other_boundary() {
+        let head = "type Age = Int64 where value >= 18 \
+                    type T = { xs: Array<Age> } \
+                    fn rt(n: Int64) -> Int64 { return n - 1 } ";
+        // `t.xs.push(v)` — the in-place append fast path.
+        let push = format!(
+            "{head} fn main() -> Int64 {{ let mut t = T {{ xs: [] }} \
+             t.xs.push(rt(6)) return t.xs[0] }}"
+        );
+        assert_eq!(run(&push).unwrap_err(), "validation failed for `Age`");
+        // The same, through a `modify` parameter rather than the local.
+        let param = format!(
+            "{head} fn add(t: modify T) {{ t.xs.push(rt(6)) }} \
+             fn main() -> Int64 {{ let mut t = T {{ xs: [] }} add(t) return t.xs[0] }}"
+        );
+        assert_eq!(run(&param).unwrap_err(), "validation failed for `Age`");
+        // And through module state, whose slot type is inferred from the
+        // initializer for exactly this reason.
+        let global = format!(
+            "{head} let mut g = T {{ xs: [] }} \
+             fn main() -> Int64 {{ g.xs.push(rt(6)) return g.xs[0] }}"
+        );
+        assert_eq!(run(&global).unwrap_err(), "validation failed for `Age`");
+        // Valid values still flow through all three.
+        let ok = format!(
+            "{head} let mut g = T {{ xs: [] }} \
+             fn add(t: modify T) {{ t.xs.push(rt(21)) }} \
+             fn main() -> Int64 {{ let mut t = T {{ xs: [] }} add(t) g.xs.push(rt(31)) \
+             return t.xs[0] + g.xs[0] }}"
+        );
+        assert_eq!(run(&ok).unwrap(), 50);
     }
 
     #[test]

@@ -1,0 +1,48 @@
+// Validation at a field STORE — the boundary the corpus was missing.
+//
+// `validate_fail.vyrn` covers a value entering a validated type through a
+// parameter and a return. This one covers the other direction: a value written
+// INTO a record, where the validated type is the element type of an array field
+// and the record is reached three different ways — a local, a `modify`
+// parameter, and module state.
+//
+// The interpreter accepted every store below without checking anything until
+// RFC-0082 M3, while both compiled backends trapped: `t.xs.push(v)` desugars to
+// `t.xs = push(t.xs, v)`, and that field assignment was the one typed boundary
+// with no coercion behind it. A literal would have been caught at compile time
+// by `consteval` on all three engines, so only a value the compiler cannot fold
+// — `rt(6)` here — reaches the runtime check, which is why nothing said.
+//
+//   vyrn run   examples/validate_store.vyrn   -> 21 31 41, then error, exit 1
+//   vyrn build examples/validate_store.vyrn   -> byte-identical
+
+type Age = Int64 where value >= 18
+
+type Roster = { ages: Array<Age> }
+
+let mut shared = Roster { ages: [] }
+
+/// Opaque to `consteval`: whatever this returns is checked at runtime.
+fn rt(n: Int64) -> Int64 {
+    return n * 1
+}
+
+fn enroll(r: modify Roster, n: Int64) {
+    r.ages.push(rt(n))
+}
+
+fn main() -> Int64 {
+    // Valid values flow through all three spellings untouched.
+    let mut local = Roster { ages: [] }
+    local.ages.push(rt(21))
+    enroll(local, 31)
+    shared.ages.push(rt(41))
+    print(local.ages[0])
+    print(local.ages[1])
+    print(shared.ages[0])
+
+    // 17 is not an `Age`, and the store is where that is discovered.
+    local.ages.push(rt(17))
+    print(local.ages[2])
+    return 0
+}
