@@ -1107,6 +1107,16 @@ struct Fn_<'a> {
     /// calling a `fn` parameter a lookup here rather than a value on the stack,
     /// and why no function table exists.
     fn_binds: HashMap<String, FnBinding>,
+    /// The local `String` accumulators `s = s + …` may grow in place, from
+    /// [`crate::append_candidates`] — the SAME whitelist the textual backend
+    /// clears, not a second one. Two copies of that rule would be two answers to
+    /// "may this buffer move", and one of them a use-after-free.
+    append_ok: std::collections::HashSet<String>,
+    /// wasm local holding the accumulator's pointer → the frame slot holding its
+    /// `(len, cap)` shadow. Keyed by local index rather than by name because the
+    /// local IS the binding: two `let out`s in one body are two accumulators, and
+    /// a global (a `Place::Static`) never gets an entry at all.
+    str_append: HashMap<u32, u32>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -1127,6 +1137,8 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
         drops: HashMap::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
+        append_ok: std::collections::HashSet::new(),
+        str_append: HashMap::new(),
     }
 }
 
@@ -1204,6 +1216,8 @@ fn lower_body(
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
         expect: Vec::new(),
         fn_binds: binds,
+        append_ok: crate::append_candidates(&f.body),
+        str_append: HashMap::new(),
     };
 
     // By-value parameter semantics: an aggregate arrives as the caller's
@@ -1638,6 +1652,15 @@ impl Fn_<'_> {
                         (place, got)
                     }
                 };
+                // A String accumulator gets its append shadow here, at the one
+                // declaration site — the same place, under the same whitelist, as
+                // the textual backend's.
+                if let Place::Local(l) = place {
+                    if self.cx.resolve(&bound) == Type::Str && self.append_ok.contains(name.as_str())
+                    {
+                        self.str_append_shadow(b, l);
+                    }
+                }
                 self.scope.push((name.clone(), place, bound));
                 // A non-escaping `cell(..)` is released when this block exits.
                 // The key is the statement's node address, which is `own`'s own
@@ -1651,7 +1674,36 @@ impl Fn_<'_> {
             Stmt::Assign { name, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
                 let r = self.cx.repr(&ty, *line)?;
+                // `s = s + a + b` on an eligible local String: grow the buffer
+                // instead of building a new one. `concat` allocates and copies
+                // both halves every time, which makes the shape every writer is
+                // written in quadratic — `toJson` of 40k `Int64` did not merely
+                // take 1.4 s here, it exhausted linear memory and trapped.
+                //
+                // Only outside a `region` (arena memory is not the bump heap the
+                // helper grows out of) and only for a local that owns a shadow,
+                // which is exactly a `let`-declared one the whitelist cleared. The
+                // spine is [`crate::self_append_spine`], shared with the textual
+                // backend: what counts as a self-append is one rule, so the two
+                // backends cannot recognize different sets of writers and diverge
+                // on which one still copies.
+                if let Place::Local(l) = place {
+                    if self.region_depth == 0 && self.str_append.contains_key(&l) {
+                        if let Some(parts) = crate::self_append_spine(name, value) {
+                            let slot = self.str_append[&l];
+                            for p in parts {
+                                b.slot(slot).ins(&Instruction::LocalGet(l));
+                                self.expr_as(m, b, p, &Type::Str)?;
+                                self.emit_str_append(b, l);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
                 self.store_into(m, b, place, &r, value, &ty.clone())?;
+                if let Place::Local(l) = place {
+                    self.str_append_reset(b, l);
+                }
             }
             Stmt::SetField { name, field, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
@@ -1962,6 +2014,43 @@ impl Fn_<'_> {
             Repr::Agg(l) => Place::Slot(b.alloc(l.size, l.align)),
             Repr::Unit => return unsupported("a binding of a Unit value", line),
         })
+    }
+
+    /// Give the accumulator in wasm local `l` its `(len, cap)` shadow, and start
+    /// it unowned.
+    ///
+    /// A Vyrn `String` is a bare NUL-terminated pointer with no header, so growing
+    /// one in place needs its length and capacity kept beside it. They go in the
+    /// frame rather than in two more wasm locals because the runtime helper writes
+    /// them back and wasm has no way to pass a local by reference — eight bytes of
+    /// shadow stack against a three-result function type, and the frame is already
+    /// per-invocation, so a recursive writer (`emitArr` calling `emit`) gets its
+    /// own without anything being said about recursion.
+    ///
+    /// `cap == 0` means "this pointer was not allocated by the append path" — a
+    /// literal in a data segment, a `concat` result, a call result — so it may not
+    /// be grown and `len` says nothing. Emitted at the `let`, so the second trip
+    /// through an enclosing loop starts unowned again.
+    fn str_append_shadow(&mut self, b: &mut Frame, l: u32) {
+        let at = *self.str_append.entry(l).or_insert_with(|| b.alloc(8, 4));
+        b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(cap_at()));
+    }
+
+    /// Append the `String` on top of the stack to the accumulator in local `l`,
+    /// in place. The helper takes the shadow's address, the current pointer and
+    /// the operand, and gives back the pointer to store — which is the whole
+    /// convention, and why the call site is five instructions.
+    fn emit_str_append(&mut self, b: &mut Frame, l: u32) {
+        b.ins(&Instruction::Call(self.cx.rt.str_append));
+        b.ins(&Instruction::LocalSet(l));
+    }
+
+    /// Invalidate the shadow after any other write to the accumulator: the local
+    /// now holds a pointer this path did not allocate.
+    fn str_append_reset(&mut self, b: &mut Frame, l: u32) {
+        if let Some(&at) = self.str_append.get(&l) {
+            b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(cap_at()));
+        }
     }
 
     /// Evaluate `value` into an existing place of known type.
@@ -7774,6 +7863,10 @@ struct Rt {
     int_str: u32,
     bool_str: u32,
     concat: u32,
+    /// Grow a `String` accumulator in place (RFC-0081). A function rather than an
+    /// inline sequence at every `s = s + …`: the body is forty instructions with
+    /// two `if`s in it, and `std/json` alone has six append sites.
+    str_append: u32,
     trap_idx: u32,
     utf8valid: u32,
     str_from_bytes: u32,
@@ -7897,6 +7990,7 @@ impl Rt {
             int_str: slot("int_str"),
             bool_str: slot("bool_str"),
             concat: slot("concat"),
+            str_append: slot("str_append"),
             trap_idx: slot("trap_idx"),
             utf8valid: slot("utf8valid"),
             str_from_bytes: slot("str_from_bytes"),
@@ -7969,6 +8063,13 @@ fn byte() -> MemArg {
 
 fn word() -> MemArg {
     MemArg { offset: 0, align: 2, memory_index: 0 }
+}
+
+/// The second word of a String accumulator's `(len, cap)` shadow. Named because
+/// the two halves are addressed from the same base in four places and an offset
+/// of 0 where 4 was meant is a silent wrong length.
+fn cap_at() -> MemArg {
+    MemArg { offset: 4, align: 2, memory_index: 0 }
 }
 
 fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
@@ -8285,6 +8386,126 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
                 .ins(&Instruction::LocalGet(r));
+        },
+    );
+
+    // str_append(st, p, v) -> p' — append `v` to the accumulator `p`, in place,
+    // growing geometrically. `st` addresses its `(len, cap)` shadow in the
+    // caller's frame; the new pointer comes back as the result because a wasm
+    // local has no address to write through (RFC-0081).
+    //
+    // The grow is `malloc` and copy, not a `realloc`, because this backend's
+    // allocator IS a bump pointer with no free (see `malloc` above) — so there is
+    // nothing to hand a block back to, and nothing to extend it into once the
+    // next element's string has been bumped past it. That is not the quadratic
+    // part: doubling makes N appends copy O(N) bytes in total and bump O(N) of
+    // heap, where `concat` per element copied and bumped O(N²) — which is why 40k
+    // `Int64` did not merely take 1.4 s, it walked the bump pointer past 4 GiB
+    // and trapped out of bounds on 229 KB of JSON.
+    //
+    // ponytail: a bump allocator can extend its own top allocation in place
+    // (`HEAP == p + cap`), which would make an accumulator with nothing allocated
+    // after it grow for free. Not taken — the writers that matter allocate each
+    // element's string BETWEEN appends, so the accumulator is never on top and
+    // the fast path would never fire in the case this exists for.
+    let (st, p, v) = (0, 1, 2);
+    let (vlen, cap, len, need, nc, nb) = (4, 5, 6, 7, 8, 9);
+    rt.next_is(m, rt.str_append);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32; 6],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(v))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(vlen));
+            // `cap == 0`: the pointer is not ours (a literal, a `concat` result,
+            // a call result), so copy it into a buffer that is. 32 bytes minimum,
+            // matching the textual backend's floor so the two grow in step.
+            b.ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Load(cap_at()))
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I32Const(32))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(32))
+                .ins(&Instruction::LocalSet(cap))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(nb))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(nb))
+                .ins(&Instruction::LocalSet(p))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Store(cap_at()))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::End);
+            // Reserve `len + vlen + 1`, doubling so N appends are O(N).
+            b.ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(need))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalTee(nc))
+                .ins(&Instruction::LocalGet(need))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(need))
+                .ins(&Instruction::LocalSet(nc))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(nc))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(nb))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(nb))
+                .ins(&Instruction::LocalSet(p))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::LocalGet(nc))
+                .ins(&Instruction::I32Store(cap_at()))
+                .ins(&Instruction::End);
+            // Copy the operand's bytes AND its NUL over the old terminator.
+            b.ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(v))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(vlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::LocalGet(p));
         },
     );
 

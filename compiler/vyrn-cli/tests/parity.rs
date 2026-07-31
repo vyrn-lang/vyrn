@@ -3452,3 +3452,164 @@ fn main() -> Int64 {
     );
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
 }
+
+/// A `String` accumulator grown IN PLACE says the same bytes as one copied
+/// (RFC-0081).
+///
+/// `d4d96aa` gave the textual backend the append that `return out + "]"` had been
+/// banning, and pinned the rule where the rule lives — `binop_retains_str` and
+/// `append_candidates` are one whitelist in `vyrn-codegen`, and the direct wasm
+/// backend now calls the SAME two functions rather than restating them. So what is
+/// left to pin here is not the policy, it is the half each backend owns: whether
+/// its own lowering of the whitelisted shape still computes the same string.
+///
+/// The four functions are the four ways the shadow `(len, cap)` beside the
+/// accumulator can go stale, which is the only way an in-place append can be
+/// wrong:
+///
+/// - `build` — the ordinary loop, plus the tail concat that used to disqualify it.
+/// - `reassigned` — a whole-value store between appends. The pointer is a data
+///   segment literal afterwards, so `cap` must go back to 0 or the next append
+///   writes into read-only-by-convention bytes it never allocated.
+/// - `perTurn` — a `let` INSIDE the loop, so the accumulator is a fresh unowned
+///   pointer every turn while the wasm local and its frame slot are the same two
+///   words. The second turn is the one that catches a shadow that is not reset.
+/// - `aliased` — `let copy = out` is exactly what the whitelist bans, so this one
+///   must still take the copying path on every engine; it is the negative that
+///   keeps the other three from passing by accident.
+///
+/// Byte equality across all three engines is the assertion, because a wrong
+/// `(len, cap)` does not trap — it prints a truncated or doubled string, which is
+/// the failure mode no amount of "it ran" would have caught.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_string_accumulator_grown_in_place_says_the_same_bytes_on_all_three_engines() {
+    let rows = three_engines(
+        "strappend",
+        "accum",
+        r#"
+fn build(n: Int64) -> String {
+    let mut out = "["
+    let mut i = 0
+    while i < n {
+        out = out + i.toString() + ","
+        i = i + 1
+    }
+    return out + "]"
+}
+
+fn reassigned() -> String {
+    let mut out = "a"
+    out = out + "b"
+    out = "c"
+    out = out + "d"
+    return out + "!"
+}
+
+fn perTurn(n: Int64) -> String {
+    let mut all = ""
+    let mut i = 0
+    while i < n {
+        let mut row = "<"
+        row = row + i.toString()
+        all = all + row + ">"
+        i = i + 1
+    }
+    return all
+}
+
+fn aliased(n: Int64) -> String {
+    let mut out = "["
+    let mut i = 0
+    while i < n {
+        out = out + "x"
+        let copy = out
+        print(copy)
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    print(build(0))
+    print(build(1))
+    print(build(4))
+    print(reassigned())
+    print(perTurn(3))
+    print(aliased(3))
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        rows.len(),
+        3,
+        "wasmtime did not resolve, so wasm was never tested: {:?}",
+        rows.iter().map(|r| r.0).collect::<Vec<_>>()
+    );
+    all_agree(&rows, "accum");
+    assert_eq!(
+        rows[0].1,
+        "[]\n[0,]\n[0,1,2,3,]\ncd!\n<0><1><2>\n[x\n[xx\n[xxx\n[xxx\n",
+        "an empty loop, one turn, four turns, a reset mid-way, a per-turn `let`, \
+         and the aliased accumulator that still copies"
+    );
+}
+
+/// `toJson` of a large array is LINEAR on all three engines, pinned by the wasm
+/// address space rather than by a clock (RFC-0081).
+///
+/// The copying lowering re-`malloc`s and re-copies the whole result per element,
+/// so the bytes it allocates go as N·L/2 — at 100k `Int64` that is about 34 GB,
+/// and wasm32 has 4 GiB. The direct backend's allocator is a bump pointer that
+/// never frees (see `direct::runtime`'s `malloc`), so those bytes are not
+/// reclaimed and the run does not get slow, it walks off the end of linear memory:
+/// 40k elements producing 229 KB of JSON trapped with `out of bounds memory
+/// access` in 1.4 s. The in-place append allocates about 4L in total, which is
+/// 2.7 MB here.
+///
+/// So this test cannot pass by being fast on a fast machine and cannot go flaky on
+/// a loaded one — the ceiling it asserts against is a property of the target, not
+/// of the host. That is why it is a size and not a duration. The alternative was
+/// counting `call` instructions in the emitted code section, the way the textual
+/// backend's pins count `strcat`; rejected because `wasm::Module::sweep` renumbers
+/// every function index at `finish`, so the count would be over indices no source
+/// of truth outside the finished bytes could name.
+///
+/// The full JSON is compared, not its length: a wrong `(len, cap)` shadow is a
+/// truncation somewhere in the middle, and 684 KB of it is the shape most likely
+/// to catch one.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn to_json_of_a_large_array_stays_within_the_wasm_address_space() {
+    let rows = three_engines(
+        "jsonbig",
+        "big",
+        r#"
+fn main() -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < 100000 {
+        a.push(i * 7 - 3)
+        i = i + 1
+    }
+    let s = toJson(a)
+    print(s.byteLength)
+    print(s)
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        rows.len(),
+        3,
+        "wasmtime did not resolve, so wasm was never tested: {:?}",
+        rows.iter().map(|r| r.0).collect::<Vec<_>>()
+    );
+    all_agree(&rows, "big");
+    assert!(
+        rows[0].1.starts_with("684125\n[-3,4,11,"),
+        "the length and the first elements, so a passing run is one that produced \
+         the JSON rather than one that produced nothing"
+    );
+}
