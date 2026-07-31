@@ -1,6 +1,6 @@
 # RFC-0079 — Failure Is a Value, and Crashing Is the Caller's Call
 
-- **Status:** **Accepted.** Design settled; M1–M3 not yet started.
+- **Status:** **Accepted.** M1 shipped; M2–M3 not yet started.
 - **Depends on:** RFC-0078 (which recorded this as open language question **B**
   and refused to decide it), RFC-0009 (`Validation`/`Issue` — the existing error
   model, and why this is not it), RFC-0060 (divergence-aware movecheck, which
@@ -148,7 +148,7 @@ not be made to.**
 
 ## Milestones
 
-### M1 — `Never` and `panic`
+### M1 — `Never` and `panic` — **shipped**
 
 The one real primitive. `Never` in the checker: a type that unifies with any
 type, produced only by `panic`, and treated as divergent by movecheck — which is
@@ -170,6 +170,23 @@ that does not look like the rest. Exit code 1, matching every existing trap.
 
 Pin: a three-engine parity case whose program panics with a message containing a
 non-ASCII byte and a `\{}` interpolation, proving the bytes agree.
+
+**As landed.** `a_panic_says_the_same_bytes_on_all_three_engines` in
+`compiler/vyrn-cli/tests/parity.rs`, in three programs: the message pin, a
+`panic` two regions deep, and every join shape `Never` has to survive with the
+panic NOT taken. Two things the plan above did not say:
+
+- The textual backend needs **no special case in its `phi`**. The block ends in
+  `unreachable` and a dead one opens, so a panicking arm reaches the merge as
+  `poison`, which is valid at every LLVM type. What the joins did need is to stop
+  *reporting* `Never` — one arm having no type is the whole change.
+- The direct backend needs **no new runtime function**. It writes the three
+  pieces and hands the last to `trap`, whose `proc_exit(1)` is the exit path
+  every trap already takes; wasm's `unreachable` then makes the stack polymorphic
+  so the arm owes its enclosing block no value.
+
+`panic` joins the RFC-0078 census as a `Control` row (61 → 62), which is the row
+`slice` leaves at M3.
 
 ### M2 — `??`
 
