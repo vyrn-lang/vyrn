@@ -190,6 +190,30 @@ function in `direct.rs` is `base + n` and the emission order must match, so
 removing a slot renumbers the table. RFC-0078 flagged this same hazard for
 `charCount` and it was survivable there.
 
+### The thesis, corrected by its own measurement
+
+This RFC opened by saying three implementations that must agree is worse than
+one. M1's numbers say that was the wrong count to object to. **The problem was
+never "more than one" — it was "N peers with no reference among them."**
+
+Three peers agree because someone made them agree, and each is as likely to be
+the wrong one. Two implementations where one is *designated the oracle* and a
+differential test enforces the relation is a different structure, not a weaker
+version of the same one. And here it is a better structure for a reason specific
+to this problem: exact decimal expansion of a binary float, rounded half-to-even
+at the sixth place, has a correctness space of 2^64 and **cannot be pinned
+exhaustively**. A differential oracle is how it gets checked at all.
+
+Which exposes the cost of going further than M2 does. If all three engines ran
+`f64Str`, the parity suite would go **blind to formatting bugs** — all three
+would agree, all three would be wrong, and the invariant that catches everything
+else in this compiler would report green. `slice` could go all the way because a
+byte loop can be pinned directly. This cannot, so the last implementation is
+worth more as an oracle than as a deletion.
+
+The unit of the objection is therefore *unreferenced multiplicity*, not
+multiplicity. RFC-0078's census should be read that way too.
+
 ## What this does not touch
 
 **Integer `toString`.** `@str` covers more than floats; only the float case is
