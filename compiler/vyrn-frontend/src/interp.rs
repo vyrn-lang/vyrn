@@ -2737,6 +2737,13 @@ impl<'a> Interp<'a> {
                     return self.call(rt, &vals);
                 }
                 match name.as_str() {
+                    // RFC-0079: `panic(msg)` is a trap whose text the caller
+                    // wrote. Same channel as every `@.trap.*` — the CLI prefixes
+                    // `error: ` and the newline — so nothing here formats it.
+                    "panic" => match &vals[0] {
+                        Val::Str(s) => Err(Ctrl::Err((**s).clone())),
+                        other => Err(Ctrl::Err(format!("{other:?}"))),
+                    },
                     "print" => {
                         match &vals[0] {
                             Val::Int(n) => println!("{n}"),

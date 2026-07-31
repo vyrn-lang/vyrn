@@ -832,7 +832,14 @@ pub fn emit(program: &Program) -> Result<String, String> {
     );
     out.push_str(
         "@.trap.slicesplit = private unnamed_addr constant [39 x i8] \
-         c\"error: slice splits a UTF-8 character\\0A\\00\"\n\n",
+         c\"error: slice splits a UTF-8 character\\0A\\00\"\n",
+    );
+    // `panic(msg)` (RFC-0079): the caller owns the text, the compiler owns the
+    // frame. It is a format rather than three `fputs` because the catalogue
+    // above already prints through `fprintf` for the traps that interpolate,
+    // and `%s` is safe here — a Vyrn `String` cannot contain a NUL (RFC-0014).
+    out.push_str(
+        "@.panic.fmt = private unnamed_addr constant [11 x i8] c\"error: %s\\0A\\00\"\n\n",
     );
 
     // ---- region / arena runtime (RFC-0004 §4) ---------------------------
@@ -1654,6 +1661,13 @@ impl<'a> Gen<'a> {
     }
 
     fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {
+        // A `Never` (RFC-0079) is `poison` in a block the `panic` already left
+        // through `unreachable`. There is nothing to reconcile — and running a
+        // validation here would emit a live-looking check over a value that does
+        // not exist. `poison` is valid at `to` as it stands.
+        if matches!(from, Type::Never) {
+            return Ok((op, to.clone()));
+        }
         // AUTOMATIC VALIDATION: a value flowing into a predicated named type
         // coerces to its base, then runs the `where` predicate inline and traps
         // with the canonical message — mirroring the interpreter's `coerce`.
@@ -3474,14 +3488,15 @@ impl<'a> Gen<'a> {
         // tag == 1 arm (Some / Ok)
         self.emit_label(&one_l);
         let one_arm = arms.iter().find(|a| pattern_is_one(&a.pattern)).unwrap();
-        let (one_val, ty) = self.gen_arm_body(&sv, one_arm, &one_ty)?;
+        let (one_val, one_t) = self.gen_arm_body(&sv, one_arm, &one_ty)?;
         let one_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
         // tag == 0 arm (None / Err)
         self.emit_label(&zero_l);
         let zero_arm = arms.iter().find(|a| !pattern_is_one(&a.pattern)).unwrap();
-        let (zero_val, _) = self.gen_arm_body(&sv, zero_arm, &zero_ty)?;
+        let (zero_val, zero_t) = self.gen_arm_body(&sv, zero_arm, &zero_ty)?;
+        let ty = join_never(one_t, zero_t);
         let zero_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
@@ -3521,7 +3536,7 @@ impl<'a> Gen<'a> {
 
         // then branch
         self.emit_label(&then_l);
-        let (then_val, ty) = self.gen_expr(then_branch)?;
+        let (then_val, then_t) = self.gen_expr(then_branch)?;
         // The predecessor of the join is the CURRENT block — a nested if/match in
         // the branch body may have moved us past `then_l`.
         let then_end = self.cur_block.clone();
@@ -3529,7 +3544,8 @@ impl<'a> Gen<'a> {
 
         // else branch
         self.emit_label(&else_l);
-        let (else_val, _) = self.gen_expr(else_branch)?;
+        let (else_val, else_t) = self.gen_expr(else_branch)?;
+        let ty = join_never(then_t, else_t);
         let else_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
@@ -3609,7 +3625,12 @@ impl<'a> Gen<'a> {
             // type instead of the bare `Type::Param` (which lowers to an invalid
             // `alloca void`). Every instantiation shares one LLVM layout, so this
             // never disturbs the `phi` below — only the reported type.
-            if !(self.ty_is_concrete_app(&ty) && !self.ty_is_concrete_app(&t)) {
+            // A `panic` arm (RFC-0079) reports `Never` and answers nothing: it
+            // is `poison` in the `phi`, and the arms that produce a value decide
+            // the type.
+            if !matches!(t, Type::Never)
+                && !(self.ty_is_concrete_app(&ty) && !self.ty_is_concrete_app(&t))
+            {
                 ty = t;
             }
             self.scope.pop();
@@ -5494,6 +5515,26 @@ impl<'a> Gen<'a> {
                 "{out} = call {llty} asm sideeffect \"\", \"=r,0\"({llty} {v})"
             ));
             return Ok((out, ty));
+        }
+        // RFC-0079: `panic(msg)` — the message, then `exit(1)`, which is the
+        // trap path [`Emitter::trap_if`] takes minus the branch. The block ends
+        // in `unreachable` and a fresh (dead) one opens, so whatever the caller
+        // does with the "value" — `phi` it into a join, coerce it, drop it —
+        // lands in code no execution reaches. `poison` is that value: valid at
+        // every LLVM type, which is what makes a panicking `match` arm need no
+        // special case in the merge.
+        if name == "panic" {
+            let (v, _) = self.gen_expr(&args[0])?;
+            let e = self.fresh_tmp();
+            self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
+            self.emit(format!(
+                "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.panic.fmt, ptr {v})"
+            ));
+            self.emit("call void @exit(i32 1)".into());
+            self.emit_term("unreachable".into());
+            let dead = self.fresh_label("panic.dead");
+            self.emit_label(&dead);
+            return Ok(("poison".to_string(), Type::Never));
         }
         if name == "print" {
             let (v, ty) = self.gen_expr(&args[0])?;
@@ -8137,6 +8178,20 @@ pub(crate) fn applied_type(
 /// preferring different arms would report two different types for one expression,
 /// and the enum's LAYOUT is the same either way (`enum_ll` is arity-wide), so the
 /// disagreement would surface as a payload encoded one way and read the other.
+/// The type a two-arm join carries when one arm may be a `panic` (RFC-0079).
+///
+/// `Never` names an arm that left through `unreachable` and reached the merge
+/// only as a `poison` incoming, so it contributes no type — the other arm
+/// answers. Both arms `Never` keeps `Never`, whose `llt` is `void`, and the
+/// merge's existing "nothing to `phi`" case takes it from there.
+fn join_never(a: Type, b: Type) -> Type {
+    if matches!(a, Type::Never) {
+        b
+    } else {
+        a
+    }
+}
+
 pub(crate) fn ty_is_concrete_app(t: &Type, resolve: &dyn Fn(&Type) -> Type) -> bool {
     matches!(t, Type::App(_, args)
         if !args.is_empty()
@@ -8196,7 +8251,10 @@ fn mangle_ty(t: &Type) -> String {
             ps.iter().map(mangle_ty).collect::<String>(),
             mangle_ty(r)
         ),
-        // Checker recovery sentinel; never reaches codegen in a valid program.
+        // Neither is a type a monomorphization can be keyed on: `Err` is the
+        // checker's recovery sentinel and never reaches codegen, and `Never`
+        // (RFC-0079) is unspellable in a signature, so no type argument is one.
+        Type::Never => "Never".into(),
         Type::Err => "Err".into(),
     }
 }
@@ -8267,7 +8325,10 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         Type::Float32 => "float".into(),
         Type::Bool => "i1".into(),
         Type::Str => "ptr".into(),
-        Type::Unit => "void".into(),
+        // `Never` (RFC-0079) carries no value, so it lowers like `Unit`: a
+        // statement-position `panic` has nothing to drop, and a `void` join is
+        // already the "no value to merge" case both merges test for.
+        Type::Unit | Type::Never => "void".into(),
         // Option/Result both lower to { tag, payload }; payload is i64.
         // { tag, word0, word1 } — two payload words so a `Ref` (which is two
         // words) fits inline without a heap box.

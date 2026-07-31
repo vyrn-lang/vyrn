@@ -2541,7 +2541,7 @@ static MACRO_BUILTINS: &[&str] = &[
     "base64Encode", "base64Decode", "urlEncode", "urlDecode", "args", "readLine",
     "readFile", "writeFile", "renameFile", "fsyncFile", "readFileBytes",
     "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "contractOf", "jsonSchema",
-    "toJson", "fromJson", "assert", "assertEq", "cell", "array", "parse", "str",
+    "toJson", "fromJson", "assert", "assertEq", "cell", "array", "parse", "str", "panic",
 ];
 
 /// Option / result constructors — builtin enum-like variants, coloured as

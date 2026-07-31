@@ -653,6 +653,17 @@ pub enum Type {
     /// every use is monomorphized away, so no function value exists at runtime in
     /// any backend and this type has no runtime lowering (`llt` never sees it).
     Fn(Vec<Type>, Box<Type>),
+    /// The type of an expression that never produces a value (RFC-0079). The
+    /// only thing that has it is `panic(msg)`, which writes the message and
+    /// exits 1, so no context downstream of one ever runs. It is the bottom
+    /// type: `assignable(Never, _)` is true and the reverse is not, which is
+    /// what lets `match x { A => panic(".."), B => 5 }` be an `Int64`.
+    ///
+    /// Unspellable in a signature — RFC-0079 leaves divergent functions open —
+    /// so it arises only from that one call. Both backends lower it to `void`
+    /// and neither produces a value for it: the textual one has already left
+    /// through `unreachable` and the direct one through wasm's `unreachable`.
+    Never,
     /// A compile-time "type-check failed here" sentinel used for inside-body
     /// error recovery (RFC-0006 accumulation). When a `let` initializer or a
     /// sub-expression fails to type-check, the binding / hole is filled with
@@ -722,6 +733,7 @@ impl std::fmt::Display for Type {
                 }
                 Ok(())
             }
+            Type::Never => write!(f, "Never"),
             Type::Err => write!(f, "<type error>"),
         }
     }

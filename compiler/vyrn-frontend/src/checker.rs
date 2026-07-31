@@ -239,6 +239,7 @@ fn check_accum_inner(
         "assert",
         "assertEq",
         "blackBox",
+        "panic",
         "Int",
         "Int64",
         "Int32",
@@ -1069,6 +1070,13 @@ impl<'a> Checker<'a> {
         // it should flow through without manufacturing a second diagnostic. This
         // is what keeps inside-body error recovery cascade-free.
         if matches!(from, Type::Err) || matches!(to, Type::Err) {
+            return true;
+        }
+        // `Never` (RFC-0079) is the bottom type: a `panic` produces no value, so
+        // it fits wherever a value is wanted. One direction only — a `String` is
+        // not a `Never`, and making it one would let a panic-typed context
+        // swallow a real value.
+        if matches!(from, Type::Never) {
             return true;
         }
         // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
@@ -2399,8 +2407,12 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Expr(e) => {
-                self.expr(e, scope, None, Some(ret))?;
-                Ok(false)
+                // A `panic` statement is `Never`-typed, so it satisfies the
+                // return-path check the way a `return` does (RFC-0079): the
+                // statements after it are unreachable and a function whose body
+                // ends in one owes no value.
+                let t = self.expr(e, scope, None, Some(ret))?;
+                Ok(matches!(t, Type::Never))
             }
             Stmt::Region { body, .. } => {
                 // Record the frame count at entry so the escape guard can tell
@@ -3784,6 +3796,27 @@ impl<'a> Checker<'a> {
             // Identity: the argument's own type flows straight out (generic in T).
             let t = self.expr(&args[0], scope, expected, fn_ret)?;
             return Ok(t);
+        }
+
+        // RFC-0079: `panic(msg) -> Never`. The reason is written by the caller,
+        // at the site that knows it — the compiler owns only the `error: `
+        // prefix and the newline, so a panic line is indistinguishable from a
+        // trap line and the channel stays uniform.
+        if name == "panic" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `panic` takes 1 String argument, got {}",
+                    args.len()
+                ));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!("line {line}: `panic` needs a String, found {t}"));
+            }
+            return Ok(Type::Never);
         }
 
         // built-in: print(Int|Bool) -> Unit
@@ -6001,8 +6034,10 @@ impl<'a> Checker<'a> {
         subst: &mut HashMap<String, Type>,
         line: usize,
     ) -> Result<(), String> {
-        // A recovered `Err` unifies with anything (no spurious mismatch).
-        if matches!(pty, Type::Err) || matches!(aty, Type::Err) {
+        // A recovered `Err` unifies with anything (no spurious mismatch), and so
+        // does a `Never` (RFC-0079) — `f(panic(".."))` places no demand on `T`,
+        // and binding `T = Never` would fix the parameter to a type no value has.
+        if matches!(pty, Type::Err) || matches!(aty, Type::Err) || matches!(aty, Type::Never) {
             return Ok(());
         }
         match pty {
