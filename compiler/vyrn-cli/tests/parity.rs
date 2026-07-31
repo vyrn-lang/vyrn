@@ -1411,6 +1411,13 @@ fn main() -> Int64 {
     print(f64Str(0.0234375))
     print(f64Str(floatFromBits(9223372036854775808)))
     print(f64Str(floatFromBits(1)))
+    // The four spelled values, by bits — the random half above reaches an
+    // exponent field of 2047 only about a fifth of the time, and a NEGATIVE NaN
+    // is the row where the two references disagree about what to say.
+    print(f64Str(floatFromBits(9218868437227405312)))
+    print(f64Str(floatFromBits(18442240474082181120)))
+    print(f64Str(floatFromBits(9221120237041090560)))
+    print(f64Str(floatFromBits(18444492273895866368)))
     return 0
 }
 "#,

@@ -116,6 +116,17 @@ affordable: `f64_str` multiplies by two or by five `reps` times and `reps` reach
 `limb × mul + carry` inside an `Int64` (`2^40`, or `5^18`). That is `halveBy`'s
 trick in the other direction and worth about the same.
 
+**"Reuse `Dec`, `tidy`, `halveBy`, `twiceBy`" was wrong, and worth saying why.**
+The two directions have the same *shape* — a digit array and an exponent — and
+opposite *invariants*. `tidy` caps at 800 digits and sets a sticky flag, which is
+sound for parsing (past 800 digits nothing but a tie can change which double you
+land on, and the flag decides the tie) and unsound for formatting, where a
+subnormal's exact expansion is 1074 digits and every one of them is a digit that
+must be examined before the sixth place is settled. `halveBy` and `twiceBy` also
+carry one decimal digit per `Int64`; base-10^6 limbs do six, and given the
+interpreter number below, six-at-a-time was not optional. So this shares the
+file and the idiom with `parseFloat64`, not its functions.
+
 **Gate 1 — the microbenchmark.** 200,000 formats, an identical loop without the
 format subtracted, minimum of five runs:
 
