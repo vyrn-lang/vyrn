@@ -1,0 +1,40 @@
+// Validation at a SUM-PAYLOAD boundary — the boundary the corpus was missing.
+//
+// `validate_store.vyrn` covers a value written into a record field. This one
+// covers the other half of RFC-0082's audit: a value entering a validated type
+// as the payload of `Some`, `Ok` or `Err`.
+//
+// Native accepted all three without checking anything until RFC-0082, while the
+// interpreter and the direct wasm backend both trapped. The user-enum
+// constructor has always coerced each argument into its DECLARED payload type
+// before boxing it; the two built-in sums took the expected payload type only as
+// a hint for typing the argument and then boxed whatever came back. As in
+// `validate_store.vyrn`, a literal would have been folded and rejected at
+// compile time by `consteval` on all three engines, so only a value the compiler
+// cannot fold — `rt(6)` here — reaches the runtime check, which is why nothing
+// said.
+//
+//   vyrn run   examples/validate_sum.vyrn   -> 21 22 23, then error, exit 1
+//   vyrn build examples/validate_sum.vyrn   -> byte-identical
+
+type Age = Int64 where value >= 18
+
+/// Opaque to `consteval`: whatever this returns is checked at runtime.
+fn rt(n: Int64) -> Int64 {
+    return n * 1
+}
+
+fn main() -> Int64 {
+    // Valid values flow through all three constructors untouched.
+    let ok: Option<Age> = Some(rt(21))
+    let good: Result<Age, String> = Ok(rt(22))
+    let bad: Result<String, Age> = Err(rt(23))
+    print(match ok { Some(a) => a, None => 0 })
+    print(match good { Ok(a) => a, Err(e) => 0 })
+    print(match bad { Ok(s) => 0, Err(a) => a })
+
+    // 5 is not an `Age`, and the `Some` is where that is discovered.
+    let no: Option<Age> = Some(rt(5))
+    print(match no { Some(a) => a, None => 0 })
+    return 0
+}

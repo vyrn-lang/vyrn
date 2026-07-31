@@ -596,6 +596,49 @@ the coerce but not the `push` builtin's clone, which is what makes it quadratic.
    the end of somebody else's milestone. Whoever takes it should decide first
    whether `rebox_sum` still has a caller, because the answer may be no.
 
+   **Taken, and the answer was no.** Both constructors now coerce the payload
+   into the expected type before boxing it, exactly as the user-enum constructor
+   beside them always has. The three diverging spellings — `Some`, `Ok`, `Err`
+   with a scalar validated payload — all trap natively with the bytes the other
+   two engines already produced. The neighbours were already correct and for a
+   reason worth writing down: an array payload (`Some([rt(21), rt(6))])` into
+   `Option<Array<Age>>`) and a record payload (`Ok(Row { age: rt(6) })`) validate
+   at the *literal*, where the element and field expectations already coerce, so
+   the payload was a validated value before the constructor ever saw it. Only a
+   scalar makes the constructor itself the boundary. `Option<Option<Age>>` is not
+   expressible: the checker rejects nested `Option`/`Result` in v0.1, on all three
+   engines.
+
+   `rebox_sum` had no caller left and is deleted. Subsumed, not bypassed, and the
+   checker is what settles the difference: it already reports these constructors
+   at the *expected* payload type (`Some` returns `Option<want>`, not
+   `Option<typeof x>`), and it refuses an `Option<Array<T, N>>` flowing into an
+   `Option<Array<T>>` for any expression except an array literal directly under a
+   constructor — `fn g() -> Option<Array<Int64, 3>>` passed to an
+   `Option<Array<Int64>>` parameter is a type error, not a reshape. So the only
+   value that could ever reach that repair was the one construction now reshapes
+   at the source. The pin stays, renamed to
+   `result_array_payload_is_boxed_in_the_target_representation`: same invariant —
+   the boxed payload is the growable triple and the arm loads one back — asserted
+   where it is now held, plus the absence of any `rebox` branch, since one
+   reappearing would mean construction had stopped reshaping.
+
+   The cost is a class, and it is smaller than expected: 89 of the 92 examples
+   emit byte-identical IR, because `coerce` adds instructions only when
+   `validation_required` says so or a representation actually reshapes. Of the
+   three that moved, one got *shorter* — `enumarray.vyrn` loses the whole
+   `rebox` branch and one of its two `malloc`s per `Ok([..])`, since the old path
+   boxed the fixed literal and then allocated a second buffer to re-materialize it
+   — and one got longer for the right reason: `i18ndemo.vyrn` gained seven
+   `__vyrn_regex_run` calls, one per `Some(k)` returning a validated `TransKey`.
+   That is this same bug, a second instance of it, inside `std/i18n`, which native
+   had been skipping and the other two engines had been paying all along.
+
+   `examples/validate_sum.vyrn` is the corpus's half, beside
+   `validate_store.vyrn` and for the same reason: no example put a runtime value
+   into a validated sum payload, and a literal is folded by `consteval` before any
+   engine runs.
+
 ### M3 — `Map` over `Array` — **withdrawn**
 
 Three rows. `Map<String, V>` is `String`-keyed, and `std/hash` already exists, so
