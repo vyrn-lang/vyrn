@@ -94,11 +94,85 @@ itself: the census row stops saying "refused on a measured cost" and starts
 carrying the actual number, which is what it should have said in the first
 place.
 
+### As landed
+
+`f64Str` is in `std/num`, beside `parseFloat64` and over the same `Dec`-shaped
+arithmetic run backwards. Nothing is deleted and nothing is routed to it.
+
+**Correctness held on the first run, on every engine.** It is pinned three ways:
+the module's own `test` blocks on the values the RFC named, `f64Str` against
+Rust's `{:.6}` over 850 bit patterns (`tests/numbers.rs`, which reaches
+subnormals, both zeros and every exponent because a bit pattern can name values
+no literal in this language can), and — the one that matters — 400 doubles
+formatted twice inside one program and compared against **each engine's own**
+`@str`, on interpreter, native and wasm (`tests/parity.rs`). Zero mismatches in
+all three. The wasm column is asserted present rather than skipped when
+`wasmtime()` returns `None`, because a green run that never tested wasm proves
+nothing about the 511 lines.
+
+One departure from `f64_str`'s algorithm, and it is what makes the loop
+affordable: `f64_str` multiplies by two or by five `reps` times and `reps` reaches
+1074, so this puts in the largest chunk of the power that keeps
+`limb × mul + carry` inside an `Int64` (`2^40`, or `5^18`). That is `halveBy`'s
+trick in the other direction and worth about the same.
+
+**Gate 1 — the microbenchmark.** 200,000 formats, an identical loop without the
+format subtracted, minimum of five runs:
+
+| engine | builtin `@str` | `f64Str` | |
+|---|---|---|---|
+| interpreter | 314 ns | 56,700 ns | **180x** |
+| native | 240 ns | 750 ns | 3.1x |
+| direct wasm | 246 ns | 721 ns | 2.9x |
+
+The compiled bar was 330 ns hand-written and the RFC expected "somewhat slower";
+3x is that, and it is the price of call overhead, bounds checks and three heap
+arrays where the hand-written version has a frame. The interpreter is a different
+finding: 180x is not a defect (`push` was checked and is O(1); the digit loop is
+linear) but the arithmetic of the answer, run one `Val` at a time, against a
+`format!` that is one call into Rust.
+
+**Gate 2 — the existing corpus, which is the gate that matters.** Instrumented
+rather than assumed — the interpreter's float arm was made to count itself:
+
+- `vyrn check` with the gen cache off on `twdemo`, `vyxdemo` and `shelf`'s client
+  formats **zero** floats. No generator in `std/` turns a `Float64` into text at
+  all, so the compile path cannot move, and there is no before-and-after to
+  report because there is no difference to measure.
+- The entire 60-program example corpus performs **46** float formats in total,
+  across every program in it.
+- The shape that WOULD show it — 200,000 `print(x)` of a float, output to a file
+  — is dominated by the write, not the format: native 2621 → 2620 ms, wasm
+  2626 → 2655 ms (+1%), both inside run-to-run noise. **The interpreter goes
+  2215 → 13653 ms, 6.2x**, which is the one real-program regression M1 found.
+
+So the gate passes for native and for direct wasm — outright, on both numbers —
+and fails for the interpreter on a program that prints floats and does nothing
+else, while being invisible to everything in the repo today.
+
+That splits M2 in a way the RFC did not anticipate, and the split is worth
+stating plainly: the two implementations that are *algorithms* — the native
+`printf` selection and the 511 hand-written lines — cost 3x on a microbenchmark
+and nothing observable in a program, and should go. The interpreter's arm is not
+an algorithm; it is `format!("{f:.6}")`, one line, and it is the **oracle** the
+other two were made to match. Replacing it buys one line and costs 6x on
+interpreted float printing.
+
 ## M2 — delete the three
 
 Only after M1's gate. Route `@str`'s float case to `num$f64Str`; delete the
 interpreter's arm, the native path's `printf` call, and `direct.rs`'s 511 lines
 plus its `Rt` slot. The census row leaves `Measured`.
+
+**M1's numbers amend this.** The gate passed for native and wasm and failed for
+the interpreter, so the three deletions are no longer one decision. Deleting the
+`printf` selection and the 511 lines is bought and paid for. Deleting the
+interpreter's `format!("{f:.6}")` costs 6.2x on an interpreted program that
+prints floats, and what it buys is one line — a line which is also the oracle
+`tests/numbers.rs` compares against. Two implementations where one is the
+reference for the other and a differential test says so is a different
+arrangement from three peers that must agree, and it is the arrangement M1's
+numbers argue for.
 
 The `Rt` slot removal is the one real hazard and it is known: every runtime
 function in `direct.rs` is `base + n` and the emission order must match, so

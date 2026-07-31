@@ -820,10 +820,21 @@ test "the extremes print as the backends spell them" {
     // 301 integer digits, the first eighteen of which are the ones the double
     // actually holds and the rest of which are exact consequences of its
     // exponent — the shape no floating-point formatter reproduces.
+    // Pinned whole rather than by its ends, the way `tests/parity.rs` pins the
+    // same value: a carry bug in the multiply loop is a wrong digit in the
+    // MIDDLE. (`slice` would have read it, but `slice` is itself Vyrn now and a
+    // `std/` module that calls one needs a std root in every link that reaches
+    // this file — which `std/num`, importing nothing, deliberately does not have.)
     let big = match parseFloat64("1e300") { Some(v) => f64Str(v), None => "None" }
     assertEq(big.charCount(), 308)
-    assertEq(match slice(big, 0, 20) { Ok(s) => s, Err(e) => "" }, "10000000000000000525")
-    assertEq(match slice(big, 301, 308) { Ok(s) => s, Err(e) => "" }, ".000000")
+    assertEq(
+        big,
+        "1000000000000000052504760255204420248704468581108159154915854115511802457988"
+        + "9081957863713750804478640437044438328838781769425232353604305756447921847867"
+        + "0698284838720092657580373783023379478809005936895323497079994508111903896764"
+        + "0880074652742780142494579258788820056842838115669472196386865459400540160"
+        + ".000000",
+    )
     // The smallest positive double: 1074 halvings deep, and every one of them
     // below the sixth place.
     assertEq(match parseFloat64("5e-324") { Some(v) => f64Str(v), None => "None" }, "0.000000")
