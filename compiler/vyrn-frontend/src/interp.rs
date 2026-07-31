@@ -2199,7 +2199,88 @@ impl<'a> Interp<'a> {
             Stmt::SetField {
                 name, field, value, ..
             } => {
-                let v = self.expr(value, scope)?;
+                // `t.xs.push(v)` on a LOCAL record: append IN PLACE — the same
+                // fix as `xs.push(v)` above, one level down.
+                //
+                // The statement desugars to `t.xs = push(t.xs, v)`, so the
+                // general path evaluates `t.xs` into a second `Rc` while the
+                // field still holds the first, and `push`'s `Rc::make_mut` then
+                // copies the whole vector: measured 135 / 310 / 1,705 / 10,704 ms
+                // at N = 4,000 → 32,000 against a flat 45 / 44 / 49 / 49 for the
+                // same loop on a plain local. Quadratic, on the most common
+                // container operation there is. Both compiled backends were
+                // always flat (~44 native, ~50 wasm at every N), so this is
+                // interpreter-only like the take below it.
+                //
+                // This is NOT `take_place`'s take, and deliberately not: there
+                // the desugar had already split the statement in three and the
+                // container HAD to live in a temp, so the move-out leaves
+                // `Val::Unit` behind for the rest of the group. Here the whole
+                // mutation is one statement, so the snapshot does that job. The
+                // field's `Rc` is cloned BEFORE the item is evaluated, and the
+                // field's own reference is dropped after — which is what puts
+                // the refcount back to 1 and makes the append O(1), and what
+                // keeps the general path's order: a callee that reaches the same
+                // field mid-statement (`t.xs.push(f(t))` with `f` taking
+                // `t: modify T`) mutates its own copy and loses the write, which
+                // is what all three engines do today.
+                //
+                // Locals only, exactly as the take is, and for the reason spelled
+                // out on `take_place`: between dropping the field's reference and
+                // storing the grown array back, an out-of-memory reserve can
+                // escape, and only a local's frame is guaranteed popped by the
+                // one boundary — `vyrn test` — that recovers from a trap. A
+                // global keeps the copy and stays quadratic.
+                //
+                // The slot is inspected BEFORE the item is evaluated, so a shape
+                // this cannot handle falls through having evaluated nothing.
+                let mut pushed = None;
+                if let Expr::Call { name: fname, args, .. } = value {
+                    if fname == "push"
+                        && args.len() == 2
+                        && matches!(&args[0], Expr::Field { expr, field: f, .. }
+                            if f == field
+                                && matches!(expr.as_ref(), Expr::Var { name: n, .. } if n == name))
+                    {
+                        let snap = scope
+                            .iter()
+                            .rev()
+                            .find_map(|fr| fr.get(name))
+                            .and_then(|s| match &s.v {
+                                Val::Record(map) => match map.get(field) {
+                                    Some(Val::Array(elems)) => Some(elems.clone()),
+                                    _ => None,
+                                },
+                                _ => None,
+                            });
+                        if let Some(mut arr) = snap {
+                            let item = self.expr(&args[1], scope)?;
+                            // Drop the field's own reference to the array. What
+                            // it holds now is discarded either way: unchanged it
+                            // is the snapshot, and changed it is a mid-statement
+                            // write the general path also overwrites.
+                            for fr in scope.iter_mut().rev() {
+                                let Some(slot) = fr.get_mut(name) else { continue };
+                                if let Val::Record(map) = &mut slot.v {
+                                    if let Some(cur) = map.get_mut(field) {
+                                        *cur = Val::Unit;
+                                    }
+                                }
+                                break;
+                            }
+                            let elems = std::rc::Rc::make_mut(&mut arr);
+                            reserve_vec(elems, 1)?;
+                            elems.push(item);
+                            pushed = Some(Val::Array(arr));
+                        }
+                    }
+                }
+                // The write-back is the ordinary one: the fast path only decided
+                // what value the field gets.
+                let v = match pushed {
+                    Some(v) => v,
+                    None => self.expr(value, scope)?,
+                };
                 for frame in scope.iter_mut().rev() {
                     if let Some(Slot {
                         v: Val::Record(map),

@@ -131,6 +131,23 @@ fn a_nested_field_chain_allocates_nothing_either() {
     assert!(calls.is_empty(), "{}\nin:\n{body}", calls.join("\n"));
 }
 
+/// The interpreter timing the two ratios below are built from: the fastest of
+/// three `vyrn run`s of `src`, which must print `expect`.
+fn best_of_3(dir: &std::path::Path, name: &str, src: &str, expect: &str) -> std::time::Duration {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    (0..3)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expect);
+            t.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
 /// The interpreter's half, which this file could not see at all until RFC-0082
 /// M2 — and that is precisely why a quadratic shipped: the IR assertions above
 /// are true, the compiled backends really do write through one buffer, and the
@@ -172,26 +189,53 @@ fn the_interpreter_does_not_copy_the_array_once_per_write() {
          return 0\n}}\n"
     );
 
-    let best_of_3 = |name: &str, src: &str| {
-        let file = dir.join(format!("{name}.vyrn"));
-        std::fs::write(&file, src).unwrap();
-        (0..3)
-            .map(|_| {
-                let t = std::time::Instant::now();
-                let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
-                assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-                assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "31999");
-                t.elapsed()
-            })
-            .min()
-            .unwrap()
-    };
-    let plain = best_of_3("interp-plain", &plain);
-    let field = best_of_3("interp-field", &field);
+    let plain = best_of_3(&dir, "interp-plain", &plain, "31999");
+    let field = best_of_3(&dir, "interp-field", &field, "31999");
     assert!(
         field.as_secs_f64() < 4.0 * plain.as_secs_f64(),
         "an index assignment through a field is copying the array: \
          {field:?} against {plain:?} for the same {N} writes on a local"
+    );
+}
+
+/// The same ratio for `push`, which is the OTHER quadratic M2 found and left:
+/// `t.xs.push(v)` desugars to `t.xs = push(t.xs, v)`, so the general path read
+/// the field into a second `Rc` while the field still held the first, and the
+/// `push` builtin's `make_mut` copied the whole vector per append.
+///
+/// One token apart again — whether the array being appended to lives in a record
+/// field or in a local — and the same N appends. 449x at this N before the fix
+/// (8.90 s against 19.8 ms), 1.1x after. A ratio and not a duration because the
+/// claim is a complexity class and a loaded box slows both sides equally.
+#[test]
+fn the_interpreter_does_not_copy_the_array_once_per_append() {
+    const N: usize = 32_000;
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let local = format!(
+        "fn main() -> Int64 {{\n\
+         let mut xs: Array<Int64> = []\n\
+         let mut i = 0\n\
+         while i < {N} {{ xs.push(i)  i = i + 1 }}\n\
+         print(xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let field = format!(
+        "type T = {{ xs: Array<Int64> }}\n\
+         fn main() -> Int64 {{\n\
+         let mut t = T {{ xs: [] }}\n\
+         let mut i = 0\n\
+         while i < {N} {{ t.xs.push(i)  i = i + 1 }}\n\
+         print(t.xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let local = best_of_3(&dir, "interp-push-local", &local, "31999");
+    let field = best_of_3(&dir, "interp-push-field", &field, "31999");
+    assert!(
+        field.as_secs_f64() < 4.0 * local.as_secs_f64(),
+        "a push through a field is copying the array: \
+         {field:?} against {local:?} for the same {N} appends on a local"
     );
 }
 
