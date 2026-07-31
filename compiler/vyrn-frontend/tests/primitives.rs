@@ -184,7 +184,13 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // ---- The semantics differ observably -------------------------------------
     ("parse", Semantics, "WRAPS on overflow where std/num's parseInt64 refuses"),
     // ---- Movable, refused on a measured cost --------------------------------
-    ("@str", Measured, "float formatting: 511 lines in direct.rs, three engines, every print"),
+    // The float half LEFT via RFC-0081: `std/num`'s `f64Str` is the one
+    // implementation, native and wasm route to it, and `direct.rs`'s 511 lines
+    // are gone. What is still Rust here is integer/bool rendering, and the
+    // interpreter's `{:.6}` — kept deliberately as the differential ORACLE, not
+    // as a third peer, since exact decimal formatting cannot be pinned
+    // exhaustively over 2^64 inputs.
+    ("@str", Measured, "integer rendering; the float case is `std/num`'s `f64Str` (RFC-0081)"),
     ("@concat", Measured, "every string concatenation and every interpolation in the repo"),
     // ---- The one finding, and it is CLOSED -----------------------------------
     // (`@charCount` was here, as `Unjustified`: "three implementations of a
