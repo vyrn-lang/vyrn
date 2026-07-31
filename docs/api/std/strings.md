@@ -3,7 +3,7 @@
 std/strings — string helpers, written in Vyrn itself on the `slice` builtin
 (RFC-0046) and `bytes()`. A `String` is UTF-8 bytes; indices and lengths are
 BYTE offsets, and `slice` keeps every result on a codepoint boundary (a cut
-inside a multi-byte character traps). The case and whitespace helpers are
+inside a multi-byte character is refused). The case and whitespace helpers are
 ASCII-only by necessity — a real Unicode case fold or whitespace class would
 need tables this library does not carry; non-ASCII bytes pass through
 unchanged, so multi-byte text is never corrupted (documented per function).
@@ -14,6 +14,16 @@ functions) available everywhere WITHOUT importing this module — so a single
 `import { .. } from "std/strings"` plus those builtins covers the surface.
 `indexOf`/`lastIndexOf` return an honest `Option<Int64>` (the house idiom —
 no `-1` sentinel), `None` when the needle is absent.
+
+**`slice` returns `Result<String, SliceError>`** since RFC-0079 M3, so every
+call below says what it knows. Nearly all of them cut at an offset this module
+just found by scanning `s` — at an ASCII byte, or at a needle match, and a
+valid UTF-8 needle can only match on a character boundary (the
+self-synchronizing argument in `std/strpred`'s doc) — so they take
+`?? panic("…")` with the reason written out, and `grep -n "?? panic"` over this
+file is the list of ranges claimed to be correct by construction. The three
+that can genuinely receive a bad range — `substring`, `padStart`, `padEnd` —
+say so in their own words.
 
 ## fromBytesOr
 
@@ -53,9 +63,19 @@ The elements of `parts` joined with `sep` between them.
 fn substring(s: String, start: Int64, end: Int64) -> String
 ```
 
-A byte-range substring — a friendly alias of the `slice` builtin. `start`/`end`
-are byte offsets; a cut inside a multi-byte UTF-8 character or an out-of-range
-offset traps (RFC-0046).
+A byte-range substring, and the ONE place in `std/` that turns a `SliceError`
+into a crash. `start`/`end` are byte offsets; an out-of-range offset or a cut
+inside a multi-byte UTF-8 character ends the process (RFC-0046, RFC-0079 M3).
+
+This is what `slice` used to be, and it is deliberately still here rather than
+pushed onto the ten callers: every one of them computes its offsets from a
+scan of the same String and cannot pass a bad range, so returning
+`Result<String, SliceError>` from here would relocate the crash into ten places
+that have nothing to put in an `Err` arm. A caller that CAN receive a bad range
+calls `slice` and matches — that is the whole point of the return type.
+
+The message says more than the trap it replaces did: the builtin had two fixed
+strings and no way to name the offset, and the enum carries it.
 
 ## indexOf
 
@@ -86,8 +106,8 @@ fn split(s: String, sep: String) -> Array<String>
 Split `s` on every occurrence of `sep`. Adjacent/leading/trailing separators
 yield empty segments (like Rust/JS). An EMPTY separator returns `[s]` unsplit:
 per-byte "char" splitting would cut multi-byte UTF-8 characters (a `slice`
-trap), so it is deliberately not done — iterate codepoints another way if you
-need them.
+failure), so it is deliberately not done — iterate codepoints another way if
+you need them.
 
 ## lines
 
@@ -167,7 +187,8 @@ fn padStart(s: String, len: Int64, fill: String) -> String
 
 `s` left-padded with `fill` to at least `len` BYTES. `fill` should be ASCII
 (typically a single character such as `" "` or `"0"`); a multi-byte `fill`
-that does not tile the padding width evenly traps on a codepoint boundary.
+that does not tile the padding width evenly panics on a codepoint boundary —
+the one failure here a caller can actually cause, and the `panic` says so.
 A `s` already `len` bytes or longer is returned unchanged.
 
 ## padEnd

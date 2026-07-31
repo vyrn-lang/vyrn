@@ -1,6 +1,6 @@
 # RFC-0079 — Failure Is a Value, and Crashing Is the Caller's Call
 
-- **Status:** **Accepted.** M1 and M2 shipped; M3 not yet started.
+- **Status:** **Accepted and complete.** M1, M2 and M3 shipped.
 - **Depends on:** RFC-0078 (which recorded this as open language question **B**
   and refused to decide it), RFC-0009 (`Validation`/`Issue` — the existing error
   model, and why this is not it), RFC-0060 (divergence-aware movecheck, which
@@ -322,7 +322,7 @@ what it actually guarantees is pinned as such: `??` emits exactly the frees the
 `match` a user would write by hand emits. When arm binders become droppable, both
 spellings gain it together, which is the whole reason `??` is a `match`.
 
-### M3 — `slice` becomes Vyrn
+### M3 — `slice` becomes Vyrn — **shipped**
 
 1. `std/strpred` exports `SliceError` and a `slice` returning
    `Result<String, SliceError>`, built from the existing `sliceV` body with the
@@ -344,6 +344,72 @@ String containing a NUL where the builtin returns the substring, because
 `stringFromBytes` rejects NUL (RFC-0014's rule). No program can construct such a
 String — there is no `\0` escape, and the lexer now rejects a NUL in a literal
 outright — so the case is unreachable from source.
+
+**As landed.** The five numbered steps happened as written and the deletion was
+larger than the list implies: `@__vyrn_bytecopy` went too (its only caller was
+`slice`), and so did the direct backend's `rt.slice` slot and its 60-instruction
+body — 62 → 61 in the census, and the trap catalogue **shrank** by two rows,
+which is the trade RFC-0078's `@abort(kind)` design would have made in the
+opposite direction.
+
+Six things the plan above did not have right.
+
+- **The routed function is `strpred$sliceV`, not `strpred$slice`.** `slice` is a
+  RESERVED word, so a module cannot declare one — which is the reason the whole
+  `V`-suffix convention exists, and step 2 forgot it. `sliceV` therefore does not
+  "survive as a separate function": it IS `slice`, exactly as `containsV` is
+  `contains`, and `examples/strpredbytes.vyrn`'s slice rows became pins for the
+  same reason the predicate rows did in RFC-0078 M4c.
+- **`slice` is the first routed builtin whose refusal is a CHECK error.** The
+  other eleven are typed by an answer the checker can write down (`Bool`,
+  `Result<String, String>`), so a source with no std root checks clean and each
+  engine refuses by name at lowering. `slice` answers
+  `Result<String, SliceError>`, and `SliceError` is a `std/strpred` declaration —
+  so the checker reads the type out of the link (`self.sigs`) and, when the module
+  is not there, refuses with the engines' own wording and a line number. Reading
+  it rather than restating it is the point: a second spelling of a std type inside
+  the compiler is the multiplicity the routing exists to remove.
+- **`Err(SliceError.OutOfRange(i))` is not spellable.** The example in §1 above
+  shows a nested pattern, and `Pattern` has none — `Err(e)` binds the payload and
+  a second `match e` reads the variant, which is what every call site here does.
+  The diagnostics claim is unaffected (the index is carried either way), but the
+  syntax in §1 is aspirational, not a description.
+- **A `match` whose EVERY arm diverges was broken on both backends**, and M1 could
+  not have caught it: M1 pinned every join shape with the panic NOT taken, where a
+  surviving arm supplies the value and type. With no surviving arm the merge is
+  `Never` and is *still in value position*. The textual emitter reported `Unit`,
+  handed back the empty string, and wrote `phi ptr [ %t12, %a ], [ , %b ]`, which
+  clang rejects; the direct backend left the enclosing block owing an i32 with
+  nothing on the stack, because `unreachable` inside an arm goes polymorphic only
+  until that arm's `end`. Fixed in both (`void_merge_value`, `Fn_::diverged`), and
+  `std/strings`'s `substring` is the first construct in the repo with the shape.
+- **"`std/` never panics" is overstated, and it was load-bearing above.** Three
+  functions can genuinely receive a bad range and cannot carry it in their type:
+  `substring` (arbitrary caller offsets — changing it to a `Result` would relocate
+  the crash into ten callers that have nothing to put in an `Err` arm), and
+  `padStart`/`padEnd` (a multi-byte `fill` that does not tile the padding width).
+  They panic, and the message names the function and the offset, which the two
+  fixed strings could not. The byte-parity argument survives intact anyway — a
+  library `panic` is deterministic text, so all three engines print it identically
+  — but the correct claim is "**no failure in `std/` has two authors**", not "no
+  failure in `std/` crashes".
+- **The other ~23 sites are correct by construction for ONE reason**, not
+  twenty-three. Every cut in `std/scan`, `std/contract` and the rest of
+  `std/strings` is at 0, at `byteLength`, or at an offset the same walk found by
+  comparing a byte against an **ASCII** constant (a quote, a delimiter, a comment
+  marker, a separator match) — and a multi-byte character contains no ASCII byte.
+  `std/scan`'s eight sites therefore share one written-out reason (`walked()`)
+  rather than inventing eight; the rest name their own stop condition.
+
+The `SliceError` variants are `OutOfRange(Int64)` and `SplitsCharacter(Int64)` as
+proposed. `OutOfRange` blames `start` for a negative start and `end` for the other
+two clauses, since an `end` that precedes its `start` is the one that is too
+small; the range is checked before the boundary, matching all three deleted
+implementations. The boundary check had to be **written out** rather than left to
+`stringFromBytes` — naming the offending offset needs the two cut points tested
+individually — and `s[n]` is out of bounds in Vyrn where the builtins could read
+the NUL terminator, so a cut at `byteLength` is skipped as a boundary by
+definition.
 
 ## What this does not decide
 
