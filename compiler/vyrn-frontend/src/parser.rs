@@ -637,6 +637,132 @@ fn is_index_field_chain(e: &Expr) -> bool {
     }
 }
 
+/// The plain-variable receiver an in-place container mutation writes through,
+/// for a base expression that may be a record field or an array element
+/// (RFC-0082 M1).
+///
+/// `a[i] = v`, `a[i].f = v`, `a.pop()` and friends all need the container's
+/// header to live in a *slot* the backends can load and store — a local
+/// binding. `r.a` and `rows[0]` are not slots, so they move out into an
+/// unspellable temp, get mutated there, and move back. That is the idiom users
+/// write by hand today and it is O(1) per write, not a copy: RFC-0082 measured
+/// it flat at 57 / 53 / 65 ms for N = 5,000 / 10,000 / 20,000. Doing it as a
+/// desugar is why this milestone touches no backend — the alternative was a
+/// second addressing mode in three of them.
+///
+/// Returns the receiver name plus the statements that must bracket the
+/// mutation: `pre` before it, `post` after it, both outermost-first/-last so an
+/// arbitrarily deep chain (`r.inner.a[i] = v`) nests correctly. A base that is
+/// neither (a call result, a temporary) yields `None` and keeps today's error.
+fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<Stmt>)> {
+    match base {
+        // Already a slot: nothing to move, and the common case stays a single
+        // statement.
+        Expr::Var { name, .. } => Some((name.clone(), Vec::new(), Vec::new())),
+        Expr::Field { expr, field, .. } => {
+            let (parent, mut pre, mut post) = place_receiver(expr, line)?;
+            // Unspellable (contains `[`), like the `a[i].f = v` element temp:
+            // it cannot collide with a real identifier and is filtered out of
+            // the symbol/completion index, but reads naturally if it surfaces
+            // in a diagnostic ("`r.xs[]` holds Int64 but ..").
+            let tmp = format!("{parent}.{field}[]");
+            pre.push(Stmt::Let {
+                name: tmp.clone(),
+                mutable: true,
+                ty: None,
+                value: Expr::Field {
+                    expr: Box::new(Expr::Var {
+                        name: parent.clone(),
+                        line,
+                    }),
+                    field: field.clone(),
+                    line,
+                },
+                line,
+            });
+            post.insert(
+                0,
+                Stmt::SetField {
+                    name: parent,
+                    field: field.clone(),
+                    value: Expr::Var {
+                        name: tmp.clone(),
+                        line,
+                    },
+                    line,
+                },
+            );
+            Some((tmp, pre, post))
+        }
+        // `rows[i][j] = v` — an element that is itself a container. Same shape
+        // as `a[i].push(v)`, which has always written back this way; the index
+        // is evaluated on both the read and the store, as in `a[i].f = v`.
+        Expr::Call { name, args, .. } if name == "at" && args.len() == 2 => {
+            let (parent, mut pre, mut post) = place_receiver(&args[0], line)?;
+            let tmp = format!("{parent}[]");
+            let load = Expr::Call {
+                name: "at".to_string(),
+                args: vec![
+                    Expr::Var {
+                        name: parent.clone(),
+                        line,
+                    },
+                    args[1].clone(),
+                ],
+                line,
+            };
+            pre.push(Stmt::Let {
+                name: tmp.clone(),
+                mutable: true,
+                ty: None,
+                value: load,
+                line,
+            });
+            post.insert(
+                0,
+                Stmt::IndexSet {
+                    name: parent,
+                    index: args[1].clone(),
+                    value: Expr::Var {
+                        name: tmp.clone(),
+                        line,
+                    },
+                    line,
+                },
+            );
+            Some((tmp, pre, post))
+        }
+        _ => None,
+    }
+}
+
+/// `r.a.pop()`, `rows[i].swapRemove(j)`, `r.m.remove(k)` — the mutating methods
+/// whose receiver must be a slot the backends can store the shrunk header back
+/// into (the checker and all three backends demand a plain variable). Rewrite
+/// the receiver in place to a moved-out temp and hand back the statements that
+/// must bracket it (RFC-0082 M1).
+///
+/// Unlike `a[i] = v` these are EXPRESSIONS, and the move-back is only sound
+/// where nothing observes the container between the mutation and it. So callers
+/// apply this to a whole statement — `r.a.pop()` alone, or `let x = r.a.pop()`
+/// — and nothing else: in `if r.a.pop() == None { .. r.a .. }` the body would
+/// read the field before the move-back landed, so that keeps today's error
+/// rather than a silently stale read.
+fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<Stmt>)> {
+    let Expr::Call { name, args, .. } = e else {
+        return None;
+    };
+    if !matches!(name.as_str(), "@pop" | "@swapRemove" | "@remove") {
+        return None;
+    }
+    let (recv, pre, post) = place_receiver(args.first()?, line)?;
+    if pre.is_empty() {
+        return None; // already a plain variable — nothing to move
+    }
+    args[0] = Expr::Var { name: recv, line };
+    Some((pre, post))
+}
+
 impl Parser {
     // ---- token cursor helpers -------------------------------------------
 
@@ -2693,6 +2819,15 @@ impl Parser {
         })
     }
 
+    /// Return a multi-statement desugar as its first statement plus a queue:
+    /// [`Parser::extra_stmts`] is spliced in right after the primary one, in
+    /// order (see [`Parser::block`]).
+    fn spliced(&mut self, mut stmts: Vec<Stmt>) -> Stmt {
+        let head = stmts.remove(0);
+        self.extra_stmts.extend(stmts);
+        head
+    }
+
     fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
         let line = self.line();
         match self.peek() {
@@ -2712,8 +2847,23 @@ impl Parser {
                     None
                 };
                 self.eat(&Tok::Eq)?;
-                let value = self.expr()?;
+                let mut value = self.expr()?;
                 self.eat_semi();
+                // `let x = r.a.pop()` — the receiver moves out and back around
+                // this statement (RFC-0082 M1). Only when the mutating call IS
+                // the whole initializer, so nothing can observe the container
+                // between the mutation and the move-back.
+                if let Some((mut pre, post)) = hoist_mutating_receiver(&mut value, line) {
+                    pre.push(Stmt::Let {
+                        name,
+                        mutable,
+                        ty,
+                        value,
+                        line,
+                    });
+                    pre.extend(post);
+                    return Ok(self.spliced(pre));
+                }
                 Ok(Stmt::Let {
                     name,
                     mutable,
@@ -2842,25 +2992,29 @@ impl Parser {
                 if *self.peek() == Tok::Eq {
                     if let Expr::Call { name, args, .. } = &e {
                         if name == "at" && args.len() == 2 {
-                            if let Expr::Var { name: recv, .. } = &args[0] {
-                                let recv = recv.clone();
+                            // The array may live in a slot already, or in a
+                            // record field / array element that `place_receiver`
+                            // moves out and back around the store (RFC-0082 M1).
+                            if let Some((recv, mut pre, post)) = place_receiver(&args[0], line) {
                                 let index = args[1].clone();
                                 self.advance(); // eat `=`
                                 let value = self.expr()?;
                                 self.eat_semi();
-                                return Ok(Stmt::IndexSet {
+                                pre.push(Stmt::IndexSet {
                                     name: recv,
                                     index,
                                     value,
                                     line,
                                 });
+                                pre.extend(post);
+                                return Ok(self.spliced(pre));
                             }
                             return Err(Diagnostic::error(
                                 line,
                                 self.col(),
                                 "parse",
                                 "the left side of an index assignment `[i] = ..` must be \
-                                 a plain array variable"
+                                 an array variable, a record field, or an array element"
                                     .to_string(),
                             ));
                         }
@@ -2877,9 +3031,9 @@ impl Parser {
                     if let Expr::Field { expr, field, .. } = &e {
                         if let Expr::Call { name, args, .. } = expr.as_ref() {
                             if name == "at" && args.len() == 2 {
-                                if let Expr::Var { name: recv, .. } = &args[0] {
-                                    let recv = recv.clone();
-                                    let load = (**expr).clone();
+                                if let Some((recv, mut pre, post)) = place_receiver(&args[0], line)
+                                {
+                                    let index = args[1].clone();
                                     let field = field.clone();
                                     self.advance(); // eat `=`
                                     let value = self.expr()?;
@@ -2891,37 +3045,50 @@ impl Parser {
                                     // naturally if it surfaces in a SetField
                                     // diagnostic ("record `ps[]` has no field ..").
                                     let tmp = format!("{recv}[]");
-                                    // `@tmp.f = v` then `a[i] = @tmp` follow the
-                                    // returned `let mut @tmp = a[i]`.
-                                    self.extra_stmts.push(Stmt::SetField {
+                                    // `let mut @tmp = a[i]`, `@tmp.f = v`, then
+                                    // `a[i] = @tmp` — inside whatever move-out /
+                                    // move-back `place_receiver` asked for.
+                                    pre.push(Stmt::Let {
+                                        name: tmp.clone(),
+                                        mutable: true,
+                                        ty: None,
+                                        value: Expr::Call {
+                                            name: "at".to_string(),
+                                            args: vec![
+                                                Expr::Var {
+                                                    name: recv.clone(),
+                                                    line,
+                                                },
+                                                index.clone(),
+                                            ],
+                                            line,
+                                        },
+                                        line,
+                                    });
+                                    pre.push(Stmt::SetField {
                                         name: tmp.clone(),
                                         field,
                                         value,
                                         line,
                                     });
-                                    self.extra_stmts.push(Stmt::IndexSet {
+                                    pre.push(Stmt::IndexSet {
                                         name: recv,
-                                        index: args[1].clone(),
+                                        index,
                                         value: Expr::Var {
-                                            name: tmp.clone(),
+                                            name: tmp,
                                             line,
                                         },
                                         line,
                                     });
-                                    return Ok(Stmt::Let {
-                                        name: tmp,
-                                        mutable: true,
-                                        ty: None,
-                                        value: load,
-                                        line,
-                                    });
+                                    pre.extend(post);
+                                    return Ok(self.spliced(pre));
                                 }
                                 return Err(Diagnostic::error(
                                     line,
                                     self.col(),
                                     "parse",
-                                    "the left side of `[i].field = ..` must be a plain \
-                                     array variable"
+                                    "the left side of `[i].field = ..` must be an array \
+                                     variable, a record field, or an array element"
                                         .to_string(),
                                 ));
                             }
@@ -2955,8 +3122,15 @@ impl Parser {
                 // `r.a.b.push(v)` / `a[i].f.push(v)` beyond one level of write-back)
                 // cannot be stored back and would silently drop the push, so it is a
                 // hard parse error rather than a no-op. `pop`/`swapRemove`/`remove`
-                // stay variable-only (the checker rejects field/element receivers);
-                // they return a value AND mutate, so there is no statement to desugar.
+                // return a value AND mutate, so they are handled below instead:
+                // the receiver moves out into a temp and back around this one
+                // statement (RFC-0082 M1).
+                let mut e = e;
+                if let Some((mut pre, post)) = hoist_mutating_receiver(&mut e, line) {
+                    pre.push(Stmt::Expr(e));
+                    pre.extend(post);
+                    return Ok(self.spliced(pre));
+                }
                 if let Expr::Call { name, args, .. } = &e {
                     if name == "push" {
                         match args.first() {
@@ -5001,21 +5175,116 @@ mod tests {
 
     #[test]
     fn index_field_assign_on_non_variable_array_is_rejected() {
-        // The left side must be a plain array variable, not a call result.
+        // A call result is not a place: there is nowhere to move the array back
+        // to, so no desugar can rescue it.
         let src = "fn main() -> Int64 { f()[0].x = 9  return 0 }";
         let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("plain array variable"), "{}", e.message);
+        assert!(
+            e.message.contains("record field, or an array element"),
+            "{}",
+            e.message
+        );
+    }
+
+    // ---- RFC-0082 M1: index assignment through a place, not just a variable --
+
+    /// The move-not-copy pin, structurally. `s.xs[0] = 9` must lower to exactly
+    /// three statements — move the header out, store, move it back — and NOT to
+    /// anything that reads the array elementwise. A copying lowering would be
+    /// just as correct and quadratic, so behaviour cannot tell them apart; the
+    /// statement count and the absence of any loop or `push` can.
+    #[test]
+    fn index_assign_through_a_record_field_is_a_move() {
+        let p =
+            parse_src("fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[0] = 9  return 0 }");
+        let stmts = &p.functions[0].body.stmts;
+        // [0] is the `let mut s = ..`; the desugar is [1..=3].
+        match &stmts[1] {
+            Stmt::Let {
+                name,
+                mutable: true,
+                value: Expr::Field { field, .. },
+                ..
+            } => {
+                assert_eq!(name, "s.xs[]");
+                assert_eq!(field, "xs");
+            }
+            other => panic!("expected `let mut s.xs[] = s.xs`, got {other:?}"),
+        }
+        match &stmts[2] {
+            Stmt::IndexSet { name, .. } => assert_eq!(name, "s.xs[]"),
+            other => panic!("expected `s.xs[][0] = 9`, got {other:?}"),
+        }
+        match &stmts[3] {
+            Stmt::SetField {
+                name,
+                field,
+                value: Expr::Var { name: v, .. },
+                ..
+            } => {
+                assert_eq!((name.as_str(), field.as_str(), v.as_str()), ("s", "xs", "s.xs[]"));
+            }
+            other => panic!("expected `s.xs = s.xs[]`, got {other:?}"),
+        }
+        assert_eq!(stmts.len(), 5, "three statements plus the let and the return");
     }
 
     #[test]
-    fn index_assign_on_a_record_field_array_is_rejected() {
-        // `s.xs[i] = v` where `xs` is a record-field array is NOT a plain array
-        // variable, so it is a parse error today — pinning the CURRENT behavior.
-        // (Whether index-assign should gain the same field write-back that `push`
-        // has is a DEFERRED design question; see NOTES-dogfood-bin.md.)
-        let src = "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[0] = 9  return 0 }";
-        let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("plain array variable"), "{}", e.message);
+    fn index_assign_through_a_nested_field_nests_the_move() {
+        // Two fields deep: outermost moves out first and back last.
+        let p = parse_src(
+            "fn main() -> Int64 { let mut o: O = O { i: I { xs: [1] } }  o.i.xs[0] = 9  return 0 }",
+        );
+        let names: Vec<String> = p.functions[0]
+            .body
+            .stmts
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect();
+        let joined = names.join("\n");
+        for needle in [
+            r#"Let { name: "o.i[]""#,
+            r#"Let { name: "o.i[].xs[]""#,
+            r#"IndexSet { name: "o.i[].xs[]""#,
+            r#"SetField { name: "o.i[]", field: "xs""#,
+            r#"SetField { name: "o", field: "i""#,
+        ] {
+            assert!(joined.contains(needle), "missing {needle} in\n{joined}");
+        }
+    }
+
+    #[test]
+    fn pop_through_a_record_field_moves_out_and_back() {
+        // `pop` mutates AND returns, so it is hoisted around the whole
+        // statement rather than desugared inside an expression.
+        let p = parse_src(
+            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  let x = s.xs.pop()  return 0 }",
+        );
+        let stmts = &p.functions[0].body.stmts;
+        assert!(matches!(&stmts[1], Stmt::Let { name, .. } if name == "s.xs[]"));
+        match &stmts[2] {
+            Stmt::Let {
+                name,
+                value: Expr::Call { name: c, args, .. },
+                ..
+            } => {
+                assert_eq!((name.as_str(), c.as_str()), ("x", "@pop"));
+                assert!(matches!(&args[0], Expr::Var { name, .. } if name == "s.xs[]"));
+            }
+            other => panic!("expected `let x = s.xs[].pop()`, got {other:?}"),
+        }
+        assert!(matches!(&stmts[3], Stmt::SetField { name, field, .. } if name == "s" && field == "xs"));
+    }
+
+    #[test]
+    fn pop_inside_a_branching_statement_is_still_rejected() {
+        // The move-back cannot be placed anywhere the branch body would not see
+        // a stale field, so this keeps the checker's error rather than becoming
+        // a silently wrong read.
+        let src = "fn main() -> Int64 { let mut s: S = S { xs: [1] }  if s.xs.pop() == None { return 1 }  return 0 }";
+        let p = parse_src(src);
+        // The parser leaves it alone: the receiver is still the field.
+        assert!(format!("{:?}", p.functions[0].body.stmts).contains(r#"Call { name: "@pop", args: [Field"#));
     }
 
     // ---- statement-position `push` writes back through its receiver place ---
