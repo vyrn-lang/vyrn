@@ -17,7 +17,11 @@ use common::*;
 fn body_of(src: &str, name: &str) -> String {
     let dir = std::env::temp_dir().join("vyrn-places");
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join(format!("{name}.vyrn"));
+    // Two tests here both emit `fn bump`, and cargo runs them concurrently, so
+    // the file name has to be unique per call and not per function.
+    static NTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = dir.join(format!("{name}-{nth}.vyrn"));
     std::fs::write(&file, src).unwrap();
     let out = vyrn().arg("emit-ir").arg(&file).output().expect("vyrn emit-ir");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
