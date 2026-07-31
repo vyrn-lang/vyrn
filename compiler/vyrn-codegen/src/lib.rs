@@ -1662,42 +1662,19 @@ impl<'a> Gen<'a> {
         if matches!(self.resolve(to), Type::Fn(..)) && matches!(self.resolve(from), Type::Fn(..)) {
             return Ok((op, to.clone()));
         }
-        // An Option/Result whose payload representation changed: an array
-        // literal is boxed by `Some`/`Ok`/`Err` as a fixed `[N x T]` value, but
-        // the target payload is a growable `Array<T>` (e.g. `Ok([1,2,3])`
-        // returned as `Result<Array<Int64>, E>`). The boxed bytes must be
-        // re-materialized in the target representation, or a later `match`/`?`
-        // decodes them at the wrong width (the raw elements read as a
-        // `{ptr,len,cap}` header). Branch on the tag and rebuild only the arm
-        // whose payload actually reshapes; the other arm — including the
-        // placeholder type the constructor supplies for the unused side — keeps
-        // its words untouched. (Enum construction fixes this at the source; this
-        // covers the two built-in sum types, whose target is only known at the
-        // outer flow.)
-        {
-            let (rf, rt) = (self.resolve(from), self.resolve(to));
-            let arms: Option<((Type, Type), Option<(Type, Type)>)> = match (&rf, &rt) {
-                (Type::Option(fa), Type::Option(ta)) => {
-                    Some((((**fa).clone(), (**ta).clone()), None))
-                }
-                (Type::Result(fo, fe), Type::Result(to_ok, te)) => Some((
-                    ((**fo).clone(), (**to_ok).clone()),
-                    Some(((**fe).clone(), (**te).clone())),
-                )),
-                _ => None,
-            };
-            if let Some((one, zero)) = arms {
-                let reshapes = |c: &Self, f: &Type, t: &Type| {
-                    matches!((c.resolve(f), c.resolve(t)), (Type::ArrayN(..), Type::Array(_)))
-                };
-                let needs = reshapes(self, &one.0, &one.1)
-                    || zero.as_ref().is_some_and(|(f, t)| reshapes(self, f, t));
-                if needs {
-                    let v = self.rebox_sum(&op, &one, zero.as_ref())?;
-                    return Ok((v, to.clone()));
-                }
-            }
-        }
+        // NOTE: there is deliberately no Option/Result payload reshape here.
+        // Until RFC-0082 the boxed payload of `Ok([1,2,3])` was a fixed
+        // `[N x T]` while the target wanted the growable `Array<T>` triple, and
+        // this site repaired it afterwards by branching on the tag and
+        // re-materializing the arm (`rebox_sum`). That repair is gone because
+        // `Some`/`Ok`/`Err` now coerce the payload INTO the expected type before
+        // boxing it, as the user-enum constructor always has — so the words are
+        // right at the source and there is nothing to reinterpret. Nothing else
+        // can produce an `Option<Array<T, N>>` that reaches an `Array<T>`
+        // target: the checker refuses that flow for any expression other than an
+        // array literal directly under a constructor (`Option<Array<Int64, 3>>`
+        // is not assignable to `Option<Array<Int64>>`), which is exactly the case
+        // construction now covers.
         // Fixed arrays coerce element-wise (unrolled), so `[x, y]` flowing into
         // an `Array<Age, 2>` validates every element.
         if let (Type::ArrayN(fi, fnn), Type::ArrayN(ti, tn)) =
@@ -3710,6 +3687,30 @@ impl<'a> Gen<'a> {
         v
     }
 
+    /// Coerce a `Some`/`Ok`/`Err` payload into the type the enclosing expectation
+    /// asks for, BEFORE it is encoded into the aggregate's words. The checker
+    /// already reports these constructors at the expected payload type (its
+    /// `Some` arm returns `Option<want>`, not `Option<typeof x>`), so this is the
+    /// runtime half of a coercion the frontend has already accepted — including
+    /// the `where` predicate, which is why native alone used to build an
+    /// `Option<Age>` out of a runtime `5` (RFC-0082 finding 7). The user-enum
+    /// constructor below has always done this against its DECLARED payload types;
+    /// the two built-in sums are the ones that never did.
+    ///
+    /// An unresolved type parameter is left alone, as in the enum path: the
+    /// inline-monomorphized payload keeps the argument's own type.
+    fn coerce_into_payload(
+        &mut self,
+        v: String,
+        ty: Type,
+        want: Option<&Type>,
+    ) -> Result<(String, Type), String> {
+        match want {
+            Some(w) if !matches!(self.resolve(w), Type::Param(_)) => self.coerce(v, &ty, w),
+            _ => Ok((v, ty)),
+        }
+    }
+
     /// Encode an Option/Result payload into the aggregate's two words `(w0, w1)`.
     /// A `Ref` (two words) fits inline with no heap box; scalars use `w0`; wider
     /// types (records/enums) are boxed and the pointer stored in `w0`.
@@ -3762,78 +3763,6 @@ impl<'a> Gen<'a> {
             }
             _ => self.unbox_payload(w0, ty),
         }
-    }
-
-    /// Rebuild an Option/Result aggregate `{i1,i64,i64}` so each arm's payload
-    /// is re-encoded from its old declared type into the new one. `one` is the
-    /// tag-1 (`Some`/`Ok`) payload; `zero` the tag-0 (`Err`) payload, absent for
-    /// `Option` (its `None` arm carries nothing). The tag is a single bit, so
-    /// this is always a two-way branch; each arm is rebuilt only when its
-    /// representation actually reshapes (see [`Self::rebuild_arm`]).
-    fn rebox_sum(
-        &mut self,
-        agg: &str,
-        one: &(Type, Type),
-        zero: Option<&(Type, Type)>,
-    ) -> Result<String, String> {
-        let tagv = self.fresh_tmp();
-        self.emit(format!("{tagv} = extractvalue {{ i1, i64, i64 }} {agg}, 0"));
-        let one_l = self.fresh_label("rebox.one");
-        let zero_l = self.fresh_label("rebox.zero");
-        let end_l = self.fresh_label("rebox.end");
-        self.emit_term(format!("br i1 {tagv}, label %{one_l}, label %{zero_l}"));
-
-        self.emit_label(&one_l);
-        let one_v = self.rebuild_arm(agg, 1, &one.0, &one.1)?;
-        let one_b = self.cur_block.clone();
-        self.emit_term(format!("br label %{end_l}"));
-
-        self.emit_label(&zero_l);
-        let zero_v = match zero {
-            Some((f, t)) => self.rebuild_arm(agg, 0, f, t)?,
-            None => agg.to_string(),
-        };
-        let zero_b = self.cur_block.clone();
-        self.emit_term(format!("br label %{end_l}"));
-
-        self.emit_label(&end_l);
-        let res = self.fresh_tmp();
-        self.emit(format!(
-            "{res} = phi {{ i1, i64, i64 }} [ {one_v}, %{one_b} ], [ {zero_v}, %{zero_b} ]"
-        ));
-        Ok(res)
-    }
-
-    /// Re-encode one Option/Result arm's payload from `from` to `to`. When the
-    /// representation is unchanged — including the constructor's placeholder
-    /// type on the arm this value never actually is — the aggregate is returned
-    /// untouched, so no bogus scalar⇄heap coercion is emitted on a dead arm.
-    /// Only the `ArrayN → Array` reshape (the sole shape an array *literal* takes
-    /// before coercion) is materialized.
-    fn rebuild_arm(
-        &mut self,
-        agg: &str,
-        tag: i64,
-        from: &Type,
-        to: &Type,
-    ) -> Result<String, String> {
-        if !matches!((self.resolve(from), self.resolve(to)), (Type::ArrayN(..), Type::Array(_))) {
-            return Ok(agg.to_string());
-        }
-        let w0 = self.fresh_tmp();
-        let w1 = self.fresh_tmp();
-        self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {agg}, 1"));
-        self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {agg}, 2"));
-        let v = self.decode_payload(&w0, &w1, from);
-        let (cv, _) = self.coerce(v, from, to)?;
-        let (nw0, nw1) = self.encode_payload(&cv, to);
-        let a = self.fresh_tmp();
-        let b = self.fresh_tmp();
-        let c = self.fresh_tmp();
-        self.emit(format!("{a} = insertvalue {{ i1, i64, i64 }} undef, i1 {tag}, 0"));
-        self.emit(format!("{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {nw0}, 1"));
-        self.emit(format!("{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 {nw1}, 2"));
-        Ok(c)
     }
 
     /// Emit an arm body, binding the payload (decoded to `payload_ty`) if the
@@ -6955,6 +6884,7 @@ impl<'a> Gen<'a> {
                 self.expect.pop();
             }
             let (v, ty) = r?;
+            let (v, ty) = self.coerce_into_payload(v, ty, payload_expect.as_ref())?;
             let (w0, w1) = self.encode_payload(&v, &ty);
             let a = self.fresh_tmp();
             let b = self.fresh_tmp();
@@ -6990,6 +6920,7 @@ impl<'a> Gen<'a> {
                 self.expect.pop();
             }
             let (v, ty) = r?;
+            let (v, ty) = self.coerce_into_payload(v, ty, payload_expect.as_ref())?;
             let (w0, w1) = self.encode_payload(&v, &ty);
             let a = self.fresh_tmp();
             let b = self.fresh_tmp();
@@ -9717,24 +9648,37 @@ mod tests {
     }
 
     #[test]
-    fn result_array_payload_rematerializes_on_coerce() {
-        // RFC-0026 regression for the built-in sum types: `Ok([..])` boxes the
-        // array as a fixed `[N x T]`, but the declared return type wants the
-        // growable `Array<T>`. Coercing the `Result` into the return type must
-        // re-materialize the boxed payload in the target representation (a
-        // tag-branch rebuild), or `match` decodes it at the wrong width.
+    fn result_array_payload_is_boxed_in_the_target_representation() {
+        // RFC-0026 regression for the built-in sum types: `Ok([..])` writes an
+        // array literal, a fixed `[N x T]` value, into a `Result` whose declared
+        // payload is the growable `Array<T>`. Box the literal as it stands and
+        // `match` decodes it at the wrong width — the raw elements read as a
+        // `{ptr,len,cap}` header.
+        //
+        // This used to be repaired after the fact, by branching on the tag at the
+        // coercion into the return type and re-materializing the arm
+        // (`rebox_sum`). RFC-0082 made the constructor coerce its payload into
+        // the expected type before boxing — it had to, so that a validated
+        // payload runs its predicate — and that reshapes the literal at the
+        // source, so the repair became unreachable and went. The invariant is the
+        // same one and the tell is the same one `enum_array_payload_boxes_
+        // growable_triple` uses: the boxed payload is the growable triple, and
+        // the arm loads one back. The absence of the branch is asserted too,
+        // because a `rebox` reappearing would mean construction had stopped
+        // reshaping and something downstream was papering over it.
         let src = "fn load() -> Result<Array<Int64>, String> { return Ok([1, 2, 3]); } \
                    fn main() -> Int64 { return match load() { Ok(xs) => xs.length, Err(e) => 0 }; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("rebox.one") && ir.contains("rebox.zero"),
-            "coercing Result<ArrayN,_> into Result<Array,_> must rebuild the \
-             payload arm-by-arm:\n{ir}"
+            ir.contains("store { ptr, i64, i64 }"),
+            "the boxed Ok payload must be the growable triple, not the raw \
+             `[N x T]` literal:\n{ir}"
         );
         assert!(
-            ir.contains("phi { i1, i64, i64 }"),
-            "the re-materialized aggregate merges through a phi:\n{ir}"
+            ir.contains("load { ptr, i64, i64 }"),
+            "the Ok arm must unbox the payload as the growable triple:\n{ir}"
         );
+        assert!(!ir.contains("rebox."), "the payload is reshaped at construction, not repaired after it:\n{ir}");
     }
 
     #[test]
