@@ -165,8 +165,27 @@ export type SliceError = | OutOfRange(Int64) | SplitsCharacter(Int64)
 /// `SplitsCharacter` rather than inventing a third variant for a case no program
 /// can reach, and the boundary checks above are what make the two cut points the
 /// only honest thing left to name.
+/// **`s.byteLength` and `s[i]`, not `byteLengthV(s)` and `bytes(s)`** — the one
+/// place in this module where the difference was measured and mattered. Both of
+/// those allocate a copy of the WHOLE string, and `slice` is called once per token
+/// by `std/scan`, so a scanner over a large source would copy that source once per
+/// token. That is quadratic, and it is the shape of the 240x string-append bug
+/// RFC-0076 found. The byte read `s[i]` is the same O(1) view `startsWithV` and
+/// `containsV` are written on, and `s.byteLength` is `strlen` (and folds).
+///
+/// What remains is a real cost and is recorded rather than chased: the builtin's
+/// body was one `memcpy`, and this is a push loop plus `stringFromBytes`, which
+/// re-walks the UTF-8 DFA over bytes the boundary check above already proved
+/// valid. It is not removable — `stringFromBytes` is the ONLY construction of a
+/// `String` from bytes there is (the census's `View` row) — and it is the honest
+/// price of the runtime being Vyrn. It is also, measurably, not the expensive
+/// part. Generator-heavy `vyrn check` with the gen cache off, min of 8, builtin ->
+/// this function written on `bytes(s)` -> this function written on `s[i]`:
+/// `examples/twdemo` 67 -> 81 -> 68 ms, `examples/vyxdemo` 67 -> 78 -> 66 ms,
+/// `examples/shelf`'s client 160 -> 171 -> 159 ms. The whole-string copy was the
+/// entire regression; the extra UTF-8 walk does not show up at all.
 export fn sliceV(s: String, start: Int64, end: Int64) -> Result<String, SliceError> {
-    let n = byteLengthV(s)
+    let n = s.byteLength
     if start < 0 {
         return Err(OutOfRange(start))
     }
@@ -179,11 +198,10 @@ export fn sliceV(s: String, start: Int64, end: Int64) -> Result<String, SliceErr
     if end < n && (Int64(s[end]) & 192) == 128 {
         return Err(SplitsCharacter(end))
     }
-    let b = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = start
     while i < end {
-        out.push(b[i])
+        out.push(s[i])
         i = i + 1
     }
     return match stringFromBytes(out) {
