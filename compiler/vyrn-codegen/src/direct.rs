@@ -2065,6 +2065,13 @@ impl Fn_<'_> {
         // looks at it: a `T` where `T = Age` is an `Age` flow, and a `Param`
         // would silently be neither `Named` nor a boundary.
         let (from, to) = (&self.cx.sub(from), &self.cx.sub(to));
+        // A `Never` (RFC-0079) reached this seam from a `panic`, which left
+        // nothing on the stack and ended the block in `unreachable`. There is no
+        // value to reconcile and no validation to owe — the polymorphic stack
+        // after `unreachable` satisfies `to` on its own.
+        if matches!(from, Type::Never) {
+            return Ok(());
+        }
         if let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned() {
             // The value has to be in the base's representation before the
             // predicate reads it. The recursion terminates because a base is one
@@ -2668,10 +2675,17 @@ impl Fn_<'_> {
         if self.concrete_app(&ty) {
             return Ok(ty);
         }
+        // A `panic` arm (RFC-0079) is `Never` and answers nothing, so a later arm
+        // answers instead — the same fall-through the type-argument upgrade uses,
+        // which is why "the first arm answers" survives a `?? panic(..)` in one.
+        let mut ty = ty;
         for arm in &arms[1..] {
             if let Ok(t) = self.peek_arm(arm, sum, line) {
                 if self.concrete_app(&t) {
                     return Ok(t);
+                }
+                if matches!(ty, Type::Never) && !matches!(t, Type::Never) {
+                    ty = t;
                 }
             }
         }
@@ -2706,7 +2720,11 @@ impl Fn_<'_> {
         else_e: &Expr,
         line: usize,
     ) -> Result<Type, String> {
-        let want = self.peek(then_e, line)?;
+        // A `panic` then-branch (RFC-0079) names no type, so the else answers.
+        let want = match self.peek(then_e, line)? {
+            Type::Never => self.peek(else_e, line)?,
+            t => t,
+        };
         let want = self.join_ty(want);
         let r = self.cx.repr(&want, line)?;
         self.cond(m, b, cond, line)?;
@@ -2842,7 +2860,14 @@ impl Fn_<'_> {
                     None => Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
                 },
             },
-            Expr::IfExpr { then_branch, .. } => self.peek(then_branch, line)?,
+            // A `panic` then-branch names no type, so the else answers — the rule
+            // [`Fn_::join`] emits under.
+            Expr::IfExpr { then_branch, else_branch, .. } => {
+                match (self.peek(then_branch, line)?, else_branch) {
+                    (Type::Never, Some(e)) => self.peek(e, line)?,
+                    (t, _) => t,
+                }
+            }
             // A `match` is typed by its arms — see [`Fn_::match_ty`], which is the
             // same rule the emitting path uses.
             Expr::Match { scrutinee, arms, .. } => {
@@ -2878,6 +2903,7 @@ impl Fn_<'_> {
                 n if self.gen_peek(n, args).is_some() => {
                     self.gen_peek(n, args).expect("guarded above")
                 }
+                "panic" => Type::Never,
                 "@str" | "@concat" | "jsonSchema" | "slice" | "toJson" => Type::Str,
                 "floatBits" => Type::IntN { bits: 64, signed: false },
                 "floatFromBits" => Type::Float,
@@ -3643,6 +3669,42 @@ impl Fn_<'_> {
             }
         }
         match name {
+            // RFC-0079: `panic(msg)` — `error: `, the caller's message, a
+            // newline, exit 1, in three `write_all`s for the reason `log_write`
+            // takes five (the pieces are already where they need to be, and
+            // concatenating first would cost a `malloc` out of an allocator that
+            // never frees). The LAST piece is handed to `trap`, which writes its
+            // argument and `proc_exit(1)`s — so the exit path is the one every
+            // trap already takes, and this lowering adds no runtime function.
+            "panic" => {
+                if args.len() != 1 {
+                    return unsupported("`panic` with other than one argument", line);
+                }
+                let (write_all, strlen) = (self.cx.rt.write_all, self.cx.rt.strlen);
+                let (pre, nl) = (self.cx.rt.intern(m, "error: "), self.cx.rt.intern(m, "\n"));
+                // Parked in a local because `write_all` consumes three operands,
+                // so the message cannot wait on the stack under the prefix's
+                // call. Evaluated FIRST, since the other two engines evaluate the
+                // argument before any byte of the line is written.
+                let msg = self.scratch(b, ValType::I32, 7);
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                b.ins(&Instruction::LocalSet(msg));
+                b.ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Const(pre as i32))
+                    .ins(&Instruction::I32Const(7))
+                    .ins(&Instruction::Call(write_all));
+                b.ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::LocalGet(msg))
+                    .ins(&Instruction::LocalGet(msg))
+                    .ins(&Instruction::Call(strlen))
+                    .ins(&Instruction::Call(write_all));
+                b.ins(&Instruction::I32Const(nl as i32))
+                    .ins(&Instruction::Call(self.cx.rt.trap));
+                // The stack goes polymorphic here, which is what lets a `panic`
+                // arm sit inside a `block (result T)` owing no value.
+                b.ins(&Instruction::Unreachable);
+                return Ok(Type::Never);
+            }
             "print" => {
                 if args.len() != 1 {
                     return unsupported("`print` with other than one argument", line);

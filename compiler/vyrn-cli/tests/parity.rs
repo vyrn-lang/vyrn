@@ -3128,3 +3128,157 @@ fn main() -> Int64 {
     assert_eq!(rows[0].2, "error: region nesting exceeds 64\n", "the 65th is not");
     assert_eq!(rows[0].3, Some(1));
 }
+
+/// `panic(msg)` (RFC-0079 M1) — the first runtime message whose TEXT a program
+/// wrote, and the reason RFC-0078 had refused a user-callable abort.
+///
+/// The objection was that parity compares stderr byte for byte and
+/// library-authored text is text the compiler no longer single-sources. What is
+/// actually single-sourced is the FRAME — `error: `, the newline, exit 1 — and
+/// each engine assembles it differently: the interpreter hands the message to the
+/// same `Ctrl::Err` channel every `@.trap.*` uses and the CLI prefixes it, the
+/// textual backend `fprintf`s one format, and the direct backend writes three
+/// pieces and hands the last to `trap`. Three assemblies of one line is exactly
+/// the shape that drifts, so the message here carries a **non-ASCII byte** and an
+/// **interpolation**: a length taken in characters rather than bytes truncates
+/// `«bäd»`, and an argument evaluated after the prefix is written reorders it.
+///
+/// The other two cases are about `Never` rather than about the bytes.
+///
+/// A `panic` **in a match arm** is the unification that matters — the arm has no
+/// type and the other arm decides, which every join in both backends had to be
+/// taught. It is the shape M3's `?? panic("..")` desugars into, so `slice`
+/// becoming Vyrn rests on it.
+///
+/// A `panic` **inside a region** is here for the class 911efb2 fixed: an exit out
+/// of a region owes the region stack an unwind, and a lowering that forgot one
+/// left the counter raised. `panic` owes NOTHING — the process is gone before the
+/// next allocation — and the way to tell "correctly owes nothing" from "forgot"
+/// is that the message still arrives, in full, from two regions deep.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_panic_says_the_same_bytes_on_all_three_engines() {
+    // The message: a `\{}` hole, and `ø`/`«»`/`ä` outside ASCII.
+    let rows = three_engines(
+        "panic",
+        "bytes",
+        r#"
+fn label(x: Option<Int64>, tag: String) -> String {
+    return match x {
+        Some(n) => "n=\{n}",
+        None => panic("wrøng tag «\{tag}» — nothing to label"),
+    }
+}
+
+fn main() -> Int64 {
+    print(label(Some(7), "ok"))
+    region {
+        let inside = "région"
+        print(inside)
+        print(label(None, "bäd"))
+    }
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "bytes");
+    // Spelled out, not only compared: the failure this is about is a message that
+    // still looks like a message — one byte short, or the prefix in the wrong
+    // place — and three engines can be wrong together about where `error: ` goes.
+    assert_eq!(rows[0].1, "n=7\nrégion\n", "the live arm ran, and the region printed");
+    assert_eq!(
+        rows[0].2,
+        "error: wrøng tag «bäd» — nothing to label\n",
+        "the caller's text, framed by the compiler"
+    );
+    assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
+
+    // Two regions deep, as a bare statement rather than through a call: the
+    // region stack is at depth 2 and the arena holds `hëld` when the process ends.
+    let rows = three_engines(
+        "panic",
+        "region",
+        r#"
+fn main() -> Int64 {
+    let mut n = 0
+    region {
+        let held = "hëld"
+        n = n + 1
+        region {
+            print(held)
+            panic("inside two regions, \{n} deep")
+        }
+    }
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "region");
+    assert_eq!(rows[0].1, "hëld\n", "the region's own String survived to be printed");
+    assert_eq!(rows[0].2, "error: inside two regions, 1 deep\n", "the message, in full");
+    assert_eq!(rows[0].3, Some(1));
+
+    // Every shape `Never` has to flow through, with the panic NOT taken — so what
+    // is checked is that the OTHER arm's value arrives intact. A scalar join, an
+    // aggregate one (the direct backend allocates the destination before either
+    // arm runs, from a type a `Never` arm cannot name), a user enum's `switch`, an
+    // `if` in both arm positions, and a function whose whole body is a `panic`.
+    let rows = three_engines(
+        "panic",
+        "never",
+        r#"
+type Point = { x: Int64, y: Int64 }
+
+type Shape =
+    | Dot
+    | Line(Int64)
+
+fn firstArm(x: Option<Int64>) -> Int64 {
+    return match x {
+        Some(n) => panic("no"),
+        None => 5,
+    }
+}
+
+fn aggArm(x: Option<Int64>) -> Point {
+    return match x {
+        Some(n) => Point { x: n, y: n },
+        None => panic("no point"),
+    }
+}
+
+fn onEnum(s: Shape) -> Int64 {
+    return match s {
+        Dot => panic("a dot has no length"),
+        Line(n) => n,
+    }
+}
+
+fn onlyPanics(n: Int64) -> Int64 {
+    panic("this function never returns \{n}")
+}
+
+fn main() -> Int64 {
+    print(firstArm(None))
+    let p = aggArm(Some(3))
+    print(p.x + p.y)
+    print(onEnum(Line(9)))
+    print(if true { "then-wins" } else { panic("dead") })
+    print(if false { panic("nope") } else { "else-wins" })
+    region {
+        if false { panic("not here") }
+        print("region intact")
+    }
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "never");
+    assert_eq!(
+        rows[0].1,
+        "5\n6\n9\nthen-wins\nelse-wins\nregion intact\n",
+        "every join took the arm that has a value"
+    );
+    assert_eq!(rows[0].2, "", "nothing panicked");
+    assert_eq!(rows[0].3, Some(0), "exit 0");
+}
