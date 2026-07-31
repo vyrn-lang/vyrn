@@ -25,8 +25,23 @@ pub const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 /// the parity loop and instead asserted to fail `vyrn check` by
 /// [`expected_check_failures_do_fail`]. This is distinct from KNOWN_DIVERGENT
 /// (which is about interp/native divergence of programs that DO run).
-pub const EXPECTED_CHECK_FAILURE: &[(&str, &str)] =
-    &[("validate_compile.vyrn", "compile-time rejection of a provably-invalid constant")];
+///
+/// The third field is a substring the diagnostic must contain. It exists because
+/// the assertion used to hard-code `does not satisfy` — fine while every entry
+/// was a validation failure, and a silent hole the moment a second kind of
+/// refusal was pinned here.
+pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
+    (
+        "validate_compile.vyrn",
+        "compile-time rejection of a provably-invalid constant",
+        "does not satisfy",
+    ),
+    (
+        "protocol_overlap.vyrn",
+        "two impls of one protocol for one type constructor (RFC-0080 M1)",
+        "overlaps `impl<T> Show for Option<T>` (line",
+    ),
+];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser
 /// page supplies the `vyrn` import namespace, so three-way output parity cannot

@@ -1,0 +1,45 @@
+// Overlapping impls are REJECTED, not ranked — RFC-0080 M1.
+//
+// A generic impl covers a whole type constructor: `impl<T> Show for Option<T>`
+// is the impl for `Option<Int64>`, `Option<String>` and every instantiation
+// nobody has written yet. A second impl for a *particular* instantiation is
+// therefore not a more specific alternative to pick between; it is a second
+// answer to a question that already has one.
+//
+// Rust allows exactly this only behind an unstable feature, and has for years,
+// because ranking overlapping impls is a genuinely hard design problem. Vyrn
+// does not import it: one impl per (protocol, type constructor), checked when
+// the second impl is DECLARED rather than when a call turns out ambiguous —
+// which is the only time both impls are in hand to name.
+//
+// This file is an INTENTIONAL compile error. It is meant to FAIL `vyrn check`,
+// so the parity harness lists it under EXPECTED_CHECK_FAILURE rather than
+// running it. Observe the diagnostic with:
+//
+//   vyrn check examples/protocol_overlap.vyrn
+//
+// It names both heads and the line of the one that was already there.
+
+protocol Show {
+    fn show(self) -> String
+}
+
+impl<T> Show for Option<T> {
+    fn show(self) -> String {
+        return match self {
+            Some(v) => "something",
+            None => "nothing",
+        }
+    }
+}
+
+// Rejected: `Option` already has a `Show` impl, above.
+impl Show for Option<Int64> {
+    fn show(self) -> String { return "an optional number" }
+}
+
+fn main() -> Int64 {
+    let a: Option<Int64> = Some(7)
+    print(a.show())
+    return 0
+}
