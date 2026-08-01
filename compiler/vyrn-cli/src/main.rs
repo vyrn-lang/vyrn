@@ -54,7 +54,7 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n\
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -74,23 +74,157 @@ fn deny_warnings() -> bool {
     std::env::var("VYRN_DENY_WARNINGS").is_ok()
 }
 
+/// The microarchitecture a native build is compiled for.
+///
+/// A curated set instead of a passthrough `-march` string, for two reasons. A
+/// typo in a passthrough reaches the user as a clang error they have to decode;
+/// and an arbitrary `-march` can turn on FMA behind our back, which is the one
+/// thing a native build must not do silently (see `add_native_clang_flags`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NativeTarget {
+    /// The bare `x86-64` baseline: SSE2 and nothing later. What every build
+    /// before this flag existed got.
+    V1,
+    /// SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT — Nehalem, 2009. The default.
+    V2,
+    /// AVX/AVX2/BMI/**FMA**.
+    V3,
+    /// AVX-512 (F/BW/CD/DQ/VL), and everything v3 has.
+    V4,
+    /// `-march=native`: everything *this* machine has, which on any recent CPU
+    /// includes FMA. The artifact is then only guaranteed to run here.
+    Native,
+}
 
-/// The platform link flags every native build needs, in one place.
+/// The values `--native-target` and `vyrn.json`'s `nativeTarget` accept, for
+/// diagnostics. One list, so the error can't drift from `NativeTarget::parse`.
+const NATIVE_TARGETS: &str = "v1, v2, v3, v4, native";
+
+impl NativeTarget {
+    fn parse(s: &str) -> Option<NativeTarget> {
+        Some(match s {
+            "v1" => NativeTarget::V1,
+            "v2" => NativeTarget::V2,
+            "v3" => NativeTarget::V3,
+            "v4" => NativeTarget::V4,
+            "native" => NativeTarget::Native,
+            _ => return None,
+        })
+    }
+
+    /// The `-march=` value, or `None` when there is nothing to pass.
+    ///
+    /// The `x86-64-vN` vocabulary is x86-64's alone: `-march=x86-64-v2` is an
+    /// error on aarch64, and Apple Silicon and ARM servers are real build
+    /// hosts. So the whole knob is guarded on the *target* arch, not on
+    /// whether a value was written. `native` is x86-64-only here too — clang
+    /// spells the AArch64 equivalent `-mcpu=native` and support has moved
+    /// across releases, and this branch has no ARM host to verify on. Off
+    /// x86-64 every value is inert rather than fatal, because a manifest is
+    /// shared across machines: a project that pins v3 for its x86 CI still has
+    /// to build on a maintainer's Mac.
+    fn march(self) -> Option<&'static str> {
+        if !cfg!(target_arch = "x86_64") {
+            return None;
+        }
+        Some(match self {
+            NativeTarget::V1 => "x86-64",
+            NativeTarget::V2 => "x86-64-v2",
+            NativeTarget::V3 => "x86-64-v3",
+            NativeTarget::V4 => "x86-64-v4",
+            NativeTarget::Native => "native",
+        })
+    }
+}
+
+/// The default when nothing selects otherwise.
 ///
-/// There are two clang invocations in this file — `run` builds a temporary and
-/// executes it, `build` writes the artifact — and they drifted: `-lm` was added
-/// to one and CI kept failing with `undefined reference to ceilf` from the
-/// other, because the parity harness uses the second. Two link sites with
-/// hand-copied flags is the same shape of defect this project has hit in
-/// codegen and in the interpreter; a third caller now inherits both flags
-/// instead of remembering them.
+/// v2 rather than the bare baseline because of RFC-0083's weakest census row:
+/// without SSE4.1, `llvm.trunc.v4f32` has no instruction and scalarizes to four
+/// `truncf` calls, leaving `F32x4.trunc` at 0.43x of C — *slower* than the Vyrn
+/// it replaced. SSE4.1's `roundps` is one instruction, and the same loop goes
+/// 77 ms -> 36 ms (2.1x). v2 is Nehalem, 2009; nothing that can run this
+/// compiler is older.
+const DEFAULT_NATIVE_TARGET: NativeTarget = NativeTarget::V2;
+
+/// Resolve the native target for a build rooted at `root`.
 ///
+/// `--native-target` (normalized into the environment by `real_main`, like
+/// `--offline`) wins over `vyrn.json`'s `nativeTarget`, which wins over the
+/// default — a one-off build must not need a manifest edit.
+///
+/// The manifest is looked up from the root file's directory, the same start
+/// point `load_options` uses, so `vyrn build sub/proj/main.vyrn` reads the
+/// manifest that governs that file rather than the one above the cwd.
+fn native_target_for(root: &str) -> Result<NativeTarget, String> {
+    if let Ok(v) = std::env::var("VYRN_NATIVE_TARGET") {
+        // Already validated in `real_main`; a bad value here came from the
+        // environment directly, so it still gets a diagnostic rather than a
+        // silent fallback to a different target than the one asked for.
+        return NativeTarget::parse(&v).ok_or_else(|| {
+            format!("unknown VYRN_NATIVE_TARGET `{v}` (expected one of: {NATIVE_TARGETS})")
+        });
+    }
+    let start = Path::new(root)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::current_dir().ok());
+    let Some(m) = start.and_then(|d| find_manifest(&d)) else {
+        return Ok(DEFAULT_NATIVE_TARGET);
+    };
+    let Some(v) = m.native_target else {
+        return Ok(DEFAULT_NATIVE_TARGET);
+    };
+    // Cites the key and the file, the shape RFC-0072's audience diagnostics
+    // set. A misspelled target must not fall back to the default: the user
+    // would ship a binary built for something other than what they wrote.
+    NativeTarget::parse(&v).ok_or_else(|| {
+        format!("unknown `nativeTarget` `{v}` in {}/vyrn.json (expected one of: {NATIVE_TARGETS})", m.dir)
+    })
+}
+
+/// Every flag a native clang invocation needs, in one place.
+///
+/// There are two clang invocations in this file — `bench_native` builds a
+/// temporary and times it, `build` writes the artifact the user ships — and
+/// they have drifted twice. First `-lm`, added to one, and CI kept failing with
+/// `undefined reference to ceilf` from the other because the parity harness
+/// uses the second. Then `-O2`, which only `bench_native` passed, so every
+/// number RFC-0083 recorded described an optimized binary that `vyrn build`
+/// never emitted. This helper now owns the codegen flags too, not just the link
+/// flags, so there is nothing left at a call site to copy wrong — and
+/// `bench_native` measures the target `build` ships by construction.
+///
+/// - `-O2`: clang's default is `-O0`.
+/// - `-march`: see `NativeTarget`. Absent off x86-64.
+/// - `-ffp-contract=off`: **the parity flag.** From v3 up, and on `native` on
+///   any recent CPU, the machine has FMA, and clang's default `-ffp-contract=on`
+///   permits fusing `a*b+c` into one instruction — which rounds once instead of
+///   twice, so it is *more* accurate and therefore a different number from the
+///   one the tree-walking interpreter computes. Byte-identical output across
+///   interpreter, native and wasm is this project's whole invariant, so the
+///   more accurate answer is still the wrong answer. Today it is belt and
+///   braces: our input is textual IR carrying no `contract` fast-math flags and
+///   the C shim does no float arithmetic at all, so nothing fuses even at
+///   `-march=native` (verified: zero `vfmadd` in the emitted assembly at every
+///   level). The flag is what keeps that true if either of those changes.
+///   It costs nothing measurable — at v2 the emitted assembly is byte-identical
+///   with and without it — and it is passed unconditionally rather than only
+///   above v2, because aarch64's *baseline* has FMA and there is no `-march`
+///   there to hang the condition on.
+/// - `-Wno-override-module`: our IR carries no target triple; clang supplies
+///   the target's, and we don't want the warning.
 /// - `-pthread`: worker threads (RFC-0025). Win32 threads need no flag.
-/// - `-lm`: RFC-0083's roundings. Without SSE4.1 in the baseline,
+/// - `-lm`: RFC-0083's roundings. Below SSE4.1,
 ///   `llvm.ceil/floor/trunc/rint.v4f32` scalarize to `ceilf`/`floorf`/`truncf`/
 ///   `rintf`, which live in libm on Unix and in the UCRT — linked by default —
 ///   on Windows. A Windows-only check structurally cannot see this missing.
-fn add_platform_link_flags(cmd: &mut Command) {
+fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
+    cmd.arg("-O2").arg("-ffp-contract=off").arg("-Wno-override-module");
+    if let Some(march) = target.march() {
+        cmd.arg(format!("-march={march}"));
+    }
     if !cfg!(windows) {
         cmd.arg("-pthread");
         cmd.arg("-lm");
@@ -130,6 +264,22 @@ fn real_main() -> ExitCode {
         std::env::set_var("VYRN_DENY_WARNINGS", "1");
     }
     args.retain(|a| a != "--deny-warnings");
+    // `--native-target <v>`: same treatment as `--offline` — a global flag,
+    // validated once here so a typo is one clear error rather than a clang
+    // error, normalized into the environment, and stripped before any command
+    // parses its own options.
+    if let Some(i) = args.iter().position(|a| a == "--native-target") {
+        let Some(v) = args.get(i + 1).cloned() else {
+            eprintln!("error: --native-target needs a value (one of: {NATIVE_TARGETS})");
+            return ExitCode::from(2);
+        };
+        if NativeTarget::parse(&v).is_none() {
+            eprintln!("error: unknown --native-target `{v}` (expected one of: {NATIVE_TARGETS})");
+            return ExitCode::from(2);
+        }
+        std::env::set_var("VYRN_NATIVE_TARGET", &v);
+        args.drain(i..=i + 1);
+    }
     if args.len() < 2 {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -370,6 +520,9 @@ struct Manifest {
     /// manifest has no `audience` key — which leaves every module universal and
     /// every import legal, exactly as before this key existed.
     audience: Option<vyrn_frontend::audience::AudienceMap>,
+    /// The `nativeTarget` key, unvalidated. Kept as written so the diagnostic
+    /// in `native_target_for` can quote it back and name the file.
+    native_target: Option<String>,
 }
 
 /// Find `vyrn.json` by walking up from `start` (a directory).
@@ -401,6 +554,10 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                     .collect(),
                 _ => Vec::new(),
             };
+            let native_target = match doc.get("nativeTarget") {
+                Some(Json::Str(s)) => Some(s.clone()),
+                _ => None,
+            };
             let slash_dir = dir.to_string_lossy().replace('\\', "/");
             let audience = vyrn_frontend::audience::from_manifest(&text, &slash_dir);
             return Some(Manifest {
@@ -408,6 +565,7 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                 main,
                 dependencies,
                 audience,
+                native_target,
             });
         }
         dir = dir.parent()?.to_path_buf();
@@ -2239,6 +2397,15 @@ fn bench_native(
     program.tests.clear();
 
     // 4. Emit IR + shim, compile native via clang into a temp dir, and run it.
+    //    The same target `vyrn build` would ship, or the measurement stops
+    //    describing the artifact — the bug `-O2` just was.
+    let target = match native_target_for(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return (ExitCode::FAILURE, None);
+        }
+    };
     let ir = match vyrn_codegen::emit(&program) {
         Ok(ir) => ir,
         Err(e) => {
@@ -2288,13 +2455,8 @@ fn bench_native(
         }
     };
     let mut cmd = Command::new(&clang);
-    cmd.arg(&ll_path)
-        .arg(&shim_path)
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out_path)
-        .arg("-Wno-override-module");
-    add_platform_link_flags(&mut cmd);
+    cmd.arg(&ll_path).arg(&shim_path).arg("-o").arg(&out_path);
+    add_native_clang_flags(&mut cmd, target);
     match cmd.status() {
         Ok(s) if s.success() => {}
         Ok(s) => {
@@ -3241,6 +3403,22 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     }
 
+    // Resolved before anything expensive. A misspelled `nativeTarget` is a
+    // config error, and reporting it after a full compile — or worse, behind a
+    // "could not find clang" — helps nobody. Native only: `nativeTarget` says
+    // nothing about a wasm build, so a wasm build must not fail on it.
+    let native_target = if wasm {
+        None
+    } else {
+        match native_target_for(path) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    };
+
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -3333,20 +3511,9 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     };
 
     let mut cmd = Command::new(&clang);
-    cmd.arg(&ll_path)
-        .arg(&shim_path)
-        // `-O2`, because clang's default is `-O0` and this is the artifact a
-        // user ships. `bench_native` has always passed it, which is how the gap
-        // hid: every recorded number in RFC-0083 came from `vyrn bench` and was
-        // therefore optimized, while `vyrn build` emitted the unoptimized
-        // binary those numbers were taken to describe. Measured on a 30M-read
-        // loop, the two differ by the ratio below in this commit's message.
-        .arg("-O2")
-        .arg("-o")
-        .arg(&out_path)
-        // our IR carries no target triple; clang supplies the target's — don't warn.
-        .arg("-Wno-override-module");
-    add_platform_link_flags(&mut cmd);
+    cmd.arg(&ll_path).arg(&shim_path).arg("-o").arg(&out_path);
+    // Resolved at the top of `build`; the wasm path never reaches this line.
+    add_native_clang_flags(&mut cmd, native_target.unwrap_or(DEFAULT_NATIVE_TARGET));
     let status = cmd.status();
     match status {
         Ok(s) if s.success() => {
@@ -3486,5 +3653,46 @@ mod tests {
     fn min_table_rejects_a_non_report() {
         let doc = vyrn_frontend::schema::parse_json(r#"{"nope":1}"#).unwrap();
         assert!(bench_min_table(&doc).is_none());
+    }
+
+    /// The default is v2 on x86-64 and *nothing* elsewhere: `-march=x86-64-v2`
+    /// is an error on aarch64, and Apple Silicon is a real build host.
+    #[test]
+    fn default_native_target_is_v2_on_x86_64_and_absent_elsewhere() {
+        assert_eq!(DEFAULT_NATIVE_TARGET, NativeTarget::V2);
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(DEFAULT_NATIVE_TARGET.march(), Some("x86-64-v2"));
+        } else {
+            assert_eq!(DEFAULT_NATIVE_TARGET.march(), None);
+            // Every value, not just the default — an explicit v3 in a manifest
+            // shared with an x86 CI must not break the build on this host.
+            for t in [NativeTarget::V1, NativeTarget::V3, NativeTarget::V4, NativeTarget::Native] {
+                assert_eq!(t.march(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn native_target_parses_only_the_curated_set() {
+        assert_eq!(NativeTarget::parse("v3"), Some(NativeTarget::V3));
+        assert_eq!(NativeTarget::parse("native"), Some(NativeTarget::Native));
+        // A passthrough would hand these to clang; the curated set refuses them.
+        for bad in ["", "V2", "x86-64-v2", "haswell", "v5", "-march=native"] {
+            assert_eq!(NativeTarget::parse(bad), None, "{bad} must not parse");
+        }
+    }
+
+    /// The parity flag is unconditional — aarch64's *baseline* has FMA and
+    /// there is no `-march` there to hang a condition on.
+    #[test]
+    fn every_native_build_disables_fp_contraction() {
+        for t in [NativeTarget::V1, NativeTarget::V2, NativeTarget::V3, NativeTarget::V4, NativeTarget::Native] {
+            let mut cmd = Command::new("clang");
+            add_native_clang_flags(&mut cmd, t);
+            let args: Vec<String> =
+                cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert!(args.iter().any(|a| a == "-ffp-contract=off"), "{t:?} lost the parity flag");
+            assert!(args.iter().any(|a| a == "-O2"), "{t:?} lost -O2");
+        }
     }
 }

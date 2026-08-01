@@ -112,6 +112,23 @@ up from the cwd, makes a directory a project:
 - Bare `vyrn run file.vyrn` stays **manifest-free forever** — a single file is
   always runnable without ceremony.
 
+Later RFCs add keys to the same file rather than a second one:
+`audience` (RFC-0072), `roles` (RFC-0072 M2), and:
+
+- **`nativeTarget`** — the microarchitecture `vyrn build` and `vyrn bench`
+  compile for: `"v1"`, `"v2"` (the default), `"v3"`, `"v4"`, or `"native"`.
+  `--native-target <v>` overrides it for one build. The values map to
+  `-march=x86-64-vN` / `-march=native`; **off x86-64 they are inert**, because
+  `-march=x86-64-v2` is an error on aarch64 and a manifest is shared between an
+  x86 CI and a maintainer's Mac. A curated set, not a passthrough `-march`
+  string, so a typo is a Vyrn diagnostic naming the key rather than a clang
+  error, and so no value can quietly enable FMA — see RFC-0083 for why that
+  distinction is a parity question and not a performance one.
+
+An unknown value for a key is an **error naming the key and the file**, never a
+silent fall back to the default: a build for a target other than the one written
+down is the surprise these keys exist to prevent.
+
 ## Reproducible remote imports (M4)
 
 Remote specifiers — `github:owner/repo@ref/path`, `gist:user/id[@rev]/file`, and

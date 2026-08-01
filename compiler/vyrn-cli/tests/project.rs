@@ -86,3 +86,44 @@ fn no_file_and_no_manifest_is_a_clear_error() {
     let err = String::from_utf8_lossy(&run.stderr);
     assert!(err.contains("no input file"), "{err}");
 }
+
+/// A misspelled `nativeTarget` must fail naming the key and the file, before
+/// the compile and before clang is even looked for — so this runs in the
+/// default suite. A silent fall back to the default would ship a binary built
+/// for something other than what the project wrote down.
+#[test]
+fn an_unknown_native_target_names_the_manifest_key() {
+    let dir = scratch("nativetarget");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"name": "t", "main": "src/main.vyrn", "nativeTarget": "haswell"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/main.vyrn"), "fn main() -> Int64 { return 0 }\n").unwrap();
+    let out = vyrn().current_dir(&dir).args(["build", "src/main.vyrn"]).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    for want in ["nativeTarget", "haswell", "vyrn.json", "v1, v2, v3, v4, native"] {
+        assert!(err.contains(want), "missing {want:?} in: {err}");
+    }
+    // `--native-target` wins, so the same project gets past the config error.
+    // Asserted as "no longer complains about the key" rather than "succeeds",
+    // because this file's suite is the one that runs without clang.
+    let ov = vyrn()
+        .current_dir(&dir)
+        .args(["--native-target", "v2", "build", "src/main.vyrn"])
+        .output()
+        .unwrap();
+    let ov_err = String::from_utf8_lossy(&ov.stderr);
+    assert!(!ov_err.contains("nativeTarget"), "the override did not win: {ov_err}");
+
+    // A wasm build ignores the key entirely rather than failing on it — and
+    // since RFC-0077 M5 it needs no clang, so this half can assert success.
+    let w = vyrn()
+        .current_dir(&dir)
+        .args(["build", "src/main.vyrn", "--target", "wasm"])
+        .output()
+        .unwrap();
+    assert!(w.status.success(), "{}", String::from_utf8_lossy(&w.stderr));
+}
