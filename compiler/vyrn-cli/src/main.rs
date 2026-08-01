@@ -2273,6 +2273,16 @@ fn bench_native(
         .arg("-Wno-override-module");
     if !cfg!(windows) {
         cmd.arg("-pthread");
+        // `-lm` beside it, and the reason is RFC-0083's roundings. Without
+        // SSE4.1 in the baseline, `llvm.ceil/floor/trunc/rint.v4f32` scalarize
+        // to `ceilf`/`floorf`/`truncf`/`rintf`, which live in libm on Unix and
+        // in the UCRT — linked by default — on Windows. So a program using
+        // `F32x4.ceil` built and ran here and failed to LINK on CI with
+        // `undefined reference to ceilf`. The flag is unconditional rather than
+        // guarded on whether the program rounds: the shim already calls `fmod`
+        // and `strtod`, and a link flag that depends on which builtins a program
+        // reached is a second thing to keep in sync.
+        cmd.arg("-lm");
     }
     match cmd.status() {
         Ok(s) if s.success() => {}
