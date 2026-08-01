@@ -7,7 +7,16 @@
 ///   a < b   a == b   a != b    lane-wise -> Mask32x4, NOT Bool
 ///   m.lane(k)                  one mask lane, as the Bool it is
 ///   m.anyTrue()  m.allTrue()  the whole mask, as one Bool
+///   m & n   m | n   m ^ n   ~m   lane-wise, on two masks
 ///   F32x4.min/max/abs/sqrt
+///
+/// **The mask combinators are `& | ^ ~`, not `&& || !`.** `&&` and `||` are
+/// Vyrn's short-circuiting Bool operators — the right operand may not be
+/// evaluated — and there is nothing to short-circuit in four lanes computed at
+/// once, so borrowing that spelling would advertise a property the operation
+/// does not have. The bitwise family promises only "both sides, always", which
+/// is what this is; it is also already how a mask is stored on both backends.
+/// `!` stays the Bool operator for the same reason `~` is not one.
 ///
 /// **The bounds check is emitted ONCE for the whole vector**, not once per lane,
 /// and that single check is most of what a vector load buys over a scalar loop —
@@ -120,6 +129,41 @@ fn main() -> Int64 {
     mlanes(F32x4(nzero, nzero, z, ninf) == F32x4(z, nzero, nzero, ninf)) // all true
     mlanes(F32x4(nzero, inf, ninf, sub) < F32x4(z, inf, ninf, sub)) // all false
 
+    // ---- combining masks: the two-condition predicate ---------------------
+    // `edgeLo < mid && mid < edgeHi` per lane, which is what no amount of `anyTrue`
+    // could express before — a mask could be produced and reduced but never
+    // combined.
+    let mid = F32x4(0.5, 1.5, 2.5, 3.5)
+    let edgeLo = F32x4.splat(1.0)
+    let edgeHi = F32x4.splat(3.0)
+    mlanes((edgeLo < mid) & (mid < edgeHi)) // false true true false
+    mlanes((mid < edgeLo) | (edgeHi < mid)) // true false false true
+    // De Morgan holds lane-wise, which is the pin that `~` complements each lane
+    // rather than the whole vector: a whole-vector negation would still satisfy
+    // it for all-true and all-false and diverge exactly here.
+    mlanes(~((edgeLo < mid) & (mid < edgeHi))) // true false false true
+    mlanes(~(edgeLo < mid) | ~(mid < edgeHi)) // true false false true
+    // `^` is the lane-wise disagreement, so a mask against itself is empty and a
+    // mask against its complement is full — the two answers that would coincide
+    // if `^` had been wired to `&` or `|` by mistake.
+    mlanes((edgeLo < mid) ^ (edgeLo < mid)) // all false
+    mlanes((edgeLo < mid) ^ ~(edgeLo < mid)) // all true
+    // NaN in every operand position, through the combinators. `nv != nv` is the
+    // all-true mask and `nv == nv` the all-false one, so this is also the
+    // identity check: `m & all` is `m`, `m | none` is `m`.
+    let nv = F32x4.splat(nan)
+    let all = nv != nv
+    let none = nv == nv
+    mlanes((l < r) | (l != r)) // true true true false
+    mlanes((l >= r) & (l != r)) // all false   (ordered and unordered disagree)
+    mlanes((l == r) ^ (l != r)) // all true    (exactly one holds, NaN or not)
+    mlanes((l != r) & all) // true true true false
+    mlanes((l != r) | none) // true true true false
+    mlanes(~all) // all false
+    // A combined mask reduces like any other, which is the point of having both.
+    reduce(((edgeLo < mid) & (mid < edgeHi))) // true false
+    reduce(~((edgeLo < mid) | (mid < edgeHi))) // false false
+
     // ---- the reductions: did any lane pass, did every lane -----------------
     // `anyTrue` lowers to `v128.any_true`, which is WHOLE-VECTOR (any bit set
     // anywhere) rather than per lane, while `allTrue` is `i32x4.all_true` and is
@@ -152,7 +196,6 @@ fn main() -> Int64 {
     // NaN in every operand position, through the operators whose answers it
     // changes. A mask off a NaN comparison is not empty — `NaN != NaN` is true —
     // so these carry real content into the reduction rather than reducing zero.
-    let nv = F32x4.splat(nan)
     reduce(nv != nv) // true  true    (unordered: every lane true)
     reduce(nv == nv) // false false
     reduce(nv < nv) // false false

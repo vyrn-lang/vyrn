@@ -147,6 +147,37 @@ fn min_and_max_lower_to_the_nan_propagating_intrinsic() {
     assert!(!body.contains("minnum"), "minNum is the wrong rule:\n{body}");
 }
 
+/// `nearest` is roundTiesToEven, and `llvm.round` is a DIFFERENT function —
+/// roundTiesAwayFromZero, which answers `3` for `2.5` where wasm's
+/// `f32x4.nearest` answers `2`. The two agree everywhere except at an exact half,
+/// so a wrong intrinsic is invisible until a `.5` reaches it; this fails in the
+/// default suite instead. `llvm.rint` and not `llvm.roundeven` is a linking
+/// choice argued where the declaration is emitted — baseline x86-64 scalarizes
+/// `roundeven` to a `roundevenf` the MSVC UCRT does not ship — and the two are
+/// the same function under the only rounding mode Vyrn can produce.
+#[test]
+fn nearest_lowers_to_ties_to_even_and_not_to_ties_away() {
+    let body = body_of(
+        "fn four(v: F32x4) -> Float32 {\n\
+         return F32x4.ceil(v).lane(0) + F32x4.floor(v).lane(1)\n\
+         + F32x4.trunc(v).lane(2) + F32x4.nearest(v).lane(3)\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(four(F32x4.splat(2.5)))\n\
+         return 0\n\
+         }\n",
+        "four",
+    );
+    assert!(body.contains("@llvm.ceil.v4f32"), "not ceil:\n{body}");
+    assert!(body.contains("@llvm.floor.v4f32"), "not floor:\n{body}");
+    assert!(body.contains("@llvm.trunc.v4f32"), "not trunc:\n{body}");
+    assert!(body.contains("@llvm.rint.v4f32"), "not ties-to-even:\n{body}");
+    assert!(
+        !body.contains("llvm.round.v4f32"),
+        "`llvm.round` is ties-AWAY and answers 3 for 2.5:\n{body}"
+    );
+}
+
 /// The mask reductions are ONE reduction over the vector, not four lane reads
 /// and a branch chain — which is the whole reason they are builtins rather than
 /// the Vyrn `||`/`&&` `examples/simdbench.vyrn` prices against them. `-O2` can

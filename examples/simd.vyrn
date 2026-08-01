@@ -10,6 +10,13 @@
 /// `v.lane(k)` needs a literal `k` in `0..3`. A non-constant or out-of-range
 /// index is a compile error, not a runtime trap — that is what keeps the read
 /// total, and it is why no bounds check is emitted on any of the three engines.
+/// `v.replaceLane(k, x)` is its inverse and carries the same rule.
+///
+/// `-v` is here rather than beside `abs` because it is the negation OPERATOR,
+/// not a named function: it flips each lane's sign bit. That is not
+/// `F32x4.splat(0.0) - v`, which was the only way to write it before — the two
+/// disagree at a zero lane, and this file prints both so the difference is a
+/// line of output rather than a claim.
 
 /// Every lane of `v`, one per line — also the ABI test: a vector crosses a
 /// function boundary here on all three engines.
@@ -70,6 +77,26 @@ fn main() -> Int64 {
     lanes(F32x4(inf, ninf, z, o) - F32x4.splat(inf)) // NaN -inf -inf -inf
     lanes(F32x4(inf, ninf, nzero, o) * F32x4(z, z, inf, inf)) // NaN NaN NaN inf
     lanes(F32x4(o, neg, z, nzero) / F32x4.splat(z)) // inf -inf NaN NaN
+
+    // ---- writing one lane back ------------------------------------------
+    // Without this, changing one lane of a computed vector means naming all
+    // four again through the constructor. The index is the same compile-time
+    // constant `lane` takes, so there is still no bounds check anywhere.
+    lanes(a.replaceLane(0, 9.0)) // 9 2 3 4
+    lanes(a.replaceLane(3, o).replaceLane(1, nan)) // 1 NaN 3 1
+    // Every lane replaced in turn is the constructor, which is the lane-ORDER
+    // pin: a backend that numbered lanes the other way would still print four
+    // right-looking values for a single replace.
+    lanes(a.replaceLane(0, 7.0).replaceLane(1, 8.0).replaceLane(2, 9.0).replaceLane(3, 10.0))
+
+    // ---- negation is a sign-bit flip, not a subtraction ------------------
+    lanes(-a) // -1 -2 -3 -4
+    // Lane 1 is the whole reason `-v` exists: `-(+0.0)` is `-0.0`, while
+    // `0.0 - 0.0` is `+0.0`. The two lines below differ there and nowhere else.
+    lanes(-F32x4(nzero, z, nan, inf)) // 0 -0 NaN -inf
+    lanes(F32x4.splat(z) - F32x4(nzero, z, nan, inf)) // 0 0 NaN -inf
+    // Twice is the identity, sign of zero included.
+    lanes(-(-F32x4(nzero, z, ninf, sub))) // -0 0 -inf sub
 
     return 0
 }

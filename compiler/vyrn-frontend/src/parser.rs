@@ -3564,6 +3564,12 @@ impl Parser {
                             // `v.lane(k)` reads one lane of a vector (RFC-0083).
                             // Method-only, like the array and map mutators above.
                             "lane" => "@lane".to_string(),
+                            // `v.replaceLane(k, x)` writes one lane back
+                            // (RFC-0083 M2). A value method rather than
+                            // `F32x4.replaceLane(v, k, x)` because it is `lane`'s
+                            // inverse and nothing exports the name — the same two
+                            // reasons that made `lane` one.
+                            "replaceLane" => "@replaceLane".to_string(),
                             // `m.anyTrue()` / `m.allTrue()` reduce a mask to a
                             // `Bool` (RFC-0083 M2). Value methods rather than
                             // `Mask32x4.anyTrue(m)` for the rule the comment below
