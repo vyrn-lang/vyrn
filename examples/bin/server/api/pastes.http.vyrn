@@ -1,0 +1,15 @@
+/// The public REST API for pastes (RFC-0074 M1) — base path `/pastes`, derived
+/// from this file's stem, so renaming the resource moves its URLs.
+///
+/// Opt-in and hand-written, because these three decisions are API *design* and
+/// nothing can reflect them: that a listing is `GET /pastes` rather than a POST,
+/// that a lookup carries its id in the path rather than in a body, and that
+/// creation is a POST to the collection. The derived RPC surface these same
+/// procedures already answer on (`/_/pastes/*`) stays exactly as it was — it is
+/// what the pages call, and it needed no file at all.
+import { http, Route, GET, POST } from "std/http"
+import { recent, byId, create } from http("./pastes")
+
+export fn routes() -> Array<Route> {
+    return [GET(recent("/")), GET(byId("/{id}")), POST(create("/"))]
+}

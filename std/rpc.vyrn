@@ -630,6 +630,12 @@ fn rpcStem(name: String) -> String {
 ///
 /// `module.vyrn` is excluded: it is the directory's own slot, and mounting a
 /// configuration file as procedures would make it part of the wire surface.
+///
+/// A DOTTED stem is excluded for the same reason: `pastes.http.vyrn` is a
+/// protocol projection (RFC-0074) written OVER the procedures beside it, and
+/// mounting its `routes()` as a procedure would put `Array<Route>` on the wire.
+/// The dot is what marks it — the same suffix that derives its base path — so a
+/// projection colocates with what it projects without joining it.
 gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
     let entries = match listDir(dir) {
         Ok(ns) => ns,
@@ -639,7 +645,7 @@ gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
     for name in entries {
         if name.endsWith(".vyrn") {
             let st = rpcStem(name)
-            if st != "module" {
+            if st != "module" && st.contains(".") == false {
                 let rel = if prefix == "" { st } else { prefix + "/" + st }
                 out.push(RpcModule { modPath: dir + "/" + st, rel: rel })
             }

@@ -284,19 +284,21 @@ fn httpSubsumes(a: Route, b: Route) -> Bool {
 /// The JSON a generated adapter hands `fromJson`: the placeholder bindings as
 /// object fields, with the request body's own fields after them.
 ///
-/// Captured segments are strings, which is what a URL carries — a placeholder
-/// standing in for a numeric field decodes as a 422 naming that field rather than
-/// silently coercing. The generator knows the field's base type and could emit a
-/// number instead; that is deliberately not M1, because the pastes/shelf
-/// dogfoods have no numeric path field and an unexercised coercion is how a
-/// silent bug ships.
-export fn httpInput(ps: Map<String, String>, body: String) -> String {
+/// A captured segment is text, but the field it binds may not be: `/users/{id}`
+/// over an `Int64` id must produce `{"id":7}`, not `{"id":"7"}`, or every numeric
+/// REST route in existence decodes as a 422. The generator resolves each
+/// placeholder's field to its base type and passes the numeric ones in
+/// `numeric`; a value that does not parse as an integer stays a string, so the
+/// decoder reports a typed issue naming the field rather than this function
+/// inventing a number. A `Float64` path field is text here too — `parse` is
+/// integer-only, and no dogfood has one.
+export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> String {
     if ps.length == 0 {
         return body
     }
     let mut fs: Array<JsonField> = []
     for k in ps.keys() {
-        fs.push(JsonField { key: k, value: JStr(httpAt(ps, k)) })
+        fs.push(JsonField { key: k, value: httpValue(httpAt(ps, k), httpListHas(numeric, k)) })
     }
     if body != "" {
         for f in httpBodyFields(body) {
@@ -304,6 +306,26 @@ export fn httpInput(ps: Map<String, String>, body: String) -> String {
         }
     }
     return emit(JObj(fs))
+}
+
+/// A captured segment as the JSON value its field expects.
+fn httpValue(raw: String, isNumber: Bool) -> Json {
+    if isNumber {
+        return match parse(raw) {
+            Some(n) => JNum(n.toString()),
+            None => JStr(raw),
+        }
+    }
+    return JStr(raw)
+}
+
+fn httpListHas(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
 }
 
 fn httpAt(ps: Map<String, String>, k: String) -> String {
@@ -361,15 +383,19 @@ fn httpBasePath(module: String) -> String {
     return "/" + segs[segs.length - 1]
 }
 
-/// The field names of the record type `name` declares, in declaration order.
+/// One field of a procedure's input type: the name a placeholder may spell, and
+/// whether the value it binds is a number on the wire.
+type HttpField = { name: String, numeric: Bool }
+
+/// The fields of the record type `name` declares, in declaration order.
 ///
 /// Read off `TypeInfo.source` — canonical Vyrn source — with the compiler's own
 /// lexer (RFC-0054), not a hand-rolled scanner: the repo already paid for that
 /// lesson in the `std/vyx` scanner bugs. At brace depth 1, an identifier followed
 /// by `:` is a field; anything nested (an inline record, a `Map<String, Int64>`
 /// value type) is at another depth or is not followed by `:`.
-gen fn httpFieldNames(name: String, iface: ModuleInterface) -> Array<String> {
-    let mut out: Array<String> = []
+gen fn httpFields(name: String, iface: ModuleInterface) -> Array<HttpField> {
+    let mut out: Array<HttpField> = []
     for t in iface.types {
         if t.name == name {
             let toks = lex(t.source)
@@ -383,10 +409,10 @@ gen fn httpFieldNames(name: String, iface: ModuleInterface) -> Array<String> {
                 if tk.kind == "punct" && tk.text == "}" {
                     depth = depth - 1
                 }
-                if depth == 1 && tk.kind == "ident" && i + 1 < toks.length {
+                if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
                     let nx = toks[i + 1]
                     if nx.kind == "punct" && nx.text == ":" {
-                        out.push(tk.text)
+                        out.push(HttpField { name: tk.text, numeric: httpIsNumeric(toks[i + 2], iface) })
                     }
                 }
                 i = i + 1
@@ -394,6 +420,50 @@ gen fn httpFieldNames(name: String, iface: ModuleInterface) -> Array<String> {
         }
     }
     return out
+}
+
+/// Whether a field whose type begins with token `ty` carries a JSON number.
+///
+/// One alias hop (`Age` => `Int64`), which is how every validated scalar in the
+/// dogfoods is written; a longer chain reads as text and decodes as a 422 rather
+/// than as a wrong number.
+gen fn httpIsNumeric(ty: Token, iface: ModuleInterface) -> Bool {
+    if ty.kind != "ident" {
+        return false
+    }
+    if httpIsNumericBase(ty.text) {
+        return true
+    }
+    for t in iface.types {
+        if t.name == ty.text {
+            return httpIsNumericBase(t.schema.base)
+        }
+    }
+    return false
+}
+
+fn httpIsNumericBase(spelling: String) -> Bool {
+    return spelling.startsWith("Int") || spelling.startsWith("UInt") || spelling.startsWith("Float")
+}
+
+/// Just the names, for the pattern type's placeholder alternatives.
+fn httpNamesOf(fields: Array<HttpField>) -> Array<String> {
+    let mut out: Array<String> = []
+    for f in fields {
+        out.push(f.name)
+    }
+    return out
+}
+
+/// The numeric names as a Vyrn array literal, for the emitted `httpInput` call.
+fn httpNumericLit(fields: Array<HttpField>) -> String {
+    let mut names: Array<String> = []
+    for f in fields {
+        if f.numeric {
+            names.push("\"" + f.name + "\"")
+        }
+    }
+    return "[" + joinWith(names, ", ") + "]"
 }
 
 /// The `where` predicate of a procedure's path-pattern type: any run of ordinary
@@ -416,23 +486,24 @@ gen fn httpProcedure(f: FnInfo, iface: ModuleInterface, base: String) -> String 
     let cap = httpCapFirst(f.name)
     let run = "httpRun" + cap
     let pathType = "Path" + cap
-    let mut fields: Array<String> = []
+    let mut fields: Array<HttpField> = []
     if f.params.length == 1 {
-        fields = httpFieldNames(f.params[0].spelling, iface)
+        fields = httpFields(f.params[0].spelling, iface)
     }
+    let names = httpNamesOf(fields)
     let mut out = "/// Path patterns `" + f.name + "` accepts"
     if fields.length > 0 {
-        out = out + ": " + joinWith(httpBraced(fields), ", ") + " (the fields of `" + f.params[0].spelling + "`)"
+        out = out + ": " + joinWith(httpBraced(names), ", ") + " (the fields of `" + f.params[0].spelling + "`)"
     } else {
         out = out + " — no placeholders (it takes no input)"
     }
     out = out + ".\n"
-    out = out + "export type " + pathType + " = String where value =~ \"" + httpPathRegex(fields) + "\"\n"
+    out = out + "export type " + pathType + " = String where value =~ \"" + httpPathRegex(names) + "\"\n"
     out = out + "fn " + run + "(req: Request, ps: Map<String, String>) -> Option<Response> {\n"
     let call = f.name + "__real"
     if f.params.length == 1 {
         let reqType = f.params[0].spelling
-        out = out + "    return match fromJson(" + reqType + ", httpInput(ps, req.body)) {\n"
+        out = out + "    return match fromJson(" + reqType + ", httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
         if f.ret == "" {
             out = out + "        Valid(input) => " + run + "Unit(input),\n"
             out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\" }),\n"
