@@ -6032,4 +6032,36 @@ contract Q { let y: String }
         assert!(!is_member_type_param("t"));
         assert!(!is_member_type_param(""));
     }
+
+    /// RFC-0080 M2. An associated type is substituted where the method is
+    /// parsed, so `type Output = ..` must come first — and the one case that
+    /// costs anything says so, instead of surfacing as `unknown type Output`
+    /// three lines above where the binding actually is.
+    #[test]
+    fn an_associated_type_is_substituted_and_must_precede_the_methods() {
+        let (p, errors) = parse_accum(
+            lex("protocol Unwrap { type Output  fn get(self) -> Output }
+impl Unwrap for Int64 { type Output = Int64  fn get(self) -> Output { return self } }
+")
+            .unwrap(),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(p.protocols[0].assoc, vec!["Output".to_string()]);
+        // The protocol keeps `Output` as the type variable it is; the impl has
+        // already resolved it, so nothing downstream ever sees the name.
+        assert_eq!(p.protocols[0].methods[0].ret, Type::Param("Output".to_string()));
+        assert_eq!(p.impls[0].methods[0].ret, Type::Int);
+        assert_eq!(p.impls[0].assoc, vec![("Output".to_string(), Type::Int)]);
+
+        let (_, late) = parse_accum(
+            lex("protocol Unwrap { type Output  fn get(self) -> Output }
+impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = Int64 }
+")
+            .unwrap(),
+        );
+        assert!(
+            late.iter().any(|d| d.message.contains("must be declared before the methods")),
+            "{late:?}"
+        );
+    }
 }

@@ -1,0 +1,43 @@
+// An impl must bind exactly the associated types its protocol declares —
+// RFC-0080 M2.
+//
+// The two halves are one rule seen from two sides. An impl that omits a `type`
+// leaves the protocol's promise unkept: `valueOr` was declared to take and
+// return `Output`, and without a binding there is no type for the compiler to
+// substitute, so the method below is not the method the protocol asked for. An
+// impl that binds a `type` the protocol never declared is the mirror: a name
+// nothing will ever ask about, which is far more likely a typo than an
+// intention.
+//
+// Both fire at the IMPL rather than at a call site, because the impl is the only
+// place where both lists — what the protocol declares and what this type binds —
+// are in hand.
+//
+// This file is an INTENTIONAL compile error. It is meant to FAIL `vyrn check`,
+// so the parity harness lists it under EXPECTED_CHECK_FAILURE rather than
+// running it. Observe both diagnostics with:
+//
+//   vyrn check examples/assoctype_unbound.vyrn
+
+protocol Unwrap {
+    type Output
+    fn valueOr(self, fallback: Output) -> Output
+}
+
+// Rejected: no `type Output = ..`. (`Int64` is what it meant to bind, and
+// writing the return type out by hand does not stand in for saying so.)
+impl Unwrap for Int64 {
+    fn valueOr(self, fallback: Int64) -> Int64 { return self }
+}
+
+// Rejected the other way: `Elem` is not a member of `Unwrap`. The missing
+// `Output` is reported here too — the two errors are independent.
+impl Unwrap for String {
+    type Elem = String
+    fn valueOr(self, fallback: String) -> String { return self }
+}
+
+fn main() -> Int64 {
+    print(7.valueOr(0).toString())
+    return 0
+}

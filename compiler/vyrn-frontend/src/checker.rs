@@ -10944,4 +10944,57 @@ mod tests {
         .unwrap_err();
         assert!(mixed.contains("F32x4"), "{mixed}");
     }
+
+    /// RFC-0080 M2. The associated type is resolved at the IMPL, so a concrete
+    /// receiver types fine — and a `<T: P>` bound, where no impl has been
+    /// selected, has nothing to resolve against and says so by name. Rust writes
+    /// `T::Output` here; Vyrn has no such spelling, and M3 is the milestone that
+    /// decides whether it needs one.
+    #[test]
+    fn an_associated_type_resolves_at_the_impl_and_not_through_a_bound() {
+        let proto = "protocol Unwrap { type Output  fn valueOr(self, f: Output) -> Output }\n\
+             impl Unwrap for Int64 { type Output = Int64\n\
+               fn valueOr(self, f: Output) -> Output { return self } }\n";
+        // Concrete receiver: the impl is selected, so `Output` is `Int64`, and it
+        // adds like one.
+        let ok = check_src(&format!(
+            "{proto}fn main() -> Int64 {{ return 7.valueOr(0) + 1 }}"
+        ));
+        assert!(ok.is_ok(), "{ok:?}");
+        // Through a bound: refused, naming the protocol and the member.
+        let e = check_src(&format!(
+            "{proto}fn pick<T: Unwrap>(x: T) -> Int64 {{ return 0 }}\n\
+             fn viaBound<T: Unwrap>(x: T, f: Int64) -> Int64 {{ return x.valueOr(f) }}\n\
+             fn main() -> Int64 {{ return viaBound(7, 0) + pick(1) }}"
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("associated type `Output`") && e.contains("cannot name it"),
+            "{e}"
+        );
+    }
+
+    /// An impl binds exactly what its protocol declares — both directions, both
+    /// reported at the impl (RFC-0080 M2).
+    #[test]
+    fn an_impl_binds_exactly_the_protocols_associated_types() {
+        let missing = check_src(
+            "protocol Unwrap { type Output  fn get(self) -> Output }\n\
+             impl Unwrap for Int64 { fn get(self) -> Int64 { return self } }\n\
+             fn main() -> Int64 { return 7.get() }",
+        )
+        .unwrap_err();
+        assert!(missing.contains("does not bind the associated type `Output`"), "{missing}");
+        let unknown = check_src(
+            "protocol Unwrap { type Output  fn get(self) -> Output }\n\
+             impl Unwrap for Int64 { type Output = Int64  type Elem = Int64\n\
+               fn get(self) -> Output { return self } }\n\
+             fn main() -> Int64 { return 7.get() }",
+        )
+        .unwrap_err();
+        assert!(
+            unknown.contains("binds `type Elem`, which protocol `Unwrap` does not declare"),
+            "{unknown}"
+        );
+    }
 }
