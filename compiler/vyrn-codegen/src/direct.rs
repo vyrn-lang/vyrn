@@ -2649,6 +2649,17 @@ impl Fn_<'_> {
                             &Instruction::F64Neg
                         });
                     }
+                    // `-v` (RFC-0083 M2) is the sign-bit flip, not a subtraction
+                    // from zero — `f32x4.neg` keeps the sign of a zero where
+                    // `splat(0.0) - v` does not.
+                    (UnOp::Neg, None) if rt == Type::F32x4 => {
+                        b.ins(&Instruction::F32x4Neg);
+                    }
+                    // `~m` complements all 128 bits, which is the lane-wise
+                    // complement because a mask lane is all-ones or all-zeros.
+                    (UnOp::BitNot, None) if rt == Type::Mask32x4 => {
+                        b.ins(&Instruction::V128Not);
+                    }
                     (UnOp::Not, _) if rt == Type::Bool => {
                         b.ins(&Instruction::I32Eqz);
                     }
@@ -3084,7 +3095,8 @@ impl Fn_<'_> {
                 "logger" => Type::Logger,
                 // RFC-0083: the vector builtins, whose result type is fixed.
                 "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
-                | "@f32x4Abs" | "@f32x4Sqrt" => Type::F32x4,
+                | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
+                | "@f32x4Trunc" | "@f32x4Nearest" | "@replaceLane" => Type::F32x4,
                 "@f32x4Store" => Type::Unit,
                 "@lane" if matches!(self.peek(&args[0], line)?, Type::Mask32x4) => Type::Bool,
                 "@lane" => Type::Float32,
@@ -3414,6 +3426,22 @@ impl Fn_<'_> {
                 _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
             });
             return Ok(if mask { Type::Mask32x4 } else { lt });
+        }
+        // Combining masks (RFC-0083 M2). The `v128.*` opcodes are width-agnostic —
+        // they are bit operations on 128 bits — which costs nothing here because a
+        // `Mask32x4` lane is all-ones or all-zeros and no program can build one
+        // that is neither. That is the same closed set of inhabitants `any_true`
+        // already leans on. `v128.andnot` exists and has no Vyrn spelling: `a & ~b`
+        // is one instruction more and nothing measured wanted it.
+        if lt == Type::Mask32x4 {
+            self.expr_as(m, b, rhs, &lt)?;
+            b.ins(&match op {
+                BinOp::BitAnd => Instruction::V128And,
+                BinOp::BitOr => Instruction::V128Or,
+                BinOp::BitXor => Instruction::V128Xor,
+                _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
+            });
+            return Ok(lt);
         }
         if matches!(lt, Type::Float | Type::Float32) {
             self.expr_as(m, b, rhs, &lt)?;
@@ -4283,6 +4311,18 @@ impl Fn_<'_> {
                 b.ins(&Instruction::F32x4ExtractLane(k));
                 return Ok(Type::Float32);
             }
+            // `v.replaceLane(k, x)` — the same immediate as the read, and the same
+            // opcode the four-argument constructor above already uses one lane at a
+            // time. Vectors only: the checker refuses a mask receiver.
+            "@replaceLane" if args.len() == 3 => {
+                self.expr_as(m, b, &args[0], &Type::F32x4)?;
+                let Some(k) = ftypes::const_lane(&args[1], 4) else {
+                    return unsupported("a lane index that is not a constant in 0..3", line);
+                };
+                self.expr_as(m, b, &args[2], &Type::Float32)?;
+                b.ins(&Instruction::F32x4ReplaceLane(k));
+                return Ok(Type::F32x4);
+            }
             // Mask reductions (RFC-0083 M2). Both push an `i32` that is already 0
             // or 1, so unlike the mask lane read there is no normalising `i32.eqz`
             // pair to add.
@@ -4305,7 +4345,13 @@ impl Fn_<'_> {
             // RFC-0083 M2. `min`/`max` are wasm's own, which is the rule the other
             // two engines were pointed AT rather than the one they fell into: NaN
             // in either operand propagates and `-0.0` orders below `+0.0`.
-            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" => {
+            //
+            // `f32x4.nearest` is roundTiesToEven, and it is the engine with no
+            // choice again: the other two were pointed at it (`llvm.roundeven`,
+            // `round_ties_even`) rather than at their `round`, which is ties-away
+            // and answers 3 for 2.5.
+            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Ceil"
+            | "@f32x4Floor" | "@f32x4Trunc" | "@f32x4Nearest" => {
                 self.expr_as(m, b, &args[0], &Type::F32x4)?;
                 if args.len() == 2 {
                     self.expr_as(m, b, &args[1], &Type::F32x4)?;
@@ -4314,6 +4360,10 @@ impl Fn_<'_> {
                     "@f32x4Min" => Instruction::F32x4Min,
                     "@f32x4Max" => Instruction::F32x4Max,
                     "@f32x4Abs" => Instruction::F32x4Abs,
+                    "@f32x4Ceil" => Instruction::F32x4Ceil,
+                    "@f32x4Floor" => Instruction::F32x4Floor,
+                    "@f32x4Trunc" => Instruction::F32x4Trunc,
+                    "@f32x4Nearest" => Instruction::F32x4Nearest,
                     _ => Instruction::F32x4Sqrt,
                 });
                 return Ok(Type::F32x4);

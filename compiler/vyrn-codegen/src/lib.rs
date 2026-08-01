@@ -714,6 +714,31 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare <4 x float> @llvm.maximum.v4f32(<4 x float>, <4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.fabs.v4f32(<4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)\n");
+    // Rounding (RFC-0083 M2). `nearest` is roundTiesToEven — wasm's
+    // `f32x4.nearest` — and emphatically NOT `llvm.round`, which is
+    // roundTiesAwayFromZero. The two are different functions and they differ on
+    // exactly the halves: measured before the intrinsic was picked,
+    // `llvm.round.v4f32` on `<0.5, 1.5, 2.5, -2.5>` answers `1 2 3 -3` where
+    // wasmtime's `f32x4.nearest` answers `0 2 2 -2`. That is the `minnum` bug one
+    // operation over, and `f32::round` would have walked the interpreter into it
+    // too.
+    //
+    // The intrinsic that NAMES roundTiesToEven is `llvm.roundeven`, and it is not
+    // the one emitted, for a linking reason rather than a semantic one: baseline
+    // x86-64 has no `roundps` (that is SSE4.1) and this project's `clang -O2`
+    // passes no `-march`, so `llvm.roundeven.v4f32` scalarizes to four calls to
+    // `roundevenf` — a C23 symbol the MSVC UCRT does not ship, and the link fails
+    // outright. `llvm.rint` lowers to `rintf`, which every libc here has, and
+    // under the default rounding mode it IS roundTiesToEven. Vyrn has no `fenv`
+    // surface to change that mode with; a host that changed it behind an `extern`
+    // would already have moved every `fadd` in the program, so this adds no hole
+    // that was not there. The exact halves are pinned in `examples/simdround.vyrn`
+    // so a future `-march=x86-64-v2` can switch this line back to `roundeven` and
+    // find out immediately if it was wrong.
+    out.push_str("declare <4 x float> @llvm.ceil.v4f32(<4 x float>)\n");
+    out.push_str("declare <4 x float> @llvm.floor.v4f32(<4 x float>)\n");
+    out.push_str("declare <4 x float> @llvm.trunc.v4f32(<4 x float>)\n");
+    out.push_str("declare <4 x float> @llvm.rint.v4f32(<4 x float>)\n");
     // The mask reductions. `<4 x i1>` is fine as an intrinsic ARGUMENT — the ABI
     // objection that kept it out of the mask's own representation is about values
     // crossing function boundaries, and these never leave the block.
@@ -3130,6 +3155,20 @@ impl<'a> Gen<'a> {
                         let f = if self.resolve(&ty) == Type::Float32 { "float" } else { "double" };
                         self.emit(format!("{t} = fneg {f} {v}"))
                     }
+                    // `-v` on a vector (RFC-0083 M2) is the same `fneg`, four lanes
+                    // wide — a sign-bit flip, which is what makes it different from
+                    // `F32x4.splat(0.0) - v`: `0.0 - -0.0` is `+0.0` and loses the
+                    // sign a negation keeps.
+                    UnOp::Neg if self.resolve(&ty) == Type::F32x4 => {
+                        self.emit(format!("{t} = fneg <4 x float> {v}"))
+                    }
+                    // `~m` complements every lane. The constant is spelled out
+                    // rather than written `splat (i32 -1)` because the elementwise
+                    // form is what every LLVM this project has built against
+                    // accepts, and `-O2` folds them to the same `pcmpeqd`/`pxor`.
+                    UnOp::BitNot if self.resolve(&ty) == Type::Mask32x4 => self.emit(format!(
+                        "{t} = xor <4 x i32> {v}, <i32 -1, i32 -1, i32 -1, i32 -1>"
+                    )),
                     UnOp::Neg if matches!(self.resolve(&ty), Type::IntN { .. }) => {
                         let w = self.llt(&ty);
                         self.emit(format!("{t} = sub {w} 0, {v}"))
@@ -5494,7 +5533,19 @@ impl<'a> Gen<'a> {
         // four `insertelement`s into a `zeroinitializer` rather than into `undef`:
         // every lane IS written, so `undef` would be equivalent, and a start that
         // is a defined value is one less thing a reader has to prove.
-        if matches!(name, "F32x4" | "@f32x4Splat" | "@lane") {
+        if matches!(name, "F32x4" | "@f32x4Splat" | "@lane" | "@replaceLane") {
+            if name == "@replaceLane" {
+                let (v, _) = self.gen_expr(&args[0])?;
+                let k = vyrn_frontend::types::const_lane(&args[1], 4)
+                    .ok_or("a lane index must be a compile-time constant in 0..3")?;
+                let (x, xt) = self.gen_expr(&args[2])?;
+                let (x, _) = self.coerce(x, &xt, &Type::Float32)?;
+                let t = self.fresh_tmp();
+                self.emit(format!(
+                    "{t} = insertelement <4 x float> {v}, float {x}, i32 {k}"
+                ));
+                return Ok((t, Type::F32x4));
+            }
             if name == "@lane" {
                 let (v, vty) = self.gen_expr(&args[0])?;
                 // Proven constant and in range by the checker, so no bounds check
@@ -5557,13 +5608,29 @@ impl<'a> Gen<'a> {
         // `F32x4.min/max/abs/sqrt` and `F32x4.select` (RFC-0083 M2). The four
         // intrinsics are declared once in the prologue, where the choice of
         // `llvm.minimum` over `llvm.minnum` is argued.
-        if matches!(name, "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt") {
+        if matches!(
+            name,
+            "@f32x4Min"
+                | "@f32x4Max"
+                | "@f32x4Abs"
+                | "@f32x4Sqrt"
+                | "@f32x4Ceil"
+                | "@f32x4Floor"
+                | "@f32x4Trunc"
+                | "@f32x4Nearest"
+        ) {
             let (a, _) = self.gen_expr(&args[0])?;
             let t = self.fresh_tmp();
             let (f, rest) = match name {
                 "@f32x4Min" => ("llvm.minimum.v4f32", true),
                 "@f32x4Max" => ("llvm.maximum.v4f32", true),
                 "@f32x4Abs" => ("llvm.fabs.v4f32", false),
+                "@f32x4Ceil" => ("llvm.ceil.v4f32", false),
+                "@f32x4Floor" => ("llvm.floor.v4f32", false),
+                "@f32x4Trunc" => ("llvm.trunc.v4f32", false),
+                // `llvm.rint`, which is roundTiesToEven under the default rounding
+                // mode; see the declaration for why not `llvm.roundeven`.
+                "@f32x4Nearest" => ("llvm.rint.v4f32", false),
                 _ => ("llvm.sqrt.v4f32", false),
             };
             let second = if rest {

@@ -2823,10 +2823,19 @@ impl<'a> Checker<'a> {
                 }
                 let t = self.base(&self.expr(expr, scope, None, fn_ret)?);
                 match op {
+                    // `-v` on a vector flips every lane's SIGN BIT (RFC-0083 M2).
+                    // That is not `F32x4.splat(0.0) - v`, which was the only way to
+                    // write it before: `0.0 - (-0.0)` is `+0.0` and `0.0 - (+0.0)`
+                    // is also `+0.0`, so the subtraction loses the sign of a zero
+                    // that a negation keeps. NaN is the same story one step over.
                     UnOp::Neg
                         if matches!(
                             t,
-                            Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
+                            Type::Int
+                                | Type::Float
+                                | Type::Float32
+                                | Type::IntN { .. }
+                                | Type::F32x4
                         ) =>
                     {
                         Ok(t)
@@ -2835,7 +2844,14 @@ impl<'a> Checker<'a> {
                     // `~x` complements within the operand's integer width
                     // (RFC-0045): a sized integer, or the literal `Int`. Not
                     // Bool (use `!`), not a float.
-                    UnOp::BitNot if matches!(t, Type::Int | Type::IntN { .. }) => Ok(t),
+                    //
+                    // `~m` on a mask is the lane-wise complement, and it is `~`
+                    // rather than `!` for the reason the binary arm below states:
+                    // `!` is the Bool operator, a mask is four answers, and reusing
+                    // the scalar spelling would invite reading one as the other.
+                    UnOp::BitNot if matches!(t, Type::Int | Type::IntN { .. } | Type::Mask32x4) => {
+                        Ok(t)
+                    }
                     UnOp::Neg => Err(format!(
                         "line {line}: unary `-` needs a numeric type, found {t}"
                     )),
@@ -3736,6 +3752,19 @@ impl<'a> Checker<'a> {
             Lt | LtEq | Gt | GtEq | Eq | NotEq if l == Type::F32x4 && r == Type::F32x4 => {
                 Ok(Type::Mask32x4)
             }
+            // Combining masks (RFC-0083 M2): `(a < b) & (c < d)` is the lane-wise
+            // AND, and `&`/`|`/`^` rather than `&&`/`||` is the one spelling
+            // decision here. `&&` and `||` are Vyrn's SHORT-CIRCUIT Bool operators
+            // — the right operand may not be evaluated at all — and a lane-wise
+            // combination evaluates both sides always and combines them four ways
+            // at once. Borrowing that spelling would advertise a control-flow
+            // property the operation does not have. The bitwise family carries no
+            // such promise (RFC-0045 uses it on integers, where both sides are
+            // always evaluated), and it is already how a mask is represented on
+            // both backends. `v128.andnot` exists and is deliberately not given a
+            // spelling: `a & ~b` is two instructions instead of one, and neither
+            // optimizer needed help finding it.
+            BitAnd | BitOr | BitXor if l == Type::Mask32x4 && r == Type::Mask32x4 => Ok(l),
             Add | Sub | Mul | Div => {
                 if l == r && numeric(&l) {
                     Ok(l)
@@ -3926,6 +3955,50 @@ impl<'a> Checker<'a> {
                 }
                 Ok(out)
             }
+            // `v.replaceLane(k, x)` — the write `lane` had no inverse for. Without
+            // it a vector built from computed values has to go back through the
+            // four-argument constructor, which means naming all four lanes to
+            // change one.
+            //
+            // Vectors only, not masks: a mask lane write would be a second way to
+            // BUILD a mask, and while a `Bool` source keeps every lane all-ones or
+            // all-zeros (so the closed-inhabitants argument survives it), nothing
+            // needs it — masks are produced by comparison and consumed by
+            // reduction or `lane`.
+            "@replaceLane" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {line}: `replaceLane` takes a lane index and a value \
+                         (it is `v.replaceLane(k, x)`), got {} argument(s)",
+                        args.len() - 1
+                    ));
+                }
+                let v = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+                if matches!(v, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if v != Type::F32x4 {
+                    return Err(format!(
+                        "line {line}: `replaceLane` must be called on a vector \
+                         (e.g. `v.replaceLane(0, x)`), found {v}"
+                    ));
+                }
+                // The same constant-index rule `lane` has, and for the same reason:
+                // a runtime index would need either a bounds check or a memory
+                // round-trip, and both backends' replace-lane opcodes take an
+                // immediate.
+                if crate::types::const_lane(&args[1], 4).is_none() {
+                    return Err(format!(
+                        "line {line}: a lane index must be a compile-time constant in 0..3 \
+                         (that is what makes `replaceLane` total — there is no bounds check \
+                         to fall back on)"
+                    ));
+                }
+                if let Some(e) = lane_arg(&args[2], "`replaceLane`")? {
+                    return Ok(e);
+                }
+                Ok(Type::F32x4)
+            }
             // `m.anyTrue()` / `m.allTrue()` — the question a mask exists to
             // answer, reduced to one `Bool`. Masks only, not vectors: "is any
             // lane of an `F32x4` non-zero" would be a float predicate wearing a
@@ -4016,10 +4089,34 @@ impl<'a> Checker<'a> {
             // See the RFC: `minNum` is what LLVM's `llvm.minnum` and Rust's
             // `f32::min` do, they return the non-NaN operand, and that difference
             // survives the formatter where a NaN PAYLOAD difference does not.
-            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" => {
+            //
+            // `ceil`/`floor`/`trunc`/`nearest` join them: `nearest` is
+            // roundTiesToEven, which is wasm's `f32x4.nearest`, LLVM's
+            // `llvm.roundeven` and Rust's `round_ties_even` — NOT `llvm.round` /
+            // `f32::round`, which are roundTiesAwayFromZero and answer `3` where
+            // these answer `2` for `2.5`. That is the same shape of silent
+            // divergence `minnum` was, so the three engines were each pointed at
+            // the rule rather than left to a default.
+            //
+            // They live on the type name rather than as value methods for the
+            // reason `min`/`max`/`abs` do, one step ahead of it: `ceil` and `floor`
+            // are exactly the names a float section of `std/math` would export, and
+            // a value-receiver method name is a GLOBAL rename in the parser's table.
+            "@f32x4Min"
+            | "@f32x4Max"
+            | "@f32x4Abs"
+            | "@f32x4Sqrt"
+            | "@f32x4Ceil"
+            | "@f32x4Floor"
+            | "@f32x4Trunc"
+            | "@f32x4Nearest" => {
                 let (want, what) = match name {
                     "@f32x4Abs" => (1, "abs"),
                     "@f32x4Sqrt" => (1, "sqrt"),
+                    "@f32x4Ceil" => (1, "ceil"),
+                    "@f32x4Floor" => (1, "floor"),
+                    "@f32x4Trunc" => (1, "trunc"),
+                    "@f32x4Nearest" => (1, "nearest"),
                     "@f32x4Min" => (2, "min"),
                     _ => (2, "max"),
                 };
@@ -5373,7 +5470,7 @@ impl<'a> Checker<'a> {
         // numeric conversions above and sits here for that reason; the rest arrive
         // under internal names the parser assigns, so a user `fn min` / `fn lane`
         // is untouched — which is exactly why they are spelled on the type name.
-        if matches!(name, "F32x4" | "@lane" | "@anyTrue" | "@allTrue")
+        if matches!(name, "F32x4" | "@lane" | "@replaceLane" | "@anyTrue" | "@allTrue")
             || name.starts_with("@f32x4")
         {
             return self.vector_call(name, args, line, scope, fn_ret);
