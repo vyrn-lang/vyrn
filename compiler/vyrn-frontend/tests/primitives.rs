@@ -188,6 +188,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("F32x4", View, "RFC-0083: four Float32 lanes into one value"),
     ("@f32x4Splat", View, "RFC-0083: one value into all four lanes"),
     ("@lane", View, "RFC-0083: a lane back out, at a checker-proven constant index"),
+    ("@replaceLane", View, "RFC-0083: one lane written back, same constant index"),
     // ---- Control: abort, and waiting -----------------------------------------
     ("panic", Control, "RFC-0079: the abort itself, and the only irreducible row here"),
     ("assert", Control, "RFC-0015: traps the current test"),
@@ -250,6 +251,26 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // 1.3x would be a bar `select` (1.1x, deleted) already failed to clear.
     ("@anyTrue", Measured, "2.5x native (1356 ms against 543 ms, unpredictable lanes) / 1.2x wasm; 1.3x when the short circuit predicts"),
     ("@allTrue", Measured, "2.4x native (1170 ms against 481 ms, unpredictable lanes) / 1.2x wasm; 2.3x when the short circuit predicts"),
+    // The four roundings, and they are the block where the NATIVE column stops
+    // being the one that decides. Baseline x86-64 has no `roundps` (that is
+    // SSE4.1) and `vyrn build` passes clang no `-march`, so every one of
+    // `llvm.ceil/floor/trunc/rint.v4f32` scalarizes to four libc calls — checked
+    // by reading the assembly, and proved separately by `llvm.roundeven`, which
+    // scalarizes to a `roundevenf` that does not exist and fails to LINK. So the
+    // Vyrn implementations, which are ordinary inline arithmetic, are level with
+    // three of them and beat one. Cranelift emits the instruction and the wasm
+    // ratios are 5-9x. Raising the native baseline to x86-64-v2 would make all
+    // four one instruction and is the upgrade path; it is a project-wide ISA
+    // decision, not this RFC's.
+    ("@f32x4Ceil", Measured, "1.0x native (53.4 us against 50.3 us per 65536 lanes) but 7.4x wasm (163 ms against 22 ms): native scalarizes to four ceilf calls"),
+    ("@f32x4Floor", Measured, "1.0x native (54.2 us against 50.2 us) but 8.2x wasm (181 ms against 22 ms), the mirror of `ceil`"),
+    // The only row in the census where the builtin is SLOWER than the Vyrn it
+    // replaces: `truncf` four times against an inlined `cvttss2si` round-trip.
+    // Kept anyway, on the wasm column and on symmetry — three of four roundings
+    // and a hand-written fourth would be a surface with a hole in it, and the
+    // Vyrn version needs `floatBits` to keep the sign of a zero.
+    ("@f32x4Trunc", Measured, "0.43x native — the builtin LOSES (102.5 us against 44.4 us, four truncf calls) — and 4.9x wasm (112 ms against 23 ms), which is what keeps it"),
+    ("@f32x4Nearest", Measured, "1.9x native (53.8 us against 101.7 us) / 9.3x wasm (215 ms against 23 ms); ties-to-even by hand is 20 lines and gets `-0.0` wrong first"),
     // ---- The one finding, and it is CLOSED -----------------------------------
     // (`@charCount` was here, as `Unjustified`: "three implementations of a
     // four-line loop, for ONE caller". It is `std/text`'s `charCountV` now, so the
@@ -372,8 +393,15 @@ fn the_census_is_the_code() {
     // when the mask reductions completed M2's surface: two more `Measured` rows,
     // and the first pair whose ratio had to be quoted against a stated DATA
     // distribution rather than a workload — a short-circuiting `||` chain is only
-    // slow when the branch is unpredictable.
-    assert_eq!(found.len(), 74, "the primitive core changed size");
+    // slow when the branch is unpredictable. 74 -> 79 when the rest of M2's
+    // `F32x4` surface landed: `@replaceLane` is a `View` beside `@lane` (a lane
+    // written instead of read), and the four roundings are `Measured` rows whose
+    // refusal is decided by the WASM column for all four — natively they
+    // scalarize to libc calls and one of them, `trunc`, is slower than the Vyrn
+    // it replaces. The mask combinators and `-v` cost no rows at all: they are a
+    // `BinOp` and a `UnOp`, which this dispatch never sees, which is also why the
+    // comparison operators never appeared here.
+    assert_eq!(found.len(), 79, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

@@ -3430,7 +3430,14 @@ impl<'a> Interp<'a> {
                                 "@f32x4Floor" => a[k].floor(),
                                 "@f32x4Trunc" => a[k].trunc(),
                                 "@f32x4Nearest" => a[k].round_ties_even(),
-                                _ => a[k].sqrt(),
+                                // Spelled out rather than left as the `_` arm
+                                // because the census scan (`primitives.rs`) reads
+                                // these literals, and the outer head above is too
+                                // long for it to parse across the wrap.
+                                "@f32x4Sqrt" => a[k].sqrt(),
+                                other => {
+                                    return Err(format!("vector op: {other}").into())
+                                }
                             };
                         }
                         Ok(Val::F32x4(out))
