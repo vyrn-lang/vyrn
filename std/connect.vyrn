@@ -201,18 +201,18 @@ fn connectDispatchFn(f: FnInfo) -> String {
             out = out + "    }\n}\n"
             out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
             out = out + "    " + f.name + "(input)\n"
-            out = out + "    return Response { status: 200, contentType: \"application/json\", body: \"{}\", vary: \"\" }\n}\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: \"{}\", vary: \"\", headers: [:] }\n}\n"
         } else {
-            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)), vary: \"\" },\n"
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)), vary: \"\", headers: [:] },\n"
             out = out + "        Invalid(issues) => connectFail400(issues),\n"
             out = out + "    }\n}\n"
         }
     } else {
         if retUnit {
             out = out + "    " + f.name + "()\n"
-            out = out + "    return Response { status: 200, contentType: \"application/json\", body: \"{}\", vary: \"\" }\n}\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: \"{}\", vary: \"\", headers: [:] }\n}\n"
         } else {
-            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()), vary: \"\" }\n}\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()), vary: \"\", headers: [:] }\n}\n"
         }
     }
     return out
@@ -260,9 +260,9 @@ export gen fn connectServer(contract: String) -> String {
     // The two shared error builders: a lossless 400 from Issues, and a bare
     // code-only Connect error (`unimplemented`).
     out = out + "fn connectFail400(issues: Array<Issue>) -> Response {\n"
-    out = out + "    return Response { status: 400, contentType: \"application/json\", body: toJson(ConnectError { code: \"invalid_argument\", message: \"request validation failed\", details: issues }), vary: \"\" }\n}\n"
+    out = out + "    return Response { status: 400, contentType: \"application/json\", body: toJson(ConnectError { code: \"invalid_argument\", message: \"request validation failed\", details: issues }), vary: \"\", headers: [:] }\n}\n"
     out = out + "fn connectCodeErr(status: Int64, code: String) -> Response {\n"
-    out = out + "    return Response { status: status, contentType: \"application/json\", body: \"{\\\"code\\\":\\\"\" + code + \"\\\"}\", vary: \"\" }\n}\n"
+    out = out + "    return Response { status: status, contentType: \"application/json\", body: \"{\\\"code\\\":\\\"\" + code + \"\\\"}\", vary: \"\", headers: [:] }\n}\n"
     for f in iface.functions {
         out = out + connectDispatchFn(f)
     }

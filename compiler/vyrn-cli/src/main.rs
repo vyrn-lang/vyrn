@@ -3153,6 +3153,7 @@ fn dev_serve_one(
                 resp.status,
                 &resp.content_type,
                 &resp.vary,
+                &resp.headers,
                 resp.body.as_bytes(),
             );
         }
@@ -3195,6 +3196,7 @@ fn serve_one(
                         resp.status,
                         &resp.content_type,
                         &resp.vary,
+                        &resp.headers,
                         resp.body.as_bytes(),
                     );
                 }
@@ -3350,28 +3352,44 @@ fn reason_phrase(status: i64) -> &'static str {
 /// `Connection: close`, blank line, body. Errors are ignored — the peer may
 /// have hung up, and one dropped connection must not fault the server.
 fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &str, body: &[u8]) {
-    write_response_vary(stream, status, content_type, "", body)
+    write_response_vary(stream, status, content_type, "", &[], body)
 }
 
-/// [`write_response`] plus a `Vary` field (RFC-0072 M4). `vary` empty writes no
-/// header at all, so a response that does not negotiate stays byte-identical to
-/// what this host wrote before the field existed.
+/// [`write_response`] plus a `Vary` field (RFC-0072 M4) and the response's own
+/// header map (RFC-0074 M2). `vary` empty writes no header at all, so a response
+/// that does not negotiate stays byte-identical to what this host wrote before
+/// the field existed; an empty `headers` likewise.
+///
+/// An empty `content_type` writes NO `Content-Type` line. A 304 carries no body
+/// and so has no media type to declare (RFC 9110 §15.4.5 lists the fields a 304
+/// SHOULD send, and `Content-Type` is not among them) — writing `Content-Type:`
+/// with nothing after it would be a malformed field rather than an absent one.
 fn write_response_vary(
     stream: &mut std::net::TcpStream,
     status: i64,
     content_type: &str,
     vary: &str,
+    headers: &[(String, String)],
     body: &[u8],
 ) {
     use std::io::Write;
     let reason = reason_phrase(status);
+    let type_line = if content_type.is_empty() {
+        String::new()
+    } else {
+        format!("Content-Type: {content_type}\r\n")
+    };
     let vary_line = if vary.is_empty() {
         String::new()
     } else {
         format!("Vary: {vary}\r\n")
     };
+    let mut extra = String::new();
+    for (name, value) in headers {
+        extra.push_str(&format!("{name}: {value}\r\n"));
+    }
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{vary_line}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\n{type_line}{vary_line}{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(header.as_bytes());

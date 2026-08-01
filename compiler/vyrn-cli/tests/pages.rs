@@ -185,7 +185,7 @@ fn string_segment_and_respond_route_end_to_end() {
         &dir.join("pages/raw/[id].vyrn"),
         "export type Params = { id: String }\n\
          export fn respond(p: Params) -> Response {\n\
-         return Response { status: 200, contentType: \"text/plain; charset=utf-8\", body: \"raw:\" + p.id, vary: \"\" }\n\
+         return Response { status: 200, contentType: \"text/plain; charset=utf-8\", body: \"raw:\" + p.id, vary: \"\", headers: [:] }\n\
          }\n",
     );
     write(

@@ -157,7 +157,7 @@ fn emit_gen_connect_server_shows_the_router_and_dispatchers() {
     assert!(src.contains("\\\"unimplemented\\\"") || src.contains("\"unimplemented\""), "unimplemented:\n{src}");
     // A validated request decodes and a Result return is a 200 (RFC-0024).
     assert!(src.contains("fn connectDispatchGetUser(body: String) -> Response"), "{src}");
-    assert!(src.contains("Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(getUser(input)), vary: \"\" }"), "{src}");
+    assert!(src.contains("Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(getUser(input)), vary: \"\", headers: [:] }"), "{src}");
     assert!(src.contains("Invalid(issues) => connectFail400(issues)"), "{src}");
     // The router uses the Connect path shape `/contract.<Proc>` and mounts as an
     // Option-returning handler (beside rpcHandle).

@@ -31,14 +31,14 @@ fn main() -> Int64 {
 fn handle(req: Request) -> Response {
     hits = hits + 1
     if req.path == "/health" {
-        return Response { status: 200, contentType: "text/plain", body: "ok", vary: "" }
+        return Response { status: 200, contentType: "text/plain", body: "ok", vary: "", headers: [:] }
     }
     if req.path == "/boom" {
         let z = hits - hits
         let bad = hits / z
-        return Response { status: 200, contentType: "text/plain", body: bad.toString(), vary: "" }
+        return Response { status: 200, contentType: "text/plain", body: bad.toString(), vary: "", headers: [:] }
     }
-    return Response { status: 200, contentType: "text/plain", body: "hits=\{hits.toString()}", vary: "" }
+    return Response { status: 200, contentType: "text/plain", body: "hits=\{hits.toString()}", vary: "", headers: [:] }
 }
 "#;
 
@@ -270,9 +270,9 @@ fn main() -> Int64 {
 
 fn handle(req: Request) -> Response {
     if req.path == "/fib" {
-        return Response { status: 200, contentType: "text/plain", body: fib(20).toString(), vary: "" }
+        return Response { status: 200, contentType: "text/plain", body: fib(20).toString(), vary: "", headers: [:] }
     }
-    return Response { status: 200, contentType: "text/plain", body: "echo:\{req.path}", vary: "" }
+    return Response { status: 200, contentType: "text/plain", body: "echo:\{req.path}", vary: "", headers: [:] }
 }
 "#;
 
@@ -320,9 +320,9 @@ fn handle(req: Request) -> Response {
     if req.path == "/boom" {
         let n = req.body.byteLength
         let z = n - n
-        return Response { status: 200, contentType: "text/plain", body: (n / z).toString(), vary: "" }
+        return Response { status: 200, contentType: "text/plain", body: (n / z).toString(), vary: "", headers: [:] }
     }
-    return Response { status: 200, contentType: "text/plain", body: "ok", vary: "" }
+    return Response { status: 200, contentType: "text/plain", body: "ok", vary: "", headers: [:] }
 }
 "#,
         &["--workers", "2"],
@@ -350,7 +350,7 @@ fn bump() -> Int64 {
 }
 
 fn handle(req: Request) -> Response {
-    return Response { status: 200, contentType: "text/plain", body: bump().toString(), vary: "" }
+    return Response { status: 200, contentType: "text/plain", body: bump().toString(), vary: "", headers: [:] }
 }
 "#;
     let unique = format!(

@@ -918,6 +918,9 @@ pub struct ServeResponse {
     pub body: String,
     /// The `Vary` header to write, or `""` for none (RFC-0072 M4).
     pub vary: String,
+    /// Every other response header, in the order the program inserted them
+    /// (RFC-0074 M2). Written verbatim; an empty map writes nothing.
+    pub headers: Vec<(String, String)>,
 }
 
 /// Run a served program (RFC-0016) under the interpreter: build ONE interpreter,
@@ -1007,11 +1010,26 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
                 Some(Val::Str(s)) => (**s).clone(),
                 _ => return Err("handle returned a Response without a String `vary`".into()),
             };
+            let headers = match map.get("headers") {
+                Some(Val::Map(m)) => m
+                    .iter()
+                    .map(|(k, v)| match v {
+                        Val::Str(s) => Ok((k.clone(), (**s).clone())),
+                        _ => Err("handle returned a Response whose `headers` holds a non-String"),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => {
+                    return Err(
+                        "handle returned a Response without a Map<String, String> `headers`".into(),
+                    )
+                }
+            };
             Ok(ServeResponse {
                 status,
                 content_type,
                 body,
                 vary,
+                headers,
             })
         }
         Ok(other) => Err(format!(

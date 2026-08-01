@@ -563,6 +563,18 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
                 name: "vary".to_string(),
                 ty: Type::Str,
             },
+            // Every OTHER response header, in insertion order (RFC-0074 M2).
+            // `Vary` kept its own field because RFC-0072 M4 already shipped it and
+            // one negotiation channel is better than two; the rest of HTTP's
+            // response vocabulary — `ETag`, `Cache-Control`, `Last-Modified`,
+            // `Location` — is open-ended, so it is a map rather than a field per
+            // header. Names are written as they go on the wire (response header
+            // names are never looked up by the program that just wrote them, so
+            // the `Request` lowercasing rule does not apply here).
+            Field {
+                name: "headers".to_string(),
+                ty: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
+            },
         ]),
         predicate: None,
         line: 0,

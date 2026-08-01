@@ -21,7 +21,7 @@ import { rpcHandle } from rpc("./fullstack/server/api")
 fn handle(req: Request) -> Response {
     return match mount(req, [[surface("/_", rpcHandle)], usersHttp.routes()]) {
         Some(r) => r,
-        None => Response { status: 404, contentType: "text/plain", body: "no route", vary: "" },
+        None => Response { status: 404, contentType: "text/plain", body: "no route", vary: "", headers: [:] },
     }
 }
 

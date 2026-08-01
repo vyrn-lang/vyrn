@@ -13,9 +13,9 @@ export fn respond(p: Params) -> Response {
 }
 
 fn rawOk(p: Paste) -> Response {
-    return Response { status: 200, contentType: "text/plain; charset=utf-8", body: p.body, vary: "" }
+    return Response { status: 200, contentType: "text/plain; charset=utf-8", body: p.body, vary: "", headers: [:] }
 }
 
 fn rawMissing() -> Response {
-    return Response { status: 404, contentType: "text/plain; charset=utf-8", body: "not found", vary: "" }
+    return Response { status: 404, contentType: "text/plain; charset=utf-8", body: "not found", vary: "", headers: [:] }
 }

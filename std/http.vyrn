@@ -544,22 +544,22 @@ gen fn httpProcedure(f: FnInfo, iface: ModuleInterface, base: String) -> String 
         out = out + "    return match fromJson(" + reqType + ", httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
         if f.ret == "" {
             out = out + "        Valid(input) => " + run + "Unit(input),\n"
-            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\" }),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
             out = out + "    }\n}\n"
             out = out + "fn " + run + "Unit(input: " + reqType + ") -> Option<Response> {\n"
             out = out + "    " + call + "(input)\n"
-            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" })\n}\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
         } else {
-            out = out + "        Valid(input) => Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "(input)), vary: \"\" }),\n"
-            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\" }),\n"
+            out = out + "        Valid(input) => Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "(input)), vary: \"\", headers: [:] }),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
             out = out + "    }\n}\n"
         }
     } else {
         if f.ret == "" {
             out = out + "    " + call + "()\n"
-            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" })\n}\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
         } else {
-            out = out + "    return Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "()), vary: \"\" })\n}\n"
+            out = out + "    return Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "()), vary: \"\", headers: [:] })\n}\n"
         }
     }
     out = out + "/// `" + f.name + "` at `" + base + "` + `path`.\n"

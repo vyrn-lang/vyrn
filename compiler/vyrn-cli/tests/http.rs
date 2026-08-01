@@ -128,7 +128,7 @@ import { mount, surface, Route } from \"std/http\"
 import * as api from \"./notes.http\"
 
 fn under(req: Request) -> Option<Response> {
-    return if req.path.startsWith(\"/_/\") { Some(Response { status: 200, contentType: \"text/plain\", body: \"surface\", vary: \"\" }) } else { None }
+    return if req.path.startsWith(\"/_/\") { Some(Response { status: 200, contentType: \"text/plain\", body: \"surface\", vary: \"\", headers: [:] }) } else { None }
 }
 
 fn hit(method: String, path: String) -> String {

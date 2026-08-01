@@ -32,7 +32,7 @@ let mut middleware: Array<Middleware> = [
         return None
     },
         |req| if req.path =~ "/admin.*" {
-        Some(Response { status: 403, contentType: "text/plain", body: "forbidden", vary: "" })
+        Some(Response { status: 403, contentType: "text/plain", body: "forbidden", vary: "", headers: [:] })
     } else {
         None
     },
@@ -57,13 +57,13 @@ fn handle(req: Request) -> Response {
 fn routed(req: Request) -> Response {
     // Baked constants served with their conventional content types.
     if req.method == "GET" && req.path == "/theme.css" {
-        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "" }
+        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "", headers: [:] }
     }
     if req.method == "GET" && req.path == "/openapi.json" {
-        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "" }
+        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "", headers: [:] }
     }
     if req.method == "GET" && req.path == "/schema.graphql" {
-        return Response { status: 200, contentType: "application/graphql", body: sdlText(), vary: "" }
+        return Response { status: 200, contentType: "application/graphql", body: sdlText(), vary: "", headers: [:] }
     }
     // rpcHandle (the derived /_/* surface) and connectHandle (the Connect
     // /<service>.<Proc> surface) mount side by side — one api directory, two
