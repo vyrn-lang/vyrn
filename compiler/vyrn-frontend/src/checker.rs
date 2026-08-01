@@ -3563,6 +3563,20 @@ impl<'a> Checker<'a> {
         for arm in arms {
             let (vname, bind) = match &arm.pattern {
                 Pattern::Variant(n, b) => (n.clone(), b.clone()),
+                // The `??` desugar's patterns (RFC-0079 M2) reaching an enum. They
+                // name "the success side" and "the failure side", which an enum
+                // with more than two variants does not have as a *pattern* — that
+                // would be a wildcard over N-1 variants, and `Pattern` has none.
+                // `?` reaches a `Fallible` enum (RFC-0080 M3) because it never
+                // pattern-matches at all; `??` does, so it stops here, and it says
+                // so in the source's own words rather than naming a pattern nobody
+                // wrote.
+                Pattern::Success(_) | Pattern::Failure(_) => {
+                    return Err(format!(
+                        "line {line}: `??` works on an Option or a Result, not on {sty} — \
+                         `match` names the variant to fall back on"
+                    ))
+                }
                 _ => return Err(format!("line {line}: expected an enum variant pattern")),
             };
             let ev = evs
