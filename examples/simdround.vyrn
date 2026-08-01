@@ -1,0 +1,123 @@
+/// Explicit SIMD, part three — the four roundings (RFC-0083 M2).
+///
+///   F32x4.ceil(v)      toward +infinity
+///   F32x4.floor(v)     toward -infinity
+///   F32x4.trunc(v)     toward zero
+///   F32x4.nearest(v)   to the nearest integer, TIES TO EVEN
+///
+/// **`nearest` is roundTiesToEven and not the `round` most languages ship.**
+/// wasm's `f32x4.nearest` is roundTiesToEven; LLVM's `llvm.round` and Rust's
+/// `f32::round` are roundTiesAwayFromZero, and those are a *different function*,
+/// not a different spelling of one. They agree everywhere except at an exact
+/// half, where ties-to-even answers `2` for both `2.5` and `1.5` while ties-away
+/// answers `3` and `2`. That is the same shape as the `minnum` / `minimum` split
+/// M2 found, so the halves are the first thing this file prints: reached by
+/// default the three engines would have gone two-to-one.
+///
+/// Native emits `llvm.rint`, which is roundTiesToEven under the default rounding
+/// mode, rather than the intrinsic that names the rule. `llvm.roundeven` has no
+/// lowering on baseline x86-64 — `roundps` is SSE4.1 and `clang -O2` here passes
+/// no `-march` — so it scalarizes to `roundevenf`, a C23 symbol the MSVC UCRT
+/// does not ship, and the link fails. Vyrn has no way to change the rounding
+/// mode, so the two are the same function for every program this compiler can
+/// produce; the halves below are what would catch it if that ever stopped
+/// being true.
+///
+/// The three toward-a-direction rounds differ from each other only on the sign
+/// of the operand, so every one of them is printed against a negative as well:
+/// `ceil(-0.5)` is `-0.0` and `floor(-0.5)` is `-1.0`, and an engine that had
+/// them the wrong way round would still agree on every positive lane.
+
+fn lanes(v: F32x4) {
+    print(v.lane(0))
+    print(v.lane(1))
+    print(v.lane(2))
+    print(v.lane(3))
+}
+
+/// All four roundings of one vector, in the order the header lists them.
+fn round4(v: F32x4) {
+    lanes(F32x4.ceil(v))
+    lanes(F32x4.floor(v))
+    lanes(F32x4.trunc(v))
+    lanes(F32x4.nearest(v))
+}
+
+fn main() -> Int64 {
+    // Built by arithmetic, as in `simd.vyrn`: there is no NaN or infinity
+    // literal, and a runtime division also stops `consteval` folding the answer
+    // with the compiler's arithmetic instead of the engine's.
+    let z: Float32 = 0.0
+    let o: Float32 = 1.0
+    let neg = z - o
+    let nan = z / z
+    let inf = o / z
+    let ninf = neg / z
+    let nzero = neg * z
+    let e: Float32 = 0.00000000000000000001
+    let sub = e * e
+
+    // ---- the exact halves, which is the whole hazard ---------------------
+    // Negatives come from `-v` rather than from a literal: a unary minus in a
+    // `Float32` position is still a `Float64` to the checker, and negating the
+    // vector is exact anyway (it is a sign-bit flip).
+    let half = F32x4(0.5, 1.5, 2.5, 3.5)
+    round4(half) // nearest: 0 2 2 4  -- NOT 1 2 3 4
+    round4(-half) // nearest: -0 -2 -2 -4
+    // 4.5 and 5.5 continue the alternation, which is the pin that this is
+    // ties-to-even and not "ties toward zero" — those two agree on 0.5 and 2.5
+    // and part company at 1.5.
+    round4(F32x4(4.5, 5.5, 6.5, 7.5)) // nearest: 4 6 6 8
+    round4(-F32x4(4.5, 5.5, 6.5, 7.5)) // nearest: -4 -6 -6 -8
+
+    // Either side of a half, at the last `Float32` that is not one. `0.5 - 2^-25`
+    // is not representable, so the neighbours are reached by subtracting from a
+    // whole number instead: `1.0 - 0.5` is exactly `0.5`, and the two values
+    // below bracket it by one ulp.
+    let justUnder = F32x4.splat(o) - F32x4.splat(0.50000003)
+    let justOver = F32x4.splat(o) - F32x4.splat(0.49999997)
+    lanes(F32x4.nearest(justUnder)) // 0 0 0 0
+    lanes(F32x4.nearest(justOver)) // 0 0 0 0   (both round to 0.5's neighbours)
+    print(justUnder.lane(0)) // 0.500000
+    print(justOver.lane(0)) // 0.500000
+
+    // ---- the sign of a zero survives every one of them -------------------
+    // `trunc(-0.7)` is `-0.0` and not `+0.0`: the result is a zero, but IEEE
+    // keeps the sign of the operand. An implementation that went through an
+    // integer would lose it, which is exactly what `simdbench.vyrn`'s Vyrn
+    // `trunc1` has to put back by hand.
+    let small = F32x4(0.3, 0.7, 0.3, 0.7) * F32x4(o, o, neg, neg)
+    round4(small) // trunc: 0 0 -0 -0   floor: 0 0 -1 -1   ceil: 1 1 -0 -0
+    round4(F32x4(z, nzero, z, nzero)) // every round of a zero is that zero
+
+    // ---- the values the engines are supposed to disagree about -----------
+    // NaN in every lane position, one operand at a time, through all four.
+    round4(F32x4(nan, o, o, o))
+    round4(F32x4(o, nan, o, o))
+    round4(F32x4(o, o, nan, o))
+    round4(F32x4(o, o, o, nan))
+    // Both infinities are already integers, so every round returns them; a
+    // subnormal is not, and rounds to a zero of its own sign rather than being
+    // flushed on the way in.
+    round4(F32x4(inf, ninf, sub, neg * sub))
+    round4(F32x4(nan, inf, ninf, nzero))
+
+    // ---- big values, where the operand is already an integer -------------
+    // Above 2^23 every `Float32` is an integer, so all four are the identity —
+    // and this is the range a `Float64`/`Int64` round-trip would get wrong.
+    let big = F32x4.splat(16777216.0)
+    round4(big)
+    round4(-big)
+    round4(F32x4(16777215.0, 8388609.0, 8388608.5, 8388607.5))
+
+    // ---- rounding composes with the rest of the surface -------------------
+    // A rounded vector is an ordinary `F32x4`: comparable, maskable, negatable,
+    // and one lane of it can be written back.
+    let r = F32x4.nearest(half)
+    lanes(r.replaceLane(1, o))
+    print((F32x4.floor(half) == F32x4.trunc(half)).allTrue()) // true (all positive)
+    print((F32x4.floor(-half) == F32x4.trunc(-half)).anyTrue()) // false
+    print(((F32x4.ceil(half) - F32x4.floor(half)) == F32x4.splat(o)).allTrue()) // true
+
+    return 0
+}
