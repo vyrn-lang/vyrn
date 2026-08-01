@@ -147,8 +147,43 @@ over `Type` and both were in the textual backend.
   `Array<Float32>` at an index (**bounds-checked once for the whole vector**, not
   per lane), lane-wise comparisons producing a mask, `min`/`max`/`abs`/`sqrt`.
   This is where SIMD becomes useful rather than demonstrated.
-- **M3 — the other widths.** `I32x4`, `F64x2`, `I64x2`. Mechanical once M1 and
-  M2 have settled the shape, and worth doing only if something wants them.
+- **M3 — the other widths.** `I32x4`, `F64x2`, `I64x2`. **Not mechanical — this
+  line said "mechanical once M1 and M2 have settled the shape" and that is
+  wrong.** The operator set differs by lane type, verified against the encoder
+  rather than assumed:
+
+  | | floats | integers |
+  |---|---|---|
+  | `/` | `F32x4Div`, `F64x2Div` | **does not exist** — there is no `I32x4Div`, because no hardware has SIMD integer divide |
+  | `min`/`max` | one each | **two each** — `MinS`/`MinU`/`MaxS`/`MaxU`, and only at i8/i16/i32; `I64x2` has none at all |
+  | saturating `+`/`-` | none | `AddSat`/`SubSat`, signed and unsigned, **i8 and i16 only** — not i32 |
+  | `sqrt`, `ceil`, `floor`, `trunc`, `nearest` | yes | none |
+
+  So `I32x4` is not `F32x4` with a different lane type: it loses `/`, gains a
+  signedness question on `min`/`max` that Vyrn's `Int32` vs `UInt32` can answer,
+  and `I64x2` is thinner still. Whoever takes M3 should price each width
+  separately and is free to ship one.
+
+  Two further findings from the same pass, both worth having before M3 starts:
+
+  - **`v128` is a single wasm type whose lane interpretation belongs to the
+    *instruction*, not the value.** Vyrn instead makes each width its own type,
+    which is a checker-level choice and the right one — it is what stops
+    `F32x4.min` being applied to integer lanes. The consequence is that
+    reinterpreting the same 128 bits across widths is free in wasm and needs an
+    explicit Vyrn operation to be expressible at all. None is proposed; it is
+    named so its absence is a decision.
+  - **`Mask32x4` has no reduction, and wasm has three.** `V128AnyTrue`,
+    `AllTrue` and `Bitmask` are exactly the "did any lane pass / did every lane
+    pass" question a mask exists to answer, and M2 shipped `.lane(k)` without
+    them. That is a gap in the *current* surface rather than an M3 item, and it
+    is the cheapest useful thing left in this RFC.
+
+  Also noted and deliberately not taken: `F32x4PMin`/`PMax` exist beside
+  `Min`/`Max`. They are the "pseudo-minimum" pair with different NaN behaviour,
+  so they are a *different operation*, not a faster spelling — M2's IEEE-754-2019
+  `minimum`/`maximum` choice stands and this is only recorded so nobody
+  "optimises" one into the other.
 
 ### As landed (M2)
 
