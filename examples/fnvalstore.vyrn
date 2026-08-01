@@ -64,6 +64,18 @@ fn makeHandlers(cb: UserSink) -> Handlers {
 
 /// A GENERIC record holding a `fn` whose PARAMETER type is a type parameter —
 /// the `std/ui` `ParamQuery<P, T>` shape (RFC-0071 M2b).
+/// A lambda whose BODY CALLS a stored `fn` value from the enclosing scope.
+///
+/// The callee is a value, not a symbol, and it was missing from the lifted
+/// lambda's capture list — so both compiling backends emitted a call to
+/// `@vyrn_sink`, a name no module defines, while the interpreter (which resolves
+/// through the environment) ran it. A build failure rather than a wrong answer,
+/// but only on the two engines that a test running `vyrn run` never reaches.
+fn wrapSink(n: Int64) -> IntSink {
+    let sink: IntSink = double
+    return |m| sink(m + n)
+}
+
 type Deferred<P, T> = { run: fn(P) -> T }
 
 /// `run` is the only place `P` occurs, so nothing pins it before this call. Until
@@ -198,6 +210,10 @@ fn main() -> Int64 {
         None => print("no local sink"),
     }
     drop local
+
+    // A lambda that CALLS a captured stored fn value (not merely reads one).
+    let wrapped = wrapSink(10)
+    wrapped(1) // chain-b: 22
 
     // A type parameter that occurs ONLY inside a `fn` parameter's own parameter
     // list, solved from the named target and crossing a function boundary.

@@ -1,0 +1,13 @@
+/// The public REST projection of the user procedures (RFC-0074 M1) — base path
+/// `/users`, derived from the stem this file shares with `users.vyrn`.
+///
+/// It colocates with what it projects and does NOT join it: `rpc("./server/api")`
+/// skips a dotted stem, so the derived RPC surface is exactly the three
+/// procedures, unchanged, and this file adds a second surface over the same
+/// three rather than a fourth procedure.
+import { http, Route, GET, POST, DELETE } from "std/http"
+import { byId, create, del } from http("./users")
+
+export fn routes() -> Array<Route> {
+    return [GET(byId("/{id}")), POST(create("/")), DELETE(del("/{id}"))]
+}

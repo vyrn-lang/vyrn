@@ -1,0 +1,58 @@
+/// A REST projection beside the derived RPC surface (RFC-0074 M1), over ONE set
+/// of procedures — `examples/fullstack/server/api/users.vyrn`, the same module
+/// `examples/rpc.vyrn` calls in-process and the browser demo serves.
+///
+/// The point of the file is the last three lines of `main`: the REST response and
+/// the RPC response for the same procedure are compared byte for byte. They come
+/// out identical because the projection is not a re-encoding — it decodes the
+/// path and body with the same `fromJson` and encodes with the same `toJson`, so
+/// there is no second wire format to keep in sync. The parity corpus then proves
+/// that identity holds on all three engines rather than just this one.
+///
+/// Inspect the generated projection with:  vyrn emit-gen examples/rest.vyrn
+import { mount, surface, Route } from "std/http"
+import * as usersHttp from "./fullstack/server/api/users.http"
+import { rpc } from "std/rpc"
+import { rpcHandle } from rpc("./fullstack/server/api")
+
+/// The composition root: the derived RPC surface first (it owns `/_/*`), then the
+/// public REST API. `mount` traps at startup on any overlap between the two, so
+/// the order below is a stated policy rather than an accident of listing.
+fn handle(req: Request) -> Response {
+    return match mount(req, [[surface("/_", rpcHandle)], usersHttp.routes()]) {
+        Some(r) => r,
+        None => Response { status: 404, contentType: "text/plain", body: "no route", vary: "" },
+    }
+}
+
+fn hit(method: String, path: String, body: String) -> Response {
+    return handle(Request { method: method, path: path, headers: [:], body: body })
+}
+
+fn show(label: String, r: Response) {
+    print("\{label} -> \{r.status} \{r.contentType} \{r.body}")
+}
+
+fn main() -> Int64 {
+    // The placeholder binds an `Int64` field, so `{id}` arrives as the number 7
+    // and not as `"7"` — a REST projection that could not do this would 422 on
+    // the most common route in the world.
+    let one = hit("GET", "/users/7", "")
+    show("GET /users/7", one)
+    show("POST /users", hit("POST", "/users", "{\"name\":\"ada\",\"age\":36}"))
+    show("DELETE /users/0", hit("DELETE", "/users/0", ""))
+
+    // A validated field that fails its `where` is a 422 carrying the same issue
+    // shape the RPC surface produces — the projection did not restate validation.
+    show("POST /users (bad age)", hit("POST", "/users", "{\"name\":\"ada\",\"age\":999}"))
+
+    // Nothing claims this path: neither surface matched.
+    show("GET /nope", hit("GET", "/nope", ""))
+
+    // The two surfaces, same procedure, same bytes.
+    let viaRpc = hit("POST", "/_/users/byId", "{\"id\":7}")
+    print("REST body == RPC body: \{(one.body == viaRpc.body).toString()}")
+    print("REST type == RPC type: \{(one.contentType == viaRpc.contentType).toString()}")
+    print("REST status == RPC status: \{(one.status == viaRpc.status).toString()}")
+    return 0
+}

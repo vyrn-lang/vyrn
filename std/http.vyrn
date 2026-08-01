@@ -1,0 +1,639 @@
+/// std/http — the REST projection (RFC-0074 M1), a library over the same
+/// procedures the derived RPC surface reflects on. The compiler knows nothing
+/// about routes: everything below is either an ordinary record moved around at
+/// runtime or generated Vyrn source over `moduleInterface` reflection, exactly
+/// as `std/rpc`, `std/openapi` and `std/graphql` are.
+///
+/// A projection is opt-in and hand-written, because `GET /pastes/{id}` is API
+/// *design* — no reflection can derive it, and deriving it would need the magic
+/// naming conventions RFC-0072 exists to remove. You write one when you publish
+/// a public API, and not before:
+///
+/// ```vyrn
+/// // server/api/pastes.http.vyrn — base path `/pastes`, from the stem.
+/// import { http, Route, GET, POST } from "std/http"
+/// import { recent, byId, create } from http("./pastes")
+///
+/// export fn routes() -> Array<Route> {
+///     return [GET(recent("/")), GET(byId("/{id}")), POST(create("/"))]
+/// }
+/// ```
+///
+/// **The chain is value-level, not type-level.** `Route` is `Route` after every
+/// call — `GET(..)` takes a `Route` and hands back a `Route`, and M2's
+/// `cacheFor`/`etag` will do the same. Nothing accumulates in the type, so the
+/// fortieth route costs the checker one more nominal value rather than a wider
+/// instantiation. That is the property this design exists to keep.
+///
+/// The shape is `GET(byId("/{id}"))` and not the RFC's `get("/{id}", byId)`, for
+/// one reason: the pattern has to sit in the *procedure's own* parameter slot for
+/// its placeholders to be checked at compile time. `byId`'s generated parameter
+/// type is a `String where value =~ …` admitting exactly the placeholders `IdReq`
+/// has fields for, so `byId("/{ID}")` is a checker error at the call site and
+/// needs neither RFC-0073's symbol map nor a compiler rule. A uniform
+/// `GET(pattern, proc)` cannot do that: it would have to be generic over the
+/// signature, and a generic cannot name a type to `fromJson` — the first argument
+/// there must be a declared type name, which is precisely what a type parameter
+/// is not.
+import { Json, JsonField, emit } from "std/json"
+import { parseJson } from "std/jsonread"
+import { fromBytesOr, indexOf, joinWith, split, substring } from "std/strings"
+
+// The procedure rule, imported rather than restated: a projection publishes the
+// very procedures the derived RPC surface reflects on, in the same codec, so
+// "what is a procedure" is one rule (RFC-0072 M2) with one message. A second
+// copy would be a second thing to drift.
+import { validateContract } from "std/rpc"
+
+// ---- the values ------------------------------------------------------------
+
+/// What a mounted route runs: the request, plus the placeholder bindings the
+/// pattern captured. `None` declines — a whole mounted subsystem (the derived RPC
+/// surface, a page router) answers for some paths under its prefix and passes on
+/// the rest, and `mount` continues to the next group when it does.
+export type Handler = fn(Request, Map<String, String>) -> Option<Response>
+
+/// A whole mounted subsystem: it takes the request and nothing else, because a
+/// prefix binds no placeholders. `rpcHandle` and a page router already have this
+/// shape (the RFC-0016 `handle` convention).
+export type Surface = fn(Request) -> Option<Response>
+
+/// One route: an HTTP method, a full path pattern (base + sub-path), what runs,
+/// and the `derived` policy line the diagnostics quote. `prefix` marks a whole
+/// subsystem mounted under `pattern` rather than a single path, and selects
+/// which of the two callables `mount` invokes.
+///
+/// `method` is `""` until a method constructor sets it — a route that reaches
+/// `mount` without one is a startup error, not a silent GET.
+///
+/// Two fn fields rather than one plus an adapting closure, and the reason is a
+/// backend limit worth naming: a lambda that CALLS a captured `fn`-typed
+/// PARAMETER (`|req, ps| run(req)`) lowers to a call on a symbol no module
+/// defines, so it runs under the interpreter and fails to build natively. Each
+/// route uses one field and leaves the other at a named never-answers stub,
+/// which costs a word and no closure at all.
+export type Route = {
+    method: String,
+    pattern: String,
+    prefix: Bool,
+    run: Handler,
+    whole: Surface,
+    derived: String,
+}
+
+/// The `run` of a prefix route, and the `whole` of a path route: never called,
+/// because `prefix` decides which field `mount` reaches for.
+fn httpNoRun(req: Request, ps: Map<String, String>) -> Option<Response> {
+    return None
+}
+
+fn httpNoWhole(req: Request) -> Option<Response> {
+    return None
+}
+
+/// Build a route with no method yet. What a generated per-procedure constructor
+/// calls; `pattern` is already base-qualified.
+export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
+    return Route {
+        method: "",
+        pattern: httpTidy(pattern),
+        prefix: false,
+        run: run,
+        whole: httpNoWhole,
+        derived: derived,
+    }
+}
+
+/// `/pastes/` => `/pastes`, `//` => `/`. The base and the sub-path are joined by
+/// concatenation, so `GET(recent("/"))` would otherwise mount `/pastes/` and miss
+/// the URL everyone actually types.
+fn httpTidy(pattern: String) -> String {
+    if pattern == "" {
+        return "/"
+    }
+    if pattern.endsWith("/") && pattern != "/" {
+        return substring(pattern, 0, pattern.byteLength - 1)
+    }
+    return pattern
+}
+
+/// `GET` this route. The four below are the same call with another verb; the
+/// vocabulary is HTTP's, so `PUT` and `PATCH` are separate words rather than one
+/// `method("PUT")` taking a string nobody can complete or spell-check.
+///
+/// UPPERCASE, against the house style, because `get` and `set` are RESERVED
+/// (the `cell`/`Ref` builtins dispatch before user functions, so a `fn get`
+/// would be silently unreachable and the checker rejects it outright). Given
+/// that `get` is unavailable, the wire spelling is the better fallback than a
+/// coined synonym: `GET` is what the method IS, and it keeps the five verbs
+/// spelled one way.
+export fn GET(r: Route) -> Route {
+    return httpWithMethod(r, "GET")
+}
+
+export fn POST(r: Route) -> Route {
+    return httpWithMethod(r, "POST")
+}
+
+export fn PUT(r: Route) -> Route {
+    return httpWithMethod(r, "PUT")
+}
+
+export fn PATCH(r: Route) -> Route {
+    return httpWithMethod(r, "PATCH")
+}
+
+export fn DELETE(r: Route) -> Route {
+    return httpWithMethod(r, "DELETE")
+}
+
+fn httpWithMethod(r: Route, method: String) -> Route {
+    return Route {
+        method: method,
+        pattern: r.pattern,
+        prefix: r.prefix,
+        run: r.run,
+        whole: r.whole,
+        derived: method + " " + r.pattern + " " + r.derived,
+    }
+}
+
+/// A whole subsystem mounted under `prefix`: the derived RPC surface, a page
+/// router. It answers with `Some` or declines with `None` — the same
+/// `handle`-convention shape those already have (RFC-0016) — so mounting one
+/// costs no adapter at the composition root.
+export fn surface(prefix: String, run: Surface) -> Route {
+    return Route {
+        method: "*",
+        pattern: httpTidy(prefix),
+        prefix: true,
+        run: httpNoRun,
+        whole: run,
+        derived: "* " + prefix + " (surface)",
+    }
+}
+
+// ---- mounting --------------------------------------------------------------
+
+/// Resolve `req` against the mounted groups, in order, first match wins.
+///
+/// Overlaps BETWEEN groups are a startup error, not a silent shadow: a route in a
+/// later group that an earlier group already answers for is unreachable, and an
+/// unreachable route is the kind of thing nobody notices until production. Order
+/// *within* a group is the author's own, and left alone.
+///
+/// The check runs on every call rather than once, because there is no init hook
+/// to hang it on and a router is a handful of routes: the scan is O(routes²) over
+/// a number that is 5 in `examples/bin` and would have to reach the thousands
+/// before it showed up next to a JSON decode. `vyrn serve` runs `main` at
+/// startup, so an app that touches `handle` there sees the trap at startup, which
+/// is where it belongs.
+export fn mount(req: Request, groups: Array<Array<Route>>) -> Option<Response> {
+    httpCheckMount(groups)
+    for g in groups {
+        for r in g {
+            if let Some(ps) = httpMatch(r, req) {
+                let answer = if r.prefix { httpInvokeWhole(r.whole, req) } else { httpInvoke(r.run, req, ps) }
+                if let Some(resp) = answer {
+                    return Some(resp)
+                }
+            }
+        }
+    }
+    return None
+}
+
+/// Call a stored handler. RFC-0037 calls a `fn` value by NAME, so the field has
+/// to be bound to a parameter before it can be called.
+fn httpInvoke(h: Handler, req: Request, ps: Map<String, String>) -> Option<Response> {
+    return h(req, ps)
+}
+
+fn httpInvokeWhole(h: Surface, req: Request) -> Option<Response> {
+    return h(req)
+}
+
+/// The placeholder bindings if `r` matches `req`, `None` otherwise.
+fn httpMatch(r: Route, req: Request) -> Option<Map<String, String>> {
+    if r.method != "*" && r.method != req.method {
+        return None
+    }
+    let path = httpPathOnly(req.path)
+    if r.prefix {
+        let under = r.pattern == "/" || path == r.pattern || path.startsWith(r.pattern + "/")
+        return if under { Some([:]) } else { None }
+    }
+    let pat = split(r.pattern, "/")
+    let got = split(path, "/")
+    if pat.length != got.length {
+        return None
+    }
+    let mut ps: Map<String, String> = [:]
+    let mut i = 0
+    while i < pat.length {
+        if httpIsPlaceholder(pat[i]) {
+            ps[httpPlaceholderName(pat[i])] = got[i]
+        } else {
+            if pat[i] != got[i] {
+                return None
+            }
+        }
+        i = i + 1
+    }
+    return Some(ps)
+}
+
+/// The request path without its query string. `path` carries the query as sent
+/// (RFC-0072 M4), and a route pattern never mentions one.
+fn httpPathOnly(path: String) -> String {
+    return match indexOf(path, "?") {
+        Some(i) => substring(path, 0, i),
+        None => path,
+    }
+}
+
+fn httpIsPlaceholder(seg: String) -> Bool {
+    return seg.startsWith("{") && seg.endsWith("}")
+}
+
+fn httpPlaceholderName(seg: String) -> String {
+    return substring(seg, 1, seg.byteLength - 1)
+}
+
+/// Trap on any route a later group could never reach, and on any route that never
+/// got a method.
+fn httpCheckMount(groups: Array<Array<Route>>) {
+    let mut gi = 0
+    for g in groups {
+        for r in g {
+            if r.method == "" {
+                panic("mount: route `" + r.pattern + "` (" + r.derived + ") has no method — wrap it in GET(..)/POST(..)/PUT(..)/PATCH(..)/DELETE(..)")
+            }
+        }
+        let mut gj = 0
+        for earlier in groups {
+            if gj < gi {
+                for a in earlier {
+                    for b in g {
+                        if httpSubsumes(a, b) {
+                            panic("mount: " + b.method + " " + b.pattern + " (group " + gi.toString() + ", " + b.derived + ") is unreachable — " + a.method + " " + a.pattern + " (group " + gj.toString() + ") already answers it")
+                        }
+                    }
+                }
+            }
+            gj = gj + 1
+        }
+        gi = gi + 1
+    }
+}
+
+/// Whether every path `b` matches, `a` matches too — so mounting `a` first leaves
+/// `b` dead. Conservative on purpose: it reports the containments it can prove
+/// (an earlier prefix that covers a later pattern, an earlier pattern whose
+/// placeholders swallow a later one) and stays quiet otherwise, because a false
+/// startup trap is worse than a missed shadow.
+fn httpSubsumes(a: Route, b: Route) -> Bool {
+    if a.method != "*" && a.method != b.method {
+        return false
+    }
+    if a.prefix {
+        return a.pattern == "/" || b.pattern == a.pattern || b.pattern.startsWith(a.pattern + "/")
+    }
+    if b.prefix {
+        return false
+    }
+    let sa = split(a.pattern, "/")
+    let sb = split(b.pattern, "/")
+    if sa.length != sb.length {
+        return false
+    }
+    let mut i = 0
+    while i < sa.length {
+        if httpIsPlaceholder(sa[i]) == false && sa[i] != sb[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ---- the decode input ------------------------------------------------------
+
+/// The JSON a generated adapter hands `fromJson`: the placeholder bindings as
+/// object fields, with the request body's own fields after them.
+///
+/// A captured segment is text, but the field it binds may not be: `/users/{id}`
+/// over an `Int64` id must produce `{"id":7}`, not `{"id":"7"}`, or every numeric
+/// REST route in existence decodes as a 422. The generator resolves each
+/// placeholder's field to its base type and passes the numeric ones in
+/// `numeric`; a value that does not parse as an integer stays a string, so the
+/// decoder reports a typed issue naming the field rather than this function
+/// inventing a number. A `Float64` path field is text here too — `parse` is
+/// integer-only, and no dogfood has one.
+export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> String {
+    if ps.length == 0 {
+        return body
+    }
+    let mut fs: Array<JsonField> = []
+    for k in ps.keys() {
+        fs.push(JsonField { key: k, value: httpValue(httpAt(ps, k), httpListHas(numeric, k)) })
+    }
+    if body != "" {
+        for f in httpBodyFields(body) {
+            fs.push(f)
+        }
+    }
+    return emit(JObj(fs))
+}
+
+/// A captured segment as the JSON value its field expects.
+fn httpValue(raw: String, isNumber: Bool) -> Json {
+    if isNumber {
+        return match parse(raw) {
+            Some(n) => JNum(n.toString()),
+            None => JStr(raw),
+        }
+    }
+    return JStr(raw)
+}
+
+fn httpListHas(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+fn httpAt(ps: Map<String, String>, k: String) -> String {
+    return match ps[k] {
+        Some(v) => v,
+        None => "",
+    }
+}
+
+/// The body's top-level object fields, or none when it is not an object — an
+/// unparseable body with a placeholder present is left to `fromJson`, which
+/// reports the missing fields it needs by name.
+fn httpBodyFields(body: String) -> Array<JsonField> {
+    return match parseJson(body) {
+        Ok(j) => httpFieldsOf(j),
+        Err(e) => [],
+    }
+}
+
+fn httpFieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => fs,
+        JNull => [],
+        JBool(b) => [],
+        JNum(n) => [],
+        JStr(s) => [],
+        JArr(xs) => [],
+    }
+}
+
+// ---- the generator ---------------------------------------------------------
+// (Comptime-pure string building, as every generator in std/ is.)
+
+/// Uppercase the first byte (ASCII): `byId` => `ById`, for the internal names.
+fn httpCapFirst(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in raw {
+        if i == 0 && b >= 'a' && b <= 'z' {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, s)
+}
+
+/// The base path a projection derives from its stem: `"./server/api/pastes"` =>
+/// `"/pastes"`. Renaming the resource moves its URLs, which is the whole reason
+/// the placement rule exists.
+fn httpBasePath(module: String) -> String {
+    let segs = split(module, "/")
+    return "/" + segs[segs.length - 1]
+}
+
+/// One field of a procedure's input type: the name a placeholder may spell, and
+/// whether the value it binds is a number on the wire.
+type HttpField = { name: String, numeric: Bool }
+
+/// The fields of the record type `name` declares, in declaration order.
+///
+/// Read off `TypeInfo.source` — canonical Vyrn source — with the compiler's own
+/// lexer (RFC-0054), not a hand-rolled scanner: the repo already paid for that
+/// lesson in the `std/vyx` scanner bugs. At brace depth 1, an identifier followed
+/// by `:` is a field; anything nested (an inline record, a `Map<String, Int64>`
+/// value type) is at another depth or is not followed by `:`.
+gen fn httpFields(name: String, iface: ModuleInterface) -> Array<HttpField> {
+    let mut out: Array<HttpField> = []
+    for t in iface.types {
+        if t.name == name {
+            let toks = lex(t.source)
+            let mut depth = 0
+            let mut i = 0
+            while i < toks.length {
+                let tk = toks[i]
+                if tk.kind == "punct" && tk.text == "{" {
+                    depth = depth + 1
+                }
+                if tk.kind == "punct" && tk.text == "}" {
+                    depth = depth - 1
+                }
+                if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
+                    let nx = toks[i + 1]
+                    if nx.kind == "punct" && nx.text == ":" {
+                        out.push(HttpField { name: tk.text, numeric: httpIsNumeric(toks[i + 2], iface) })
+                    }
+                }
+                i = i + 1
+            }
+        }
+    }
+    return out
+}
+
+/// Whether a field whose type begins with token `ty` carries a JSON number.
+///
+/// One alias hop (`Age` => `Int64`), which is how every validated scalar in the
+/// dogfoods is written; a longer chain reads as text and decodes as a 422 rather
+/// than as a wrong number.
+gen fn httpIsNumeric(ty: Token, iface: ModuleInterface) -> Bool {
+    if ty.kind != "ident" {
+        return false
+    }
+    if httpIsNumericBase(ty.text) {
+        return true
+    }
+    for t in iface.types {
+        if t.name == ty.text {
+            return httpIsNumericBase(t.schema.base)
+        }
+    }
+    return false
+}
+
+fn httpIsNumericBase(spelling: String) -> Bool {
+    return spelling.startsWith("Int") || spelling.startsWith("UInt") || spelling.startsWith("Float")
+}
+
+/// Just the names, for the pattern type's placeholder alternatives.
+fn httpNamesOf(fields: Array<HttpField>) -> Array<String> {
+    let mut out: Array<String> = []
+    for f in fields {
+        out.push(f.name)
+    }
+    return out
+}
+
+/// The numeric names as a Vyrn array literal, for the emitted `httpInput` call.
+fn httpNumericLit(fields: Array<HttpField>) -> String {
+    let mut names: Array<String> = []
+    for f in fields {
+        if f.numeric {
+            names.push("\"" + f.name + "\"")
+        }
+    }
+    return "[" + joinWith(names, ", ") + "]"
+}
+
+/// The `where` predicate of a procedure's path-pattern type: any run of ordinary
+/// bytes, or one of the placeholders its input type has a field for.
+///
+/// Emitted INTO a Vyrn string literal that the compiler re-lexes, so a single
+/// output backslash is written as two — the `std/ui:uiRegexEscapeLit` rule.
+fn httpPathRegex(fields: Array<String>) -> String {
+    let mut alts = "[^{}]"
+    for f in fields {
+        alts = alts + "|\\\\{" + f + "\\\\}"
+    }
+    return "(" + alts + ")*"
+}
+
+/// One procedure's projection: the pattern type that checks its placeholders, the
+/// adapter that decodes / calls / encodes, and the constructor the projection
+/// file names.
+gen fn httpProcedure(f: FnInfo, iface: ModuleInterface, base: String) -> String {
+    let cap = httpCapFirst(f.name)
+    let run = "httpRun" + cap
+    let pathType = "Path" + cap
+    let mut fields: Array<HttpField> = []
+    if f.params.length == 1 {
+        fields = httpFields(f.params[0].spelling, iface)
+    }
+    let names = httpNamesOf(fields)
+    let mut out = "/// Path patterns `" + f.name + "` accepts"
+    if fields.length > 0 {
+        out = out + ": " + joinWith(httpBraced(names), ", ") + " (the fields of `" + f.params[0].spelling + "`)"
+    } else {
+        out = out + " — no placeholders (it takes no input)"
+    }
+    out = out + ".\n"
+    out = out + "export type " + pathType + " = String where value =~ \"" + httpPathRegex(names) + "\"\n"
+    out = out + "fn " + run + "(req: Request, ps: Map<String, String>) -> Option<Response> {\n"
+    let call = f.name + "__real"
+    if f.params.length == 1 {
+        let reqType = f.params[0].spelling
+        out = out + "    return match fromJson(" + reqType + ", httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
+        if f.ret == "" {
+            out = out + "        Valid(input) => " + run + "Unit(input),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\" }),\n"
+            out = out + "    }\n}\n"
+            out = out + "fn " + run + "Unit(input: " + reqType + ") -> Option<Response> {\n"
+            out = out + "    " + call + "(input)\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" })\n}\n"
+        } else {
+            out = out + "        Valid(input) => Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "(input)), vary: \"\" }),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\" }),\n"
+            out = out + "    }\n}\n"
+        }
+    } else {
+        if f.ret == "" {
+            out = out + "    " + call + "()\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" })\n}\n"
+        } else {
+            out = out + "    return Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "()), vary: \"\" })\n}\n"
+        }
+    }
+    out = out + "/// `" + f.name + "` at `" + base + "` + `path`.\n"
+    out = out + "export fn " + f.name + "(path: " + pathType + ") -> Route {\n"
+    out = out + "    return httpRoute(\"" + base + "\" + path, " + run + ", \"" + f.name + "\")\n}\n"
+    return out
+}
+
+/// `["id", "lang"]` => `["{id}", "{lang}"]`, for the doc line.
+fn httpBraced(fields: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for f in fields {
+        out.push("{" + f + "}")
+    }
+    return out
+}
+
+/// The import block: the procedures under `__real` aliases (their projection
+/// constructors take their names), and every reachable type from the module that
+/// DECLARES it, so a type crossing an import keeps one identity (RFC-0031).
+fn httpImports(iface: ModuleInterface, module: String) -> String {
+    let mut specs: Array<String> = [module]
+    for t in iface.types {
+        if httpContains(specs, t.module) == false {
+            specs.push(t.module)
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        if spec == module {
+            for f in iface.functions {
+                names.push(f.name + " as " + f.name + "__real")
+            }
+        }
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name)
+            }
+        }
+        if names.length > 0 {
+            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+fn httpContains(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+/// `http(module)` — the REST projection of one procedure module: a
+/// placeholder-checked constructor per procedure, mounted under the base path its
+/// stem derives.
+///
+/// Inspect the generated module with:  vyrn emit-gen <file>
+export gen fn http(module: String) -> String {
+    let iface = moduleInterface(module)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let base = httpBasePath(module)
+    let mut out = "/// Generated by std/http `http` (RFC-0074) — do not edit.\n"
+    out = out + "import { Route, httpRoute, httpInput } from \"std/http\"\n"
+    out = out + httpImports(iface, module)
+    out = out + "type HttpIssues = { issues: Array<Issue> }\n"
+    for f in iface.functions {
+        out = out + httpProcedure(f, iface, base)
+    }
+    return out
+}

@@ -20,6 +20,8 @@ import { route } from pagesThemed("./app/routes", "./theme.json")
 import * as rawPages from pagesThemed("./server/routes", "./theme.json")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
+import { mount, surface } from "std/http"
+import * as pastesHttp from "./server/api/pastes.http"
 
 /// A middleware may answer a request outright (`Some`) or pass it along (`None`);
 /// the chain runs in registration order in front of routing.
@@ -63,8 +65,16 @@ fn routed(req: Request) -> Response {
     if req.path.startsWith("/raw/") {
         return rawPages.route(req)
     }
-    // The derived RPC surface (/_/*) claims its paths first; everything else routes.
-    return match rpcHandle(req) {
+    // The two wire surfaces, mounted in order, first match wins (RFC-0074): the
+    // derived RPC surface (/_/*) that the pages call, then the public REST API
+    // written over the same three procedures. `mount` traps at startup if either
+    // could shadow the other, so "which one answers /pastes/x" is not a question
+    // anyone has to hold in their head.
+    //
+    // Pages stay OUTSIDE the mount and last, because `route` always answers
+    // (`-> Response`, with its own 404 page) — it is the fallback, not a group
+    // that can decline.
+    return match mount(req, [[surface("/_", rpcHandle)], pastesHttp.routes()]) {
         Some(r) => r,
         None => route(req),
     }

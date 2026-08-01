@@ -10,6 +10,7 @@
 - [std/graphql](std/graphql.md) — std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
 - [std/hash](std/hash.md) — std/hash — non-cryptographic byte hashing (RFC-0045).
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).
+- [std/http](std/http.md)
 - [std/i18n](std/i18n.md) — std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
 - [std/json](std/json.md) — std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
 - [std/jsondec](std/jsondec.md) — std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
