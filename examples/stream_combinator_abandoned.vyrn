@@ -1,0 +1,57 @@
+// The obligation does not launder through a combinator — RFC-0075 M2.
+//
+// M1 made an abandoned `fromArray(...)` a compile error. That is worth exactly
+// nothing if `map(s, f)` can take the obligation in and not hand one back: a
+// combinator that drops its argument on the floor, or one whose result may be
+// ignored, is a hole through the whole analysis and it is a hole that only
+// opens once combinators exist. So each rejection below is the M2 half of a
+// rule M1 established, and each is here to FAIL rather than to run.
+//
+// Nothing in the compiler knows the word "combinator". std/stream is ordinary
+// Vyrn (std/stream.vyrn): its functions take a `Stream` parameter — which
+// carries the obligation into the callee — and return one, so the caller owes
+// the result for the same reason it owed `fromArray`'s. That is why this file
+// needs no new diagnostic: it produces M1's.
+//
+// This file is an INTENTIONAL compile error, listed under
+// EXPECTED_CHECK_FAILURE. Observe the diagnostics with:
+//
+//   vyrn check examples/stream_combinator_abandoned.vyrn
+//
+// Compare streamops.vyrn, which discharges every combinator result.
+import { map, filter, take } from "std/stream"
+
+fn feed() -> Stream<Int64> {
+    let xs: Array<Int64> = [1, 2, 3]
+    return fromArray(xs)
+}
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn odd(n: Int64) -> Bool {
+    return n % 2 == 1
+}
+
+fn main() -> Int64 {
+    // Rejected: the mapped stream is an obligation like any other. If this were
+    // legal, `map` would be a laundry for every stream in the program.
+    let mapped = map(feed(), double)
+    print(0)
+
+    // Rejected: a chain is not a loophole either — only the outermost result is
+    // live (each combinator consumed the one it was handed), and it is abandoned.
+    let chained = take(filter(feed(), odd), 2)
+    print(1)
+
+    // Rejected twice over: `for … in` consumed it, and `close` then frees the
+    // same buffer again. The leak was only ever half the problem.
+    let twice = map(feed(), double)
+    for v in twice {
+        print(v)
+    }
+    close(twice)
+
+    return 0
+}

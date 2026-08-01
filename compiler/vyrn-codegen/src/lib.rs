@@ -9806,6 +9806,61 @@ mod tests {
         assert_eq!(stream, array, "fromArray must lower to nothing at all");
     }
 
+    /// RFC-0075 M2's combinator, spelled locally: it takes the obligation in as a
+    /// parameter, discharges it with its own `for … in`, and hands back a new
+    /// stream. std/stream's `map`/`filter`/`take`/`merge` are all this shape.
+    const TWICE: &str = "fn twice(s: Stream<Int64>) -> Stream<Int64> { \
+                         let mut out: Array<Int64> = array() \
+                         for x in s { out = push(out, x * 2) } return fromArray(out) }";
+
+    #[test]
+    fn stream_combinator_chain_releases_once_per_stream() {
+        // Two streams exist — the one `feed` made and the one `twice` made — so
+        // two releases, each in the function that owns its stream. Counted rather
+        // than assumed: "it composes" is exactly the claim a hole hides behind.
+        let src = format!(
+            "{FEED} {TWICE} fn main() -> Int64 {{ for p in twice(feed()) {{ print(p) }} return 0 }}"
+        );
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 2,
+            "one release per stream, never two on one path: {ir}"
+        );
+    }
+
+    #[test]
+    fn stream_combinator_chain_releases_on_break_and_early_return() {
+        // `break` out of the chain's consumer: still one release per stream.
+        let src = format!(
+            "{FEED} {TWICE} fn main() -> Int64 {{ for p in twice(feed()) \
+             {{ print(p) break }} return 0 }}"
+        );
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(free_calls(&ir), RUNTIME_FREES + 2, "break path: {ir}");
+
+        // An early `return` leaves through `emit_all_drops`, so `main` carries a
+        // second release — one per exit path, and the early one must precede the
+        // `ret` rather than follow it into unreachable code.
+        let src = format!(
+            "{FEED} {TWICE} fn main() -> Int64 {{ for p in twice(feed()) \
+             {{ if p == 2 {{ return 7 }} }} return 0 }}"
+        );
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 3,
+            "the early-return path needs its own release: {ir}"
+        );
+        // The basic block the early `ret` terminates, from its label onward.
+        let upto = &ir[..ir.find("ret i64 7").expect("the early return is in the IR")];
+        let blk = &upto[upto.rfind(":\n").expect("a label precedes the early ret")..];
+        assert!(
+            blk.contains("call void @free(ptr"),
+            "the release must precede the early `ret`: {ir}"
+        );
+    }
+
     #[test]
     fn generational_reference_lowers_to_slab_calls() {
         let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); \

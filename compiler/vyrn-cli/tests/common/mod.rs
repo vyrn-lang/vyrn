@@ -46,6 +46,12 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "a `Stream` acquired and abandoned (RFC-0075 M1) — the `trpc#6193` shape",
         "`events` is a `Stream<Int64>` and is never disposed",
     ),
+    (
+        "stream_combinator_abandoned.vyrn",
+        "an abandoned std/stream combinator result (RFC-0075 M2) — the obligation \
+         must not launder through `map`",
+        "`mapped` is a `Stream` and is never disposed",
+    ),
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser
