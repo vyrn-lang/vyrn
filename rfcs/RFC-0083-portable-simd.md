@@ -177,7 +177,10 @@ over `Type` and both were in the textual backend.
     `AllTrue` and `Bitmask` are exactly the "did any lane pass / did every lane
     pass" question a mask exists to answer, and M2 shipped `.lane(k)` without
     them. That is a gap in the *current* surface rather than an M3 item, and it
-    is the cheapest useful thing left in this RFC.
+    is the cheapest useful thing left in this RFC. **Closed** — `anyTrue` and
+    `allTrue` are in M2's "As landed" above, `bitmask` is refused there with its
+    reason, and M3's `Mask64x2` inherits both the spelling and the
+    closed-inhabitants argument the lowering rests on.
 
   Also noted and deliberately not taken: `F32x4PMin`/`PMax` exist beside
   `Min`/`Max`. They are the "pseudo-minimum" pair with different NaN behaviour,
@@ -192,6 +195,7 @@ let v = F32x4.load(xs, i)          // xs: Array<Float32>, ONE bounds check
 F32x4.store(xs, i, v)              // the same four, written back
 let m = a < b                      // Mask32x4 — `< <= > >= == !=`, never Bool
 print(m.lane(0))                   // true
+print(m.anyTrue())  print(m.allTrue())   // the whole mask, as one Bool
 F32x4.min(a, b)  F32x4.max(a, b)  F32x4.abs(v)  F32x4.sqrt(v)
 ```
 
@@ -217,6 +221,69 @@ pattern costs an instruction on every use and a decision on every engine.
 mask crosses function boundaries here like any other value, and `<4 x i1>` is a
 strange ABI type (packed to `i4` in places). The `sext`/`icmp ne` pair that
 choosing `<4 x i32>` costs is folded away by `-O2` at every use.
+
+**The reductions, `m.anyTrue()` and `m.allTrue()`, complete this surface.** M2
+shipped `.lane(k)` and nothing else, so the only way to ask the question a mask
+exists for was four lane reads and three `&&`. They are **value methods, not
+`Mask32x4.anyTrue(m)`**, and the choice follows the rule stated above rather than
+adding a third convention: the type name is where an operation lives when
+something *else* exports the name (`min`, `max`, `abs` are `std/math`, and
+`math.min(a, b)` reaches the parser in the same shape), and nothing exports
+these. That is the same reason `lane` is a value method. They are the wasm
+instructions' names rather than Rust's `any`/`all` because `any` and `all` are
+exactly the two names a future `std/arrays` predicate would want, and taking them
+here would be taking them globally.
+
+| engine | how |
+|---|---|
+| interpreter | a fold over the four `bool`s — the reference answer |
+| textual | `icmp ne <4 x i32>`, then `llvm.vector.reduce.or`/`.and.v4i1` |
+| direct wasm | `v128.any_true` / `i32x4.all_true` |
+
+**The ambiguity the mask type exists to prevent does not come back, but only
+because of a property worth naming.** `v128.any_true` is *whole-vector* — any bit
+set anywhere — while `i32x4.all_true` is per lane, and the other two engines are
+per lane at both. They agree because a `Mask32x4` lane is all-ones or all-zeros
+and **no program can build one that is neither**, which is the same closed set of
+inhabitants that made the distinct type worth its enum variant. A mask that could
+hold a partial lane would split the engines here first, before it split them at
+`select`. There is no `i32x4.any_true` to reach for instead: the encoder carries
+exactly one any-true, at `v128` width. Natively the lowering is deliberately not
+the tempting one — `bitcast` to `i128` and compare against `-1` — for the reason
+the mask lane read already gives: the all-ones encoding is how a mask is *stored*,
+not what it means, and `-O2` folds the readable spelling to the same `movmskps`.
+
+Three engines byte-identical on all-true, all-false, one true lane at a time and
+one false lane at a time (the lane-order and lane-*width* pin — a reduction
+reading the wrong width answers all-true and all-false correctly and diverges only
+there), and on masks built from NaN comparisons in every operand position.
+**NaN-derived masks are not empty masks**: `NaN != NaN` is true, so `nv != nv`
+reduces to true on both counts while `nv == nv` and `nv < nv` reduce to false on
+both, and all three engines agree on every one.
+
+**`bitmask` was considered and is not shipped**, which is a decision and not an
+omission. `i32x4.bitmask` gathers each lane's MSB into an `i32`, and that number's
+meaning *is* the lane-to-bit order — lane 0 in bit 0 — so shipping it would make a
+layout fact part of the language surface, where `anyTrue`/`allTrue` expose none.
+The RFC has already recorded the mirror of this for reinterpretation across
+widths: lane order is free in wasm and needs an explicit Vyrn operation to be
+expressible at all, and none is proposed. Nor is there anything to *do* with the
+integer once you have it — Vyrn has no popcount and no computed jump, so every
+use reduces to `!= 0` (which is `anyTrue`) or `== 15` (which is `allTrue`), both
+already spelled. "wasm has it" is the argument RFC-0078's census exists to
+refuse.
+
+The census gains two `Measured` rows, 72 → 74, and they are **the first whose
+ratio depends on the input distribution rather than on the workload**. The Vyrn
+implementation is `||`/`&&` over four lane reads, which short-circuits: over
+`simdbench.vyrn`'s monotonic array the chain bails at lane 0 almost every pass and
+the branch is predicted perfectly, so the builtins win only 1.3x (`anyTrue`) and
+2.3x (`allTrue`) natively. Rebuild `data` to return unpredictable lanes and the
+same benches say **2.5x** (1356 ms against 543 ms) and **2.4x** (1170 ms against
+481 ms); wasm is 1.2x either way. The rows quote the unpredictable number, because
+1.3x is the bar `select` already failed to clear and sorted input is the unusual
+case for a predicate — a row that quoted the friendly number would be claiming a
+justification the general case does not support.
 
 **What each engine does for NaN, measured rather than assumed.**
 
