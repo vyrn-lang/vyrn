@@ -268,6 +268,12 @@ fn check_accum_inner(
         "Float",
         "Float64",
         "Float32",
+        // RFC-0083: the vector CONSTRUCTOR is a reserved name for the reason the
+        // numeric conversions are — it is dispatched before user functions, so a
+        // user `fn F32x4` would be silently unreachable. `splat` and `lane` are
+        // not here: they reach the builtin only under the internal names the
+        // parser assigns to method sugar, so a free `fn lane(..)` still resolves.
+        "F32x4",
         "UInt8",
         "UInt16",
         "UInt32",
