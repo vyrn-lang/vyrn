@@ -10,6 +10,15 @@
 // find, so `selectV` stayed and `F32x4.select` did not ship. Only the Vyrn half
 // can be timed now — its partner is deleted — which is why it has no pair here.
 //
+// The mask reductions are the pair whose answer depends on the DATA, which none
+// of the others do. Written in Vyrn they are `||`/`&&` over four lane reads, and
+// those short-circuit: over the monotonic array below the chain bails at lane 0
+// almost every pass and the branch is predicted perfectly, so the builtins win
+// only 1.3x (`anyTrue`) and 2.3x (`allTrue`) natively. Rebuild `data` to return
+// unpredictable lanes and the same four benches say 2.5x and 2.4x. The census
+// quotes the unpredictable number, because sorted input is the unusual case and
+// the friendly one sits at the bar `select` already failed to clear.
+//
 // Each `*V` function below is the honest Vyrn implementation of the builtin on
 // the primitives M1 and M2 already ship: lane reads, lane-wise comparison, and
 // `floatBits` for the sign of a zero. `main` runs both halves so the three
@@ -101,6 +110,16 @@ fn selectV(m: Mask32x4, a: F32x4, b: F32x4) -> F32x4 {
         if m.lane(2) { a.lane(2) } else { b.lane(2) },
         if m.lane(3) { a.lane(3) } else { b.lane(3) },
     )
+}
+
+/// The mask reductions written out: four lane reads and a short-circuiting
+/// chain, which is the only way to ask before `anyTrue`/`allTrue` existed.
+fn anyV(m: Mask32x4) -> Bool {
+    return m.lane(0) || m.lane(1) || m.lane(2) || m.lane(3)
+}
+
+fn allV(m: Mask32x4) -> Bool {
+    return m.lane(0) && m.lane(1) && m.lane(2) && m.lane(3)
 }
 
 fn sum(v: F32x4) -> Float32 {
@@ -198,6 +217,64 @@ fn selVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
     return sum(acc)
 }
 
+// The reduction pairs count vectors rather than summing lanes, because a
+// reduction's whole output is a `Bool` — there is nothing else to accumulate.
+// `data` rises monotonically, so the branch is well predicted and this is the
+// case FRIENDLIEST to the Vyrn version: the short-circuit chain bails at lane 0
+// for most of the array. A hostile-data variant would flatter the builtin; the
+// friendly one is the honest bar for keeping it.
+fn anyBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Int64 {
+    let h = F32x4.splat(t)
+    let mut c = 0
+    let mut i = 0
+    while i < n {
+        if (F32x4.load(xs, i) > h).anyTrue() {
+            c = c + 1
+        }
+        i = i + 4
+    }
+    return c
+}
+
+fn anyVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Int64 {
+    let h = F32x4.splat(t)
+    let mut c = 0
+    let mut i = 0
+    while i < n {
+        if anyV(F32x4.load(xs, i) > h) {
+            c = c + 1
+        }
+        i = i + 4
+    }
+    return c
+}
+
+fn allBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Int64 {
+    let h = F32x4.splat(t)
+    let mut c = 0
+    let mut i = 0
+    while i < n {
+        if (F32x4.load(xs, i) > h).allTrue() {
+            c = c + 1
+        }
+        i = i + 4
+    }
+    return c
+}
+
+fn allVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Int64 {
+    let h = F32x4.splat(t)
+    let mut c = 0
+    let mut i = 0
+    while i < n {
+        if allV(F32x4.load(xs, i) > h) {
+            c = c + 1
+        }
+        i = i + 4
+    }
+    return c
+}
+
 bench "min builtin" {
     let xs = data(1024)
     let mut r: Float32 = 0.0
@@ -282,6 +359,54 @@ bench "select in Vyrn" {
     drop xs
 }
 
+bench "anyTrue builtin" {
+    let xs = data(1024)
+    let mut r = 0
+    let mut k = 0
+    while k < 64 {
+        r = r + anyBuiltin(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "anyTrue in Vyrn" {
+    let xs = data(1024)
+    let mut r = 0
+    let mut k = 0
+    while k < 64 {
+        r = r + anyVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "allTrue builtin" {
+    let xs = data(1024)
+    let mut r = 0
+    let mut k = 0
+    while k < 64 {
+        r = r + allBuiltin(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "allTrue in Vyrn" {
+    let xs = data(1024)
+    let mut r = 0
+    let mut k = 0
+    while k < 64 {
+        r = r + allVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
 /// Both halves of every pair, so the three engines check that the builtin and
 /// the Vyrn implementation of it agree before the benchmark prices them.
 fn main() -> Int64 {
@@ -293,6 +418,13 @@ fn main() -> Int64 {
     print(absBuiltin(xs, 64, 0.5))
     print(absVyrn(xs, 64, 0.5))
     print(selVyrn(xs, 64, 0.5))
+    // Threshold `0.0` and not `0.5`: over 64 elements `data` only reaches
+    // 0.033, so `0.5` would make every mask empty and the two halves would
+    // agree by both answering zero.
+    print(anyBuiltin(xs, 64, 0.0))
+    print(anyVyrn(xs, 64, 0.0))
+    print(allBuiltin(xs, 64, 0.0))
+    print(allVyrn(xs, 64, 0.0))
     drop xs
     return 0
 }
