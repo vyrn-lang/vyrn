@@ -1395,6 +1395,24 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Reject a `Stream` in a position that STORES it (RFC-0075).
+    ///
+    /// [`ensure_type_exists`](Self::ensure_type_exists) already rejects a stream
+    /// nested inside a composite, but a declared record's fields and an enum's
+    /// payloads are validated one at a time, so each arrives at the root position
+    /// the guard there deliberately allows. This is that same rule, spelled for
+    /// the two sites where "root" is a lie.
+    fn ensure_no_stream(&self, ty: &Type, line: usize, where_: &str) -> Result<(), String> {
+        if self.contains_stream(ty) {
+            return Err(format!(
+                "line {line}: `{ty}` may not be {where_} — a stream's lifetime is a scope, \
+                 so it may be a binding, a parameter, or a return type, and nothing may \
+                 store it (RFC-0075)"
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), String> {
         // RFC-0075: a stream's lifetime is a SCOPE, which is what makes the
         // obligation checkable. A `Stream` inside a record, an array, a `Ref` or
@@ -1729,6 +1747,7 @@ impl<'a> Checker<'a> {
                         t.line, f.name, t.name
                     ));
                 }
+                self.ensure_no_stream(&f.ty, t.line, "a record field")?;
                 self.ensure_type_exists(&f.ty, t.line)?;
             }
             if let Some(pred) = &t.predicate {
@@ -1775,6 +1794,7 @@ impl<'a> Checker<'a> {
             }
             for v in vs {
                 for p in &v.payload {
+                    self.ensure_no_stream(p, t.line, "an enum payload")?;
                     self.ensure_type_exists(p, t.line)?;
                 }
             }

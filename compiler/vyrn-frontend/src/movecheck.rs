@@ -612,12 +612,12 @@ mod streams {
             // A `Stream` parameter carries the obligation into the callee: the
             // caller discharged its own by moving it, and `fn sink(s: Stream<T>) {}`
             // must not be the hole that lets it evaporate.
-            let mut live: Vec<String> = Vec::new();
+            let mut live: Vec<(String, String)> = Vec::new();
             for p in &f.params {
                 if let Type::Stream(_) = p.ty {
-                    let s = scan(&f.body.stmts, &p.name, &producers);
+                    let s = scan(&f.body.stmts, &p.name, false);
                     report(&mut out, &s, f.line, &p.name, &p.ty.to_string(), &f.module);
-                    live.push(p.name.clone());
+                    live.push((p.name.clone(), p.ty.to_string()));
                 }
             }
             block(&f.body, &mut live, &producers, &f.module, &mut out);
@@ -660,7 +660,7 @@ mod streams {
     /// stream names, needed only so `let t = s` is recognised as a move.
     fn block(
         b: &Block,
-        live: &mut Vec<String>,
+        live: &mut Vec<(String, String)>,
         producers: &HashMap<&str, String>,
         module: &Option<String>,
         out: &mut Vec<Diagnostic>,
@@ -672,9 +672,14 @@ mod streams {
             } = st
             {
                 if let Some(rendered) = stream_let(ty.as_ref(), value, live, producers) {
-                    let s = scan(&b.stmts[i + 1..], name, producers);
+                    // `false`: a `break` in the rest of THIS block leaves the block
+                    // that declared the stream, so it abandons it. Inside a loop
+                    // nested below, a `break` only leaves that loop and control
+                    // comes back here still owning it — which is what the flag
+                    // distinguishes.
+                    let s = scan(&b.stmts[i + 1..], name, false);
                     report(out, &s, *line, name, &rendered, module);
-                    live.push(name.clone());
+                    live.push((name.clone(), rendered));
                 }
             }
             for sub in sub_blocks(st) {
@@ -688,7 +693,7 @@ mod streams {
     fn stream_let(
         ty: Option<&Type>,
         value: &Expr,
-        live: &[String],
+        live: &[(String, String)],
         producers: &HashMap<&str, String>,
     ) -> Option<String> {
         if let Some(t @ Type::Stream(_)) = ty {
@@ -697,16 +702,22 @@ mod streams {
         match value {
             Expr::Call { name, .. } if name == "fromArray" => Some("Stream".to_string()),
             Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
-            // `let t = s` moves the stream; `t` inherits the obligation, and the
-            // mention of `s` discharges `s`'s.
-            Expr::Var { name, .. } if live.iter().any(|l| l == name) => {
-                Some("Stream".to_string())
-            }
+            // `let t = s` moves the stream; `t` inherits both the obligation and
+            // the rendering, and the mention of `s` discharges `s`'s.
+            Expr::Var { name, .. } => live
+                .iter()
+                .find(|(l, _)| l == name)
+                .map(|(_, rendered)| rendered.clone()),
             _ => None,
         }
     }
 
-    fn scan(stmts: &[Stmt], name: &str, producers: &HashMap<&str, String>) -> Scan {
+    /// `nested_loop` is whether this list is (transitively) the body of a loop
+    /// *inside* the block that declared the stream. It is the whole difference
+    /// between the two things `break` can mean: leaving the declaring block, which
+    /// abandons the stream, and leaving a loop below it, after which control
+    /// returns to the declaring block still owning it.
+    fn scan(stmts: &[Stmt], name: &str, nested_loop: bool) -> Scan {
         let mut acc = Scan::default();
         for (i, st) in stmts.iter().enumerate() {
             // The one place a disposal is decided: any mention of the binding in a
@@ -731,6 +742,12 @@ mod streams {
             if moved {
                 acc.disposed = true;
                 acc.doubled = stmts[i + 1..].iter().any(|s| stmt_mentions(s, name));
+                // The disposal settles `disposed`, but the caller's branch merge
+                // still needs to know whether anything falls out of this list —
+                // `if c { close(s) return 1 }` disposes AND diverges, and reading
+                // it as a plain fall-through made the merge see two branches
+                // disagreeing when only one of them continues.
+                acc.diverges = diverges(&stmts[i + 1..]);
                 return acc;
             }
             match st {
@@ -741,11 +758,13 @@ mod streams {
                     acc.leaked |= !value.as_ref().is_some_and(|e| mentions(e, name));
                     return acc;
                 }
-                // `break`/`continue` leave for the enclosing loop's exit, where the
-                // stream is still owned — so the obligation is measured at the
-                // loop's fall-through, not here. Nothing falls out of this list.
+                // Inside a loop below the declaring block, `break`/`continue` land
+                // back in the declaring block still owning the stream — nothing to
+                // report. At the declaring block's own level they leave it, so an
+                // undisposed stream is abandoned exactly as by a bare `return`.
                 Stmt::Break { .. } | Stmt::Continue { .. } => {
                     acc.diverges = true;
+                    acc.leaked |= !nested_loop;
                     return acc;
                 }
                 Stmt::If {
@@ -758,9 +777,9 @@ mod streams {
                     else_block,
                     ..
                 } => {
-                    let t = scan(&then_block.stmts, name, producers);
+                    let t = scan(&then_block.stmts, name, nested_loop);
                     let e = match else_block {
-                        Some(b) => scan(&b.stmts, name, producers),
+                        Some(b) => scan(&b.stmts, name, nested_loop),
                         None => Scan::default(),
                     };
                     acc.leaked |= t.leaked || e.leaked;
@@ -803,12 +822,12 @@ mod streams {
                 // one iteration would dispose again on the next, which is the same
                 // shape `check_loop_reuse` already rejects for `consume`.
                 Stmt::While { body, .. } | Stmt::ForIn { body, .. } => {
-                    let b = scan(&body.stmts, name, producers);
+                    let b = scan(&body.stmts, name, true);
                     acc.leaked |= b.leaked || b.disposed;
                     acc.doubled |= b.doubled;
                 }
                 Stmt::Region { body, .. } => {
-                    let b = scan(&body.stmts, name, producers);
+                    let b = scan(&body.stmts, name, nested_loop);
                     acc.leaked |= b.leaked;
                     acc.doubled |= b.doubled;
                     if b.disposed || b.diverges {
@@ -821,6 +840,34 @@ mod streams {
             }
         }
         acc
+    }
+
+    /// Whether every path out of `stmts` leaves via `return`/`break`/`continue`
+    /// (or `panic`, which diverges for the same reason it does above).
+    ///
+    /// The same question `MoveCheck::block` answers as its return value; asked
+    /// again here because [`scan`] stops at the disposal and so never reaches the
+    /// `return` that follows it.
+    fn diverges(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+            Stmt::Expr(Expr::Call { name, .. }) => name == "panic",
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | Stmt::IfLet {
+                then_block,
+                else_block,
+                ..
+            } => {
+                diverges(&then_block.stmts)
+                    && else_block.as_ref().is_some_and(|b| diverges(&b.stmts))
+            }
+            Stmt::Region { body, .. } => diverges(&body.stmts),
+            _ => false,
+        })
     }
 
     /// The nested blocks of a statement, for the declaration walk.
