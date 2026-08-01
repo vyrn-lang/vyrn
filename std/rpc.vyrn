@@ -140,7 +140,11 @@ fn rpcIsSerializable(spelling: String, iface: ModuleInterface) -> Bool {
 /// A `gen fn`, because `contractOf` is compile-time reflection and has no
 /// runtime lowering by design (RFC-0071 M1) — the same reason `std/ui`'s
 /// `uiContractErrs` is one. Every caller is already a `gen fn`.
-gen fn validateContract(iface: ModuleInterface) -> String {
+///
+/// Exported because `std/http`'s REST projection (RFC-0074) publishes the SAME
+/// procedures over the same codec, so it applies the same rule. Two copies of
+/// "what is a procedure" would be two things to drift.
+export gen fn validateContract(iface: ModuleInterface) -> String {
     for iss in checkContract(iface, contractOf(Api)) {
         return contractError(rpcIdentOf(iss.path) + "__" + rpcIdentOf(iss.key))
     }
