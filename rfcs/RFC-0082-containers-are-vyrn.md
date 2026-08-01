@@ -3,8 +3,9 @@
 - **Status:** **Accepted**, **M1 shipped** (see "As landed"), **M2 stopped at its
   own gate** — the port is blocked twice over and the gate failed anyway; M3 and
   M4 are **withdrawn**. The two interpreter quadratics M2 found instead of the
-  port — the write `t.xs[k] = v` and the append `t.xs.push(v)` — are both
-  **fixed** (M2's "As landed"). Milestones are gated on measurement the way
+  port — the write `t.xs[k] = v` and the append through a place, at both the
+  field `t.xs.push(v)` and the element `rows[i].push(v)` — are all **fixed**
+  (M2's "As landed"). Milestones are gated on measurement the way
   RFC-0081's were: nothing is deleted until a number says it should be, and here
   a number said stop.
 - **Depends on:** RFC-0078 (the census, and question **A**, which this
@@ -487,6 +488,9 @@ after this one; finding 5 is still open):
    It desugars to `Stmt::IndexSet` rather than `SetField`, so it is a third
    receiver form and a third copy of the same twenty lines. Left until something
    measures it in a real program: `t.xs.push(v)` is what the corpus writes.
+   (**Fixed**, in the last section of this milestone. It was a third receiver
+   form and it was *not* a third shape, which is why it did not become a third
+   copy.)
 6. **The interpreter does not validate an append through a field at all**, and
    both compiled backends do. `type Age = Int64 where value >= 18` with
    `t.xs: Array<Age>` and `t.xs.push(5)` prints `5` under `vyrn run` and traps
@@ -573,6 +577,7 @@ any engine runs.
 Finding 5 is still open and still quadratic — 206 / 402 / 1,648 ms at
 N = 4,000 → 16,000, down from 275 / 735 / 3,307 because the short-circuit removes
 the coerce but not the `push` builtin's clone, which is what makes it quadratic.
+(Closed in the section below.)
 
 7. **The audit found a second, unrelated validation divergence, and this one is
    the textual backend's.** A validated payload inside an `Option` or a `Result`
@@ -638,6 +643,65 @@ the coerce but not the `push` builtin's clone, which is what makes it quadratic.
    `validate_store.vyrn` and for the same reason: no example put a runtime value
    into a validated sum payload, and a literal is folded by `consteval` before any
    engine runs.
+
+##### As landed — finding 5, which was a third receiver form and not a third shape
+
+The last quadratic. `rows[i].push(v)`, isolated, best of 3, milliseconds, three
+engines (process floor ~45):
+
+| N | interp before | interp after | native | wasm |
+|---|---|---|---|---|
+| 4,000 | 211 | 50 | 46 → 42 | 58 → 54 |
+| 8,000 | 401 | 50 | 41 → 45 | 54 → 53 |
+| 16,000 | 1,744 | 55 | 38 → 43 | 49 → 51 |
+| 32,000 | 9,420 | 65 | 42 → 51 | 67 → 50 |
+
+`xs.push(i)` on a plain local is 49 / 47 / 58 / 55 either side — the after
+column is that column. Both compiled backends flat at every N before and after,
+which was checked and not assumed: **all 93 examples emit byte-identical IR and
+byte-identical wasm**, whole modules this time and not only the code section,
+because the change touches no backend at all.
+
+**Finding 5 was wrong about the cost and right about the receiver.** It is a
+third receiver form; it is not a third *shape*, and the shape is what decides
+which mechanism applies. The parser emits ONE `Stmt::IndexSet` for this
+statement — `rows[i] = push(rows[i], v)` — exactly as it emits one
+`Stmt::SetField` for `t.xs.push(v)`. Nothing is split into a temp, so, by the
+argument the append above makes, nothing has to be *taken*: the snapshot is the
+right tool at both places and `take_place` stays what it is, the move-out half of
+a desugar that had already split its statement in three. So the twenty lines
+became one `append_snapshot` that both sites call, each supplying only how to
+find its container and how to drop its reference — the field site lost its
+inline copy in the same commit, which is the diff being *shorter* than the
+duplication it avoided.
+
+**The one thing the element form has that the field form does not is a second
+read of the index.** The receiver's index is the parser's clone of the
+statement's own, so the general path reads it twice: `rows[f()].push(g())` calls
+`f` twice and `g` once, on all three engines, before and after. Finding 4 hoisted
+exactly this double read out of `rows[f()][j] = v` because soundness needed the
+hoist anyway; here nothing needs it, and doing it would move IR in both backends
+at the end of the milestone. So the fast path fires only when re-reading the
+index is unobservable — a variable or a literal, which is what a loop writes —
+and it re-reads it rather than assuming the two expressions are the same one.
+Any other index keeps the copy and stays quadratic, exactly as a global does.
+
+Locals only and the validation rule are both reused, not re-derived, and both
+were checked rather than inherited on faith. `type Age = Int64 where value >= 18`
+with `rows: Array<Array<Age>>` and a runtime `rows[0].push(rt(6))` traps with the
+same bytes on all three engines before and after — the fast path coerces the
+ITEM into `Age`, where the general path coerced the whole grown row into
+`Array<Age>` and re-proved every element already proven. `a[0].push(a[0][1] +
+10)` still reads the row it is growing (`12`), and `b[0].push(grow(b))` with
+`grow` pushing into that same row still loses the callee's write — the snapshot's
+whole point, identical on three engines either side of the change.
+
+Pinned by `the_interpreter_does_not_copy_the_row_once_per_append`, the third of
+`places.rs`'s ratios and deliberately the second's shape: N appends onto a local
+against N appends into `rows[0]`, within 4x. On the pre-fix binary it is 438x
+(9.08 s against 20.8 ms) and the test fails; after, 1.1x.
+
+That is every receiver form fast, and the M2 findings list is closed.
 
 ### M3 — `Map` over `Array` — **withdrawn**
 

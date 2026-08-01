@@ -239,6 +239,46 @@ fn the_interpreter_does_not_copy_the_array_once_per_append() {
     );
 }
 
+/// The same ratio for the THIRD and last receiver form, `rows[i].push(v)` —
+/// RFC-0082 M2's finding 5, left open by the append fix above because it lands
+/// in `Stmt::IndexSet` rather than `Stmt::SetField`.
+///
+/// It is the same quadratic for the same reason (`at` clones the row's `Rc` and
+/// `push`'s `make_mut` copies it), and it is fixed by the same snapshot — one
+/// `append_snapshot` now serves both, which is why there is no third pin shape
+/// either: N appends onto a local against N appends into `rows[0]`, one token
+/// apart. 438x at this N before the fix (9.08 s against 20.8 ms), 1.1x after.
+#[test]
+fn the_interpreter_does_not_copy_the_row_once_per_append() {
+    const N: usize = 32_000;
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let local = format!(
+        "fn main() -> Int64 {{\n\
+         let mut xs: Array<Int64> = []\n\
+         let mut i = 0\n\
+         while i < {N} {{ xs.push(i)  i = i + 1 }}\n\
+         print(xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let element = format!(
+        "fn main() -> Int64 {{\n\
+         let mut rows: Array<Array<Int64>> = [[]]\n\
+         let mut i = 0\n\
+         while i < {N} {{ rows[0].push(i)  i = i + 1 }}\n\
+         print(rows[0][{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let local = best_of_3(&dir, "interp-push-local", &local, "31999");
+    let element = best_of_3(&dir, "interp-push-elem", &element, "31999");
+    assert!(
+        element.as_secs_f64() < 4.0 * local.as_secs_f64(),
+        "a push through an array element is copying the row: \
+         {element:?} against {local:?} for the same {N} appends on a local"
+    );
+}
+
 /// The third quadratic, and the one behaviour cannot see either: `coerce`
 /// rebuilt a whole array at every typed boundary even when the element type can
 /// neither change a value nor reject one, so `rows[i][j] = v` paid for the inner
