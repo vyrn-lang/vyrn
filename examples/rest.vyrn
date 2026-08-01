@@ -29,8 +29,23 @@ fn hit(method: String, path: String, body: String) -> Response {
     return handle(Request { method: method, path: path, headers: [:], body: body })
 }
 
+/// A conditional GET. Header names are lowercase because that is how the host
+/// hands them over (RFC-0072 M4 folds case at the edge, so a `Map` lookup is
+/// exact), and a hand-written `Request` follows the same rule.
+fn hitIfNoneMatch(path: String, tag: String) -> Response {
+    return handle(Request { method: "GET", path: path, headers: ["if-none-match": tag], body: "" })
+}
+
 fn show(label: String, r: Response) {
     print("\{label} -> \{r.status} \{r.contentType} \{r.body}")
+}
+
+/// One response header, `""` when absent.
+fn header(r: Response, name: String) -> String {
+    return match r.headers[name] {
+        Some(v) => v,
+        None => "",
+    }
 }
 
 fn main() -> Int64 {
@@ -54,5 +69,36 @@ fn main() -> Int64 {
     print("REST body == RPC body: \{(one.body == viaRpc.body).toString()}")
     print("REST type == RPC type: \{(one.contentType == viaRpc.contentType).toString()}")
     print("REST status == RPC status: \{(one.status == viaRpc.status).toString()}")
+
+    // ---- M2: cache, validators, conditionals -------------------------------
+
+    // The policy the projection declared, on the wire.
+    print("cache-control: \{header(one, "Cache-Control")}")
+    print("vary: \{one.vary}")
+
+    // The validator hashes the representation and nothing else, so the SAME
+    // content gets the same tag on every engine and in every process — which is
+    // the only reason a client's `If-None-Match` can ever match.
+    let tag = header(one, "ETag")
+    let again = hit("GET", "/users/7", "")
+    print("etag stable across calls: \{(tag == header(again, "ETag")).toString()}")
+    print("etag differs by content: \{(tag != header(hit("GET", "/users/8", ""), "ETag")).toString()}")
+
+    // The acceptance criterion: the client already has this representation.
+    let fresh = hitIfNoneMatch("/users/7", tag)
+    print("If-None-Match -> \{fresh.status}, body \{fresh.body.byteLength} bytes, type \"\{fresh.contentType}\"")
+    print("304 keeps its validator: \{(header(fresh, "ETag") == tag).toString()}")
+    // A validator we never issued is not a match, so the body comes back.
+    let stale = hitIfNoneMatch("/users/7", "\"0\"")
+    print("stale If-None-Match -> \{stale.status} \{stale.body}")
+
+    // `createdAt` — 201 and a Location built from the created user's own id.
+    let made = hit("POST", "/users", "{\"name\":\"ada\",\"age\":36}")
+    print("POST /users -> \{made.status} Location: \{header(made, "Location")}")
+
+    // `notFoundWhen` reads the SAME `{"Err":…}` the RPC surface answers with, and
+    // separates the two errors `del` reports: absence is 404, refusal is not.
+    show("DELETE /users/1000", hit("DELETE", "/users/1000", ""))
+    show("DELETE /users/0", hit("DELETE", "/users/0", ""))
     return 0
 }
