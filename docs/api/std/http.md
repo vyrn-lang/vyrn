@@ -11,18 +11,36 @@ pattern captured. `None` declines — a whole mounted subsystem (the derived RPC
 surface, a page router) answers for some paths under its prefix and passes on
 the rest, and `mount` continues to the next group when it does.
 
+## Surface
+
+```vyrn
+type Surface = fn(Request) -> Option<Response>
+```
+
+A whole mounted subsystem: it takes the request and nothing else, because a
+prefix binds no placeholders. `rpcHandle` and a page router already have this
+shape (the RFC-0016 `handle` convention).
+
 ## Route
 
 ```vyrn
-type Route = { method: String, pattern: String, prefix: Bool, run: Handler, derived: String }
+type Route = { method: String, pattern: String, prefix: Bool, run: Handler, whole: Surface, derived: String }
 ```
 
-One route: an HTTP method, a full path pattern (base + sub-path), the handler,
+One route: an HTTP method, a full path pattern (base + sub-path), what runs,
 and the `derived` policy line the diagnostics quote. `prefix` marks a whole
-subsystem mounted under `pattern` rather than a single path.
+subsystem mounted under `pattern` rather than a single path, and selects
+which of the two callables `mount` invokes.
 
 `method` is `""` until a method constructor sets it — a route that reaches
 `mount` without one is a startup error, not a silent GET.
+
+Two fn fields rather than one plus an adapting closure, and the reason is a
+backend limit worth naming: a lambda that CALLS a captured `fn`-typed
+PARAMETER (`|req, ps| run(req)`) lowers to a call on a symbol no module
+defines, so it runs under the interpreter and fails to build natively. Each
+route uses one field and leaves the other at a named never-answers stub,
+which costs a word and no closure at all.
 
 ## httpRoute
 
@@ -77,7 +95,7 @@ fn DELETE(r: Route) -> Route
 ## surface
 
 ```vyrn
-fn surface(prefix: String, run: fn(Request) -> Option<Response>) -> Route
+fn surface(prefix: String, run: Surface) -> Route
 ```
 
 A whole subsystem mounted under `prefix`: the derived RPC surface, a page

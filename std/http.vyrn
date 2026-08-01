@@ -31,13 +31,13 @@
 /// type is a `String where value =~ …` admitting exactly the placeholders `IdReq`
 /// has fields for, so `byId("/{ID}")` is a checker error at the call site and
 /// needs neither RFC-0073's symbol map nor a compiler rule. A uniform
-/// `GET(pattern, proc)` cannot do that: `get` would have to be generic, and a
-/// generic cannot name a type to `fromJson` — the first argument there must be a
-/// declared type name, which is precisely what a type parameter is not.
+/// `GET(pattern, proc)` cannot do that: it would have to be generic over the
+/// signature, and a generic cannot name a type to `fromJson` — the first argument
+/// there must be a declared type name, which is precisely what a type parameter
+/// is not.
 import { Json, JsonField, emit } from "std/json"
 import { parseJson } from "std/jsonread"
-import { fromBytesOr } from "std/strings"
-import { indexOf, split, substring, joinWith } from "std/strings"
+import { fromBytesOr, indexOf, joinWith, split, substring } from "std/strings"
 
 // The procedure rule, imported rather than restated: a projection publishes the
 // very procedures the derived RPC surface reflects on, in the same codec, so

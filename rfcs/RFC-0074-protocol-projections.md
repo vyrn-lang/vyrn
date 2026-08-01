@@ -264,6 +264,21 @@ for coverage:
   decodes as a 422 naming that field. `parse` is integer-only and no dogfood has
   either.
 
+**A native codegen bug fell out of `surface`**, and half of it is fixed. A
+lambda whose body CALLS a captured `fn` value — `|req, ps| run(req)` — left the
+callee out of the lifted lambda's capture list, because the capture walk looked
+only at a call's arguments. Both compiling backends then emitted a call to
+`@vyrn_run`, a symbol no module defines; the interpreter, resolving through its
+environment, ran the same program. It was a build failure on exactly the two
+engines a `vyrn run` test never reaches. Capturing a `let`-bound fn value is
+fixed in the shared walker (`examples/fnvalstore.vyrn` covers it on all three
+engines). Capturing a fn-typed *parameter* is not: that binding has no slot — it
+lives in `fn_bindings` as a target symbol plus capture values — and materializing
+it as a capture is RFC-0037 work, not this milestone's. `Route` therefore carries
+two `fn` fields, `run` and `whole`, with `prefix` selecting which `mount` calls
+and the other left at a named never-answers stub. It costs a word per route and
+no closure at all.
+
 The manifest's `projections` key is not implemented: `std/http` knows its own
 suffix. What the suffix does do is keep a projection out of the derived surface —
 `rpc(dir)` skips a dotted stem now, so `pastes.http.vyrn` colocates with
