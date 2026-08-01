@@ -4845,8 +4845,23 @@ fn captures_of_expr(
             captures_of_expr(lhs, locals, out, seen, is_local);
             captures_of_expr(rhs, locals, out, seen, is_local);
         }
-        Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
+        // A CALL captures its callee when the callee names an enclosing local:
+        // `|req, ps| run(req)` over a `fn`-typed `run` calls a value, not a
+        // symbol, and leaving it out of the capture list lowered it as a direct
+        // call to `@vyrn_run` — a name no module defines (the interpreter, which
+        // resolves through the environment, ran the same program fine). Nothing
+        // else changes: `is_local` is false for a top-level function, so an
+        // ordinary call still reaches its symbol with no capture at all.
+        Expr::Call { name, args, .. } => {
+            if !locals.contains(name) && !seen.contains(name) && is_local(name) {
+                seen.insert(name.clone());
+                out.push(name.clone());
+            }
+            for a in args {
+                captures_of_expr(a, locals, out, seen, is_local);
+            }
+        }
+        Expr::Spawn { args, .. }
         | Expr::TryConstruct { args, .. }
         | Expr::ArrayLit { elems: args, .. } => {
             for a in args {

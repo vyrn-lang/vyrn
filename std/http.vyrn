@@ -53,24 +53,55 @@ import { validateContract } from "std/rpc"
 /// the rest, and `mount` continues to the next group when it does.
 export type Handler = fn(Request, Map<String, String>) -> Option<Response>
 
-/// One route: an HTTP method, a full path pattern (base + sub-path), the handler,
+/// A whole mounted subsystem: it takes the request and nothing else, because a
+/// prefix binds no placeholders. `rpcHandle` and a page router already have this
+/// shape (the RFC-0016 `handle` convention).
+export type Surface = fn(Request) -> Option<Response>
+
+/// One route: an HTTP method, a full path pattern (base + sub-path), what runs,
 /// and the `derived` policy line the diagnostics quote. `prefix` marks a whole
-/// subsystem mounted under `pattern` rather than a single path.
+/// subsystem mounted under `pattern` rather than a single path, and selects
+/// which of the two callables `mount` invokes.
 ///
 /// `method` is `""` until a method constructor sets it — a route that reaches
 /// `mount` without one is a startup error, not a silent GET.
+///
+/// Two fn fields rather than one plus an adapting closure, and the reason is a
+/// backend limit worth naming: a lambda that CALLS a captured `fn`-typed
+/// PARAMETER (`|req, ps| run(req)`) lowers to a call on a symbol no module
+/// defines, so it runs under the interpreter and fails to build natively. Each
+/// route uses one field and leaves the other at a named never-answers stub,
+/// which costs a word and no closure at all.
 export type Route = {
     method: String,
     pattern: String,
     prefix: Bool,
     run: Handler,
+    whole: Surface,
     derived: String,
+}
+
+/// The `run` of a prefix route, and the `whole` of a path route: never called,
+/// because `prefix` decides which field `mount` reaches for.
+fn httpNoRun(req: Request, ps: Map<String, String>) -> Option<Response> {
+    return None
+}
+
+fn httpNoWhole(req: Request) -> Option<Response> {
+    return None
 }
 
 /// Build a route with no method yet. What a generated per-procedure constructor
 /// calls; `pattern` is already base-qualified.
 export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
-    return Route { method: "", pattern: httpTidy(pattern), prefix: false, run: run, derived: derived }
+    return Route {
+        method: "",
+        pattern: httpTidy(pattern),
+        prefix: false,
+        run: run,
+        whole: httpNoWhole,
+        derived: derived,
+    }
 }
 
 /// `/pastes/` => `/pastes`, `//` => `/`. The base and the sub-path are joined by
@@ -122,6 +153,7 @@ fn httpWithMethod(r: Route, method: String) -> Route {
         pattern: r.pattern,
         prefix: r.prefix,
         run: r.run,
+        whole: r.whole,
         derived: method + " " + r.pattern + " " + r.derived,
     }
 }
@@ -130,12 +162,13 @@ fn httpWithMethod(r: Route, method: String) -> Route {
 /// router. It answers with `Some` or declines with `None` — the same
 /// `handle`-convention shape those already have (RFC-0016) — so mounting one
 /// costs no adapter at the composition root.
-export fn surface(prefix: String, run: fn(Request) -> Option<Response>) -> Route {
+export fn surface(prefix: String, run: Surface) -> Route {
     return Route {
         method: "*",
         pattern: httpTidy(prefix),
         prefix: true,
-        run: |req, ps| run(req),
+        run: httpNoRun,
+        whole: run,
         derived: "* " + prefix + " (surface)",
     }
 }
@@ -160,7 +193,8 @@ export fn mount(req: Request, groups: Array<Array<Route>>) -> Option<Response> {
     for g in groups {
         for r in g {
             if let Some(ps) = httpMatch(r, req) {
-                if let Some(resp) = httpInvoke(r.run, req, ps) {
+                let answer = if r.prefix { httpInvokeWhole(r.whole, req) } else { httpInvoke(r.run, req, ps) }
+                if let Some(resp) = answer {
                     return Some(resp)
                 }
             }
@@ -173,6 +207,10 @@ export fn mount(req: Request, groups: Array<Array<Route>>) -> Option<Response> {
 /// to be bound to a parameter before it can be called.
 fn httpInvoke(h: Handler, req: Request, ps: Map<String, String>) -> Option<Response> {
     return h(req, ps)
+}
+
+fn httpInvokeWhole(h: Surface, req: Request) -> Option<Response> {
+    return h(req)
 }
 
 /// The placeholder bindings if `r` matches `req`, `None` otherwise.
