@@ -266,6 +266,11 @@ pub struct ProtocolDecl {
     pub module: Option<String>,
     /// `///` documentation (markdown), attached by the parser; `None` if absent.
     pub doc: Option<String>,
+    /// `type Output` — the associated types the protocol declares (RFC-0080 M2),
+    /// in declaration order. A method signature may name one; it arrives as
+    /// [`Type::Param`], because that is exactly what it is — a type variable the
+    /// *implementing type* binds rather than the caller.
+    pub assoc: Vec<String>,
     pub methods: Vec<MethodSig>,
     pub line: usize,
 }
@@ -497,6 +502,13 @@ pub struct ImplBlock {
     /// Bounds per bound variable, e.g. `impl<T: Show> Show for Option<T>`.
     pub type_bounds: std::collections::HashMap<String, Vec<String>>,
     pub ty: Type,
+    /// The associated types this impl binds (RFC-0080 M2), in declaration order.
+    /// The NAMES only: the parser has already substituted each binding into the
+    /// methods below, so the sole remaining question is whether this set matches
+    /// the protocol's declarations. Keeping the bound [`Type`] here as well would
+    /// be a second copy that no loader walk rewrites — inert today and wrong the
+    /// first time someone believed it.
+    pub assoc: Vec<String>,
     pub methods: Vec<Function>,
     pub line: usize,
 }

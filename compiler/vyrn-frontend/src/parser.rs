@@ -114,6 +114,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         pos: 0,
         no_struct: false,
         type_params: Vec::new(),
+        type_aliases: Default::default(),
         field_preds: None,
         extra_stmts: Vec::new(),
         errors: Vec::new(),
@@ -605,6 +606,17 @@ struct Parser {
     /// The current function's generic parameters; a type name matching one of
     /// these parses as [`Type::Param`] rather than a named type.
     type_params: Vec<String>,
+    /// Associated types in scope (RFC-0080 M2): `Output` inside a `protocol` body
+    /// maps to `Type::Param("Output")`, and inside an `impl` body to whatever
+    /// that impl's `type Output = ..` bound it to. Resolving here — at the one
+    /// place a type name becomes a [`Type`] — is what makes the rest of the
+    /// compiler unaware the feature exists: by the time an impl method leaves the
+    /// parser its return type already *is* `T`, so unification, monomorphization
+    /// and all three backends see an ordinary generic function.
+    ///
+    /// The cost of resolving at parse time is that a `type` member must precede
+    /// the methods that name it; [`Parser::impl_block`] says so where it fires.
+    type_aliases: std::collections::HashMap<String, Type>,
     /// Inline per-field refinements collected while parsing a record type
     /// inside a `type` declaration: `(field, predicate)` for each
     /// `field: T where pred`. Drained by `type_decl`, which desugars each into
@@ -1307,19 +1319,62 @@ impl Parser {
         }
     }
 
-    /// `protocol Name { fn m(self, p: T, ..) -> R; .. }` — a set of method
-    /// signatures. The `self` receiver is required and elided from the stored
-    /// parameter types.
+    /// `protocol Name { type A  fn m(self, p: T, ..) -> R; .. }` — a set of
+    /// method signatures, plus any associated types (RFC-0080 M2). The `self`
+    /// receiver is required and elided from the stored parameter types.
+    ///
+    /// An associated type is a type variable the *implementing type* binds, so
+    /// inside the protocol it is [`Type::Param`] — the same variant a `fn f<T>`
+    /// binder produces, which is why no walk anywhere had to learn a new type.
+    /// It must be declared before the signatures that name it (see
+    /// [`Parser::impl_block`]).
     fn protocol_decl(&mut self) -> Result<ProtocolDecl, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Protocol)?;
         let name = self.expect_ident()?;
         self.eat(&Tok::LBrace)?;
         let mut methods = Vec::new();
+        let mut assoc: Vec<String> = Vec::new();
+        let outer_aliases = std::mem::take(&mut self.type_aliases);
         while *self.peek() != Tok::RBrace {
             self.take_docs(); // method-level docs (not retained yet)
             if *self.peek() == Tok::RBrace {
                 break;
+            }
+            if *self.peek() == Tok::Type {
+                let (tline, col) = (self.line(), self.col());
+                self.advance();
+                let aname = self.expect_ident()?;
+                if *self.peek() == Tok::Eq {
+                    self.type_aliases = outer_aliases;
+                    return Err(Diagnostic::error(
+                        tline,
+                        col,
+                        "parse",
+                        format!(
+                            "`type {aname}` in a protocol declares an associated type and takes no \
+                             right-hand side — the implementing type supplies it, so \
+                             `type {aname} = ..` belongs in the `impl`"
+                        ),
+                    ));
+                }
+                if !methods.is_empty() {
+                    self.type_aliases = outer_aliases;
+                    return Err(Diagnostic::error(
+                        tline,
+                        col,
+                        "parse",
+                        format!(
+                            "`type {aname}` must be declared before the methods of `{name}` — an \
+                             associated type is resolved where it is named, so a signature above \
+                             it cannot see it"
+                        ),
+                    ));
+                }
+                assoc.push(aname.clone());
+                self.type_aliases.insert(aname.clone(), Type::Param(aname));
+                self.eat_semi();
+                continue;
             }
             let mline = self.line();
             self.eat(&Tok::Fn)?;
@@ -1349,11 +1404,13 @@ impl Parser {
             });
         }
         self.eat(&Tok::RBrace)?;
+        self.type_aliases = outer_aliases;
         Ok(ProtocolDecl {
             exported: false,
             module: None,
             name,
             doc: None,
+            assoc,
             methods,
             line,
         })
@@ -1613,6 +1670,20 @@ impl Parser {
     /// `impl<T> P for C<T>` (RFC-0080 M1) binds type variables in the head; they
     /// are in scope for the target type and every method signature and body, so
     /// they parse as [`Type::Param`] exactly as a `fn f<T>`'s do.
+    ///
+    /// `type Output = T` (RFC-0080 M2) binds one of the protocol's associated
+    /// types. It is substituted *here*, as the methods parse: a method that
+    /// returns `Output` leaves this function already returning `T`, so selection,
+    /// unification and the three backends stay exactly as M1 left them. Resolution
+    /// therefore happens at the impl, not at the call site — which is the whole
+    /// claim "the implementing type fixes it" makes.
+    ///
+    /// The price of resolving during the parse is ordering: a `type` member must
+    /// come before the methods that name it. Deferring instead would mean a second
+    /// substitution pass over every method BODY (only `params`/`ret` are reachable
+    /// from `types::substitute`), and body annotations are where an unsubstituted
+    /// `Type::Param` reaches codegen and lowers to `void` — a smaller function,
+    /// not an error. One ordering rule with a diagnostic is the cheaper trade.
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Impl)?;
@@ -1623,10 +1694,54 @@ impl Parser {
         let ty = self.type_()?;
         self.eat(&Tok::LBrace)?;
         let mut methods = Vec::new();
+        let mut assoc: Vec<String> = Vec::new();
+        let outer_aliases = std::mem::take(&mut self.type_aliases);
         while *self.peek() != Tok::RBrace {
             self.take_docs(); // method-level docs (not retained yet)
             if *self.peek() == Tok::RBrace {
                 break;
+            }
+            if *self.peek() == Tok::Type {
+                let (tline, col) = (self.line(), self.col());
+                self.advance();
+                let aname = self.expect_ident()?;
+                // Both bail-outs restore the parser's type scopes first: this
+                // declaration is abandoned, and a stale alias would silently
+                // rewrite a type name in whatever declaration recovery lands on.
+                if !methods.is_empty() {
+                    self.type_aliases = outer_aliases;
+                    self.type_params.clear();
+                    return Err(Diagnostic::error(
+                        tline,
+                        col,
+                        "parse",
+                        format!(
+                            "`type {aname} = ..` must be declared before the methods of \
+                             `impl {protocol} for {ty}` — an associated type is resolved where it \
+                             is named, so a method above it cannot see it"
+                        ),
+                    ));
+                }
+                if type_params.contains(&aname) {
+                    self.type_aliases = outer_aliases;
+                    self.type_params.clear();
+                    return Err(Diagnostic::error(
+                        tline,
+                        col,
+                        "parse",
+                        format!(
+                            "`type {aname}` collides with the `{aname}` this impl's head binds — \
+                             an associated type and a type variable are different things and \
+                             cannot share a name"
+                        ),
+                    ));
+                }
+                self.eat(&Tok::Eq)?;
+                let bound = self.type_()?;
+                assoc.push(aname.clone());
+                self.type_aliases.insert(aname, bound);
+                self.eat_semi();
+                continue;
             }
             let mut m = self.impl_method(&ty)?;
             m.type_params = type_params.clone();
@@ -1635,11 +1750,13 @@ impl Parser {
         }
         self.eat(&Tok::RBrace)?;
         self.type_params.clear();
+        self.type_aliases = outer_aliases;
         Ok(ImplBlock {
             protocol,
             type_params,
             type_bounds,
             ty,
+            assoc,
             methods,
             line,
         })
@@ -2674,6 +2791,12 @@ impl Parser {
                 self.eat(&Tok::Gt)?;
                 inner
             }
+            // An associated type of the enclosing `protocol`/`impl` (RFC-0080 M2).
+            // Checked before the generic parameters because an impl may not shadow
+            // its own binder with one — `impl<T> P for C<T> { type T = .. }` is
+            // rejected where the alias is declared, so the two sets are disjoint
+            // here and the order only decides which diagnostic a bug produces.
+            other if self.type_aliases.contains_key(other) => self.type_aliases[other].clone(),
             // A generic parameter of the current function/type.
             other if self.type_params.iter().any(|p| p == other) => Type::Param(other.to_string()),
             // `Name<T, ...>` — an application of a generic named type.
@@ -3952,6 +4075,7 @@ impl Parser {
             pos: 0,
             no_struct: false,
             type_params: self.type_params.clone(),
+            type_aliases: self.type_aliases.clone(),
             field_preds: None,
             extra_stmts: Vec::new(),
             errors: Vec::new(),
@@ -4165,6 +4289,7 @@ impl Parser {
             pos: 0,
             no_struct: false,
             type_params: self.type_params.clone(),
+            type_aliases: self.type_aliases.clone(),
             field_preds: None,
             extra_stmts: Vec::new(),
             errors: Vec::new(),
@@ -5058,6 +5183,7 @@ mod tests {
             pos: 0,
             no_struct: false,
             type_params: Vec::new(),
+            type_aliases: Default::default(),
             field_preds: None,
             extra_stmts: Vec::new(),
             errors: Vec::new(),
@@ -5905,5 +6031,37 @@ contract Q { let y: String }
         assert!(!is_member_type_param("Ta"));
         assert!(!is_member_type_param("t"));
         assert!(!is_member_type_param(""));
+    }
+
+    /// RFC-0080 M2. An associated type is substituted where the method is
+    /// parsed, so `type Output = ..` must come first — and the one case that
+    /// costs anything says so, instead of surfacing as `unknown type Output`
+    /// three lines above where the binding actually is.
+    #[test]
+    fn an_associated_type_is_substituted_and_must_precede_the_methods() {
+        let (p, errors) = parse_accum(
+            lex("protocol Unwrap { type Output  fn get(self) -> Output }
+impl Unwrap for Int64 { type Output = Int64  fn get(self) -> Output { return self } }
+")
+            .unwrap(),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(p.protocols[0].assoc, vec!["Output".to_string()]);
+        // The protocol keeps `Output` as the type variable it is; the impl has
+        // already resolved it, so nothing downstream ever sees the name.
+        assert_eq!(p.protocols[0].methods[0].ret, Type::Param("Output".to_string()));
+        assert_eq!(p.impls[0].methods[0].ret, Type::Int);
+        assert_eq!(p.impls[0].assoc, vec!["Output".to_string()]);
+
+        let (_, late) = parse_accum(
+            lex("protocol Unwrap { type Output  fn get(self) -> Output }
+impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = Int64 }
+")
+            .unwrap(),
+        );
+        assert!(
+            late.iter().any(|d| d.message.contains("must be declared before the methods")),
+            "{late:?}"
+        );
     }
 }

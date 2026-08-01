@@ -42,6 +42,12 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "collides with `impl<T> Show for Option<T>` (line",
     ),
     (
+        "assoctype_unbound.vyrn",
+        "an impl that omits an associated type the protocol declares, and one that \
+         binds a name it does not (RFC-0080 M2)",
+        "does not bind the associated type `Output`",
+    ),
+    (
         "stream_abandoned.vyrn",
         "a `Stream` acquired and abandoned (RFC-0075 M1) — the `trpc#6193` shape",
         "`events` is a `Stream<Int64>` and is never disposed",

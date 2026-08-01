@@ -1,7 +1,7 @@
 # RFC-0080 — Associated Types and Generic Impls
 
-- **Status:** **M1 shipped**; M2 and M3 designed, not started. Whether to build
-  them is a separate decision from whether the design is right.
+- **Status:** **M1 and M2 shipped**; M3 designed, not started. Whether to build
+  it is a separate decision from whether the design is right.
 - **Depends on:** RFC-0002 §5 (protocols, static monomorphized dispatch),
   RFC-0023 (monomorphized function values — the unification machinery this
   extends), RFC-0079 (`?`/`??`, the motivating consumers)
@@ -232,12 +232,68 @@ refusal. What the plan above got wrong or left out:
   generic impl cannot be exercised at two levels. Unrelated to this RFC and
   unchanged by it.
 
-### M2 — Associated types
+### M2 — Associated types — **SHIPPED**
 
 `type Name` in a protocol body; `type Name = Concrete` in an impl; the type
 resolved when the impl is selected. Pin: a protocol whose method returns its
 associated type, implemented for two types with different resolutions, monomorphized
 correctly in one program.
+
+**As landed.** The pin is `examples/assoctype.vyrn` — one protocol whose
+`valueOr` both takes and returns its `Output`, three impls resolving it three
+ways (`impl<T> Unwrap for Option<T>` binding it to the head's own `T`, and two
+concrete impls binding `Int64` and `String`), byte-identical across the three
+engines. `examples/assoctype_unbound.vyrn` is the refusal, both directions. What
+the plan above got wrong or left out:
+
+- **"resolved when the impl is selected" is one step later than where it
+  happens.** Selection is a *call-site* act; an associated type is fixed at the
+  **impl**, before any call exists. So it is substituted where the impl's methods
+  are **parsed**: `fn valueOr(self, f: Output) -> Output` inside
+  `impl<T> Unwrap for Option<T> { type Output = T … }` leaves the parser as
+  `fn(self: Option<T>, f: T) -> T`, an ordinary generic function. M1's call path
+  then unifies `Option<Int64>` against `self` and gets `Int64` back with no
+  knowledge that an associated type was ever involved. Checking whether that
+  seam "carries a return type that is not a parameter of anything" turned out to
+  be the wrong question: after substitution the return type is a parameter of the
+  receiver, which is what "the implementing type fixes it" *means*.
+
+- **No new `Type` variant, so no walk census.** An associated type is a
+  `Type::Param` — the variant a `fn f<T>` binder already produces. Inside the
+  protocol it is `Param("Output")`, a variable nothing has bound yet; inside an
+  impl it never survives the parse. `substitute`, both unifiers, `collect_params`,
+  `walk_type`, `contains_heap`, `fn_sigs_match`, the loader's three walks, the
+  parser and the schema reflector all needed exactly nothing. RFC-0075 M2's
+  ten-walk hunt has no counterpart here.
+
+- **The backends did not change, and this time that is a claim rather than luck.**
+  All three read `program.protocols` only to map a method name to its protocol;
+  none reads a `MethodSig`'s types. The frontend is the whole feature.
+
+- **A caller cannot name the associated type, and no syntax was invented.**
+  Inside `fn f<T: Unwrap>(x: T)`, `x.valueOr(..)` has no selected impl, so
+  `Output` has no value. Rust writes `T::Output`; Vyrn refuses by name instead,
+  because M3 is the milestone that decides whether that spelling is needed and
+  guessing now would be guessing at M3's shape. The refusal matters more than it
+  looks: typing the call as the bare `Type::Param` would have let it reach
+  codegen, where a parameter outside a monomorphization lowers to `void` — a
+  smaller function, not an error.
+
+- **Resolving during the parse costs an ordering rule**, and it is the only cost:
+  a `type` member must precede the methods that name it. Deferring would mean a
+  second substitution pass over every method **body**, since only `params`/`ret`
+  are reachable from `types::substitute`, and body annotations are exactly where
+  an unsubstituted parameter reaches codegen. The parser names the rule where it
+  fires rather than letting it surface as `unknown type Output` several lines
+  above the binding.
+
+- **Method conformance is still unchecked, and was before this milestone.**
+  Nothing verifies that an impl method's signature matches the protocol's — that
+  was true of M1 and of RFC-0002 §5, and M2 does not change it. What M2 does
+  check is that an impl binds exactly the associated types its protocol declares,
+  in both directions. The binding is not decorative despite that gap: an impl
+  whose `type Output = ..` is wrong fails to type-check in its own body, because
+  the body was parsed against it.
 
 ### M3 — `Fallible`, and the operators resolve through it
 
