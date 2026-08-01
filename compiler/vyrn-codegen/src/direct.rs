@@ -876,7 +876,10 @@ impl Cx {
             // backend's spelling for the same reason every other repr is — one
             // copy of the lowering decision — and matched before the aggregate
             // test because `<4 x float>` is a wasm VALUE, not a memory shape.
-            "<4 x float>" => Repr::Scalar(ValType::V128),
+            // A `Mask32x4` is `<4 x i32>` all-ones/all-zeros on both backends —
+            // the one bit pattern, so `v128.bitselect` here and `select` there
+            // consume the same thing.
+            "<4 x float>" | "<4 x i32>" => Repr::Scalar(ValType::V128),
             _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(
                 layout::of_ll(&ll).map_err(|e| format!("direct backend: layout of {ll}: {e}"))?,
             ),
@@ -2998,7 +3001,15 @@ impl Fn_<'_> {
             Expr::Unary { expr, .. } => self.peek(expr, line)?,
             Expr::Binary { op, lhs, .. } => match op {
                 BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
-                | BinOp::And | BinOp::Or | BinOp::Match => Type::Bool,
+                | BinOp::And | BinOp::Or | BinOp::Match => {
+                    // Comparing two vectors yields a mask, not a `Bool` (RFC-0083
+                    // M2) — the one place in this table where the operator alone
+                    // does not settle the answer.
+                    match self.peek(lhs, line)? {
+                        Type::F32x4 => Type::Mask32x4,
+                        _ => Type::Bool,
+                    }
+                }
                 _ => self.peek(lhs, line)?,
             },
             // A literal in a branch is the fixed shape; the join's conversion
@@ -3071,8 +3082,11 @@ impl Fn_<'_> {
                 // threshold cannot change a type.
                 "print" | "trace" | "debug" | "info" | "warn" | "error" => Type::Unit,
                 "logger" => Type::Logger,
-                // RFC-0083 M1: the vector builtins, whose result type is fixed.
-                "F32x4" | "@f32x4Splat" => Type::F32x4,
+                // RFC-0083: the vector builtins, whose result type is fixed.
+                "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
+                | "@f32x4Abs" | "@f32x4Sqrt" => Type::F32x4,
+                "@f32x4Store" => Type::Unit,
+                "@lane" if matches!(self.peek(&args[0], line)?, Type::Mask32x4) => Type::Bool,
                 "@lane" => Type::Float32,
                 "at" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
@@ -3365,17 +3379,29 @@ impl Fn_<'_> {
         // Lane-wise arithmetic (RFC-0083). One instruction, four independent
         // single-precision operations — nothing renormalizes and nothing
         // reassociates, so this needs no more bookkeeping than the scalar floats
-        // below. The checker admits only these four operators on a vector.
+        // below. The checker admits ten operators on a vector; the six relational
+        // ones yield a `Mask32x4`, and wasm's `f32x4.lt`..`f32x4.ge` and
+        // `f32x4.eq` are already the ORDERED comparisons (false on a NaN operand)
+        // while `f32x4.ne` is the unordered one — the same pairing the textual
+        // backend's `fcmp olt`/`fcmp une` makes, which is what RFC-0081 had to
+        // correct at scalar width and is written down here for that reason.
         if lt == Type::F32x4 {
             self.expr_as(m, b, rhs, &lt)?;
+            let mask = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
             b.ins(&match op {
                 BinOp::Add => Instruction::F32x4Add,
                 BinOp::Sub => Instruction::F32x4Sub,
                 BinOp::Mul => Instruction::F32x4Mul,
                 BinOp::Div => Instruction::F32x4Div,
+                BinOp::Lt => Instruction::F32x4Lt,
+                BinOp::LtEq => Instruction::F32x4Le,
+                BinOp::Gt => Instruction::F32x4Gt,
+                BinOp::GtEq => Instruction::F32x4Ge,
+                BinOp::Eq => Instruction::F32x4Eq,
+                BinOp::NotEq => Instruction::F32x4Ne,
                 _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
             });
-            return Ok(lt);
+            return Ok(if mask { Type::Mask32x4 } else { lt });
         }
         if matches!(lt, Type::Float | Type::Float32) {
             self.expr_as(m, b, rhs, &lt)?;
@@ -4228,12 +4254,69 @@ impl Fn_<'_> {
             // The lane index was proven constant and in range by the checker, so
             // this is a plain immediate and there is no bounds check to emit.
             "@lane" if args.len() == 2 => {
-                self.expr_as(m, b, &args[0], &Type::F32x4)?;
+                let vt = self.expr(m, b, &args[0])?;
                 let Some(k) = ftypes::const_lane(&args[1], 4) else {
                     return unsupported("a lane index that is not a constant in 0..3", line);
                 };
+                // A mask lane is all-ones or all-zeros; `Bool` rides an `i32` that
+                // must be 0 or 1, so the extract is followed by a test against
+                // zero rather than being handed over raw — `-1` where `1` is
+                // expected would print `true` and compare unequal to `true`.
+                if self.cx.resolve(&vt) == Type::Mask32x4 {
+                    b.ins(&Instruction::I32x4ExtractLane(k));
+                    b.ins(&Instruction::I32Eqz);
+                    b.ins(&Instruction::I32Eqz);
+                    return Ok(Type::Bool);
+                }
                 b.ins(&Instruction::F32x4ExtractLane(k));
                 return Ok(Type::Float32);
+            }
+            // RFC-0083 M2. `min`/`max` are wasm's own, which is the rule the other
+            // two engines were pointed AT rather than the one they fell into: NaN
+            // in either operand propagates and `-0.0` orders below `+0.0`.
+            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" => {
+                self.expr_as(m, b, &args[0], &Type::F32x4)?;
+                if args.len() == 2 {
+                    self.expr_as(m, b, &args[1], &Type::F32x4)?;
+                }
+                b.ins(&match name {
+                    "@f32x4Min" => Instruction::F32x4Min,
+                    "@f32x4Max" => Instruction::F32x4Max,
+                    "@f32x4Abs" => Instruction::F32x4Abs,
+                    _ => Instruction::F32x4Sqrt,
+                });
+                return Ok(Type::F32x4);
+            }
+            // Four consecutive `Float32`s of an `Array<Float32>` as one 16-byte
+            // access, behind ONE bounds check rather than four.
+            "@f32x4Load" | "@f32x4Store" => {
+                let aty = self.expr(m, b, &args[0])?;
+                let w = self.walk(b, &aty, line)?;
+                self.expr_as(m, b, &args[1], &Type::Int)?;
+                let idx = b.local(ValType::I64);
+                b.ins(&Instruction::LocalSet(idx));
+                self.bounds_check_span(b, &w, idx);
+                if name == "@f32x4Load" {
+                    self.elem_addr(b, &w, idx);
+                    // `align: 0` — one byte. The buffer is an array of `float`, so
+                    // nothing guarantees the 16 a `v128.load` would like, and an
+                    // overstated hint is a validation-legal lie the engine may act
+                    // on. The textual backend states `align 4` for the same reason.
+                    b.ins(&Instruction::V128Load(MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                    return Ok(Type::F32x4);
+                }
+                self.elem_addr(b, &w, idx);
+                self.expr_as(m, b, &args[2], &Type::F32x4)?;
+                b.ins(&Instruction::V128Store(MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                }));
+                return Ok(Type::Unit);
             }
             // `Int64(x)` / `UInt16(x)` — a conversion, not a call. Which names are
             // conversions is the frontend's answer (`numeric_conv_target`), so the
@@ -5733,6 +5816,44 @@ impl Fn_<'_> {
         self.depth += 1;
         b.ins(&Instruction::I32Const(pre as i32));
         b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I32Const(post as i32));
+        b.ins(&Instruction::Call(trap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+    }
+
+    /// Trap unless all four of `idx..idx+3` are in `0..len` (RFC-0083 M2).
+    ///
+    /// ONE branch for the whole vector — the amortisation that is the point of a
+    /// vector load, and what a scalar loop cannot express. Two compares rather
+    /// than [`bounds_check`]'s one because the unsigned trick does not survive a
+    /// span: `idx + 4` wraps for a huge `idx` and would let the access through,
+    /// while `len - 4` cannot wrap because `len >= 0`.
+    fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32) {
+        let (pre, post, trap) = (self.cx.rt.msg_aoob, self.cx.rt.msg_oob_end, self.cx.rt.trap_idx);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64LtS);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::LocalGet(w.len));
+        b.ins(&Instruction::I64Const(4));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::I64GtS);
+        b.ins(&Instruction::I32Or);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::I32Const(pre as i32));
+        // The first lane of `idx..idx+3` actually out of range: `idx` when it is
+        // negative, `idx + 3` when the tail overruns. Reporting `idx` alone would
+        // name an in-range element in the common case, and this is the cold path.
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I64Const(3));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64LtS);
+        b.ins(&Instruction::Select);
         b.ins(&Instruction::I32Const(post as i32));
         b.ins(&Instruction::Call(trap));
         self.depth -= 1;

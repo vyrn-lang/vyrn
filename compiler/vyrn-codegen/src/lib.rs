@@ -703,6 +703,17 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i64 @llvm.fptoui.sat.i64.f64(double)\n");
     out.push_str("declare i64 @llvm.fptosi.sat.i64.f32(float)\n");
     out.push_str("declare i64 @llvm.fptoui.sat.i64.f32(float)\n");
+    // Vector `min`/`max`/`abs`/`sqrt` (RFC-0083 M2). `llvm.minimum` and NOT
+    // `llvm.minnum`: `minnum` is IEEE-754 `minNum`, which returns the non-NaN
+    // operand, while `minimum` propagates NaN and orders `-0.0` below `+0.0` —
+    // which is what wasm's `f32x4.min` does. The two answer differently for
+    // `min(NaN, 1.0)` and the six-decimal formatter SHOWS that difference, unlike
+    // a NaN payload difference. Choosing the intrinsic is how native was made to
+    // agree rather than left to whatever the host's `minps` does.
+    out.push_str("declare <4 x float> @llvm.minimum.v4f32(<4 x float>, <4 x float>)\n");
+    out.push_str("declare <4 x float> @llvm.maximum.v4f32(<4 x float>, <4 x float>)\n");
+    out.push_str("declare <4 x float> @llvm.fabs.v4f32(<4 x float>)\n");
+    out.push_str("declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)\n");
     // Worker threads (RFC-0025): `spawn f(args)` packs its evaluated arguments
     // into a heap frame and hands the shim a per-spawn-site thunk SYMBOL plus
     // that frame; the shim runs the thunk on a real OS thread natively (Win32 /
@@ -4040,9 +4051,10 @@ impl<'a> Gen<'a> {
             Type::Float | Type::Float32 | Type::F32x4
         ) {
             // Floating-point ops (Float64 → `double`, Float32 → `float`). A vector
-            // (RFC-0083) rides the same four arms: `fadd <4 x float>` is the same
-            // instruction over four lanes, and the checker admits no comparison on
-            // one, so the relational arms below are unreachable for it.
+            // (RFC-0083) rides the same arms: `fadd <4 x float>` is the same
+            // instruction over four lanes, and so is `fcmp olt` — which is why the
+            // NaN discipline written in the relational comment below is inherited
+            // by the mask rather than being decided a second time for it.
             let f = match self.resolve(&lty) {
                 Type::Float32 => "float",
                 Type::F32x4 => "<4 x float>",
@@ -4165,6 +4177,16 @@ impl<'a> Gen<'a> {
             }
         };
         self.emit(instr);
+        // A vector comparison's `fcmp` yields `<4 x i1>`; a `Mask32x4` IS `<4 x
+        // i32>` of all-ones/all-zeros (see `llt_of`), so widen. `sext` and not
+        // `zext`: all-ones is what `v128.bitselect` and every mask consumer on the
+        // wasm side reads, and having the two backends carry the same bit pattern
+        // is what stops a mask from meaning two things.
+        if self.resolve(&lty) == Type::F32x4 && !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+            let m = self.fresh_tmp();
+            self.emit(format!("{m} = sext <4 x i1> {t} to <4 x i32>"));
+            return Ok((m, Type::Mask32x4));
+        }
         let result_ty = match op {
             // Arithmetic and bitwise keep the operand's integer type (Int or
             // IntN); arithmetic also covers Float.
@@ -5444,12 +5466,22 @@ impl<'a> Gen<'a> {
         // is a defined value is one less thing a reader has to prove.
         if matches!(name, "F32x4" | "@f32x4Splat" | "@lane") {
             if name == "@lane" {
-                let (v, _) = self.gen_expr(&args[0])?;
+                let (v, vty) = self.gen_expr(&args[0])?;
                 // Proven constant and in range by the checker, so no bounds check
                 // is emitted here and none is missing.
                 let k = vyrn_frontend::types::const_lane(&args[1], 4)
                     .ok_or("a lane index must be a compile-time constant in 0..3")?;
                 let t = self.fresh_tmp();
+                // A mask lane is `0` or `-1`; `Bool` is `i1`, so the read is an
+                // extract plus a test against zero rather than a truncation —
+                // `trunc i32 -1 to i1` is `true` only because the low bit is set,
+                // which is an accident of the encoding rather than its meaning.
+                if self.resolve(&vty) == Type::Mask32x4 {
+                    let e = self.fresh_tmp();
+                    self.emit(format!("{e} = extractelement <4 x i32> {v}, i32 {k}"));
+                    self.emit(format!("{t} = icmp ne i32 {e}, 0"));
+                    return Ok((t, Type::Bool));
+                }
                 self.emit(format!("{t} = extractelement <4 x float> {v}, i32 {k}"));
                 return Ok((t, Type::Float32));
             }
@@ -5474,6 +5506,87 @@ impl<'a> Gen<'a> {
                 acc = t;
             }
             return Ok((acc, Type::F32x4));
+        }
+        // `F32x4.min/max/abs/sqrt` and `F32x4.select` (RFC-0083 M2). The four
+        // intrinsics are declared once in the prologue, where the choice of
+        // `llvm.minimum` over `llvm.minnum` is argued.
+        if matches!(name, "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt") {
+            let (a, _) = self.gen_expr(&args[0])?;
+            let t = self.fresh_tmp();
+            let (f, rest) = match name {
+                "@f32x4Min" => ("llvm.minimum.v4f32", true),
+                "@f32x4Max" => ("llvm.maximum.v4f32", true),
+                "@f32x4Abs" => ("llvm.fabs.v4f32", false),
+                _ => ("llvm.sqrt.v4f32", false),
+            };
+            let second = if rest {
+                let (b, _) = self.gen_expr(&args[1])?;
+                format!(", <4 x float> {b}")
+            } else {
+                String::new()
+            };
+            self.emit(format!(
+                "{t} = call <4 x float> @{f}(<4 x float> {a}{second})"
+            ));
+            return Ok((t, Type::F32x4));
+        }
+        // `F32x4.load(xs, i)` / `F32x4.store(xs, i, v)` (RFC-0083 M2) — sixteen
+        // bytes at element `i` of an `Array<Float32>`, behind ONE bounds check
+        // rather than four. That amortisation is the milestone's point; the
+        // structural pin in `vyrn-cli/tests/simd.rs` counts the branch.
+        if matches!(name, "@f32x4Load" | "@f32x4Store") {
+            let (av, _) = self.gen_expr(&args[0])?;
+            let (iv, _) = self.gen_expr(&args[1])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
+            // SIGNED, and against `len - 4` rather than `i + 4` against `len`.
+            // The unsigned single-compare trick the scalar path uses does not
+            // survive a span: `i + 4` wraps for a huge `i` and lets the load
+            // through, while `len - 4` cannot wrap because `len >= 0`. Two
+            // compares, one branch — still once for the whole vector.
+            let lo = self.fresh_tmp();
+            let lim = self.fresh_tmp();
+            let hi = self.fresh_tmp();
+            let bad = self.fresh_tmp();
+            self.emit(format!("{lo} = icmp slt i64 {iv}, 0"));
+            self.emit(format!("{lim} = sub nsw i64 {len}, 4"));
+            self.emit(format!("{hi} = icmp sgt i64 {iv}, {lim}"));
+            self.emit(format!("{bad} = or i1 {lo}, {hi}"));
+            let bad_l = self.fresh_label("vec.oob");
+            let ok_l = self.fresh_label("vec.ok");
+            self.emit_term(format!("br i1 {bad}, label %{bad_l}, label %{ok_l}"));
+            self.emit_label(&bad_l);
+            // The reported index is the first lane of `i..i+3` actually out of
+            // range — naming `i` would name an in-range element whenever only the
+            // tail overruns. Computed in the trap block, so the hot path pays
+            // nothing for the nicety.
+            let hi3 = self.fresh_tmp();
+            let k = self.fresh_tmp();
+            let e = self.fresh_tmp();
+            self.emit(format!("{hi3} = add i64 {iv}, 3"));
+            self.emit(format!("{k} = select i1 {lo}, i64 {iv}, i64 {hi3}"));
+            self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
+            self.emit(format!(
+                "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.trap.aoob, i64 {k})"
+            ));
+            self.emit("call void @exit(i32 1)".into());
+            self.emit_term("unreachable".into());
+            self.emit_label(&ok_l);
+            let ep = self.fresh_tmp();
+            self.emit(format!("{ep} = getelementptr float, ptr {data}, i64 {iv}"));
+            // `align 4`, not the vector's natural 16: the buffer is an array of
+            // `float`, so nothing guarantees more, and claiming 16 would be a
+            // promise the allocator never made.
+            if name == "@f32x4Load" {
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = load <4 x float>, ptr {ep}, align 4"));
+                return Ok((t, Type::F32x4));
+            }
+            let (v, _) = self.gen_expr(&args[2])?;
+            self.emit(format!("store <4 x float> {v}, ptr {ep}, align 4"));
+            return Ok(("undef".to_string(), Type::Unit));
         }
         // `blackBox(v)` (RFC-0055): identity with an optimizer-opacity guarantee.
         // The *semantics* — the value is used and its result is unknowable, so the
@@ -8241,6 +8354,7 @@ fn mangle_ty(t: &Type) -> String {
         Type::Task(inner) => format!("Task{}", mangle_ty(inner)),
         Type::Logger => "Logger".into(),
         Type::F32x4 => "F32x4".into(),
+        Type::Mask32x4 => "Mask32x4".into(),
         // A function-value type (RFC-0023) mangles by shape — used only when a
         // generic instance's own type argument mentions one (rare); the
         // higher-order specialization keys are formed separately.
@@ -8326,6 +8440,12 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // wasm backend reads this same spelling back out to reach `v128`, which is
         // why the vector lives here rather than in a table of its own.
         Type::F32x4 => "<4 x float>".into(),
+        // A mask is `<4 x i32>` of all-ones/all-zeros, not the `<4 x i1>` an
+        // `fcmp` actually produces. `<4 x i1>` is a legal IR type but a strange
+        // ABI one — it is passed as a packed `i4` in places — and a mask crosses
+        // function boundaries here like any other value. The `sext`/`trunc` pair
+        // that costs is folded away by `-O2` at every use, which was checked.
+        Type::Mask32x4 => "<4 x i32>".into(),
         Type::Bool => "i1".into(),
         Type::Str => "ptr".into(),
         // `Never` (RFC-0079) carries no value, so it lowers like `Unit`: a

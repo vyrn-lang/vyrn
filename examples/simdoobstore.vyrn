@@ -1,0 +1,23 @@
+/// A vector store at a NEGATIVE index (RFC-0083 M2) — the other branch of the
+/// one bounds check, and the reason it is signed.
+///
+/// The scalar path gets both ends from a single unsigned compare, because a
+/// negative index reads as a huge one. A span cannot: `i + 4` on that huge
+/// value wraps back into range and would let the store through. So the check is
+/// signed, `i < 0 || i > len - 4`, and `len - 4` is the side that cannot wrap.
+///
+/// Here the reported index is `-1` itself rather than `i + 3`: when the head is
+/// out of range it is the first lane out of range.
+///
+///   vyrn run   examples/simdoobstore.vyrn   -> error: array index -1 out of bounds, exit 1
+
+fn idx(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    let xs: Array<Float32> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    F32x4.store(xs, idx(0 - 1), F32x4.splat(0.0))
+    print(xs[0])
+    return 0
+}

@@ -1,0 +1,25 @@
+/// A vector load whose TAIL runs past the end of the array (RFC-0083 M2).
+///
+/// `xs` has 7 elements, so element 6 is the last, and a load at 4 wants 4..7.
+/// The check is emitted once for the whole vector, and the index it reports is
+/// the first lane actually out of range — `7`, not the `4` the load was asked
+/// for, which is an element that exists. `simdoobstore.vyrn` is the other
+/// branch, where the index itself is negative and IS the one reported.
+///
+/// The wording is the scalar one: a vector access is still an array access, and
+/// a second spelling of `out of bounds` would be a second thing to keep in
+/// step across three engines.
+///
+///   vyrn run   examples/simdoob.vyrn   -> error: array index 7 out of bounds, exit 1
+
+/// The index arrives through a parameter, so nothing folds it at compile time.
+fn idx(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    let xs: Array<Float32> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    let v = F32x4.load(xs, idx(4))
+    print(v.lane(0))
+    return 0
+}

@@ -1,8 +1,9 @@
 # RFC-0083 — Portable SIMD, Without `unsafe` and Without Breaking Parity
 
-- **Status:** **Accepted.** **M1 shipped** (`examples/simd.vyrn`, three-engine
-  byte-identical including NaN — see "As landed"). Later milestones are gated on
-  M1's parity result, in the manner RFC-0081 established.
+- **Status:** **Accepted.** **M1 and M2 shipped** (`examples/simd.vyrn`,
+  `examples/simdmem.vyrn`, three-engine byte-identical including NaN — see the
+  two "As landed" notes). M3 is gated on M2's parity result, in the manner
+  RFC-0081 established.
 - **Depends on:** RFC-0077 (the direct wasm backend — `wasm-encoder` is what
   emits the instructions), RFC-0078 (the census — `View` is the category these
   join), RFC-0082 (the capability boundary this narrows by one row)
@@ -148,6 +149,130 @@ over `Type` and both were in the textual backend.
   This is where SIMD becomes useful rather than demonstrated.
 - **M3 — the other widths.** `I32x4`, `F64x2`, `I64x2`. Mechanical once M1 and
   M2 have settled the shape, and worth doing only if something wants them.
+
+### As landed (M2)
+
+```vyrn
+let v = F32x4.load(xs, i)          // xs: Array<Float32>, ONE bounds check
+F32x4.store(xs, i, v)              // the same four, written back
+let m = a < b                      // Mask32x4 — `< <= > >= == !=`, never Bool
+print(m.lane(0))                   // true
+F32x4.min(a, b)  F32x4.max(a, b)  F32x4.abs(v)  F32x4.sqrt(v)
+```
+
+Three engines byte-identical across `examples/simdmem.vyrn` (every operation
+against `±0.0`, a `Float32` subnormal, `±Infinity` and NaN in every operand
+position), `examples/simdbench.vyrn`, and both trap examples — stdout, stderr
+and exit code. `wasmtime -W simd=n,relaxed-simd=n` rejects the modules with
+`SIMD support is not enabled`, which is the positive proof these are really the
+vector instructions and not a scalar emulation the parity sweep would have been
+just as happy with.
+
+**The mask is its own type, `Mask32x4`, and the reason is what the alternative
+cannot say.** The bit pattern is the conventional one on both backends —
+`<4 x i32>` of all-ones/all-zeros textually, a `v128` in wasm — so the decision
+is not about representation. It is that an `I32x4` mask would be a type a program
+can *build*, and `select(I32x4(7,7,7,7), a, b)` has no answer the three engines
+agree on for free: wasm's `v128.bitselect` is bit-wise and would mix the two
+operands' mantissas, LLVM's `select` wants an `<4 x i1>` and would read only the
+low bit, and an interpreter would have to pick one of those to imitate. A type
+with no other inhabitants costs one enum variant; normalising an arbitrary
+pattern costs an instruction on every use and a decision on every engine.
+`<4 x i1>` was rejected as the *textual* representation for a separate reason: a
+mask crosses function boundaries here like any other value, and `<4 x i1>` is a
+strange ABI type (packed to `i4` in places). The `sext`/`icmp ne` pair that
+choosing `<4 x i32>` costs is folded away by `-O2` at every use.
+
+**What each engine does for NaN, measured rather than assumed.**
+
+| | `min(NaN, 1.0)` | `min(1.0, NaN)` | `min(-0.0, +0.0)` | `NaN < 1.0` | `NaN != NaN` |
+|---|---|---|---|---|---|
+| wasm `f32x4.min` | NaN | NaN | `-0.0` | false | true |
+| LLVM `llvm.minimum` | NaN | NaN | `-0.0` | — | — |
+| LLVM `llvm.minnum` | **1.0** | **1.0** | either | — | — |
+| Rust `f32::min` | **1.0** | **1.0** | either | — | — |
+| `fcmp olt` / `une` | — | — | — | false | true |
+
+The rule shipped is **IEEE-754-2019 `minimum`/`maximum`: NaN in either operand
+propagates, and `-0.0` orders strictly below `+0.0`** — wasm's, because wasm is
+the engine with no choice. Native calls `llvm.minimum` (not `llvm.minnum`) and
+the interpreter spells the rule out by hand (not `f32::min`); a structural test,
+`min_and_max_lower_to_the_nan_propagating_intrinsic`, pins the intrinsic name so
+a future "simplification" to `minnum` fails in the default suite rather than only
+under `--ignored` parity.
+
+**This is the case M1 handed forward and it is genuinely different from M1's.**
+M1's agreement came free because a NaN's *identity* is unobservable — the
+six-decimal formatter answers `NaN` for any payload and either sign. `min` is not
+of that kind: `minNum` and `minimum` disagree about *which operand comes back*,
+so `min(NaN, 1.0)` prints `1.000000` under one and `NaN` under the other, and the
+formatter shows it. Left to defaults the three engines would have split
+two-to-one. Comparison needed no such intervention: wasm's `f32x4.lt`..`ge`/`eq`
+are already the ordered predicates and `f32x4.ne` the unordered one, which is the
+`fcmp olt`/`fcmp une` pairing RFC-0081 corrected at scalar width — inherited, but
+pinned rather than assumed. `abs` clears the sign bit on all three (a bit
+operation, so there is no NaN question), and `sqrt` is correctly-rounded IEEE on
+all three, `-0.0` sign kept and subnormals not flushed.
+
+**The bounds check is signed, and that is not a stylistic choice.** The scalar
+path gets both ends from one unsigned compare, because a negative index reads as
+a huge one. A span cannot: `i + 4` on that huge value wraps back into range and
+would let the access through. So the check is `i < 0 || i > len - 4`, where
+`len - 4` cannot wrap because `len >= 0` — two compares, **one branch**. The
+reported index is the first lane actually out of range (`i + 3` when the tail
+overruns, `i` when the head is negative), computed inside the trap block so the
+hot path pays nothing for it; naming `i` alone would name an element that exists.
+The wording is the scalar one, since a vector access is still an array access.
+`vyrn-cli/tests/simd.rs` counts the checks in the IR — one for a vector load,
+**four** for the same four elements read scalarly, which is the amortisation
+stated as a number rather than as a claim.
+
+**The surface lives on the type name, and that is a parser constraint rather than
+a taste.** A value-receiver method (`v.min(w)`) is a *global* rename in the
+parser's method table, and `min`/`max`/`abs` are `std/math` exports that
+`math.min(a, b)` reaches in exactly the same AST shape — renaming them would
+break namespace calls. So `F32x4.<anything>(..)` became one arm that drops the
+type-name receiver and prefixes `@f32x4`, replacing M1's `splat`-specific guard;
+M3's `F64x2.*` is a table entry, not new machinery. `lane` stays a value method
+because M1 made it one and nothing exports that name. Comparison is the
+*operators* for the same reason: six arms instead of six global renames, and
+`if a < b` on vectors fails with "condition must be `Bool`".
+
+**M2's finding: `select` is not a builtin, and the census is why.** A
+`v128.bitselect` / `select <4 x i1>` lowering was built, worked, and was then
+deleted. Written in Vyrn on `m.lane(k)` and `if` it measures **1.1x native**
+(7.08 µs against 6.33 µs over 65536 lanes) and **1.06x wasm** (282 ms against
+268 ms over 400 000 passes) — both optimizers put the four branches back together
+into one blend. RFC-0078's census asks every Rust primitive to say why it is one,
+and "it is 6% faster" is not an answer; `examples/simdmem.vyrn` defines its own
+`select` in six lines. The measurement is `examples/simdbench.vyrn`, which also
+caught its own first version measuring nothing: without a `blackBox` on the
+threshold the whole pass is loop-invariant and LLVM hoists it, so the benchmark
+timed 64 float additions and reported confident ratios to match.
+
+The census gains six rows and 64 → 70. `@f32x4Load`/`@f32x4Store` are **Memory**
+(array access with a bounds trap, exactly as `at` is). `@f32x4Min`/`Max`/`Abs`
+are **Measured** — all three *are* writable in Vyrn, `simdbench.vyrn` holds the
+implementations and `main` checks all three engines agree with the builtins, at
+3.6x / 3.7x / 1.0x native. `abs`'s row is the interesting one: natively LLVM
+recognises the `Float64`-widen / mask / narrow round-trip and emits the same
+code, so the number that refuses it is **Cranelift's 3.5x** — the first census
+row decided by the wasm column. `@f32x4Sqrt` is **Semantics**: it is not movable
+at all, because no finite sequence of Vyrn arithmetic is the correctly-rounded
+IEEE result and a Newton iteration differing in the last bits is, under this
+project's promise, a different program. The comparison operators are `BinOp`s
+like M1's arithmetic, so the mask cost no rows.
+
+Two smaller things the RFC above got wrong or left out:
+
+- **The milestone list says "lane-wise comparisons producing a mask" as though
+  the mask were an implementation detail.** It is the one type decision in the
+  whole RFC, and M3's `F64x2` will need `Mask64x2` — two lanes, and a `v128`
+  again. The naming convention (`Mask32x4` after Rust's `mask32x4`) is set here.
+- **"`min`/`max`/`abs`/`sqrt`" reads as four operations of one kind.** They are
+  three kinds: two that needed a semantics chosen for them, one that is a bit
+  operation with no question to answer, and one that is the only irreducible
+  primitive in the whole RFC.
 
 ## What this does not decide
 

@@ -2096,11 +2096,17 @@ fn rfc0050_definition_on_import_path() {
     let dir = std::env::temp_dir().join(format!("vyrn-lsp-imp-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("store.vyrn"), "export fn get() -> Int64 { return 1 }\n").unwrap();
+    // NOT `get`: that is a RESERVED name (the slot table's generation-checked
+    // read), so `export fn get()` is a program no valid module can contain. This
+    // fixture used it and passed only because the loader registered reserved
+    // names into its flat namespace — the same defect that made one `fn at`
+    // produce 53 diagnostics pointing into `std/num.vyrn`. The name is
+    // incidental to what this test checks, so it is a legal one now.
+    std::fs::write(dir.join("store.vyrn"), "export fn stored() -> Int64 { return 1 }\n").unwrap();
     let app = "\
-import { get } from \"./store\"
+import { stored } from \"./store\"
 import { now } from \"std/time\"
-fn main() -> Int64 { return get() + now() }
+fn main() -> Int64 { return stored() + now() }
 ";
     let app_path = dir.join("app.vyrn");
     std::fs::write(&app_path, app).unwrap();
@@ -2119,11 +2125,11 @@ fn main() -> Int64 { return get() + now() }
     let stdt = definition_target(&mut client, &uri, l, c).expect("definition on std/time");
     assert!(stdt.replace('\\', "/").ends_with("std/time.vyrn"), "std/time → std file: {stdt}");
 
-    // A cursor NOT on an import string (the `get` call) still does identifier
+    // A cursor NOT on an import string (the `stored` call) still does identifier
     // go-to-definition — the import-path path is additive, not a hijack.
-    let (l, c) = at(app, 3, "get");
-    let g = definition_target(&mut client, &uri, l, c).expect("definition on get() call");
-    assert!(g.ends_with("/store.vyrn"), "get() → its imported decl in store.vyrn: {g}");
+    let (l, c) = at(app, 3, "stored");
+    let g = definition_target(&mut client, &uri, l, c).expect("definition on stored() call");
+    assert!(g.ends_with("/store.vyrn"), "stored() → its imported decl in store.vyrn: {g}");
 
     let _ = client.child.kill();
 }

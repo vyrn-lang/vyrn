@@ -2719,6 +2719,20 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
 
     let mut register =
         |name: &str, module: &str, exported: bool, line: usize, errors: &mut Vec<Diagnostic>| {
+            // A reserved name never enters the flat namespace, and the reason is
+            // not tidiness. `owner` is what decides whether a use is a foreign
+            // reference, so registering one made every use of the BUILTIN inside
+            // a linked `std/` module look like an unimported import: a single
+            // user `fn at` produced 53 diagnostics, all pointing into
+            // `std/num.vyrn`, none at the declaration, none saying "reserved".
+            //
+            // No diagnostic here on purpose. `check`'s own RESERVED guard already
+            // reports this once, at the declaration, with the right wording — it
+            // was simply never reached, because the loader failed the program
+            // first. Skipping is what lets it be reached.
+            if crate::checker::RESERVED.contains(&name) {
+                return;
+            }
             if let Some((prev, _)) = owner.get(name) {
                 if prev != module {
                     errors.push(Diagnostic::error(

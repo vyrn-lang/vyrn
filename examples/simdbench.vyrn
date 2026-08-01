@@ -1,0 +1,298 @@
+// Are `F32x4.min`/`max`/`abs` movable into Vyrn? Yes — and this is what moving
+// them costs (RFC-0083 M2, and RFC-0078's census question).
+//
+// `select` is the reason this file exists at all, and it is the one operation
+// M2 tried to add and then did not. While the builtin still existed it measured
+// 1.1x native (7.08 us against 6.33 us over 65536 lanes) and 1.06x wasm (282 ms
+// against 268 ms over 400000 passes): both optimizers turn `selectV`'s four
+// branches back into a blend, so a `v128.bitselect` primitive bought nothing.
+// A Rust builtin that buys nothing is exactly what RFC-0078's census exists to
+// find, so `selectV` stayed and `F32x4.select` did not ship. Only the Vyrn half
+// can be timed now — its partner is deleted — which is why it has no pair here.
+//
+// Each `*V` function below is the honest Vyrn implementation of the builtin on
+// the primitives M1 and M2 already ship: lane reads, lane-wise comparison, and
+// `floatBits` for the sign of a zero. `main` runs both halves so the three
+// engines check they agree; `vyrn bench` prices the difference.
+//
+// The `blackBox` on the threshold inside each bench loop is load-bearing.
+// Without it the whole pass is loop-invariant, LLVM hoists it, and the
+// benchmark times 64 float additions and one pass — which it duly did, and
+// reported ratios to match, before the barrier went in.
+
+/// IEEE-754-2019 `minimum` on one lane: NaN propagates, and `-0.0` orders below
+/// `+0.0`. The zero case needs the sign BIT — `-0.0 < 0.0` is false, so no
+/// comparison can separate them — and `floatBits` on the widened lane is the
+/// only view of one there is. `Float32` -> `Float64` is exact, so nothing is
+/// lost on the way there or back.
+fn min1(a: Float32, b: Float32) -> Float32 {
+    if a != a {
+        return a
+    }
+    if b != b {
+        return b
+    }
+    if a == b {
+        let sign: UInt64 = 9223372036854775808
+        if floatBits(Float64(a)) >= sign {
+            return a
+        }
+        return b
+    }
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn max1(a: Float32, b: Float32) -> Float32 {
+    if a != a {
+        return a
+    }
+    if b != b {
+        return b
+    }
+    if a == b {
+        let sign: UInt64 = 9223372036854775808
+        if floatBits(Float64(a)) >= sign {
+            return b
+        }
+        return a
+    }
+    if a > b {
+        return a
+    }
+    return b
+}
+
+/// `abs` clears the sign bit, NaN included — so it is the bits and not a
+/// comparison: `abs(-0.0)` is `+0.0`, which `if x < 0.0` gets wrong.
+fn abs1(x: Float32) -> Float32 {
+    let mask: UInt64 = 9223372036854775807
+    return Float32(floatFromBits(floatBits(Float64(x)) & mask))
+}
+
+fn minV(a: F32x4, b: F32x4) -> F32x4 {
+    return F32x4(
+        min1(a.lane(0), b.lane(0)),
+        min1(a.lane(1), b.lane(1)),
+        min1(a.lane(2), b.lane(2)),
+        min1(a.lane(3), b.lane(3)),
+    )
+}
+
+fn maxV(a: F32x4, b: F32x4) -> F32x4 {
+    return F32x4(
+        max1(a.lane(0), b.lane(0)),
+        max1(a.lane(1), b.lane(1)),
+        max1(a.lane(2), b.lane(2)),
+        max1(a.lane(3), b.lane(3)),
+    )
+}
+
+fn absV(v: F32x4) -> F32x4 {
+    return F32x4(abs1(v.lane(0)), abs1(v.lane(1)), abs1(v.lane(2)), abs1(v.lane(3)))
+}
+
+fn selectV(m: Mask32x4, a: F32x4, b: F32x4) -> F32x4 {
+    return F32x4(
+        if m.lane(0) { a.lane(0) } else { b.lane(0) },
+        if m.lane(1) { a.lane(1) } else { b.lane(1) },
+        if m.lane(2) { a.lane(2) } else { b.lane(2) },
+        if m.lane(3) { a.lane(3) } else { b.lane(3) },
+    )
+}
+
+fn sum(v: F32x4) -> Float32 {
+    return v.lane(0) + v.lane(1) + v.lane(2) + v.lane(3)
+}
+
+fn data(n: Int64) -> Array<Float32> {
+    let mut xs: Array<Float32> = []
+    let mut i = 0
+    while i < n {
+        xs.push(Float32(i) / 1000.0 - 0.03)
+        i = i + 1
+    }
+    return xs
+}
+
+// Seven walks: three pairs, plus the Vyrn `select` whose partner was deleted.
+// Each takes the threshold as an argument so the caller can hide it behind a
+// `blackBox`.
+fn minBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F32x4.min(F32x4.load(xs, i), h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn minVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + minV(F32x4.load(xs, i), h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn maxBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F32x4.max(F32x4.load(xs, i), h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn maxVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + maxV(F32x4.load(xs, i), h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn absBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F32x4.abs(F32x4.load(xs, i) - h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn absVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + absV(F32x4.load(xs, i) - h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn selVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        let v = F32x4.load(xs, i)
+        acc = acc + selectV(v < h, v, h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+bench "min builtin" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + minBuiltin(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "min in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + minVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "max builtin" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + maxBuiltin(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "max in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + maxVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "abs builtin" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + absBuiltin(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "abs in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + absVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "select in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + selVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+/// Both halves of every pair, so the three engines check that the builtin and
+/// the Vyrn implementation of it agree before the benchmark prices them.
+fn main() -> Int64 {
+    let xs = data(64)
+    print(minBuiltin(xs, 64, 0.5))
+    print(minVyrn(xs, 64, 0.5))
+    print(maxBuiltin(xs, 64, 0.5))
+    print(maxVyrn(xs, 64, 0.5))
+    print(absBuiltin(xs, 64, 0.5))
+    print(absVyrn(xs, 64, 0.5))
+    print(selVyrn(xs, 64, 0.5))
+    drop xs
+    return 0
+}

@@ -141,6 +141,11 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@has", Memory, "Map (RFC-0028): key probe"),
     ("@keys", Memory, "Map: a fresh snapshot of the key column"),
     ("@remove", Memory, "Map: order-preserving removal in place"),
+    // RFC-0083 M2. Array access with a bounds trap, exactly as `at` is — the only
+    // difference is that ONE check covers four elements, which is the whole reason
+    // the vector form exists.
+    ("@f32x4Load", Memory, "Array<Float32>: four consecutive elements, one bounds check"),
+    ("@f32x4Store", Memory, "Array<Float32>: the same four written back"),
     ("cell", Memory, "the slot table: allocate a slot and a generation"),
     ("get", Memory, "the slot table: generation-checked read"),
     ("set", Memory, "the slot table: generation-checked write"),
@@ -203,6 +208,12 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("colAt", Cache, "as `lineAt`, sharing the same table"),
     // ---- The semantics differ observably -------------------------------------
     ("parse", Semantics, "WRAPS on overflow where std/num's parseInt64 refuses"),
+    // RFC-0083 M2: the one vector operation that is not movable AT ALL. Every
+    // other row below was written in Vyrn and priced; a square root cannot be,
+    // because no finite sequence of Vyrn arithmetic is the correctly-rounded IEEE
+    // result. A Newton iteration differs in the last bits, which under this
+    // project's byte-identical promise is a different program.
+    ("@f32x4Sqrt", Semantics, "a Vyrn Newton iteration is not the correctly-rounded IEEE result"),
     // ---- Movable, refused on a measured cost --------------------------------
     // The float half LEFT via RFC-0081: `std/num`'s `f64Str` is the one
     // implementation, native and wasm route to it, and `direct.rs`'s 511 lines
@@ -212,6 +223,16 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // exhaustively over 2^64 inputs.
     ("@str", Measured, "integer rendering: a Vyrn digit loop is 150 ns against 60 ns (2.5x), on every print"),
     ("@concat", Measured, "9.7x native / 11x wasm (580 ns against 60 ns): a Vyrn join must revalidate UTF-8"),
+    // RFC-0083 M2. All three ARE movable — `examples/simdbench.vyrn` holds the
+    // Vyrn implementations, `main` checks the three engines agree with the
+    // builtins, and `vyrn bench` prices them. The Vyrn version is the scalar loop
+    // the vector type exists to replace, which is why the ratios are what they are.
+    ("@f32x4Min", Measured, "3.6x native (44.4 us against 12.3 us per 65536 lanes); Vyrn needs floatBits for -0.0"),
+    ("@f32x4Max", Measured, "3.7x native (44.1 us against 12.1 us per 65536 lanes), the mirror of `min`"),
+    // The one row whose refusal is a WASM number: natively LLVM recognises the
+    // Float64-widen/mask/narrow round-trip and emits the same code (1.0x), so the
+    // measurement that decides this row is Cranelift's, which does not.
+    ("@f32x4Abs", Measured, "1.0x native but 3.5x wasm (770 ms against 223 ms): Cranelift does not fold the bit round-trip"),
     // ---- The one finding, and it is CLOSED -----------------------------------
     // (`@charCount` was here, as `Unjustified`: "three implementations of a
     // four-line loop, for ONE caller". It is `std/text`'s `charCountV` now, so the
@@ -320,8 +341,14 @@ fn the_census_is_the_code() {
     // traded for one primitive, and the one that left had three implementations
     // where the one that arrived has three lines. 61 -> 64 when RFC-0083 M1 added
     // a TYPE the language cannot name — three `View` rows and no operation, since
-    // the lane-wise arithmetic is a `BinOp` and never reaches this dispatch.
-    assert_eq!(found.len(), 64, "the primitive core changed size");
+    // the lane-wise arithmetic is a `BinOp` and never reaches this dispatch. 64 ->
+    // 70 when M2 added the memory pair (`Memory`, a bounds trap like `at`'s), the
+    // three total operations that are movable and priced (`Measured`), and the one
+    // that is not movable at all (`Sqrt`, `Semantics`). M2's comparison operators
+    // are `BinOp`s like M1's arithmetic, so the mask cost no rows either — and the
+    // operation M2 tried to add and could NOT justify, `select`, is not here
+    // because it is not in the interpreter. See RFC-0083's M2 note.
+    assert_eq!(found.len(), 70, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

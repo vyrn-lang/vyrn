@@ -113,6 +113,103 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
 /// target. `lib::check_and_synthesize` needs both before any engine builds its
 /// function table. One pass: a second full check to collect them would double
 /// every load.
+/// Names the compiler owns: builtin free functions, builtin type names, and the
+/// sum constructors. A top-level declaration may not take one.
+///
+/// This is `pub` because the **loader** needs it too, and that is not an
+/// aesthetic point. The loader builds a flat `owner` map of every top-level name
+/// in the program; before this was shared, a user `fn at` registered `at` as
+/// owned by their file, and every use of the BUILTIN `at` inside a linked
+/// `std/` module then looked like an unimported foreign reference. One
+/// declaration produced 53 diagnostics, none of them at the declaration and none
+/// of them mentioning that the name is reserved.
+pub const RESERVED: &[&str] = &[
+    "print",
+    "len",
+    "concat",
+    "Some",
+    "None",
+    "Ok",
+    "Err",
+    "match",
+    "cell",
+    "get",
+    "set",
+    "release",
+    "array",
+    "push",
+    "at",
+    "alen",
+    "afree",
+    "str",
+    "parse",
+    "join",
+    "logger",
+    "contains",
+    "startsWith",
+    "endsWith",
+    "slice",
+    "bytes",
+    "chars",
+    "floatBits",
+    "floatFromBits",
+    "hexEncode",
+    "hexDecode",
+    "base64Encode",
+    "base64Decode",
+    "urlEncode",
+    "urlDecode",
+    "args",
+    "readLine",
+    "readFile",
+    "writeFile",
+    "renameFile",
+    "fsyncFile",
+    "readFileBytes",
+    "stringFromBytes",
+    "listDir",
+    "lineAt",
+    "colAt",
+    "moduleInterface",
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error",
+    "value",
+    "list",
+    "schemaOf",
+    "contractOf",
+    "jsonSchema",
+    "toJson",
+    "fromJson",
+    "toString",
+    "pop",
+    "swapRemove",
+    "assert",
+    "assertEq",
+    "blackBox",
+    "panic",
+    "Int",
+    "Int64",
+    "Int32",
+    "Int16",
+    "Int8",
+    "Float",
+    "Float64",
+    "Float32",
+    // RFC-0083: the vector CONSTRUCTOR is a reserved name for the reason the
+    // numeric conversions are — it is dispatched before user functions, so a
+    // user `fn F32x4` would be silently unreachable. `splat` and `lane` are
+    // not here: they reach the builtin only under the internal names the
+    // parser assigns to method sugar, so a free `fn lane(..)` still resolves.
+    "F32x4",
+    "UInt8",
+    "UInt16",
+    "UInt32",
+    "UInt64",
+];
+
 pub fn check_accum_with_json_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {
@@ -193,92 +290,7 @@ fn check_accum_inner(
         types.insert(t.name.clone(), t.clone());
     }
 
-    const RESERVED: &[&str] = &[
-        "print",
-        "len",
-        "concat",
-        "Some",
-        "None",
-        "Ok",
-        "Err",
-        "match",
-        "cell",
-        "get",
-        "set",
-        "release",
-        "array",
-        "push",
-        "at",
-        "alen",
-        "afree",
-        "str",
-        "parse",
-        "join",
-        "logger",
-        "contains",
-        "startsWith",
-        "endsWith",
-        "slice",
-        "bytes",
-        "chars",
-        "floatBits",
-        "floatFromBits",
-        "hexEncode",
-        "hexDecode",
-        "base64Encode",
-        "base64Decode",
-        "urlEncode",
-        "urlDecode",
-        "args",
-        "readLine",
-        "readFile",
-        "writeFile",
-        "renameFile",
-        "fsyncFile",
-        "readFileBytes",
-        "stringFromBytes",
-        "listDir",
-        "lineAt",
-        "colAt",
-        "moduleInterface",
-        "trace",
-        "debug",
-        "info",
-        "warn",
-        "error",
-        "value",
-        "list",
-        "schemaOf",
-        "contractOf",
-        "jsonSchema",
-        "toJson",
-        "fromJson",
-        "toString",
-        "pop",
-        "swapRemove",
-        "assert",
-        "assertEq",
-        "blackBox",
-        "panic",
-        "Int",
-        "Int64",
-        "Int32",
-        "Int16",
-        "Int8",
-        "Float",
-        "Float64",
-        "Float32",
-        // RFC-0083: the vector CONSTRUCTOR is a reserved name for the reason the
-        // numeric conversions are — it is dispatched before user functions, so a
-        // user `fn F32x4` would be silently unreachable. `splat` and `lane` are
-        // not here: they reach the builtin only under the internal names the
-        // parser assigns to method sugar, so a free `fn lane(..)` still resolves.
-        "F32x4",
-        "UInt8",
-        "UInt16",
-        "UInt32",
-        "UInt64",
-    ];
+
 
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
@@ -3608,9 +3620,16 @@ impl<'a> Checker<'a> {
             // match exactly (no implicit widening). `Rem` (%) is integer-only.
             // Lane-wise arithmetic on a vector (RFC-0083). Deliberately NOT folded
             // into `numeric`: that predicate also gates `<`/`==`, and a vector
-            // comparison yields a lane MASK (M2), never a `Bool`, so admitting it
-            // there would type six operators this milestone cannot lower.
+            // comparison yields a lane MASK, never a `Bool`.
             Add | Sub | Mul | Div if l == Type::F32x4 && r == Type::F32x4 => Ok(l),
+            // Lane-wise comparison (RFC-0083 M2) — the operators rather than
+            // `a.lt(b)`, because that spelling costs a global method rename and
+            // this one costs an arm. The result is a `Mask32x4`, so `if a < b` on
+            // vectors fails with "condition must be Bool" and there is no silent
+            // reading of it as one.
+            Lt | LtEq | Gt | GtEq | Eq | NotEq if l == Type::F32x4 && r == Type::F32x4 => {
+                Ok(Type::Mask32x4)
+            }
             Add | Sub | Mul | Div => {
                 if l == r && numeric(&l) {
                     Ok(l)
@@ -3712,13 +3731,16 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The three vector builtins (RFC-0083 M1): `F32x4(a, b, c, d)`,
-    /// `F32x4.splat(x)` and `v.lane(k)`.
+    /// The vector builtins: `F32x4(a, b, c, d)`, `F32x4.splat(x)` and
+    /// `v.lane(k)` (M1), plus `F32x4.load/store/min/max/abs/sqrt/select` (M2).
     ///
     /// The lane index is resolved HERE and nowhere else that matters: a
     /// non-constant or out-of-range `k` is a compile error, not a runtime trap,
     /// which is what keeps the read total and is why none of the three backends
-    /// emits a bounds check for it.
+    /// emits a bounds check for it. `load`/`store` are the opposite case and the
+    /// reason M2 exists: their index is a runtime value, so they DO bounds-check
+    /// — once for the whole vector, which is the amortisation a scalar loop
+    /// cannot express.
     fn vector_call(
         &self,
         name: &str,
@@ -3766,7 +3788,7 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Type::F32x4)
             }
-            _ => {
+            "@lane" => {
                 if args.len() != 2 {
                     return Err(format!(
                         "line {line}: `lane` takes a vector and a lane index, got {} argument(s)",
@@ -3777,18 +3799,127 @@ impl<'a> Checker<'a> {
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
                 }
-                if v != Type::F32x4 {
-                    return Err(format!(
-                        "line {line}: `lane` must be called on a vector (e.g. `v.lane(0)`), found {v}"
-                    ));
-                }
+                // A mask lane reads as the `Bool` it is. Same builtin because it
+                // is the same operation — one lane out of four — and giving the
+                // mask its own spelling would only be a second name for it.
+                let out = match v {
+                    Type::F32x4 => Type::Float32,
+                    Type::Mask32x4 => Type::Bool,
+                    other => {
+                        return Err(format!(
+                            "line {line}: `lane` must be called on a vector or a mask \
+                             (e.g. `v.lane(0)`), found {other}"
+                        ))
+                    }
+                };
                 if crate::types::const_lane(&args[1], 4).is_none() {
                     return Err(format!(
                         "line {line}: a lane index must be a compile-time constant in 0..3 \
                          (that is what makes `lane` total — there is no bounds check to fall back on)"
                     ));
                 }
-                Ok(Type::Float32)
+                Ok(out)
+            }
+            // `F32x4.load(xs, i)` / `F32x4.store(xs, i, v)` — four consecutive
+            // `Float32`s of an `Array<Float32>` as one value, `i` counted in
+            // ELEMENTS (so `load(xs, 1)` reads `xs[1..4]`), bounds-checked once.
+            "@f32x4Load" | "@f32x4Store" => {
+                let store = name == "@f32x4Store";
+                let want = if store { 3 } else { 2 };
+                if args.len() != want {
+                    return Err(format!(
+                        "line {line}: `F32x4.{}(..)` takes {want} arguments, got {}",
+                        if store { "store" } else { "load" },
+                        args.len()
+                    ));
+                }
+                // `store` writes through the binding, so it needs the binding and
+                // not a value — the same restriction (and the same reason)
+                // `xs.pop()` has: the interpreter's arrays are copy-on-write, so a
+                // store into a temporary would be a store into a copy.
+                if store && !matches!(&args[0], Expr::Var { .. }) {
+                    return Err(format!(
+                        "line {line}: `F32x4.store` needs an array binding as its first \
+                         argument, not an expression"
+                    ));
+                }
+                let a = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+                if matches!(a, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                match &a {
+                    Type::Array(inner) if self.base(inner) == Type::Float32 => {}
+                    other => {
+                        return Err(format!(
+                            "line {line}: `F32x4.{}` needs an Array<Float32>, found {other}",
+                            if store { "store" } else { "load" }
+                        ))
+                    }
+                }
+                let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
+                if matches!(i, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if i != Type::Int {
+                    return Err(format!(
+                        "line {line}: a vector load/store index must be an Int64, found {i}"
+                    ));
+                }
+                if !store {
+                    return Ok(Type::F32x4);
+                }
+                let v = self.base(&self.expr(&args[2], scope, Some(&Type::F32x4), fn_ret)?);
+                if matches!(v, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if v != Type::F32x4 {
+                    return Err(format!(
+                        "line {line}: `F32x4.store` stores an F32x4, found {v}"
+                    ));
+                }
+                Ok(Type::Unit)
+            }
+            // `min`/`max` propagate NaN and order `-0.0` below `+0.0` — wasm's
+            // `f32x4.min` rule, which is IEEE-754-2019 `minimum`, NOT `minNum`.
+            // See the RFC: `minNum` is what LLVM's `llvm.minnum` and Rust's
+            // `f32::min` do, they return the non-NaN operand, and that difference
+            // survives the formatter where a NaN PAYLOAD difference does not.
+            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" => {
+                let (want, what) = match name {
+                    "@f32x4Abs" => (1, "abs"),
+                    "@f32x4Sqrt" => (1, "sqrt"),
+                    "@f32x4Min" => (2, "min"),
+                    _ => (2, "max"),
+                };
+                if args.len() != want {
+                    return Err(format!(
+                        "line {line}: `F32x4.{what}(..)` takes {want} arguments, got {}",
+                        args.len()
+                    ));
+                }
+                for a in args {
+                    let t = self.base(&self.expr(a, scope, Some(&Type::F32x4), fn_ret)?);
+                    if matches!(t, Type::Err) {
+                        return Ok(Type::Err);
+                    }
+                    if t != Type::F32x4 {
+                        return Err(format!(
+                            "line {line}: `F32x4.{what}` takes F32x4, found {t}"
+                        ));
+                    }
+                }
+                Ok(Type::F32x4)
+            }
+            // The parser capitalized whatever followed `F32x4.`; put it back, so
+            // the message names the spelling the program used.
+            other => {
+                let m = other.trim_start_matches("@f32x4");
+                let mut it = m.chars();
+                let m = match it.next() {
+                    Some(c) => c.to_lowercase().collect::<String>() + it.as_str(),
+                    None => m.to_string(),
+                };
+                Err(format!("line {line}: `F32x4` has no `{m}`"))
             }
         }
     }
@@ -5065,11 +5196,11 @@ impl<'a> Checker<'a> {
             }
             return Ok(target);
         }
-        // Vector construction, splat and lane read (RFC-0083 M1). `F32x4(a,b,c,d)`
-        // is spelled like the numeric conversions above and sits here for that
-        // reason; the other two arrive under internal names the parser assigns, so
-        // a user `fn splat` / `fn lane` is untouched.
-        if matches!(name, "F32x4" | "@f32x4Splat" | "@lane") {
+        // The vector builtins (RFC-0083). `F32x4(a,b,c,d)` is spelled like the
+        // numeric conversions above and sits here for that reason; the rest arrive
+        // under internal names the parser assigns, so a user `fn min` / `fn lane`
+        // is untouched — which is exactly why they are spelled on the type name.
+        if matches!(name, "F32x4" | "@lane") || name.starts_with("@f32x4") {
             return self.vector_call(name, args, line, scope, fn_ret);
         }
         // built-in: schemaOf(TypeName) -> Schema — compile-time reflection of a
