@@ -615,8 +615,22 @@ pub enum Type {
     /// SIMD is expressible here when auto-vectorised float reductions are not.
     /// Lowers to `<4 x float>` textually and to a wasm `v128`.
     F32x4,
+    /// Four `Int32` lanes as one value (RFC-0083 M3). A value exactly as
+    /// [`Type::F32x4`] is, and lowered the same way — `<4 x i32>` textually, a
+    /// wasm `v128` — but NOT the same type with a different lane: it has no `/`
+    /// (no hardware has SIMD integer divide, and the wasm encoder has no
+    /// `I32x4Div` to emit), no `sqrt` or rounding, and it gains `& | ^ ~`
+    /// directly, which `F32x4` reaches only through a [`Type::Mask32x4`].
+    ///
+    /// The lanes are SIGNED, and that is what answers the one question the width
+    /// raises: wasm has `i32x4.min_s`/`min_u` and four ordered-comparison pairs,
+    /// and a lane type of `Int32` picks the signed half of every one. The
+    /// unsigned half would need a `U32x4` — a second type, since the choice
+    /// belongs to the operand and not to the operation — and nothing asks for
+    /// one. Arithmetic WRAPS at 32 bits, as scalar `Int32` does.
+    I32x4,
     /// Four `Bool` lanes as one value — what a lane-wise comparison of two
-    /// [`Type::F32x4`]s yields (RFC-0083 M2).
+    /// [`Type::F32x4`]s (or two [`Type::I32x4`]s) yields (RFC-0083 M2).
     ///
     /// A type of its OWN rather than an `I32x4` of all-ones/all-zeros, which is
     /// what wasm and LLVM both call a mask at the machine level. The bit pattern
@@ -762,6 +776,7 @@ impl std::fmt::Display for Type {
             Type::Float => write!(f, "Float64"),
             Type::Float32 => write!(f, "Float32"),
             Type::F32x4 => write!(f, "F32x4"),
+            Type::I32x4 => write!(f, "I32x4"),
             Type::Mask32x4 => write!(f, "Mask32x4"),
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
