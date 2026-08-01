@@ -3335,6 +3335,13 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     let mut cmd = Command::new(&clang);
     cmd.arg(&ll_path)
         .arg(&shim_path)
+        // `-O2`, because clang's default is `-O0` and this is the artifact a
+        // user ships. `bench_native` has always passed it, which is how the gap
+        // hid: every recorded number in RFC-0083 came from `vyrn bench` and was
+        // therefore optimized, while `vyrn build` emitted the unoptimized
+        // binary those numbers were taken to describe. Measured on a 30M-read
+        // loop, the two differ by the ratio below in this commit's message.
+        .arg("-O2")
         .arg("-o")
         .arg(&out_path)
         // our IR carries no target triple; clang supplies the target's — don't warn.
