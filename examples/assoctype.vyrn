@@ -1,0 +1,106 @@
+// Associated types — RFC-0080 M2. `type Output` in a protocol body declares a
+// type the IMPLEMENTING type fixes; `type Output = ..` in each impl fixes it.
+//
+// The difference from a protocol parameter (`protocol Unwrap<T>`) is that
+// nothing may implement this twice with two different answers — the output type
+// is *determined by* the input type. That is the property an operator with no
+// annotation position needs, which is why `?` is downstream of this (M3).
+//
+// Resolution happens at the impl. By the time a method leaves the parser its
+// `Output` already IS the type the impl bound, so selection, monomorphization
+// and all three backends are unchanged from M1: an impl method is still an
+// ordinary (possibly generic) top-level function.
+
+protocol Unwrap {
+    type Output
+    fn present(self) -> Bool
+    fn valueOr(self, fallback: Output) -> Output
+}
+
+type Reading = | Unread | Celsius(Int64)
+type Line = | Blank | Words(String)
+
+// Three impls, three different answers for `Output`, one program.
+
+// `Output` is the impl head's own type variable (RFC-0080 M1 + M2 together), so
+// it resolves per instantiation: `Int64` for `Option<Int64>`, `String` for
+// `Option<String>`. Both specializations are monomorphized from this one body.
+impl<T> Unwrap for Option<T> {
+    type Output = T
+    fn present(self) -> Bool {
+        return match self {
+            Some(v) => true,
+            None => false,
+        }
+    }
+    fn valueOr(self, fallback: Output) -> Output {
+        return match self {
+            Some(v) => v,
+            None => fallback,
+        }
+    }
+}
+
+// `Output` is a concrete type that is not the implementing type — the case a
+// protocol parameter would have had to be written at every use site.
+impl Unwrap for Reading {
+    type Output = Int64
+    fn present(self) -> Bool {
+        return match self {
+            Unread => false,
+            Celsius(c) => true,
+        }
+    }
+    fn valueOr(self, fallback: Output) -> Output {
+        return match self {
+            Unread => fallback,
+            Celsius(c) => c,
+        }
+    }
+}
+
+// A second concrete answer, in the same program as the one above. If the two
+// leaked into one another the arithmetic below would not type-check and the
+// string below would not print.
+impl Unwrap for Line {
+    type Output = String
+    fn present(self) -> Bool {
+        return match self {
+            Blank => false,
+            Words(w) => true,
+        }
+    }
+    fn valueOr(self, fallback: Output) -> Output {
+        return match self {
+            Blank => fallback,
+            Words(w) => w,
+        }
+    }
+}
+
+fn main() -> Int64 {
+    // One generic impl, two payload types.
+    let n: Option<Int64> = Some(7)
+    let missingN: Option<Int64> = None
+    let s: Option<String> = Some("hi")
+    print((n.valueOr(0) + missingN.valueOr(41)).toString()) // 48
+    print(s.valueOr("none")) // hi
+
+    // `Output = Int64`: the fallback and the result are numbers, so they add.
+    let warm: Reading = Celsius(21)
+    let unknown: Reading = Unread
+    print((warm.valueOr(0) + unknown.valueOr(-1)).toString()) // 20
+
+    // `Output = String` for a different type, in the same program.
+    let greeting: Line = Words("hello")
+    let empty: Line = Blank
+    print(greeting.valueOr("(blank)") + " " + empty.valueOr("(blank)")) // hello (blank)
+
+    if warm.present() {
+        print("a reading is present")
+    }
+    if !empty.present() {
+        print("a line is blank")
+    }
+    return 0
+}

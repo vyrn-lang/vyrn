@@ -484,6 +484,15 @@ fn check_accum_inner(
             protocol_methods.insert(m.name.clone(), (p.name.clone(), m.clone()));
         }
     }
+    // Associated types per protocol (RFC-0080 M2). The checker's whole interest
+    // in them is at the impl: the parser has already substituted each binding
+    // into the methods, so what is left to verify is that an impl binds exactly
+    // the set its protocol declares.
+    let protocol_assoc: HashMap<&str, &Vec<String>> = program
+        .protocols
+        .iter()
+        .map(|p| (p.name.as_str(), &p.assoc))
+        .collect();
     let mut impls: std::collections::HashSet<(String, String)> = Default::default();
     // The impl already declared for each (protocol, type-constructor) key, so a
     // second one is rejected where it is WRITTEN rather than where it is called
@@ -491,6 +500,36 @@ fn check_accum_inner(
     // the error can only name both impls if it fires at declaration).
     let mut impl_heads: HashMap<(String, String), (usize, String)> = HashMap::new();
     for imp in &program.impls {
+        // The impl binds exactly the associated types the protocol declares
+        // (RFC-0080 M2) — no more, no fewer. Both halves fire at the IMPL, which
+        // is the only place both lists are in hand. An unknown protocol name is
+        // left alone: a missing `type` is not the interesting news about it.
+        if let Some(declared) = protocol_assoc.get(imp.protocol.as_str()) {
+            for name in declared.iter() {
+                if !imp.assoc.iter().any(|(n, _)| n == name) {
+                    out.push(Diagnostic::from_rendered(
+                        format!(
+                            "line {}: `impl {} for {}` does not bind the associated type `{name}` \
+                             — add `type {name} = ..` (protocol `{}` declares it)",
+                            imp.line, imp.protocol, imp.ty, imp.protocol
+                        ),
+                        "check",
+                    ));
+                }
+            }
+            for (name, _) in &imp.assoc {
+                if !declared.contains(name) {
+                    out.push(Diagnostic::from_rendered(
+                        format!(
+                            "line {}: `impl {} for {}` binds `type {name}`, which protocol `{}` \
+                             does not declare",
+                            imp.line, imp.protocol, imp.ty, imp.protocol
+                        ),
+                        "check",
+                    ));
+                }
+            }
+        }
         // A named target must be an enum: validated/nominal scalars erase to their
         // base at runtime, so the interpreter could not dispatch them (it would
         // diverge from native). Records have no runtime identity either.
@@ -5792,6 +5831,28 @@ impl<'a> Checker<'a> {
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
             if let Type::Param(t) = &recv {
                 if self.param_has_bound(t, &proto) {
+                    // The receiver is a type variable, so the impl is not selected
+                    // here and an associated type in the signature has nothing to
+                    // resolve against (RFC-0080 M2). Rust writes `T::Output` for
+                    // this; Vyrn has no such spelling and does not invent one,
+                    // because M3 is the milestone that decides whether it needs
+                    // one. Refused by name rather than silently typed as the bare
+                    // parameter, which would escape into codegen as `void`.
+                    let mut assoc = None;
+                    for ty in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+                        walk_type(ty, &mut |t| {
+                            if let Type::Param(a) = t {
+                                assoc.get_or_insert_with(|| a.clone());
+                            }
+                        });
+                    }
+                    if let Some(a) = assoc {
+                        return Err(format!(
+                            "line {line}: `{name}` mentions `{proto}`'s associated type `{a}`, and \
+                             a `<{t}: {proto}>` bound cannot name it — call `.{name}(..)` on a \
+                             concrete type, where the impl (and so `{a}`) is known"
+                        ));
+                    }
                     // Check arity, then EVERY remaining argument against the
                     // signature (a bare `zip` would silently drop extras and
                     // leave them entirely unchecked).
