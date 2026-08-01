@@ -713,7 +713,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // agree rather than left to whatever the host's `minps` does.
     out.push_str("declare <4 x float> @llvm.minimum.v4f32(<4 x float>, <4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.maximum.v4f32(<4 x float>, <4 x float>)\n");
-    out.push_str("declare <4 x float> @llvm.fabs.v4f32(<4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)\n");
     // Rounding (RFC-0083 M2). `nearest` is roundTiesToEven — wasm's
     // `f32x4.nearest` — and emphatically NOT `llvm.round`, which is
@@ -5697,14 +5696,15 @@ impl<'a> Gen<'a> {
             ));
             return Ok((t, Type::Bool));
         }
-        // `F32x4.min/max/abs/sqrt` and `F32x4.select` (RFC-0083 M2). The four
+        // `F32x4.min`/`max`/`sqrt` and the four roundings (RFC-0083 M2/M3). The
         // intrinsics are declared once in the prologue, where the choice of
-        // `llvm.minimum` over `llvm.minnum` is argued.
+        // `llvm.minimum` over `llvm.minnum` is argued. (`@f32x4Abs` was here as
+        // `llvm.fabs.v4f32` and was deleted in M4 — 1.00x native, 1.07x wasm once
+        // the Vyrn version has no helper call in it.)
         if matches!(
             name,
             "@f32x4Min"
                 | "@f32x4Max"
-                | "@f32x4Abs"
                 | "@f32x4Sqrt"
                 | "@f32x4Ceil"
                 | "@f32x4Floor"
@@ -5716,7 +5716,6 @@ impl<'a> Gen<'a> {
             let (f, rest) = match name {
                 "@f32x4Min" => ("llvm.minimum.v4f32", true),
                 "@f32x4Max" => ("llvm.maximum.v4f32", true),
-                "@f32x4Abs" => ("llvm.fabs.v4f32", false),
                 "@f32x4Ceil" => ("llvm.ceil.v4f32", false),
                 "@f32x4Floor" => ("llvm.floor.v4f32", false),
                 "@f32x4Trunc" => ("llvm.trunc.v4f32", false),

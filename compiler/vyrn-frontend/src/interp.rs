@@ -3491,7 +3491,6 @@ impl<'a> Interp<'a> {
                     // than after.
                     "@f32x4Min"
                     | "@f32x4Max"
-                    | "@f32x4Abs"
                     | "@f32x4Sqrt"
                     | "@f32x4Ceil"
                     | "@f32x4Floor"
@@ -3510,10 +3509,11 @@ impl<'a> Interp<'a> {
                             out[k] = match name.as_str() {
                                 "@f32x4Min" => fminimum(a[k], b[k]),
                                 "@f32x4Max" => fmaximum(a[k], b[k]),
-                                // `abs` clears the sign bit, NaN included — a bit
-                                // operation, not a comparison, so there is no NaN
-                                // question to answer.
-                                "@f32x4Abs" => f32::from_bits(a[k].to_bits() & 0x7fff_ffff),
+                                // (`@f32x4Abs` was here, clearing the sign bit.
+                                // Deleted in M4: a bit operation with no rule to
+                                // reproduce measured 1.00x native and 1.07x wasm
+                                // once the Vyrn version was written without a
+                                // helper call, which is `select`'s bar.)
                                 "@f32x4Ceil" => a[k].ceil(),
                                 "@f32x4Floor" => a[k].floor(),
                                 "@f32x4Trunc" => a[k].trunc(),

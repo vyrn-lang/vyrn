@@ -148,7 +148,8 @@ over `Type` and both were in the textual backend.
 - **M2 — memory and comparison.** Load/store four lanes from an
   `Array<Float32>` at an index (**bounds-checked once for the whole vector**, not
   per lane), lane-wise comparisons producing a mask, `min`/`max`/`abs`/`sqrt`.
-  This is where SIMD becomes useful rather than demonstrated.
+  This is where SIMD becomes useful rather than demonstrated. **Taken — and
+  `abs` was taken back in M4**, on a re-measurement; see that note.
 - **M3 — the other widths.** `I32x4`, `F64x2`, `I64x2`. **Not mechanical — this
   line said "mechanical once M1 and M2 have settled the shape" and that is
   wrong.** The operator set differs by lane type, verified against the encoder
@@ -202,7 +203,7 @@ F32x4.store(xs, i, v)              // the same four, written back
 let m = a < b                      // Mask32x4 — `< <= > >= == !=`, never Bool
 print(m.lane(0))                   // true
 print(m.anyTrue())  print(m.allTrue())   // the whole mask, as one Bool
-F32x4.min(a, b)  F32x4.max(a, b)  F32x4.abs(v)  F32x4.sqrt(v)
+F32x4.min(a, b)  F32x4.max(a, b)  F32x4.sqrt(v)   // `abs` too — see M4, which deleted it
 ```
 
 Three engines byte-identical across `examples/simdmem.vyrn` (every operation
@@ -365,7 +366,12 @@ implementations and `main` checks all three engines agree with the builtins, at
 3.6x / 3.7x / 1.0x native. `abs`'s row is the interesting one: natively LLVM
 recognises the `Float64`-widen / mask / narrow round-trip and emits the same
 code, so the number that refuses it is **Cranelift's 3.5x** — the first census
-row decided by the wasm column. `@f32x4Sqrt` is **Semantics**: it is not movable
+row decided by the wasm column. **That 3.5x was wrong, and `abs` is deleted**:
+it was four calls Cranelift declines to inline rather than the instruction, and
+written inline the row is 1.07x. See the M4 note. The paragraph is left standing
+because "the first census row decided by the wasm column" is exactly the shape
+of row that most needed the correction, and saying so afterwards is cheaper than
+pretending it was never claimed. `@f32x4Sqrt` is **Semantics**: it is not movable
 at all, because no finite sequence of Vyrn arithmetic is the correctly-rounded
 IEEE result and a Newton iteration differing in the last bits is, under this
 project's promise, a different program. The comparison operators are `BinOp`s
@@ -479,7 +485,10 @@ against 50.2); `nearest` is 1.9x (53.8 against 101.7, ties-to-even by hand being
 twenty lines); and **`trunc` is 0.43x — the builtin is 2.3x *slower*** (102.5 µs
 against 44.4 µs), because four `truncf` calls lose to the inlined `cvttss2si`
 round-trip LLVM compiles the Vyrn version into. On wasm the same four are 7.4x,
-8.2x, 9.3x and 4.9x, Cranelift emitting the instruction. `abs` was recorded above
+8.2x, 9.3x and 4.9x, Cranelift emitting the instruction — **those four wasm
+figures are the ones M4 corrected to 2.3x, 2.3x, 4.1x and 1.9x**, since the Vyrn
+half here is four helper calls Cranelift does not inline. All four still ship;
+the operation that did not survive the same correction is `abs`. `abs` was recorded above
 as "the first census row decided by the wasm column"; this is four more, and the
 first where the native number is not merely unhelpful but negative. **The upgrade
 path is a native baseline of `x86-64-v2`**, which would make all four one
@@ -615,7 +624,8 @@ here on purpose**: deleting a shipped builtin is a language change that owes its
 own milestone and its own parity run, not a side effect of M3. It is recorded so
 the next reader has the number, and the four rounding rows deserve the same
 re-timing (their Vyrn halves are twenty lines, so they are the likeliest to
-survive it).
+survive it). **Taken as M4**: `abs` is deleted at 1.07x, the four roundings
+survive at 1.9x–4.1x, and the guess in that parenthesis was right.
 
 **Three engines byte-identical on `examples/simdint.vyrn`** — construction,
 splat, both lane accessors with every lane replaced in turn (the lane-order pin),
@@ -661,6 +671,94 @@ the scan in `primitives.rs` anchored on the literal `if name == "`, so it saw
 only the first and reported the second as a stale row. The needle is now
 `name == "`; every match in that region is a guard, and the existing assertion is
 what says so if that ever stops being true.
+
+### As landed — M4 (re-timing, and one deletion)
+
+M3 closed with a finding rather than a fix: the Vyrn half of every benchmark in
+`examples/simdbench.vyrn` is spelled as four calls to a one-lane helper, and
+**Cranelift does not inline across wasm function boundaries**, so the wasm column
+of five census rows was pricing a call. M3 left them alone on purpose — deleting a
+shipped builtin is a language change that owes its own parity run. This is that
+run. All five were re-taken against a Vyrn spelling written *into the loop*, with
+no call in it, on both backends.
+
+| per 65536 lanes, native `-O2` | builtin | Vyrn inline | Vyrn behind a helper | ratio |
+|---|---|---|---|---|
+| `abs` | 5.61 µs | 5.61 µs | 5.61 µs | **1.00x** |
+| `trunc` | 97.2 µs | 42.0 µs | 43.6 µs | **0.43x** |
+| `floor` | 53.9 µs | 52.7 µs | 51.0 µs | **1.0x** |
+| `ceil` | 49.9 µs | 56.1 µs | 53.5 µs | **1.1x** |
+| `nearest` | 49.8 µs | 70.7 µs | 102.6 µs | **1.4x** |
+
+| per 102 M lanes, wasm | builtin | Vyrn inline | Vyrn behind a helper | ratio (was) |
+|---|---|---|---|---|
+| `abs` | 54 ms | 58 ms | 184 ms | **1.07x** (3.5x) |
+| `trunc` | 53 ms | 100 ms | 299 ms | **1.9x** (4.9x) |
+| `floor` | 54 ms | 124 ms | 446 ms | **2.3x** (8.2x) |
+| `ceil` | 54 ms | 126 ms | 438 ms | **2.3x** (7.4x) |
+| `nearest` | 54 ms | 219 ms | 600 ms | **4.1x** (9.3x) |
+
+The *helper* column reproduces the recorded numbers almost exactly (3.4 / 5.6 /
+8.3 / 8.1 / 11.1 against the 3.5 / 4.9 / 8.2 / 7.4 / 9.3 the rows claimed), which
+is what says the rows were quoting the call and not that the machine has moved.
+Native is unchanged in every row, because LLVM inlines `abs1` and the two Vyrn
+spellings converge to within a percent — the whole distortion is one backend's.
+
+**`F32x4.abs` is deleted.** 1.00x native and 1.07x wasm is `select`'s bar
+(deleted at 1.06x) and `i32x4.min`'s (refused at 1.05x), and there is no second
+argument to fall back on: `min` and `max` earn their rows on a NaN rule and a
+signed zero that a program would have to reproduce, where `abs` is one line of
+`floatBits` — `abs1` in `simdbench.vyrn` is one expression where `min1` is twenty.
+Keeping it on "it is a natural companion to `sqrt`" would be the census justifying
+itself by preference, which is the thing it exists to prevent. `examples/simdmem.vyrn`
+grows an `abs` in Vyrn beside its `select`, for the same stated reason, and prints
+the same `1 0 inf NaN`.
+
+**All four roundings survive, and the reason generalises.** A rounding is a
+truncation, a magnitude guard, a NaN case and a sign-of-zero fixup — a dozen
+operations — so removing the call leaves something behind. A sign-bit mask is one
+operation, so removing the call leaves nothing. That is the rule this milestone
+adds to the census: **the call-overhead correction is proportionally largest for
+the smallest operation, which is exactly the operation least likely to deserve a
+row.** Every row that was near the bar was near it for that reason.
+
+**`trunc` is the weakest row in this RFC and it stays, said plainly.** It is the
+only census row where the builtin is *slower* than the Vyrn it replaces — 0.43x
+natively, four `truncf` calls against an inlined `cvttss2si` round-trip — so
+keeping it costs native programs 2.3x to buy wasm programs 1.9x. It did not
+collapse the way `abs` did, and 1.9x is not near the bar that deleted anything
+here. What holds it up is that number plus symmetry: three roundings and a
+hand-written fourth is a surface with a hole in it, and the fourth is the one the
+other three are built on. The thing that would settle it is not another
+measurement but the **`x86-64-v2` baseline** this RFC already names as the upgrade
+path — `roundps` makes all four one instruction and the native column stops being
+a cost. Recorded here so the next reader takes that decision knowing this row is
+waiting on it.
+
+**A second measurement bug, found on the way and not fixed here.** `vyrn build`
+passes clang **no `-O` flag at all**; only `bench_native` passes `-O2` (one
+occurrence in the whole CLI). So a wall-clock program built with `vyrn build`
+measures unoptimized code and the first native table above, taken that way, said
+`abs` was 0.59x and `ceil` 3.2x — ratios that are about `-O0` and nothing else.
+The native column here is `vyrn bench`'s, which is `-O2`, and it reproduces M2's
+numbers. The wasm column is a wall-clock program under `wasmtime` because there
+is no wasm bench harness — but the direct backend has no optimization level, so
+that program is what a wasm program actually gets. **This is not a defect in any
+recorded number** (every native figure in this RFC came from `vyrn bench`), but a
+`vyrn build` that ships `-O0` binaries is a finding for whoever owns the native
+backend.
+
+Verification: `cargo test --workspace --features wasm-gen` (1314 passed) and
+`vyrn-lsp` separately (56, excluded crate, own resolve); the full corpus parity
+sweep serially, 102 examples, three engines, stdout/stderr/exit code — the wasm
+column present, since the harness prints `no wasmtime` when it is not and did
+not. Beyond that the five SIMD examples were run through all three engines by
+hand and hashed: `simd` 81 lines, `simdmem` 193, `simdround` **257**, `simdint`
+133, `simdbench` 18, byte-identical every one, and `wasmtime -W
+simd=n,relaxed-simd=n` still answers `SIMD support is not enabled` — the positive
+proof that the roundings are the instructions and not a scalar emulation the
+sweep would have been equally happy with. `simdround.vyrn` is untouched: it uses
+the four roundings and no `abs`, and its output did not move by a byte.
 
 ## What this does not decide
 
