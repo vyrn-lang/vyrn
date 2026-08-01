@@ -241,6 +241,15 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // Float64-widen/mask/narrow round-trip and emits the same code (1.0x), so the
     // measurement that decides this row is Cranelift's, which does not.
     ("@f32x4Abs", Measured, "1.0x native but 3.5x wasm (770 ms against 223 ms): Cranelift does not fold the bit round-trip"),
+    // The mask reductions, and their number depends on the DATA in a way the
+    // three above do not. Written in Vyrn they are `||`/`&&` over four lane
+    // reads, which SHORT-CIRCUITS: on `simdbench`'s monotonic array the chain
+    // bails at lane 0 almost every pass and is predicted perfectly, so the ratio
+    // there is only 1.3x / 2.3x. The rows quote the unpredictable case instead,
+    // because a filter predicate over sorted data is the unusual one and the
+    // 1.3x would be a bar `select` (1.1x, deleted) already failed to clear.
+    ("@anyTrue", Measured, "2.5x native (1356 ms against 543 ms, unpredictable lanes) / 1.2x wasm; 1.3x when the short circuit predicts"),
+    ("@allTrue", Measured, "2.4x native (1170 ms against 481 ms, unpredictable lanes) / 1.2x wasm; 2.3x when the short circuit predicts"),
     // ---- The one finding, and it is CLOSED -----------------------------------
     // (`@charCount` was here, as `Unjustified`: "three implementations of a
     // four-line loop, for ONE caller". It is `std/text`'s `charCountV` now, so the
@@ -359,8 +368,12 @@ fn the_census_is_the_code() {
     // RFC-0075 M1 added `fromArray`/`close` — two `Memory` rows for a type that is
     // `Array<T>` at runtime, so they are the array rows again. The pair is the
     // price of the linearity being checkable: a stream has to be unforgeable, and
-    // an unforgeable type needs a constructor nothing else can spell.
-    assert_eq!(found.len(), 72, "the primitive core changed size");
+    // an unforgeable type needs a constructor nothing else can spell. 72 -> 74
+    // when the mask reductions completed M2's surface: two more `Measured` rows,
+    // and the first pair whose ratio had to be quoted against a stated DATA
+    // distribution rather than a workload — a short-circuiting `||` chain is only
+    // slow when the branch is unpredictable.
+    assert_eq!(found.len(), 74, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

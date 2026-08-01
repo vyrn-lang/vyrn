@@ -146,3 +146,31 @@ fn min_and_max_lower_to_the_nan_propagating_intrinsic() {
     assert!(body.contains("@llvm.maximum.v4f32"), "not maxnum:\n{body}");
     assert!(!body.contains("minnum"), "minNum is the wrong rule:\n{body}");
 }
+
+/// The mask reductions are ONE reduction over the vector, not four lane reads
+/// and a branch chain — which is the whole reason they are builtins rather than
+/// the Vyrn `||`/`&&` `examples/simdbench.vyrn` prices against them. `-O2` can
+/// turn the chain back into a reduce (that is what makes the measured gap only
+/// 1.2x on wasm), so an unoptimised body is the only place the difference is
+/// visible, and no output ever shows it. Same shape as the intrinsic pin above:
+/// a "simplification" back to `extractelement` fails here rather than only under
+/// `--ignored` parity.
+#[test]
+fn the_mask_reductions_are_one_reduce_and_not_four_lane_reads() {
+    let body = body_of(
+        "fn both(a: F32x4, b: F32x4) -> Bool {\n\
+         return (a < b).anyTrue() && (a > b).allTrue()\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(both(F32x4.splat(1.0), F32x4.splat(2.0)))\n\
+         return 0\n\
+         }\n",
+        "both",
+    );
+    assert!(body.contains("@llvm.vector.reduce.or.v4i1"), "not a reduce:\n{body}");
+    assert!(body.contains("@llvm.vector.reduce.and.v4i1"), "not a reduce:\n{body}");
+    assert!(
+        !body.contains("extractelement"),
+        "a reduction read lanes one at a time:\n{body}"
+    );
+}

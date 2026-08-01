@@ -3529,6 +3529,14 @@ impl Parser {
                         // `t.join()` awaits via `@join`. The bare free-function
                         // forms (`toString(x)`, `join(t)`) never reach this arm,
                         // so the checker reports them with a migration hint.
+                        //
+                        // The pre-table spelling is kept for the type-name arm
+                        // below, which reports what the program WROTE: without it
+                        // `F32x4.anyTrue(m)` — the plausible mistake, since the
+                        // rest of the surface IS on the type name — comes back as
+                        // "`F32x4` has no `@anyTrue`", the internal name leaking
+                        // through two rewrites.
+                        let wrote = name.clone();
                         let name = match name.as_str() {
                             "toString" => "@str".to_string(),
                             "join" => "@join".to_string(),
@@ -3556,6 +3564,16 @@ impl Parser {
                             // `v.lane(k)` reads one lane of a vector (RFC-0083).
                             // Method-only, like the array and map mutators above.
                             "lane" => "@lane".to_string(),
+                            // `m.anyTrue()` / `m.allTrue()` reduce a mask to a
+                            // `Bool` (RFC-0083 M2). Value methods rather than
+                            // `Mask32x4.anyTrue(m)` for the rule the comment below
+                            // states: the type name is for names something else
+                            // exports, and nothing exports these. They are the
+                            // wasm instructions' own names rather than Rust's
+                            // `any`/`all`, which are the two names a future
+                            // `std/arrays` predicate would most want.
+                            "anyTrue" => "@anyTrue".to_string(),
+                            "allTrue" => "@allTrue".to_string(),
                             _ => name,
                         };
                         // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`
@@ -3577,7 +3595,7 @@ impl Parser {
                         let mut args = args;
                         let name = match args.first() {
                             Some(Expr::Var { name: ty, .. }) if ty == "F32x4" => {
-                                let mut it = name.chars();
+                                let mut it = wrote.chars();
                                 let m = match it.next() {
                                     Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
                                     None => name.clone(),

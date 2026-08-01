@@ -714,6 +714,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare <4 x float> @llvm.maximum.v4f32(<4 x float>, <4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.fabs.v4f32(<4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)\n");
+    // The mask reductions. `<4 x i1>` is fine as an intrinsic ARGUMENT — the ABI
+    // objection that kept it out of the mask's own representation is about values
+    // crossing function boundaries, and these never leave the block.
+    out.push_str("declare i1 @llvm.vector.reduce.or.v4i1(<4 x i1>)\n");
+    out.push_str("declare i1 @llvm.vector.reduce.and.v4i1(<4 x i1>)\n");
     // Worker threads (RFC-0025): `spawn f(args)` packs its evaluated arguments
     // into a heap frame and hands the shim a per-spawn-site thunk SYMBOL plus
     // that frame; the shim runs the thunk on a real OS thread natively (Win32 /
@@ -5531,6 +5536,23 @@ impl<'a> Gen<'a> {
                 acc = t;
             }
             return Ok((acc, Type::F32x4));
+        }
+        // `m.anyTrue()` / `m.allTrue()` (RFC-0083 M2). `icmp ne` first, then an
+        // or/and reduction: the same "test each lane against zero" the mask lane
+        // read above does, for the same reason — the all-ones encoding is how the
+        // mask is stored, not what it means, and a `bitcast` to `i128` compared
+        // against `-1` would be reading the storage. `-O2` folds both spellings to
+        // the same `movmskps`, so the readable one costs nothing.
+        if matches!(name, "@anyTrue" | "@allTrue") {
+            let (mv, _) = self.gen_expr(&args[0])?;
+            let ne = self.fresh_tmp();
+            let t = self.fresh_tmp();
+            self.emit(format!("{ne} = icmp ne <4 x i32> {mv}, zeroinitializer"));
+            let op = if name == "@anyTrue" { "or" } else { "and" };
+            self.emit(format!(
+                "{t} = call i1 @llvm.vector.reduce.{op}.v4i1(<4 x i1> {ne})"
+            ));
+            return Ok((t, Type::Bool));
         }
         // `F32x4.min/max/abs/sqrt` and `F32x4.select` (RFC-0083 M2). The four
         // intrinsics are declared once in the prologue, where the choice of

@@ -6,6 +6,7 @@
 ///   F32x4.store(xs, i, v)      the same four, written back
 ///   a < b   a == b   a != b    lane-wise -> Mask32x4, NOT Bool
 ///   m.lane(k)                  one mask lane, as the Bool it is
+///   m.anyTrue()  m.allTrue()  the whole mask, as one Bool
 ///   F32x4.min/max/abs/sqrt
 ///
 /// **The bounds check is emitted ONCE for the whole vector**, not once per lane,
@@ -47,6 +48,13 @@ fn mlanes(m: Mask32x4) {
     print(m.lane(1))
     print(m.lane(2))
     print(m.lane(3))
+}
+
+/// Both reductions of one mask, `anyTrue` first — the mask crosses a function
+/// boundary on the way in, as it does for `mlanes`.
+fn reduce(m: Mask32x4) {
+    print(m.anyTrue())
+    print(m.allTrue())
 }
 
 /// Lane *i* from `a` where the mask's lane *i* is true, from `b` where it is
@@ -111,6 +119,56 @@ fn main() -> Int64 {
     // an ordering, which is exactly why `min` below needs its own rule for it.
     mlanes(F32x4(nzero, nzero, z, ninf) == F32x4(z, nzero, nzero, ninf)) // all true
     mlanes(F32x4(nzero, inf, ninf, sub) < F32x4(z, inf, ninf, sub)) // all false
+
+    // ---- the reductions: did any lane pass, did every lane -----------------
+    // `anyTrue` lowers to `v128.any_true`, which is WHOLE-VECTOR (any bit set
+    // anywhere) rather than per lane, while `allTrue` is `i32x4.all_true` and is
+    // per lane. The two coincide only because a `Mask32x4` lane is all-ones or
+    // all-zeros and no program can build one that is neither — the same closed
+    // set of inhabitants that let the mask be its own type. Native reduces an
+    // `icmp ne` instead, which is per lane at both widths, so a mask that ever
+    // held a partial lane would split the engines here first.
+    let t = F32x4.splat(o) == F32x4.splat(o)
+    let f = F32x4.splat(o) < F32x4.splat(o)
+    reduce(t) // true  true
+    reduce(f) // false false
+
+    // One true lane at a time, then one false lane at a time. This is the pin
+    // for lane order and lane WIDTH: a reduction that read the vector at the
+    // wrong lane width would still answer correctly for all-true and all-false
+    // and only diverge here.
+    let hi = F32x4(4.0, 3.0, 2.0, 1.0)
+    let lo = F32x4(1.0, 2.0, 3.0, 4.0)
+    reduce(hi == lo) // false false   (no lane: 4 3 2 1 vs 1 2 3 4)
+    reduce(F32x4(1.0, 9.0, 9.0, 9.0) == lo) // true  false
+    reduce(F32x4(9.0, 2.0, 9.0, 9.0) == lo) // true  false
+    reduce(F32x4(9.0, 9.0, 3.0, 9.0) == lo) // true  false
+    reduce(F32x4(9.0, 9.0, 9.0, 4.0) == lo) // true  false
+    reduce(F32x4(9.0, 2.0, 3.0, 4.0) == lo) // true  false
+    reduce(F32x4(1.0, 9.0, 3.0, 4.0) == lo) // true  false
+    reduce(F32x4(1.0, 2.0, 9.0, 4.0) == lo) // true  false
+    reduce(F32x4(1.0, 2.0, 3.0, 9.0) == lo) // true  false
+
+    // NaN in every operand position, through the operators whose answers it
+    // changes. A mask off a NaN comparison is not empty — `NaN != NaN` is true —
+    // so these carry real content into the reduction rather than reducing zero.
+    let nv = F32x4.splat(nan)
+    reduce(nv != nv) // true  true    (unordered: every lane true)
+    reduce(nv == nv) // false false
+    reduce(nv < nv) // false false
+    reduce(l < r) // false false   NaN left, right, both, neither
+    reduce(l != r) // true  false
+    reduce(l == r) // true  false   (only lane 3, where neither is NaN)
+    reduce(l >= r) // true  false
+    // Infinities and signed zero reduce like any other ordered comparison.
+    reduce(F32x4(inf, ninf, nzero, sub) == F32x4(inf, ninf, z, sub)) // true true
+    reduce(F32x4(inf, ninf, nzero, sub) < F32x4(inf, ninf, z, sub)) // false false
+
+    // The reduction is a `Bool` like any other, so it is what `if` and `&&` take
+    // — which is the whole point of having it rather than four `lane` reads.
+    if (l != r).anyTrue() && !(l != r).allTrue() {
+        print("some but not all")
+    }
 
     // ---- select, in the language rather than in the compiler --------------
     // What a mask is FOR, and it needs no builtin: `m.lane(k)` is a `Bool`, `if`
