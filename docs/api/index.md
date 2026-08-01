@@ -20,6 +20,7 @@
 - [std/rpc](std/rpc.md) — std/rpc — Typed RPC as a library (RFC-0019), built entirely on RFC-0021
 - [std/scan](std/scan.md) — std/scan (RFC-0054) — one shared, comment- and string-aware cursor over
 - [std/storage](std/storage.md) — std/storage — crash-safe persistence (RFC-0044).
+- [std/stream](std/stream.md) — std/stream — the `Stream<T>` combinators (RFC-0075 M2), written in Vyrn
 - [std/strings](std/strings.md) — std/strings — string helpers, written in Vyrn itself on the `slice` builtin
 - [std/strpred](std/strpred.md) — std/strpred — the string predicates and `slice`, written in Vyrn
 - [std/text](std/text.md) — std/text — UTF-8 decoding and byte-offset line/column, written in Vyrn

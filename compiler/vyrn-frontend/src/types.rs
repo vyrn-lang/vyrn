@@ -908,6 +908,13 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             Box::new(substitute(v, subst)),
         ),
         Type::Task(inner) => Type::Task(Box::new(substitute(inner, subst))),
+        // A `Stream<T>` (RFC-0075) substitutes like the `Array<T>` it lowers to.
+        // M1 never needed this because `fromArray` was the only producer and it
+        // was always called at a concrete element type; M2's `map<T, U>(s:
+        // Stream<T>, ..) -> Stream<U>` is the first signature with a type
+        // parameter *inside* a stream, and without this arm `Stream<U>` reached
+        // codegen as a bare parameter.
+        Type::Stream(inner) => Type::Stream(Box::new(substitute(inner, subst))),
         // A function-value type (RFC-0023): substitute into its parameter and
         // return types so a generic `fn(T) -> U` monomorphizes with the rest.
         Type::Fn(params, ret) => Type::Fn(

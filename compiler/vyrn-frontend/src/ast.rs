@@ -409,6 +409,7 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
         | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
+        | Type::Stream(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)
         | Type::SmallArray(a, _)

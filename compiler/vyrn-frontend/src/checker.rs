@@ -2616,9 +2616,12 @@ impl<'a> Checker<'a> {
             Type::Str => true,
             // Array buffers and the cell slab are always malloc'd (never in the
             // region arena), so only their *contents* can dangle.
-            Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                self.contains_heap(&inner)
-            }
+            // A `Stream<T>` is an `Array<T>`'s three words with a malloc'd buffer
+            // (RFC-0075), so it dangles exactly where an array does.
+            Type::Array(inner)
+            | Type::ArrayN(inner, _)
+            | Type::SmallArray(inner, _)
+            | Type::Stream(inner) => self.contains_heap(&inner),
             // A Map's buffers are malloc'd; its keys are always heap (String) and
             // its values may be — either way it carries heap (RFC-0028).
             Type::Map(..) => true,
@@ -6677,6 +6680,15 @@ impl<'a> Checker<'a> {
                 Type::ArrayN(a, m) if m == n => self.unify(inner, a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
+            // A generic `Stream<T>` binds `T` from the element type, exactly as
+            // `Array<T>` does — RFC-0075 M2's combinators are `map<T, U>(s:
+            // Stream<T>, f: fn(T) -> U)`, so without this every call reported
+            // "argument expects Stream<T>, found Stream<Int64>". `resolve` first,
+            // so `type Feed = Stream<Paste>` unifies like the stream it is.
+            Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
+                Type::Stream(a) => self.unify(inner, &a, subst, line),
+                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+            },
             // A generic `SmallArray<T, N>` binds `T` from the element type; `N`
             // must match exactly (RFC-0056 — integer arguments do not infer).
             Type::SmallArray(inner, n) => match crate::types::resolve(aty, self.types) {
@@ -6913,6 +6925,7 @@ fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
         | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
+        | Type::Stream(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)
         | Type::SmallArray(a, _)
@@ -7350,7 +7363,8 @@ fn fn_sigs_match(a: &Type, b: &Type) -> bool {
         (Type::Option(x), Type::Option(y))
         | (Type::Array(x), Type::Array(y))
         | (Type::Ref(x), Type::Ref(y))
-        | (Type::Task(x), Type::Task(y)) => fn_sigs_match(x, y),
+        | (Type::Task(x), Type::Task(y))
+        | (Type::Stream(x), Type::Stream(y)) => fn_sigs_match(x, y),
         (Type::Result(x1, x2), Type::Result(y1, y2)) | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
             fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2)
         }

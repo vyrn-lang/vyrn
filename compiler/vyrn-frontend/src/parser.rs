@@ -40,6 +40,7 @@ fn mark_member_type_params(ty: &mut Type) {
         | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
+        | Type::Stream(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)
         | Type::SmallArray(a, _)

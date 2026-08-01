@@ -605,7 +605,7 @@ mod streams {
             .functions
             .iter()
             .filter(|f| matches!(f.ret, Type::Stream(_)))
-            .map(|f| (f.name.as_str(), f.ret.to_string()))
+            .map(|f| (f.name.as_str(), rendered_ret(f)))
             .collect();
         let mut out = Vec::new();
         for f in &program.functions {
@@ -629,6 +629,27 @@ mod streams {
             block(&b.body, &mut Vec::new(), &producers, &b.module, &mut out);
         }
         out
+    }
+
+    /// How a producer's stream type is quoted at a CALL site.
+    ///
+    /// A generic producer — every std/stream combinator is one — returns
+    /// `Stream<U>`, and quoting that at `let m = map(feed(), double)` names a
+    /// type parameter the program never wrote. This pass has no types, so it
+    /// cannot say `Stream<Int64>` either; it says `Stream`, which is what it
+    /// already said for `fromArray` and is an under-specification rather than a
+    /// wrong name. The match is on the rendered spelling because a signature's
+    /// type parameter is not reliably a `Type::Param` before the checker runs.
+    fn rendered_ret(f: &Function) -> String {
+        let r = f.ret.to_string();
+        let mentions = |p: &String| {
+            r.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|w| w == p.as_str())
+        };
+        if f.type_params.iter().any(mentions) {
+            return "Stream".to_string();
+        }
+        r
     }
 
     fn report(
@@ -1195,6 +1216,64 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.contains("`s` is a `Stream<Int64>` and is never disposed"), "{e}");
+    }
+
+    // ---- RFC-0075 M2: the obligation through a combinator ----------------
+
+    /// A combinator, spelled locally rather than imported: nothing in the
+    /// compiler knows about std/stream, and the point is that nothing has to.
+    const TWICE: &str = "fn twice(s: Stream<Int64>) -> Stream<Int64> { \
+                         let mut out: Array<Int64> = [] for x in s { out.push(x * 2) } \
+                         return fromArray(out) } ";
+
+    #[test]
+    fn a_combinator_neither_swallows_the_obligation_nor_launders_it() {
+        // The hole that only opens once combinators exist, in both directions.
+        // M1's two rules already close it — a `Stream` parameter carries the
+        // obligation in, a `Stream` return hands one back — so this pins that
+        // they compose rather than adding a rule about combinators.
+
+        // The result is owed exactly as `fromArray`'s is.
+        let e = run(&format!(
+            "{FEED}{TWICE} fn main() -> Int64 {{ let m = twice(feed()) return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("`m` is a `Stream<Int64>` and is never disposed"), "{e}");
+
+        // A combinator that drops its argument on the floor does not build.
+        let e = run(&format!(
+            "{FEED} fn sink(s: Stream<Int64>) -> Stream<Int64> {{ return feed() }} \
+             fn main() -> Int64 {{ close(sink(feed())) return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("`s` is a `Stream<Int64>` and is never disposed"), "{e}");
+
+        // Consumed and then closed is still the double free.
+        let e = run(&format!(
+            "{FEED}{TWICE} fn main() -> Int64 {{ let m = twice(feed()) \
+             for v in m {{ print(v) }} close(m) return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("disposed more than once"), "{e}");
+
+        // A discharged chain is accepted, including the intermediate that never
+        // gets a name.
+        assert!(run(&format!(
+            "{FEED}{TWICE} fn main() -> Int64 {{ for v in twice(twice(feed())) \
+             {{ print(v) }} return 0 }}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn a_generic_producer_is_quoted_as_plain_stream() {
+        // `Stream<U>` at a call site names a type parameter the program never
+        // wrote. This pass has no types, so it under-specifies instead — the
+        // same `Stream` it has always used for `fromArray`.
+        let e = run("fn mk<T>(xs: Array<T>) -> Stream<T> { return fromArray(xs) } \
+                     fn main() -> Int64 { let s = mk([1, 2]) return 0 }")
+            .unwrap_err();
+        assert!(e.contains("`s` is a `Stream` and is never disposed"), "{e}");
     }
 
     #[test]
