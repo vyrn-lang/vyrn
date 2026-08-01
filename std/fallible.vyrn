@@ -1,0 +1,28 @@
+// `Fallible` — the protocol `?` resolves through for a type that is not
+// `Option` or `Result` (RFC-0080 M3).
+//
+// Propagation in Vyrn is a copy of the whole sum, not a destructure-and-rebuild:
+// `x?` returns the value it was given, byte for byte, into a function of the
+// same type. So the protocol owes exactly two answers and no more — which side
+// of the sum a value is on, and how to read the success payload. There is no
+// residual to name (Rust's `FromResidual` exists because its `?` changes types)
+// and no reconstruction step.
+//
+// A consequence: variant count is free. An enum with two failing variants
+// propagates whichever one it holds, payload intact, because nothing takes it
+// apart.
+//
+//     impl Fallible for Http {
+//         type Output = Body
+//         fn isSuccess(self) -> Bool { .. }
+//         fn success(self) -> Body { .. }   // total: `panic` on the failing arms
+//     }
+//
+// `success` is called only after `isSuccess` answered true, so its failing arms
+// are unreachable; they still have to return something, and `panic` (RFC-0079
+// M1) is what says so.
+export protocol Fallible {
+    type Output
+    fn isSuccess(self) -> Bool
+    fn success(self) -> Output
+}

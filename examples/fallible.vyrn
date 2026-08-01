@@ -1,0 +1,92 @@
+// `?` on a user type — RFC-0080 M3. `Fallible` is a protocol like any other;
+// what makes it special is that the `?` operator resolves through it when its
+// operand is neither an `Option` nor a `Result`.
+//
+// The protocol owes two answers and no more: which side of the sum a value is
+// on, and how to read the success payload. There is no residual type and no
+// reconstruction step, because Vyrn's `?` propagates by copying the WHOLE value
+// into a function of the same type rather than taking it apart and rebuilding
+// it. Rust needs `FromResidual` because its `?` changes types on the way out;
+// this one does not.
+//
+// The visible consequence is below: four variants, two of them failures, and
+// the failing one arrives at the caller with its payload intact. Nothing in the
+// protocol mentions failure payloads at all — `ServerError("...")` survives
+// because nobody ever looked inside it.
+
+import { Fallible } from "std/fallible"
+
+type Http =
+    | Body(String)
+    | Created(String)
+    | NotFound
+    | ServerError(String)
+
+impl Fallible for Http {
+    type Output = String
+
+    fn isSuccess(self) -> Bool {
+        return match self {
+            Body(b) => true,
+            // Two successes are fine as long as their payloads agree on one
+            // `Output`. What is lost is WHICH success it was — which is what
+            // writing `?` asked for.
+            Created(b) => true,
+            NotFound => false,
+            ServerError(m) => false,
+        }
+    }
+
+    fn success(self) -> Output {
+        return match self {
+            Body(b) => b,
+            Created(b) => b,
+            // `?` calls this only after `isSuccess` answered true, so these two
+            // arms are unreachable. They still owe a `String`, and `panic`
+            // (RFC-0079) is how an arm says it has none.
+            NotFound => panic("Fallible.success on NotFound"),
+            ServerError(m) => panic("Fallible.success on ServerError"),
+        }
+    }
+}
+
+fn fetch(code: Int64) -> Http {
+    if code == 200 {
+        return Body("hello")
+    }
+    if code == 201 {
+        return Created("made")
+    }
+    if code == 404 {
+        return NotFound
+    }
+    return ServerError("upstream timed out")
+}
+
+// `?` here is the same operator `Option` and `Result` use. On failure it returns
+// the value it was handed, whichever of the two failing variants that is.
+fn greet(code: Int64) -> Http {
+    let body = fetch(code)?
+    return Body("<<" + body + ">>")
+}
+
+fn describe(h: Http) -> String {
+    return match h {
+        Body(b) => "body " + b,
+        Created(b) => "created " + b,
+        NotFound => "not found",
+        ServerError(m) => "server error: " + m,
+    }
+}
+
+fn main() -> Int64 {
+    print(describe(greet(200))) // body <<hello>>
+    // A second success variant unwraps to the same `Output`.
+    print(describe(greet(201))) // body <<made>>
+    // A payload-free failure propagates as itself.
+    print(describe(greet(404))) // not found
+    // And a failure carrying a String arrives with the String still in it. No
+    // mapping, no conversion, no residual — the bytes were copied.
+    print(describe(greet(500))) // server error: upstream timed out
+    return 0
+}

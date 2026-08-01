@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use crate::ast::*;
 use crate::consteval::{self, ConstVal};
 use crate::diagnostics::Diagnostic;
+use crate::types::FALLIBLE;
 
 /// Type-check the program, returning **all** problems found across functions
 /// and types as structured [`Diagnostic`]s, plus a table of the (inferred or
@@ -3379,6 +3380,11 @@ impl<'a> Checker<'a> {
     /// Check `expr?`: `expr` must be an `Option`/`Result`, and the enclosing
     /// function must return a matching `Option`/`Result` so the `None`/`Err` can
     /// be propagated. Yields the unwrapped payload type.
+    ///
+    /// A third operand is admitted (RFC-0080 M3): any type carrying an impl of
+    /// `Fallible`. The two nominal arms are deliberately left ahead of it and
+    /// unchanged — see [`FALLIBLE`] for why `Option`/`Result` do NOT route
+    /// through the protocol.
     fn check_try(
         &self,
         expr: &Expr,
@@ -3408,9 +3414,39 @@ impl<'a> Checker<'a> {
                      but it returns {ret}"
                 )),
             },
-            other => Err(format!(
-                "line {line}: `?` needs an Option or Result, found {other}"
-            )),
+            other => {
+                let key = crate::types::type_key(other)
+                    .filter(|k| self.impls.contains(&(FALLIBLE.to_string(), k.clone())));
+                let Some(key) = key else {
+                    return Err(format!(
+                        "line {line}: `?` needs an Option, a Result, or a type that implements \
+                         `{FALLIBLE}`, found {other}"
+                    ));
+                };
+                // Propagation copies the whole value, so the two types must be the
+                // same one — there is no error half to check separately (the way
+                // `Result`'s `assignable(e, re)` above does) because the failing
+                // variants are part of the value being copied.
+                if !self.assignable(other, ret) {
+                    return Err(format!(
+                        "line {line}: `?` propagates the whole {other}, but the function \
+                         returns {ret}"
+                    ));
+                }
+                // `Output` is read off the selected impl by typing the call the
+                // backends will emit. That is the same generic-inference path a
+                // written `x.success()` takes, so a generic impl
+                // (`impl<T> Fallible for Box<T>`) resolves its payload here for
+                // free instead of needing a second substitution rule.
+                self.call(
+                    &crate::types::impl_method_name(FALLIBLE, &key, "success"),
+                    std::slice::from_ref(expr),
+                    line,
+                    scope,
+                    None,
+                    fn_ret,
+                )
+            }
         }
     }
 
