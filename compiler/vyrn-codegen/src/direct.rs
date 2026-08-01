@@ -3104,8 +3104,8 @@ impl Fn_<'_> {
                 "logger" => Type::Logger,
                 // RFC-0083: the vector builtins, whose result type is fixed.
                 "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
-                | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
-                | "@f32x4Trunc" | "@f32x4Nearest" => Type::F32x4,
+                | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor" | "@f32x4Trunc"
+                | "@f32x4Nearest" => Type::F32x4,
                 "I32x4" | "@i32x4Splat" | "@i32x4Load" => Type::I32x4,
                 // `replaceLane` is the one that reads its receiver: it is a value
                 // method, so the width is the receiver's rather than the name's.
@@ -4430,8 +4430,8 @@ impl Fn_<'_> {
             // choice again: the other two were pointed at it (`llvm.roundeven`,
             // `round_ties_even`) rather than at their `round`, which is ties-away
             // and answers 3 for 2.5.
-            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Ceil"
-            | "@f32x4Floor" | "@f32x4Trunc" | "@f32x4Nearest" => {
+            "@f32x4Min" | "@f32x4Max" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
+            | "@f32x4Trunc" | "@f32x4Nearest" => {
                 self.expr_as(m, b, &args[0], &Type::F32x4)?;
                 if args.len() == 2 {
                     self.expr_as(m, b, &args[1], &Type::F32x4)?;
@@ -4439,7 +4439,6 @@ impl Fn_<'_> {
                 b.ins(&match name {
                     "@f32x4Min" => Instruction::F32x4Min,
                     "@f32x4Max" => Instruction::F32x4Max,
-                    "@f32x4Abs" => Instruction::F32x4Abs,
                     "@f32x4Ceil" => Instruction::F32x4Ceil,
                     "@f32x4Floor" => Instruction::F32x4Floor,
                     "@f32x4Trunc" => Instruction::F32x4Trunc,
@@ -4448,6 +4447,12 @@ impl Fn_<'_> {
                 });
                 return Ok(Type::F32x4);
             }
+            // (`@f32x4Abs` was here as `f32x4.abs`, deleted in M4 — and this is the
+            // column that kept it two milestones too long. Its census row claimed
+            // 3.5x HERE, which was four calls Cranelift declined to inline and not
+            // the instruction; written inline the walk is 54 ms against 58 ms over
+            // 102 M lanes — 1.07x, `select`'s bar. See RFC-0083's M4 note.)
+            //
             // (`@i32x4Min`/`Max`/`Abs` were here, as `i32x4.min_s`/`max_s`/`abs`,
             // and were deleted on their measurement. This is the column that came
             // CLOSEST to keeping them and still did not: over 200 M lanes the

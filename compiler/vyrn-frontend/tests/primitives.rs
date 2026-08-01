@@ -255,10 +255,12 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // the vector type exists to replace, which is why the ratios are what they are.
     ("@f32x4Min", Measured, "3.6x native (44.4 us against 12.3 us per 65536 lanes); Vyrn needs floatBits for -0.0"),
     ("@f32x4Max", Measured, "3.7x native (44.1 us against 12.1 us per 65536 lanes), the mirror of `min`"),
-    // The one row whose refusal is a WASM number: natively LLVM recognises the
-    // Float64-widen/mask/narrow round-trip and emits the same code (1.0x), so the
-    // measurement that decides this row is Cranelift's, which does not.
-    ("@f32x4Abs", Measured, "1.0x native but 3.5x wasm (770 ms against 223 ms): Cranelift does not fold the bit round-trip"),
+    // (`@f32x4Abs` was here, claiming "1.0x native but 3.5x wasm". RFC-0083 M4
+    // re-took that number against an INLINE Vyrn spelling and it is 1.07x on wasm
+    // (54 ms against 58 ms per 102 M lanes) and 1.00x natively — the 3.5x was four
+    // calls Cranelift does not inline, which is a fact about the benchmark's shape
+    // and not about `f32x4.abs`. Deleted at `select`'s bar, and with no rule to
+    // reproduce to argue against it: clearing the sign bit is one line.)
     // The mask reductions, and their number depends on the DATA in a way the
     // three above do not. Written in Vyrn they are `||`/`&&` over four lane
     // reads, which SHORT-CIRCUITS: on `simdbench`'s monotonic array the chain
@@ -275,19 +277,28 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // by reading the assembly, and proved separately by `llvm.roundeven`, which
     // scalarizes to a `roundevenf` that does not exist and fails to LINK. So the
     // Vyrn implementations, which are ordinary inline arithmetic, are level with
-    // three of them and beat one. Cranelift emits the instruction and the wasm
-    // ratios are 5-9x. Raising the native baseline to x86-64-v2 would make all
-    // four one instruction and is the upgrade path; it is a project-wide ISA
-    // decision, not this RFC's.
-    ("@f32x4Ceil", Measured, "1.0x native (53.4 us against 50.3 us per 65536 lanes) but 7.4x wasm (163 ms against 22 ms): native scalarizes to four ceilf calls"),
-    ("@f32x4Floor", Measured, "1.0x native (54.2 us against 50.2 us) but 8.2x wasm (181 ms against 22 ms), the mirror of `ceil`"),
+    // three of them and beat one. Raising the native baseline to x86-64-v2 would
+    // make all four one instruction and is the upgrade path; it is a project-wide
+    // ISA decision, not this RFC's.
+    //
+    // Every number below is against an INLINE Vyrn spelling, re-taken in M4. The
+    // wasm ratios used to read 5-9x and now read 2-4x: Cranelift does not inline
+    // across function boundaries, so the earlier figures were pricing the four
+    // helper calls the benchmark happened to be written with. They stayed above
+    // the bar where `@f32x4Abs` did not, and the reason generalises — a rounding
+    // is a dozen operations and a NaN case, so there is something left over after
+    // the call is removed, which a sign-bit mask does not have.
+    ("@f32x4Ceil", Measured, "1.1x native (49.9 us against 56.1 us per 65536 lanes) / 2.3x wasm (54 ms against 126 ms per 102 M lanes), both inline"),
+    ("@f32x4Floor", Measured, "1.0x native (53.9 us against 52.7 us) / 2.3x wasm (54 ms against 124 ms), the mirror of `ceil`"),
     // The only row in the census where the builtin is SLOWER than the Vyrn it
     // replaces: `truncf` four times against an inlined `cvttss2si` round-trip.
-    // Kept anyway, on the wasm column and on symmetry — three of four roundings
-    // and a hand-written fourth would be a surface with a hole in it, and the
-    // Vyrn version needs `floatBits` to keep the sign of a zero.
-    ("@f32x4Trunc", Measured, "0.43x native — the builtin LOSES (102.5 us against 44.4 us, four truncf calls) — and 4.9x wasm (112 ms against 23 ms), which is what keeps it"),
-    ("@f32x4Nearest", Measured, "1.9x native (53.8 us against 101.7 us) / 9.3x wasm (215 ms against 23 ms); ties-to-even by hand is 20 lines and gets `-0.0` wrong first"),
+    // Kept anyway, and it is the WEAKEST row here — 1.9x on one backend against a
+    // 2.3x loss on the other, plus symmetry: three of four roundings and a
+    // hand-written fourth would be a surface with a hole in it, and the Vyrn
+    // version needs `floatBits` to keep the sign of a zero. An x86-64-v2 baseline
+    // is what would settle it rather than another measurement.
+    ("@f32x4Trunc", Measured, "0.43x native — the builtin LOSES (97.2 us against 42.0 us, four truncf calls) — and 1.9x wasm (53 ms against 100 ms), which is all that keeps it"),
+    ("@f32x4Nearest", Measured, "1.4x native (49.8 us against 70.7 us) / 4.1x wasm (54 ms against 219 ms); ties-to-even by hand is 20 lines and gets `-0.0` wrong first"),
     // ---- The one finding, and it is CLOSED -----------------------------------
     // (`@charCount` was here, as `Unjustified`: "three implementations of a
     // four-line loop, for ONE caller". It is `std/text`'s `charCountV` now, so the
@@ -430,7 +441,14 @@ fn the_census_is_the_code() {
     // (`min_s`/`max_s`/`abs`) were built and deleted at 1.0x native / 1.05x wasm.
     // A whole width for four rows, none of them `Measured`, is what it looks like
     // when the census is asked BEFORE the arms are written rather than after.
-    assert_eq!(found.len(), 83, "the primitive core changed size");
+    // 83 -> 82 when M4 re-took `@f32x4Abs`'s number the way M3 took the integer
+    // ones — against a Vyrn spelling with no helper call in it — and got 1.07x on
+    // the column that had been keeping it. The row is the census's own failure
+    // mode caught by the census's own method: a `Measured` row can be wrong about
+    // the benchmark rather than about the operation, and the only defence is that
+    // the number says which shape it measured. The four roundings were re-taken
+    // in the same pass and all four survived, with corrected numbers.
+    assert_eq!(found.len(), 82, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

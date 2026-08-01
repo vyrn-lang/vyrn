@@ -1,5 +1,17 @@
 // Are `F32x4.min`/`max`/`abs` movable into Vyrn? Yes — and this is what moving
-// them costs (RFC-0083 M2, and RFC-0078's census question).
+// them costs (RFC-0083 M2, and RFC-0078's census question). `abs` has since been
+// moved: see the note on its bench below.
+//
+// A WARNING the whole file now carries. Every `*V` function here is the honest
+// Vyrn spelling, but it is spelled as four calls to a ONE-LANE helper, and
+// Cranelift does not inline across wasm function boundaries. For `min1`, twenty
+// lines, that is a rounding error; for `abs1`, one line, it is the entire
+// measurement — 3.4x with the call, 1.07x without it. So the wasm numbers a
+// reader takes from this file are upper bounds on the cost of moving an
+// operation into Vyrn, and a row that lives or dies near the bar has to be
+// re-taken with the body written into the loop. That is what M3 did for the
+// integer width and M4 for these. Natively it does not arise: LLVM inlines
+// `abs1` and the two spellings measure the same to three digits.
 //
 // `select` is the reason this file exists at all, and it is the one operation
 // M2 tried to add and then did not. While the builtin still existed it measured
@@ -226,7 +238,8 @@ fn data(n: Int64) -> Array<Float32> {
     return xs
 }
 
-// Seven walks: three pairs, plus the Vyrn `select` whose partner was deleted.
+// Six walks: two pairs, plus the Vyrn `select` and `abs` whose partners were
+// deleted.
 // Each takes the threshold as an argument so the caller can hide it behind a
 // `blackBox`.
 fn minBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
@@ -268,17 +281,6 @@ fn maxVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
     let mut i = 0
     while i < n {
         acc = acc + maxV(F32x4.load(xs, i), h)
-        i = i + 4
-    }
-    return sum(acc)
-}
-
-fn absBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
-    let mut acc = F32x4.splat(0.0)
-    let h = F32x4.splat(t)
-    let mut i = 0
-    while i < n {
-        acc = acc + F32x4.abs(F32x4.load(xs, i) - h)
         i = i + 4
     }
     return sum(acc)
@@ -504,18 +506,11 @@ bench "max in Vyrn" {
     drop xs
 }
 
-bench "abs builtin" {
-    let xs = data(1024)
-    let mut r: Float32 = 0.0
-    let mut k = 0
-    while k < 64 {
-        r = r + absBuiltin(xs, 1024, blackBox(0.5))
-        k = k + 1
-    }
-    blackBox(r)
-    drop xs
-}
-
+// `abs` is the second bench with no partner. `F32x4.abs` shipped in M2 on a
+// wasm number of 3.5x, which M4 re-took against `absV` INLINED into the walk —
+// no call for Cranelift to decline — and got 1.07x (54 ms against 58 ms over
+// 102 M lanes), with native at 1.00x. That is `select`'s bar exactly, so the
+// builtin went the same way and only this half is left to time.
 bench "abs in Vyrn" {
     let xs = data(1024)
     let mut r: Float32 = 0.0
@@ -692,7 +687,6 @@ fn main() -> Int64 {
     print(minVyrn(xs, 64, 0.5))
     print(maxBuiltin(xs, 64, 0.5))
     print(maxVyrn(xs, 64, 0.5))
-    print(absBuiltin(xs, 64, 0.5))
     print(absVyrn(xs, 64, 0.5))
     // The rounds against a threshold that puts the lanes across several
     // integers, halves included: `data` steps by 0.001, so scaling by 8.5 makes

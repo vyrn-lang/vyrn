@@ -8,7 +8,7 @@
 ///   m.lane(k)                  one mask lane, as the Bool it is
 ///   m.anyTrue()  m.allTrue()  the whole mask, as one Bool
 ///   m & n   m | n   m ^ n   ~m   lane-wise, on two masks
-///   F32x4.min/max/abs/sqrt
+///   F32x4.min/max/sqrt        (`abs` is in Vyrn here — see the note on `abs`)
 ///
 /// **The mask combinators are `& | ^ ~`, not `&& || !`.** `&&` and `||` are
 /// Vyrn's short-circuiting Bool operators — the right operand may not be
@@ -74,6 +74,21 @@ fn select(m: Mask32x4, a: F32x4, b: F32x4) -> F32x4 {
         if m.lane(1) { a.lane(1) } else { b.lane(1) },
         if m.lane(2) { a.lane(2) } else { b.lane(2) },
         if m.lane(3) { a.lane(3) } else { b.lane(3) },
+    )
+}
+
+/// The sign bit cleared, NaN included — the BITS and not a comparison, since
+/// `if x < 0.0` gets `-0.0` wrong. A user function, for `select`'s reason: the
+/// builtin measured 1.00x native and 1.07x wasm against exactly this spelling
+/// (RFC-0083 M4). `Float32` -> `Float64` is exact, so the widen/mask/narrow
+/// round-trip loses nothing on the way there or back.
+fn abs(v: F32x4) -> F32x4 {
+    let mask: UInt64 = 9223372036854775807
+    return F32x4(
+        Float32(floatFromBits(floatBits(Float64(v.lane(0))) & mask)),
+        Float32(floatFromBits(floatBits(Float64(v.lane(1))) & mask)),
+        Float32(floatFromBits(floatBits(Float64(v.lane(2))) & mask)),
+        Float32(floatFromBits(floatBits(Float64(v.lane(3))) & mask)),
     )
 }
 
@@ -232,8 +247,9 @@ fn main() -> Int64 {
     lanes(F32x4.min(F32x4.splat(sub), F32x4(z, sub, nzero, inf))) // 0 sub -0 sub
 
     // ---- abs / sqrt ------------------------------------------------------
-    // `abs` clears the sign bit — a bit operation, so there is no NaN question.
-    lanes(F32x4.abs(F32x4(neg, nzero, ninf, nan))) // 1 0 inf NaN
+    // `abs` clears the sign bit — a bit operation, so there is no NaN question,
+    // and no builtin either: it is `abs` above, in Vyrn.
+    lanes(abs(F32x4(neg, nzero, ninf, nan))) // 1 0 inf NaN
     // `sqrt` of a negative is NaN, of `-0.0` is `-0.0` (IEEE keeps the sign),
     // and of a subnormal is not flushed to zero on any of the three.
     lanes(F32x4.sqrt(F32x4(4.0, neg, nzero, inf))) // 2 NaN -0 inf

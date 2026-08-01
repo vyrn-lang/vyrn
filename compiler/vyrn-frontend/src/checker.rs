@@ -4288,9 +4288,20 @@ impl<'a> Checker<'a> {
             // where the float one has a NaN rule and a signed zero to reproduce;
             // that difference is the whole reason the two widths answer
             // differently.
+            //
+            // `@f32x4Abs` was here and was deleted in M4, on the same measurement
+            // that refused the integer three — taken the same way, which is the
+            // whole point. Written WITHOUT a helper call the Vyrn version is
+            // 1.00x natively (5.61 µs against 5.61 µs per 65536 lanes at `-O2`)
+            // and 1.07x on wasm (54 ms against 58 ms over 102 M lanes); the 3.5x
+            // its census row used to claim was four calls Cranelift does not
+            // inline. `select` was deleted at 1.06x and `i32x4.min` refused at
+            // 1.05x, so this is the bar, not a new one. Unlike `min`/`max` there
+            // is no rule to reproduce either: clearing the sign bit is one line of
+            // `floatBits`, which is why `abs1` in `examples/simdbench.vyrn` is a
+            // one-liner where `min1` is twenty.
             "@f32x4Min"
             | "@f32x4Max"
-            | "@f32x4Abs"
             | "@f32x4Sqrt"
             | "@f32x4Ceil"
             | "@f32x4Floor"
