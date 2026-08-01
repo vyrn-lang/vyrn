@@ -27,7 +27,7 @@ paying for a row of the census."**
 That framing is wrong, and the reason is worth stating precisely because it was
 believed for four RFCs.
 
-## Why Rust needs `unsafe` for `Vec`, and why Vyrn does not
+## Why `Vec` needs `unsafe` and a Vyrn container does not
 
 The operation that makes a safe `Vec` *unbuildable from safe parts* is
 **`set_len`**: it asserts that memory is initialized when the type system cannot
@@ -45,15 +45,13 @@ operation inside the real one.
 
 The conclusion survives by a different and simpler route: **every one of those
 operations is about addressing a pointer, and none of them arises if the
-primitive is a bounds-checked growable buffer instead.** That is the Java, C#
-and Go arrangement — collections are ordinary safe code over an array — and it
-is what `Array` already is.
+primitive is a bounds-checked growable buffer instead.**
 
-Vyrn's `Array` never exposes that state. It owns `len` and `cap` together, every
-read is checked against `len`, and spare capacity is allocated but unreadable —
-there is no `set_len` to be unsafe. This is the arrangement Java, C# and Go use:
-collections are ordinary safe code over an array primitive, and nobody reaches
-for pointers to write one.
+That is what `Array` is. It owns `len` and `cap` together, every read is checked
+against `len`, and spare capacity is allocated but unreadable — so there is no
+`set_len` to be unsafe, no element address to compute, and nothing to `dealloc`
+by hand. It is the Java, C# and Go arrangement: collections are ordinary safe
+code over an array, and nobody reaches for pointers to write one.
 
 So `Array<T>` is *already* the right primitive, and the containers standing on it
 were never blocked on a memory view. They were blocked on something much smaller.
