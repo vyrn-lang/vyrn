@@ -23,6 +23,28 @@ Two layers of generators:
 Inspect any generated module with:  vyrn emit-gen <file>
 Inspect the derived table with:     vyrn routes <file>
 
+## validateContract
+
+```vyrn
+fn validateContract(iface: ModuleInterface) -> String
+```
+
+Reject any module the RPC layer cannot model. Returns "" when it is clean.
+
+Two checks, in the order a reader would apply them. First the `Api` contract
+(RFC-0071): every export is a procedure, which is what the OPEN rule states.
+Then serializability, which the contract grammar cannot express because it is
+a property of the types rather than of the signature shape: at most one
+parameter, and both ends nameable by the module's own reflection.
+
+A `gen fn`, because `contractOf` is compile-time reflection and has no
+runtime lowering by design (RFC-0071 M1) — the same reason `std/ui`'s
+`uiContractErrs` is one. Every caller is already a `gen fn`.
+
+Exported because `std/http`'s REST projection (RFC-0074) publishes the SAME
+procedures over the same codec, so it applies the same rule. Two copies of
+"what is a procedure" would be two things to drift.
+
 ## rpcServer
 
 ```vyrn
