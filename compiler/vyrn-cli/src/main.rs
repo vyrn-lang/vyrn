@@ -74,6 +74,29 @@ fn deny_warnings() -> bool {
     std::env::var("VYRN_DENY_WARNINGS").is_ok()
 }
 
+
+/// The platform link flags every native build needs, in one place.
+///
+/// There are two clang invocations in this file — `run` builds a temporary and
+/// executes it, `build` writes the artifact — and they drifted: `-lm` was added
+/// to one and CI kept failing with `undefined reference to ceilf` from the
+/// other, because the parity harness uses the second. Two link sites with
+/// hand-copied flags is the same shape of defect this project has hit in
+/// codegen and in the interpreter; a third caller now inherits both flags
+/// instead of remembering them.
+///
+/// - `-pthread`: worker threads (RFC-0025). Win32 threads need no flag.
+/// - `-lm`: RFC-0083's roundings. Without SSE4.1 in the baseline,
+///   `llvm.ceil/floor/trunc/rint.v4f32` scalarize to `ceilf`/`floorf`/`truncf`/
+///   `rintf`, which live in libm on Unix and in the UCRT — linked by default —
+///   on Windows. A Windows-only check structurally cannot see this missing.
+fn add_platform_link_flags(cmd: &mut Command) {
+    if !cfg!(windows) {
+        cmd.arg("-pthread");
+        cmd.arg("-lm");
+    }
+}
+
 fn main() -> ExitCode {
     // The loader runs generators (RFC-0021) by invoking the tree-walking
     // interpreter recursively, nested deep inside the load/parse/check call
@@ -2271,9 +2294,7 @@ fn bench_native(
         .arg("-o")
         .arg(&out_path)
         .arg("-Wno-override-module");
-    if !cfg!(windows) {
-        cmd.arg("-pthread");
-    }
+    add_platform_link_flags(&mut cmd);
     match cmd.status() {
         Ok(s) if s.success() => {}
         Ok(s) => {
@@ -3318,10 +3339,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         .arg(&out_path)
         // our IR carries no target triple; clang supplies the target's — don't warn.
         .arg("-Wno-override-module");
-    if !cfg!(windows) {
-        // Worker threads (RFC-0025): pthreads. Win32 threads need no flag.
-        cmd.arg("-pthread");
-    }
+    add_platform_link_flags(&mut cmd);
     let status = cmd.status();
     match status {
         Ok(s) if s.success() => {

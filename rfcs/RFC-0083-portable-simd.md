@@ -1,9 +1,10 @@
 # RFC-0083 — Portable SIMD, Without `unsafe` and Without Breaking Parity
 
-- **Status:** **Accepted.** **M1 and M2 shipped** (`examples/simd.vyrn`,
-  `examples/simdmem.vyrn`, three-engine byte-identical including NaN — see the
-  two "As landed" notes). M3 is gated on M2's parity result, in the manner
-  RFC-0081 established.
+- **Status:** **Accepted.** **M1 and M2 shipped, and M2's surface is complete**
+  (`examples/simd.vyrn`, `examples/simdmem.vyrn`, `examples/simdround.vyrn`,
+  three-engine byte-identical including NaN and the exact halves — see the two
+  "As landed" notes). M3 is gated on M2's parity result, in the manner RFC-0081
+  established.
 - **Depends on:** RFC-0077 (the direct wasm backend — `wasm-encoder` is what
   emits the instructions), RFC-0078 (the census — `View` is the category these
   join), RFC-0082 (the capability boundary this narrows by one row)
@@ -186,7 +187,9 @@ over `Type` and both were in the textual backend.
   `Min`/`Max`. They are the "pseudo-minimum" pair with different NaN behaviour,
   so they are a *different operation*, not a faster spelling — M2's IEEE-754-2019
   `minimum`/`maximum` choice stands and this is only recorded so nobody
-  "optimises" one into the other.
+  "optimises" one into the other. The **relaxed** family (`RelaxedMadd`,
+  `RelaxedMin`, …) is the same trap with the arguing already done for it: see
+  the M2 note below, where it is refused permanently rather than deferred.
 
 ### As landed (M2)
 
@@ -364,6 +367,152 @@ at all, because no finite sequence of Vyrn arithmetic is the correctly-rounded
 IEEE result and a Newton iteration differing in the last bits is, under this
 project's promise, a different program. The comparison operators are `BinOp`s
 like M1's arithmetic, so the mask cost no rows.
+
+**The surface M2 left half-finished, and the one genuine hole in it.** A mask
+could be *produced* and *reduced* and never **combined**: `(a < b) && (c < d)`
+was inexpressible, because `&&` is a `Bool` operator and nothing joined two
+masks. That is the difference between expressing a predicate and expressing a
+predicate with two conditions, and it was the only gap here that changed what a
+program can say rather than how conveniently it says it.
+
+**The spelling is `& | ^ ~`, and `&&`/`||`/`!` were rejected for a reason that
+is about promises rather than taste.** Vyrn's `&&` and `||` **short-circuit** —
+the right operand may not be evaluated at all — and a lane-wise combination
+evaluates both sides always, four times over. Borrowing that spelling would
+advertise a control-flow property the operation does not have, in the one place
+a reader would most want to rely on it (`expensive(x) && cheap(y)`). The bitwise
+family promises only "both sides, always", which is exactly what this is; it is
+what RFC-0045 already means on integers, and it is already how a mask is stored
+on both backends. Methods (`m.and(n)`) were the other candidate and lose twice:
+`and`/`or`/`not` are three global renames in the parser's method table for names
+a future `std/bool` or `std/arrays` would want, and every other lane-wise
+operation on this type — arithmetic, all six comparisons — is already an
+operator. `v128.andnot` exists and is deliberately given no spelling: `a & ~b`
+is one instruction more and nothing measured asked for it.
+
+| engine | how |
+|---|---|
+| interpreter | `&&`/`\|\|`/`!=` over four `bool`s — the reference answer |
+| textual | `and`/`or`/`xor <4 x i32>`, and `xor` against all-ones for `~` |
+| direct wasm | `v128.and`/`or`/`xor`/`not` |
+
+The textual backend needed **no code at all** for the binary three: a
+`Mask32x4`'s `llt` is `<4 x i32>`, the integer arm already emits `and {ll}`, and
+the result type is the operand type. That is the mask's representation decision
+paying for itself a second time. The wasm side does need its own arm, because
+`v128.*` are bit operations on 128 bits with no lane width — which costs nothing
+here for the closed-inhabitants reason `any_true` already leans on, and which is
+pinned by **De Morgan lane-wise** in `examples/simdmem.vyrn`: a whole-vector
+complement satisfies `~(m & n) == ~m | ~n` for all-true and all-false and
+diverges exactly at a mixed mask.
+
+**Three smaller completions, in the order they bite.**
+
+- **`v.replaceLane(k, x)`** — `lane` read and nothing wrote, so building a vector
+  from computed values meant going back through the four-argument constructor to
+  change one lane. Same constant-index rule, same absence of a bounds check. A
+  *value* method rather than `F32x4.replaceLane(v, k, x)`, which is the rule this
+  RFC already stated read the other way: the type name is where an operation
+  lives when something *else* exports the name, and nothing exports this one —
+  the same two reasons `lane` is a value method. Masks are refused: a mask lane
+  write would be a second way to *build* a mask, and while a `Bool` source keeps
+  every lane all-ones or all-zeros (so the closed-inhabitants argument would
+  survive it), nothing needs it.
+- **`-v`** — previously `F32x4.splat(0.0) - v`, **which is a different
+  function**. Negation flips the sign bit; the subtraction does not: `0.0 - 0.0`
+  is `+0.0` where `-(+0.0)` is `-0.0`. `examples/simd.vyrn` prints both lines so
+  the difference is output rather than a claim. It is `fneg <4 x float>` /
+  `f32x4.neg` / Rust's unary `-`, all three of which are IEEE `negate`.
+- **`ceil`/`floor`/`trunc`/`nearest`** — on the type name, one step ahead of the
+  `min`/`max`/`abs` rule rather than behind it: nothing exports `ceil` *today*,
+  but those are exactly the names a float section of `std/math` would want, and
+  taking a value-method name is taking it globally. The three toward-a-direction
+  rounds differ from each other only in sign handling, so every one is pinned
+  against a negative as well.
+
+**`nearest` is roundTiesToEven, and this is the `minnum` bug one operation
+over.** wasm's `f32x4.nearest` is roundTiesToEven. LLVM's `llvm.round` and Rust's
+`f32::round` are roundTiesAwayFromZero — a **different function**, not a faster
+spelling of one — and they agree everywhere except at an exact half, which is
+precisely where a wrong choice hides. Measured before anything was chosen rather
+than after:
+
+| on `<0.5, 1.5, 2.5, -2.5>` | result |
+|---|---|
+| wasmtime `f32x4.nearest` | `0 2 2 -2` |
+| `llvm.roundeven.v4f32` | `0 2 2 -2` |
+| `llvm.rint.v4f32` | `0 2 2 -2` |
+| **`llvm.round.v4f32`** | **`1 2 3 -3`** |
+| Rust `f32::round_ties_even` | `0 2 2 -2` |
+| **Rust `f32::round`** | **`1 2 3 -3`** |
+
+Left to defaults the three engines would have split two-to-one, exactly as they
+did for `min`. All three were pointed at roundTiesToEven instead, and
+`examples/simdround.vyrn` leads with the halves — `0.5 1.5 2.5 3.5` and
+`4.5 5.5 6.5 7.5`, both signs — because that is the only place the two rules
+differ. `nearest_lowers_to_ties_to_even_and_not_to_ties_away` in
+`vyrn-cli/tests/simd.rs` pins the intrinsic name so a "simplification" to
+`llvm.round` fails in the default suite rather than only under `--ignored`
+parity, which is the shape `min_and_max_lower_to_the_nan_propagating_intrinsic`
+already has.
+
+**The intrinsic emitted is `llvm.rint` and not the one that names the rule, and
+the reason is linking rather than semantics.** `llvm.roundeven.v4f32` has no
+lowering on baseline x86-64 — `roundps` is SSE4.1 and `vyrn build` passes clang
+no `-march` — so it scalarizes to four calls to `roundevenf`, a C23 symbol the
+MSVC UCRT does not ship, and the **link fails outright**. `llvm.rint` lowers to
+`rintf`, which every libc here has, and under the default rounding mode it *is*
+roundTiesToEven. Vyrn has no `fenv` surface; a host that changed the rounding
+mode behind an `extern` would already have moved every `fadd` in the program, so
+this adds no hole that was not there. If the native baseline is ever raised, the
+halves above are what will say immediately whether the switch back was right.
+
+**The four roundings are the first census block the *wasm* column decides
+outright, and one of them the builtin loses.** The same scalarization applies to
+`ceil`/`floor`/`trunc`: each is four libc calls natively, read out of the
+assembly. So against `examples/simdbench.vyrn`'s Vyrn implementations, per 65536
+lanes, `ceil` is **1.0x** (53.4 µs against 50.3 µs) and `floor` **1.0x** (54.2
+against 50.2); `nearest` is 1.9x (53.8 against 101.7, ties-to-even by hand being
+twenty lines); and **`trunc` is 0.43x — the builtin is 2.3x *slower*** (102.5 µs
+against 44.4 µs), because four `truncf` calls lose to the inlined `cvttss2si`
+round-trip LLVM compiles the Vyrn version into. On wasm the same four are 7.4x,
+8.2x, 9.3x and 4.9x, Cranelift emitting the instruction. `abs` was recorded above
+as "the first census row decided by the wasm column"; this is four more, and the
+first where the native number is not merely unhelpful but negative. **The upgrade
+path is a native baseline of `x86-64-v2`**, which would make all four one
+instruction — a project-wide ISA decision (Penryn, 2008), not this RFC's to take.
+`trunc` ships anyway: three roundings and a hand-written fourth is a surface with
+a hole in it, and the Vyrn version needs `floatBits` to keep the sign of a zero
+(`Int64(-0.5)` is `0`, whose `Float32` is `+0.0`).
+
+**Relaxed SIMD must never be added, and it is the fastest thing on the list.**
+`F32x4RelaxedMadd`, `RelaxedNmadd`, `RelaxedMin` and `RelaxedMax` are in the
+encoder beside everything else here, and a relaxed multiply-add is the single
+biggest win available in this instruction set. They are **deliberately
+implementation-defined**: a relaxed madd *may or may not* fuse, so the result
+differs in the last bits by host, and `RelaxedMin`/`Max` leave the NaN and
+signed-zero behaviour to the engine — the exact question M2 had to answer by
+hand for `min`. That is categorically incompatible with byte-identical parity,
+for the same reason auto-vectorised float reductions are: not "hard to get
+right", but *specified* to be allowed to differ. This paragraph exists because
+someone will reach for them, and "wasm has it, and it is faster" is the argument
+RFC-0078's census exists to refuse.
+
+The five new census rows are `@replaceLane` (`View`, beside `@lane` — a lane
+written instead of read) and the four roundings (`Measured`, with the numbers
+above), 74 → 79. **The mask combinators and `-v` cost no rows at all**: they are
+a `BinOp` and a `UnOp`, which the interpreter's `Call` dispatch never sees — the
+same reason M2's comparison operators did not appear there either.
+
+Three engines byte-identical across `examples/simd.vyrn` (now including
+`replaceLane`, `-v`, and `-v` beside `splat(0.0) - v`), `examples/simdmem.vyrn`
+(the combinators, De Morgan lane-wise, `^` against itself and against its
+complement, and NaN-derived masks through all four), the new
+`examples/simdround.vyrn` (the halves both signs, either side of a half by one
+ulp, `±0.0` through every round, NaN in each lane position one at a time, `±∞`,
+a subnormal of each sign, and the range above 2^23 where a `Float64` round-trip
+would fail) and `examples/simdbench.vyrn` — stdout, stderr and exit code.
+`wasmtime -W simd=n,relaxed-simd=n` still rejects every one of the modules.
 
 Two smaller things the RFC above got wrong or left out:
 

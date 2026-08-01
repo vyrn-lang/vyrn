@@ -2858,7 +2858,17 @@ impl<'a> Interp<'a> {
                     }),
                     (UnOp::Neg, Val::Float(x)) => Ok(Val::Float(-x)),
                     (UnOp::Neg, Val::Float32(x)) => Ok(Val::Float32(-x)),
+                    // `-v` flips each lane's sign bit (RFC-0083 M2). Rust's unary
+                    // `-` on `f32` is IEEE `negate`, which is the bit flip and not
+                    // `0.0 - x` — the difference shows at `-0.0` and is why this
+                    // exists rather than leaving `F32x4.splat(0.0) - v` as the
+                    // spelling.
+                    (UnOp::Neg, Val::F32x4(v)) => Ok(Val::F32x4(v.map(|x| -x))),
                     (UnOp::Not, Val::Bool(b)) => Ok(Val::Bool(!b)),
+                    // `~m` complements a mask lane-wise (RFC-0083 M2) — `~` and not
+                    // `!` because `!` is the Bool operator and a mask is four
+                    // answers, the same separation `&`/`&&` keeps in `binop`.
+                    (UnOp::BitNot, Val::Mask32x4(m)) => Ok(Val::Mask32x4(m.map(|b| !b))),
                     // `~n` complements within the operand's width (RFC-0045):
                     // the literal `Int` at 64 bits, a sized integer at its own
                     // width (re-wrapped so an unsigned complement stays in range).
@@ -3320,6 +3330,24 @@ impl<'a> Interp<'a> {
                         (Val::Mask32x4(m), Val::Int(k)) => Ok(Val::Bool(m[*k as usize])),
                         (a, b) => Err(format!("lane: {a:?}[{b:?}]").into()),
                     },
+                    // `v.replaceLane(k, x)` — `lane`'s inverse, and the same
+                    // checker-proven constant index, so again no bounds check.
+                    // The lane goes through `convert_val` for the reason the
+                    // constructor's do: a float LITERAL is a `Val::Float` here.
+                    "@replaceLane" => {
+                        let mut v = match &vals[0] {
+                            Val::F32x4(v) => *v,
+                            other => return Err(format!("replaceLane: {other:?}").into()),
+                        };
+                        let Val::Int(k) = vals[1] else {
+                            return Err(format!("replaceLane index: {:?}", vals[1]).into());
+                        };
+                        v[k as usize] = match convert_val(vals.remove(2), &Type::Float32) {
+                            Val::Float32(f) => f,
+                            other => return Err(format!("replaceLane value: {other:?}").into()),
+                        };
+                        Ok(Val::F32x4(v))
+                    }
                     // Mask reductions (RFC-0083 M2). This is the reference answer
                     // the two backends' single instructions have to match, and it
                     // is a plain fold over the four lanes because a `Mask32x4`'s
@@ -3365,7 +3393,22 @@ impl<'a> Interp<'a> {
                     // reaching for `f32::min`, which is `minNum` and returns the
                     // NON-NaN operand — a difference the six-decimal formatter DOES
                     // show, unlike a NaN payload difference.
-                    "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" => {
+                    //
+                    // `nearest` is `round_ties_even` and deliberately NOT
+                    // `f32::round`, which is roundTiesAwayFromZero: they differ on
+                    // exactly the halves (`2.5` -> 2 against 3), which is the same
+                    // kind of silent split `f32::min` would have been. wasm's
+                    // `f32x4.nearest` and LLVM's `llvm.roundeven` are both
+                    // roundTiesToEven, measured before the choice was made rather
+                    // than after.
+                    "@f32x4Min"
+                    | "@f32x4Max"
+                    | "@f32x4Abs"
+                    | "@f32x4Sqrt"
+                    | "@f32x4Ceil"
+                    | "@f32x4Floor"
+                    | "@f32x4Trunc"
+                    | "@f32x4Nearest" => {
                         let a = match &vals[0] {
                             Val::F32x4(v) => *v,
                             other => return Err(format!("F32x4 op: {other:?}").into()),
@@ -3383,7 +3426,18 @@ impl<'a> Interp<'a> {
                                 // operation, not a comparison, so there is no NaN
                                 // question to answer.
                                 "@f32x4Abs" => f32::from_bits(a[k].to_bits() & 0x7fff_ffff),
-                                _ => a[k].sqrt(),
+                                "@f32x4Ceil" => a[k].ceil(),
+                                "@f32x4Floor" => a[k].floor(),
+                                "@f32x4Trunc" => a[k].trunc(),
+                                "@f32x4Nearest" => a[k].round_ties_even(),
+                                // Spelled out rather than left as the `_` arm
+                                // because the census scan (`primitives.rs`) reads
+                                // these literals, and the outer head above is too
+                                // long for it to parse across the wrap.
+                                "@f32x4Sqrt" => a[k].sqrt(),
+                                other => {
+                                    return Err(format!("vector op: {other}").into())
+                                }
                             };
                         }
                         Ok(Val::F32x4(out))
@@ -4326,6 +4380,23 @@ impl<'a> Interp<'a> {
                 };
             }
             return Ok(Val::F32x4(out));
+        }
+        // Combining masks (RFC-0083 M2). `&`/`|`/`^` and not `&&`/`||`, which are
+        // the SHORT-CIRCUITING Bool operators — there is nothing to short-circuit
+        // in four lanes computed at once, and the bitwise family makes no such
+        // promise. Both backends emit `v128.and` / `and <4 x i32>`; this is the
+        // reference answer they have to match.
+        if let (Val::Mask32x4(a), Val::Mask32x4(b)) = (&l, &r) {
+            let mut m = [false; 4];
+            for i in 0..4 {
+                m[i] = match op {
+                    BitAnd => a[i] && b[i],
+                    BitOr => a[i] || b[i],
+                    BitXor => a[i] != b[i],
+                    _ => return Err("type error in mask binop (should have been caught)".into()),
+                };
+            }
+            return Ok(Val::Mask32x4(m));
         }
         // Float32 (possibly with a plain-Float literal sibling): round both to f32
         // and compute at single precision, matching native `float` instructions.

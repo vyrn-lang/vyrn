@@ -81,6 +81,75 @@ fn abs1(x: Float32) -> Float32 {
     return Float32(floatFromBits(floatBits(Float64(x)) & mask))
 }
 
+/// Truncation toward zero, which the other three rounds are built on.
+///
+/// Three things it cannot do naively. A `Float32` of magnitude >= 2^23 is
+/// ALREADY an integer and would not survive the `Int64` round-trip anyway (the
+/// conversion saturates), so it comes straight back — which also covers both
+/// infinities. NaN fails every comparison, so it has to be tested for rather
+/// than falling through; `Int64(NaN)` saturates to 0. And `Int64(-0.5)` is `0`,
+/// whose `Float32` is `+0.0`, so a zero result gets its sign put back by
+/// multiplying the input by zero — the one operation that answers `-0.0` for a
+/// negative input and `+0.0` for a positive one.
+fn trunc1(x: Float32) -> Float32 {
+    if x != x {
+        return x
+    }
+    let big: Float32 = 8388608.0
+    if abs1(x) >= big {
+        return x
+    }
+    let t = Float32(Int64(x))
+    if t == 0.0 {
+        return x * 0.0
+    }
+    return t
+}
+
+fn floor1(x: Float32) -> Float32 {
+    let t = trunc1(x)
+    if t > x {
+        return t - 1.0
+    }
+    return t
+}
+
+fn ceil1(x: Float32) -> Float32 {
+    let t = trunc1(x)
+    if t < x {
+        return t + 1.0
+    }
+    return t
+}
+
+/// roundTiesToEven, and the tie is the whole of the difference from the `round`
+/// every language ships: at exactly a half this returns the EVEN neighbour, not
+/// the one further from zero. `t * 0.5` is an integer exactly when `t` is even,
+/// which is the cheapest evenness test available without an integer round-trip
+/// that `t` might not survive.
+fn nearest1(x: Float32) -> Float32 {
+    if x != x {
+        return x
+    }
+    let big: Float32 = 8388608.0
+    if abs1(x) >= big {
+        return x
+    }
+    let t = trunc1(x)
+    let a = abs1(x - t)
+    if a < 0.5 {
+        return t
+    }
+    let up = if x < 0.0 { t - 1.0 } else { t + 1.0 }
+    if a > 0.5 {
+        return up
+    }
+    if trunc1(t * 0.5) == t * 0.5 {
+        return t
+    }
+    return up
+}
+
 fn minV(a: F32x4, b: F32x4) -> F32x4 {
     return F32x4(
         min1(a.lane(0), b.lane(0)),
@@ -101,6 +170,27 @@ fn maxV(a: F32x4, b: F32x4) -> F32x4 {
 
 fn absV(v: F32x4) -> F32x4 {
     return F32x4(abs1(v.lane(0)), abs1(v.lane(1)), abs1(v.lane(2)), abs1(v.lane(3)))
+}
+
+fn ceilV(v: F32x4) -> F32x4 {
+    return F32x4(ceil1(v.lane(0)), ceil1(v.lane(1)), ceil1(v.lane(2)), ceil1(v.lane(3)))
+}
+
+fn floorV(v: F32x4) -> F32x4 {
+    return F32x4(floor1(v.lane(0)), floor1(v.lane(1)), floor1(v.lane(2)), floor1(v.lane(3)))
+}
+
+fn truncV(v: F32x4) -> F32x4 {
+    return F32x4(trunc1(v.lane(0)), trunc1(v.lane(1)), trunc1(v.lane(2)), trunc1(v.lane(3)))
+}
+
+fn nearestV(v: F32x4) -> F32x4 {
+    return F32x4(
+        nearest1(v.lane(0)),
+        nearest1(v.lane(1)),
+        nearest1(v.lane(2)),
+        nearest1(v.lane(3)),
+    )
 }
 
 fn selectV(m: Mask32x4, a: F32x4, b: F32x4) -> F32x4 {
@@ -200,6 +290,97 @@ fn absVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
     let mut i = 0
     while i < n {
         acc = acc + absV(F32x4.load(xs, i) - h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+// The four rounds. Each scales by the threshold first, so the lanes span a few
+// integers instead of sitting inside one — `data` only reaches 1.0 and every
+// round of that is 0 or 1, which would time the loop rather than the operation.
+fn ceilBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F32x4.ceil(F32x4.load(xs, i) * h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn ceilVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + ceilV(F32x4.load(xs, i) * h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn floorBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F32x4.floor(F32x4.load(xs, i) * h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn floorVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + floorV(F32x4.load(xs, i) * h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn truncBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F32x4.trunc(F32x4.load(xs, i) * h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn truncVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + truncV(F32x4.load(xs, i) * h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn nearestBuiltin(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F32x4.nearest(F32x4.load(xs, i) * h)
+        i = i + 4
+    }
+    return sum(acc)
+}
+
+fn nearestVyrn(xs: Array<Float32>, n: Int64, t: Float32) -> Float32 {
+    let mut acc = F32x4.splat(0.0)
+    let h = F32x4.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + nearestV(F32x4.load(xs, i) * h)
         i = i + 4
     }
     return sum(acc)
@@ -347,6 +528,102 @@ bench "abs in Vyrn" {
     drop xs
 }
 
+bench "ceil builtin" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + ceilBuiltin(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "ceil in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + ceilVyrn(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "floor builtin" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + floorBuiltin(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "floor in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + floorVyrn(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "trunc builtin" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + truncBuiltin(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "trunc in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + truncVyrn(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "nearest builtin" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + nearestBuiltin(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "nearest in Vyrn" {
+    let xs = data(1024)
+    let mut r: Float32 = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + nearestVyrn(xs, 1024, blackBox(8.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
 bench "select in Vyrn" {
     let xs = data(1024)
     let mut r: Float32 = 0.0
@@ -417,6 +694,18 @@ fn main() -> Int64 {
     print(maxVyrn(xs, 64, 0.5))
     print(absBuiltin(xs, 64, 0.5))
     print(absVyrn(xs, 64, 0.5))
+    // The rounds against a threshold that puts the lanes across several
+    // integers, halves included: `data` steps by 0.001, so scaling by 8.5 makes
+    // every 2000th lane land exactly on one and the tie rule gets exercised
+    // rather than only asserted in `simdround.vyrn`.
+    print(ceilBuiltin(xs, 64, 8.5))
+    print(ceilVyrn(xs, 64, 8.5))
+    print(floorBuiltin(xs, 64, 8.5))
+    print(floorVyrn(xs, 64, 8.5))
+    print(truncBuiltin(xs, 64, 8.5))
+    print(truncVyrn(xs, 64, 8.5))
+    print(nearestBuiltin(xs, 64, 8.5))
+    print(nearestVyrn(xs, 64, 8.5))
     print(selVyrn(xs, 64, 0.5))
     // Threshold `0.0` and not `0.5`: over 64 elements `data` only reaches
     // 0.033, so `0.5` would make every mask empty and the two halves would
