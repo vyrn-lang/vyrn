@@ -1997,6 +1997,66 @@ impl<'a> Interp<'a> {
         Ok(None) // a global: not in any frame, so leave it to the copying path
     }
 
+    /// The append half of an in-place `push` through a place (RFC-0082 M2),
+    /// shared by the two receiver forms that need one: a record field
+    /// (`t.xs.push(v)`, `Stmt::SetField`) and an array element
+    /// (`rows[i].push(v)`, `Stmt::IndexSet`). `xs.push(v)` on a plain variable
+    /// does not go through here — it owns its slot outright and appends into it
+    /// directly, with no snapshot and nothing to drop.
+    ///
+    /// **This is not `take_place`'s take, and deliberately not.** That exists
+    /// because the index-store desugar had already split the statement in three,
+    /// so the container HAD to live in a temp and the move-out has to leave a
+    /// `Val::Unit` hole behind it for the rest of the group. An append is ONE
+    /// statement (`place = push(place, v)`), so the array never has to leave its
+    /// home and a snapshot does that job instead: the caller clones the place's
+    /// `Rc` *before* this runs, this evaluates the item, and only then does
+    /// `drop_place_ref` release the place's own reference — which is what puts
+    /// the refcount back to 1 and makes the append O(1). Cloning first is what
+    /// keeps the general path's evaluation order, and that is not academic:
+    /// `t.xs.push(f(t))` with `f` taking `t: modify T` reaches the same
+    /// container mid-statement, and its write is discarded by all three engines
+    /// either way. Taking early would make that program trap on `push of
+    /// non-Array Unit`; appending without the snapshot would make it print `2`
+    /// where every engine prints `1`.
+    ///
+    /// **Locals only**, and the callers enforce it by looking in `scope` and
+    /// nowhere else. The rule is `take_place`'s, reused rather than re-derived,
+    /// and weaker here on purpose: the only escape between dropping the place's
+    /// reference and storing the grown array back is an out-of-memory `reserve`,
+    /// and a local's frame is the exact scope in which `vyrn test`'s recovery
+    /// cannot observe a hole. A global keeps the copy and stays quadratic.
+    ///
+    /// `elem_ty` is the type of the ITEM, not of the container. Appending one
+    /// element only requires that element to be validated, so the coercion runs
+    /// on the item alone; the general path coerces the whole grown array and
+    /// re-proves every element already proven, once per push.
+    fn append_snapshot(
+        &self,
+        mut arr: std::rc::Rc<Vec<Val>>,
+        item: &Expr,
+        elem_ty: Option<&Type>,
+        scope: &mut Vec<Frame>,
+        drop_place_ref: impl FnOnce(&mut Vec<Frame>),
+    ) -> Result<Val, Ctrl> {
+        let item = self.expr(item, scope)?;
+        // Validate before anything is disturbed: a trap here must leave the
+        // container exactly as it was, which is what the backends do (they check
+        // the pushed element before the store).
+        let item = match elem_ty {
+            Some(t) => self.coerce(item, t)?,
+            None => item,
+        };
+        // What the place holds now is discarded either way: unchanged it is the
+        // snapshot, and changed it is a mid-statement write the general path
+        // also overwrites.
+        drop_place_ref(scope);
+        let elems = std::rc::Rc::make_mut(&mut arr);
+        reserve_vec(elems, 1)?;
+        elems.push(item);
+        Ok(Val::Array(arr))
+    }
+
     fn stmt(&self, stmt: &Stmt, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
         // Generation step budget (RFC-0021): a runaway generator fails loudly
         // instead of hanging the build. Only active inside a generation run.
@@ -2204,8 +2264,9 @@ impl<'a> Interp<'a> {
             Stmt::SetField {
                 name, field, value, ..
             } => {
-                // `t.xs.push(v)` on a LOCAL record: append IN PLACE — the same
-                // fix as `xs.push(v)` above, one level down.
+                // `t.xs.push(v)` on a LOCAL record: append IN PLACE via
+                // `append_snapshot`, which carries the mechanism and its rules —
+                // the same fix as `xs.push(v)` above, one level down.
                 //
                 // The statement desugars to `t.xs = push(t.xs, v)`, so the
                 // general path evaluates `t.xs` into a second `Rc` while the
@@ -2216,26 +2277,6 @@ impl<'a> Interp<'a> {
                 // container operation there is. Both compiled backends were
                 // always flat (~44 native, ~50 wasm at every N), so this is
                 // interpreter-only like the take below it.
-                //
-                // This is NOT `take_place`'s take, and deliberately not: there
-                // the desugar had already split the statement in three and the
-                // container HAD to live in a temp, so the move-out leaves
-                // `Val::Unit` behind for the rest of the group. Here the whole
-                // mutation is one statement, so the snapshot does that job. The
-                // field's `Rc` is cloned BEFORE the item is evaluated, and the
-                // field's own reference is dropped after — which is what puts
-                // the refcount back to 1 and makes the append O(1), and what
-                // keeps the general path's order: a callee that reaches the same
-                // field mid-statement (`t.xs.push(f(t))` with `f` taking
-                // `t: modify T`) mutates its own copy and loses the write, which
-                // is what all three engines do today.
-                //
-                // Locals only, exactly as the take is, and for the reason spelled
-                // out on `take_place`: between dropping the field's reference and
-                // storing the grown array back, an out-of-memory reserve can
-                // escape, and only a local's frame is guaranteed popped by the
-                // one boundary — `vyrn test` — that recovers from a trap. A
-                // global keeps the copy and stays quadratic.
                 //
                 // The slot is inspected BEFORE the item is evaluated, so a shape
                 // this cannot handle falls through having evaluated nothing.
@@ -2284,33 +2325,24 @@ impl<'a> Interp<'a> {
                                     _ => None,
                                 })
                         });
-                        if let Some((mut arr, elem_ty)) = snap {
-                            let item = self.expr(&args[1], scope)?;
-                            // Validate before anything is disturbed: a trap here
-                            // must leave the record exactly as it was, which is
-                            // what the backends do (they check the pushed element
-                            // before the field store).
-                            let item = match &elem_ty {
-                                Some(t) => self.coerce(item, t)?,
-                                None => item,
-                            };
-                            // Drop the field's own reference to the array. What
-                            // it holds now is discarded either way: unchanged it
-                            // is the snapshot, and changed it is a mid-statement
-                            // write the general path also overwrites.
-                            for fr in scope.iter_mut().rev() {
-                                let Some(slot) = fr.get_mut(name) else { continue };
-                                if let Val::Record(map) = &mut slot.v {
-                                    if let Some(cur) = map.get_mut(field) {
-                                        *cur = Val::Unit;
+                        if let Some((arr, elem_ty)) = snap {
+                            pushed = Some(self.append_snapshot(
+                                arr,
+                                &args[1],
+                                elem_ty.as_ref(),
+                                scope,
+                                |scope| {
+                                    for fr in scope.iter_mut().rev() {
+                                        let Some(slot) = fr.get_mut(name) else { continue };
+                                        if let Val::Record(map) = &mut slot.v {
+                                            if let Some(cur) = map.get_mut(field) {
+                                                *cur = Val::Unit;
+                                            }
+                                        }
+                                        break;
                                     }
-                                }
-                                break;
-                            }
-                            let elems = std::rc::Rc::make_mut(&mut arr);
-                            reserve_vec(elems, 1)?;
-                            elems.push(item);
-                            pushed = Some(Val::Array(arr));
+                                },
+                            )?);
                         }
                     }
                 }
@@ -2436,10 +2468,11 @@ impl<'a> Interp<'a> {
                         return Err(format!("array index must be an Int64, found {other:?}").into())
                     }
                 };
-                let mut v = self.expr(value, scope)?;
                 // Coerce into the element type of the array binding's declared
                 // type (validated element types validate here, exactly like a
-                // `push` argument or an annotated `let`).
+                // `push` argument or an annotated `let`). Resolved before the
+                // value runs because the append below needs it too; a binding's
+                // declared type cannot change under evaluation.
                 let elem_of = |s: &Slot| match &s.ty {
                     Some(Type::Array(t))
                     | Some(Type::ArrayN(t, _))
@@ -2451,9 +2484,109 @@ impl<'a> Interp<'a> {
                     .rev()
                     .find_map(|f| f.get(name).and_then(elem_of))
                     .or_else(|| self.globals.borrow().get(name).and_then(elem_of));
-                if let Some(t) = &elem_ty {
-                    v = self.coerce(v, t)?;
+                // `rows[i].push(v)` on a LOCAL array of arrays: append IN PLACE.
+                // The third and last receiver form, and the SAME snapshot as
+                // `t.xs.push(v)` rather than a third copy of it — because the
+                // shape is the same shape. The parser emits one `Stmt::IndexSet`
+                // for this statement (`rows[i] = push(rows[i], v)`), exactly as
+                // it emits one `Stmt::SetField` for the field form; nothing is
+                // split into a temp, so nothing has to be taken. It was the last
+                // quadratic left: 211 / 401 / 1,744 / 9,420 ms at
+                // N = 4,000 → 32,000 against a flat 49 / 47 / 58 / 55 for the
+                // same appends on a plain local, both compiled backends flat
+                // throughout. `at` clones the row's `Rc` to refcount 2 and
+                // `push`'s `Rc::make_mut` copies the whole row per append.
+                //
+                // The receiver's index is the parser's CLONE of this statement's
+                // own, so the general path reads it a second time and
+                // `rows[f()].push(g())` calls `f` twice — on all three engines,
+                // checked. Not this milestone's to change (finding 4 hoisted the
+                // equivalent double read out of `rows[f()][j] = v`, and the same
+                // hoist here would move IR in both backends), so the fast path
+                // only fires when re-reading the index is unobservable: a
+                // variable or a literal, which is what a loop writes. Anything
+                // else keeps the copy and stays quadratic, like a global does.
+                let mut pushed = None;
+                if let (Expr::Call { name: fname, args, .. }, true) =
+                    (value, matches!(index, Expr::Var { .. } | Expr::Int(_)))
+                {
+                    if fname == "push" && args.len() == 2 {
+                        if let Expr::Call { name: at, args: iargs, .. } = &args[0] {
+                            if at == "at"
+                                && iargs.len() == 2
+                                && matches!(&iargs[0], Expr::Var { name: n, .. } if n == name)
+                                && matches!(&iargs[1], Expr::Var { .. } | Expr::Int(_))
+                                // Re-read rather than assume it is the same
+                                // expression: a `Var` lookup is free and this is
+                                // what says the row grown is the row stored back.
+                                && matches!(self.expr(&iargs[1], scope)?, Val::Int(n) if n == idx)
+                            {
+                                // The item's type is one level in from the outer
+                                // array's element type. A fixed or small row
+                                // carries a capacity only the general path
+                                // enforces, so those fall through, exactly as
+                                // the two sibling fast paths bail on them.
+                                let item_ty = match &elem_ty {
+                                    None => Some(None),
+                                    Some(t) => match crate::types::resolve(t, &self.type_map) {
+                                        Type::Array(i) => Some(Some(*i)),
+                                        _ => None,
+                                    },
+                                };
+                                // Inspected BEFORE the item is evaluated, so a
+                                // shape this cannot handle — an out-of-bounds
+                                // index, a global — falls through to the general
+                                // path having evaluated nothing, and traps with
+                                // `at`'s own wording.
+                                let snap = item_ty.and_then(|e| {
+                                    scope.iter().rev().find_map(|fr| fr.get(name)).and_then(|s| {
+                                        match &s.v {
+                                            Val::Array(rows) if idx >= 0 => {
+                                                match rows.get(idx as usize) {
+                                                    Some(Val::Array(elems)) => {
+                                                        Some((elems.clone(), e))
+                                                    }
+                                                    _ => None,
+                                                }
+                                            }
+                                            _ => None,
+                                        }
+                                    })
+                                });
+                                if let Some((arr, item_ty)) = snap {
+                                    pushed = Some(self.append_snapshot(
+                                        arr,
+                                        &args[1],
+                                        item_ty.as_ref(),
+                                        scope,
+                                        |scope| {
+                                            for fr in scope.iter_mut().rev() {
+                                                let Some(slot) = fr.get_mut(name) else { continue };
+                                                if let Val::Array(rows) = &mut slot.v {
+                                                    std::rc::Rc::make_mut(rows)[idx as usize] =
+                                                        Val::Unit;
+                                                }
+                                                break;
+                                            }
+                                        },
+                                    )?);
+                                }
+                            }
+                        }
+                    }
                 }
+                // The write-back is the ordinary one: the fast path only decided
+                // what value the element gets (and already coerced its item).
+                let v = match pushed {
+                    Some(v) => v,
+                    None => {
+                        let v = self.expr(value, scope)?;
+                        match &elem_ty {
+                            Some(t) => self.coerce(v, t)?,
+                            None => v,
+                        }
+                    }
+                };
                 for frame in scope.iter_mut().rev() {
                     if let Some(Slot {
                         v: Val::Array(items),
