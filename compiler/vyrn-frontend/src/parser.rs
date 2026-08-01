@@ -2612,9 +2612,13 @@ impl Parser {
             // `Float64` is 64-bit IEEE-754; `Float32` is 32-bit.
             "Float64" => Type::Float,
             "Float32" => Type::Float32,
-            // Four `Float32` lanes as one value, and the four `Bool` lanes a
-            // comparison of two of them yields (RFC-0083).
+            // Four `Float32` lanes as one value, four `Int32` lanes (RFC-0083
+            // M3), and the four `Bool` lanes a comparison of either pair yields.
+            // ONE mask for both widths: an `I32x4` comparison answers four
+            // questions about four 32-bit lanes, which is the same shape and the
+            // same `<4 x i32>` / `v128` a float comparison produces.
             "F32x4" => Type::F32x4,
+            "I32x4" => Type::I32x4,
             "Mask32x4" => Type::Mask32x4,
             // The unsized names are removed — point at the sized spellings.
             "Int" => {
@@ -3724,14 +3728,20 @@ impl Parser {
                         // three backends must decode.
                         let mut args = args;
                         let name = match args.first() {
-                            Some(Expr::Var { name: ty, .. }) if ty == "F32x4" => {
+                            // M3's `I32x4.*` is the table entry M1 predicted, not
+                            // a receiver the three backends have to decode: one
+                            // internal prefix per width, assigned here.
+                            Some(Expr::Var { name: ty, .. })
+                                if ty == "F32x4" || ty == "I32x4" =>
+                            {
+                                let pre = if ty == "F32x4" { "@f32x4" } else { "@i32x4" };
                                 let mut it = wrote.chars();
                                 let m = match it.next() {
                                     Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
                                     None => name.clone(),
                                 };
                                 args.remove(0);
-                                format!("@f32x4{m}")
+                                format!("{pre}{m}")
                             }
                             _ => name,
                         };

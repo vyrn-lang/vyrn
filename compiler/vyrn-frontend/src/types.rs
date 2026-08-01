@@ -55,6 +55,16 @@ pub fn numeric_conv_target(name: &str) -> Option<Type> {
     }
 }
 
+/// `I32x4`'s lane type (RFC-0083 M3), spelled once for all three engines.
+///
+/// SIGNED, and that is the whole of the signedness decision: wasm offers
+/// `i32x4.min_s`/`min_u` and a signed and an unsigned form of every comparison,
+/// and the lane type picks one half of each pair rather than the operation
+/// naming it. The other half belongs to a `U32x4` that is not proposed — the
+/// choice is the operand's, so a second set of spellings on one type would be
+/// two answers to a question the type already answered.
+pub const INT32: Type = Type::IntN { bits: 32, signed: true };
+
 /// The lane `v.lane(k)` reads, or `None` when `k` is not a compile-time constant
 /// in `0..lanes` (RFC-0083).
 ///

@@ -178,6 +178,42 @@ fn nearest_lowers_to_ties_to_even_and_not_to_ties_away() {
     );
 }
 
+/// An `I32x4` comparison is SIGNED, and that is the M3 decision a wrong opcode
+/// hides best: `icmp slt` and `icmp ult` agree on every value except across the
+/// sign bit, so `min(Int32.min, 1)` is the only place the difference shows.
+/// `examples/simdint.vyrn` prints it, but only under `--ignored` parity and only
+/// with a clang; this fails in the default suite.
+///
+/// The wrap is pinned in the same body, and for a related reason. `add <4 x i32>`
+/// carries no `nsw`/`nuw`, so `Int32.max + 1` is `Int32.min` — the language's
+/// overflow rule at every other width, and what `i32x4.add` does with no choice
+/// in the matter. An `nsw` here would make the same expression UB natively and a
+/// wrap on wasm: a divergence that shows at exactly one input and nowhere else.
+#[test]
+fn integer_lane_compare_is_signed_and_the_add_does_not_promise_no_overflow() {
+    let body = body_of(
+        "fn both(a: I32x4, b: I32x4) -> Int32 {\n\
+         if (a < b).anyTrue() { return (a + b).lane(0) }\n\
+         return (a - b).lane(0)\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(both(I32x4.splat(1), I32x4.splat(2)))\n\
+         return 0\n\
+         }\n",
+        "both",
+    );
+    assert!(body.contains("icmp slt <4 x i32>"), "not a signed compare:\n{body}");
+    assert!(
+        !body.contains("icmp ult <4 x i32>"),
+        "`ult` is the `U32x4` comparison and answers false for `Int32.min < 1`:\n{body}"
+    );
+    assert!(body.contains("add <4 x i32>"), "no vector add at all:\n{body}");
+    assert!(
+        !body.contains("nsw <4 x i32>") && !body.contains("nuw <4 x i32>"),
+        "integer vector arithmetic WRAPS; a no-overflow flag makes it UB:\n{body}"
+    );
+}
+
 /// The mask reductions are ONE reduction over the vector, not four lane reads
 /// and a branch chain — which is the whole reason they are builtins rather than
 /// the Vyrn `||`/`&&` `examples/simdbench.vyrn` prices against them. `-O2` can

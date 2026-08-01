@@ -1,10 +1,11 @@
 # RFC-0083 — Portable SIMD, Without `unsafe` and Without Breaking Parity
 
-- **Status:** **Accepted.** **M1 and M2 shipped, and M2's surface is complete**
-  (`examples/simd.vyrn`, `examples/simdmem.vyrn`, `examples/simdround.vyrn`,
-  three-engine byte-identical including NaN and the exact halves — see the two
-  "As landed" notes). M3 is gated on M2's parity result, in the manner RFC-0081
-  established.
+- **Status:** **Accepted.** **M1, M2 and M3 shipped** (`examples/simd.vyrn`,
+  `examples/simdmem.vyrn`, `examples/simdround.vyrn`, `examples/simdint.vyrn`,
+  three-engine byte-identical including NaN, the exact halves and both ends of
+  `Int32` — see the three "As landed" notes). M3 took **`I32x4` only**, on the
+  licence the milestone gave itself; `F64x2` and `I64x2` are priced and refused
+  in its note.
 - **Depends on:** RFC-0077 (the direct wasm backend — `wasm-encoder` is what
   emits the instructions), RFC-0078 (the census — `View` is the category these
   join), RFC-0082 (the capability boundary this narrows by one row)
@@ -163,7 +164,9 @@ over `Type` and both were in the textual backend.
   So `I32x4` is not `F32x4` with a different lane type: it loses `/`, gains a
   signedness question on `min`/`max` that Vyrn's `Int32` vs `UInt32` can answer,
   and `I64x2` is thinner still. Whoever takes M3 should price each width
-  separately and is free to ship one.
+  separately and is free to ship one. **Taken, `I32x4` only — and the pricing
+  went further than this table expects: `min`/`max` do not ship either.** See
+  the "As landed — M3" note.
 
   Two further findings from the same pass, both worth having before M3 starts:
 
@@ -524,6 +527,140 @@ Two smaller things the RFC above got wrong or left out:
   three kinds: two that needed a semantics chosen for them, one that is a bit
   operation with no question to answer, and one that is the only irreducible
   primitive in the whole RFC.
+
+### As landed — M3 (`I32x4` only)
+
+```vyrn
+let a = I32x4(1, 2, 3, 4)          // + - * (no /), - and ~ unary
+let b = I32x4.splat(10)            // & | ^ DIRECTLY, not through a mask
+let m = a < b                      // Mask32x4 — the same one F32x4 yields
+let v = I32x4.load(xs, i)          // xs: Array<Int32>, ONE bounds check
+I32x4.store(xs, i, v)
+a.lane(0)  a.replaceLane(2, 99)    // the same constant-index rule
+```
+
+`F64x2` and `I64x2` are **not shipped**, on the licence this milestone gave
+itself ("free to ship one"), and each for its own reason. `I64x2` has no
+`min`/`max` at all, no `MulHigh`, and no `AllTrue` before the relaxed proposal —
+the RFC already called it the thinnest, and after M3's finding below there is
+nothing left in it but the representation. `F64x2` would be the substantial one
+and it needs a `Mask64x2` (M2's note, still correct: two lanes, still a `v128`),
+so it is a milestone with a type decision in it rather than a table entry.
+
+**The signedness question is answered by the lane type, and the answer is that
+there is only one right instruction rather than a choice between two.** The
+lanes are `Int32`, so `i32x4.lt_s` is the comparison and `lt_u` is not an
+alternative spelling — it is the operation a `U32x4` would name. Reaching the
+unsigned half needs a second *type*, because the choice belongs to the operand
+and not to the operation; a `minUnsigned` beside a `min` would be two answers to
+a question the type had already answered. `U32x4` is therefore named and not
+proposed, in the shape this RFC uses for reinterpretation across widths. What
+makes this checkable rather than asserted is that **the two rules disagree only
+across the sign bit**: `Int32.min < 1` is true signed and false unsigned, and
+`examples/simdint.vyrn` prints that lane through every comparison.
+
+**The mask is `Mask32x4`, shared and not duplicated.** M2's note warns that
+`F64x2` would need a `Mask64x2`, and the reason is *lane width* — which is
+exactly what `I32x4` does not change. Four lanes of 32 bits produce four answers
+in a `<4 x i32>` / `v128` of all-ones and all-zeros, bit for bit what a float
+comparison produces, so the closed-inhabitants argument `anyTrue`/`allTrue` rest
+on carries over unchanged rather than being re-argued. The consequence is that
+`(edge < ones) & (f < F32x4.splat(2.5))` type-checks, which the example prints:
+a mask is four booleans about four lanes, and nothing in it remembers what
+compared them.
+
+**The wrap matches the scalar, and it was never at risk of not doing so.** wasm
+has saturating adds, but only at i8 and i16, so at this width there was nothing
+to pick wrongly — `i32x4.add`, `add <4 x i32>` and `i32::wrapping_add` all wrap,
+and the only way to break it would be an `nsw` flag on the textual side, which
+`integer_lane_compare_is_signed_and_the_add_does_not_promise_no_overflow` pins in
+the default suite along with the signed compare. `-Int32.min` is `Int32.min` on
+all three; the example prints the scalar `Int32` answer on the line above each
+vector one, so a vector that saturated where the scalar wraps would be two
+different numbers rather than a claim.
+
+**What M3 refuses, and the number that refuses it.** `i32x4.min_s`, `max_s` and
+`abs` all exist in the encoder, all three were built end to end, and all three
+were **deleted**. Natively LLVM compiles the Vyrn `if a < b` into the same
+`pminsd`: 5.98 µs against 5.98 µs per 65536 lanes, the builtin marginally
+*behind*. On wasm, over 200 M lanes, the builtin walk is 139 ms and the Vyrn one
+146 ms — **1.05x**, with `max` at 1.14x and `abs` at 1.04x. `select` was refused
+at 1.06x, so this is the bar the RFC had already set. The reason the two widths
+answer differently is worth stating because it generalises: what earns
+`F32x4.min` its row is the NaN rule and the signed zero, twenty lines of
+`floatBits` a program would have to get right; an integer `min` is one
+comparison, and there is nothing there for a builtin to be faster at.
+
+**So M3 adds four census rows and not one is `Measured`, 79 → 83.** `I32x4` and
+`@i32x4Splat` are `View` (the representation, as M1's three were), `@i32x4Load`
+and `@i32x4Store` are `Memory` (a bounds trap, as `at` is). `@lane` and
+`@replaceLane` serve both widths from one arm each — a lane accessor is about the
+lane *index*, and that rule did not change. Every operator is a `BinOp` or a
+`UnOp` the interpreter's `Call` dispatch never sees, which is why `+ - * & | ^ ~
+-` and all six comparisons cost nothing here, exactly as M1's arithmetic and M2's
+comparisons did. A whole width for four rows is what it looks like when the
+census is asked before the arms are written rather than after.
+
+**The measurement method changed, and that is a finding about the earlier rows
+rather than only about these.** Cranelift does not inline across wasm functions,
+and the Vyrn half of every benchmark in `examples/simdbench.vyrn` is spelled as
+four calls to a one-lane helper. For a long helper that is a rounding error; for
+a one-comparison helper it is the entire measurement. `I32x4.min` reads **2.0x**
+wasm with the helper spelling and **1.05x** written inline, and only the second
+number is about the instruction. Re-timing M2's `@f32x4Abs` the same way says the
+same thing: 152 ms builtin, 415 ms via the helper (2.7x), **156 ms written inline
+(1.03x)** — so the row that reads "1.0x native but 3.5x wasm ... which is what
+keeps it" is quoting a call Cranelift did not inline. **That row is left alone
+here on purpose**: deleting a shipped builtin is a language change that owes its
+own milestone and its own parity run, not a side effect of M3. It is recorded so
+the next reader has the number, and the four rounding rows deserve the same
+re-timing (their Vyrn halves are twenty lines, so they are the likeliest to
+survive it).
+
+**Three engines byte-identical on `examples/simdint.vyrn`** — construction,
+splat, both lane accessors with every lane replaced in turn (the lane-order pin),
+`+ - *` and `-` at both ends of the range with the scalar `Int32` printed beside
+each, `65536 * 65536` and `Int32.max * Int32.max` (both unrepresentable, so both
+are the wrap and nothing else), `-Int32.min`, all six comparisons against
+`Int32.min` and `Int32.max`, both mask reductions, a mask combined across the two
+widths, `& | ^ ~` including De Morgan lane-wise and `~` across the sign bit, and
+a load/store round trip carrying the boundary values through memory (where a
+sign-extending load would go wrong and nowhere else). The full sweep is 102
+examples, three engines, stdout/stderr/exit code, run serially with the wasm
+column confirmed present — the harness prints `no wasmtime` when it is not, and
+did not. `wasmtime -W simd=n,relaxed-simd=n` rejects the module with `SIMD
+support is not enabled`.
+
+Four smaller things, in the order they bite:
+
+- **No `/`, and it reports itself by name.** `Div` on two `I32x4`s gets its own
+  checker arm rather than falling through to "arithmetic needs matching numeric
+  operands", which would be a confusing thing to say about two operands that
+  plainly match. There is no `i32x4.div` because no hardware has SIMD integer
+  divide.
+- **`<<` and `>>` are refused, and this is the one refusal that is about
+  semantics rather than a ratio.** wasm's `i32x4.shl` **masks** the count mod 32,
+  LLVM's `shl <4 x i32>` is **poison** past the width, and Vyrn's scalar `<<`
+  **traps** (RFC-0045). Three answers to one question, and the vector spelling of
+  an operation must not mean something different from the scalar one. Demanding a
+  constant count — `lane`'s rule, which would make it total — works, and would
+  also make it the only binary operator in the language whose right operand must
+  be a literal. Nothing measured asked for it.
+- **No conversion between the widths.** `i32x4.trunc_sat_f32x4_s` and
+  `f32x4.convert_i32x4_s` exist and are a *conversion*, not the free
+  reinterpretation this RFC already recorded as needing an explicit operation.
+  Neither is proposed; named so the absence is a decision.
+- **No second trap example.** `@i32x4Load`/`@i32x4Store` share the float pair's
+  bounds check literally — one `if` in each backend, since the element stride is
+  4 either way — so `examples/simdoob.vyrn` already covers both branches. A
+  duplicate would pin the same code twice and read as though it pinned more.
+
+One correction to the census's own scanner. The store guard is
+`if name == "@f32x4Store" || name == "@i32x4Store"` — one body, two widths — and
+the scan in `primitives.rs` anchored on the literal `if name == "`, so it saw
+only the first and reported the second as a stale row. The needle is now
+`name == "`; every match in that region is a guard, and the existing assertion is
+what says so if that ever stops being true.
 
 ## What this does not decide
 

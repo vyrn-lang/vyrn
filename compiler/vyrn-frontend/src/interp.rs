@@ -124,6 +124,11 @@ pub enum Val {
     /// IEEE-754 single-precision operation, so nothing reassociates and the loop
     /// below produces the same bits a hardware `f32x4.add` does.
     F32x4([f32; 4]),
+    /// Four `Int32` lanes as one value (RFC-0083 M3). `i32` and not the `i64`
+    /// [`Val::IntN`] carries, because a vector lane has exactly one width and
+    /// wrapping it back after every operation would be re-deriving what the
+    /// narrower type already guarantees: `i32::wrapping_add` IS `i32x4.add`.
+    I32x4([i32; 4]),
     /// Four `Bool` lanes — a lane-wise comparison's result (RFC-0083 M2). Four
     /// `bool`s rather than an `[i32; 4]` of all-ones/all-zeros, because the type
     /// has no other inhabitants: the backends' bit patterns are their own
@@ -604,6 +609,20 @@ fn fmaximum(a: f32, b: f32) -> f32 {
         a
     } else {
         b
+    }
+}
+
+/// One `I32x4` lane out of a `Val` (RFC-0083 M3).
+///
+/// Through [`convert_val`] rather than off the `Val` directly, for the reason a
+/// float lane goes through it: an integer LITERAL evaluates to a `Val::Int` (i64)
+/// while the checker has already typed it `Int32`, and the backends truncate it
+/// with a `trunc i64 to i32`. Doing anything else here would make `I32x4(1, 2,
+/// 3, 4)` a different value in the interpreter than in the other two engines.
+fn i32_lane(v: Val) -> Result<i32, Ctrl> {
+    match convert_val(v, &Type::IntN { bits: 32, signed: true }) {
+        Val::IntN { v, .. } => Ok(v as i32),
+        other => Err(format!("I32x4 lane: {other:?}").into()),
     }
 }
 
@@ -2864,11 +2883,19 @@ impl<'a> Interp<'a> {
                     // exists rather than leaving `F32x4.splat(0.0) - v` as the
                     // spelling.
                     (UnOp::Neg, Val::F32x4(v)) => Ok(Val::F32x4(v.map(|x| -x))),
+                    // The integer negation WRAPS, exactly as the scalar one above
+                    // does and as `i32x4.sub` from zero does: `-Int32.min` is
+                    // `Int32.min`. Bare `-` would panic in a debug build.
+                    (UnOp::Neg, Val::I32x4(v)) => Ok(Val::I32x4(v.map(|x| x.wrapping_neg()))),
                     (UnOp::Not, Val::Bool(b)) => Ok(Val::Bool(!b)),
                     // `~m` complements a mask lane-wise (RFC-0083 M2) — `~` and not
                     // `!` because `!` is the Bool operator and a mask is four
                     // answers, the same separation `&`/`&&` keeps in `binop`.
                     (UnOp::BitNot, Val::Mask32x4(m)) => Ok(Val::Mask32x4(m.map(|b| !b))),
+                    // An integer vector complements its lanes directly — `v128.not`
+                    // has no lane width, so this is `xor` against all-ones either
+                    // way, and the mask reaches it through the same instruction.
+                    (UnOp::BitNot, Val::I32x4(v)) => Ok(Val::I32x4(v.map(|x| !x))),
                     // `~n` complements within the operand's width (RFC-0045):
                     // the literal `Int` at 64 bits, a sized integer at its own
                     // width (re-wrapped so an unsigned complement stays in range).
@@ -3151,9 +3178,9 @@ impl<'a> Interp<'a> {
                 // elements, bounds-checked ONCE. Handled here rather than below
                 // because it mutates the receiver, and the receiver is copy-on-
                 // write: storing into the evaluated VALUE would store into a copy.
-                if name == "@f32x4Store" {
+                if name == "@f32x4Store" || name == "@i32x4Store" {
                     let Some(Expr::Var { name: recv, .. }) = args.first() else {
-                        return Err("`F32x4.store` needs a mutable array binding".into());
+                        return Err("`.store` needs a mutable array binding".into());
                     };
                     let recv = recv.clone();
                     let idx = match self.expr(&args[1], scope)? {
@@ -3164,17 +3191,24 @@ impl<'a> Interp<'a> {
                             )
                         }
                     };
-                    let lanes = match self.expr(&args[2], scope)? {
-                        Val::F32x4(v) => v,
-                        other => return Err(format!("F32x4.store: {other:?}").into()),
+                    // The lane VALUES the array will hold, boxed by width: the
+                    // element type is the lane type, so a store is four ordinary
+                    // element writes and the array stays an ordinary array.
+                    let lanes: Vec<Val> = match self.expr(&args[2], scope)? {
+                        Val::F32x4(v) => v.iter().map(|l| Val::Float32(*l)).collect(),
+                        Val::I32x4(v) => v
+                            .iter()
+                            .map(|l| Val::IntN { v: i64::from(*l), bits: 32, signed: true })
+                            .collect(),
+                        other => return Err(format!(".store: {other:?}").into()),
                     };
-                    let mut put = |items: &mut std::rc::Rc<Vec<Val>>| -> Result<Val, Ctrl> {
+                    let put = |items: &mut std::rc::Rc<Vec<Val>>| -> Result<Val, Ctrl> {
                         if idx < 0 || idx > items.len() as i64 - 4 {
                             return Err(vec_oob(idx).into());
                         }
                         let items = std::rc::Rc::make_mut(items);
                         for (k, l) in lanes.iter().enumerate() {
-                            items[idx as usize + k] = Val::Float32(*l);
+                            items[idx as usize + k] = l.clone();
                         }
                         Ok(Val::Unit)
                     };
@@ -3188,7 +3222,7 @@ impl<'a> Interp<'a> {
                     {
                         return put(items);
                     }
-                    return Err("`F32x4.store` needs a mutable array binding".into());
+                    return Err("`.store` needs a mutable array binding".into());
                 }
                 // `m.remove(k)` (RFC-0028) — remove the entry for `k`, shifting
                 // later entries down (order-preserving), returning whether it was
@@ -3323,10 +3357,28 @@ impl<'a> Interp<'a> {
                         Val::Float32(f) => Ok(Val::F32x4([f; 4])),
                         other => Err(format!("F32x4.splat: {other:?}").into()),
                     },
+                    // The integer width (RFC-0083 M3), same two shapes. An integer
+                    // literal is a `Val::Int` (i64) here for the reason a float
+                    // literal is a `Val::Float`, so it goes through `convert_val`
+                    // to be truncated exactly as the backends' `trunc i64 to i32`
+                    // truncates it.
+                    "I32x4" => {
+                        let mut lanes = [0i32; 4];
+                        for (i, v) in vals.into_iter().enumerate() {
+                            lanes[i] = i32_lane(v)?;
+                        }
+                        Ok(Val::I32x4(lanes))
+                    }
+                    "@i32x4Splat" => Ok(Val::I32x4([i32_lane(vals.remove(0))?; 4])),
                     // The index was proven constant and in range by the checker,
                     // so there is nothing to bounds-check and no trap to reach.
                     "@lane" => match (&vals[0], &vals[1]) {
                         (Val::F32x4(v), Val::Int(k)) => Ok(Val::Float32(v[*k as usize])),
+                        (Val::I32x4(v), Val::Int(k)) => Ok(Val::IntN {
+                            v: i64::from(v[*k as usize]),
+                            bits: 32,
+                            signed: true,
+                        }),
                         (Val::Mask32x4(m), Val::Int(k)) => Ok(Val::Bool(m[*k as usize])),
                         (a, b) => Err(format!("lane: {a:?}[{b:?}]").into()),
                     },
@@ -3335,18 +3387,25 @@ impl<'a> Interp<'a> {
                     // The lane goes through `convert_val` for the reason the
                     // constructor's do: a float LITERAL is a `Val::Float` here.
                     "@replaceLane" => {
-                        let mut v = match &vals[0] {
-                            Val::F32x4(v) => *v,
-                            other => return Err(format!("replaceLane: {other:?}").into()),
-                        };
                         let Val::Int(k) = vals[1] else {
                             return Err(format!("replaceLane index: {:?}", vals[1]).into());
                         };
-                        v[k as usize] = match convert_val(vals.remove(2), &Type::Float32) {
-                            Val::Float32(f) => f,
-                            other => return Err(format!("replaceLane value: {other:?}").into()),
-                        };
-                        Ok(Val::F32x4(v))
+                        let recv = vals[0].clone();
+                        let x = vals.remove(2);
+                        match recv {
+                            Val::F32x4(mut v) => {
+                                v[k as usize] = match convert_val(x, &Type::Float32) {
+                                    Val::Float32(f) => f,
+                                    o => return Err(format!("replaceLane value: {o:?}").into()),
+                                };
+                                Ok(Val::F32x4(v))
+                            }
+                            Val::I32x4(mut v) => {
+                                v[k as usize] = i32_lane(x)?;
+                                Ok(Val::I32x4(v))
+                            }
+                            other => Err(format!("replaceLane: {other:?}").into()),
+                        }
                     }
                     // Mask reductions (RFC-0083 M2). This is the reference answer
                     // the two backends' single instructions have to match, and it
@@ -3387,6 +3446,35 @@ impl<'a> Interp<'a> {
                         }
                         Ok(Val::F32x4(lanes))
                     }
+                    // The integer load (RFC-0083 M3), the same one check for four
+                    // elements. Written separately rather than merged with the
+                    // float one because the ELEMENT type is what differs and the
+                    // census scan reads these arm heads.
+                    "@i32x4Load" => {
+                        let (Val::Array(xs), Val::Int(i)) = (&vals[0], &vals[1]) else {
+                            return Err(format!("I32x4.load: {:?}", vals[0]).into());
+                        };
+                        let (i, len) = (*i, xs.len() as i64);
+                        if i < 0 || i > len - 4 {
+                            return Err(vec_oob(i).into());
+                        }
+                        let mut lanes = [0i32; 4];
+                        for (k, l) in lanes.iter_mut().enumerate() {
+                            *l = i32_lane(xs[(i + k as i64) as usize].clone())?;
+                        }
+                        Ok(Val::I32x4(lanes))
+                    }
+                    // (`@i32x4Min`/`Max`/`Abs` were here, lowering to
+                    // `i32x4.min_s`/`max_s`/`abs`, and were deleted for `select`'s
+                    // reason with `select`'s number. Natively LLVM compiles the
+                    // Vyrn `if a < b` into the same `pminsd` — 5.98 µs against
+                    // 5.98 µs per 65536 lanes — and on wasm the builtin wins 1.05x
+                    // once the Vyrn version is written without helper calls. An
+                    // integer `min` is ONE comparison; the float one below has a
+                    // NaN rule and a signed zero to reproduce, which is why that
+                    // one is 3.7x and this one was not worth a row. See RFC-0083's
+                    // M3 note.)
+                    //
                     // `min`/`max` are IEEE-754-2019 `minimum`/`maximum`, which is
                     // wasm's `f32x4.min` rule: NaN in either operand propagates,
                     // and `-0.0` orders below `+0.0`. Written out rather than
@@ -4396,6 +4484,44 @@ impl<'a> Interp<'a> {
             }
             return Ok(Val::F32x4(out));
         }
+        // Lane-wise integer arithmetic (RFC-0083 M3). Wrapping, which is the
+        // language's overflow rule at every other width and also what `i32x4.add`
+        // and `add <4 x i32>` do — a SATURATING add where the scalar wraps would
+        // be a divergence, so the `wrapping_*` spelling is written out rather
+        // than left to a release build's `+`. There is no `Div` arm: the checker
+        // refuses `/` on this type, because no instruction exists to lower it to.
+        if let (Val::I32x4(a), Val::I32x4(b)) = (&l, &r) {
+            // SIGNED comparison, from the lane type. `i32x4.lt_u` is the operation
+            // a `U32x4` would name, and the difference is visible exactly at
+            // `Int32.min`, which reads as the largest value unsigned.
+            if matches!(op, Lt | LtEq | Gt | GtEq | Eq | NotEq) {
+                let mut m = [false; 4];
+                for i in 0..4 {
+                    m[i] = match op {
+                        Lt => a[i] < b[i],
+                        LtEq => a[i] <= b[i],
+                        Gt => a[i] > b[i],
+                        GtEq => a[i] >= b[i],
+                        Eq => a[i] == b[i],
+                        _ => a[i] != b[i],
+                    };
+                }
+                return Ok(Val::Mask32x4(m));
+            }
+            let mut out = [0i32; 4];
+            for i in 0..4 {
+                out[i] = match op {
+                    Add => a[i].wrapping_add(b[i]),
+                    Sub => a[i].wrapping_sub(b[i]),
+                    Mul => a[i].wrapping_mul(b[i]),
+                    BitAnd => a[i] & b[i],
+                    BitOr => a[i] | b[i],
+                    BitXor => a[i] ^ b[i],
+                    _ => return Err("type error in vector binop (should have been caught)".into()),
+                };
+            }
+            return Ok(Val::I32x4(out));
+        }
         // Combining masks (RFC-0083 M2). `&`/`|`/`^` and not `&&`/`||`, which are
         // the SHORT-CIRCUITING Bool operators — there is nothing to short-circuit
         // in four lanes computed at once, and the bitwise family makes no such
@@ -4850,16 +4976,17 @@ impl<'a> Interp<'a> {
         }
         let d = depth + 1;
         match ty {
-            // `F32x4`/`Mask32x4` are here for the reason the scalars are: their
-            // lanes are already `f32`/`bool`, so there is nothing to round and
-            // nothing to validate (RFC-0083 — they are values, and a value type
-            // carries no predicate).
+            // `F32x4`/`I32x4`/`Mask32x4` are here for the reason the scalars are:
+            // their lanes are already `f32`/`i32`/`bool`, so there is nothing to
+            // round and nothing to validate (RFC-0083 — they are values, and a
+            // value type carries no predicate).
             Type::Int
             | Type::Float
             | Type::Bool
             | Type::Str
             | Type::Unit
             | Type::F32x4
+            | Type::I32x4
             | Type::Mask32x4 => true,
             Type::Named(n) => match self.types.get(n.as_str()) {
                 // An unknown name coerces to itself in the walk below.
