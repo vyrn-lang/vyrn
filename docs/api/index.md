@@ -6,6 +6,7 @@
 - [std/codecs](std/codecs.md) — std/codecs — hex, base64 and percent encoding, written in Vyrn (RFC-0078 M4b).
 - [std/connect](std/connect.md) — std/connect — Connect wire compatibility as a library (RFC-0038), built
 - [std/contract](std/contract.md) — std/contract — check a module against a module contract (RFC-0071).
+- [std/fallible](std/fallible.md)
 - [std/graphql](std/graphql.md) — std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
 - [std/hash](std/hash.md) — std/hash — non-cryptographic byte hashing (RFC-0045).
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).
