@@ -1,6 +1,10 @@
 # RFC-0075 — `Stream<T>`: Cleanup as an Obligation, Not a Convention
 
-- **Status:** Draft
+- **Status:** **M1 shipped** — `Stream<T>` is a linear resource, an abandoned
+  stream does not compile (`examples/stream_abandoned.vyrn`), and release runs on
+  normal end, `break` and early `return`. M2–M4 unstarted; **M4 additionally
+  depends on RFC-0074, which has no implementation at all.** One claim in this
+  document is now known false — see "As landed — M1" on the trap row.
 - **Depends on:** RFC-0074 (`sse` / `ws` projections — the transports that
   consume streams), RFC-0072 (audience, derived RPC), RFC-0037 (stored closures
   / defunctionalization — the producer state below), RFC-0060 (`break` /
