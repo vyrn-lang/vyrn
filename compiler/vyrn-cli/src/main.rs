@@ -74,7 +74,6 @@ fn deny_warnings() -> bool {
     std::env::var("VYRN_DENY_WARNINGS").is_ok()
 }
 
-
 /// The microarchitecture a native build is compiled for.
 ///
 /// A curated set instead of a passthrough `-march` string, for two reasons. A
@@ -162,8 +161,9 @@ fn native_target_for(root: &str) -> Result<NativeTarget, String> {
         // Already validated in `real_main`; a bad value here came from the
         // environment directly, so it still gets a diagnostic rather than a
         // silent fallback to a different target than the one asked for.
-        return NativeTarget::parse(&v)
-            .ok_or_else(|| format!("unknown VYRN_NATIVE_TARGET `{v}` (expected one of: {NATIVE_TARGETS})"));
+        return NativeTarget::parse(&v).ok_or_else(|| {
+            format!("unknown VYRN_NATIVE_TARGET `{v}` (expected one of: {NATIVE_TARGETS})")
+        });
     }
     let start = Path::new(root)
         .parent()
