@@ -3926,6 +3926,32 @@ impl<'a> Checker<'a> {
                 }
                 Ok(out)
             }
+            // `m.anyTrue()` / `m.allTrue()` — the question a mask exists to
+            // answer, reduced to one `Bool`. Masks only, not vectors: "is any
+            // lane of an `F32x4` non-zero" would be a float predicate wearing a
+            // bitwise instruction's clothes, and `v != F32x4.splat(0.0)` already
+            // spells it with the NaN behaviour written down.
+            "@anyTrue" | "@allTrue" => {
+                let what = if name == "@anyTrue" { "anyTrue" } else { "allTrue" };
+                if args.len() != 1 {
+                    return Err(format!(
+                        "line {line}: `{what}` takes no arguments (it is `m.{what}()`), \
+                         got {}",
+                        args.len() - 1
+                    ));
+                }
+                let m = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+                if matches!(m, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if m != Type::Mask32x4 {
+                    return Err(format!(
+                        "line {line}: `{what}` must be called on a mask \
+                         (e.g. `(a < b).{what}()`), found {m}"
+                    ));
+                }
+                Ok(Type::Bool)
+            }
             // `F32x4.load(xs, i)` / `F32x4.store(xs, i, v)` — four consecutive
             // `Float32`s of an `Array<Float32>` as one value, `i` counted in
             // ELEMENTS (so `load(xs, 1)` reads `xs[1..4]`), bounds-checked once.
@@ -5347,7 +5373,9 @@ impl<'a> Checker<'a> {
         // numeric conversions above and sits here for that reason; the rest arrive
         // under internal names the parser assigns, so a user `fn min` / `fn lane`
         // is untouched — which is exactly why they are spelled on the type name.
-        if matches!(name, "F32x4" | "@lane") || name.starts_with("@f32x4") {
+        if matches!(name, "F32x4" | "@lane" | "@anyTrue" | "@allTrue")
+            || name.starts_with("@f32x4")
+        {
             return self.vector_call(name, args, line, scope, fn_ret);
         }
         // built-in: schemaOf(TypeName) -> Schema — compile-time reflection of a

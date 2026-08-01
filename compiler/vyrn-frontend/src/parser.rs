@@ -3556,6 +3556,16 @@ impl Parser {
                             // `v.lane(k)` reads one lane of a vector (RFC-0083).
                             // Method-only, like the array and map mutators above.
                             "lane" => "@lane".to_string(),
+                            // `m.anyTrue()` / `m.allTrue()` reduce a mask to a
+                            // `Bool` (RFC-0083 M2). Value methods rather than
+                            // `Mask32x4.anyTrue(m)` for the rule the comment below
+                            // states: the type name is for names something else
+                            // exports, and nothing exports these. They are the
+                            // wasm instructions' own names rather than Rust's
+                            // `any`/`all`, which are the two names a future
+                            // `std/arrays` predicate would most want.
+                            "anyTrue" => "@anyTrue".to_string(),
+                            "allTrue" => "@allTrue".to_string(),
                             _ => name,
                         };
                         // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`

@@ -3320,6 +3320,23 @@ impl<'a> Interp<'a> {
                         (Val::Mask32x4(m), Val::Int(k)) => Ok(Val::Bool(m[*k as usize])),
                         (a, b) => Err(format!("lane: {a:?}[{b:?}]").into()),
                     },
+                    // Mask reductions (RFC-0083 M2). This is the reference answer
+                    // the two backends' single instructions have to match, and it
+                    // is a plain fold over the four lanes because a `Mask32x4`'s
+                    // only inhabitants are comparison results — there is no
+                    // "partly set" lane here whose meaning the engines could read
+                    // differently.
+                    "@anyTrue" | "@allTrue" => {
+                        let m = match &vals[0] {
+                            Val::Mask32x4(m) => *m,
+                            other => return Err(format!("mask reduce: {other:?}").into()),
+                        };
+                        Ok(Val::Bool(if name == "@anyTrue" {
+                            m.iter().any(|b| *b)
+                        } else {
+                            m.iter().all(|b| *b)
+                        }))
+                    }
                     // `F32x4.load(xs, i)` (RFC-0083 M2) — four consecutive
                     // elements as one value, bounds-checked ONCE. The check is
                     // signed and against `i + 4`, not unsigned against `i`, because

@@ -3088,6 +3088,7 @@ impl Fn_<'_> {
                 "@f32x4Store" => Type::Unit,
                 "@lane" if matches!(self.peek(&args[0], line)?, Type::Mask32x4) => Type::Bool,
                 "@lane" => Type::Float32,
+                "@anyTrue" | "@allTrue" => Type::Bool,
                 "at" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
@@ -4281,6 +4282,25 @@ impl Fn_<'_> {
                 }
                 b.ins(&Instruction::F32x4ExtractLane(k));
                 return Ok(Type::Float32);
+            }
+            // Mask reductions (RFC-0083 M2). Both push an `i32` that is already 0
+            // or 1, so unlike the mask lane read there is no normalising `i32.eqz`
+            // pair to add.
+            //
+            // `v128.any_true` is whole-vector — any bit set anywhere — where
+            // `i32x4.all_true` is per lane. They coincide here because a
+            // `Mask32x4` lane is all-ones or all-zeros and nothing else can build
+            // one; that is the same closed-inhabitants argument that let the mask
+            // be its own type. There is no `i32x4.any_true` to reach for instead:
+            // the encoder carries exactly one any-true, at v128 width.
+            "@anyTrue" | "@allTrue" => {
+                self.expr_as(m, b, &args[0], &Type::Mask32x4)?;
+                b.ins(&if name == "@anyTrue" {
+                    Instruction::V128AnyTrue
+                } else {
+                    Instruction::I32x4AllTrue
+                });
+                return Ok(Type::Bool);
             }
             // RFC-0083 M2. `min`/`max` are wasm's own, which is the rule the other
             // two engines were pointed AT rather than the one they fell into: NaN
