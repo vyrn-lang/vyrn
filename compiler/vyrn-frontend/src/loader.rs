@@ -2375,6 +2375,7 @@ impl NsResolver<'_> {
             | Type::Ref(a)
             | Type::Array(a)
             | Type::Task(a)
+            | Type::Stream(a)
             | Type::Partial(a)
             | Type::ArrayN(a, _)
             | Type::SmallArray(a, _)
@@ -3399,6 +3400,7 @@ fn type_names(ty: &Type) -> Vec<String> {
             | Type::Ref(a)
             | Type::Array(a)
             | Type::Task(a)
+            | Type::Stream(a)
             | Type::Partial(a)
             | Type::ArrayN(a, _)
             | Type::SmallArray(a, _) => walk(a, out),
@@ -3466,6 +3468,7 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
         | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
+        | Type::Stream(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)
         | Type::SmallArray(a, _)

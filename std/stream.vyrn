@@ -1,0 +1,91 @@
+/// std/stream — the `Stream<T>` combinators (RFC-0075 M2), written in Vyrn
+/// itself, exactly as std/arrays is. Being ordinary Vyrn they get
+/// interpreter == native == wasm parity for free, they add no builtin and no
+/// census row, and — the part that matters here — they inherit M1's linearity
+/// instead of restating it. Every function below takes a `Stream` parameter,
+/// which carries the obligation into the callee, discharges it with `for … in`,
+/// and hands back a stream the caller now owes. An abandoned `map(...)` result
+/// therefore fails to compile for precisely the reason an abandoned
+/// `fromArray(...)` does; there is no combinator-shaped hole to plug because
+/// there is no combinator-shaped rule.
+///
+/// **These four and no more.** `unfold`, `merge`-by-arrival and `channel` are
+/// NOT here, and the reason is the representation, not the effort: a
+/// `Stream<T>` is `Array<T>`'s three words on all three engines (RFC-0075 M1,
+/// "As landed"), so a stream is a buffer that already exists. Everything below
+/// is expressible as a walk over that buffer producing another one. A producer
+/// whose length is not known — the `unfold` in the RFC's own example — is not,
+/// and faking it by running the step function to exhaustion at construction
+/// time would turn "stream an unbounded feed" into "materialize an unbounded
+/// feed", which is the `#6156` heap growth this RFC exists to prevent. See
+/// "As landed — M2" in the RFC for what changing the representation costs.
+
+/// Apply `f` to every element. `s` is consumed; the result is a new obligation.
+export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
+    let mut out: Array<U> = []
+    for x in s {
+        out.push(f(x))
+    }
+    return fromArray(out)
+}
+
+/// Keep only the elements for which `pred` holds.
+export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
+    let mut out: Array<T> = []
+    for x in s {
+        if pred(x) {
+            out.push(x)
+        }
+    }
+    return fromArray(out)
+}
+
+/// The first `n` elements (fewer if the stream is shorter; none if `n <= 0`).
+///
+/// The `break` is the point: it leaves the loop early, and M1's release still
+/// runs on that path — one `free`, never two. Over the eager representation the
+/// early exit buys nothing but the pin, since the buffer is already built; over
+/// a pull-based one it is the whole reason `take` exists.
+export fn take<T>(s: Stream<T>, n: Int64) -> Stream<T> {
+    let mut out: Array<T> = []
+    for x in s {
+        if out.length >= n {
+            break
+        }
+        out.push(x)
+    }
+    return fromArray(out)
+}
+
+/// Interleave two streams one element at a time, draining whichever outlasts
+/// the other. Both inputs are consumed.
+///
+/// This is merge on *sequences*, which is the only merge this RFC can mean —
+/// it states outright that it does not add concurrency, so "whichever source
+/// has a value ready" is not a question the language can ask. Turn-taking is
+/// what a pull-based merge would do anyway when both sides are ready, so the
+/// observable sequence is the same one a lazy implementation would produce for
+/// any stream that terminates. What is lost is merging an endless source with
+/// a finite one, and nothing in the language can build an endless source yet.
+export fn merge<T>(a: Stream<T>, b: Stream<T>) -> Stream<T> {
+    let mut xs: Array<T> = []
+    for x in a {
+        xs.push(x)
+    }
+    let mut ys: Array<T> = []
+    for y in b {
+        ys.push(y)
+    }
+    let mut out: Array<T> = []
+    let mut i = 0
+    while i < xs.length || i < ys.length {
+        if i < xs.length {
+            out.push(xs[i])
+        }
+        if i < ys.length {
+            out.push(ys[i])
+        }
+        i = i + 1
+    }
+    return fromArray(out)
+}

@@ -8319,6 +8319,13 @@ pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Ty
         (Type::Array(p), Type::Array(a)) => solve_param(p, a, subst),
         (Type::ArrayN(p, _), Type::ArrayN(a, _)) => solve_param(p, a, subst),
         (Type::SmallArray(p, _), Type::SmallArray(a, _)) => solve_param(p, a, subst),
+        // A `Stream<T>` (RFC-0075) binds its element exactly as an `Array<T>`
+        // does — it is the same three words. M2's combinators are the first
+        // signatures with a type parameter inside a stream, and without this the
+        // direct backend refused `take` outright while the LLVM emitter quietly
+        // substituted `Unit`, i.e. the two backends specialized different
+        // functions for one call site.
+        (Type::Stream(p), Type::Stream(a)) => solve_param(p, a, subst),
         (Type::Map(pk, pv), Type::Map(ak, av)) => {
             solve_param(pk, ak, subst);
             solve_param(pv, av, subst);
