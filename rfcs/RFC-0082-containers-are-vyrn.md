@@ -29,11 +29,25 @@ believed for four RFCs.
 
 ## Why Rust needs `unsafe` for `Vec`, and why Vyrn does not
 
-The operation that forces `unsafe` in `Vec` is **`set_len`**: it asserts that
-memory is initialized when the type system cannot see that it is. That is the
-entire reason `MaybeUninit` exists — a `Vec` holding uninitialized elements is
-undefined behaviour under most safe operations, including being dropped. The
-unsafety is not "pointers"; it is **uninitialized capacity being observable**.
+The operation that makes a safe `Vec` *unbuildable from safe parts* is
+**`set_len`**: it asserts that memory is initialized when the type system cannot
+see that it is, which is the entire reason `MaybeUninit` exists — a `Vec` holding
+uninitialized elements is undefined behaviour under most safe operations,
+including being dropped.
+
+**This paragraph originally said "the operation that forces `unsafe` in `Vec`",
+which is too strong and was repeated as settled several times before anyone
+checked it.** `Vec`'s implementation needs `unsafe` for more than that: pointer
+arithmetic to reach element *i*, `ptr::read`/`ptr::write` to move a value out of
+a slot without dropping it, and `dealloc`. `set_len` is the reason a *safe*
+`Vec` cannot be assembled from safe primitives; it is not the only unsafe
+operation inside the real one.
+
+The conclusion survives by a different and simpler route: **every one of those
+operations is about addressing a pointer, and none of them arises if the
+primitive is a bounds-checked growable buffer instead.** That is the Java, C#
+and Go arrangement — collections are ordinary safe code over an array — and it
+is what `Array` already is.
 
 Vyrn's `Array` never exposes that state. It owns `len` and `cap` together, every
 read is checked against `len`, and spare capacity is allocated but unreadable —
@@ -742,6 +756,39 @@ generation-checked slab that `Ref<T>` actually is.
 **Whether a raw-memory view should ever exist** for its own sake — FFI struct
 layouts, SIMD alignment, zero-copy over foreign buffers. Those are real and this
 RFC does not serve them. It only withdraws the claim that *containers* need one.
+
+### The capability boundary, stated so it is not read as broader than it is
+
+This RFC's title and headline invite the reading "Vyrn does not need `unsafe`".
+What it establishes is narrower, and the difference matters because the premise
+it replaced survived four RFCs unexamined. Checked against the code:
+
+**Covered — every use of `unsafe` that exists to *build a safe abstraction*:**
+
+| | mechanism |
+|---|---|
+| containers over uninitialized capacity | `Array` owns `len`/`cap`; spare is unreadable |
+| aliasing the ownership analysis rejects — graphs, doubly-linked lists, intrusive structures, self-reference | the generation-checked slot table; `Type::Ref` is also what breaks the size cycle for `Node = { next: Option<Ref<Node>> }` |
+| FFI in both directions | `extern` (RFC-0012) |
+| shared mutable state across threads | designed out — RFC-0025's isolation analysis is "the whole safety story": no module state, no I/O, no `drop` of shared cells, so there is nothing to race and no atomics to need |
+| arenas | `region { }` (RFC-0004) |
+| float ↔ bits, String ↔ bytes | `floatBits`/`floatFromBits`, `bytes`/`stringFromBytes` — four specific views, verified to be the only ones |
+
+**Not covered — every use of `unsafe` that exists to *reach past* the
+abstraction.** There is no `transmute` and no unchecked indexing anywhere in the
+front end; both were grepped for, not assumed:
+
+general reinterpretation · custom allocators beyond `region` (pool, slab, bump
+with its own policy) · SIMD intrinsics · inline assembly · atomics and lock-free
+structures · `get_unchecked` in a hot loop · memory-mapped I/O, device
+registers, DMA · zero-copy over a buffer Vyrn does not own.
+
+The pattern is consistent enough to be a design statement rather than a list of
+gaps, so it is worth writing as one: **Vyrn serves the abstraction-building uses
+of `unsafe` and none of the abstraction-escaping ones.** That is coherent for
+the language's stated direction, and it also means Vyrn is not today a kernel,
+embedded, HPC or codec language, and will not become one without the view this
+RFC declined to add *for containers*.
 
 **`Array` itself in Vyrn.** That needs the raw view, and the interpreter cost
 measured in RFC-0081 suggests it would be expensive. Not proposed.
