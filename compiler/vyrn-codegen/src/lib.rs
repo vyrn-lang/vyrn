@@ -2877,9 +2877,10 @@ impl<'a> Gen<'a> {
                 // zero-extended); arrays load their element type directly.
                 let byte_elem = resolved == Type::Str;
                 let elem = match &resolved {
-                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                        (**inner).clone()
-                    }
+                    Type::Array(inner)
+                    | Type::ArrayN(inner, _)
+                    | Type::SmallArray(inner, _)
+                    | Type::Stream(inner) => (**inner).clone(),
                     Type::Str => Type::Int,
                     other => return Err(format!("for-loop needs an Array or String, found {other:?}")),
                 };
@@ -2913,6 +2914,19 @@ impl<'a> Gen<'a> {
                         (data, len)
                     }
                 };
+                // RFC-0075: iterating a stream CONSUMES it, so the loop owns the
+                // release. Spill the header to a slot so the same `emit_drop` the
+                // block-exit path uses can reach it, and put that slot in the
+                // loop-variable drop frame — which `emit_all_drops` walks, so an
+                // early `return` from inside the body releases it too. `break`
+                // lands on `end_l`, where the release is emitted below, and the
+                // loop-variable frame sits BELOW `drop_boundary` so
+                // `emit_loop_exit_cleanup` does not free it a second time.
+                let stream_slot = matches!(resolved, Type::Stream(_)).then(|| {
+                    let s = self.fresh_alloca("{ ptr, i64, i64 }");
+                    self.emit(format!("store {{ ptr, i64, i64 }} {av}, ptr {s}"));
+                    s
+                });
 
                 let idx = self.fresh_alloca("i64");
                 self.emit(format!("store i64 0, ptr {idx}"));
@@ -2953,6 +2967,12 @@ impl<'a> Gen<'a> {
                 // stays empty.
                 self.scope.push(Vec::new());
                 self.drop_stack.push(Vec::new());
+                if let Some(s) = &stream_slot {
+                    self.drop_stack
+                        .last_mut()
+                        .unwrap()
+                        .push((s.clone(), DropKind::AfreeArr));
+                }
                 let vslot = self.declare(var, &elem);
                 self.emit(format!("store {ell} {ev}, ptr {vslot}"));
                 // The loop-var frame is already on the stack; `drop_boundary` is
@@ -2984,6 +3004,11 @@ impl<'a> Gen<'a> {
                 self.emit_term(format!("br label %{cond_l}"));
 
                 self.emit_label(&end_l);
+                // Normal end and `break` both land here: run the stream's release
+                // once, on the one path that leaves the loop still owning it.
+                if let Some(s) = &stream_slot {
+                    self.emit_drop(&s.clone(), DropKind::AfreeArr);
+                }
                 Ok(())
             }
             Stmt::Drop { name, .. } => {
@@ -6659,12 +6684,27 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        if name == "afree" {
+        // RFC-0075: `close(s)` is the explicit half of the disposal obligation and
+        // `afree(a)` is the same three instructions — the stream's buffer is the
+        // array's. They are separate names because the *types* are separate; when
+        // M2's producer stops being an eager buffer, this is where its teardown
+        // goes and `afree` stays where it is.
+        if name == "afree" || name == "close" {
             let (av, _) = self.gen_expr(&args[0])?;
             let data = self.fresh_tmp();
             self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
             self.emit(format!("call void @free(ptr {data})"));
             return Ok((String::new(), Type::Unit));
+        }
+        // `fromArray(xs)` moves the array's three words into a `Stream<T>`, which
+        // is the same three words — no instruction at all.
+        if name == "fromArray" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let inner = match self.resolve(&aty) {
+                Type::Array(i) => *i,
+                other => return Err(format!("fromArray of non-Array {other:?}")),
+            };
+            return Ok((av, Type::Stream(Box::new(inner))));
         }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Loads the `{ptr,len,cap}` header from the binding's slot;
@@ -8344,6 +8384,10 @@ fn mangle_ty(t: &Type) -> String {
         Type::Param(p) => sanitize(p),
         Type::Ref(inner) => format!("Ref{}", mangle_ty(inner)),
         Type::Array(inner) => format!("Arr{}", mangle_ty(inner)),
+        // Distinct from `Arr` even though the layout is identical: a generic
+        // instantiated at `Stream<T>` must not share a symbol with one at
+        // `Array<T>`, or the two bodies would be the same code under one name.
+        Type::Stream(inner) => format!("Strm{}", mangle_ty(inner)),
         Type::ArrayN(inner, n) => format!("Arr{n}{}", mangle_ty(inner)),
         // RFC-0056: key on BOTH the element type and the inline capacity, so
         // `SmallArray<Int64, 4>` and `SmallArray<Int64, 8>` are distinct
@@ -8460,7 +8504,12 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // (the payload is boxed), so it is a fixed-size handle.
         Type::Ref(_) => "{ i64, i64 }".into(),
         // A growable array is { ptr data, i64 len, i64 cap }.
-        Type::Array(_) => "{ ptr, i64, i64 }".into(),
+        // A `Stream<T>` (RFC-0075) is byte-identical to `Array<T>` here: the
+        // linearity it adds is a *checker* rule, so there is nothing new to lay
+        // out and the array walk, the `afree`, and the wasm column all work on it
+        // unchanged. When M2 replaces `fromArray` with a real state machine this
+        // is the line that changes; nothing in movecheck moves with it.
+        Type::Array(_) | Type::Stream(_) => "{ ptr, i64, i64 }".into(),
         // A `Map<String, V>` (RFC-0028) is two parallel growable buffers
         // sharing one length/capacity: { ptr keys, ptr values, i64 len,
         // i64 cap }. Keys are `ptr` (String); values are `llt(V)`-stride.

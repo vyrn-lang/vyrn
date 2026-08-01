@@ -680,6 +680,25 @@ pub enum Type {
     /// growable buffers sharing one length/capacity, preserving first-insertion
     /// order (an update keeps the slot; remove-then-insert moves to the end).
     Map(Box<Type>, Box<Type>),
+    /// A **linear** sequence of `T` (RFC-0075): produced once, disposed exactly
+    /// once, and the disposal is checked at compile time by `movecheck`.
+    ///
+    /// A type of its own rather than an `Array<T>` with an attribute, and rather
+    /// than a library type, for one reason each: an attribute on `Array<T>`
+    /// would leave `at`/`push`/`.length` applicable to a stream (a consumed
+    /// stream would still answer `alen`), and a library type would have to be
+    /// spelled with an `Array` base, so `let a: Array<T> = s` would launder the
+    /// obligation away. Neither is a runtime concern — both are about what the
+    /// checker will accept — so the *lowering* is `Array<T>`'s exactly, in all
+    /// three engines: `{ ptr data, i64 len, i64 cap }`, `Val::Array`, the same
+    /// indexed walk for `for … in`. RFC-0083's `F32x4` is the opposite case (a
+    /// value with a new representation and no ownership); this is a resource
+    /// with a new *rule* and no new representation.
+    ///
+    /// M1's only producer is `fromArray`, so the sequence is eager. M2's
+    /// `unfold`/`channel` are what make it pull-based; nothing in the obligation
+    /// depends on which, which is why the checking half could land first.
+    Stream(Box<Type>),
     /// A handle to a concurrent task's result (RFC-0004 §Q4). Lowers to the
     /// result type `T` itself (a deterministic fork-join needs no boxing).
     Task(Box<Type>),
@@ -765,6 +784,7 @@ impl std::fmt::Display for Type {
             Type::SmallArray(t, n) => write!(f, "SmallArray<{t}, {n}>"),
             Type::ConstInt(n) => write!(f, "{n}"),
             Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
+            Type::Stream(t) => write!(f, "Stream<{t}>"),
             Type::Task(t) => write!(f, "Task<{t}>"),
             Type::Logger => write!(f, "Logger"),
             Type::Fn(params, ret) => {

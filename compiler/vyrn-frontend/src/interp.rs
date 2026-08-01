@@ -3922,6 +3922,20 @@ impl<'a> Interp<'a> {
                         Val::Array(_) => Ok(Val::Unit),
                         other => Err(format!("afree of non-Array {other:?}").into()),
                     },
+                    // RFC-0075. A `Stream<T>` shares `Array<T>`'s representation
+                    // in all three engines, so producing one is the identity and
+                    // closing one is `afree` under a different name — the two
+                    // agree on output and exit code, and the linearity that makes
+                    // a stream different from an array was settled before this
+                    // ran, in movecheck.
+                    "fromArray" => match &vals[0] {
+                        Val::Array(_) => Ok(vals.remove(0)),
+                        other => Err(format!("fromArray of non-Array {other:?}").into()),
+                    },
+                    "close" => match &vals[0] {
+                        Val::Array(_) => Ok(Val::Unit),
+                        other => Err(format!("close of non-Stream {other:?}").into()),
+                    },
                     // value(x) -> Value: box a scalar into the interpolation enum.
                     "value" => {
                         let v = vals.remove(0);
