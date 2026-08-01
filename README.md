@@ -159,6 +159,10 @@ tests). Highlights:
 - **A working native path**: `vyrn build prog.vyrn` emits LLVM IR and links a
   real executable with `clang` (verified end-to-end; interpreter and native
   binary agree on output and exit codes, including runtime validation failures).
+  It targets `x86-64-v2` at `-O2` by default; `nativeTarget` in `vyrn.json` or
+  `--native-target v1|v2|v3|v4|native` picks another, and every one of them is
+  built with `-ffp-contract=off` so that no target can quietly fuse `a*b+c` into
+  an FMA and give a different float than the interpreter (RFC-0083).
 - **A server (RFC-0016)** — `vyrn serve prog.vyrn [--port N]` runs an ordinary
   `fn handle(req: Request) -> Response` over a hand-rolled HTTP/1.1 host
   (`std::net` only, no crates). The host owns the accept loop; module state

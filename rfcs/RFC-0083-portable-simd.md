@@ -760,6 +760,56 @@ proof that the roundings are the instructions and not a scalar emulation the
 sweep would have been equally happy with. `simdround.vyrn` is untouched: it uses
 the four roundings and no `abs`, and its output did not move by a byte.
 
+## The upgrade path, taken — and the flag that made it safe to take
+
+The native baseline is now **`x86-64-v2`** by default, selectable per project
+with `nativeTarget` in `vyrn.json` (RFC-0010) and per build with
+`--native-target v1|v2|v3|v4|native`, which wins. Off x86-64 nothing is passed
+at all: `-march=x86-64-v2` is an error on aarch64, and Apple Silicon is a real
+build host.
+
+The weakest row above moves the most. Re-running `examples/simdbench.vyrn` at v1
+against v2, `trunc` is **15.0x** faster (0.10 ms → 0.007 ms per run), `nearest`
+8.2x, `floor` 7.7x, `ceil` 7.6x — one `roundps` where there were four `truncf`
+calls, exactly as predicted. The hand-written Vyrn halves do not move (1.0–1.1x),
+which is the control: the change is the intrinsic getting an instruction, not the
+machine being faster today. **On the example corpus the default is free and
+invisible** — 103 examples, best-of-5 wall time, 548 ms at v1 against 552 ms at
+v2, a 0.993x ratio inside the ±20% per-example noise of a 4 ms process. That is
+the honest shape of it: 15x on the one thing it was chosen for, and nothing
+anywhere else, because nothing else in the corpus is a rounding loop.
+
+**The reason a curated set exists rather than a passthrough `-march` string is
+not typo ergonomics, it is §"The constraint that shapes the whole design".**
+From `x86-64-v3` up — and on `native` on any recent CPU — the machine has FMA,
+and clang's default `-ffp-contract=on` permits fusing `a*b+c` into one
+instruction. That fusion rounds once instead of twice: it is *more* accurate, and
+therefore a different number from the one the tree-walking interpreter computes
+with a separate multiply and add. More accurate is still wrong when the invariant
+is byte-identical output across three engines, and it would break for a program
+the user wrote, on a machine they chose, silently. An arbitrary `-march` string
+would let any user enable that without knowing they had.
+
+So **every native build passes `-ffp-contract=off`**, unconditionally, at every
+level including v1 — aarch64's *baseline* has FMA and there is no `-march` there
+to hang a condition on. Measured: a one-line C `a*b+c` at `-march=native` with
+clang's default *does* emit `vfmadd`, and does not with the flag; the flag is
+therefore load-bearing for the C shim linked into every artifact. On the IR half
+it is belt and braces — our textual IR carries no `contract` fast-math flags, so
+zero `vfmadd` appears at every level with or without it, and at v2 the emitted
+assembly is byte-identical either way. The flag is what keeps that true when
+either half changes. With it, `simdround.vyrn` (257 lines of exactly these
+operations) and an `a*b+c` accumulation loop are byte-identical to the
+interpreter at **all five** targets, `native` included — which is why `native` is
+offered rather than refused.
+
+`vyrn bench` compiles with the same target `vyrn build` ships, through one
+shared helper that now owns `-O2`, `-march` and `-ffp-contract` as well as
+`-pthread`/`-lm`. Those two invocations have drifted twice: `-lm`, and then
+`-O2`, the second meaning every number recorded in this RFC described an
+optimized binary `vyrn build` never emitted. A benchmark measuring a different
+`-march` than the artifact would be that same bug a third time.
+
 ## What this does not decide
 
 **Auto-vectorisation of integer loops.** Free from LLVM at `-O2` and from
