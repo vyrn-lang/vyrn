@@ -3600,6 +3600,11 @@ impl<'a> Checker<'a> {
             Add if l == Type::Str && r == Type::Str => Ok(Type::Str),
             // Arithmetic works on Int, Float, or a sized integer; operands must
             // match exactly (no implicit widening). `Rem` (%) is integer-only.
+            // Lane-wise arithmetic on a vector (RFC-0083). Deliberately NOT folded
+            // into `numeric`: that predicate also gates `<`/`==`, and a vector
+            // comparison yields a lane MASK (M2), never a `Bool`, so admitting it
+            // there would type six operators this milestone cannot lower.
+            Add | Sub | Mul | Div if l == Type::F32x4 && r == Type::F32x4 => Ok(l),
             Add | Sub | Mul | Div => {
                 if l == r && numeric(&l) {
                     Ok(l)
@@ -3697,6 +3702,87 @@ impl<'a> Checker<'a> {
                         "line {line}: `=~` needs a String and a pattern, found {l} and {r}"
                     ))
                 }
+            }
+        }
+    }
+
+    /// The three vector builtins (RFC-0083 M1): `F32x4(a, b, c, d)`,
+    /// `F32x4.splat(x)` and `v.lane(k)`.
+    ///
+    /// The lane index is resolved HERE and nowhere else that matters: a
+    /// non-constant or out-of-range `k` is a compile error, not a runtime trap,
+    /// which is what keeps the read total and is why none of the three backends
+    /// emits a bounds check for it.
+    fn vector_call(
+        &self,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+        scope: &Vec<HashMap<String, Binding>>,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, String> {
+        // A `Float32` argument, with a plain float literal adapting to it exactly
+        // as it does beside a `Float32` operand in a binary expression.
+        let lane_arg = |e: &Expr, what: &str| -> Result<Option<Type>, String> {
+            let t = self.base(&self.expr(e, scope, Some(&Type::Float32), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Some(Type::Err));
+            }
+            if t != Type::Float32 {
+                return Err(format!("line {line}: {what} takes Float32 lanes, found {t}"));
+            }
+            Ok(None)
+        };
+        match name {
+            "F32x4" => {
+                if args.len() != 4 {
+                    return Err(format!(
+                        "line {line}: `F32x4(..)` takes 4 lanes, got {}",
+                        args.len()
+                    ));
+                }
+                for a in args {
+                    if let Some(e) = lane_arg(a, "`F32x4(..)`")? {
+                        return Ok(e);
+                    }
+                }
+                Ok(Type::F32x4)
+            }
+            "@f32x4Splat" => {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "line {line}: `F32x4.splat(..)` takes 1 argument, got {}",
+                        args.len()
+                    ));
+                }
+                if let Some(e) = lane_arg(&args[0], "`F32x4.splat(..)`")? {
+                    return Ok(e);
+                }
+                Ok(Type::F32x4)
+            }
+            _ => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {line}: `lane` takes a vector and a lane index, got {} argument(s)",
+                        args.len()
+                    ));
+                }
+                let v = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+                if matches!(v, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if v != Type::F32x4 {
+                    return Err(format!(
+                        "line {line}: `lane` must be called on a vector (e.g. `v.lane(0)`), found {v}"
+                    ));
+                }
+                if crate::types::const_lane(&args[1], 4).is_none() {
+                    return Err(format!(
+                        "line {line}: a lane index must be a compile-time constant in 0..3 \
+                         (that is what makes `lane` total — there is no bounds check to fall back on)"
+                    ));
+                }
+                Ok(Type::Float32)
             }
         }
     }
@@ -4972,6 +5058,13 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(target);
+        }
+        // Vector construction, splat and lane read (RFC-0083 M1). `F32x4(a,b,c,d)`
+        // is spelled like the numeric conversions above and sits here for that
+        // reason; the other two arrive under internal names the parser assigns, so
+        // a user `fn splat` / `fn lane` is untouched.
+        if matches!(name, "F32x4" | "@f32x4Splat" | "@lane") {
+            return self.vector_call(name, args, line, scope, fn_ret);
         }
         // built-in: schemaOf(TypeName) -> Schema — compile-time reflection of a
         // validated type's `where` predicate (RFC-0003). The argument is a *type
