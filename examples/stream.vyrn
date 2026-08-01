@@ -1,0 +1,91 @@
+/// `Stream<T>` — cleanup as an obligation, not a convention (RFC-0075 M1).
+///
+/// A stream is a **linear resource**: produced once, disposed exactly once, and
+/// the disposal is checked at compile time. That is the whole point. The two
+/// tRPC incidents this RFC is built on were programs that typechecked, followed
+/// the documented idiom, and leaked anyway — one of them OOMing production
+/// servers every couple of hours because a cleanup path silently never ran.
+/// Nothing in a type system that only describes *shape* can see that. Ownership
+/// can, and Vyrn already has ownership.
+///
+/// The obligation is discharged three ways, all shown below:
+///
+///   * consume it with `for … in`,
+///   * forward it by returning it (ownership moves to the caller), or
+///   * release it with `close(s)`.
+///
+/// Abandon it instead and the program does not build — see stream_abandoned.vyrn,
+/// which is that refusal on purpose.
+///
+/// What M1 does NOT claim: the sequence here is eager. `fromArray` is the only
+/// producer, so this is a linear handle to a buffer. M2's `unfold`/`channel`
+/// make it pull-based; nothing about the obligation depends on which, which is
+/// why the checking half could land first.
+
+/// A producer: hands the array's buffer to a stream and moves it out.
+fn feed(n: Int64) -> Stream<Int64> {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        xs.push(i * 10)
+        i = i + 1
+    }
+    return fromArray(xs)
+}
+
+/// Forwarding: `s` leaves this function, so this function does not dispose it —
+/// the caller now owes the obligation. Movecheck follows the move.
+fn relay(n: Int64) -> Stream<Int64> {
+    let s = feed(n)
+    return s
+}
+
+/// A stream PARAMETER carries the obligation into the callee. Without that rule
+/// `fn sink(s: Stream<Int64>) -> Int64 { return 0 }` would be a one-line hole
+/// through the whole analysis: the caller discharges by moving, and nobody else
+/// has to do anything.
+fn total(s: Stream<Int64>) -> Int64 {
+    let mut sum = 0
+    for v in s {
+        sum = sum + v
+    }
+    return sum
+}
+
+fn main() -> Int64 {
+    // ---- discharge 1: consume it -------------------------------------------
+    for v in feed(3) {
+        print(v) // 0 10 20
+    }
+
+    // `break` releases too, and there is no `finally` to write. That is the
+    // pathology behind both incidents: cleanup that has to be remembered.
+    for v in feed(5) {
+        if v > 20 {
+            break
+        }
+        print(v) // 0 10 20
+    }
+
+    // ---- discharge 2: forward it -------------------------------------------
+    print(total(relay(4))) // 0 + 10 + 20 + 30 = 60
+
+    // ---- discharge 3: close it ---------------------------------------------
+    // A stream acquired and not read still has to go somewhere.
+    let unread = feed(9)
+    close(unread)
+    print(-1)
+
+    // On every path, including the ones that leave early. `s` is disposed on the
+    // branch that returns and on the branch that does not; disposing on only one
+    // of them does not compile.
+    let s = feed(2)
+    if 1 == 1 {
+        close(s)
+        print(-2)
+    } else {
+        close(s)
+    }
+
+    return 0
+}

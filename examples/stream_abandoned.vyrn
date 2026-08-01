@@ -1,0 +1,54 @@
+// The `trpc#6193` program shape, made non-buildable — RFC-0075 M1.
+//
+// The incident: a documented streaming idiom whose cleanup path silently never
+// ran. `while (!opts.signal!.aborted)` kept looping with `aborted === false`
+// after the client tab had closed, and a second reporter put it plainly — "our
+// `return` method on the AsyncIterable is not being called after connection
+// closes. This is causing a memory leak and our servers to OOM every couple of
+// hours." The maintainer placed fault in the framework, not in user code. Eight
+// months and five PRs later the fix was reverted, trading proxy correctness for
+// a different leak.
+//
+// Every one of those programs typechecked. No amount of describing the SHAPE of
+// a value says anything about whether its disposal runs. Ownership does, and the
+// point of this RFC is that Vyrn already had the machinery — the same movecheck
+// that governs owned values and divergent exits (RFC-0060).
+//
+// So the acquisition below is the error, not the missing cleanup: there is no
+// line to point at for cleanup that was never written. That is what "an
+// obligation, not a convention" means.
+//
+// This file is an INTENTIONAL compile error. It is meant to FAIL `vyrn check`,
+// so the parity harness lists it under EXPECTED_CHECK_FAILURE rather than
+// running it. Observe the diagnostics with:
+//
+//   vyrn check examples/stream_abandoned.vyrn
+//
+// Compare stream.vyrn, which discharges the obligation all three ways.
+
+fn feed() -> Stream<Int64> {
+    let xs: Array<Int64> = [1, 2, 3]
+    return fromArray(xs)
+}
+
+fn main() -> Int64 {
+    // Rejected: acquired here, never consumed and never closed.
+    let events = feed()
+    print(0)
+
+    // Rejected: cleanup that exists but is not on every path — which is the
+    // incident itself, in one line. The `else` path abandons it.
+    let conditional = feed()
+    if 1 == 1 {
+        close(conditional)
+    }
+
+    // Rejected: leaving early skips the release below it.
+    let early = feed()
+    if 1 == 1 {
+        return 1
+    }
+    close(early)
+
+    return 0
+}

@@ -2536,6 +2536,14 @@ impl Parser {
                 self.eat(&Tok::Gt)?;
                 Type::Task(Box::new(inner))
             }
+            // `Stream<T>` (RFC-0075) — a linear sequence: disposed exactly once,
+            // checked by movecheck rather than by anything here.
+            "Stream" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Stream(Box::new(inner))
+            }
             // `Array<T>` (growable) or `Array<T, N>` (fixed-size const generic).
             "Array" => {
                 self.eat(&Tok::Lt)?;

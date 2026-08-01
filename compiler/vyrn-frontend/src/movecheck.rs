@@ -107,6 +107,13 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
             out.push(d);
         }
     }
+    // RFC-0075: the disposal obligation on a `Stream<T>`. A separate walk over the
+    // same bodies rather than a fifth thing threaded through `Consumed`, because
+    // the two analyses want OPPOSITE merges at an `if`: use-after-consume is a
+    // may-analysis (consumed on either branch ⇒ consumed after), and "disposed
+    // exactly once" is a must-analysis. Folding them would have made one of the
+    // two wrong at every branch.
+    out.extend(streams::check(program));
     out
 }
 
@@ -545,6 +552,409 @@ impl MoveCheck<'_> {
     }
 }
 
+/// RFC-0075 — the linearity of `Stream<T>`: acquired once, disposed exactly once.
+///
+/// This is the milestone's whole claim, so it is worth stating what it is not.
+/// `own.rs` already reclaims an owned heap value at block exit and on every
+/// divergent exit (RFC-0060), which is "owned and dropped". A stream is stronger:
+/// disposal must be *written*, because M2's producer has a teardown that no
+/// generic memory drop can run, and the tRPC incidents this RFC quotes were live
+/// producers rather than unreachable bytes. So the obligation is checked here and
+/// the release is emitted by the construct that discharges it — a stream binding
+/// is never in a `drop_stack` frame of its own.
+///
+/// The analysis is deliberately name-based and typeless, like the rest of this
+/// file: movecheck runs only on programs the checker already accepted, so
+/// `close(x)` implies `x` is a stream and there is no read operation on a stream
+/// at all — every mention of a stream binding is a move. That last fact is what
+/// makes a one-pass syntactic walk exact instead of approximate.
+///
+/// Known limit, shared with the `Consumed` map above: bindings are keyed by NAME,
+/// so an inner `let s = 1` shadowing an outer stream `s` reads as a disposal of
+/// the outer one. Erring toward accepting matches the existing pass; a scope-id
+/// key would have to be introduced for both at once.
+mod streams {
+    use std::collections::HashMap;
+
+    use crate::ast::*;
+    use crate::diagnostics::Diagnostic;
+
+    /// What a straight-line statement list does to one live stream binding.
+    #[derive(Clone, Copy, Default)]
+    struct Scan {
+        /// Disposed on every path that FALLS OUT of the list.
+        disposed: bool,
+        /// Nothing falls out — every path leaves via `return`/`break`/`continue`,
+        /// so `disposed` says nothing about what follows.
+        diverges: bool,
+        /// Some path abandons it: a `return` that does not move it out, or two
+        /// branches that disagree about whether it was disposed (one of those two
+        /// paths is wrong whatever comes next, so it is reported here rather than
+        /// left to a later statement to make look fine).
+        leaked: bool,
+        /// Disposed, then mentioned again on the same path.
+        doubled: bool,
+    }
+
+    pub fn check(program: &Program) -> Vec<Diagnostic> {
+        // Functions whose return type is a stream, with the rendering the
+        // diagnostic quotes. `fromArray` is the builtin producer and carries no
+        // element type here — this pass has no types — so a stream from it is
+        // spelled plainly `Stream`.
+        let producers: HashMap<&str, String> = program
+            .functions
+            .iter()
+            .filter(|f| matches!(f.ret, Type::Stream(_)))
+            .map(|f| (f.name.as_str(), f.ret.to_string()))
+            .collect();
+        let mut out = Vec::new();
+        for f in &program.functions {
+            // A `Stream` parameter carries the obligation into the callee: the
+            // caller discharged its own by moving it, and `fn sink(s: Stream<T>) {}`
+            // must not be the hole that lets it evaporate.
+            let mut live: Vec<(String, String)> = Vec::new();
+            for p in &f.params {
+                if let Type::Stream(_) = p.ty {
+                    let s = scan(&f.body.stmts, &p.name, false);
+                    report(&mut out, &s, f.line, &p.name, &p.ty.to_string(), &f.module);
+                    live.push((p.name.clone(), p.ty.to_string()));
+                }
+            }
+            block(&f.body, &mut live, &producers, &f.module, &mut out);
+        }
+        for t in &program.tests {
+            block(&t.body, &mut Vec::new(), &producers, &t.module, &mut out);
+        }
+        for b in &program.benches {
+            block(&b.body, &mut Vec::new(), &producers, &b.module, &mut out);
+        }
+        out
+    }
+
+    fn report(
+        out: &mut Vec<Diagnostic>,
+        s: &Scan,
+        line: usize,
+        name: &str,
+        ty: &str,
+        module: &Option<String>,
+    ) {
+        let msg = if s.doubled {
+            format!("`{name}` is a `{ty}` and is disposed more than once")
+        } else if s.leaked || !(s.disposed || s.diverges) {
+            format!("`{name}` is a `{ty}` and is never disposed")
+        } else {
+            return;
+        };
+        let mut d = Diagnostic::error(line, 0, "movecheck", msg);
+        d.note = Some(format!(
+            "a stream must be consumed with `for … in`, forwarded by returning it, \
+             or released with `close({name})` — on every path"
+        ));
+        d.file = module.clone();
+        out.push(d);
+    }
+
+    /// Check one block: every stream binding declared in it must be disposed on
+    /// every path out of the REST of that block. `live` is the enclosing scopes'
+    /// stream names, needed only so `let t = s` is recognised as a move.
+    fn block(
+        b: &Block,
+        live: &mut Vec<(String, String)>,
+        producers: &HashMap<&str, String>,
+        module: &Option<String>,
+        out: &mut Vec<Diagnostic>,
+    ) {
+        let base = live.len();
+        for (i, st) in b.stmts.iter().enumerate() {
+            if let Stmt::Let {
+                name, ty, value, line, ..
+            } = st
+            {
+                if let Some(rendered) = stream_let(ty.as_ref(), value, live, producers) {
+                    // `false`: a `break` in the rest of THIS block leaves the block
+                    // that declared the stream, so it abandons it. Inside a loop
+                    // nested below, a `break` only leaves that loop and control
+                    // comes back here still owning it — which is what the flag
+                    // distinguishes.
+                    let s = scan(&b.stmts[i + 1..], name, false);
+                    report(out, &s, *line, name, &rendered, module);
+                    live.push((name.clone(), rendered));
+                }
+            }
+            for sub in sub_blocks(st) {
+                block(sub, live, producers, module, out);
+            }
+        }
+        live.truncate(base);
+    }
+
+    /// The rendered stream type this `let` binds, if it binds one.
+    fn stream_let(
+        ty: Option<&Type>,
+        value: &Expr,
+        live: &[(String, String)],
+        producers: &HashMap<&str, String>,
+    ) -> Option<String> {
+        if let Some(t @ Type::Stream(_)) = ty {
+            return Some(t.to_string());
+        }
+        match value {
+            Expr::Call { name, .. } if name == "fromArray" => Some("Stream".to_string()),
+            Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
+            // `let t = s` moves the stream; `t` inherits both the obligation and
+            // the rendering, and the mention of `s` discharges `s`'s.
+            Expr::Var { name, .. } => live
+                .iter()
+                .find(|(l, _)| l == name)
+                .map(|(_, rendered)| rendered.clone()),
+            _ => None,
+        }
+    }
+
+    /// `nested_loop` is whether this list is (transitively) the body of a loop
+    /// *inside* the block that declared the stream. It is the whole difference
+    /// between the two things `break` can mean: leaving the declaring block, which
+    /// abandons the stream, and leaving a loop below it, after which control
+    /// returns to the declaring block still owning it.
+    fn scan(stmts: &[Stmt], name: &str, nested_loop: bool) -> Scan {
+        let mut acc = Scan::default();
+        for (i, st) in stmts.iter().enumerate() {
+            // The one place a disposal is decided: any mention of the binding in a
+            // statement's own expressions moves it (`close(s)`, `for x in s`,
+            // `sink(s)`, `let t = s`). A second mention anywhere in the rest of the
+            // list is then a double disposal on this path.
+            let moved = match st {
+                Stmt::Let { value, .. }
+                | Stmt::Assign { value, .. }
+                | Stmt::SetField { value, .. }
+                | Stmt::Expr(value) => mentions(value, name),
+                Stmt::IndexSet { index, value, .. } => {
+                    mentions(index, name) || mentions(value, name)
+                }
+                Stmt::If { cond, .. } | Stmt::While { cond, .. } => mentions(cond, name),
+                Stmt::IfLet { scrutinee, .. } => mentions(scrutinee, name),
+                Stmt::ForIn { iter, .. } => mentions(iter, name),
+                Stmt::Drop { name: n, .. } => n == name,
+                Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => false,
+                Stmt::Region { .. } => false,
+            };
+            if moved {
+                acc.disposed = true;
+                acc.doubled = stmts[i + 1..].iter().any(|s| stmt_mentions(s, name));
+                // The disposal settles `disposed`, but the caller's branch merge
+                // still needs to know whether anything falls out of this list —
+                // `if c { close(s) return 1 }` disposes AND diverges, and reading
+                // it as a plain fall-through made the merge see two branches
+                // disagreeing when only one of them continues.
+                acc.diverges = diverges(&stmts[i + 1..]);
+                return acc;
+            }
+            match st {
+                Stmt::Return { value, .. } => {
+                    // Forwarding by returning it is a disposal; returning anything
+                    // else leaves the function still owning it.
+                    acc.diverges = true;
+                    acc.leaked |= !value.as_ref().is_some_and(|e| mentions(e, name));
+                    return acc;
+                }
+                // Inside a loop below the declaring block, `break`/`continue` land
+                // back in the declaring block still owning the stream — nothing to
+                // report. At the declaring block's own level they leave it, so an
+                // undisposed stream is abandoned exactly as by a bare `return`.
+                Stmt::Break { .. } | Stmt::Continue { .. } => {
+                    acc.diverges = true;
+                    acc.leaked |= !nested_loop;
+                    return acc;
+                }
+                Stmt::If {
+                    then_block,
+                    else_block,
+                    ..
+                }
+                | Stmt::IfLet {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    let t = scan(&then_block.stmts, name, nested_loop);
+                    let e = match else_block {
+                        Some(b) => scan(&b.stmts, name, nested_loop),
+                        None => Scan::default(),
+                    };
+                    acc.leaked |= t.leaked || e.leaked;
+                    acc.doubled |= t.doubled || e.doubled;
+                    match (t.diverges, e.diverges) {
+                        (true, true) => {
+                            acc.diverges = true;
+                            return acc;
+                        }
+                        (true, false) => {
+                            if e.disposed {
+                                acc.disposed = true;
+                                return acc;
+                            }
+                        }
+                        (false, true) => {
+                            if t.disposed {
+                                acc.disposed = true;
+                                return acc;
+                            }
+                        }
+                        (false, false) => {
+                            if t.disposed && e.disposed {
+                                acc.disposed = true;
+                                return acc;
+                            }
+                            // The branches DISAGREE. Whatever follows, one of the
+                            // two paths is wrong: if nothing disposes later the
+                            // disposing branch is the only correct one, and if
+                            // something does, it double-frees on that branch. Both
+                            // are the same authoring mistake, so it is reported
+                            // once, here, rather than turned into a puzzle by a
+                            // later statement that makes the merge look clean.
+                            acc.leaked |= t.disposed != e.disposed;
+                        }
+                    }
+                }
+                // A loop body may run zero times, so a disposal inside it never
+                // discharges the obligation on the fall-through — and disposing on
+                // one iteration would dispose again on the next, which is the same
+                // shape `check_loop_reuse` already rejects for `consume`.
+                Stmt::While { body, .. } | Stmt::ForIn { body, .. } => {
+                    let b = scan(&body.stmts, name, true);
+                    acc.leaked |= b.leaked || b.disposed;
+                    acc.doubled |= b.doubled;
+                }
+                Stmt::Region { body, .. } => {
+                    let b = scan(&body.stmts, name, nested_loop);
+                    acc.leaked |= b.leaked;
+                    acc.doubled |= b.doubled;
+                    if b.disposed || b.diverges {
+                        acc.disposed = b.disposed;
+                        acc.diverges = b.diverges;
+                        return acc;
+                    }
+                }
+                _ => {}
+            }
+        }
+        acc
+    }
+
+    /// Whether every path out of `stmts` leaves via `return`/`break`/`continue`
+    /// (or `panic`, which diverges for the same reason it does above).
+    ///
+    /// The same question `MoveCheck::block` answers as its return value; asked
+    /// again here because [`scan`] stops at the disposal and so never reaches the
+    /// `return` that follows it.
+    fn diverges(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+            Stmt::Expr(Expr::Call { name, .. }) => name == "panic",
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | Stmt::IfLet {
+                then_block,
+                else_block,
+                ..
+            } => {
+                diverges(&then_block.stmts)
+                    && else_block.as_ref().is_some_and(|b| diverges(&b.stmts))
+            }
+            Stmt::Region { body, .. } => diverges(&body.stmts),
+            _ => false,
+        })
+    }
+
+    /// The nested blocks of a statement, for the declaration walk.
+    fn sub_blocks(s: &Stmt) -> Vec<&Block> {
+        match s {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | Stmt::IfLet {
+                then_block,
+                else_block,
+                ..
+            } => {
+                let mut v = vec![then_block];
+                v.extend(else_block.as_ref());
+                v
+            }
+            Stmt::While { body, .. }
+            | Stmt::ForIn { body, .. }
+            | Stmt::Region { body, .. } => vec![body],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether a whole statement (including everything nested in it) mentions the
+    /// binding — the double-disposal probe.
+    fn stmt_mentions(s: &Stmt, name: &str) -> bool {
+        let here = match s {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::Expr(value) => mentions(value, name),
+            Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
+            Stmt::If { cond, .. } | Stmt::While { cond, .. } => mentions(cond, name),
+            Stmt::IfLet { scrutinee, .. } => mentions(scrutinee, name),
+            Stmt::ForIn { iter, .. } => mentions(iter, name),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| mentions(e, name)),
+            Stmt::Drop { name: n, .. } => n == name,
+            _ => false,
+        };
+        here || sub_blocks(s)
+            .iter()
+            .any(|b| b.stmts.iter().any(|s| stmt_mentions(s, name)))
+    }
+
+    /// Whether `e` names the binding anywhere. Every mention of a stream is a
+    /// move — a `Stream` has no field, no length, and no indexing — so this needs
+    /// no notion of position, which is what keeps it a dozen lines.
+    fn mentions(e: &Expr, name: &str) -> bool {
+        match e {
+            Expr::Var { name: n, .. } => n == name,
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                mentions(expr, name)
+            }
+            Expr::Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
+            Expr::Call { args, .. }
+            | Expr::Spawn { args, .. }
+            | Expr::TryConstruct { args, .. }
+            | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| mentions(a, name)),
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| mentions(k, name) || mentions(v, name)),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| mentions(v, name)),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => mentions(scrutinee, name) || arms.iter().any(|a| mentions(&a.body, name)),
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                mentions(cond, name)
+                    || mentions(then_branch, name)
+                    || else_branch.as_ref().is_some_and(|e| mentions(e, name))
+            }
+            Expr::Lambda { body, .. } => match body {
+                LambdaBody::Expr(e) => mentions(e, name),
+                LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
+            },
+        }
+    }
+}
+
 /// The payload names a `match` pattern binds.
 pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
@@ -704,6 +1114,87 @@ mod tests {
                        while true { break let a = take(x); let b = take(x); } \
                        return 0; }";
         assert!(run(src).is_ok(), "{:?}", run(src));
+    }
+
+    // ---- RFC-0075: the disposal obligation -------------------------------
+
+    /// The producer every stream case below acquires from.
+    const FEED: &str = "fn feed() -> Stream<Int64> { let xs: Array<Int64> = [1, 2] \
+                        return fromArray(xs) } ";
+
+    fn stream(body: &str) -> Result<(), String> {
+        run(&format!("{FEED} fn main() -> Int64 {{ {body} }}"))
+    }
+
+    #[test]
+    fn an_abandoned_stream_does_not_build() {
+        // The milestone's whole claim: the `#6193` shape is a compile error.
+        let e = stream("let events = feed() return 0").unwrap_err();
+        assert!(e.contains("`events` is a `Stream<Int64>` and is never disposed"), "{e}");
+    }
+
+    #[test]
+    fn the_three_discharges_are_accepted() {
+        assert!(stream("for p in feed() { print(p) } return 0").is_ok());
+        assert!(stream("let s = feed() close(s) return 0").is_ok());
+        assert!(run(&format!(
+            "{FEED} fn fwd() -> Stream<Int64> {{ let s = feed() return s }} \
+             fn main() -> Int64 {{ close(fwd()) return 0 }}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn a_stream_must_be_disposed_on_every_path() {
+        // Disposing on one branch only is the tRPC pathology in miniature: the
+        // cleanup exists, and there is a path that skips it.
+        let e = stream("let s = feed() if true { close(s) } return 0").unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        let e = stream("let s = feed() if true { return 1 } close(s) return 0").unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        // Both branches, or a branch that leaves, are fine.
+        assert!(stream("let s = feed() if true { close(s) } else { close(s) } return 0").is_ok());
+        assert!(stream("let s = feed() if true { close(s) return 1 } close(s) return 0").is_ok());
+    }
+
+    #[test]
+    fn breaking_out_of_the_declaring_block_abandons_it() {
+        // `break` means two different things depending on which side of the
+        // declaring block the loop it leaves is on.
+        let e = stream("for i in [0, 1] { let s = feed() break } return 0").unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        // Here the loop is BELOW the declaration, so control comes back owning it.
+        assert!(stream("let s = feed() for i in [0, 1] { break } close(s) return 0").is_ok());
+    }
+
+    #[test]
+    fn a_stream_may_not_be_disposed_twice() {
+        // The direction the leak check does not cover, and the worse bug of the
+        // two: `close` frees the buffer, so a second one is a double free.
+        let e = stream("let s = feed() close(s) close(s) return 0").unwrap_err();
+        assert!(e.contains("disposed more than once"), "{e}");
+        let e = stream("let s = feed() for p in s { print(p) } close(s) return 0").unwrap_err();
+        assert!(e.contains("disposed more than once"), "{e}");
+    }
+
+    #[test]
+    fn aliasing_moves_the_obligation_rather_than_dropping_it() {
+        let e = stream("let s = feed() let t = s return 0").unwrap_err();
+        assert!(e.contains("`t` is a `Stream<Int64>`"), "{e}");
+        assert!(stream("let s = feed() let t = s close(t) return 0").is_ok());
+    }
+
+    #[test]
+    fn a_stream_parameter_carries_the_obligation_into_the_callee() {
+        // Without this, `fn sink(s: Stream<Int64>) {}` is a one-line hole through
+        // the whole analysis: the caller discharges by moving, and nobody else has
+        // to do anything.
+        let e = run(&format!(
+            "{FEED} fn sink(s: Stream<Int64>) -> Int64 {{ return 0 }} \
+             fn main() -> Int64 {{ return sink(feed()) }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("`s` is a `Stream<Int64>` and is never disposed"), "{e}");
     }
 
     #[test]

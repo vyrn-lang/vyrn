@@ -190,6 +190,11 @@ pub const RESERVED: &[&str] = &[
     "assertEq",
     "blackBox",
     "panic",
+    // RFC-0075: the only two ways to make and unmake a `Stream<T>`. Reserved for
+    // the reason every other builtin here is — they are dispatched before user
+    // functions, so a user `fn close` would be silently unreachable.
+    "fromArray",
+    "close",
     "Int",
     "Int64",
     "Int32",
@@ -1083,6 +1088,53 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
     }
 
+    /// Whether `ty` transitively contains a `Stream<T>` (RFC-0075), resolving
+    /// named types so `type Feed = Stream<Int64>` cannot launder one into a
+    /// record field. Structural rather than a `contains_fn` clone because a
+    /// stream may not be a type argument either: `Option<Stream<T>>` is exactly
+    /// the storage the scope rule forbids.
+    fn contains_stream(&self, ty: &Type) -> bool {
+        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+            match ty {
+                Type::Stream(_) => true,
+                Type::Option(i)
+                | Type::Array(i)
+                | Type::ArrayN(i, _)
+                | Type::SmallArray(i, _)
+                | Type::Ref(i)
+                | Type::Task(i)
+                | Type::Partial(i) => walk(i, types, seen),
+                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
+                    walk(a, types, seen) || walk(b, types, seen)
+                }
+                Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
+                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
+                Type::Enum(vs) => vs
+                    .iter()
+                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
+                Type::Fn(ps, r) => {
+                    ps.iter().any(|p| walk(p, types, seen)) || walk(r, types, seen)
+                }
+                Type::Named(n) | Type::App(n, _) => {
+                    let args = match ty {
+                        Type::App(_, a) => a.as_slice(),
+                        _ => &[],
+                    };
+                    args.iter().any(|a| walk(a, types, seen))
+                        || (!seen.iter().any(|s| s == n)
+                            && types.get(n).is_some_and(|d| {
+                                seen.push(n.clone());
+                                let r = walk(&d.base, types, seen);
+                                seen.pop();
+                                r
+                            }))
+                }
+                _ => false,
+            }
+        }
+        walk(ty, self.types, &mut Vec::new())
+    }
+
     /// Whether `ty` transitively contains a function-value type (RFC-0037),
     /// resolving named types (cycle-safe). Used to keep function values out of
     /// the positions that stay illegal: `extern`/`gen` signatures, `Ref`/`Task`
@@ -1343,7 +1395,39 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Reject a `Stream` in a position that STORES it (RFC-0075).
+    ///
+    /// [`ensure_type_exists`](Self::ensure_type_exists) already rejects a stream
+    /// nested inside a composite, but a declared record's fields and an enum's
+    /// payloads are validated one at a time, so each arrives at the root position
+    /// the guard there deliberately allows. This is that same rule, spelled for
+    /// the two sites where "root" is a lie.
+    fn ensure_no_stream(&self, ty: &Type, line: usize, where_: &str) -> Result<(), String> {
+        if self.contains_stream(ty) {
+            return Err(format!(
+                "line {line}: `{ty}` may not be {where_} — a stream's lifetime is a scope, \
+                 so it may be a binding, a parameter, or a return type, and nothing may \
+                 store it (RFC-0075)"
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), String> {
+        // RFC-0075: a stream's lifetime is a SCOPE, which is what makes the
+        // obligation checkable. A `Stream` inside a record, an array, a `Ref` or
+        // an enum payload would outlive the binding movecheck can see, so the
+        // acquisition site would have nothing to point at — the obligation would
+        // be laundered away by one field declaration. Legal exactly at the root
+        // of a binding, parameter, or return type; rejected anywhere below that,
+        // here, at the one walk every declared type passes through.
+        if !matches!(self.base(ty), Type::Stream(_)) && self.contains_stream(ty) {
+            return Err(format!(
+                "line {line}: `{ty}` holds a `Stream`, but a stream's lifetime is a scope — \
+                 it may be a binding, a parameter, or a return type, and nothing may \
+                 store it (RFC-0075)"
+            ));
+        }
         match ty {
             // `Code` (RFC-0054) is a builtin opaque type, legal only in a
             // generation context — using it elsewhere is a compile error (which
@@ -1448,6 +1532,9 @@ impl<'a> Checker<'a> {
             }
             // Container types recurse so their element types are validated.
             Type::Array(inner) | Type::ArrayN(inner, _) => self.ensure_type_exists(inner, line)?,
+            // `Stream<T>` (RFC-0075) — the root-position case the guard above
+            // lets through; its element type is validated like any other.
+            Type::Stream(inner) => self.ensure_type_exists(inner, line)?,
             // `SmallArray<T, N>` (RFC-0056): the inline capacity is bounded
             // `1 <= N <= 64` (keeps the worst-case stack/inline footprint sane),
             // and the element type must be a real type (not a stray integer).
@@ -1660,6 +1747,7 @@ impl<'a> Checker<'a> {
                         t.line, f.name, t.name
                     ));
                 }
+                self.ensure_no_stream(&f.ty, t.line, "a record field")?;
                 self.ensure_type_exists(&f.ty, t.line)?;
             }
             if let Some(pred) = &t.predicate {
@@ -1706,6 +1794,7 @@ impl<'a> Checker<'a> {
             }
             for v in vs {
                 for p in &v.payload {
+                    self.ensure_no_stream(p, t.line, "an enum payload")?;
                     self.ensure_type_exists(p, t.line)?;
                 }
             }
@@ -1963,6 +2052,18 @@ impl<'a> Checker<'a> {
                 if self.base(&vty) == Type::Unit {
                     return Err(format!(
                         "line {}: cannot bind module state `{}` to a Unit value",
+                        g.line, g.name
+                    ));
+                }
+                // RFC-0075: module state lives for the whole module and is never
+                // dropped (RFC-0013), so a stream stored there could not be
+                // disposed by anything movecheck can see — the obligation would
+                // be unsatisfiable rather than merely unchecked.
+                if matches!(self.base(&vty), Type::Stream(_)) {
+                    return Err(format!(
+                        "line {}: module state `{}` may not be a `Stream` — a stream's \
+                         lifetime is a scope, and module state is never dropped \
+                         (RFC-0075)",
                         g.line, g.name
                     ));
                 }
@@ -2425,6 +2526,11 @@ impl<'a> Checker<'a> {
                     Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
                         (*inner).clone()
                     }
+                    // A `Stream<T>` (RFC-0075) yields `T` and is CONSUMED by the
+                    // loop — the one construct that discharges the obligation
+                    // without naming a release. Movecheck enforces the "once"
+                    // half; here it is an ordinary element type.
+                    Type::Stream(inner) => (*inner).clone(),
                     // Iterating a String yields each byte as an Int.
                     Type::Str => Type::Int,
                     other => {
@@ -5068,6 +5174,47 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Unit);
         }
+        // RFC-0075 M1. `fromArray(xs)` is the whole producer set for now: it hands
+        // the array's buffer to a `Stream<T>`, which is the same three words, so
+        // the call is a move and emits nothing. `close(s)` is the explicit release.
+        // Both are builtins because neither can be written in Vyrn — there is no
+        // other way to make or unmake a `Stream`.
+        if name == "fromArray" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `fromArray` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let at = self.base(&at);
+            if matches!(at, Type::Err) {
+                return Ok(Type::Err);
+            }
+            let Type::Array(inner) = at else {
+                return Err(format!(
+                    "line {line}: `fromArray` needs an `Array<T>`, found {at}"
+                ));
+            };
+            return Ok(Type::Stream(inner));
+        }
+        if name == "close" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `close` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let at = self.base(&at);
+            if matches!(at, Type::Err) {
+                return Ok(Type::Unit);
+            }
+            if !matches!(at, Type::Stream(_)) {
+                return Err(format!("line {line}: `close` needs a `Stream<T>`, found {at}"));
+            }
+            return Ok(Type::Unit);
+        }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Method-only (`@pop`); the receiver must be a `mut`
         // `Array<T>` binding. A fixed-size `Array<T, N>` cannot shrink, so it is
@@ -6741,6 +6888,9 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "set",
     "release",
     "afree",
+    // `close` frees a stream's buffer, for the same reason `afree` is here: the
+    // caller may still hold it across the task boundary.
+    "close",
     "trace",
     "debug",
     "info",

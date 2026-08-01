@@ -2959,6 +2959,10 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "at", detail: "at(array, index) -> T — read an element by index" },
     BuiltinMethod { name: "alen", detail: "alen(array) -> Int64 — element count" },
     BuiltinMethod { name: "afree", detail: "afree(array) -> Unit — free a growable array" },
+    // RFC-0075. `close` is offered on a `Stream<T>` below; `fromArray` is here
+    // for hover only, since it takes an Array and produces the stream.
+    BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
+    BuiltinMethod { name: "close", detail: "close(stream) -> Unit — discharge a stream's disposal obligation without consuming it" },
     BuiltinMethod { name: "pop", detail: "array.pop() -> Option<T> — remove and return the last element (None if empty)" },
     BuiltinMethod { name: "swapRemove", detail: "array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot" },
     BuiltinMethod { name: "has", detail: "map.has(key) -> Bool — whether the map contains the key (RFC-0028)" },
@@ -3004,6 +3008,9 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
         .into_iter()
         .flatten()
         .collect(),
+        // A `Stream<T>` (RFC-0075) offers exactly one method, which is the point:
+        // no `at`, no `alen`, no `push`. It is read by `for … in` or released.
+        Type::Stream(_) => vec![by_name("close")].into_iter().flatten().collect(),
         // A fixed-size `Array<T, N>` cannot shrink — no `pop`/`swapRemove`.
         Type::ArrayN(..) => vec![
             by_name("push"),

@@ -163,7 +163,7 @@ and any third-party adapter — must pass a shared suite:
 |---|---|
 | client disconnects mid-stream | producer release runs within 100 ms |
 | consumer `break`s | release runs before the loop's next statement |
-| consumer traps | release runs during unwind |
+| consumer traps | release runs during unwind — **unachievable as written; see "As landed"** |
 | producer raises | release runs; the error surfaces to the consumer |
 | stream is dropped unconsumed | compile error, not a runtime condition |
 | 10 000 open-then-abandon cycles | steady-state memory within 5% of baseline |
@@ -209,13 +209,88 @@ inherited.
 ## Milestones
 
 - **M1 — the type.** `Stream<T>`, linearity in movecheck with its diagnostic,
-  `for … in` consumption with release on every exit path, `close()`.
+  `for … in` consumption with release on every exit path, `close()`. **Shipped**
+  — see "As landed" below; the trap claim in this document is wrong and M3
+  depends on it.
 - **M2 — `std/stream`.** `unfold`, `fromArray`, `map`, `filter`, `take`,
   `merge`, `channel` with mandatory bounded capacity and overflow policy.
 - **M3 — cancellation + conformance.** The normalized signal; the conformance
   suite; native and wasm adapters passing it.
 - **M4 — transports.** `sse` and `ws` projections; resumability via seed;
   the raw-`EventSource` completion test; a live tail in `examples/bin`.
+
+## As landed — M1
+
+M1 shipped as specified: `Stream<T>`, the linearity, `for … in` consumption with
+release on every exit path, and `close()`. Four things the text above got wrong
+or left unsaid, in the order they cost time.
+
+**A trap does not run the release, and cannot.** The text claims "`break`, early
+`return`, and a trap all run the producer's release path", and the conformance
+table has a row for "consumer traps → release runs during unwind". **Vyrn has no
+unwinding.** Every trap on every engine is `fputs(stderr); exit(1); unreachable`
+— checked in the emitted IR, and it is the same in the interpreter and the direct
+wasm backend. So no drop, no `region_exit` and no stream release has ever run on
+a trap in this language, and none does now. For M1 the consequence is nil: the
+release is a `free`, and the process exiting reclaims the buffer either way. For
+M3 it is not nil — a producer holding a socket would not close it — and closing
+that row means *adding unwinding*, which is a language change with a
+three-engine parity cost, not an adapter detail. The row should be rewritten as
+"the host reclaims on abnormal exit" or the RFC should own the unwinding
+question explicitly. **Do not plan M3 assuming the release runs on a trap.**
+
+**`Stream<T>` is a new `Type` variant whose lowering is `Array<T>`'s exactly.**
+The open question was type-versus-library-type-with-an-attribute. It has to be a
+type, because both alternatives launder the obligation: an attribute on
+`Array<T>` leaves `at`/`push`/`.length` applicable to a stream, and a library
+alias has to name an `Array` base, so `let a: Array<T> = s` erases it. But that
+is entirely a *checker* argument — the runtime has nothing new in it. `Stream<T>`
+is `{ ptr, i64, i64 }`, `Val::Array`, and the same indexed walk, on all three
+engines; `fromArray` lowers to no instruction at all (pinned by emitting it
+beside the `Array` version and comparing the bodies byte for byte). RFC-0083's
+`F32x4` was the mirror image: a new representation with no ownership. This is a
+new *rule* with no new representation.
+
+**The obligation needed a second analysis, not an extension of the first.**
+"Extend movecheck" was the right instinct and the wrong mechanism. Movecheck's
+existing `Consumed` map is a **may**-analysis — a value consumed on either branch
+of an `if` is consumed afterward, which is what makes use-after-consume sound.
+Disposal is a **must**-analysis, and the two want opposite merges at every
+branch. Folding them would have made one of the two wrong everywhere. So M1 adds
+a second walk over the same bodies (`movecheck::streams`), sharing the file and
+the diagnostic channel and nothing else. It is ~250 lines and it is exact rather
+than conservative, for one reason worth recording: **a stream has no read
+operations at all**, so every mention of a stream binding is a move, and a
+syntactic walk needs no notion of position. The stronger claim was affordable
+because the type surface was kept small.
+
+Two rules fell out of implementation that the text does not mention, and both are
+load-bearing:
+
+- **A stream may not be stored.** The text says this about module state; it is
+  true of any composite. `type R = { s: Stream<Int64> }` was a one-line erasure
+  of the entire obligation, so a stream is now legal exactly at the root of a
+  binding, a parameter, or a return type — rejected in a record field, an enum
+  payload, an `Array`, an `Option`, a `Ref`, a `Map` value, and module state.
+- **A `Stream` parameter carries the obligation into the callee.** Otherwise
+  `fn sink(s: Stream<Int64>) -> Int64 { return 0 }` is the same one-line hole:
+  the caller discharges by moving, and nobody else has to do anything.
+
+**Disposing twice is the other half, and it is the worse bug.** The text is only
+about the leak. `close` frees the buffer, so a second `close` — or a `close`
+after a `for … in` — is a double free, which the may-analysis does not catch
+because `close` is not a `consume` parameter. Both directions are checked now,
+and where two branches disagree about whether a stream was disposed, the
+*acquisition* is reported rather than waiting for a later statement to make the
+merge look clean: whatever follows, one of those two paths is wrong.
+
+Two limits, stated so they are not mistaken for coverage. Bindings are keyed by
+**name**, exactly as the `Consumed` map above them is, so an inner `let s = 1`
+shadowing an outer stream `s` reads as a disposal of the outer one; fixing that
+means giving both analyses a scope-id key at once. And the `close` on the direct
+wasm backend reclaims nothing, because that backend's `malloc` is a bump pointer
+that never frees — pre-existing, already noted at its `region_exit`, and
+unobservable, since a released stream cannot be named again on any engine.
 
 ## Acceptance
 
