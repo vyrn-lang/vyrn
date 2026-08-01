@@ -3099,6 +3099,17 @@ impl Fn_<'_> {
                         other => return unsupported(&format!("a branch indexing `{other}`"), line),
                     }
                 }
+                // RFC-0075. `Stream<T>` is `Array<T>`'s three words here as
+                // everywhere, so producing one is a retype and nothing more.
+                "fromArray" if args.len() == 1 => {
+                    match self.cx.resolve(&self.peek(&args[0], line)?) {
+                        Type::Array(i) => Type::Stream(i),
+                        other => {
+                            return unsupported(&format!("`fromArray` of `{other}`"), line)
+                        }
+                    }
+                }
+                "close" => Type::Unit,
                 "@has" | "@remove" => Type::Bool,
                 "@keys" => Type::Array(Box::new(Type::Str)),
                 "push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
@@ -4461,6 +4472,26 @@ impl Fn_<'_> {
                 let aty = Type::SmallArray(inner.clone(), n);
                 return self.sa_method(m, b, name, args, &aty, &inner, n, line);
             }
+            // RFC-0075. `fromArray` is a retype of the same aggregate — the value
+            // is already on the stack in exactly the right shape. `close` drops
+            // it, which reclaims nothing here for the reason `region_exit`
+            // reclaims nothing and `Stmt::Drop` of an array reclaims nothing: this
+            // backend's `malloc` is a bump pointer that never frees. That is the
+            // pre-existing property showing through, not a hole `close` opened —
+            // and it is unobservable, since a released stream cannot be named
+            // again on any engine.
+            "fromArray" if args.len() == 1 => {
+                let got = self.expr(m, b, &args[0])?;
+                return match self.cx.resolve(&got) {
+                    Type::Array(i) => Ok(Type::Stream(i)),
+                    other => unsupported(&format!("`fromArray` of `{other}`"), line),
+                };
+            }
+            "close" if args.len() == 1 => {
+                self.expr(m, b, &args[0])?;
+                b.ins(&Instruction::Drop);
+                return Ok(Type::Unit);
+            }
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
             "@swapRemove" if args.len() == 2 => return self.swap_remove(m, b, args, line),
             // `list([..])` is the explicit spelling of the contextual literal;
@@ -5742,7 +5773,10 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalSet(addr));
         let len = b.local(ValType::I64);
         Ok(match self.cx.resolve(ty) {
-            Type::Array(inner) => {
+            // A `Stream<T>` walks exactly as its `Array<T>` does (RFC-0075): same
+            // three words, same stride, and the loop OWNS it — the linearity that
+            // makes the two types different was settled in movecheck.
+            Type::Array(inner) | Type::Stream(inner) => {
                 let l = self.layout_of(ty, line)?;
                 let data = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(addr));

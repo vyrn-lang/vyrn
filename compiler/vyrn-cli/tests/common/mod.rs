@@ -41,6 +41,11 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "two impls of one protocol for one type constructor (RFC-0080 M1)",
         "collides with `impl<T> Show for Option<T>` (line",
     ),
+    (
+        "stream_abandoned.vyrn",
+        "a `Stream` acquired and abandoned (RFC-0075 M1) — the `trpc#6193` shape",
+        "`events` is a `Stream<Int64>` and is never disposed",
+    ),
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser
