@@ -1,7 +1,8 @@
 # RFC-0080 — Associated Types and Generic Impls
 
-- **Status:** **M1 and M2 shipped**; M3 designed, not started. Whether to build
-  it is a separate decision from whether the design is right.
+- **Status:** **M1 and M2 shipped. M3 shipped in half** — `?` resolves through
+  `Fallible` for user types; `Option` and `Result` stay nominal, and the "As
+  landed — M3" note says why that is a refusal rather than an omission.
 - **Depends on:** RFC-0002 §5 (protocols, static monomorphized dispatch),
   RFC-0023 (monomorphized function values — the unification machinery this
   extends), RFC-0079 (`?`/`??`, the motivating consumers)
@@ -166,6 +167,14 @@ written today keeps working unchanged**. The change is purely additive. Nothing
 in RFC-0079 forecloses it: `Success`/`Failure` are unspellable internal patterns
 that can be replaced wholesale.
 
+(**Two of those three sentences turned out to be wrong**, and M3's note below
+carries the corrections. `std` does *not* implement `Fallible` for `Option` and
+`Result` — it cannot, because a bare `vyrn run` has no `std`. And
+`Success`/`Failure` cannot be replaced wholesale, because they are a *parser*
+artifact and a protocol lives in the checker. The sentence that held is the one
+that mattered: every program written today does keep working unchanged, and the
+corpus is byte-identical.)
+
 That is the reason to build this for `Show` and containers, and to treat the
 operator generalization as a payoff that arrives later rather than a deadline.
 
@@ -306,6 +315,96 @@ with its failing variant intact.
 M3 is where this could go wrong in a way M1 and M2 cannot, because it touches an
 operator every program uses. It should be attempted only when the two below it
 have been green for a while, and abandoning it leaves M1 and M2 standing.
+
+**As landed — partially, and the refused half is the interesting one.**
+`std/fallible.vyrn` declares the protocol, `?` resolves through it for any
+operand that is not an `Option` or a `Result`, and `examples/fallible.vyrn` is
+the four-variant pin — three engines byte-identical. The corpus passed
+**unchanged**: 106 of 106 pre-existing examples emit byte-identical IR, 238 `?`
+lowerings among them, and no example was edited.
+
+**`Option` and `Result` do NOT resolve through the protocol, and will not.**
+That is half the sentence above this one, refused for four reasons found in the
+order they bite (`types::FALLIBLE` carries them beside the code):
+
+1. **`vyrn run` on a bare file has no resolver and therefore no `std/`** — the
+   interpreter's own tests are exactly that. Routing `x?` on an `Option` through
+   a std protocol makes the most common operator in the language depend on a
+   module lookup that is *allowed to fail*. The RFC's "`std` gains `Fallible`
+   with impls for `Option` and `Result`" assumed a prelude that does not exist,
+   and RFC-0062 deliberately went the other way (explicit `std/option`,
+   `std/result` imports).
+2. **`?` on a `Result` checks `assignable(e, re)`.** `Fallible` has one
+   associated type and it is the *success* payload; the error check has nowhere
+   to live. A `type Error` would give it one — and then `Option`'s `Error` is a
+   payload that does not exist and a four-variant enum's is the whole enum. Two
+   associated types to re-derive a check that is one line today.
+3. **The diagnostics are better nominal.** ``line N: `?` propagates error {e},
+   but the function returns Result<_, {re}>`` degrades to "does not implement
+   `Fallible`" on the protocol path. A worse message on this operator is a real
+   cost.
+4. **The lowering is inline and would stop being.** `Option`/`Result` `?` is a
+   tag test and an `extractvalue`; through the protocol it becomes two calls
+   whose bodies re-`match` the value the branch already tested. `std/json`,
+   `std/scan` and `std/num` use `?` in loops.
+
+So the operator is nominal for the two shapes the language builds in and open
+for everything else. Calling that "M3 shipped" would be reading the milestone
+generously; what shipped is the capability, not the unification.
+
+The rest of what the plan got wrong or left out:
+
+- **`Success`/`Failure` were not "replaced wholesale" — they cannot be, and the
+  reason is structural rather than incidental.** They exist because the `??`
+  desugar runs in the **parser**, which holds no types. A protocol lives in the
+  checker, which is one phase too late to change what the parser emits; it sits
+  *above* the two patterns rather than replacing them. So `??` does not follow
+  `?` onto a user enum at all, and it is not a matter of effort: "the failure
+  side" of a four-variant sum is a wildcard over N−1 variants, and `Pattern`
+  still has none. `?` reaches a `Fallible` enum precisely because it never
+  pattern-matches — it tests and copies. `check_match_enum` now says that in the
+  source's own words instead of surfacing ``expected an enum variant pattern``,
+  which named a pattern nobody wrote.
+
+- **The four-variant claim holds, and a negative control proves *why* it
+  holds.** `ServerError("upstream timed out")` reaches the caller with its
+  `String` intact, and nothing in the protocol mentions failure payloads.
+  Narrowing the direct backend's propagating `memory.copy` from the aggregate's
+  width to 8 bytes makes exactly that payload — and nothing else — come out
+  empty, on the wasm column, on this example. The payload survives *because* the
+  bytes are copied whole; there is no residual because there is nothing to
+  reconstruct.
+
+- **The protocol owes two answers, and `success` has to be total.** `success`
+  is called only after `isSuccess` answered true, so its failing arms are
+  unreachable — and they still owe an `Output`. RFC-0079 M1's `panic` is what
+  says so. The design section did not mention this and it is the one thing an
+  impl author must be told.
+
+- **Three engines, not two.** RFC-0077 M5 made `--target wasm` the direct
+  backend unconditionally, so the wasm parity column is `direct.rs` and not
+  clang. `?` had to be lowered there as well as in the textual emitter and the
+  interpreter. Both backends park the operand in a slot under a reserved name
+  (`@try`) so the two impl calls can be spelled as an `Expr::Var` and go through
+  the existing `call` whole — including its generic path, which is why
+  `impl<T> Fallible for Slot<T>` monomorphizes at two payload types with nothing
+  new written for it.
+
+- **The checker reads `Output` by typing the call the backends will emit**
+  rather than by a substitution rule of its own. `self.call("Fallible__K__success",
+  [operand])` is the same generic-inference path a hand-written `x.success()`
+  takes, so M1's unification and M2's substitution answer the operator's type
+  question without either being told an operator asked.
+
+- **The compiler knows the name `Fallible` and nothing else.** A program that
+  declares the protocol itself is indistinguishable from one that imports
+  `std/fallible` — which is what makes the std module a canonical spelling
+  rather than a dependency of the operator.
+
+- **`?` inside a generic function was a non-event.** `fn wrap<T>(xs: Option<T>)`
+  takes the nominal `Option` arm; `T` is never asked for. M2's "a caller cannot
+  name the associated type" never fires, because the operand's *constructor* is
+  known even when its argument is not.
 
 ## What this does not decide
 

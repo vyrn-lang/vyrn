@@ -101,6 +101,34 @@ pub fn impl_method_name(protocol: &str, type_key: &str, method: &str) -> String 
     format!("{protocol}__{type_key}__{method}")
 }
 
+/// The protocol `?` resolves through for an operand that is neither `Option`
+/// nor `Result` (RFC-0080 M3). Declared in `std/fallible.vyrn`; the compiler
+/// knows only the name and the two method names below, so a program that
+/// declares the protocol itself works identically to one that imports it.
+///
+/// **`Option` and `Result` deliberately do NOT route through it**, and that is
+/// the part of M3 that was refused rather than the part that was forgotten.
+/// Four reasons, in the order they bite:
+///
+/// 1. `vyrn run` on a bare file has no resolver and therefore no `std/`
+///    (`Interp`'s tests are exactly this). Routing `x?` on an `Option` through
+///    a std protocol would make the most common operator in the language
+///    depend on a module lookup that is allowed to fail.
+/// 2. `?` on a `Result` checks `assignable(e, re)` — the error types must
+///    match. `Fallible` has one associated type and it is the *success*
+///    payload; the check has nowhere to live.
+/// 3. The two nominal arms produce specific diagnostics ("`?` propagates error
+///    {e}, but the function returns Result<_, {re}>"). A protocol path can only
+///    say the operand does not implement `Fallible`.
+/// 4. `Option`/`Result` lower `?` to a tag test and an `extractvalue`, inline.
+///    Going through the protocol makes every `?` in the corpus two calls whose
+///    bodies re-`match` the value the branch already tested — a real cost on an
+///    operator `std/json`, `std/scan` and `std/num` use in loops.
+///
+/// So the operator is nominal for the two shapes the language builds in, and
+/// open for everything else. What M3 actually delivers is the second half.
+pub const FALLIBLE: &str = "Fallible";
+
 /// Extract the `(min, max)` inclusive numeric bounds a validated type's `where`
 /// predicate implies (RFC-0003 reflection). Recognizes `value >=/> N`,
 /// `value <=/< N` in either operand order, and `&&` conjunctions. Anything else

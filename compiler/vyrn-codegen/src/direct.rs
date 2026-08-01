@@ -6897,12 +6897,12 @@ impl Fn_<'_> {
         let st = self.expr(m, b, e)?;
         // The success pattern's binder name is unread — `tag_test` and
         // `bind_payload` both take the type from `sum`, not from the pattern — so
-        // it is spelled empty rather than invented. `?` on a user enum has no
-        // meaning at all, which is why `Sum::Enum` is not a case here.
+        // it is spelled empty rather than invented.
         let (sum, ok_ty, ok_pat) = match self.sum_of(&st) {
             Some(Sum::Opt(t)) => (Sum::Opt(t.clone()), t, Pattern::Some(String::new())),
             Some(Sum::Res(t, err)) => (Sum::Res(t.clone(), err), t, Pattern::Ok(String::new())),
-            _ => return unsupported(&format!("`?` on `{st}`"), line),
+            // Anything else asks `Fallible` (RFC-0080 M3) instead of the tag.
+            _ => return self.try_fallible(m, b, &st, line),
         };
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("`?` on a non-aggregate sum", line);
@@ -6956,6 +6956,73 @@ impl Fn_<'_> {
             Place::Static(_) => return unsupported("`?` yielding module state", line),
         }
         Ok(ok_ty)
+    }
+
+    /// `?` on a type that implements `Fallible` (RFC-0080 M3), with the operand's
+    /// aggregate address already on the stack.
+    ///
+    /// Same three moves as `try_` above — test, propagate the whole value, read
+    /// the success payload — with the first and third answered by impl methods.
+    /// The propagation is still the `memory.copy` of the entire aggregate, which
+    /// is the claim the milestone exists to execute: a failing variant reaches the
+    /// caller intact because nothing looks inside it.
+    ///
+    /// The value is copied into a frame slot and given a reserved name so the two
+    /// calls can be spelled as `Expr::Var` and go through `call` whole, including
+    /// its generic path. Passing the raw address instead would mean a second
+    /// argument-passing convention beside the one `emit_call` already has.
+    fn try_fallible(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        st: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let key = ftypes::type_key(&self.cx.sub(st))
+            .ok_or_else(|| gap(&format!("`?` dispatched on `{st}`"), line))?;
+        let Repr::Agg(sl) = self.cx.repr(st, line)? else {
+            return unsupported("`?` on a non-aggregate Fallible value", line);
+        };
+        // Whole-value propagation is only sound if the two sides are the same
+        // shape. The checker requires the same type outright here (there is no
+        // error half to compare separately), so this is the width check the
+        // `memory.copy` below needs rather than a second type rule.
+        let ret_ty = self.ret_ty.clone();
+        if self.cx.ll(&ret_ty) != self.cx.ll(st) {
+            return unsupported(
+                &format!("`?` on `{st}` in a function returning `{ret_ty}`"),
+                line,
+            );
+        }
+        let addr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(addr));
+        let off = b.alloc(sl.size, sl.align);
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(addr));
+        b.ins(&Instruction::I32Const(sl.size as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        let mark = self.scope.len();
+        self.scope.push(("@try".to_string(), Place::Slot(off), st.clone()));
+        let recv = [Expr::Var { name: "@try".to_string(), line }];
+
+        self.call(m, b, &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "isSuccess"), &recv, line)?;
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(self.dest.expect("an aggregate return has a destination")));
+        b.slot(off);
+        b.ins(&Instruction::I32Const(sl.size as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        // The same two unwinds `?` owes as `return`-minus-the-keyword.
+        self.emit_releases_above(b, 0)?;
+        self.exit_regions_above(b, 0);
+        b.ins(&Instruction::Br(self.depth));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+
+        let out = self.call(m, b, &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "success"), &recv, line);
+        self.scope.truncate(mark);
+        out
     }
 
     /// `Age?(n)` — a validated construction whose refinement answers with a tag

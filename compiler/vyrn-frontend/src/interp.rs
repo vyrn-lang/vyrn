@@ -4125,7 +4125,22 @@ impl<'a> Interp<'a> {
                     Val::Option(None) => Err(Ctrl::Return(Val::Option(None))),
                     Val::Result(true, inner) => Ok(*inner),
                     Val::Result(false, e) => Err(Ctrl::Return(Val::Result(false, e))),
-                    other => Err(format!("`?` on a non-Option/Result value {other:?}").into()),
+                    // Anything else goes through `Fallible` (RFC-0080 M3). The
+                    // checker has already confirmed the impl exists and that the
+                    // enclosing function returns the same type, so the failing
+                    // path returns `v` itself — the whole sum, whichever variant
+                    // it is, which is the claim this milestone exists to execute.
+                    other => {
+                        let key = self.val_type_key(&other).ok_or_else(|| {
+                            Ctrl::Err(format!("`?` on a value with no impl target {other:?}"))
+                        })?;
+                        let ask = |m: &str| crate::types::impl_method_name(crate::types::FALLIBLE, &key, m);
+                        if !matches!(self.call(&ask("isSuccess"), &[other.clone()])?, Val::Bool(true))
+                        {
+                            return Err(Ctrl::Return(other));
+                        }
+                        self.call(&ask("success"), &[other])
+                    }
                 }
             }
             Expr::StructLit { name, fields, .. } => {

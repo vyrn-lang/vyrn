@@ -3974,6 +3974,9 @@ impl<'a> Gen<'a> {
     /// function's result; otherwise continue with the unwrapped i64 payload.
     fn gen_try(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         let (agg, aty) = self.gen_expr(expr)?;
+        if !matches!(self.resolve(&aty), Type::Option(_) | Type::Result(..)) {
+            return self.gen_try_fallible(&agg, &aty);
+        }
         // The type unwrapped on the success path.
         let ok_ty = match self.resolve(&aty) {
             Type::Option(inner) => *inner,
@@ -4002,6 +4005,46 @@ impl<'a> Gen<'a> {
         self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {agg}, 2"));
         let v = self.decode_payload(&w0, &w1, &ok_ty);
         Ok((v, ok_ty))
+    }
+
+    /// `?` on a type that implements `Fallible` (RFC-0080 M3). The operand is
+    /// already evaluated; the shape is the same one `gen_try` writes above — test,
+    /// propagate the WHOLE value, otherwise read the success payload — with the
+    /// two questions answered by impl methods instead of by field 0 and an
+    /// `extractvalue`.
+    ///
+    /// The value is parked in a scope slot rather than passed as a bare register,
+    /// because protocol dispatch in this backend resolves the receiver's type from
+    /// a *variable* (`gen_call`'s `must be called on a variable` rule). That is
+    /// also what lets the two calls reuse `gen_call` whole, including its generic
+    /// path — a generic impl monomorphizes here with nothing new written. The slot
+    /// is `declare`d, not registered on `drop_stack`, so the propagated aggregate
+    /// is not freed out from under the `ret` (`gen_match_arm` binds payloads the
+    /// same way for the same reason).
+    fn gen_try_fallible(&mut self, agg: &str, aty: &Type) -> Result<(String, Type), String> {
+        let concrete = vyrn_frontend::types::substitute(aty, self.subst);
+        let key = vyrn_frontend::types::type_key(&concrete)
+            .ok_or_else(|| format!("`?` cannot dispatch on {aty:?}"))?;
+        let tmp = format!("@try.{}", self.tmp);
+        let slot = self.declare(&tmp, aty);
+        self.emit(format!("store {} {agg}, ptr {slot}", self.llt(aty)));
+        let recv = [Expr::Var { name: tmp, line: 0 }];
+        let ask = |m: &str| {
+            vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, m)
+        };
+
+        let (ok, _) = self.gen_call(&ask("isSuccess"), &recv)?;
+        let ok_l = self.fresh_label("try.ok");
+        let prop_l = self.fresh_label("try.prop");
+        self.emit_term(format!("br i1 {ok}, label %{ok_l}, label %{prop_l}"));
+
+        self.emit_label(&prop_l);
+        self.emit_all_drops();
+        self.emit_modify_copyout();
+        self.emit_term(format!("ret {} {agg}", self.llt(aty)));
+
+        self.emit_label(&ok_l);
+        self.gen_call(&ask("success"), &recv)
     }
 
     fn gen_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(String, Type), String> {
