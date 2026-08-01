@@ -196,6 +196,80 @@ mounted groups as a startup error rather than shadowing silently.
 - **M4 — schema overrides.** `graphql(...).mutations(...).lazy(...)`; the same
   override surface for `std/openapi`.
 
+## As landed — M1
+
+`std/http.vyrn`: `Route`, five method constructors, `surface`, `mount`, and a
+`gen fn http(module)` that emits a placeholder-checked constructor per procedure.
+`examples/rest.vyrn` is the three-engine evidence; `examples/bin` and
+`examples/fullstack` both carry a projection now. The chain stayed value-level:
+`Route` is a five-field record, `GET` takes one and returns one, and nothing in
+M1 or M2's vocabulary can put a type parameter on it.
+
+**RFC-0073 was not needed, and this is the milestone's one real finding.** The
+text says placeholders are checked "via RFC-0073's symbol map", which has no
+implementation. It turns out the check needs only the procedure's input type, and
+the language could already express it: the generator reads the input record's
+fields off `TypeInfo.source` with `lex()` and emits
+
+```vyrn
+export type PathById = String where value =~ "([^{}]|\{id\})*"
+```
+
+as the parameter type of `byId`. A literal argument is const-folded against that
+predicate by the existing `prove_coercion`, so `byId("/{ID}")` is a checker error
+quoting the pattern and the legal placeholders. `std/ui`, `std/tw` and `std/i18n`
+already validate literals this way; nothing was added to the compiler. RFC-0073
+is about *renaming* across the generated boundary, which is a different need.
+
+**The cost of that check is one spelling change.** `GET(byId("/{id}"))`, not
+`get("/{id}", byId)`. The pattern must sit in the procedure's own parameter slot
+to be checked against that procedure's fields, and a uniform `get(pattern, proc)`
+cannot be: `get` would have to be generic over the signature, and a generic
+cannot hand a type parameter to `fromJson`, whose first argument must be a
+declared type name. The verbs are UPPERCASE because `get` and `set` are reserved
+(the `cell`/`Ref` builtins dispatch before user functions); given that, the wire
+spelling beat a coined synonym.
+
+**`mount` reports a shadow as a startup trap**, naming both routes and both
+groups. It proves the containments it can — an earlier prefix covering a later
+pattern, an earlier pattern whose placeholders swallow a later one — and stays
+quiet otherwise, because a false startup trap is worse than a missed shadow.
+Order *within* a group is the author's own and is not policed. A route that never
+got a method traps the same way rather than defaulting to GET.
+
+**The two surfaces are byte-identical because there is one codec, not two that
+agree.** A projection decodes with the same `fromJson` and encodes with the same
+`toJson` the derived surface uses, and it imports `validateContract` from
+`std/rpc` rather than restating what a procedure is. `examples/rest.vyrn` asserts
+status, content type and body equality between `GET /users/7` and
+`POST /_/users/byId` on all three engines.
+
+Three things are smaller than the text implies, stated so they are not mistaken
+for coverage:
+
+- **`vyrn routes` does not show explicit routes.** The table has exactly one
+  producer — the generator that mounts the surface, emitting `//@route` — and a
+  projection's patterns are written in a hand-written file the generator never
+  reads. It cannot read one either: generation-time I/O is scoped to the
+  generator's constant path arguments, and `http("./pastes")` admits `pastes` and
+  `pastes.vyrn`, not `pastes.http.vyrn`. Showing them means either a second path
+  argument at every call site or `vyrn routes` learning to run the mounted
+  router, and neither is worth it before M2 gives the table a policy column.
+- **`derived` carries the route line, not a policy line**, since M1 has no
+  policy. Its one reader today is the shadow diagnostic, which names the
+  procedure rather than only the path. M2's combinators append to it.
+- **A path placeholder binds a string or an integer.** The generator resolves the
+  field to its base type through one alias hop, so `/users/{id}` over an `Int64`
+  arrives as `7`; a `Float64` field or a two-hop alias arrives as text and
+  decodes as a 422 naming that field. `parse` is integer-only and no dogfood has
+  either.
+
+The manifest's `projections` key is not implemented: `std/http` knows its own
+suffix. What the suffix does do is keep a projection out of the derived surface —
+`rpc(dir)` skips a dotted stem now, so `pastes.http.vyrn` colocates with
+`pastes.vyrn` without becoming a fourth procedure whose `routes()` returns
+`Array<Route>` onto the wire.
+
 ## Acceptance
 
 - `examples/bin` serves both the derived RPC surface and a public REST API, with
