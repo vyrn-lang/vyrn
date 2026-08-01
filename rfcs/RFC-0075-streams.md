@@ -1,10 +1,14 @@
 # RFC-0075 — `Stream<T>`: Cleanup as an Obligation, Not a Convention
 
-- **Status:** **M1 shipped** — `Stream<T>` is a linear resource, an abandoned
-  stream does not compile (`examples/stream_abandoned.vyrn`), and release runs on
-  normal end, `break` and early `return`. M2–M4 unstarted; **M4 additionally
-  depends on RFC-0074, which has no implementation at all.** One claim in this
-  document is now known false — see "As landed — M1" on the trap row.
+- **Status:** **M1 shipped; M2 shipped in part** — `Stream<T>` is a linear
+  resource, an abandoned stream does not compile
+  (`examples/stream_abandoned.vyrn`), and release runs on normal end, `break` and
+  early `return`. `std/stream` ships `map`, `filter`, `take` and `merge`;
+  `unfold` and `channel` are **refused for now** — they need a producer the eager
+  representation cannot hold, see "As landed — M2". M3–M4 unstarted; **M4
+  additionally depends on RFC-0074, which has no implementation at all.** One
+  claim in this document is now known false — see "As landed — M1" on the trap
+  row.
 - **Depends on:** RFC-0074 (`sse` / `ws` projections — the transports that
   consume streams), RFC-0072 (audience, derived RPC), RFC-0037 (stored closures
   / defunctionalization — the producer state below), RFC-0060 (`break` /
@@ -218,6 +222,9 @@ inherited.
   depends on it.
 - **M2 — `std/stream`.** `unfold`, `fromArray`, `map`, `filter`, `take`,
   `merge`, `channel` with mandatory bounded capacity and overflow policy.
+  **Shipped in part** — four of the seven; `unfold` and `channel` are the
+  representation change M1 did not make, and `merge` shipped as sequence
+  interleave. See "As landed — M2".
 - **M3 — cancellation + conformance.** The normalized signal; the conformance
   suite; native and wasm adapters passing it.
 - **M4 — transports.** `sse` and `ws` projections; resumability via seed;
@@ -295,6 +302,92 @@ means giving both analyses a scope-id key at once. And the `close` on the direct
 wasm backend reclaims nothing, because that backend's `malloc` is a bump pointer
 that never frees — pre-existing, already noted at its `region_exit`, and
 unobservable, since a released stream cannot be named again on any engine.
+
+## As landed — M2
+
+Four of the seven combinators shipped: `map`, `filter`, `take`, `merge`, in
+`std/stream.vyrn`, with `examples/streamops.vyrn` as their three-engine parity
+evidence. `unfold` and `channel` did not, and the reason is the first thing
+below because it is the milestone's real content.
+
+**The eager representation survives, and it is the boundary.** M1 chose
+`Stream<T>` = `Array<T>`'s three words. Everything shipped here is a walk over a
+buffer that already exists, producing another one, so all four are ordinary Vyrn
+generics — no builtin, no census row, no IR. `unfold` is not that. Its state is
+a *seed plus a step*, and the seed's type `S` appears nowhere in `Stream<T>`:
+the consumer is monomorphized at `Stream<Int64>` with no `S` in scope, so it
+cannot call the step. Vyrn has no existential and no dynamic box to hide `S` in.
+The one mechanism that *could* hide it is the one RFC-0037 already uses for
+closures — defunctionalize the producer into a closed enum with one variant per
+`unfold` site, and make `next(s)` an `@dispatch` match — and that is a different
+representation, not an addition to this one. Its price, itemised:
+
+- `Stream<T>` stops being `{ ptr, i64, i64 }` (`llt_of`) and becomes a tagged
+  union, on the interpreter, the LLVM emitter and the direct wasm backend.
+- `fromArray` stops being free. It is currently pinned to emit *nothing*, by
+  compiling it beside the `Array` version and comparing the bodies byte for
+  byte (`from_array_emits_no_instruction`); it would become a variant
+  construction and that pin would be deleted, not adjusted.
+- `close` stops being a `free` and becomes variant-aware, which re-opens the
+  four release-path pins M1 counted in the IR.
+- `for … in` over a stream stops being the indexed array walk it shares with
+  `Array<T>` today (`direct.rs`'s `Type::Array(inner) | Type::Stream(inner)`
+  arm) and becomes a `next`-until-`Done` loop.
+
+That is a language change with a three-engine parity cost, and it should be its
+own milestone with its own evidence rather than a line item inside "add the
+combinators". What must NOT happen is the version that fits in the current
+representation: running the step function to exhaustion at construction time.
+That compiles, passes parity on any finite seed, and turns "stream an unbounded
+feed" into "materialize an unbounded feed" — which is `#6156`, the incident this
+RFC quotes, reintroduced by the library that was supposed to prevent it.
+
+`channel` is refused for the same reason plus one more: it is push-shaped, so
+something must be able to hand it a value while a consumer is not asking, and
+this RFC states outright that it adds no concurrency and RFC-0013 leaves the
+loop to the host. There is no producer to push. The mandatory capacity and the
+`Block`/`DropOldest`/`Fail` policy are the right design and they stay unbuilt —
+inventing a policy for a queue nothing can fill would be a decision made to have
+something to ship.
+
+**`merge` shipped as sequence interleave, which is the only merge this RFC can
+mean.** Turn by turn, then the longer side drains. Arrival-order merge needs a
+notion of which source is *ready*, and a sequence has no such notion — the "does
+not add concurrency" line above rules it out at the design level, not the
+implementation level. For any stream that terminates, turn-taking is also what a
+pull-based merge would produce, so the observable sequence is not a compromise.
+What is genuinely lost is merging an endless source with a finite one, and that
+is the `unfold` gap again rather than a second one.
+
+**The obligation composes; it was checked rather than assumed.** The worry worth
+having about combinators is that `map(s, f)` becomes a laundry — takes the
+obligation in and hands none back. It cannot, and the reason is that no rule
+about combinators exists: `std/stream` is ordinary Vyrn, so each function has a
+`Stream` parameter (M1: the parameter carries the obligation into the callee),
+discharges it with `for … in`, and returns a `Stream` (M1: the caller owes the
+result). Both halves are pinned in `movecheck`
+(`a_combinator_neither_swallows_the_obligation_nor_launders_it`), and
+`examples/stream_combinator_abandoned.vyrn` is the corpus version — an abandoned
+`map(...)` result, an abandoned chain, and a chain consumed then `close`d, all
+producing M1's own diagnostics. The release paths were counted in the IR rather
+than reasoned about: a chain releases once per stream in the function that owns
+it, on the normal, `break` and early-`return` paths alike.
+
+**M1 left `Stream` out of every generic type walk, and M2 is what found it.**
+M1 never put a type parameter *inside* a stream — `fromArray` was always called
+at a concrete element type — so `Stream` was missing from `substitute`, both
+unifiers, `collect_params`, `walk_type`, `contains_heap`, and the loader's two
+type rewrites. The one worth naming is the codegen unifier: the LLVM emitter
+silently substituted `Unit` where the direct backend refused the call outright,
+which is the two backends specializing *different* functions for one call site —
+exactly the failure `solve_type_args` was centralised to prevent. Six one-token
+arms and two real ones; the lesson is that a new `Type` variant needs the walks
+swept even when the milestone that adds it has no use for them.
+
+One diagnostic changed. A generic producer returns `Stream<U>`, and quoting that
+at `let m = map(feed(), double)` names a type parameter the program never wrote;
+the pass has no types, so it now says plain `Stream`, which is what it already
+said for `fromArray`.
 
 ## Acceptance
 
