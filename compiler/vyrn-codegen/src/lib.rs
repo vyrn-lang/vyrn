@@ -4035,9 +4035,19 @@ impl<'a> Gen<'a> {
         };
         let ll = self.llt(&numty); // op width for ints (`iN`/`i1`)
         let t = self.fresh_tmp();
-        let instr = if matches!(self.resolve(&lty), Type::Float | Type::Float32) {
-            // Floating-point ops (Float64 → `double`, Float32 → `float`).
-            let f = if self.resolve(&lty) == Type::Float32 { "float" } else { "double" };
+        let instr = if matches!(
+            self.resolve(&lty),
+            Type::Float | Type::Float32 | Type::F32x4
+        ) {
+            // Floating-point ops (Float64 → `double`, Float32 → `float`). A vector
+            // (RFC-0083) rides the same four arms: `fadd <4 x float>` is the same
+            // instruction over four lanes, and the checker admits no comparison on
+            // one, so the relational arms below are unreachable for it.
+            let f = match self.resolve(&lty) {
+                Type::Float32 => "float",
+                Type::F32x4 => "<4 x float>",
+                _ => "double",
+            };
             match op {
                 BinOp::Add => format!("{t} = fadd {f} {l}, {r}"),
                 BinOp::Sub => format!("{t} = fsub {f} {l}, {r}"),
@@ -5427,6 +5437,43 @@ impl<'a> Gen<'a> {
                 let (v, sty) = self.gen_expr(&args[0])?;
                 return self.gen_numeric_conv(v, &sty, &target);
             }
+        }
+        // Vector construction, splat and lane read (RFC-0083 M1). Construction is
+        // four `insertelement`s into a `zeroinitializer` rather than into `undef`:
+        // every lane IS written, so `undef` would be equivalent, and a start that
+        // is a defined value is one less thing a reader has to prove.
+        if matches!(name, "F32x4" | "@f32x4Splat" | "@lane") {
+            if name == "@lane" {
+                let (v, _) = self.gen_expr(&args[0])?;
+                // Proven constant and in range by the checker, so no bounds check
+                // is emitted here and none is missing.
+                let k = vyrn_frontend::types::const_lane(&args[1], 4)
+                    .ok_or("a lane index must be a compile-time constant in 0..3")?;
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = extractelement <4 x float> {v}, i32 {k}"));
+                return Ok((t, Type::Float32));
+            }
+            let mut lanes = Vec::new();
+            for a in args {
+                let (v, ty) = self.gen_expr(a)?;
+                let (v, _) = self.coerce(v, &ty, &Type::Float32)?;
+                lanes.push(v);
+            }
+            // A splat writes the one value into all four lanes. `shufflevector`
+            // would be the idiom; four `insertelement`s are the same instruction
+            // sequence after `-O3` and share this path instead of forking it.
+            if lanes.len() == 1 {
+                lanes = vec![lanes[0].clone(); 4];
+            }
+            let mut acc = "zeroinitializer".to_string();
+            for (i, l) in lanes.iter().enumerate() {
+                let t = self.fresh_tmp();
+                self.emit(format!(
+                    "{t} = insertelement <4 x float> {acc}, float {l}, i32 {i}"
+                ));
+                acc = t;
+            }
+            return Ok((acc, Type::F32x4));
         }
         // `blackBox(v)` (RFC-0055): identity with an optimizer-opacity guarantee.
         // The *semantics* — the value is used and its result is unknowable, so the
@@ -8193,6 +8240,7 @@ fn mangle_ty(t: &Type) -> String {
         Type::Map(k, v) => format!("Map{}{}", mangle_ty(k), mangle_ty(v)),
         Type::Task(inner) => format!("Task{}", mangle_ty(inner)),
         Type::Logger => "Logger".into(),
+        Type::F32x4 => "F32x4".into(),
         // A function-value type (RFC-0023) mangles by shape — used only when a
         // generic instance's own type argument mentions one (rare); the
         // higher-order specialization keys are formed separately.
@@ -8273,6 +8321,11 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         Type::IntN { bits, .. } => format!("i{bits}"),
         Type::Float => "double".into(),
         Type::Float32 => "float".into(),
+        // RFC-0083: LLVM's own vector type, so `fadd <4 x float>` is one
+        // instruction and the register allocator puts it in an xmm. The direct
+        // wasm backend reads this same spelling back out to reach `v128`, which is
+        // why the vector lives here rather than in a table of its own.
+        Type::F32x4 => "<4 x float>".into(),
         Type::Bool => "i1".into(),
         Type::Str => "ptr".into(),
         // `Never` (RFC-0079) carries no value, so it lowers like `Unit`: a

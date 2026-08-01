@@ -2494,6 +2494,8 @@ impl Parser {
             // `Float64` is 64-bit IEEE-754; `Float32` is 32-bit.
             "Float64" => Type::Float,
             "Float32" => Type::Float32,
+            // Four `Float32` lanes as one value (RFC-0083).
+            "F32x4" => Type::F32x4,
             // The unsized names are removed — point at the sized spellings.
             "Int" => {
                 return Err(Diagnostic::error(
@@ -3541,7 +3543,26 @@ impl Parser {
                             "has" => "@has".to_string(),
                             "remove" => "@remove".to_string(),
                             "keys" => "@keys".to_string(),
+                            // `v.lane(k)` reads one lane of a vector (RFC-0083).
+                            // Method-only, like the array and map mutators above.
+                            "lane" => "@lane".to_string(),
                             _ => name,
+                        };
+                        // `F32x4.splat(x)` — the receiver is the type NAME, not a
+                        // value, so it is dropped here rather than typed. Handling
+                        // it in the parser is what keeps `F32x4` out of the
+                        // expression grammar entirely: nothing downstream ever sees
+                        // a bare `F32x4` variable to fail to resolve. One internal
+                        // name per width, so M3's `F64x2.splat` is a second arm
+                        // rather than a receiver the three backends must decode.
+                        let mut args = args;
+                        let name = if name == "splat"
+                            && matches!(args.first(), Some(Expr::Var { name, .. }) if name == "F32x4")
+                        {
+                            args.remove(0);
+                            "@f32x4Splat".to_string()
+                        } else {
+                            name
                         };
                         e = Expr::Call { name, args, line };
                     } else if *self.peek() == Tok::LBrace

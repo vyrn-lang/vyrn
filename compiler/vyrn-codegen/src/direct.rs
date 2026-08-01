@@ -872,6 +872,11 @@ impl Cx {
         let ll = self.ll(ty);
         Ok(match ll.as_str() {
             "void" => Repr::Unit,
+            // RFC-0083: wasm's own 128-bit vector type. Read off the textual
+            // backend's spelling for the same reason every other repr is — one
+            // copy of the lowering decision — and matched before the aggregate
+            // test because `<4 x float>` is a wasm VALUE, not a memory shape.
+            "<4 x float>" => Repr::Scalar(ValType::V128),
             _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(
                 layout::of_ll(&ll).map_err(|e| format!("direct backend: layout of {ll}: {e}"))?,
             ),
@@ -3066,6 +3071,9 @@ impl Fn_<'_> {
                 // threshold cannot change a type.
                 "print" | "trace" | "debug" | "info" | "warn" | "error" => Type::Unit,
                 "logger" => Type::Logger,
+                // RFC-0083 M1: the vector builtins, whose result type is fixed.
+                "F32x4" | "@f32x4Splat" => Type::F32x4,
+                "@lane" => Type::Float32,
                 "at" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
@@ -3354,6 +3362,21 @@ impl Fn_<'_> {
         // `%` and the bitwise family are not valid on a float — the checker says
         // so, and the interpreter and the textual backend both call that a type
         // error rather than lowering it.
+        // Lane-wise arithmetic (RFC-0083). One instruction, four independent
+        // single-precision operations — nothing renormalizes and nothing
+        // reassociates, so this needs no more bookkeeping than the scalar floats
+        // below. The checker admits only these four operators on a vector.
+        if lt == Type::F32x4 {
+            self.expr_as(m, b, rhs, &lt)?;
+            b.ins(&match op {
+                BinOp::Add => Instruction::F32x4Add,
+                BinOp::Sub => Instruction::F32x4Sub,
+                BinOp::Mul => Instruction::F32x4Mul,
+                BinOp::Div => Instruction::F32x4Div,
+                _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
+            });
+            return Ok(lt);
+        }
         if matches!(lt, Type::Float | Type::Float32) {
             self.expr_as(m, b, rhs, &lt)?;
             let wide = lt == Type::Float;
@@ -4184,6 +4207,33 @@ impl Fn_<'_> {
                     if name == "lineAt" { self.cx.rt.line_at } else { self.cx.rt.col_at };
                 b.ins(&Instruction::Call(f));
                 return Ok(Type::Int);
+            }
+            // RFC-0083 M1. Construction starts from `v128.const 0` and replaces
+            // each lane in written order; a splat is the one opcode. No lane is
+            // read back before it is written, so the zero start costs nothing that
+            // an undefined one would have saved.
+            "F32x4" | "@f32x4Splat" if !args.is_empty() => {
+                if name == "@f32x4Splat" {
+                    self.expr_as(m, b, &args[0], &Type::Float32)?;
+                    b.ins(&Instruction::F32x4Splat);
+                } else {
+                    b.ins(&Instruction::V128Const(0));
+                    for (i, a) in args.iter().enumerate() {
+                        self.expr_as(m, b, a, &Type::Float32)?;
+                        b.ins(&Instruction::F32x4ReplaceLane(i as u8));
+                    }
+                }
+                return Ok(Type::F32x4);
+            }
+            // The lane index was proven constant and in range by the checker, so
+            // this is a plain immediate and there is no bounds check to emit.
+            "@lane" if args.len() == 2 => {
+                self.expr_as(m, b, &args[0], &Type::F32x4)?;
+                let Some(k) = ftypes::const_lane(&args[1], 4) else {
+                    return unsupported("a lane index that is not a constant in 0..3", line);
+                };
+                b.ins(&Instruction::F32x4ExtractLane(k));
+                return Ok(Type::Float32);
             }
             // `Int64(x)` / `UInt16(x)` — a conversion, not a call. Which names are
             // conversions is the frontend's answer (`numeric_conv_target`), so the

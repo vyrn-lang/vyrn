@@ -166,6 +166,15 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("stringFromBytes", View, "the only Array<UInt8> -> String construction there is"),
     ("floatBits", View, "RFC-0078 M4a: i64.reinterpret_f64, one instruction"),
     ("floatFromBits", View, "RFC-0078 M4a: the other direction"),
+    // RFC-0083 M1. Same shape as `floatBits`: nothing in the language can build a
+    // four-lane value out of four `Float32`s or read one back, so these three are
+    // the whole of the representation and the ARITHMETIC is not here at all — `+`
+    // on two vectors is a `BinOp`, which the census does not cover because it is
+    // not a Call arm. There is no operation to move to Vyrn later, only a type the
+    // language cannot otherwise name.
+    ("F32x4", View, "RFC-0083: four Float32 lanes into one value"),
+    ("@f32x4Splat", View, "RFC-0083: one value into all four lanes"),
+    ("@lane", View, "RFC-0083: a lane back out, at a checker-proven constant index"),
     // ---- Control: abort, and waiting -----------------------------------------
     ("panic", Control, "RFC-0079: the abort itself, and the only irreducible row here"),
     ("assert", Control, "RFC-0015: traps the current test"),
@@ -309,8 +318,10 @@ fn the_census_is_the_code() {
     // `charCountV`, 61 -> 62 when RFC-0079 M1 added `panic`, and 62 -> 61 when M3
     // spent that abort on `slice`. The net of the whole RFC is one primitive
     // traded for one primitive, and the one that left had three implementations
-    // where the one that arrived has three lines.
-    assert_eq!(found.len(), 61, "the primitive core changed size");
+    // where the one that arrived has three lines. 61 -> 64 when RFC-0083 M1 added
+    // a TYPE the language cannot name — three `View` rows and no operation, since
+    // the lane-wise arithmetic is a `BinOp` and never reaches this dispatch.
+    assert_eq!(found.len(), 64, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

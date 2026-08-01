@@ -55,6 +55,20 @@ pub fn numeric_conv_target(name: &str) -> Option<Type> {
     }
 }
 
+/// The lane `v.lane(k)` reads, or `None` when `k` is not a compile-time constant
+/// in `0..lanes` (RFC-0083).
+///
+/// ONE copy of the rule because it is the reason no bounds check is emitted
+/// anywhere: the checker refuses what the three backends would otherwise have to
+/// trap on, so the operation stays total, and all four ask this same question.
+/// `consteval` already answers it for refinement predicates.
+pub fn const_lane(idx: &Expr, lanes: i64) -> Option<u8> {
+    match crate::consteval::eval(idx, &HashMap::new()) {
+        Some(crate::consteval::ConstVal::Int(k)) if k >= 0 && k < lanes => Some(k as u8),
+        _ => None,
+    }
+}
+
 /// A canonical key for a type used as a protocol-impl target (RFC-0002 §5).
 /// Only the types whose runtime value carries enough to dispatch on are
 /// supported in v1: the scalars and named types (validated scalars, enums).

@@ -119,6 +119,11 @@ pub enum Val {
     /// A 32-bit float (`Float32`). Stored as `f32` so arithmetic rounds to single
     /// precision at each step, matching the native backend's `float` ops.
     Float32(f32),
+    /// Four `Float32` lanes as one value (RFC-0083). Emulated lane-by-lane, and
+    /// that is EXACT rather than approximate: each lane is an independent
+    /// IEEE-754 single-precision operation, so nothing reassociates and the loop
+    /// below produces the same bits a hardware `f32x4.add` does.
+    F32x4([f32; 4]),
     Bool(bool),
     /// Copy-on-write, like [`Val::Array`]. Generators pass multi-KB source
     /// buffers by value all day; cloning one per reference and per call is the
@@ -3190,6 +3195,31 @@ impl<'a> Interp<'a> {
                         }
                         Ok(Val::Unit)
                     }
+                    // Vector construction, splat and lane read (RFC-0083 M1). Each
+                    // lane goes through `convert_val` rather than being read
+                    // straight off the `Val`, because a float LITERAL evaluates to
+                    // `Val::Float` (f64) here while the checker already typed it
+                    // `Float32` — the same rounding the backends' `fptrunc` does.
+                    "F32x4" => {
+                        let mut lanes = [0f32; 4];
+                        for (i, v) in vals.into_iter().enumerate() {
+                            lanes[i] = match convert_val(v, &Type::Float32) {
+                                Val::Float32(f) => f,
+                                other => return Err(format!("F32x4 lane: {other:?}").into()),
+                            };
+                        }
+                        Ok(Val::F32x4(lanes))
+                    }
+                    "@f32x4Splat" => match convert_val(vals.remove(0), &Type::Float32) {
+                        Val::Float32(f) => Ok(Val::F32x4([f; 4])),
+                        other => Err(format!("F32x4.splat: {other:?}").into()),
+                    },
+                    // The index was proven constant and in range by the checker,
+                    // so there is nothing to bounds-check and no trap to reach.
+                    "@lane" => match (&vals[0], &vals[1]) {
+                        (Val::F32x4(v), Val::Int(k)) => Ok(Val::Float32(v[*k as usize])),
+                        (a, b) => Err(format!("lane: {a:?}[{b:?}]").into()),
+                    },
                     // A logger handle is its name string (RFC-0008).
                     "logger" => Ok(vals.remove(0)),
                     // Log methods write `[LEVEL] name: msg` to stderr (kept off
@@ -4074,6 +4104,21 @@ impl<'a> Interp<'a> {
 
     fn binop(&self, op: BinOp, l: Val, r: Val) -> Result<Val, Ctrl> {
         use BinOp::*;
+        // Lane-wise arithmetic (RFC-0083). Four independent `f32` operations in
+        // written lane order; the checker admits only these four operators.
+        if let (Val::F32x4(a), Val::F32x4(b)) = (&l, &r) {
+            let mut out = [0f32; 4];
+            for i in 0..4 {
+                out[i] = match op {
+                    Add => a[i] + b[i],
+                    Sub => a[i] - b[i],
+                    Mul => a[i] * b[i],
+                    Div => a[i] / b[i],
+                    _ => return Err("type error in vector binop (should have been caught)".into()),
+                };
+            }
+            return Ok(Val::F32x4(out));
+        }
         // Float32 (possibly with a plain-Float literal sibling): round both to f32
         // and compute at single precision, matching native `float` instructions.
         if matches!(l, Val::Float32(_)) || matches!(r, Val::Float32(_)) {
@@ -4511,7 +4556,10 @@ impl<'a> Interp<'a> {
         }
         let d = depth + 1;
         match ty {
-            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit => true,
+            // `F32x4` is here for the reason the scalars are: its lanes are
+            // already `f32`, so there is nothing to round and nothing to validate
+            // (RFC-0083 — it is a value, and a value type carries no predicate).
+            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit | Type::F32x4 => true,
             Type::Named(n) => match self.types.get(n.as_str()) {
                 // An unknown name coerces to itself in the walk below.
                 None => true,

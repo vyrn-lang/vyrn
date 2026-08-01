@@ -1,0 +1,75 @@
+/// Explicit SIMD — `F32x4`, four `Float32` lanes as one value (RFC-0083 M1).
+///
+/// A vector is a *value*, not a container: no heap, no ownership beyond a
+/// scalar's, nothing to drop. `+ - * /` are lane-wise, and that is what makes
+/// them expressible at all here. Lane *i* of the result depends only on lane *i*
+/// of the operands, so nothing reassociates and the interpreter's lane-by-lane
+/// loop is bit-identical to a hardware `f32x4.add`. Auto-vectorising a float
+/// REDUCTION would reassociate, which byte-identical parity forbids permanently.
+///
+/// `v.lane(k)` needs a literal `k` in `0..3`. A non-constant or out-of-range
+/// index is a compile error, not a runtime trap — that is what keeps the read
+/// total, and it is why no bounds check is emitted on any of the three engines.
+
+/// Every lane of `v`, one per line — also the ABI test: a vector crosses a
+/// function boundary here on all three engines.
+fn lanes(v: F32x4) {
+    print(v.lane(0))
+    print(v.lane(1))
+    print(v.lane(2))
+    print(v.lane(3))
+}
+
+fn main() -> Int64 {
+    // ---- construction, splat, and the four operations --------------------
+    let a = F32x4(1.0, 2.0, 3.0, 4.0)
+    let b = F32x4.splat(0.5)
+
+    lanes(a + b) // 1.5 2.5 3.5 4.5
+    lanes(a - b) // 0.5 1.5 2.5 3.5
+    lanes(a * b) // 0.5 1.0 1.5 2.0
+    lanes(a / b) // 2.0 4.0 6.0 8.0
+
+    // A vector rounds to single precision per lane, exactly as a `Float32` does:
+    // 2^24 + 1 is exact in `Float64` and is not in `Float32`.
+    lanes(F32x4.splat(16777217.0)) // 16777216.000000 x4
+
+    // ---- the values the engines are supposed to disagree about -----------
+    // Built by arithmetic rather than written down: the language has no NaN or
+    // infinity literal, and a runtime division is also what stops `consteval`
+    // folding the answer with the compiler's arithmetic instead of the engine's.
+    let z: Float32 = 0.0
+    let o: Float32 = 1.0
+    let neg = 0.0 - o
+    let nan = z / z
+    let inf = o / z
+    let ninf = neg / z
+    let nzero = neg * z
+    // A `Float32` subnormal, squared into existence because there is no exponent
+    // literal. `sub / sub` is the flush-to-zero probe: an engine that flushed
+    // denormals would compute 0/0 and say NaN where every one of them says 1.
+    let e: Float32 = 0.00000000000000000001
+    let sub = e * e
+
+    lanes(F32x4(nzero, inf, ninf, sub)) // -0.000000 inf -inf 0.000000
+    print(sub / sub) // 1.000000  (no flush to zero)
+
+    // NaN in every lane position, through every operator: the propagation rule
+    // wasm leaves loose, LLVM fixes its own way and Rust's `f32` a third. What
+    // makes them agree is the six-decimal formatter, which reads the exponent
+    // and fraction fields and says `NaN` for any payload and either sign — a
+    // NaN's IDENTITY is not observable in Vyrn, only its NaN-ness.
+    let ones = F32x4.splat(1.0)
+    lanes(F32x4(nan, o, o, o) + ones) // NaN 2 2 2
+    lanes(F32x4(o, nan, o, o) - ones) // 0 NaN 0 0
+    lanes(F32x4(o, o, nan, o) * ones) // 1 1 NaN 1
+    lanes(F32x4(o, o, o, nan) / ones) // 1 1 1 NaN
+
+    // Infinity arithmetic is IEEE's, not a trap: inf - inf and 0 * inf are NaN,
+    // and a division by zero produces an infinity rather than exiting.
+    lanes(F32x4(inf, ninf, z, o) - F32x4.splat(inf)) // NaN -inf -inf -inf
+    lanes(F32x4(inf, ninf, nzero, o) * F32x4(z, z, inf, inf)) // NaN NaN NaN inf
+    lanes(F32x4(o, neg, z, nzero) / F32x4.splat(z)) // inf -inf NaN NaN
+
+    return 0
+}

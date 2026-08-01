@@ -592,6 +592,16 @@ pub enum Type {
     /// 32-bit IEEE-754 floating point (`Float32`). Arithmetic rounds to single
     /// precision at each step; the default float literal is [`Type::Float`] (f64).
     Float32,
+    /// Four `Float32` lanes as one value (RFC-0083). A *value*, not a container:
+    /// it has no heap, no ownership beyond a scalar's, and nothing to drop, which
+    /// is why it needs no entry in `own.rs` or `movecheck.rs`. Lane-wise `+ - * /`
+    /// are four INDEPENDENT IEEE-754 single-precision operations — lane *i* of the
+    /// result reads lane *i* of the operands and nothing else — so no
+    /// reassociation happens and an interpreter emulating it in a loop is
+    /// bit-identical to a hardware `f32x4.add`. That is the whole reason explicit
+    /// SIMD is expressible here when auto-vectorised float reductions are not.
+    /// Lowers to `<4 x float>` textually and to a wasm `v128`.
+    F32x4,
     Bool,
     /// An immutable, statically-allocated string (v0.1: literals only).
     Str,
@@ -709,6 +719,7 @@ impl std::fmt::Display for Type {
             }
             Type::Float => write!(f, "Float64"),
             Type::Float32 => write!(f, "Float32"),
+            Type::F32x4 => write!(f, "F32x4"),
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
