@@ -2494,8 +2494,10 @@ impl Parser {
             // `Float64` is 64-bit IEEE-754; `Float32` is 32-bit.
             "Float64" => Type::Float,
             "Float32" => Type::Float32,
-            // Four `Float32` lanes as one value (RFC-0083).
+            // Four `Float32` lanes as one value, and the four `Bool` lanes a
+            // comparison of two of them yields (RFC-0083).
             "F32x4" => Type::F32x4,
+            "Mask32x4" => Type::Mask32x4,
             // The unsized names are removed — point at the sized spellings.
             "Int" => {
                 return Err(Diagnostic::error(
@@ -3548,21 +3550,34 @@ impl Parser {
                             "lane" => "@lane".to_string(),
                             _ => name,
                         };
-                        // `F32x4.splat(x)` — the receiver is the type NAME, not a
-                        // value, so it is dropped here rather than typed. Handling
-                        // it in the parser is what keeps `F32x4` out of the
-                        // expression grammar entirely: nothing downstream ever sees
-                        // a bare `F32x4` variable to fail to resolve. One internal
-                        // name per width, so M3's `F64x2.splat` is a second arm
-                        // rather than a receiver the three backends must decode.
+                        // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`
+                        // — the receiver is the type NAME, not a value, so it is
+                        // dropped here rather than typed. Handling it in the parser
+                        // is what keeps `F32x4` out of the expression grammar
+                        // entirely: nothing downstream ever sees a bare `F32x4`
+                        // variable to fail to resolve.
+                        //
+                        // The type name is where these live rather than the value
+                        // (`v.min(w)`) because a value-receiver method name is a
+                        // GLOBAL rename in the table above — `min`, `max` and `abs`
+                        // are `std/math` exports, and `math.min(a, b)` arrives here
+                        // in exactly the same shape, so renaming them would break
+                        // it. `lane` is a value method because M1 made it one and
+                        // nothing exports that name. One arm covers every width, so
+                        // M3's `F64x2.*` is a table entry rather than a receiver the
+                        // three backends must decode.
                         let mut args = args;
-                        let name = if name == "splat"
-                            && matches!(args.first(), Some(Expr::Var { name, .. }) if name == "F32x4")
-                        {
-                            args.remove(0);
-                            "@f32x4Splat".to_string()
-                        } else {
-                            name
+                        let name = match args.first() {
+                            Some(Expr::Var { name: ty, .. }) if ty == "F32x4" => {
+                                let mut it = name.chars();
+                                let m = match it.next() {
+                                    Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
+                                    None => name.clone(),
+                                };
+                                args.remove(0);
+                                format!("@f32x4{m}")
+                            }
+                            _ => name,
                         };
                         e = Expr::Call { name, args, line };
                     } else if *self.peek() == Tok::LBrace

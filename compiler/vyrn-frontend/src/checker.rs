@@ -3608,9 +3608,16 @@ impl<'a> Checker<'a> {
             // match exactly (no implicit widening). `Rem` (%) is integer-only.
             // Lane-wise arithmetic on a vector (RFC-0083). Deliberately NOT folded
             // into `numeric`: that predicate also gates `<`/`==`, and a vector
-            // comparison yields a lane MASK (M2), never a `Bool`, so admitting it
-            // there would type six operators this milestone cannot lower.
+            // comparison yields a lane MASK, never a `Bool`.
             Add | Sub | Mul | Div if l == Type::F32x4 && r == Type::F32x4 => Ok(l),
+            // Lane-wise comparison (RFC-0083 M2) — the operators rather than
+            // `a.lt(b)`, because that spelling costs a global method rename and
+            // this one costs an arm. The result is a `Mask32x4`, so `if a < b` on
+            // vectors fails with "condition must be Bool" and there is no silent
+            // reading of it as one.
+            Lt | LtEq | Gt | GtEq | Eq | NotEq if l == Type::F32x4 && r == Type::F32x4 => {
+                Ok(Type::Mask32x4)
+            }
             Add | Sub | Mul | Div => {
                 if l == r && numeric(&l) {
                     Ok(l)
@@ -3712,13 +3719,16 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The three vector builtins (RFC-0083 M1): `F32x4(a, b, c, d)`,
-    /// `F32x4.splat(x)` and `v.lane(k)`.
+    /// The vector builtins: `F32x4(a, b, c, d)`, `F32x4.splat(x)` and
+    /// `v.lane(k)` (M1), plus `F32x4.load/store/min/max/abs/sqrt/select` (M2).
     ///
     /// The lane index is resolved HERE and nowhere else that matters: a
     /// non-constant or out-of-range `k` is a compile error, not a runtime trap,
     /// which is what keeps the read total and is why none of the three backends
-    /// emits a bounds check for it.
+    /// emits a bounds check for it. `load`/`store` are the opposite case and the
+    /// reason M2 exists: their index is a runtime value, so they DO bounds-check
+    /// — once for the whole vector, which is the amortisation a scalar loop
+    /// cannot express.
     fn vector_call(
         &self,
         name: &str,
@@ -3766,7 +3776,7 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Type::F32x4)
             }
-            _ => {
+            "@lane" => {
                 if args.len() != 2 {
                     return Err(format!(
                         "line {line}: `lane` takes a vector and a lane index, got {} argument(s)",
@@ -3777,18 +3787,137 @@ impl<'a> Checker<'a> {
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
                 }
-                if v != Type::F32x4 {
-                    return Err(format!(
-                        "line {line}: `lane` must be called on a vector (e.g. `v.lane(0)`), found {v}"
-                    ));
-                }
+                // A mask lane reads as the `Bool` it is. Same builtin because it
+                // is the same operation — one lane out of four — and giving the
+                // mask its own spelling would only be a second name for it.
+                let out = match v {
+                    Type::F32x4 => Type::Float32,
+                    Type::Mask32x4 => Type::Bool,
+                    other => {
+                        return Err(format!(
+                            "line {line}: `lane` must be called on a vector or a mask \
+                             (e.g. `v.lane(0)`), found {other}"
+                        ))
+                    }
+                };
                 if crate::types::const_lane(&args[1], 4).is_none() {
                     return Err(format!(
                         "line {line}: a lane index must be a compile-time constant in 0..3 \
                          (that is what makes `lane` total — there is no bounds check to fall back on)"
                     ));
                 }
-                Ok(Type::Float32)
+                Ok(out)
+            }
+            // `F32x4.load(xs, i)` / `F32x4.store(xs, i, v)` — four consecutive
+            // `Float32`s of an `Array<Float32>` as one value, `i` counted in
+            // ELEMENTS (so `load(xs, 1)` reads `xs[1..4]`), bounds-checked once.
+            "@f32x4Load" | "@f32x4Store" => {
+                let store = name == "@f32x4Store";
+                let want = if store { 3 } else { 2 };
+                if args.len() != want {
+                    return Err(format!(
+                        "line {line}: `F32x4.{}(..)` takes {want} arguments, got {}",
+                        if store { "store" } else { "load" },
+                        args.len()
+                    ));
+                }
+                // `store` writes through the binding, so it needs the binding and
+                // not a value — the same restriction (and the same reason)
+                // `xs.pop()` has: the interpreter's arrays are copy-on-write, so a
+                // store into a temporary would be a store into a copy.
+                if store && !matches!(&args[0], Expr::Var { .. }) {
+                    return Err(format!(
+                        "line {line}: `F32x4.store` needs an array binding as its first \
+                         argument, not an expression"
+                    ));
+                }
+                let a = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+                if matches!(a, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                match &a {
+                    Type::Array(inner) if self.base(inner) == Type::Float32 => {}
+                    other => {
+                        return Err(format!(
+                            "line {line}: `F32x4.{}` needs an Array<Float32>, found {other}",
+                            if store { "store" } else { "load" }
+                        ))
+                    }
+                }
+                let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
+                if matches!(i, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if i != Type::Int {
+                    return Err(format!(
+                        "line {line}: a vector load/store index must be an Int64, found {i}"
+                    ));
+                }
+                if !store {
+                    return Ok(Type::F32x4);
+                }
+                let v = self.base(&self.expr(&args[2], scope, Some(&Type::F32x4), fn_ret)?);
+                if matches!(v, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if v != Type::F32x4 {
+                    return Err(format!(
+                        "line {line}: `F32x4.store` stores an F32x4, found {v}"
+                    ));
+                }
+                Ok(Type::Unit)
+            }
+            // `min`/`max` propagate NaN and order `-0.0` below `+0.0` — wasm's
+            // `f32x4.min` rule, which is IEEE-754-2019 `minimum`, NOT `minNum`.
+            // See the RFC: `minNum` is what LLVM's `llvm.minnum` and Rust's
+            // `f32::min` do, they return the non-NaN operand, and that difference
+            // survives the formatter where a NaN PAYLOAD difference does not.
+            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Select" => {
+                let (want, what) = match name {
+                    "@f32x4Abs" => (1, "abs"),
+                    "@f32x4Sqrt" => (1, "sqrt"),
+                    "@f32x4Select" => (3, "select"),
+                    "@f32x4Min" => (2, "min"),
+                    _ => (2, "max"),
+                };
+                if args.len() != want {
+                    return Err(format!(
+                        "line {line}: `F32x4.{what}(..)` takes {want} arguments, got {}",
+                        args.len()
+                    ));
+                }
+                // `select(m, a, b)` takes lane *i* from `a` where mask lane *i* is
+                // true and from `b` where it is false — the only thing a mask is
+                // FOR, and the reason comparison is worth having at all.
+                let mut expect = if name == "@f32x4Select" {
+                    vec![Type::Mask32x4, Type::F32x4, Type::F32x4]
+                } else {
+                    vec![Type::F32x4; want]
+                };
+                expect.truncate(want);
+                for (a, e) in args.iter().zip(expect) {
+                    let t = self.base(&self.expr(a, scope, Some(&e), fn_ret)?);
+                    if matches!(t, Type::Err) {
+                        return Ok(Type::Err);
+                    }
+                    if t != e {
+                        return Err(format!(
+                            "line {line}: `F32x4.{what}` takes {e}, found {t}"
+                        ));
+                    }
+                }
+                Ok(Type::F32x4)
+            }
+            // The parser capitalized whatever followed `F32x4.`; put it back, so
+            // the message names the spelling the program used.
+            other => {
+                let m = other.trim_start_matches("@f32x4");
+                let mut it = m.chars();
+                let m = match it.next() {
+                    Some(c) => c.to_lowercase().collect::<String>() + it.as_str(),
+                    None => m.to_string(),
+                };
+                Err(format!("line {line}: `F32x4` has no `{m}`"))
             }
         }
     }
@@ -5065,11 +5194,11 @@ impl<'a> Checker<'a> {
             }
             return Ok(target);
         }
-        // Vector construction, splat and lane read (RFC-0083 M1). `F32x4(a,b,c,d)`
-        // is spelled like the numeric conversions above and sits here for that
-        // reason; the other two arrive under internal names the parser assigns, so
-        // a user `fn splat` / `fn lane` is untouched.
-        if matches!(name, "F32x4" | "@f32x4Splat" | "@lane") {
+        // The vector builtins (RFC-0083). `F32x4(a,b,c,d)` is spelled like the
+        // numeric conversions above and sits here for that reason; the rest arrive
+        // under internal names the parser assigns, so a user `fn min` / `fn lane`
+        // is untouched — which is exactly why they are spelled on the type name.
+        if matches!(name, "F32x4" | "@lane") || name.starts_with("@f32x4") {
             return self.vector_call(name, args, line, scope, fn_ret);
         }
         // built-in: schemaOf(TypeName) -> Schema — compile-time reflection of a

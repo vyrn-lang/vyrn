@@ -1,0 +1,128 @@
+/// Explicit SIMD, part two — memory, comparison and the four total operations
+/// (RFC-0083 M2). `examples/simd.vyrn` is M1: construction, splat, lane reads
+/// and lane-wise `+ - * /`.
+///
+///   F32x4.load(xs, i)          four consecutive Float32s of an Array<Float32>
+///   F32x4.store(xs, i, v)      the same four, written back
+///   a < b   a == b   a != b    lane-wise -> Mask32x4, NOT Bool
+///   F32x4.select(m, a, b)      lane i from a where m's lane i is true
+///   F32x4.min/max/abs/sqrt
+///
+/// **The bounds check is emitted ONCE for the whole vector**, not once per lane,
+/// and that single check is most of what a vector load buys over a scalar loop —
+/// a loop cannot amortise its own bounds test. `examples/simdoob.vyrn` and
+/// `examples/simdoobstore.vyrn` pin the two branches of the trap.
+///
+/// **`min`/`max` are IEEE-754-2019 `minimum`/`maximum`: NaN in either operand
+/// propagates, and `-0.0` orders below `+0.0`.** That is wasm's `f32x4.min`
+/// rule. It is NOT `minNum`, which is what LLVM's `llvm.minnum` and Rust's
+/// `f32::min` do — they return the non-NaN operand. Nothing here is left to a
+/// host default: native calls `llvm.minimum` and the interpreter spells the rule
+/// out, because unlike a NaN PAYLOAD difference (which M1 found unobservable,
+/// the formatter answering `NaN` for all of them) a `min(NaN, 1.0)` that answers
+/// `1.000000` on one engine and `NaN` on another survives the formatter intact.
+///
+/// A mask is its own type rather than an `I32x4` of all-ones/all-zeros. The bit
+/// pattern IS that on both backends; what the type buys is that no program can
+/// hand `select` a vector of 7s, which is the case the three engines have no
+/// agreed answer for.
+
+fn lanes(v: F32x4) {
+    print(v.lane(0))
+    print(v.lane(1))
+    print(v.lane(2))
+    print(v.lane(3))
+}
+
+/// A mask crosses a function boundary here, which is the ABI half — the same
+/// thing `lanes` does for `F32x4` in `simd.vyrn`.
+fn mlanes(m: Mask32x4) {
+    print(m.lane(0))
+    print(m.lane(1))
+    print(m.lane(2))
+    print(m.lane(3))
+}
+
+fn main() -> Int64 {
+    // ---- load and store --------------------------------------------------
+    let xs: Array<Float32> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    lanes(F32x4.load(xs, 0)) // 10 11 12 13
+    lanes(F32x4.load(xs, 3)) // 13 14 15 16   (the last index that fits)
+
+    // A store writes four elements and leaves the rest alone, which is what
+    // reading the whole array back afterwards is for.
+    F32x4.store(xs, 2, F32x4(1.0, 2.0, 3.0, 4.0))
+    for x in xs {
+        print(x) // 10 11 1 2 3 4 16
+    }
+    // Round-trip: what was stored is what loads back, at an unaligned offset —
+    // the buffer is an array of `float`, so a 16-byte access at element 2 is
+    // 8-byte aligned at best and neither backend may claim otherwise.
+    lanes(F32x4.load(xs, 2)) // 1 2 3 4
+
+    // ---- the values the engines are supposed to disagree about -----------
+    // Built by arithmetic, as in `simd.vyrn`: there is no NaN or infinity
+    // literal, and a runtime division also stops `consteval` folding the answer
+    // with the compiler's arithmetic instead of the engine's.
+    let z: Float32 = 0.0
+    let o: Float32 = 1.0
+    let neg = z - o
+    let nan = z / z
+    let inf = o / z
+    let ninf = neg / z
+    let nzero = neg * z
+    let e: Float32 = 0.00000000000000000001
+    let sub = e * e
+
+    // ---- comparison: NaN in every operand position -----------------------
+    // Lane 0 has NaN on the left, lane 1 on the right, lane 2 on both, lane 3
+    // on neither. Under IEEE the four relational operators and `==` are ORDERED
+    // — false whenever either operand is NaN — and `!=` is UNORDERED, so
+    // `NaN != NaN` is TRUE. This is the pair RFC-0081 had to correct at scalar
+    // width (native's `fcmp one` answered the ordered thing for `!=`), so it is
+    // pinned here rather than assumed to have been inherited.
+    let l = F32x4(nan, o, nan, o)
+    let r = F32x4(o, nan, nan, o)
+    mlanes(l < r) // false false false false
+    mlanes(l <= r) // false false false true
+    mlanes(l > r) // false false false false
+    mlanes(l >= r) // false false false true
+    mlanes(l == r) // false false false true
+    mlanes(l != r) // true  true  true  false
+
+    // `-0.0 == 0.0` is TRUE and `-0.0 < 0.0` is FALSE: the sign of zero is not
+    // an ordering, which is exactly why `min` below needs its own rule for it.
+    mlanes(F32x4(nzero, nzero, z, ninf) == F32x4(z, nzero, nzero, ninf)) // all true
+    mlanes(F32x4(nzero, inf, ninf, sub) < F32x4(z, inf, ninf, sub)) // all false
+
+    // ---- select ----------------------------------------------------------
+    // The only thing a mask is FOR, and the reason comparison is worth having.
+    lanes(F32x4.select(l != r, l, r)) // NaN NaN NaN 1
+    lanes(F32x4.select(F32x4(o, neg, o, neg) > F32x4.splat(z), F32x4.splat(7.0), F32x4.splat(8.0)))
+
+    // ---- min / max: the NaN rule, stated and checked ---------------------
+    lanes(F32x4.min(l, r)) // NaN NaN NaN 1   (NaN PROPAGATES, it is not skipped)
+    lanes(F32x4.max(l, r)) // NaN NaN NaN 1
+    lanes(F32x4.min(F32x4(o, neg, inf, ninf), F32x4(neg, o, ninf, inf))) // -1 -1 -inf -inf
+    lanes(F32x4.max(F32x4(o, neg, inf, ninf), F32x4(neg, o, ninf, inf))) //  1  1  inf  inf
+    // `-0.0` below `+0.0`, in both argument orders — the half of the rule that
+    // a naive `if a < b` gets wrong, since `-0.0 < 0.0` is false.
+    lanes(F32x4.min(F32x4(nzero, z, nzero, z), F32x4(z, nzero, nzero, z))) // -0 -0 -0 0
+    lanes(F32x4.max(F32x4(nzero, z, nzero, z), F32x4(z, nzero, nzero, z))) //  0  0 -0 0
+    lanes(F32x4.min(F32x4.splat(sub), F32x4(z, sub, nzero, inf))) // 0 sub -0 sub
+
+    // ---- abs / sqrt ------------------------------------------------------
+    // `abs` clears the sign bit — a bit operation, so there is no NaN question.
+    lanes(F32x4.abs(F32x4(neg, nzero, ninf, nan))) // 1 0 inf NaN
+    // `sqrt` of a negative is NaN, of `-0.0` is `-0.0` (IEEE keeps the sign),
+    // and of a subnormal is not flushed to zero on any of the three.
+    lanes(F32x4.sqrt(F32x4(4.0, neg, nzero, inf))) // 2 NaN -0 inf
+    lanes(F32x4.sqrt(F32x4(sub, nan, z, 2.0))) // ~1e-20 NaN 0 1.414214
+    // 0.999997, not 1: `sub` is subnormal, so it carries fewer mantissa bits
+    // than `e` did and the square root cannot recover them. The digits are the
+    // point — an engine that flushed denormals would print `0.000000` here, and
+    // the three agreeing on 0.999997 says none of them does.
+    print(F32x4.sqrt(F32x4.splat(sub)).lane(0) / e)
+
+    return 0
+}

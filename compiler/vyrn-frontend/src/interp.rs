@@ -124,6 +124,11 @@ pub enum Val {
     /// IEEE-754 single-precision operation, so nothing reassociates and the loop
     /// below produces the same bits a hardware `f32x4.add` does.
     F32x4([f32; 4]),
+    /// Four `Bool` lanes — a lane-wise comparison's result (RFC-0083 M2). Four
+    /// `bool`s rather than an `[i32; 4]` of all-ones/all-zeros, because the type
+    /// has no other inhabitants: the backends' bit patterns are their own
+    /// business and there is nothing here to normalize.
+    Mask32x4([bool; 4]),
     Bool(bool),
     /// Copy-on-write, like [`Val::Array`]. Generators pass multi-KB source
     /// buffers by value all day; cloning one per reference and per call is the
@@ -559,6 +564,57 @@ fn wrap_intn(v: i64, bits: u8, signed: bool) -> i64 {
     } else {
         m
     }
+}
+
+/// IEEE-754-2019 `minimum` — NaN in either operand propagates, and `-0.0` orders
+/// strictly below `+0.0` (RFC-0083 M2).
+///
+/// This is wasm's `f32x4.min` and LLVM's `llvm.minimum`, and it is deliberately
+/// NOT `f32::min`, which is `minNum` and returns the non-NaN operand. That
+/// difference is visible: `min(NaN, 1.0)` prints `NaN` under one rule and
+/// `1.000000` under the other, where a NaN PAYLOAD difference prints the same
+/// either way. The three engines agree because all three were pointed at this
+/// rule, not because they were left to their defaults.
+fn fminimum(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    // `-0.0 == 0.0` in IEEE, so `<` cannot separate them and the sign bit has to
+    // be asked directly. This is the whole of the difference between `minimum`
+    // and a naive `if a < b`.
+    if a == b {
+        return if a.is_sign_negative() { a } else { b };
+    }
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// IEEE-754-2019 `maximum` — the mirror of [`fminimum`], `+0.0` above `-0.0`.
+fn fmaximum(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    if a == b {
+        return if a.is_sign_negative() { b } else { a };
+    }
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The bounds trap a vector load/store at element `i` reports.
+///
+/// The wording is the scalar one, and the index is the FIRST lane of `i..i+3`
+/// that is actually out of range — reporting `i` itself would name an in-range
+/// element whenever only the tail overruns, which is the common case.
+fn vec_oob(i: i64) -> String {
+    let k = if i < 0 { i } else { i + 3 };
+    format!("array index {k} out of bounds")
 }
 
 /// Convert a numeric value to `target` (Int / sized IntN / Float / Float32),
@@ -3081,6 +3137,49 @@ impl<'a> Interp<'a> {
                     }
                     return Err("`swapRemove` needs a mutable array binding".into());
                 }
+                // `F32x4.store(xs, i, v)` (RFC-0083 M2) — write four consecutive
+                // elements, bounds-checked ONCE. Handled here rather than below
+                // because it mutates the receiver, and the receiver is copy-on-
+                // write: storing into the evaluated VALUE would store into a copy.
+                if name == "@f32x4Store" {
+                    let Some(Expr::Var { name: recv, .. }) = args.first() else {
+                        return Err("`F32x4.store` needs a mutable array binding".into());
+                    };
+                    let recv = recv.clone();
+                    let idx = match self.expr(&args[1], scope)? {
+                        Val::Int(n) => n,
+                        other => {
+                            return Err(
+                                format!("array index must be an Int64, found {other:?}").into()
+                            )
+                        }
+                    };
+                    let lanes = match self.expr(&args[2], scope)? {
+                        Val::F32x4(v) => v,
+                        other => return Err(format!("F32x4.store: {other:?}").into()),
+                    };
+                    let mut put = |items: &mut std::rc::Rc<Vec<Val>>| -> Result<Val, Ctrl> {
+                        if idx < 0 || idx > items.len() as i64 - 4 {
+                            return Err(vec_oob(idx).into());
+                        }
+                        let items = std::rc::Rc::make_mut(items);
+                        for (k, l) in lanes.iter().enumerate() {
+                            items[idx as usize + k] = Val::Float32(*l);
+                        }
+                        Ok(Val::Unit)
+                    };
+                    for frame in scope.iter_mut().rev() {
+                        if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(&recv) {
+                            return put(items);
+                        }
+                    }
+                    if let Some(Slot { v: Val::Array(items), .. }) =
+                        self.globals.borrow_mut().get_mut(&recv)
+                    {
+                        return put(items);
+                    }
+                    return Err("`F32x4.store` needs a mutable array binding".into());
+                }
                 // `m.remove(k)` (RFC-0028) — remove the entry for `k`, shifting
                 // later entries down (order-preserving), returning whether it was
                 // present. Mutates the receiver in place, so it is handled here.
@@ -3218,7 +3317,69 @@ impl<'a> Interp<'a> {
                     // so there is nothing to bounds-check and no trap to reach.
                     "@lane" => match (&vals[0], &vals[1]) {
                         (Val::F32x4(v), Val::Int(k)) => Ok(Val::Float32(v[*k as usize])),
+                        (Val::Mask32x4(m), Val::Int(k)) => Ok(Val::Bool(m[*k as usize])),
                         (a, b) => Err(format!("lane: {a:?}[{b:?}]").into()),
+                    },
+                    // `F32x4.load(xs, i)` (RFC-0083 M2) — four consecutive
+                    // elements as one value, bounds-checked ONCE. The check is
+                    // signed and against `i + 4`, not unsigned against `i`, because
+                    // `i + 4` on an unsigned index can wrap past the length and let
+                    // a load through; `len - 4` cannot, since `len >= 0`.
+                    "@f32x4Load" => {
+                        let (Val::Array(xs), Val::Int(i)) = (&vals[0], &vals[1]) else {
+                            return Err(format!("F32x4.load: {:?}", vals[0]).into());
+                        };
+                        let (i, len) = (*i, xs.len() as i64);
+                        if i < 0 || i > len - 4 {
+                            return Err(vec_oob(i).into());
+                        }
+                        let mut lanes = [0f32; 4];
+                        for (k, l) in lanes.iter_mut().enumerate() {
+                            *l = match &xs[(i + k as i64) as usize] {
+                                Val::Float32(f) => *f,
+                                other => return Err(format!("F32x4.load lane: {other:?}").into()),
+                            };
+                        }
+                        Ok(Val::F32x4(lanes))
+                    }
+                    // `min`/`max` are IEEE-754-2019 `minimum`/`maximum`, which is
+                    // wasm's `f32x4.min` rule: NaN in either operand propagates,
+                    // and `-0.0` orders below `+0.0`. Written out rather than
+                    // reaching for `f32::min`, which is `minNum` and returns the
+                    // NON-NaN operand — a difference the six-decimal formatter DOES
+                    // show, unlike a NaN payload difference.
+                    "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" => {
+                        let a = match &vals[0] {
+                            Val::F32x4(v) => *v,
+                            other => return Err(format!("F32x4 op: {other:?}").into()),
+                        };
+                        let b = match vals.get(1) {
+                            Some(Val::F32x4(v)) => *v,
+                            _ => a,
+                        };
+                        let mut out = [0f32; 4];
+                        for k in 0..4 {
+                            out[k] = match name.as_str() {
+                                "@f32x4Min" => fminimum(a[k], b[k]),
+                                "@f32x4Max" => fmaximum(a[k], b[k]),
+                                // `abs` clears the sign bit, NaN included — a bit
+                                // operation, not a comparison, so there is no NaN
+                                // question to answer.
+                                "@f32x4Abs" => f32::from_bits(a[k].to_bits() & 0x7fff_ffff),
+                                _ => a[k].sqrt(),
+                            };
+                        }
+                        Ok(Val::F32x4(out))
+                    }
+                    "@f32x4Select" => match (&vals[0], &vals[1], &vals[2]) {
+                        (Val::Mask32x4(m), Val::F32x4(a), Val::F32x4(b)) => {
+                            let mut out = [0f32; 4];
+                            for k in 0..4 {
+                                out[k] = if m[k] { a[k] } else { b[k] };
+                            }
+                            Ok(Val::F32x4(out))
+                        }
+                        (m, a, b) => Err(format!("F32x4.select: {m:?} {a:?} {b:?}").into()),
                     },
                     // A logger handle is its name string (RFC-0008).
                     "logger" => Ok(vals.remove(0)),
@@ -4105,8 +4266,27 @@ impl<'a> Interp<'a> {
     fn binop(&self, op: BinOp, l: Val, r: Val) -> Result<Val, Ctrl> {
         use BinOp::*;
         // Lane-wise arithmetic (RFC-0083). Four independent `f32` operations in
-        // written lane order; the checker admits only these four operators.
+        // written lane order; the checker admits only these ten operators.
         if let (Val::F32x4(a), Val::F32x4(b)) = (&l, &r) {
+            // Comparison (M2) yields a mask, not a `Bool`. Rust's `<` on `f32` is
+            // already IEEE's ORDERED comparison — false whenever either side is
+            // NaN — and `!=` is the unordered one, true whenever either is. That
+            // is `fcmp olt`/`fcmp une`, which is the pair RFC-0081 had to correct
+            // at scalar width, so it is written down rather than assumed.
+            if matches!(op, Lt | LtEq | Gt | GtEq | Eq | NotEq) {
+                let mut m = [false; 4];
+                for i in 0..4 {
+                    m[i] = match op {
+                        Lt => a[i] < b[i],
+                        LtEq => a[i] <= b[i],
+                        Gt => a[i] > b[i],
+                        GtEq => a[i] >= b[i],
+                        Eq => a[i] == b[i],
+                        _ => a[i] != b[i],
+                    };
+                }
+                return Ok(Val::Mask32x4(m));
+            }
             let mut out = [0f32; 4];
             for i in 0..4 {
                 out[i] = match op {
@@ -4556,10 +4736,17 @@ impl<'a> Interp<'a> {
         }
         let d = depth + 1;
         match ty {
-            // `F32x4` is here for the reason the scalars are: its lanes are
-            // already `f32`, so there is nothing to round and nothing to validate
-            // (RFC-0083 — it is a value, and a value type carries no predicate).
-            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit | Type::F32x4 => true,
+            // `F32x4`/`Mask32x4` are here for the reason the scalars are: their
+            // lanes are already `f32`/`bool`, so there is nothing to round and
+            // nothing to validate (RFC-0083 — they are values, and a value type
+            // carries no predicate).
+            Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::F32x4
+            | Type::Mask32x4 => true,
             Type::Named(n) => match self.types.get(n.as_str()) {
                 // An unknown name coerces to itself in the walk below.
                 None => true,

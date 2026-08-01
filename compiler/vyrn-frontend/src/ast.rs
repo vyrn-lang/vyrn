@@ -602,6 +602,16 @@ pub enum Type {
     /// SIMD is expressible here when auto-vectorised float reductions are not.
     /// Lowers to `<4 x float>` textually and to a wasm `v128`.
     F32x4,
+    /// Four `Bool` lanes as one value — what a lane-wise comparison of two
+    /// [`Type::F32x4`]s yields (RFC-0083 M2).
+    ///
+    /// A type of its OWN rather than an `I32x4` of all-ones/all-zeros, which is
+    /// what wasm and LLVM both call a mask at the machine level. The bit pattern
+    /// is still exactly that — `<4 x i32>` and a `v128` — but nothing in the
+    /// language can name it, so no program can hand `select` a vector of `7`s and
+    /// ask what happens. There is no answer to that question the three engines
+    /// would agree on for free, and a type is cheaper than a normalisation.
+    Mask32x4,
     Bool,
     /// An immutable, statically-allocated string (v0.1: literals only).
     Str,
@@ -720,6 +730,7 @@ impl std::fmt::Display for Type {
             Type::Float => write!(f, "Float64"),
             Type::Float32 => write!(f, "Float32"),
             Type::F32x4 => write!(f, "F32x4"),
+            Type::Mask32x4 => write!(f, "Mask32x4"),
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
