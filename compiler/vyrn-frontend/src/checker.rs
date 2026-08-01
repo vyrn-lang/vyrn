@@ -2821,7 +2821,14 @@ impl<'a> Checker<'a> {
                 if *op == UnOp::Neg && matches!(**expr, Expr::Int(i64::MIN)) {
                     return Ok(Type::Int);
                 }
-                let t = self.base(&self.expr(expr, scope, None, fn_ret)?);
+                // The expectation flows through, and it has to: all three unary
+                // operators are type-PRESERVING, so `let a: Float32 = -0.5`
+                // wants its operand checked as a `Float32` exactly as the
+                // positive `0.5` already is. Passing `None` here made the
+                // negative of a literal a `Float64` and the declaration a type
+                // error, which is a difference between `0.5` and `-0.5` that no
+                // rule in the language asks for.
+                let t = self.base(&self.expr(expr, scope, expected, fn_ret)?);
                 match op {
                     UnOp::Neg
                         if matches!(
