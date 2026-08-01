@@ -1116,6 +1116,87 @@ mod tests {
         assert!(run(src).is_ok(), "{:?}", run(src));
     }
 
+    // ---- RFC-0075: the disposal obligation -------------------------------
+
+    /// The producer every stream case below acquires from.
+    const FEED: &str = "fn feed() -> Stream<Int64> { let xs: Array<Int64> = [1, 2] \
+                        return fromArray(xs) } ";
+
+    fn stream(body: &str) -> Result<(), String> {
+        run(&format!("{FEED} fn main() -> Int64 {{ {body} }}"))
+    }
+
+    #[test]
+    fn an_abandoned_stream_does_not_build() {
+        // The milestone's whole claim: the `#6193` shape is a compile error.
+        let e = stream("let events = feed() return 0").unwrap_err();
+        assert!(e.contains("`events` is a `Stream<Int64>` and is never disposed"), "{e}");
+    }
+
+    #[test]
+    fn the_three_discharges_are_accepted() {
+        assert!(stream("for p in feed() { print(p) } return 0").is_ok());
+        assert!(stream("let s = feed() close(s) return 0").is_ok());
+        assert!(run(&format!(
+            "{FEED} fn fwd() -> Stream<Int64> {{ let s = feed() return s }} \
+             fn main() -> Int64 {{ close(fwd()) return 0 }}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn a_stream_must_be_disposed_on_every_path() {
+        // Disposing on one branch only is the tRPC pathology in miniature: the
+        // cleanup exists, and there is a path that skips it.
+        let e = stream("let s = feed() if true { close(s) } return 0").unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        let e = stream("let s = feed() if true { return 1 } close(s) return 0").unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        // Both branches, or a branch that leaves, are fine.
+        assert!(stream("let s = feed() if true { close(s) } else { close(s) } return 0").is_ok());
+        assert!(stream("let s = feed() if true { close(s) return 1 } close(s) return 0").is_ok());
+    }
+
+    #[test]
+    fn breaking_out_of_the_declaring_block_abandons_it() {
+        // `break` means two different things depending on which side of the
+        // declaring block the loop it leaves is on.
+        let e = stream("for i in [0, 1] { let s = feed() break } return 0").unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        // Here the loop is BELOW the declaration, so control comes back owning it.
+        assert!(stream("let s = feed() for i in [0, 1] { break } close(s) return 0").is_ok());
+    }
+
+    #[test]
+    fn a_stream_may_not_be_disposed_twice() {
+        // The direction the leak check does not cover, and the worse bug of the
+        // two: `close` frees the buffer, so a second one is a double free.
+        let e = stream("let s = feed() close(s) close(s) return 0").unwrap_err();
+        assert!(e.contains("disposed more than once"), "{e}");
+        let e = stream("let s = feed() for p in s { print(p) } close(s) return 0").unwrap_err();
+        assert!(e.contains("disposed more than once"), "{e}");
+    }
+
+    #[test]
+    fn aliasing_moves_the_obligation_rather_than_dropping_it() {
+        let e = stream("let s = feed() let t = s return 0").unwrap_err();
+        assert!(e.contains("`t` is a `Stream<Int64>`"), "{e}");
+        assert!(stream("let s = feed() let t = s close(t) return 0").is_ok());
+    }
+
+    #[test]
+    fn a_stream_parameter_carries_the_obligation_into_the_callee() {
+        // Without this, `fn sink(s: Stream<Int64>) {}` is a one-line hole through
+        // the whole analysis: the caller discharges by moving, and nobody else has
+        // to do anything.
+        let e = run(&format!(
+            "{FEED} fn sink(s: Stream<Int64>) -> Int64 {{ return 0 }} \
+             fn main() -> Int64 {{ return sink(feed()) }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("`s` is a `Stream<Int64>` and is never disposed"), "{e}");
+    }
+
     #[test]
     fn rejects_consume_in_loop() {
         let src = "type T = { id: Int64 }; \

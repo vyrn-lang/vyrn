@@ -146,6 +146,14 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // the vector form exists.
     ("@f32x4Load", Memory, "Array<Float32>: four consecutive elements, one bounds check"),
     ("@f32x4Store", Memory, "Array<Float32>: the same four written back"),
+    // RFC-0075 M1. `Stream<T>` shares `Array<T>`'s representation, so these two
+    // are the array rows under different names — and they are separate names
+    // precisely because the TYPES are separate: nothing else can make or unmake a
+    // stream, which is what makes "disposed exactly once" checkable. When M2's
+    // producer stops being an eager buffer, `close` grows a teardown and this row
+    // stops being an alias of `afree`'s.
+    ("fromArray", Memory, "Stream: the array's buffer, moved (native emits nothing)"),
+    ("close", Memory, "Stream: reclamation (native frees; the interpreter's Vec drops)"),
     ("cell", Memory, "the slot table: allocate a slot and a generation"),
     ("get", Memory, "the slot table: generation-checked read"),
     ("set", Memory, "the slot table: generation-checked write"),
@@ -347,8 +355,12 @@ fn the_census_is_the_code() {
     // that is not movable at all (`Sqrt`, `Semantics`). M2's comparison operators
     // are `BinOp`s like M1's arithmetic, so the mask cost no rows either — and the
     // operation M2 tried to add and could NOT justify, `select`, is not here
-    // because it is not in the interpreter. See RFC-0083's M2 note.
-    assert_eq!(found.len(), 70, "the primitive core changed size");
+    // because it is not in the interpreter. See RFC-0083's M2 note. 70 -> 72 when
+    // RFC-0075 M1 added `fromArray`/`close` — two `Memory` rows for a type that is
+    // `Array<T>` at runtime, so they are the array rows again. The pair is the
+    // price of the linearity being checkable: a stream has to be unforgeable, and
+    // an unforgeable type needs a constructor nothing else can spell.
+    assert_eq!(found.len(), 72, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

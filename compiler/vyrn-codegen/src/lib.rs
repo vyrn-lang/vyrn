@@ -9599,6 +9599,117 @@ mod tests {
         );
     }
 
+    // ---- RFC-0075: a stream's release runs on every exit path ---------------
+
+    /// A producer whose buffer is a real heap allocation, so the release below is
+    /// a real `free` rather than a no-op on a static.
+    const FEED: &str = "fn feed() -> Stream<Int64> { let mut xs: Array<Int64> = array() \
+                        xs = push(xs, 1) return fromArray(xs) }";
+
+    /// The block a label introduces, up to the next label. Used instead of a bare
+    /// free COUNT because a count cannot tell "released on the break path" from
+    /// "released somewhere else in the function" — which is the entire question.
+    fn block_at<'a>(ir: &'a str, label: &str) -> &'a str {
+        let start = ir.find(&format!("\n{label}:\n")).expect("label not in IR");
+        let rest = &ir[start + 1..];
+        let end = rest[label.len() + 2..]
+            .find("\n}")
+            .map(|i| i + label.len() + 2)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn stream_for_loop_releases_on_normal_exit() {
+        let src = format!("{FEED} fn main() -> Int64 {{ for p in feed() {{ print(p) }} return 0 }}");
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 1,
+            "the loop should release the stream exactly once: {ir}"
+        );
+        // And it must be at the loop's exit block, which is where the zero-element
+        // and the run-to-completion paths both land.
+        assert!(
+            block_at(&ir, "fend.3").contains("call void @free(ptr"),
+            "the release belongs in the loop's end block: {ir}"
+        );
+    }
+
+    #[test]
+    fn stream_for_loop_releases_on_break() {
+        // RFC-0060 made `break` drop what a normal iteration end would; the stream
+        // is not in a drop frame of its own, so this checks the other half — that
+        // `break` branches to the block holding the release rather than past it.
+        let src =
+            format!("{FEED} fn main() -> Int64 {{ for p in feed() {{ print(p) break }} return 0 }}");
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 1,
+            "one release, on the one path out: {ir}"
+        );
+        let end = block_at(&ir, "fend.3");
+        assert!(end.contains("call void @free(ptr"), "{ir}");
+        assert!(
+            ir.contains("br label %fend.3"),
+            "`break` must branch to the releasing block: {ir}"
+        );
+    }
+
+    #[test]
+    fn stream_for_loop_releases_on_early_return() {
+        // The discriminating count: a `return` from inside the body leaves through
+        // `emit_all_drops`, which walks the loop-variable frame the stream was put
+        // in — so the function carries TWO releases, one per exit path, and never
+        // both on one path.
+        let src = format!(
+            "{FEED} fn main() -> Int64 {{ for p in feed() {{ if p == 1 {{ return 7 }} }} return 0 }}"
+        );
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 2,
+            "the early-return path needs its own release: {ir}"
+        );
+        let then = block_at(&ir, "then.4");
+        assert!(
+            then.contains("call void @free(ptr") && then.contains("ret i64 7"),
+            "the release must precede the early `ret`: {ir}"
+        );
+    }
+
+    #[test]
+    fn close_releases_a_stream_once() {
+        let src = format!("{FEED} fn main() -> Int64 {{ let s = feed() close(s) return 0 }}");
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 1,
+            "`close` frees the buffer, and nothing frees it a second time: {ir}"
+        );
+    }
+
+    #[test]
+    fn from_array_emits_no_instruction() {
+        // `Stream<T>` and `Array<T>` are the same three words, so producing one is
+        // a move. Pinned by emitting the two producers side by side: byte-identical
+        // bodies, or `llt_of`'s claim that they share a layout has gone stale.
+        let body = |src: &str| {
+            let ir = emit(&check(src).unwrap()).unwrap();
+            let at = ir.find("define { ptr, i64, i64 } @vyrn_feed").unwrap();
+            let rest = &ir[at..];
+            rest[..rest.find("\n}").unwrap()].to_string()
+        };
+        let stream = body(&format!("{FEED} fn main() -> Int64 {{ close(feed()) return 0 }}"));
+        let array = body(
+            "fn feed() -> Array<Int64> { let mut xs: Array<Int64> = array() \
+             xs = push(xs, 1) return xs } \
+             fn main() -> Int64 { afree(feed()) return 0 }",
+        );
+        assert_eq!(stream, array, "fromArray must lower to nothing at all");
+    }
+
     #[test]
     fn generational_reference_lowers_to_slab_calls() {
         let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); \
