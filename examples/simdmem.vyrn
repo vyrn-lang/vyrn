@@ -5,7 +5,7 @@
 ///   F32x4.load(xs, i)          four consecutive Float32s of an Array<Float32>
 ///   F32x4.store(xs, i, v)      the same four, written back
 ///   a < b   a == b   a != b    lane-wise -> Mask32x4, NOT Bool
-///   F32x4.select(m, a, b)      lane i from a where m's lane i is true
+///   m.lane(k)                  one mask lane, as the Bool it is
 ///   F32x4.min/max/abs/sqrt
 ///
 /// **The bounds check is emitted ONCE for the whole vector**, not once per lane,
@@ -24,8 +24,14 @@
 ///
 /// A mask is its own type rather than an `I32x4` of all-ones/all-zeros. The bit
 /// pattern IS that on both backends; what the type buys is that no program can
-/// hand `select` a vector of 7s, which is the case the three engines have no
+/// build a lane that is neither, which is the case the three engines have no
 /// agreed answer for.
+///
+/// There is deliberately no `F32x4.select` builtin. Written in Vyrn on
+/// `m.lane(k)` and `if` it measured 1.1x native and 1.06x wasm — both optimizers
+/// turn the four branches back into a blend — so by RFC-0078's bar it had no
+/// reason to be a primitive. `examples/simdbench.vyrn`'s `selectV` is both the
+/// measurement and the replacement.
 
 fn lanes(v: F32x4) {
     print(v.lane(0))
@@ -41,6 +47,17 @@ fn mlanes(m: Mask32x4) {
     print(m.lane(1))
     print(m.lane(2))
     print(m.lane(3))
+}
+
+/// Lane *i* from `a` where the mask's lane *i* is true, from `b` where it is
+/// not — a user function, because the measurement said it should be one.
+fn select(m: Mask32x4, a: F32x4, b: F32x4) -> F32x4 {
+    return F32x4(
+        if m.lane(0) { a.lane(0) } else { b.lane(0) },
+        if m.lane(1) { a.lane(1) } else { b.lane(1) },
+        if m.lane(2) { a.lane(2) } else { b.lane(2) },
+        if m.lane(3) { a.lane(3) } else { b.lane(3) },
+    )
 }
 
 fn main() -> Int64 {
@@ -95,10 +112,12 @@ fn main() -> Int64 {
     mlanes(F32x4(nzero, nzero, z, ninf) == F32x4(z, nzero, nzero, ninf)) // all true
     mlanes(F32x4(nzero, inf, ninf, sub) < F32x4(z, inf, ninf, sub)) // all false
 
-    // ---- select ----------------------------------------------------------
-    // The only thing a mask is FOR, and the reason comparison is worth having.
-    lanes(F32x4.select(l != r, l, r)) // NaN NaN NaN 1
-    lanes(F32x4.select(F32x4(o, neg, o, neg) > F32x4.splat(z), F32x4.splat(7.0), F32x4.splat(8.0)))
+    // ---- select, in the language rather than in the compiler --------------
+    // What a mask is FOR, and it needs no builtin: `m.lane(k)` is a `Bool`, `if`
+    // is an expression (RFC-0030), and both optimizers put the four branches
+    // back together into one blend. `examples/simdbench.vyrn` is the number.
+    lanes(select(l != r, l, r)) // NaN NaN NaN 1
+    lanes(select(F32x4(o, neg, o, neg) > F32x4.splat(z), F32x4.splat(7.0), F32x4.splat(8.0)))
 
     // ---- min / max: the NaN rule, stated and checked ---------------------
     lanes(F32x4.min(l, r)) // NaN NaN NaN 1   (NaN PROPAGATES, it is not skipped)

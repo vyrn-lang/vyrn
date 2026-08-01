@@ -5510,26 +5510,7 @@ impl<'a> Gen<'a> {
         // `F32x4.min/max/abs/sqrt` and `F32x4.select` (RFC-0083 M2). The four
         // intrinsics are declared once in the prologue, where the choice of
         // `llvm.minimum` over `llvm.minnum` is argued.
-        if matches!(
-            name,
-            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Select"
-        ) {
-            if name == "@f32x4Select" {
-                let (m, _) = self.gen_expr(&args[0])?;
-                let (a, _) = self.gen_expr(&args[1])?;
-                let (b, _) = self.gen_expr(&args[2])?;
-                // Back to `<4 x i1>` for `select`, which is the mask's meaning
-                // rather than its representation. `-O2` folds this against the
-                // `sext` the comparison emitted; the pair costs nothing and buys
-                // one bit pattern shared with the wasm backend.
-                let c = self.fresh_tmp();
-                let t = self.fresh_tmp();
-                self.emit(format!("{c} = icmp ne <4 x i32> {m}, zeroinitializer"));
-                self.emit(format!(
-                    "{t} = select <4 x i1> {c}, <4 x float> {a}, <4 x float> {b}"
-                ));
-                return Ok((t, Type::F32x4));
-            }
+        if matches!(name, "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt") {
             let (a, _) = self.gen_expr(&args[0])?;
             let t = self.fresh_tmp();
             let (f, rest) = match name {

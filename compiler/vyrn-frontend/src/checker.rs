@@ -3872,11 +3872,10 @@ impl<'a> Checker<'a> {
             // See the RFC: `minNum` is what LLVM's `llvm.minnum` and Rust's
             // `f32::min` do, they return the non-NaN operand, and that difference
             // survives the formatter where a NaN PAYLOAD difference does not.
-            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Select" => {
+            "@f32x4Min" | "@f32x4Max" | "@f32x4Abs" | "@f32x4Sqrt" => {
                 let (want, what) = match name {
                     "@f32x4Abs" => (1, "abs"),
                     "@f32x4Sqrt" => (1, "sqrt"),
-                    "@f32x4Select" => (3, "select"),
                     "@f32x4Min" => (2, "min"),
                     _ => (2, "max"),
                 };
@@ -3886,23 +3885,14 @@ impl<'a> Checker<'a> {
                         args.len()
                     ));
                 }
-                // `select(m, a, b)` takes lane *i* from `a` where mask lane *i* is
-                // true and from `b` where it is false — the only thing a mask is
-                // FOR, and the reason comparison is worth having at all.
-                let mut expect = if name == "@f32x4Select" {
-                    vec![Type::Mask32x4, Type::F32x4, Type::F32x4]
-                } else {
-                    vec![Type::F32x4; want]
-                };
-                expect.truncate(want);
-                for (a, e) in args.iter().zip(expect) {
-                    let t = self.base(&self.expr(a, scope, Some(&e), fn_ret)?);
+                for a in args {
+                    let t = self.base(&self.expr(a, scope, Some(&Type::F32x4), fn_ret)?);
                     if matches!(t, Type::Err) {
                         return Ok(Type::Err);
                     }
-                    if t != e {
+                    if t != Type::F32x4 {
                         return Err(format!(
-                            "line {line}: `F32x4.{what}` takes {e}, found {t}"
+                            "line {line}: `F32x4.{what}` takes F32x4, found {t}"
                         ));
                     }
                 }

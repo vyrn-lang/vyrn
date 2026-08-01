@@ -3084,7 +3084,7 @@ impl Fn_<'_> {
                 "logger" => Type::Logger,
                 // RFC-0083: the vector builtins, whose result type is fixed.
                 "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
-                | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Select" => Type::F32x4,
+                | "@f32x4Abs" | "@f32x4Sqrt" => Type::F32x4,
                 "@f32x4Store" => Type::Unit,
                 "@lane" if matches!(self.peek(&args[0], line)?, Type::Mask32x4) => Type::Bool,
                 "@lane" => Type::Float32,
@@ -4285,24 +4285,6 @@ impl Fn_<'_> {
                     "@f32x4Abs" => Instruction::F32x4Abs,
                     _ => Instruction::F32x4Sqrt,
                 });
-                return Ok(Type::F32x4);
-            }
-            // `v128.bitselect` is a BIT-wise choose, which is a lane-wise choose
-            // only because a mask's lanes are all-ones or all-zeros. Nothing in
-            // the language can produce any other pattern — that is what the
-            // `Mask32x4` type buys over an `I32x4` a program could fill with 7s.
-            "@f32x4Select" if args.len() == 3 => {
-                // `bitselect` wants the mask last, but the arguments are evaluated
-                // left to right — a side effect in the mask expression has to
-                // happen before one in `a`, as it does on the other two engines.
-                // Hence the spill rather than emitting them in stack order.
-                self.expr_as(m, b, &args[0], &Type::Mask32x4)?;
-                let mask = b.local(ValType::V128);
-                b.ins(&Instruction::LocalSet(mask));
-                self.expr_as(m, b, &args[1], &Type::F32x4)?;
-                self.expr_as(m, b, &args[2], &Type::F32x4)?;
-                b.ins(&Instruction::LocalGet(mask));
-                b.ins(&Instruction::V128Bitselect);
                 return Ok(Type::F32x4);
             }
             // Four consecutive `Float32`s of an `Array<Float32>` as one 16-byte

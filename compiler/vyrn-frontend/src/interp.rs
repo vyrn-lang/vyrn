@@ -3371,16 +3371,13 @@ impl<'a> Interp<'a> {
                         }
                         Ok(Val::F32x4(out))
                     }
-                    "@f32x4Select" => match (&vals[0], &vals[1], &vals[2]) {
-                        (Val::Mask32x4(m), Val::F32x4(a), Val::F32x4(b)) => {
-                            let mut out = [0f32; 4];
-                            for k in 0..4 {
-                                out[k] = if m[k] { a[k] } else { b[k] };
-                            }
-                            Ok(Val::F32x4(out))
-                        }
-                        (m, a, b) => Err(format!("F32x4.select: {m:?} {a:?} {b:?}").into()),
-                    },
+                    // (`@f32x4Select` was here, lowering to `v128.bitselect` and
+                    // `select <4 x i1>`. It is not a builtin: written in Vyrn on
+                    // `m.lane(k)` and `if` it measured 1.1x native and 1.06x wasm —
+                    // both optimizers turn the four branches back into a blend — so
+                    // by RFC-0078's own bar it had no reason to be a primitive.
+                    // `examples/simdbench.vyrn`'s `selectV` is the measurement and
+                    // the replacement at once.)
                     // A logger handle is its name string (RFC-0008).
                     "logger" => Ok(vals.remove(0)),
                     // Log methods write `[LEVEL] name: msg` to stderr (kept off
