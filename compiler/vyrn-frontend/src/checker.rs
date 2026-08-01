@@ -10417,4 +10417,43 @@ mod tests {
             "{sa}"
         );
     }
+
+    /// RFC-0083: the lane index is the ONE thing about a vector that can be
+    /// wrong, and it is wrong at compile time or not at all. If either of these
+    /// ever type-checks, the three backends emit an unguarded `extractelement` /
+    /// `f32x4.extract_lane` at an index nothing verified.
+    #[test]
+    fn a_lane_index_must_be_a_constant_in_range() {
+        let ok = "fn main() -> Int64 { let v = F32x4(1.0, 2.0, 3.0, 4.0)  \
+                  print(v.lane(0))  print(v.lane(3))  return 0 }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+        for bad in [
+            "print(v.lane(4))",
+            "print(v.lane(0 - 1))",
+            "let i = 0  print(v.lane(i))",
+        ] {
+            let src =
+                format!("fn main() -> Int64 {{ let v = F32x4.splat(1.0)  {bad}  return 0 }}");
+            let e = check_src(&src).unwrap_err();
+            assert!(e.contains("compile-time constant in 0..3"), "{bad}: {e}");
+        }
+    }
+
+    /// A vector takes `Float32` lanes and combines only with another vector.
+    /// `Float64` is refused rather than truncated, like every other numeric flow.
+    #[test]
+    fn a_vector_does_not_mix_with_a_scalar() {
+        let f64lane = check_src(
+            "fn main() -> Int64 { let d = 1.0  let v = F32x4(d, d, d, d)  \
+             print(v.lane(0))  return 0 }",
+        );
+        // A float LITERAL adapts to the lane type; a `Float64` binding does not.
+        assert!(f64lane.is_err(), "{f64lane:?}");
+        let mixed = check_src(
+            "fn main() -> Int64 { let v = F32x4.splat(1.0)  let w = v + 1.0  \
+             print(w.lane(0))  return 0 }",
+        )
+        .unwrap_err();
+        assert!(mixed.contains("F32x4"), "{mixed}");
+    }
 }

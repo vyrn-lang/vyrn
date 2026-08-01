@@ -1,7 +1,8 @@
 # RFC-0083 — Portable SIMD, Without `unsafe` and Without Breaking Parity
 
-- **Status:** **Accepted.** M1 not started. Later milestones are gated on M1's
-  parity result, in the manner RFC-0081 established.
+- **Status:** **Accepted.** **M1 shipped** (`examples/simd.vyrn`, three-engine
+  byte-identical including NaN — see "As landed"). Later milestones are gated on
+  M1's parity result, in the manner RFC-0081 established.
 - **Depends on:** RFC-0077 (the direct wasm backend — `wasm-encoder` is what
   emits the instructions), RFC-0078 (the census — `View` is the category these
   join), RFC-0082 (the capability boundary this narrows by one row)
@@ -88,6 +89,56 @@ found native's `fcmp one` answering the wrong thing for NaN operands, and fixed 
 to `une`. **If the three engines cannot be made to agree on NaN lanes, M1 stops
 and reports**, and the honest outcome may be that the arithmetic ships and NaN
 handling is specified separately. Nothing here is worth a divergence.
+
+### As landed (M1)
+
+**The NaN question is answered, and the answer is not the one this section
+braced for.** The three engines agree byte-for-byte on `±0.0`, on a `Float32`
+subnormal, on `±Infinity`, and on NaN in every lane position through every one of
+the four operators. The reason is not that the propagation rules match — they
+still do not. It is that **a NaN's identity is not observable in Vyrn**: the
+six-decimal formatter RFC-0081 moved to `std/num` reads the exponent and fraction
+fields and answers `NaN` for any payload and either sign, so wasm's loose rule,
+LLVM's and Rust's `f32`'s cannot be told apart by a program. A lane read prints
+through that same path — `Float32` widens to `Float64` rather than having a
+formatter of its own — so nothing new had to be written to make the columns line
+up.
+
+The bit patterns were checked separately and also agree, `0xFFF8000000000000` for
+every NaN produced, including through a multiplication by a negative. **That
+agreement is a property of this host, not of the three specifications**, and the
+pin deliberately does not depend on it: all three engines are running the same
+x86 hardware, and a pin on the payload would be a pin on the machine.
+
+Four smaller corrections:
+
+- **There is no exponent literal**, so the subnormal in the pin is squared into
+  existence from `1e-20` written out in full. `sub / sub` is then a
+  flush-to-zero probe worth more than the value itself: an engine that flushed
+  denormals would compute `0/0` and say `NaN` where all three say `1`.
+- **`<4 x float>` is not only the textual backend's spelling.** The direct wasm
+  backend derives its representation from `llt_of`'s string, so reading `v128`
+  off that one line keeps the lowering decision in one place, exactly as every
+  other `Repr` does. The table above reads as though the two backends were
+  independent; they share this.
+- **`F32x4.splat(x)` is desugared in the parser**, beside `toString` → `@str`,
+  because its receiver is a type *name* and not a value. Dropping it there is
+  what keeps `F32x4` out of the expression grammar entirely — nothing downstream
+  ever sees a bare `F32x4` variable to fail to resolve. One internal name per
+  width, so M3's `F64x2.splat` is a second arm rather than a receiver three
+  backends have to decode.
+- **The census (RFC-0078) gains three `View` rows and no operation.** The
+  constructor, the splat and the lane read are the whole of the representation;
+  lane-wise `+` is a `BinOp` and never reaches the interpreter's `Call` dispatch,
+  so there is nothing here to route into Vyrn later — only a type the language
+  cannot otherwise name.
+
+What did *not* happen is worth recording too, because it was the stated risk that
+a value type which is neither a scalar nor a container would collide with
+something. It collided with nothing: `own.rs`, `movecheck.rs` and the drop
+analysis needed no edit at all, which is the "it is a value" claim above actually
+holding rather than being asserted. Two matches in the compiler were exhaustive
+over `Type` and both were in the textual backend.
 
 ## Milestones after M1, each gated on the one before
 
