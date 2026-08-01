@@ -506,7 +506,7 @@ fn check_accum_inner(
         // left alone: a missing `type` is not the interesting news about it.
         if let Some(declared) = protocol_assoc.get(imp.protocol.as_str()) {
             for name in declared.iter() {
-                if !imp.assoc.iter().any(|(n, _)| n == name) {
+                if !imp.assoc.contains(name) {
                     out.push(Diagnostic::from_rendered(
                         format!(
                             "line {}: `impl {} for {}` does not bind the associated type `{name}` \
@@ -517,7 +517,7 @@ fn check_accum_inner(
                     ));
                 }
             }
-            for (name, _) in &imp.assoc {
+            for name in &imp.assoc {
                 if !declared.contains(name) {
                     out.push(Diagnostic::from_rendered(
                         format!(

@@ -502,12 +502,13 @@ pub struct ImplBlock {
     /// Bounds per bound variable, e.g. `impl<T: Show> Show for Option<T>`.
     pub type_bounds: std::collections::HashMap<String, Vec<String>>,
     pub ty: Type,
-    /// `type Output = T` — what this impl binds each of the protocol's associated
-    /// types to (RFC-0080 M2), in declaration order. The parser has already
-    /// substituted these into the methods below, so nothing downstream reads them
-    /// to type anything; they are kept so the checker can compare the set against
-    /// the protocol's declarations and name a missing or unknown one.
-    pub assoc: Vec<(String, Type)>,
+    /// The associated types this impl binds (RFC-0080 M2), in declaration order.
+    /// The NAMES only: the parser has already substituted each binding into the
+    /// methods below, so the sole remaining question is whether this set matches
+    /// the protocol's declarations. Keeping the bound [`Type`] here as well would
+    /// be a second copy that no loader walk rewrites — inert today and wrong the
+    /// first time someone believed it.
+    pub assoc: Vec<String>,
     pub methods: Vec<Function>,
     pub line: usize,
 }

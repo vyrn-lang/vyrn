@@ -1694,7 +1694,7 @@ impl Parser {
         let ty = self.type_()?;
         self.eat(&Tok::LBrace)?;
         let mut methods = Vec::new();
-        let mut assoc: Vec<(String, Type)> = Vec::new();
+        let mut assoc: Vec<String> = Vec::new();
         let outer_aliases = std::mem::take(&mut self.type_aliases);
         while *self.peek() != Tok::RBrace {
             self.take_docs(); // method-level docs (not retained yet)
@@ -1738,7 +1738,7 @@ impl Parser {
                 }
                 self.eat(&Tok::Eq)?;
                 let bound = self.type_()?;
-                assoc.push((aname.clone(), bound.clone()));
+                assoc.push(aname.clone());
                 self.type_aliases.insert(aname, bound);
                 self.eat_semi();
                 continue;
@@ -6051,7 +6051,7 @@ impl Unwrap for Int64 { type Output = Int64  fn get(self) -> Output { return sel
         // already resolved it, so nothing downstream ever sees the name.
         assert_eq!(p.protocols[0].methods[0].ret, Type::Param("Output".to_string()));
         assert_eq!(p.impls[0].methods[0].ret, Type::Int);
-        assert_eq!(p.impls[0].assoc, vec![("Output".to_string(), Type::Int)]);
+        assert_eq!(p.impls[0].assoc, vec!["Output".to_string()]);
 
         let (_, late) = parse_accum(
             lex("protocol Unwrap { type Output  fn get(self) -> Output }
