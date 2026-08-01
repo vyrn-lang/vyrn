@@ -113,6 +113,103 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
 /// target. `lib::check_and_synthesize` needs both before any engine builds its
 /// function table. One pass: a second full check to collect them would double
 /// every load.
+/// Names the compiler owns: builtin free functions, builtin type names, and the
+/// sum constructors. A top-level declaration may not take one.
+///
+/// This is `pub` because the **loader** needs it too, and that is not an
+/// aesthetic point. The loader builds a flat `owner` map of every top-level name
+/// in the program; before this was shared, a user `fn at` registered `at` as
+/// owned by their file, and every use of the BUILTIN `at` inside a linked
+/// `std/` module then looked like an unimported foreign reference. One
+/// declaration produced 53 diagnostics, none of them at the declaration and none
+/// of them mentioning that the name is reserved.
+pub const RESERVED: &[&str] = &[
+    "print",
+    "len",
+    "concat",
+    "Some",
+    "None",
+    "Ok",
+    "Err",
+    "match",
+    "cell",
+    "get",
+    "set",
+    "release",
+    "array",
+    "push",
+    "at",
+    "alen",
+    "afree",
+    "str",
+    "parse",
+    "join",
+    "logger",
+    "contains",
+    "startsWith",
+    "endsWith",
+    "slice",
+    "bytes",
+    "chars",
+    "floatBits",
+    "floatFromBits",
+    "hexEncode",
+    "hexDecode",
+    "base64Encode",
+    "base64Decode",
+    "urlEncode",
+    "urlDecode",
+    "args",
+    "readLine",
+    "readFile",
+    "writeFile",
+    "renameFile",
+    "fsyncFile",
+    "readFileBytes",
+    "stringFromBytes",
+    "listDir",
+    "lineAt",
+    "colAt",
+    "moduleInterface",
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error",
+    "value",
+    "list",
+    "schemaOf",
+    "contractOf",
+    "jsonSchema",
+    "toJson",
+    "fromJson",
+    "toString",
+    "pop",
+    "swapRemove",
+    "assert",
+    "assertEq",
+    "blackBox",
+    "panic",
+    "Int",
+    "Int64",
+    "Int32",
+    "Int16",
+    "Int8",
+    "Float",
+    "Float64",
+    "Float32",
+    // RFC-0083: the vector CONSTRUCTOR is a reserved name for the reason the
+    // numeric conversions are — it is dispatched before user functions, so a
+    // user `fn F32x4` would be silently unreachable. `splat` and `lane` are
+    // not here: they reach the builtin only under the internal names the
+    // parser assigns to method sugar, so a free `fn lane(..)` still resolves.
+    "F32x4",
+    "UInt8",
+    "UInt16",
+    "UInt32",
+    "UInt64",
+];
+
 pub fn check_accum_with_json_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {
@@ -193,92 +290,7 @@ fn check_accum_inner(
         types.insert(t.name.clone(), t.clone());
     }
 
-    const RESERVED: &[&str] = &[
-        "print",
-        "len",
-        "concat",
-        "Some",
-        "None",
-        "Ok",
-        "Err",
-        "match",
-        "cell",
-        "get",
-        "set",
-        "release",
-        "array",
-        "push",
-        "at",
-        "alen",
-        "afree",
-        "str",
-        "parse",
-        "join",
-        "logger",
-        "contains",
-        "startsWith",
-        "endsWith",
-        "slice",
-        "bytes",
-        "chars",
-        "floatBits",
-        "floatFromBits",
-        "hexEncode",
-        "hexDecode",
-        "base64Encode",
-        "base64Decode",
-        "urlEncode",
-        "urlDecode",
-        "args",
-        "readLine",
-        "readFile",
-        "writeFile",
-        "renameFile",
-        "fsyncFile",
-        "readFileBytes",
-        "stringFromBytes",
-        "listDir",
-        "lineAt",
-        "colAt",
-        "moduleInterface",
-        "trace",
-        "debug",
-        "info",
-        "warn",
-        "error",
-        "value",
-        "list",
-        "schemaOf",
-        "contractOf",
-        "jsonSchema",
-        "toJson",
-        "fromJson",
-        "toString",
-        "pop",
-        "swapRemove",
-        "assert",
-        "assertEq",
-        "blackBox",
-        "panic",
-        "Int",
-        "Int64",
-        "Int32",
-        "Int16",
-        "Int8",
-        "Float",
-        "Float64",
-        "Float32",
-        // RFC-0083: the vector CONSTRUCTOR is a reserved name for the reason the
-        // numeric conversions are — it is dispatched before user functions, so a
-        // user `fn F32x4` would be silently unreachable. `splat` and `lane` are
-        // not here: they reach the builtin only under the internal names the
-        // parser assigns to method sugar, so a free `fn lane(..)` still resolves.
-        "F32x4",
-        "UInt8",
-        "UInt16",
-        "UInt32",
-        "UInt64",
-    ];
+
 
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
