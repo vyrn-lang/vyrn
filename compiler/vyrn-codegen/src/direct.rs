@@ -41,6 +41,7 @@ use std::rc::Rc;
 use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types as ftypes;
+use vyrn_frontend::types::INT32;
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
@@ -2655,9 +2656,17 @@ impl Fn_<'_> {
                     (UnOp::Neg, None) if rt == Type::F32x4 => {
                         b.ins(&Instruction::F32x4Neg);
                     }
+                    // Two's-complement negation, four lanes (RFC-0083 M3):
+                    // `-Int32.min` is `Int32.min`, the same wrap `i32.sub` from
+                    // zero has at scalar width.
+                    (UnOp::Neg, None) if rt == Type::I32x4 => {
+                        b.ins(&Instruction::I32x4Neg);
+                    }
                     // `~m` complements all 128 bits, which is the lane-wise
-                    // complement because a mask lane is all-ones or all-zeros.
-                    (UnOp::BitNot, None) if rt == Type::Mask32x4 => {
+                    // complement because a mask lane is all-ones or all-zeros —
+                    // and the lane-wise complement of an `I32x4` for the simpler
+                    // reason that `v128.not` has no lane width to get wrong.
+                    (UnOp::BitNot, None) if matches!(rt, Type::Mask32x4 | Type::I32x4) => {
                         b.ins(&Instruction::V128Not);
                     }
                     (UnOp::Not, _) if rt == Type::Bool => {
@@ -3017,7 +3026,7 @@ impl Fn_<'_> {
                     // M2) — the one place in this table where the operator alone
                     // does not settle the answer.
                     match self.peek(lhs, line)? {
-                        Type::F32x4 => Type::Mask32x4,
+                        Type::F32x4 | Type::I32x4 => Type::Mask32x4,
                         _ => Type::Bool,
                     }
                 }
@@ -3096,10 +3105,18 @@ impl Fn_<'_> {
                 // RFC-0083: the vector builtins, whose result type is fixed.
                 "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
                 | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
-                | "@f32x4Trunc" | "@f32x4Nearest" | "@replaceLane" => Type::F32x4,
-                "@f32x4Store" => Type::Unit,
-                "@lane" if matches!(self.peek(&args[0], line)?, Type::Mask32x4) => Type::Bool,
-                "@lane" => Type::Float32,
+                | "@f32x4Trunc" | "@f32x4Nearest" => Type::F32x4,
+                "I32x4" | "@i32x4Splat" | "@i32x4Load" | "@i32x4Min" | "@i32x4Max"
+                | "@i32x4Abs" => Type::I32x4,
+                // `replaceLane` is the one that reads its receiver: it is a value
+                // method, so the width is the receiver's rather than the name's.
+                "@replaceLane" => self.peek(&args[0], line)?,
+                "@f32x4Store" | "@i32x4Store" => Type::Unit,
+                "@lane" => match self.peek(&args[0], line)? {
+                    Type::Mask32x4 => Type::Bool,
+                    Type::I32x4 => INT32,
+                    _ => Type::Float32,
+                },
                 "@anyTrue" | "@allTrue" => Type::Bool,
                 "at" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
@@ -3442,6 +3459,40 @@ impl Fn_<'_> {
                 _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
             });
             return Ok(lt);
+        }
+        // Lane-wise integer arithmetic, comparison and bitwise (RFC-0083 M3).
+        // Three ways this is not the float table with different opcodes: there is
+        // no `Div` arm, because the encoder has no `I32x4Div` and no hardware has
+        // SIMD integer divide; the comparisons are the SIGNED ones, chosen by the
+        // `Int32` lane type, where `lt_u` is what a `U32x4` would reach and the
+        // two disagree exactly at `Int32.min`; and `& | ^` are reached DIRECTLY
+        // rather than through a mask — `v128.and` has no lane width, so the
+        // integers get for free what `F32x4` can only spell on a comparison's
+        // result. The three arithmetic opcodes WRAP, matching the scalar `Int32`;
+        // wasm has saturating adds only at i8 and i16, so there is nothing here to
+        // pick wrongly.
+        if lt == Type::I32x4 {
+            self.expr_as(m, b, rhs, &lt)?;
+            let mask = matches!(
+                op,
+                BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq
+            );
+            b.ins(&match op {
+                BinOp::Add => Instruction::I32x4Add,
+                BinOp::Sub => Instruction::I32x4Sub,
+                BinOp::Mul => Instruction::I32x4Mul,
+                BinOp::Lt => Instruction::I32x4LtS,
+                BinOp::LtEq => Instruction::I32x4LeS,
+                BinOp::Gt => Instruction::I32x4GtS,
+                BinOp::GtEq => Instruction::I32x4GeS,
+                BinOp::Eq => Instruction::I32x4Eq,
+                BinOp::NotEq => Instruction::I32x4Ne,
+                BinOp::BitAnd => Instruction::V128And,
+                BinOp::BitOr => Instruction::V128Or,
+                BinOp::BitXor => Instruction::V128Xor,
+                _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
+            });
+            return Ok(if mask { Type::Mask32x4 } else { lt });
         }
         if matches!(lt, Type::Float | Type::Float32) {
             self.expr_as(m, b, rhs, &lt)?;
@@ -4278,18 +4329,36 @@ impl Fn_<'_> {
             // each lane in written order; a splat is the one opcode. No lane is
             // read back before it is written, so the zero start costs nothing that
             // an undefined one would have saved.
-            "F32x4" | "@f32x4Splat" if !args.is_empty() => {
-                if name == "@f32x4Splat" {
-                    self.expr_as(m, b, &args[0], &Type::Float32)?;
-                    b.ins(&Instruction::F32x4Splat);
+            //
+            // M3's integer width is the same two shapes with the lane-typed
+            // opcodes swapped, which is what M1 meant by "one internal name per
+            // width": nothing here decodes a receiver.
+            "F32x4" | "@f32x4Splat" | "I32x4" | "@i32x4Splat" if !args.is_empty() => {
+                let int = name.starts_with("@i32x4") || name == "I32x4";
+                let (vec, lane) = if int {
+                    (Type::I32x4, INT32)
+                } else {
+                    (Type::F32x4, Type::Float32)
+                };
+                if name.ends_with("Splat") {
+                    self.expr_as(m, b, &args[0], &lane)?;
+                    b.ins(if int {
+                        &Instruction::I32x4Splat
+                    } else {
+                        &Instruction::F32x4Splat
+                    });
                 } else {
                     b.ins(&Instruction::V128Const(0));
                     for (i, a) in args.iter().enumerate() {
-                        self.expr_as(m, b, a, &Type::Float32)?;
-                        b.ins(&Instruction::F32x4ReplaceLane(i as u8));
+                        self.expr_as(m, b, a, &lane)?;
+                        b.ins(&if int {
+                            Instruction::I32x4ReplaceLane(i as u8)
+                        } else {
+                            Instruction::F32x4ReplaceLane(i as u8)
+                        });
                     }
                 }
-                return Ok(Type::F32x4);
+                return Ok(vec);
             }
             // The lane index was proven constant and in range by the checker, so
             // this is a plain immediate and there is no bounds check to emit.
@@ -4308,6 +4377,12 @@ impl Fn_<'_> {
                     b.ins(&Instruction::I32Eqz);
                     return Ok(Type::Bool);
                 }
+                // An `Int32` lane needs no normalising: `i32x4.extract_lane` is
+                // already the whole 32-bit value, and `Int32` rides an `i32`.
+                if self.cx.resolve(&vt) == Type::I32x4 {
+                    b.ins(&Instruction::I32x4ExtractLane(k));
+                    return Ok(INT32);
+                }
                 b.ins(&Instruction::F32x4ExtractLane(k));
                 return Ok(Type::Float32);
             }
@@ -4315,13 +4390,19 @@ impl Fn_<'_> {
             // opcode the four-argument constructor above already uses one lane at a
             // time. Vectors only: the checker refuses a mask receiver.
             "@replaceLane" if args.len() == 3 => {
-                self.expr_as(m, b, &args[0], &Type::F32x4)?;
+                let vt = self.cx.resolve(&self.peek(&args[0], line)?);
+                let int = vt == Type::I32x4;
+                self.expr_as(m, b, &args[0], &vt)?;
                 let Some(k) = ftypes::const_lane(&args[1], 4) else {
                     return unsupported("a lane index that is not a constant in 0..3", line);
                 };
-                self.expr_as(m, b, &args[2], &Type::Float32)?;
-                b.ins(&Instruction::F32x4ReplaceLane(k));
-                return Ok(Type::F32x4);
+                self.expr_as(m, b, &args[2], if int { &INT32 } else { &Type::Float32 })?;
+                b.ins(&if int {
+                    Instruction::I32x4ReplaceLane(k)
+                } else {
+                    Instruction::F32x4ReplaceLane(k)
+                });
+                return Ok(vt);
             }
             // Mask reductions (RFC-0083 M2). Both push an `i32` that is already 0
             // or 1, so unlike the mask lane read there is no normalising `i32.eqz`
@@ -4368,30 +4449,54 @@ impl Fn_<'_> {
                 });
                 return Ok(Type::F32x4);
             }
-            // Four consecutive `Float32`s of an `Array<Float32>` as one 16-byte
-            // access, behind ONE bounds check rather than four.
-            "@f32x4Load" | "@f32x4Store" => {
+            // RFC-0083 M3. The SIGNED pair, because the lane type is `Int32`:
+            // `i32x4.min_u` is the operation a `U32x4` would name and it answers
+            // `1` for `min(Int32.min, 1)`. `i32x4.abs` is the WRAPPING absolute
+            // value — `abs(Int32.min)` is `Int32.min` — which is also what
+            // `llvm.abs` with a false poison flag and `i32::wrapping_abs` say, so
+            // this is the one operation in the RFC where the three engines agreed
+            // without being pointed anywhere.
+            "@i32x4Min" | "@i32x4Max" | "@i32x4Abs" => {
+                self.expr_as(m, b, &args[0], &Type::I32x4)?;
+                if args.len() == 2 {
+                    self.expr_as(m, b, &args[1], &Type::I32x4)?;
+                }
+                b.ins(&match name {
+                    "@i32x4Min" => Instruction::I32x4MinS,
+                    "@i32x4Max" => Instruction::I32x4MaxS,
+                    _ => Instruction::I32x4Abs,
+                });
+                return Ok(Type::I32x4);
+            }
+            // Four consecutive elements of an `Array<Float32>` / `Array<Int32>` as
+            // one 16-byte access, behind ONE bounds check rather than four. Both
+            // widths are the same `v128.load`: the element stride is 4 either way,
+            // which is why `walk`/`elem_addr` need no lane knowledge.
+            "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" => {
+                let int = name.starts_with("@i32x4");
+                let vec = if int { Type::I32x4 } else { Type::F32x4 };
                 let aty = self.expr(m, b, &args[0])?;
                 let w = self.walk(b, &aty, line)?;
                 self.expr_as(m, b, &args[1], &Type::Int)?;
                 let idx = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(idx));
                 self.bounds_check_span(b, &w, idx);
-                if name == "@f32x4Load" {
+                if name.ends_with("Load") {
                     self.elem_addr(b, &w, idx);
-                    // `align: 0` — one byte. The buffer is an array of `float`, so
-                    // nothing guarantees the 16 a `v128.load` would like, and an
-                    // overstated hint is a validation-legal lie the engine may act
-                    // on. The textual backend states `align 4` for the same reason.
+                    // `align: 0` — one byte. The buffer is an array of 4-byte
+                    // elements, so nothing guarantees the 16 a `v128.load` would
+                    // like, and an overstated hint is a validation-legal lie the
+                    // engine may act on. The textual backend states `align 4` for
+                    // the same reason.
                     b.ins(&Instruction::V128Load(MemArg {
                         offset: 0,
                         align: 0,
                         memory_index: 0,
                     }));
-                    return Ok(Type::F32x4);
+                    return Ok(vec);
                 }
                 self.elem_addr(b, &w, idx);
-                self.expr_as(m, b, &args[2], &Type::F32x4)?;
+                self.expr_as(m, b, &args[2], &vec)?;
                 b.ins(&Instruction::V128Store(MemArg {
                     offset: 0,
                     align: 0,

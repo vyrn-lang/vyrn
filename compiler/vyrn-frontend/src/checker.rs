@@ -217,11 +217,7 @@ pub const RESERVED: &[&str] = &[
     "UInt64",
 ];
 
-/// `I32x4`'s lane type (RFC-0083 M3), spelled once. SIGNED, and that is the
-/// whole of the signedness decision: wasm offers `min_s`/`min_u` and a signed
-/// and an unsigned comparison for every operator, and the lane type picks one
-/// half of each pair. The other half belongs to a `U32x4` that is not proposed.
-const INT32: Type = Type::IntN { bits: 32, signed: true };
+use crate::types::INT32;
 
 pub fn check_accum_with_json_types(
     program: &Program,
