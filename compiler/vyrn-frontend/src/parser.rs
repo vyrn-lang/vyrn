@@ -3529,6 +3529,14 @@ impl Parser {
                         // `t.join()` awaits via `@join`. The bare free-function
                         // forms (`toString(x)`, `join(t)`) never reach this arm,
                         // so the checker reports them with a migration hint.
+                        //
+                        // The pre-table spelling is kept for the type-name arm
+                        // below, which reports what the program WROTE: without it
+                        // `F32x4.anyTrue(m)` — the plausible mistake, since the
+                        // rest of the surface IS on the type name — comes back as
+                        // "`F32x4` has no `@anyTrue`", the internal name leaking
+                        // through two rewrites.
+                        let wrote = name.clone();
                         let name = match name.as_str() {
                             "toString" => "@str".to_string(),
                             "join" => "@join".to_string(),
@@ -3587,7 +3595,7 @@ impl Parser {
                         let mut args = args;
                         let name = match args.first() {
                             Some(Expr::Var { name: ty, .. }) if ty == "F32x4" => {
-                                let mut it = name.chars();
+                                let mut it = wrote.chars();
                                 let m = match it.next() {
                                     Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
                                     None => name.clone(),
