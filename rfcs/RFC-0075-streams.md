@@ -376,12 +376,14 @@ it, on the normal, `break` and early-`return` paths alike.
 **M1 left `Stream` out of every generic type walk, and M2 is what found it.**
 M1 never put a type parameter *inside* a stream — `fromArray` was always called
 at a concrete element type — so `Stream` was missing from `substitute`, both
-unifiers, `collect_params`, `walk_type`, `contains_heap`, and the loader's two
-type rewrites. The one worth naming is the codegen unifier: the LLVM emitter
-silently substituted `Unit` where the direct backend refused the call outright,
-which is the two backends specializing *different* functions for one call site —
-exactly the failure `solve_type_args` was centralised to prevent. Six one-token
-arms and two real ones; the lesson is that a new `Type` variant needs the walks
+unifiers, `collect_params`, `walk_type`, `contains_heap`, `fn_sigs_match`, the
+loader's three type walks, the parser's member-parameter marking, and the schema
+reflector's name collection. The one worth naming is the codegen unifier: the
+LLVM emitter silently substituted `Unit` where the direct backend refused the
+call outright, which is the two backends specializing *different* functions for
+one call site — exactly the failure `solve_type_args` was centralised to prevent.
+Three arms that had to be written and eight that were one token added to an
+existing or-pattern; the lesson is that a new `Type` variant needs the walks
 swept even when the milestone that adds it has no use for them.
 
 One diagnostic changed. A generic producer returns `Stream<U>`, and quoting that
