@@ -740,16 +740,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare <4 x float> @llvm.floor.v4f32(<4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.trunc.v4f32(<4 x float>)\n");
     out.push_str("declare <4 x float> @llvm.rint.v4f32(<4 x float>)\n");
-    // The integer width's three (RFC-0083 M3), and there is no NaN question to
-    // settle here — integer `min` is total. What the names carry instead is the
-    // SIGNEDNESS: `smin`/`smax` because the lane type is `Int32`, where `umin`
-    // would answer `1` for `min(Int32.min, 1)`. `llvm.abs`'s `i1 false` is
-    // `is_int_min_poison`, so `abs(Int32.min)` is `Int32.min` rather than poison
-    // — which is what `i32x4.abs` and `i32::wrapping_abs` both say, so the three
-    // engines agree without a rule having to be imposed on them.
-    out.push_str("declare <4 x i32> @llvm.smin.v4i32(<4 x i32>, <4 x i32>)\n");
-    out.push_str("declare <4 x i32> @llvm.smax.v4i32(<4 x i32>, <4 x i32>)\n");
-    out.push_str("declare <4 x i32> @llvm.abs.v4i32(<4 x i32>, i1)\n");
+    // There is deliberately no integer equivalent of these (RFC-0083 M3).
+    // `llvm.smin`/`smax`/`abs.v4i32` were declared here, `i32x4.min_s`/`max_s`/
+    // `abs` were emitted on the other side, and all three were deleted: the
+    // reason the float ones earn their place is the NaN rule and the signed zero,
+    // and an integer `min` has neither, so LLVM compiles the Vyrn `if a < b`
+    // into the same `pminsd` and the intrinsic buys 1.0x.
+    //
     // The mask reductions. `<4 x i1>` is fine as an intrinsic ARGUMENT — the ABI
     // objection that kept it out of the mask's own representation is about values
     // crossing function boundaries, and these never leave the block.
@@ -5739,32 +5736,11 @@ impl<'a> Gen<'a> {
             ));
             return Ok((t, Type::F32x4));
         }
-        // `I32x4.min/max/abs` (RFC-0083 M3). The SIGNED intrinsics, chosen by the
-        // lane type and not by the operation — `llvm.umin` is what a `U32x4` would
-        // reach, and the two disagree exactly at `Int32.min`. `llvm.abs`'s second
-        // argument is `is_int_min_poison`: `false`, so `abs(Int32.min)` is
-        // `Int32.min`, which is what `i32x4.abs` and `i32::wrapping_abs` also say.
-        // Vector `smin`/`smax` are always legal here — unlike the float roundings,
-        // baseline SSE2 has `pcmpgtd`+blend and LLVM never scalarizes them into
-        // libc calls.
-        if matches!(name, "@i32x4Min" | "@i32x4Max" | "@i32x4Abs") {
-            let (a, _) = self.gen_expr(&args[0])?;
-            let t = self.fresh_tmp();
-            let rest = match name {
-                "@i32x4Abs" => ", i1 false".to_string(),
-                _ => {
-                    let (b, _) = self.gen_expr(&args[1])?;
-                    format!(", <4 x i32> {b}")
-                }
-            };
-            let f = match name {
-                "@i32x4Min" => "llvm.smin.v4i32",
-                "@i32x4Max" => "llvm.smax.v4i32",
-                _ => "llvm.abs.v4i32",
-            };
-            self.emit(format!("{t} = call <4 x i32> @{f}(<4 x i32> {a}{rest})"));
-            return Ok((t, Type::I32x4));
-        }
+        // (`@i32x4Min`/`Max`/`Abs` were here, as `llvm.smin`/`smax`/`abs.v4i32`,
+        // and were deleted on their measurement — LLVM compiles the Vyrn
+        // `if a < b` into the same `pminsd`, so the intrinsic bought 1.0x. See the
+        // refusal in `checker.rs`'s `vector_call` and RFC-0083's M3 note.)
+        //
         // `F32x4.load(xs, i)` / `F32x4.store(xs, i, v)` (RFC-0083 M2) — sixteen
         // bytes at element `i` of an `Array<Float32>`, behind ONE bounds check
         // rather than four. That amortisation is the milestone's point; the

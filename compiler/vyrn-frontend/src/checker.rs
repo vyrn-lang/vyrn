@@ -4276,12 +4276,18 @@ impl<'a> Checker<'a> {
             // are exactly the names a float section of `std/math` would export, and
             // a value-receiver method name is a GLOBAL rename in the parser's table.
             //
-            // `I32x4` gets `min`/`max`/`abs` and NOTHING else from this block, and
-            // each absence is the instruction set's: `sqrt` and the four roundings
-            // have no integer form at all, and `i32x4.abs` is the WRAPPING absolute
-            // value — `abs(Int32.min)` is `Int32.min`, which is what LLVM's
-            // `llvm.abs` with a false poison flag and Rust's `wrapping_abs` also
-            // answer, so the three agree without being asked to.
+            // `I32x4` reaches NONE of this block, and that is a measurement rather
+            // than an oversight (RFC-0083 M3). `sqrt` and the four roundings have
+            // no integer form at all, so those four are the encoder's refusal; but
+            // `i32x4.min_s`/`max_s`/`abs` all exist, were built, were priced and
+            // were deleted. Natively `pminsd` is what LLVM compiles `if a < b` into
+            // anyway (5.98 µs against 5.98 µs per 65536 lanes), and on wasm the
+            // builtin wins 1.05x / 1.14x / 1.04x once the Vyrn version is written
+            // WITHOUT helper calls — which is `select`'s 1.06x, the bar this RFC
+            // has already refused something at. An integer `min` is one comparison,
+            // where the float one has a NaN rule and a signed zero to reproduce;
+            // that difference is the whole reason the two widths answer
+            // differently.
             "@f32x4Min"
             | "@f32x4Max"
             | "@f32x4Abs"
@@ -4289,10 +4295,7 @@ impl<'a> Checker<'a> {
             | "@f32x4Ceil"
             | "@f32x4Floor"
             | "@f32x4Trunc"
-            | "@f32x4Nearest"
-            | "@i32x4Min"
-            | "@i32x4Max"
-            | "@i32x4Abs" => {
+            | "@f32x4Nearest" => {
                 let (vec, _, ty) = width(name);
                 let m = &name[6..];
                 let want = if m == "Min" || m == "Max" { 2 } else { 1 };

@@ -146,6 +146,11 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // the vector form exists.
     ("@f32x4Load", Memory, "Array<Float32>: four consecutive elements, one bounds check"),
     ("@f32x4Store", Memory, "Array<Float32>: the same four written back"),
+    // RFC-0083 M3, the same pair at the integer width — the same single check and
+    // the same 4-byte stride, so these are the two rows above with a different
+    // element type.
+    ("@i32x4Load", Memory, "Array<Int32>: four consecutive elements, one bounds check"),
+    ("@i32x4Store", Memory, "Array<Int32>: the same four written back"),
     // RFC-0075 M1. `Stream<T>` shares `Array<T>`'s representation, so these two
     // are the array rows under different names — and they are separate names
     // precisely because the TYPES are separate: nothing else can make or unmake a
@@ -189,6 +194,18 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@f32x4Splat", View, "RFC-0083: one value into all four lanes"),
     ("@lane", View, "RFC-0083: a lane back out, at a checker-proven constant index"),
     ("@replaceLane", View, "RFC-0083: one lane written back, same constant index"),
+    // RFC-0083 M3. Two rows and not four: `@lane` and `@replaceLane` are the same
+    // arms serving both widths, because a lane accessor is about the LANE INDEX
+    // and the index rule is identical. What is width-specific is only the way a
+    // value is built, which is what a `View` row is for.
+    //
+    // M3 adds no `Measured` row at all, and that is the milestone's own finding:
+    // `I32x4.min`/`max`/`abs` exist as wasm instructions, were built and were
+    // deleted at 1.0x native / 1.05x wasm. The float `min` earns its row on the
+    // NaN rule and the signed zero; an integer `min` is one comparison, so there
+    // is nothing left for a builtin to be faster at.
+    ("I32x4", View, "RFC-0083 M3: four Int32 lanes into one value"),
+    ("@i32x4Splat", View, "RFC-0083 M3: one value into all four lanes"),
     // ---- Control: abort, and waiting -----------------------------------------
     ("panic", Control, "RFC-0079: the abort itself, and the only irreducible row here"),
     ("assert", Control, "RFC-0015: traps the current test"),
@@ -310,11 +327,16 @@ fn interp_builtin_names() -> BTreeSet<String> {
         .expect("the dispatch's fallthrough arm");
 
     let mut names = BTreeSet::new();
-    // The guards: `if name == "X"` before any argument is evaluated.
+    // The guards: `name == "X"` before any argument is evaluated. The `if` is not
+    // part of the needle, because a guard may cover two builtins — RFC-0083 M3's
+    // vector store is `if name == "@f32x4Store" || name == "@i32x4Store"`, one
+    // body for two widths — and anchoring on `if` would silently census only the
+    // first of them. Every `name == "` in this region is a guard; the assertion
+    // below is what says so if that stops being true.
     for l in &lines[call..arms] {
         let mut rest = *l;
-        while let Some(i) = rest.find("if name == \"") {
-            rest = &rest[i + "if name == \"".len()..];
+        while let Some(i) = rest.find("name == \"") {
+            rest = &rest[i + "name == \"".len()..];
             let end = rest.find('"').expect("an unterminated guard literal");
             names.insert(rest[..end].to_string());
             rest = &rest[end..];
@@ -400,8 +422,15 @@ fn the_census_is_the_code() {
     // scalarize to libc calls and one of them, `trunc`, is slower than the Vyrn
     // it replaces. The mask combinators and `-v` cost no rows at all: they are a
     // `BinOp` and a `UnOp`, which this dispatch never sees, which is also why the
-    // comparison operators never appeared here.
-    assert_eq!(found.len(), 79, "the primitive core changed size");
+    // comparison operators never appeared here. 79 -> 83 when RFC-0083 M3 added a
+    // second WIDTH: two `View` rows for building an `I32x4` and two `Memory` rows
+    // for moving one, and NOTHING else. `@lane`/`@replaceLane` serve both widths
+    // from one arm each, every operator is a `BinOp` or a `UnOp` this dispatch
+    // never sees, and the three named operations wasm offers at this width
+    // (`min_s`/`max_s`/`abs`) were built and deleted at 1.0x native / 1.05x wasm.
+    // A whole width for four rows, none of them `Measured`, is what it looks like
+    // when the census is asked BEFORE the arms are written rather than after.
+    assert_eq!(found.len(), 83, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

@@ -1,0 +1,184 @@
+/// Explicit SIMD, the integer width — `I32x4`, four `Int32` lanes as one value
+/// (RFC-0083 M3).
+///
+/// This is NOT `F32x4` with a different lane type, and the differences are the
+/// instruction set's rather than this milestone's:
+///
+/// - **There is no `/`.** No hardware has SIMD integer divide, so the encoder
+///   has no `i32x4.div` to emit. There is no `sqrt` and there are no roundings
+///   either, for the same reason one step further: no integer form exists.
+/// - **There are no named operations AT ALL.** `I32x4.min`/`max`/`abs` were
+///   built, priced and deleted: LLVM compiles the Vyrn `if a < b` into the same
+///   `pminsd` (5.98 µs against 5.98 µs per 65536 lanes) and Cranelift is 1.05x,
+///   which is the bar `F32x4.select` was already refused at. What makes the
+///   float `min` worth a builtin is its NaN rule and its signed zero, and an
+///   integer `min` has neither. So this file is `load`, `store`, the lane
+///   accessors and the OPERATORS, and nothing else.
+/// - **`& | ^ ~` are reached directly**, where an `F32x4` can only spell them on
+///   a comparison's result. `v128.and` has no lane interpretation at all.
+/// - **The lanes are SIGNED, and that decides every ambiguous opcode.** wasm has
+///   a signed and an unsigned form of every comparison (`i32x4.lt_s` against
+///   `lt_u`); a lane type of `Int32` picks one half of each pair. The other half
+///   belongs to a `U32x4` that is not proposed, because the choice is the
+///   operand's and not the operation's. The comparisons against `Int32.min`
+///   below are where the two rules answer differently, which is the only place a
+///   wrong opcode is visible at all.
+///
+/// Arithmetic **wraps** at 32 bits, exactly as scalar `Int32` does, and every
+/// wrap here is printed beside the scalar that computes the same thing — a
+/// vector add that saturated where the scalar wraps would be a divergence
+/// between two spellings of one operation in one language, and it would show up
+/// as two different lines rather than as a claim.
+
+/// Every lane of `v`, one per line — also the ABI test: a vector crosses a
+/// function boundary here on all three engines.
+fn lanes(v: I32x4) {
+    print(v.lane(0))
+    print(v.lane(1))
+    print(v.lane(2))
+    print(v.lane(3))
+}
+
+/// A value the constant folder cannot see through. `Int32.min` has no literal —
+/// `-2147483648` is unary minus applied to `2147483648`, which does not fit —
+/// so it arrives by the wrap itself, and routing the `1` through a call is what
+/// makes the three ENGINES compute it rather than the compiler.
+fn opaque(x: Int32) -> Int32 {
+    return x
+}
+
+/// Lane-wise `min`, in Vyrn, because it is not a builtin — an integer `min` is
+/// one comparison with no NaN rule and no signed zero, so `I32x4.min` measured
+/// 1.0x native and 1.05x wasm against exactly this and did not ship.
+fn minLanes(a: I32x4, b: I32x4) -> I32x4 {
+    return I32x4(
+        if a.lane(0) < b.lane(0) { a.lane(0) } else { b.lane(0) },
+        if a.lane(1) < b.lane(1) { a.lane(1) } else { b.lane(1) },
+        if a.lane(2) < b.lane(2) { a.lane(2) } else { b.lane(2) },
+        if a.lane(3) < b.lane(3) { a.lane(3) } else { b.lane(3) },
+    )
+}
+
+fn maxLanes(a: I32x4, b: I32x4) -> I32x4 {
+    return I32x4(
+        if a.lane(0) > b.lane(0) { a.lane(0) } else { b.lane(0) },
+        if a.lane(1) > b.lane(1) { a.lane(1) } else { b.lane(1) },
+        if a.lane(2) > b.lane(2) { a.lane(2) } else { b.lane(2) },
+        if a.lane(3) > b.lane(3) { a.lane(3) } else { b.lane(3) },
+    )
+}
+
+fn main() -> Int64 {
+    let hi: Int32 = 2147483647
+    let lo = -hi - opaque(1)
+    let one = opaque(1)
+    let zero = opaque(0)
+
+    // ---- construction, splat, lane, replaceLane --------------------------
+    let a = I32x4(1, 2, 3, 4)
+    let b = I32x4.splat(10)
+    lanes(a) // 1 2 3 4
+    lanes(b) // 10 x4
+    // Every lane replaced in turn is the constructor again, which is the lane-
+    // ORDER pin: a backend that numbered lanes the other way would still print
+    // four right-looking values for a single replace.
+    lanes(a.replaceLane(0, 7).replaceLane(1, 8).replaceLane(2, 9).replaceLane(3, 10))
+    lanes(a.replaceLane(2, lo)) // 1 2 -2147483648 4
+
+    // ---- arithmetic, and the wrap that has to match the scalar -----------
+    lanes(a + b) // 11 12 13 14
+    lanes(a - b) // -9 -8 -7 -6
+    lanes(a * b) // 10 20 30 40
+    lanes(-a) // -1 -2 -3 -4
+
+    // Both ends of the range, four ways, with the scalar answer on the line
+    // above each. `hi + 1` is `Int32.min` under wrapping and `Int32.max` under
+    // saturation, and wasm HAS saturating adds — just not at this width, which
+    // is why nothing had to be chosen here.
+    print(hi + one)
+    lanes(I32x4.splat(hi) + I32x4.splat(one)) // -2147483648 x4
+    print(lo - one)
+    lanes(I32x4.splat(lo) - I32x4.splat(one)) // 2147483647 x4
+    // 65536 * 65536 is 2^32, which is exactly zero in 32 bits, and
+    // `Int32.max * Int32.max` is 1. Neither is representable, so both are the
+    // wrap and nothing else.
+    print(opaque(65536) * opaque(65536))
+    lanes(I32x4.splat(65536) * I32x4.splat(65536)) // 0 x4
+    print(hi * hi)
+    lanes(I32x4.splat(hi) * I32x4.splat(hi)) // 1 x4
+    // `-Int32.min` is `Int32.min`: two's complement has no positive counterpart
+    // for it, so the negation is the identity there rather than a trap.
+    print(-opaque(lo))
+    lanes(-I32x4.splat(lo)) // -2147483648 x4
+
+    // ---- comparison: four answers, and they are signed -------------------
+    // `Int32.min < 1` is true signed and FALSE unsigned, because `Int32.min`
+    // reads as 2^31 with the sign bit ignored. Every lane of the masks below is
+    // a lane of that decision, and a build that reached for `i32x4.lt_u` would
+    // print the opposite on exactly the boundary lanes.
+    let edge = I32x4(lo, hi, zero, -one)
+    let ones = I32x4.splat(one)
+    let m = edge < ones
+    print(m.lane(0)) // true   (`lo < 1`)
+    print(m.lane(1)) // false  (`hi < 1`)
+    print(m.lane(2)) // true   (`0 < 1`)
+    print(m.lane(3)) // true   (`-1 < 1`)
+    print(m.anyTrue())
+    print(m.allTrue())
+    print((edge > ones).lane(0)) // false — the mirror of lane 0 above
+    print((edge == edge).allTrue())
+    print((edge != edge).anyTrue())
+
+    // `min` and `max` are not builtins here, and this is the replacement they
+    // were measured against — four `if`s, which LLVM turns into `pminsd` and
+    // Cranelift into a blend. The boundary lane is the interesting one: it
+    // answers `Int32.min` because `<` is signed, which is the same decision the
+    // deleted `i32x4.min_s` would have carried, moved from the opcode to the
+    // operator.
+    lanes(minLanes(edge, ones)) // -2147483648 1 0 -1
+    lanes(maxLanes(edge, ones)) // 1 2147483647 1 1
+
+    // The mask is `Mask32x4`, the SAME type a float comparison yields — same
+    // lane count, same lane width, same `v128`. So the two combine, and this
+    // line is what says the type was shared rather than duplicated.
+    let f = F32x4(1.0, 2.0, 3.0, 4.0)
+    print(((edge < ones) & (f < F32x4.splat(2.5))).lane(0)) // true
+    print(((edge < ones) & (f < F32x4.splat(2.5))).lane(3)) // false
+
+    // ---- bitwise, directly on the integer vector -------------------------
+    lanes(~a) // -2 -3 -4 -5
+    lanes(a & b) // 0 2 2 0
+    lanes(a | b) // 11 10 11 14
+    lanes(a ^ b) // 11 8 9 14
+    // `~` at the boundaries, where the complement crosses the sign bit.
+    lanes(~edge) // 2147483647 -2147483648 -1 0
+    // De Morgan lane-wise: it holds for a whole-vector complement only because
+    // every lane complements independently, and it fails on any lane the two
+    // sides disagree about. Printed rather than asserted so a divergence is
+    // output.
+    lanes(~(a & b)) // -1 -3 -3 -1
+    lanes(~a | ~b) // the same four
+    lanes(a ^ a) // 0 x4
+    lanes(a ^ ~a) // -1 x4
+
+    // ---- load and store: one bounds check for four elements --------------
+    // `Array<Int32>` rather than `Array<Float32>`, and the element stride is 4
+    // either way, so this is the same `v128.load` behind the same single check
+    // — the trap itself is already pinned by `examples/simdoob.vyrn`, which
+    // reaches the identical code.
+    let xs: Array<Int32> = [1, 2, 3, 4, 5, 6, 7, 8]
+    lanes(I32x4.load(xs, 0)) // 1 2 3 4
+    lanes(I32x4.load(xs, 1)) // 2 3 4 5
+    lanes(I32x4.load(xs, 4)) // 5 6 7 8
+    // The boundary values survive a round trip through memory, which is where a
+    // sign-extending load would go wrong and nowhere else.
+    I32x4.store(xs, 2, edge)
+    lanes(I32x4.load(xs, 2)) // -2147483648 2147483647 0 -1
+    print(xs[0])
+    print(xs[1])
+    print(xs[2])
+    print(xs[6])
+    print(xs[7])
+
+    return 0
+}

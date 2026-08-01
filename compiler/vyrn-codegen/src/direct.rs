@@ -3106,8 +3106,7 @@ impl Fn_<'_> {
                 "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
                 | "@f32x4Abs" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
                 | "@f32x4Trunc" | "@f32x4Nearest" => Type::F32x4,
-                "I32x4" | "@i32x4Splat" | "@i32x4Load" | "@i32x4Min" | "@i32x4Max"
-                | "@i32x4Abs" => Type::I32x4,
+                "I32x4" | "@i32x4Splat" | "@i32x4Load" => Type::I32x4,
                 // `replaceLane` is the one that reads its receiver: it is a value
                 // method, so the width is the receiver's rather than the name's.
                 "@replaceLane" => self.peek(&args[0], line)?,
@@ -4449,25 +4448,14 @@ impl Fn_<'_> {
                 });
                 return Ok(Type::F32x4);
             }
-            // RFC-0083 M3. The SIGNED pair, because the lane type is `Int32`:
-            // `i32x4.min_u` is the operation a `U32x4` would name and it answers
-            // `1` for `min(Int32.min, 1)`. `i32x4.abs` is the WRAPPING absolute
-            // value — `abs(Int32.min)` is `Int32.min` — which is also what
-            // `llvm.abs` with a false poison flag and `i32::wrapping_abs` say, so
-            // this is the one operation in the RFC where the three engines agreed
-            // without being pointed anywhere.
-            "@i32x4Min" | "@i32x4Max" | "@i32x4Abs" => {
-                self.expr_as(m, b, &args[0], &Type::I32x4)?;
-                if args.len() == 2 {
-                    self.expr_as(m, b, &args[1], &Type::I32x4)?;
-                }
-                b.ins(&match name {
-                    "@i32x4Min" => Instruction::I32x4MinS,
-                    "@i32x4Max" => Instruction::I32x4MaxS,
-                    _ => Instruction::I32x4Abs,
-                });
-                return Ok(Type::I32x4);
-            }
+            // (`@i32x4Min`/`Max`/`Abs` were here, as `i32x4.min_s`/`max_s`/`abs`,
+            // and were deleted on their measurement. This is the column that came
+            // CLOSEST to keeping them and still did not: over 200 M lanes the
+            // builtin walk is 139 ms against the Vyrn one's 146 ms — 1.05x, and
+            // `select` was refused at 1.06x. The 273 ms the same walk shows with
+            // the Vyrn version behind a helper function is Cranelift not inlining
+            // a call, not the operation. See RFC-0083's M3 note.)
+            //
             // Four consecutive elements of an `Array<Float32>` / `Array<Int32>` as
             // one 16-byte access, behind ONE bounds check rather than four. Both
             // widths are the same `v128.load`: the element stride is 4 either way,

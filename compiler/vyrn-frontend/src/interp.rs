@@ -3464,32 +3464,17 @@ impl<'a> Interp<'a> {
                         }
                         Ok(Val::I32x4(lanes))
                     }
-                    // `I32x4.min`/`max` are the SIGNED pair (`i32x4.min_s`), which
-                    // the lane type chooses: `Int32` lanes make `min_u` the wrong
-                    // instruction rather than an alternative one, and the two
-                    // disagree exactly at `Int32.min`. `abs` WRAPS — `abs(Int32.min)`
-                    // is `Int32.min` — matching `i32x4.abs`, LLVM's `llvm.abs` with
-                    // a false poison flag, and `i32::wrapping_abs` here.
-                    "@i32x4Min" | "@i32x4Max" | "@i32x4Abs" => {
-                        let a = match &vals[0] {
-                            Val::I32x4(v) => *v,
-                            other => return Err(format!("I32x4 op: {other:?}").into()),
-                        };
-                        let b = match vals.get(1) {
-                            Some(Val::I32x4(v)) => *v,
-                            _ => a,
-                        };
-                        let mut out = [0i32; 4];
-                        for k in 0..4 {
-                            out[k] = match name.as_str() {
-                                "@i32x4Min" => a[k].min(b[k]),
-                                "@i32x4Max" => a[k].max(b[k]),
-                                "@i32x4Abs" => a[k].wrapping_abs(),
-                                other => return Err(format!("vector op: {other}").into()),
-                            };
-                        }
-                        Ok(Val::I32x4(out))
-                    }
+                    // (`@i32x4Min`/`Max`/`Abs` were here, lowering to
+                    // `i32x4.min_s`/`max_s`/`abs`, and were deleted for `select`'s
+                    // reason with `select`'s number. Natively LLVM compiles the
+                    // Vyrn `if a < b` into the same `pminsd` — 5.98 µs against
+                    // 5.98 µs per 65536 lanes — and on wasm the builtin wins 1.05x
+                    // once the Vyrn version is written without helper calls. An
+                    // integer `min` is ONE comparison; the float one below has a
+                    // NaN rule and a signed zero to reproduce, which is why that
+                    // one is 3.7x and this one was not worth a row. See RFC-0083's
+                    // M3 note.)
+                    //
                     // `min`/`max` are IEEE-754-2019 `minimum`/`maximum`, which is
                     // wasm's `f32x4.min` rule: NaN in either operand propagates,
                     // and `-0.0` orders below `+0.0`. Written out rather than
