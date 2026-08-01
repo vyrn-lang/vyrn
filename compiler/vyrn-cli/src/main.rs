@@ -2397,6 +2397,15 @@ fn bench_native(
     program.tests.clear();
 
     // 4. Emit IR + shim, compile native via clang into a temp dir, and run it.
+    //    The same target `vyrn build` would ship, or the measurement stops
+    //    describing the artifact — the bug `-O2` just was.
+    let target = match native_target_for(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return (ExitCode::FAILURE, None);
+        }
+    };
     let ir = match vyrn_codegen::emit(&program) {
         Ok(ir) => ir,
         Err(e) => {
@@ -2442,15 +2451,6 @@ fn bench_native(
                 "error: could not find `clang`. Install LLVM and put clang on PATH, \
                  or set the CLANG environment variable to its full path."
             );
-            return (ExitCode::FAILURE, None);
-        }
-    };
-    // Same target `vyrn build` would ship, or the measurement stops describing
-    // the artifact — the bug `-O2` just was.
-    let target = match native_target_for(path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {e}");
             return (ExitCode::FAILURE, None);
         }
     };
@@ -3403,6 +3403,22 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     }
 
+    // Resolved before anything expensive. A misspelled `nativeTarget` is a
+    // config error, and reporting it after a full compile — or worse, behind a
+    // "could not find clang" — helps nobody. Native only: `nativeTarget` says
+    // nothing about a wasm build, so a wasm build must not fail on it.
+    let native_target = if wasm {
+        None
+    } else {
+        match native_target_for(path) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    };
+
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -3494,16 +3510,10 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     };
 
-    let target = match native_target_for(path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
     let mut cmd = Command::new(&clang);
     cmd.arg(&ll_path).arg(&shim_path).arg("-o").arg(&out_path);
-    add_native_clang_flags(&mut cmd, target);
+    // Resolved at the top of `build`; the wasm path never reaches this line.
+    add_native_clang_flags(&mut cmd, native_target.unwrap_or(DEFAULT_NATIVE_TARGET));
     let status = cmd.status();
     match status {
         Ok(s) if s.success() => {
