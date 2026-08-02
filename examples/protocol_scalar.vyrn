@@ -1,0 +1,29 @@
+// A protocol may NOT target a validated (nominal) scalar — RFC-0084.
+//
+// This is the half of the old restriction that M1 did not remove, and after M1
+// it is a different reason from the record one rather than the same reason
+// stated twice. A record has room for its declared name and now carries it; an
+// `Age` is a `Val::Int` in the interpreter with nowhere to put one, and a
+// wrapper that gave it room would put a branch in every arithmetic path — which
+// is where numeric parity between the three engines is thinnest.
+//
+// The way around it is in the diagnostic, and it is the capability M1 added:
+// give the type a record shape, and the impl is legal.
+//
+// `vyrn check` rejects this file; it is never run.
+
+type Age = Int64 where value >= 18
+
+protocol Show {
+    fn show(self) -> String
+}
+
+impl Show for Age {
+    fn show(self) -> String { return "age " + self.toString() }
+}
+
+fn main() -> Int64 {
+    let a: Age = 21
+    print(a.show())
+    return 0
+}

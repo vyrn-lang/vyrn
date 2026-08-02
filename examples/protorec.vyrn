@@ -1,0 +1,76 @@
+// Protocols on records — RFC-0084 M1.
+//
+// `impl P for <a record type>` used to be refused, for one reason: the two
+// compiled backends resolve a protocol method from the STATIC receiver type,
+// and the interpreter resolved it from the runtime value — which, for a record,
+// was a bare field map with no name on it. So a record now carries the declared
+// name of the last typed boundary it crossed, and the interpreter reads the
+// same answer the checker handed native and wasm.
+//
+// Dispatch stays static: this is one name looked up in one table, not a vtable.
+
+type Box = { n: Int64 }
+type Crate = { n: Int64 }
+type Pallet = { top: Box, id: Int64 }
+
+protocol Bump {
+    fn bump(self) -> Int64
+    fn label(self) -> String
+}
+
+impl Bump for Box {
+    fn bump(self) -> Int64 { return self.n + 1 }
+    fn label(self) -> String { return "box(" + self.n.toString() + ")" }
+}
+
+// A second record type of the SAME SHAPE. Records are structurally typed, so a
+// `Box` value is assignable to a `Crate` slot — and the two impls below are what
+// makes it observable which one a value dispatches to.
+impl Bump for Crate {
+    fn bump(self) -> Int64 { return self.n * 10 }
+    fn label(self) -> String { return "crate(" + self.n.toString() + ")" }
+}
+
+// A record target works under a bound exactly as a scalar one does: the bound is
+// discharged at check time and the call monomorphizes to the impl method.
+fn describe<T: Bump>(x: T) -> String {
+    return x.label() + " -> " + x.bump().toString()
+}
+
+fn main() -> Int64 {
+    // ---- a method on a record ----------------------------------------------
+    let b = Box { n: 4 }
+    print(b.bump()) // 5
+    print(b.label()) // box(4)
+    print(describe(b)) // box(4) -> 5
+
+    // ---- the name comes from the boundary, not from the literal -------------
+    // The same shape, coerced into `Crate`, dispatches as a `Crate`. That is not
+    // a runtime guess about the value: it is the static type of the slot, which
+    // is what the checker gave the compiled backends for this call.
+    let c: Crate = b
+    print(c.bump()) // 40
+    print(describe(c)) // crate(4) -> 40
+
+    // ---- a record that crossed a boundary as a field of another record ------
+    let p = Pallet { top: Box { n: 9 }, id: 1 }
+    let inner = p.top
+    print(inner.bump()) // 10
+    print(describe(inner)) // box(9) -> 10
+
+    // ---- records inside an Array -------------------------------------------
+    let boxes: Array<Box> = [Box { n: 0 }, Box { n: 7 }, Box { n: 41 }]
+    let mut total = 0
+    let mut i = 0
+    while i < boxes.length {
+        let item = boxes[i]
+        total = total + item.bump()
+        i = i + 1
+    }
+    print(total) // 51
+
+    let crates: Array<Crate> = [Box { n: 1 }, Box { n: 2 }]
+    let first = crates[0]
+    print(first.bump()) // 10 — an element learns its name from the array's type
+    return 0
+}

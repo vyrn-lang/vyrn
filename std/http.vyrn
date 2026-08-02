@@ -251,11 +251,12 @@ export fn surface(prefix: String, run: Surface) -> Route {
 // fortieth route with the fortieth policy is still one nominal value to the
 // checker. They are written PREFIX — `etag(cacheFor(GET(byId("/{id}")), 3600))`,
 // not the RFC's `.cacheFor(3600).etag()` — because a method call on a user value
-// needs a protocol impl, and `impl P for Route` is rejected outright: protocols
-// implement for Int64/Bool/String or an enum, since records erase at runtime.
-// The chain reads outside-in as a result. That is a spelling cost, not a
-// structural one, and it is the second time this milestone series has paid one
-// (M1's `GET(byId("/{id}"))`).
+// needs a protocol impl, and `impl P for Route` was rejected outright when this
+// shipped: a record had no runtime name for the interpreter to dispatch on. The
+// chain reads outside-in as a result. That is a spelling cost, not a structural
+// one, and it is the second time this milestone series has paid one (M1's
+// `GET(byId("/{id}"))`). RFC-0084 M1 removed the refusal; converting these to
+// methods is RFC-0084 M2, the milestone that pays for it.
 
 /// `Cache-Control: max-age=N` on a successful answer.
 ///

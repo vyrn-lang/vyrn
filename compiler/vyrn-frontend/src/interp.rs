@@ -146,8 +146,22 @@ pub enum Val {
     Option(Option<Box<Val>>),
     /// A result (RFC-0005): `(is_ok, payload)` — `Ok(v)` is `(true, v)`.
     Result(bool, Box<Val>),
-    /// A structural record (RFC-0002): field name -> value.
-    Record(HashMap<String, Val>),
+    /// A structural record (RFC-0002): field name -> value, plus the declared
+    /// type name it last crossed a boundary as (RFC-0084 M1).
+    ///
+    /// The name is what makes `impl Bump for Box` dispatchable here: the two
+    /// compiled backends key on `type_key(static receiver type)`, and without a
+    /// name the interpreter had nothing to key on. It is **optional** because a
+    /// record that has not yet crossed a typed boundary genuinely has no name —
+    /// a literal's type comes from its context, not from itself — and that is
+    /// not an error, only a value no protocol call can be made on.
+    ///
+    /// Assigned by [`Interp::coerce`], so the key is DERIVED from the static
+    /// type rather than guessed from the shape: a literal coerced into a
+    /// differently-named type of the same shape dispatches as the type it was
+    /// coerced to, which is what the checker told native/wasm. A literal starts
+    /// out under its own name, which every boundary is then free to overwrite.
+    Record(HashMap<String, Val>, Option<std::rc::Rc<str>>),
     /// A user-enum value (RFC-0002 §4): variant name + payload values.
     Enum(String, Vec<Val>),
     /// A generational reference (RFC-0004 §4, Path B): a slab slot index plus
@@ -385,7 +399,7 @@ fn lex_tokens(source: &str) -> Vec<Val> {
             r.insert("text".to_string(), Val::Str(std::rc::Rc::new(text)));
             r.insert("line".to_string(), Val::Int(line));
             r.insert("col".to_string(), Val::Int(col));
-            Val::Record(r)
+            Val::Record(r, None)
         })
         .collect()
 }
@@ -985,14 +999,17 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
             .map(|(k, v)| (k, Val::Str(std::rc::Rc::new(v))))
             .collect(),
     );
-    let request = Val::Record(HashMap::from([
-        ("method".to_string(), Val::Str(std::rc::Rc::new(req.method))),
-        ("path".to_string(), Val::Str(std::rc::Rc::new(req.path))),
-        ("headers".to_string(), headers),
-        ("body".to_string(), Val::Str(std::rc::Rc::new(req.body))),
-    ]));
+    let request = Val::Record(
+        HashMap::from([
+            ("method".to_string(), Val::Str(std::rc::Rc::new(req.method))),
+            ("path".to_string(), Val::Str(std::rc::Rc::new(req.path))),
+            ("headers".to_string(), headers),
+            ("body".to_string(), Val::Str(std::rc::Rc::new(req.body))),
+        ]),
+        None,
+    );
     match interp.call("handle", &[request]) {
-        Ok(Val::Record(map)) => {
+        Ok(Val::Record(map, _)) => {
             let status = match map.get("status") {
                 Some(Val::Int(n)) => *n,
                 Some(Val::IntN { v, .. }) => *v,
@@ -2057,7 +2074,7 @@ impl<'a> Interp<'a> {
                 (
                     parent,
                     Box::new(move |s: &mut Slot| match &mut s.v {
-                        Val::Record(map) => map
+                        Val::Record(map, _) => map
                             .get_mut(field)
                             .map(|slot| std::mem::replace(slot, Val::Unit)),
                         _ => None,
@@ -2416,7 +2433,7 @@ impl<'a> Interp<'a> {
                                 .rev()
                                 .find_map(|fr| fr.get(name))
                                 .and_then(|s| match &s.v {
-                                    Val::Record(map) => match map.get(field) {
+                                    Val::Record(map, _) => match map.get(field) {
                                         Some(Val::Array(elems)) => Some((elems.clone(), e)),
                                         _ => None,
                                     },
@@ -2432,7 +2449,7 @@ impl<'a> Interp<'a> {
                                 |scope| {
                                     for fr in scope.iter_mut().rev() {
                                         let Some(slot) = fr.get_mut(name) else { continue };
-                                        if let Val::Record(map) = &mut slot.v {
+                                        if let Val::Record(map, _) = &mut slot.v {
                                             if let Some(cur) = map.get_mut(field) {
                                                 *cur = Val::Unit;
                                             }
@@ -2478,7 +2495,7 @@ impl<'a> Interp<'a> {
                 };
                 for frame in scope.iter_mut().rev() {
                     if let Some(Slot {
-                        v: Val::Record(map),
+                        v: Val::Record(map, _),
                         ..
                     }) = frame.get_mut(name)
                     {
@@ -2487,7 +2504,7 @@ impl<'a> Interp<'a> {
                     }
                 }
                 if let Some(Slot {
-                    v: Val::Record(map),
+                    v: Val::Record(map, _),
                     ..
                 }) = self.globals.borrow_mut().get_mut(name)
                 {
@@ -4295,7 +4312,16 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
-                Ok(Val::Record(map))
+                // A literal names its own type, and the checker types it as
+                // exactly that name — so `User { .. }` is born stamped `User`
+                // (RFC-0084 M1). This is a DEFAULT, not the rule: `coerce`
+                // overwrites it at every typed boundary, which is what makes a
+                // literal passed into a differently-named parameter of the same
+                // shape dispatch as the parameter's type. Without it, an
+                // unannotated `let u = User { .. }` — the one binding `coerce`
+                // never sees — would carry no name while native dispatches on
+                // the inferred one, and the engines would disagree.
+                Ok(Val::Record(map, Some(std::rc::Rc::from(name.as_str()))))
             }
             // `xs.length` on a local Array or Map, read WITHOUT copying `xs` —
             // same reason as the index peephole above. A scan loop mentions it in
@@ -4332,7 +4358,7 @@ impl<'a> Interp<'a> {
                     // `str.byteLength` is the O(1) byte length (RFC-0058; matches
                     // `strlen`). `.length` on a String is rejected by the checker.
                     Val::Str(s) if field == "byteLength" => Ok(Val::Int(s.len() as i64)),
-                    Val::Record(map) => map
+                    Val::Record(map, _) => map
                         .get(field)
                         .cloned()
                         .ok_or_else(|| Ctrl::Err(format!("no field `{field}`"))),
@@ -4807,7 +4833,11 @@ impl<'a> Interp<'a> {
     }
 
     /// The protocol-dispatch key for a runtime value (RFC-0002 §5): the scalar
-    /// name for a scalar, or the enum's name for an enum value.
+    /// name for a scalar, the enum's name for an enum value, or the declared
+    /// name a record was stamped with at its last typed boundary (RFC-0084 M1).
+    ///
+    /// Read this together with `ok_target` in the checker: it returns `None` for
+    /// exactly the targets that one refuses.
     fn val_type_key(&self, v: &Val) -> Option<String> {
         match v {
             Val::Int(_) => Some("Int64".to_string()),
@@ -4820,6 +4850,10 @@ impl<'a> Interp<'a> {
             // so the type arguments the key drops are ones it never needed.
             Val::Option(_) => Some("Option".to_string()),
             Val::Result(..) => Some("Result".to_string()),
+            // A record answers from the name `coerce` stamped on it. An unstamped
+            // record has not crossed a typed boundary, so there is no static type
+            // to answer WITH — not an error about the record, just no key.
+            Val::Record(_, name) => name.as_ref().map(|n| n.to_string()),
             _ => None,
         }
     }
@@ -4842,7 +4876,7 @@ impl<'a> Interp<'a> {
         // the whole grid per store — 65,304 ms for a 400x400 fill against 99 ms
         // with this short-circuit (RFC-0082 M2, finding 3). Values are handed
         // back untouched, so this is not an optimization the semantics can see.
-        if self.coercion_is_identity(ty, 0) {
+        if self.coercion_is_noop(ty, &v, 0) {
             return Ok(v);
         }
         match (ty, v) {
@@ -4871,7 +4905,7 @@ impl<'a> Interp<'a> {
                     // scope); a scalar base binds `value`.
                     let holds = if matches!(decl.base, Type::Record(_)) {
                         match &v {
-                            Val::Record(map) => {
+                            Val::Record(map, _) => {
                                 let mut env = vec![map
                                     .iter()
                                     .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
@@ -4901,15 +4935,27 @@ impl<'a> Interp<'a> {
                         return Err(msg.into());
                     }
                 }
+                // The typed boundary is where a record learns its name
+                // (RFC-0084 M1). `n` is the STATIC type of the slot the value is
+                // entering, which is the same thing `type_key` hands the two
+                // compiled backends — so the interpreter's dispatch key is
+                // derived from the static type, not read off the shape.
+                if let Val::Record(map, _) = v {
+                    return Ok(Val::Record(map, Some(std::rc::Rc::from(n.as_str()))));
+                }
                 Ok(v)
             }
-            (Type::Record(fields), Val::Record(mut map)) => {
+            // The structural arm keeps whatever name the value already carried:
+            // a bare `{ x: Int64 }` has no name to give, so nothing about the
+            // value's identity changed by passing through it. The NAMED arm above
+            // is where a name is assigned (RFC-0084 M1).
+            (Type::Record(fields), Val::Record(mut map, name)) => {
                 for f in fields {
                     if let Some(fv) = map.remove(&f.name) {
                         map.insert(f.name.clone(), self.coerce(fv, &f.ty)?);
                     }
                 }
-                Ok(Val::Record(map))
+                Ok(Val::Record(map, name))
             }
             (Type::Option(inner), Val::Option(Some(p))) => {
                 Ok(Val::Option(Some(Box::new(self.coerce(*p, inner)?))))
@@ -4988,6 +5034,74 @@ impl<'a> Interp<'a> {
     /// Array<Tree> }`): the value walk in `coerce` terminates because values are
     /// finite, but a type walk does not. `crate::types::resolve` bounds itself
     /// the same way.
+    /// [`Self::coercion_is_identity`] with the value in hand — the same question
+    /// asked of a coercion that has one thing left to do.
+    ///
+    /// A named record type is never *type*-identity after RFC-0084 M1, because
+    /// coercing into it stamps the name. But stamping a name a value already
+    /// carries changes nothing, and that is the steady state: an `Array<Cell>`
+    /// written one element at a time re-coerces the whole row per store (the
+    /// `rows[i][j] = v` desugar's write-back), so answering this from the type
+    /// alone put RFC-0082 M2's quadratic straight back — measured 76 -> 881 ms
+    /// on 16,000 stores, and 3,539 at four times the row length, which is the
+    /// same scaling with the row length that fix removed.
+    ///
+    /// So the array walk is skipped when every element is ALREADY stamped. That
+    /// is O(n) reads and no allocation, against O(n) `HashMap` clones — and it
+    /// short-circuits on the first element that is not, so a coercion that
+    /// really has work to do pays one check.
+    fn coercion_is_noop(&self, ty: &Type, v: &Val, depth: usize) -> bool {
+        if self.coercion_is_identity(ty, depth) {
+            return true;
+        }
+        if depth > 16 {
+            return false;
+        }
+        let d = depth + 1;
+        match (ty, v) {
+            (Type::Named(_), Val::Record(_, Some(stamped))) => {
+                self.stamp_only(ty, d).is_some_and(|n| **stamped == *n)
+            }
+            (
+                Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
+                Val::Array(items),
+            ) => match self.stamp_only(inner, d) {
+                // The element type is decided ONCE and the scan is then a name
+                // compare per element. Asking the general question per element
+                // costs two hashed `types` lookups each, which on a 1,600-element
+                // row is most of the store.
+                Some(n) => items
+                    .iter()
+                    .all(|it| matches!(it, Val::Record(_, Some(m)) if **m == *n)),
+                None => items.iter().all(|it| self.coercion_is_noop(inner, it, d)),
+            },
+            (Type::Option(inner), Val::Option(Some(p))) => self.coercion_is_noop(inner, p, d),
+            (Type::Result(ok, err), Val::Result(is_ok, p)) => {
+                self.coercion_is_noop(if *is_ok { ok } else { err }, p, d)
+            }
+            (Type::Map(_, val), Val::Map(pairs)) => {
+                pairs.iter().all(|(_, x)| self.coercion_is_noop(val, x, d))
+            }
+            (Type::Record(fields), Val::Record(map, _)) => fields
+                .iter()
+                .all(|f| map.get(&f.name).is_none_or(|x| self.coercion_is_noop(&f.ty, x, d))),
+            _ => false,
+        }
+    }
+
+    /// The declared name of a record type that coercion has nothing to do to
+    /// except stamp it (RFC-0084 M1) — no predicate to run, no field that could
+    /// change. `None` for anything else, including a record type that really
+    /// does have work to do.
+    fn stamp_only(&self, ty: &Type, depth: usize) -> Option<&'a str> {
+        let Type::Named(n) = ty else { return None };
+        let decl = self.types.get(n.as_str())?;
+        let ok = matches!(decl.base, Type::Record(_))
+            && decl.predicate.is_none()
+            && self.coercion_is_identity(&decl.base, depth);
+        ok.then_some(decl.name.as_str())
+    }
+
     fn coercion_is_identity(&self, ty: &Type, depth: usize) -> bool {
         if depth > 16 {
             return false;
@@ -5009,7 +5123,19 @@ impl<'a> Interp<'a> {
             Type::Named(n) => match self.types.get(n.as_str()) {
                 // An unknown name coerces to itself in the walk below.
                 None => true,
-                Some(decl) => decl.predicate.is_none() && self.coercion_is_identity(&decl.base, d),
+                // A named RECORD type is never the identity, whatever its fields
+                // do: coercing into it stamps the name a protocol call dispatches
+                // on (RFC-0084 M1). This is the narrowest place to say it — the
+                // predicate already had the decl in hand, so it costs nothing
+                // where it still answers `true`, and the cost where it now
+                // answers `false` falls only on types that mention a named
+                // record. The field walk underneath is unaffected: the base is
+                // still a bare `Type::Record`, which short-circuits as before.
+                Some(decl) => {
+                    decl.predicate.is_none()
+                        && !matches!(decl.base, Type::Record(_))
+                        && self.coercion_is_identity(&decl.base, d)
+                }
             },
             Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
                 self.coercion_is_identity(i, d)
@@ -6171,7 +6297,7 @@ mod tests {
         // A comment containing `props` yields no `props` token (comment is trivia).
         let toks = lex_tokens("// props here\nlet x = 1");
         assert!(
-            !toks.iter().any(|t| matches!(t, Val::Record(r)
+            !toks.iter().any(|t| matches!(t, Val::Record(r, _)
                 if matches!(r.get("text"), Some(Val::Str(s)) if s.as_str() == "props"))),
             "a comment's words must not leak as tokens"
         );
@@ -6179,7 +6305,7 @@ mod tests {
         let toks = lex_tokens("\"</script>\"");
         assert_eq!(toks.len(), 1);
         match &toks[0] {
-            Val::Record(r) => {
+            Val::Record(r, _) => {
                 assert_eq!(r.get("kind"), Some(&Val::Str(std::rc::Rc::new("string".to_string()))));
                 assert_eq!(r.get("text"), Some(&Val::Str(std::rc::Rc::new("</script>".to_string()))));
             }
@@ -6190,7 +6316,7 @@ mod tests {
         let kinds: Vec<String> = toks
             .iter()
             .filter_map(|t| match t {
-                Val::Record(r) => match r.get("text") {
+                Val::Record(r, _) => match r.get("text") {
                     Some(Val::Str(s)) => Some((**s).clone()),
                     _ => None,
                 },
@@ -6206,7 +6332,7 @@ mod tests {
         let toks = lex_tokens("let x = \\");
         assert!(toks
             .iter()
-            .any(|t| matches!(t, Val::Record(r) if r.get("kind") == Some(&Val::Str(std::rc::Rc::new("error".to_string()))))));
+            .any(|t| matches!(t, Val::Record(r, _) if r.get("kind") == Some(&Val::Str(std::rc::Rc::new("error".to_string()))))));
     }
 
     #[test]

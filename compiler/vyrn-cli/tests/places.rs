@@ -367,6 +367,52 @@ fn a_validated_element_type_costs_a_constant_per_store() {
     );
 }
 
+/// The same ratio again, for a RECORD element type — because RFC-0084 M1 gave a
+/// record a runtime name and stamping it is a thing `coerce` has to do, so a
+/// named record type stopped being an identity coercion and the row rebuild came
+/// straight back: 881 ms for 40x400 against 3,539 for 10x1600, the same 16,000
+/// writes, which is the scaling the test above exists to forbid.
+///
+/// The fix is that a coercion whose only work is a name the value ALREADY
+/// carries is not work. That still reads the row, so this ratio is not 1.0 the
+/// way its `Int64` sibling's is — it is a name compare per element instead of a
+/// `HashMap` clone per element, which is the difference between 9.7x and 1.4x.
+#[test]
+fn an_element_store_does_not_restamp_its_row() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let grid = |rows: usize, cols: usize| {
+        format!(
+            "type Cell = {{ v: Int64 }}\n\
+             fn main() -> Int64 {{\n\
+             let mut rows: Array<Array<Cell>> = []\n\
+             let mut r = 0\n\
+             while r < {rows} {{\n\
+             let mut row: Array<Cell> = []\n\
+             let mut c = 0\n\
+             while c < {cols} {{ row.push(Cell {{ v: 0 }})  c = c + 1 }}\n\
+             rows.push(row)\n\
+             r = r + 1\n\
+             }}\n\
+             let mut i = 0\n\
+             while i < {rows} {{\n\
+             let mut j = 0\n\
+             while j < {cols} {{ rows[i][j] = Cell {{ v: 1 }}  j = j + 1 }}\n\
+             i = i + 1\n\
+             }}\n\
+             print(rows[{rows} - 1][{cols} - 1].v)\n\
+             return 0\n}}\n"
+        )
+    };
+    let short = best_of_3(&dir, "interp-recgrid-short", &grid(400, 40), "1");
+    let long = best_of_3(&dir, "interp-recgrid-long", &grid(25, 640), "1");
+    assert!(
+        long.as_secs_f64() < 3.0 * short.as_secs_f64(),
+        "an element store is re-stamping its row: {long:?} for 25x640 against \
+         {short:?} for 400x40 — the same 16,000 writes"
+    );
+}
+
 /// `vyrn test` is a RECOVERABLE trap: a trapping test is reported and the next
 /// one runs. M1 recorded that its stale field was unobservable "because traps
 /// abort" and that a recoverable trap would have to revisit the desugar — this

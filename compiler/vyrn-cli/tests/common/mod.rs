@@ -3,11 +3,13 @@
 //! how its output is normalized for comparison, and which examples do not
 //! participate.
 //!
-//! It lives here rather than in `parity.rs` because RFC-0077's burndown ladder
-//! (`directwasm.rs`) makes exactly the same comparison against exactly the same
-//! corpus — a second copy of these conventions would drift, and the two tiers
-//! disagreeing about what "the same run" means is the one way the ladder could
-//! report a number that is not about the backend.
+//! It lived here rather than in `parity.rs` because RFC-0077's burndown ladder
+//! was a second tier (`directwasm.rs`) making the same comparison against the
+//! same corpus, and a second copy of these conventions would have drifted. The
+//! ladder reached 87 of 87 and M5 folded the tier into `parity.rs`, so there is
+//! one caller again — but the conventions stay here, because the reason they
+//! were worth separating is that a tier disagreeing about what "the same run"
+//! means is how a number stops being about the thing it names.
 
 #![allow(dead_code)] // each tier uses a subset; the other's half is not dead.
 
@@ -46,6 +48,12 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "an impl that omits an associated type the protocol declares, and one that \
          binds a name it does not (RFC-0080 M2)",
         "does not bind the associated type `Output`",
+    ),
+    (
+        "protocol_scalar.vyrn",
+        "a protocol implemented for a validated scalar — the half of the old refusal \
+         RFC-0084 M1 kept, and now the only one it names",
+        "erases to `Int64` at run time",
     ),
     (
         "stream_abandoned.vyrn",

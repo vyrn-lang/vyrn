@@ -446,7 +446,7 @@ fn expected_check_failures_do_fail() {
 /// wrong wording. Both spellings, because the array and the string paths pick
 /// different prefixes.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn the_bounds_trap_says_what_the_interpreter_says() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -496,7 +496,7 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
 /// print, and exactly what a release that never fired would print too. Both are
 /// pinned against the interpreter rather than against a spelling written here.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_stale_reference_and_a_full_slab_say_what_the_interpreter_says() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -563,7 +563,7 @@ fn a_stale_reference_and_a_full_slab_say_what_the_interpreter_says() {
 /// call's RESULT type — `firstOf(twice(41))` can only fix `A` if the call
 /// reports `Pair<Int64, Int64>` rather than its record shape.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -646,7 +646,7 @@ fn main() -> Int64 {
 /// `Dfa::matches` is the third walk over the same table and the one the checker
 /// already trusts.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn the_dfa_walk_agrees_with_the_interpreter_on_what_no_example_reaches() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -722,7 +722,7 @@ fn main() -> Int64 {
 /// callee's own slot. And a global read by a later initializer, which is what
 /// makes declaration order observable inside a single file.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_modify_parameter_copies_back_whatever_the_caller_kept_it_in() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -821,7 +821,7 @@ fn main() -> Int64 {
 /// `print` showed the pointer's bytes. It compiled and it validated. `BoolVal` is
 /// here because it is the shape no example builds at all.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_boxed_enum_payload_survives_the_word_it_travels_in() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -900,7 +900,7 @@ fn main() -> Int64 {
 /// the interpreter's own answer is asserted for the failing ranges too, where
 /// before only "the stderr mentioned slice" could be.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn the_string_builtins_agree_with_the_interpreter_about_their_failures() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -1031,7 +1031,7 @@ fn main() -> Int64 {
 /// against **the width's** minimum, so an `Int8` `-128 / -1` has to trap where a
 /// guard written for `Int64` would silently return -128.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn every_integer_width_wraps_where_the_interpreter_wraps() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -1254,7 +1254,7 @@ fn main() -> Int64 {
 /// output but a value someone wrote down, is what makes that a check rather than
 /// a comparison of two copies.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn six_decimals_of_a_float_are_the_exact_ones() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -1386,7 +1386,7 @@ fn main() -> Int64 {
 /// among them. The `all_agree` at the end is what still checks the two compiled
 /// engines — against the interpreter's bytes, which are the oracle's.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn the_vyrn_float_formatter_agrees_with_every_engines_own() {
     let rows = three_engines(
         "f64str",
@@ -1477,7 +1477,7 @@ fn main() -> Int64 {
 /// between backends: two backends can be confidently wrong together about which
 /// failure happened, and every wrong answer here is a plausible-looking one.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn the_wasi_io_builtins_agree_with_the_interpreter_about_their_edges() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -1705,7 +1705,7 @@ fn main() -> Int64 {
 /// propagation: 20,000 means every propagating call copied its `modify` parameter
 /// back, 0 would mean none did.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_propagating_early_exit_releases_its_frame_and_copies_modify_back() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -1779,7 +1779,7 @@ fn main() -> Int64 {
 /// expression, the only nested one in the module), and four rejections whose
 /// `line N, col M:` wording is an `Err` propagated out through six frames.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn the_json_reader_parses_the_same_on_the_direct_backend() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -1879,7 +1879,7 @@ fn main() -> Int64 {
 /// - A **block-bodied** lambda, two `fn` parameters in one specialization, and a
 ///   `fn` parameter called three times in a loop.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_fn_typed_parameter_specializes_to_whatever_the_call_site_resolved() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -2017,7 +2017,7 @@ fn main() -> Int64 {
 ///   falls through the other's switch to the defensive arm — which is exactly what
 ///   `normalize_fn_sig` is shared with the textual backend for.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_stored_function_value_dispatches_by_signature_not_by_spelling() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -2111,7 +2111,7 @@ fn main() -> Int64 {
 /// evaluation at the spawn point is the interpreter's own schedule, so there is
 /// one right answer and it is the one the interpreter gives.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -2194,7 +2194,7 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
 /// DYNAMIC — a callee's region nests inside its caller's, which is why the counter
 /// is four bytes of memory and not a compile-time constant per body.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn every_exit_out_of_a_region_balances_and_the_65th_traps() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -2356,7 +2356,7 @@ fn main() -> Int64 {
 /// backends can be confidently wrong together, which is how M2m's non-ASCII `=~`
 /// walk passed every example it had.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn line_and_column_agree_with_the_interpreter_off_both_ends_of_the_buffer() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -2440,7 +2440,7 @@ fn main() -> Int64 {
 /// refuse — the word is an `i64` either way — and would read a pointer as a
 /// number. So the values are pinned, not just the agreement.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_generic_payload_is_typed_by_whichever_arm_knows_it() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
@@ -2535,7 +2535,7 @@ fn main() -> Int64 {
 ///   message still runs, which is RFC-0008's Q4 and the half a fold could
 ///   silently take away.
 #[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_log_sink_is_whichever_descriptor_the_config_named() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
