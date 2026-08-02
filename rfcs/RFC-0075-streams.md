@@ -1,13 +1,16 @@
 # RFC-0075 — `Stream<T>`: Cleanup as an Obligation, Not a Convention
 
-- **Status:** **M1, M2 and M2b shipped** — `Stream<T>` is a linear resource, an
-  abandoned stream does not compile (`examples/stream_abandoned.vyrn`), release
-  runs on normal end, `break` and early `return`, and since M2b a stream is a
-  PRODUCER rather than a buffer: `take(unfold(..), n)` over a feed with no end
-  runs the step n + 1 times (`examples/streamunfold.vyrn`). `std/stream` ships
-  `unfold`, `map`, `filter`, `take` and `merge`; `channel` and arrival-order
-  `merge` stay **refused**, and not for want of a representation — see "As
-  landed — M2". **M3's conformance table is four-sixths true already**: one row
+- **Status:** **M1, M2, M2b and M2c shipped** — `Stream<T>` is a linear
+  resource, an abandoned stream does not compile
+  (`examples/stream_abandoned.vyrn`), release runs on normal end, `break` and
+  early `return`, and since M2b a stream is a PRODUCER rather than a buffer.
+  Since M2c the *combinators* are too: `take(map(unfold(..), f), n)` over a feed
+  with no end asks the source exactly n times
+  (`examples/streamunfold.vyrn`, `examples/streamlazy.vyrn`). `std/stream` ships
+  `unfold`, `map`, `filter`, `take` and `merge`; `merge` is the one that stays
+  eager, for a structural reason — a cursor cell has one stream behind it — and
+  `channel` and arrival-order `merge` stay **refused**, not for want of a
+  representation. See "As landed — M2" and "As landed — M2c". **M3's conformance table is four-sixths true already**: one row
   is struck (it asks for behaviour during an unwind Vyrn does not have), one
   needed nothing (a fallible producer yields `Stream<Result<T, E>>`, so the
   error is an element), and the last — client disconnect — **is closed by
@@ -345,6 +348,9 @@ exactly n + 1 times — the same relation M2b pinned, now through a wrapper.
 roughly kn. Both are numbers rather than shapes, for the reason M2b's was: the
 eager version passes every assertion about the values.
 
+*(Both numbers came out tighter than this predicted — n, and 3n − 2 for one in
+three. See "As landed — M2c"; the +1 was an artefact of the eager `take`.)*
+
 ### M2b — the pull representation
 
 **What forced it.** RFC-0074 M3 spells `sse("/", tail).retryAfter(3000)` where
@@ -634,6 +640,8 @@ something nobody chose.
 many times the step ran: **6 for n = 5, 1001 for n = 1000, 20001 for
 n = 20000** — n + 1 every time, the extra being the element `take` reads before
 its `break` fires, and the allocation is `take`'s output array, so it is n too.
+**(M2c retired the extra ask along with the eager `take`: the numbers in that
+file are n now. The relation below is M2b's, recorded as it stood.)**
 Under M1's representation there is no number here; there is a program that does
 not terminate. The same file runs `cycles(10000)` — RFC-0075's own acceptance
 row — and that row turns out to be *stronger* than this document claims:

@@ -137,8 +137,10 @@ fn main() -> Int64 {
     print(firstOver(7))
     print(discard())
 
-    // The cost relation: n + 1 steps for n elements, at three sizes, against a
-    // producer that never ends.
+    // The cost relation: n steps for n elements, at three sizes, against a
+    // producer that never ends. It was n + 1 until M2c — the extra ask was the
+    // element the eager `take` read before its `break` fired, and a lazy one
+    // checks its counter before asking.
     print(cost(5)) // 5
     print(cost(1000)) // 1000
     print(cost(20000)) // 20000
