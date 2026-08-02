@@ -235,9 +235,43 @@ it.
 
 ### M3b — `ws`
 
-A second adapter, and the real test of whether the signal generalises: it must
-pass the same conformance file `sse` does. It additionally needs an upgrade
-handshake and a frame codec, which is why it is not in the same milestone.
+A second adapter, and the real test of whether the signal generalises: **it must
+pass the conformance file `sse` passes, unchanged.** M3a wrote that file below
+`std/http` on purpose, calling `serveStream`/`fromStep` directly, so there is
+nothing to rewrite. If it needs rewriting, the signal did not generalise and
+that is the finding.
+
+**Scope: server-push.** RFC 6455 is bidirectional and this milestone is not. The
+`ws` in this RFC's own example consumes a `Stream<T>` and its four options are
+all server-side, so a client→server message has no shape here — it would want a
+handler per message, which is a different design and not one this RFC spells.
+Say so rather than half-building it.
+
+**Who owns the bytes: Vyrn owns what the user chooses, the host owns what the
+protocol fixes.** SSE's `data:`, `id:` and `retry:` are a design surface — which
+event name, which id — so `event(id, name, data)` is Vyrn and the host writes
+what it is handed. A WebSocket frame's opcode, length and mask are not a surface;
+there is no choice in them. So the host frames, and Vyrn yields the payload. That
+rule is worth stating because the two adapters look inconsistent without it.
+
+**The handshake needs SHA-1**, and it should be ordinary Vyrn in `std/hash`
+beside `fnv1a` — pure integer work, three-way parity for free, and pinnable
+against RFC 3174's own vectors. Its doc comment must say what it is for:
+RFC 6455 mandates it as a **handshake nonce transform**, not as a security
+primitive, and a `sha1` sitting in a standard library invites exactly the misuse
+that sentence prevents. `base64` is already in `std/codecs`.
+
+**Predict `heartbeat` to fail for `keepAlive`'s reason, then check.** M3a refused
+`keepAlive` because a pull producer says `Some` or `None` and never "nothing
+yet", so there is no idle moment to fill — and the pump blocks in the producer,
+so a timer has nowhere to fire from. A ping is host-generated rather than
+producer-generated, which is the one difference worth testing before assuming
+the answer carries over. If it does carry over, refuse it the same way and for
+the same stated reason.
+
+`closeCode` (the code in the close frame when the stream ends), `subprotocol`
+(echoed in the handshake response) and `maxFrame` (splitting a large payload)
+have no such problem.
 - **M4 — schema overrides.** `graphql(...).mutations(...).lazy(...)`; the same
   override surface for `std/openapi`.
 
