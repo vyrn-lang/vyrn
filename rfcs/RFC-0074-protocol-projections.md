@@ -192,7 +192,51 @@ mounted groups as a startup error rather than shadowing silently.
 - **M2 — cache and validators.** `cacheFor`, `etag`, `lastModified`, `vary`,
   `status`, `createdAt`, `notFoundWhen`, conditional-request handling
   (`If-None-Match` → 304).
-- **M3 — streaming projections.** `sse` and `ws` over RFC-0075 streams.
+- **M3 — streaming projections.** `sse` and `ws` over RFC-0075 streams. **Split:
+  M3a is `sse`, M3b is `ws`** — see below. RFC-0075 M4 named the same work and
+  has given it up; what stays there is the conformance contract these adapters
+  must meet.
+
+### M3a — `sse`, and the disconnect signal
+
+**The signal is the write.** `#6204`/`#6343`/`#6842` burned eight months and
+five PRs guessing which host event means "the client is gone" — `res.close` on
+one deployment, `req.close` on another, none on a third, no `socket` at all on
+two more. Vyrn does not guess: **the server learns the client is gone by trying
+to write to it and failing.** That is the one mechanism every host implements
+identically, because it is the socket rather than the framework, and it is what
+makes the conformance row testable rather than deployment-specific.
+
+So the loop is: produce one event, write it, and if the write fails, `close` the
+stream. RFC-0075's "release runs within 100 ms" becomes the stronger and simpler
+"release runs before the next event would be produced".
+
+**A streaming response is a second shape, not a flag on the first.**
+`ServeResponse` is a buffered `body: String` and must stay one — a `Vary`
+header and a 304 are about a response that exists all at once. The handler
+answers either that or a stream handle, and the server pumps the handle by
+calling back into the interpreter for each element. Nothing about the buffered
+path changes.
+
+**`sse` does not return a `Route`.** This RFC says options meaningless to one
+transport are *absent* from the other rather than ignored, and `Route` carries
+`Policy` — `cacheFor`, `etag`, `lastModified`, the conditional-request
+machinery — every one of which is meaningless on an event stream. So `sse`
+returns its own record with its own protocol (`retryAfter`, `keepAlive`,
+`resumable`), and `mount` accepts both. That separation is only spellable
+because RFC-0084 M1 made a record a legal protocol target; before it, both would
+have had to be the same record and the options would have had to be ignored.
+
+**`resumable` is the cursor.** RFC-0075 M2b made the seed the resume token, so
+`Last-Event-ID` is the seed handed to `unfold` and nothing new is needed to
+support replay — the id written beside each event is the cursor that produced
+it.
+
+### M3b — `ws`
+
+A second adapter, and the real test of whether the signal generalises: it must
+pass the same conformance file `sse` does. It additionally needs an upgrade
+handshake and a frame codec, which is why it is not in the same milestone.
 - **M4 — schema overrides.** `graphql(...).mutations(...).lazy(...)`; the same
   override surface for `std/openapi`.
 
