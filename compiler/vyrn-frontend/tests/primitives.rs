@@ -151,14 +151,15 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // element type.
     ("@i32x4Load", Memory, "Array<Int32>: four consecutive elements, one bounds check"),
     ("@i32x4Store", Memory, "Array<Int32>: the same four written back"),
-    // RFC-0075 M1. `Stream<T>` shares `Array<T>`'s representation, so these two
-    // are the array rows under different names — and they are separate names
-    // precisely because the TYPES are separate: nothing else can make or unmake a
-    // stream, which is what makes "disposed exactly once" checkable. When M2's
-    // producer stops being an eager buffer, `close` grows a teardown and this row
-    // stops being an alias of `afree`'s.
-    ("fromArray", Memory, "Stream: the array's buffer, moved (native emits nothing)"),
-    ("close", Memory, "Stream: reclamation (native frees; the interpreter's Vec drops)"),
+    // RFC-0075. The three ways to make and unmake a `Stream<T>`, and they are
+    // separate names precisely because the TYPES are separate: nothing else can
+    // make or unmake a stream, which is what makes "disposed exactly once"
+    // checkable. M2b is where the note M1 left here came due — the producer
+    // stopped being an eager buffer, so `close` grew a real teardown and stopped
+    // being `afree` under another name.
+    ("fromArray", Memory, "Stream: the array's buffer, moved into a buffer-tagged header"),
+    ("fromStep", Memory, "Stream: a cursor cell plus a step, pulled once per element"),
+    ("close", Memory, "Stream: variant-aware reclamation (a buffer, or a cursor cell)"),
     ("cell", Memory, "the slot table: allocate a slot and a generation"),
     ("get", Memory, "the slot table: generation-checked read"),
     ("set", Memory, "the slot table: generation-checked write"),
@@ -447,8 +448,12 @@ fn the_census_is_the_code() {
     // mode caught by the census's own method: a `Measured` row can be wrong about
     // the benchmark rather than about the operation, and the only defence is that
     // the number says which shape it measured. The four roundings were re-taken
-    // in the same pass and all four survived, with corrected numbers.
-    assert_eq!(found.len(), 82, "the primitive core changed size");
+    // in the same pass and all four survived, with corrected numbers. 82 -> 83
+    // when RFC-0075 M2b added `fromStep`: one `Memory` row for the producer a
+    // stream can now hold, beside the buffer it always could. No row for `next` —
+    // the pull is emitted inside `for … in` rather than named, so there is no
+    // dispatch here to census.
+    assert_eq!(found.len(), 83, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

@@ -71,6 +71,9 @@ pub const SHAPES: &[(&str, &str)] = &[
     // with a narrow member and then need i64 alignment — the interesting ones.
     ("Option/Result", "{ i1, i64, i64 }"),
     ("Array", "{ ptr, i64, i64 }"),
+    // A `Stream<T>` (RFC-0075 M2b): the array triple, then the producer's tag,
+    // payload and cursor generation.
+    ("Stream", "{ ptr, i64, i64, i64, i64, i64 }"),
     ("Map", "{ ptr, ptr, i64, i64 }"),
     ("Ref", "{ i64, i64 }"),
     ("Fn", "{ i64, i64 }"),

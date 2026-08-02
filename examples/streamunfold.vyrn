@@ -1,0 +1,163 @@
+/// RFC-0075 M2b — the pull representation, and the measurement that is the
+/// point of it.
+///
+/// `naturals` never answers `None`. Under M1's representation — a `Stream<T>`
+/// was `Array<T>`'s three words, so producing one meant having the buffer — this
+/// file could not run at all: `unfold` would have had to fill an array with
+/// every element before the first one reached a consumer, which is `#6156`, the
+/// heap growth RFC-0075 quotes as its evidence. So the pin here is not the
+/// values. It is the COUNT: `take(feed, 5)` prints 5 elements and leaves
+/// `steps` at 6 — five yields plus the one `take` reads before its `break`
+/// fires — against a feed with no end. Any number at all, printed after an
+/// endless producer, is the whole milestone.
+import { unfold, map, filter, take } from "std/stream"
+
+/// How many times a step function has run. Module state rather than a capture
+/// because a closure captures by value at its evaluation site (RFC-0037) and
+/// this has to be observed after the loop, from the outside.
+let mut steps = 0
+
+/// The endless one. Reads the cursor, writes the next cursor, yields — and never
+/// answers `None`, so nothing but the consumer can stop it.
+fn naturals(c: Ref<Int64>) -> Option<Int64> {
+    let n = get(c)
+    set(c, n + 1)
+    steps = steps + 1
+    return Some(n)
+}
+
+/// A producer that DOES end, so `for … in` over it terminates on its own and the
+/// buffer and stepped variants are proven to agree about what "the end" means.
+fn upToThree(c: Ref<Int64>) -> Option<Int64> {
+    let n = get(c)
+    if n > 3 {
+        return None
+    }
+    set(c, n + 1)
+    return Some(n * 10)
+}
+
+/// The cursor need not step by one — it is a cursor, not an index, which is what
+/// makes it a resume token rather than a loop counter.
+fn powers(c: Ref<Int64>) -> Option<Int64> {
+    let n = get(c)
+    if n > 64 {
+        return None
+    }
+    set(c, n * 2)
+    return Some(n)
+}
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn odd(n: Int64) -> Bool {
+    return n % 2 == 1
+}
+
+/// A `close` on a stepped stream, which is the variant-aware half: the buffer
+/// variant has a buffer to release and this one has a cursor cell, and the cell
+/// comes from a slab of 65536 that a leak would exhaust.
+fn discard() -> Int64 {
+    let s = unfold(100, naturals)
+    close(s)
+    return 0
+}
+
+/// The measurement itself, as a relation rather than a single fact: taking `n`
+/// from a feed with no end runs the step `n + 1` times — n yielded and one read
+/// before `take`'s `break` fires — whatever `n` is. The allocation is `take`'s
+/// output array, so it is `n` too. Under the eager representation there is no
+/// number here at all; there is a program that does not terminate.
+fn cost(n: Int64) -> Int64 {
+    steps = 0
+    let mut seen = 0
+    for v in take(unfold(0, naturals), n) {
+        seen = seen + v
+    }
+    return steps
+}
+
+/// RFC-0075's own acceptance row — "10 000 open-then-abandon cycles" — at the
+/// scale it names. A stepped stream owns a cursor cell, and cells come from a
+/// slab of 65536 slots, so a `close` that did not release would not merely grow
+/// the heap: it would trap on the 65537th acquisition. This is therefore the one
+/// place in the corpus where the release is observable rather than inferred.
+fn cycles(n: Int64) -> Int64 {
+    let mut i = 0
+    while i < n {
+        let s = unfold(i, naturals)
+        close(s)
+        i = i + 1
+    }
+    return i
+}
+
+fn main() -> Int64 {
+    // The measurement. An endless feed, five elements taken.
+    for v in take(unfold(0, naturals), 5) {
+        print(v) // 0 1 2 3 4
+    }
+    print(steps) // 6 — five yielded, one read then dropped by `break`
+
+    // A stepped stream that ends by itself.
+    for v in unfold(0, upToThree) {
+        print(v) // 0 10 20 30
+    }
+
+    // A cursor that is not an index.
+    for v in unfold(1, powers) {
+        print(v) // 1 2 4 8 16 32 64
+    }
+
+    // The combinators do not care which variant they were handed: `map` and
+    // `filter` were written against M1's buffer and are untouched by M2b.
+    for v in map(take(unfold(0, naturals), 4), double) {
+        print(v) // 0 2 4 6
+    }
+    for v in filter(unfold(0, upToThree), odd) {
+        print(v) // (nothing — every element is even)
+    }
+    print(-1)
+
+    // `break` out of an endless feed directly, with no `take` in the way.
+    for v in unfold(0, naturals) {
+        if v == 3 {
+            break
+        }
+        print(v) // 0 1 2
+    }
+
+    // An early `return` out of one, which is the other release path.
+    print(firstOver(7))
+    print(discard())
+
+    // The cost relation: n + 1 steps for n elements, at three sizes, against a
+    // producer that never ends.
+    print(cost(5)) // 6
+    print(cost(1000)) // 1001
+    print(cost(20000)) // 20001
+
+    // And the release, at the scale RFC-0075's acceptance names.
+    print(cycles(10000)) // 10000
+
+    // Two streams alive at once, so the cursor cells cannot be one shared slot.
+    let mut a = unfold(0, upToThree)
+    let mut b = unfold(0, powers)
+    close(a)
+    close(b)
+
+    return 0
+}
+
+/// The early-`return` path: the stream is released on the way out, and the
+/// producer is never asked for the elements past the one that answered.
+fn firstOver(limit: Int64) -> Int64 {
+    for v in unfold(0, naturals) {
+        if v > limit {
+            return v
+        }
+    }
+    return -1
+}

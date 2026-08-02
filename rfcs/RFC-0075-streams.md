@@ -1,14 +1,15 @@
 # RFC-0075 — `Stream<T>`: Cleanup as an Obligation, Not a Convention
 
-- **Status:** **M1 shipped; M2 shipped in part** — `Stream<T>` is a linear
-  resource, an abandoned stream does not compile
-  (`examples/stream_abandoned.vyrn`), and release runs on normal end, `break` and
-  early `return`. `std/stream` ships `map`, `filter`, `take` and `merge`;
-  `unfold` and `channel` are **refused for now** — they need a producer the eager
-  representation cannot hold, see "As landed — M2". M3–M4 unstarted; **M4
-  additionally depends on RFC-0074, which has no implementation at all.** One
-  claim in this document is now known false — see "As landed — M1" on the trap
-  row.
+- **Status:** **M1, M2 and M2b shipped** — `Stream<T>` is a linear resource, an
+  abandoned stream does not compile (`examples/stream_abandoned.vyrn`), release
+  runs on normal end, `break` and early `return`, and since M2b a stream is a
+  PRODUCER rather than a buffer: `take(unfold(..), n)` over a feed with no end
+  runs the step n + 1 times (`examples/streamunfold.vyrn`). `std/stream` ships
+  `unfold`, `map`, `filter`, `take` and `merge`; `channel` and arrival-order
+  `merge` stay **refused**, and not for want of a representation — see "As
+  landed — M2". M3–M4 unstarted; **M4 additionally depends on RFC-0074, which
+  has no implementation at all.** One claim in this document is known false —
+  see "As landed — M1" on the trap row.
 - **Depends on:** RFC-0074 (`sse` / `ws` projections — the transports that
   consume streams), RFC-0072 (audience, derived RPC), RFC-0037 (stored closures
   / defunctionalization — the producer state below), RFC-0060 (`break` /
@@ -225,10 +226,48 @@ inherited.
   **Shipped in part** — four of the seven; `unfold` and `channel` are the
   representation change M1 did not make, and `merge` shipped as sequence
   interleave. See "As landed — M2".
+- **M2b — the pull representation.** `Stream<T>` stops being a buffer.
+  **Shipped** — the four deliverables M2's price list itemised, plus `unfold`.
+  See "As landed — M2b".
 - **M3 — cancellation + conformance.** The normalized signal; the conformance
   suite; native and wasm adapters passing it.
 - **M4 — transports.** `sse` and `ws` projections; resumability via seed;
   the raw-`EventSource` completion test; a live tail in `examples/bin`.
+  (RFC-0074 M3 names the same work. One of the two should give it up when it is
+  built; they are the same adapters and the same evidence.)
+
+### M2b — the pull representation
+
+**What forced it.** RFC-0074 M3 spells `sse("/", tail).retryAfter(3000)` where
+`tail` yields a live feed. A `Stream<T>` is `Array<T>`'s three words, so that
+call materialises the entire feed before the first byte reaches the client —
+which is `#6156`, the incident this RFC quotes, arriving through the library
+written to prevent it. The eager representation was the right M1 decision and it
+is now the thing standing between this RFC and its own transports milestone.
+
+**The deliverables are the price list**, already itemised above and repeated
+here as work: `Stream<T>` becomes a tagged union across the interpreter, the
+LLVM emitter and the direct wasm backend; `fromArray` stops emitting nothing and
+`from_array_emits_no_instruction` is **deleted rather than adjusted**; `close`
+becomes variant-aware and M1's four release-path pins are re-counted in the IR;
+`for … in` over a stream stops sharing `direct.rs`'s indexed-array arm and
+becomes a `next`-until-`Done` loop. The mechanism is RFC-0037's: defunctionalise
+the producer into a closed enum with one variant per `unfold` site and make
+`next` an `@dispatch` match, which is how the seed type `S` gets hidden without
+an existential.
+
+**The pin is a measurement, not a shape.** An unbounded producer consumed by
+`take(n)` must allocate O(n), not O(feed) — and the eager version passes any
+assertion about the *values* while failing that one. Something that cannot
+terminate under the old representation is the only honest evidence, so the
+example must be a producer with no end rather than a large finite one.
+
+**The alternative, and why not.** `sse` could take a procedure the runtime calls
+once per event, and then no representation changes at all. It is refused because
+each adapter would hand-roll its own cleanup and its own disconnect handling —
+the two things `Stream<T>` exists to supply once. A second transport would write
+them a second time, differently, which is the shape of every bug M1's linearity
+was built to make unspellable.
 
 ## As landed — M1
 
@@ -390,6 +429,130 @@ One diagnostic changed. A generic producer returns `Stream<U>`, and quoting that
 at `let m = map(feed(), double)` names a type parameter the program never wrote;
 the pass has no types, so it now says plain `Stream`, which is what it already
 said for `fromArray`.
+
+## As landed — M2b
+
+The four deliverables landed as priced, `unfold` joined `std/stream`, and
+`examples/streamunfold.vyrn` is the three-engine evidence. What the design got
+wrong is one thing, and it is the central one.
+
+**The seed type is not hidden by defunctionalizing the producer. It is hidden by
+not having one.** This document says the mechanism is RFC-0037's — "one variant
+per `unfold` site", `next` an `@dispatch` match — and that is right about the
+machine and wrong about who builds it. RFC-0037 already synthesizes one closed
+enum per *signature*, and a step function IS a stored fn value, so the site table
+existed before this milestone started and no new one was written. What did not
+exist was a way to make that signature independent of `S`, and that is the whole
+problem: a stream dispatches through its step's signature, so an `S` in the
+signature is an `S` in `Stream<T>` by another route. The RFC's spelling —
+`unfold(seed, |s| Next(v, s'))` — needs a `Step<T, S>` whose layout depends on
+`S`, which is the same wall one level down.
+
+What actually erased it: **the cursor is a `Ref<Int64>` and the step answers
+`Option<T>`.** A `Ref<S>` is two words for every `S`, and pinning it at `Int64`
+makes `fn(Ref<Int64>) -> Option<T>` a function of the element type alone —
+which is exactly the property the dispatcher needs. It also costs no new type:
+`Option` and `Ref` are builtins every walk, every layout and every engine
+already handles, so the "sweep every generic walk" lesson M2 recorded was not
+paid a second time. The producer is spelled
+
+```vyrn
+fn tail(c: Ref<Int64>) -> Option<Paste> {
+    match store.after(get(c)) {
+        Some(p) => { set(c, p.created) return Some(p) }
+        None => return None
+    }
+}
+… unfold(req.since, tail)
+```
+
+which threads the cursor exactly as `Next(p, p.created)` would, and keeps the
+resumability property intact: the seed IS the resume token. The limit is real
+and stated — producer state that is not one integer goes in a second cell the
+step closes over, since RFC-0037 captures are by value and a `Ref` handle copies
+fine. `unfold` is a three-line generic in `std/stream`; the builtin under it is
+`fromStep`, and the split is load-bearing rather than cosmetic: the builtin
+chain has no access to `check_fn_arg`, so a builtin taking a `fn` argument
+cannot type a lambda literal. The wrapper gets that for free from the ordinary
+RFC-0023 higher-order path.
+
+**`Stream<T>` is six words, overlaid, not a union of the widest variant.**
+`{ ptr data, i64 len, i64 tag, i64 pay, i64 cur, i64 gen }`; a negative `tag`
+means a buffer and `cur` is its read cursor, a non-negative one means a producer
+and `tag`/`pay` ARE the fn value while `cur`/`gen` ARE the cursor cell. Two
+things about that ordering are deliberate. The pairs are adjacent and 8-aligned,
+so `&s + 16` and `&s + 32` are a `{ i64, i64 }` fn value and a `{ i64, i64 }`
+`Ref` with nothing to reassemble — both backends load them whole. And the
+alternative, boxing the producer's state, would have added a malloc to every
+`unfold` and an indirection to every `next` to save two words on a value that
+lives in a frame slot.
+
+**`close` did not need a branch at the call site. It needed a runtime
+function.** The branch itself is trivial; the problem is where drops are emitted.
+`emit_drop` runs mid-block, immediately before an early `ret`, and M1's pin says
+the release is *in the block the `ret` terminates* — emitting a branch there
+would have split that block and made the pin's own claim untestable. So the
+release is one call to `@__vyrn_stream_close`, which branches inside itself. Two
+consequences worth recording: `RUNTIME_FREES` went 2 → 4 (the helper holds one
+`free` per variant), and every stream release site is now countable by name
+rather than by counting `free`s, which is strictly the better pin.
+
+**The re-counted release-path pins, against M1's and M2's numbers.** M1 counted
+`free`s; the count is now `@__vyrn_stream_close` calls, and the number of `free`s
+at the call site is zero — a stream is no longer reclaimable as an array,
+because which of the two producers it holds is not knowable there.
+
+| pin | M1/M2 counted | M2b counts |
+|---|---|---|
+| `for … in`, normal exit | 1 free, in `fend` | 1 close, in `fend` |
+| `for … in`, `break` | 1 free | 1 close, and `break` still branches to it |
+| `for … in`, early `return` | 2 frees | 2 closes |
+| `close(s)` | 1 free | 1 close |
+| combinator chain | 2 frees | 2 closes |
+| chain + `break` / early `return` | 2 / 3 frees | 2 / 3 closes |
+
+The numbers did not move. Only what a release *is* moved, which is the outcome
+worth having: the release paths were the part M1 got right.
+
+**`from_array_emits_no_instruction` is deleted rather than adjusted**, as this
+document asked. `fromArray` emits six `insertvalue`s now. Its claim — that
+`Stream<T>` and `Array<T>` lower identically — is simply not true any more, and
+a weakened version of it ("emits few instructions") would have asserted
+something nobody chose.
+
+**The measurement, which is the milestone.** `examples/streamunfold.vyrn`'s
+`naturals` never answers `None`. `cost(n)` takes `n` from it and reports how
+many times the step ran: **6 for n = 5, 1001 for n = 1000, 20001 for
+n = 20000** — n + 1 every time, the extra being the element `take` reads before
+its `break` fires, and the allocation is `take`'s output array, so it is n too.
+Under M1's representation there is no number here; there is a program that does
+not terminate. The same file runs `cycles(10000)` — RFC-0075's own acceptance
+row — and that row turns out to be *stronger* than this document claims:
+cursor cells come from a slab of 65536 on all three engines, so a `close` that
+failed to release would not merely hold memory above baseline, it would trap on
+the 65537th acquisition. The interpreter's own test runs 100 000 of them.
+
+Three smaller things, stated so they are not mistaken for coverage.
+
+- **A dead dispatcher is emitted for any program containing a stream**, even one
+  that only ever calls `fromArray`: the loop reserves the step signature's
+  dispatcher unconditionally, and with no registered variants its body is the
+  defensive trap alone. Ten lines, unreachable, and removing it would mean
+  deciding at loop-emission time whether any `fromStep` exists anywhere in the
+  program — a whole-program question asked from inside one function body.
+- **`merge` with an endless side is now a hang** rather than something the
+  language cannot spell. M2 recorded "nothing in the language can build an
+  endless source yet" as what merge-by-interleave loses; something can now, and
+  the answer is `take` on the endless side first. A merge that stops on its own
+  needs both sides to.
+- **The direct wasm backend still reclaims nothing for a buffer stream**, which
+  is M1's note unchanged — its `malloc` is a bump pointer. The cursor cell is
+  the exception and the reason `close` grew a real body there: the slab is not
+  the bump heap, and it is finite.
+
+`channel` is unchanged by any of this. It is push-shaped, and the representation
+was never what stood in its way — this RFC adds no concurrency and RFC-0013
+leaves the loop to the host, so there is still no producer to push.
 
 ## Acceptance
 

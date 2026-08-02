@@ -191,10 +191,11 @@ pub const RESERVED: &[&str] = &[
     "assertEq",
     "blackBox",
     "panic",
-    // RFC-0075: the only two ways to make and unmake a `Stream<T>`. Reserved for
-    // the reason every other builtin here is — they are dispatched before user
-    // functions, so a user `fn close` would be silently unreachable.
+    // RFC-0075: the only three ways to make and unmake a `Stream<T>`. Reserved
+    // for the reason every other builtin here is — they are dispatched before
+    // user functions, so a user `fn close` would be silently unreachable.
     "fromArray",
+    "fromStep",
     "close",
     "Int",
     "Int64",
@@ -5526,11 +5527,11 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Unit);
         }
-        // RFC-0075 M1. `fromArray(xs)` is the whole producer set for now: it hands
-        // the array's buffer to a `Stream<T>`, which is the same three words, so
-        // the call is a move and emits nothing. `close(s)` is the explicit release.
-        // Both are builtins because neither can be written in Vyrn — there is no
-        // other way to make or unmake a `Stream`.
+        // RFC-0075. `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
+        // `fromStep(seed, f)` (M2b) hands over a producer instead; `close(s)` is
+        // the explicit release for either. All three are builtins because none
+        // can be written in Vyrn — there is no other way to make or unmake a
+        // `Stream`.
         if name == "fromArray" {
             if args.len() != 1 {
                 return Err(format!(
@@ -5546,6 +5547,55 @@ impl<'a> Checker<'a> {
             let Type::Array(inner) = at else {
                 return Err(format!(
                     "line {line}: `fromArray` needs an `Array<T>`, found {at}"
+                ));
+            };
+            return Ok(Type::Stream(inner));
+        }
+        // RFC-0075 M2b. `fromStep(seed, step)` is the pull producer: the stream
+        // owns a cursor cell holding `seed`, and every `next` hands that cell to
+        // `step`, which reads it, writes the next cursor into it, and answers
+        // `Some(v)` or `None`. The step runs when the consumer asks and never
+        // before, so `take(n)` over an endless producer allocates n.
+        //
+        // The cursor is a `Ref<Int64>` rather than the seed type `S` of the
+        // RFC's `unfold(seed, |s| Next(v, s'))` sketch, and that is the whole
+        // reason this fits: a `Ref<S>` is two words for every `S`, but the
+        // dispatcher a stream calls is keyed by the step's SIGNATURE, so `S`
+        // showing up there would put it back in `Stream<T>`'s type. Fixing it at
+        // `Int64` makes the signature a function of `T` alone. Richer producer
+        // state is a second cell the step closes over.
+        if name == "fromStep" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `fromStep` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let st = self.expr(&args[0], scope, Some(&Type::Int), fn_ret)?;
+            let st = self.base(&st);
+            if matches!(st, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if st != Type::Int {
+                return Err(format!(
+                    "line {line}: `fromStep` needs an `Int64` seed, found {st}"
+                ));
+            }
+            let ft = self.expr(&args[1], scope, None, fn_ret)?;
+            let want = "fn(Ref<Int64>) -> Option<T>";
+            let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
+                return Err(format!(
+                    "line {line}: `fromStep` needs a `{want}` step, found {ft}"
+                ));
+            };
+            if ps.len() != 1 || self.base(&ps[0]) != Type::Ref(Box::new(Type::Int)) {
+                return Err(format!(
+                    "line {line}: `fromStep` needs a `{want}` step, found {ft}"
+                ));
+            }
+            let Type::Option(inner) = self.base(&ret) else {
+                return Err(format!(
+                    "line {line}: `fromStep` needs a `{want}` step, found {ft}"
                 ));
             };
             return Ok(Type::Stream(inner));
