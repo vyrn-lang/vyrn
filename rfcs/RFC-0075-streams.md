@@ -312,6 +312,39 @@ its source any number of times to answer once, so "one `next` in, one `next`
 out" stops being the shape, and the conformance row about a release running
 before the next element would be produced needs re-reading against it.
 
+**The shape, and the one open question.** A wrapper needs its source (six words)
+and its function (two) and has six to put them in, so it cannot hold them
+inline. But it does not have to: M2b's producer variant already reaches its
+state indirectly — `cur`/`gen` are a handle into the cursor slab. **A wrapper's
+state goes in a slab slot the same way**, and the wrapper is then an ordinary
+producer whose synthesised step reads the slot, asks the source, and applies the
+function. `take` becomes lazy by the same move with a counter beside the source,
+which also retires the "`take` escapes because it `break`s" special case.
+
+The open question is that slot's lifetime, and it is the milestone's real
+content: **`close` on a wrapper must release the source, exactly once, on every
+path M1 counts.** A chain of three combinators over one producer is four streams
+and one release each, and the number is countable in the IR the way M2b's were.
+Get that wrong in the direction of releasing twice and it is a double free; in
+the other direction it is `#6156` with extra steps.
+
+The alternative is to box the wrapper's state, which trades the slab's fixed
+65 536 for a malloc per combinator application. It is worth pricing rather than
+assuming — but note that the slab's ceiling is what makes a missed release
+*trap* instead of merely growing, which is why M2b's cycle row came out stronger
+than this RFC asked for. A malloc would give that up.
+
+**What must not happen** is a lazy `map` that quietly keeps the eager one for
+buffer sources. Two implementations of one combinator, chosen by a runtime tag,
+is the unreferenced multiplicity this project has repeatedly grown a divergence
+from. One `map`, whatever it costs a buffer source.
+
+**The pins.** `take(map(unfold(endless), f), n)` returns, and asks the source
+exactly n + 1 times — the same relation M2b pinned, now through a wrapper.
+`filter` over an endless source with a predicate that admits one in k asks
+roughly kn. Both are numbers rather than shapes, for the reason M2b's was: the
+eager version passes every assertion about the values.
+
 ### M2b — the pull representation
 
 **What forced it.** RFC-0074 M3 spells `sse("/", tail).retryAfter(3000)` where
