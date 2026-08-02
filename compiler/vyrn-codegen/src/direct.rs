@@ -1018,6 +1018,28 @@ enum Place {
     Static(u32),
 }
 
+/// A stream's step signature (RFC-0075 M2b), which is a function of the ELEMENT
+/// type and nothing else — the cursor is a `Ref<Int64>` precisely so that it is.
+/// Both the construction site and the loop that dispatches through it derive the
+/// signature from here, because a stored `fn` value is keyed by its signature and
+/// two spellings of one type would be two dispatchers.
+fn stream_step_sig(elem: &Type) -> Type {
+    Type::Fn(
+        vec![Type::Ref(Box::new(Type::Int))],
+        Box::new(Type::Option(Box::new(elem.clone()))),
+    )
+}
+
+/// What a release frame entry reclaims (RFC-0075 M2b added the second one).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Rel {
+    /// A `Ref<T>` binding — check the generation, hand the slot back.
+    Cell,
+    /// A `Stream<T>` — nothing if it is a buffer (this backend's allocator never
+    /// frees), its cursor cell if it is a producer.
+    Stream,
+}
+
 impl Place {
     /// Push the address `off` bytes into this place, or `None` for a wasm local —
     /// the one place with no address at all, which is exactly why a scalar passed
@@ -1087,10 +1109,12 @@ struct Fn_<'a> {
     /// followed by the reads that consume it, so one pair suffices however
     /// deeply expressions nest.
     scratch: HashMap<(ValType, u8), u32>,
-    /// This function's `ReleaseRef` bindings, one frame per open block, released
-    /// on the block's exit — innermost first, newest first, the order the textual
-    /// backend's `drop_stack` uses.
-    releases: Vec<Vec<Place>>,
+    /// This function's releasable bindings, one frame per open block, released on
+    /// the block's exit — innermost first, newest first, the order the textual
+    /// backend's `drop_stack` uses. A `Ref` releases its cell; a `Stream`
+    /// (RFC-0075 M2b) releases the cursor cell it owns IF it holds a producer
+    /// rather than a buffer, which is a runtime tag rather than a static fact.
+    releases: Vec<Vec<(Place, Rel)>>,
     /// Lexical `region` nesting depth within this body, so an exit edge knows how
     /// many arena scopes it is leaving. The runtime counter is dynamic (a callee's
     /// region nests inside its caller's); this is only the part one body can see,
@@ -1511,10 +1535,14 @@ impl Fn_<'_> {
     /// enclosing [`Fn_::block`] still emits its own copy, which lands after the
     /// branch and is therefore unreachable rather than a second release.
     fn emit_releases_above(&mut self, b: &mut Frame, boundary: usize) -> Result<(), String> {
-        let frames: Vec<Vec<Place>> = self.releases[boundary..].iter().rev().cloned().collect();
+        let frames: Vec<Vec<(Place, Rel)>> =
+            self.releases[boundary..].iter().rev().cloned().collect();
         for frame in frames {
-            for p in frame.into_iter().rev() {
-                self.emit_release(b, p, 0)?;
+            for (p, k) in frame.into_iter().rev() {
+                match k {
+                    Rel::Cell => self.emit_release(b, p, 0)?,
+                    Rel::Stream => self.stream_release(b, p, 0)?,
+                }
             }
         }
         Ok(())
@@ -1671,7 +1699,10 @@ impl Fn_<'_> {
                 // the same key, so the two cannot disagree about which `let` owns
                 // a cell.
                 if self.drops.get(&(s as *const Stmt as usize)) == Some(&DropKind::ReleaseRef) {
-                    self.releases.last_mut().expect("a `let` outside any block").push(place);
+                    self.releases
+                        .last_mut()
+                        .expect("a `let` outside any block")
+                        .push((place, Rel::Cell));
                 }
             }
             Stmt::Assign { name, value, line } => {
@@ -1850,6 +1881,10 @@ impl Fn_<'_> {
                 // a `continue` steps the index exactly like falling off the end
                 // does. Branching to the loop instead would spin on one element.
                 let it = self.expr(m, b, iter)?;
+                // RFC-0075 M2b: a stream is pulled, not indexed.
+                if let Type::Stream(inner) = self.cx.resolve(&it) {
+                    return self.for_stream(m, b, var, body, &inner, *line);
+                }
                 let w = self.walk(b, &it, *line)?;
                 let i = b.local(ValType::I64);
                 b.ins(&Instruction::I64Const(0));
@@ -3136,6 +3171,19 @@ impl Fn_<'_> {
                         other => {
                             return unsupported(&format!("`fromArray` of `{other}`"), line)
                         }
+                    }
+                }
+                // The element type is the step's, not the seed's — the seed is
+                // always `Int64` (RFC-0075 M2b).
+                "fromStep" if args.len() == 2 => {
+                    match self.cx.resolve(&self.peek(&args[1], line)?) {
+                        Type::Fn(_, r) => match self.cx.resolve(&r) {
+                            Type::Option(i) => Type::Stream(i),
+                            other => {
+                                return unsupported(&format!("a step returning `{other}`"), line)
+                            }
+                        },
+                        other => return unsupported(&format!("`fromStep` of `{other}`"), line),
                     }
                 }
                 "close" => Type::Unit,
@@ -4657,24 +4705,31 @@ impl Fn_<'_> {
                 let aty = Type::SmallArray(inner.clone(), n);
                 return self.sa_method(m, b, name, args, &aty, &inner, n, line);
             }
-            // RFC-0075. `fromArray` is a retype of the same aggregate — the value
-            // is already on the stack in exactly the right shape. `close` drops
-            // it, which reclaims nothing here for the reason `region_exit`
-            // reclaims nothing and `Stmt::Drop` of an array reclaims nothing: this
-            // backend's `malloc` is a bump pointer that never frees. That is the
-            // pre-existing property showing through, not a hole `close` opened —
-            // and it is unobservable, since a released stream cannot be named
-            // again on any engine.
+            // RFC-0075 M2b. `fromArray` is no longer a retype: a stream is a
+            // six-word header now and the array's three words go into it, with
+            // the read cursor at 0 and the producer tag at -1.
             "fromArray" if args.len() == 1 => {
                 let got = self.expr(m, b, &args[0])?;
-                return match self.cx.resolve(&got) {
-                    Type::Array(i) => Ok(Type::Stream(i)),
-                    other => unsupported(&format!("`fromArray` of `{other}`"), line),
+                let inner = match self.cx.resolve(&got) {
+                    Type::Array(i) => *i,
+                    other => return unsupported(&format!("`fromArray` of `{other}`"), line),
                 };
+                return self.stream_from_array(b, &inner, line);
             }
+            "fromStep" if args.len() == 2 => return self.stream_from_step(m, b, args, line),
+            // `close` reclaims what this backend CAN reclaim. Its `malloc` is a
+            // bump pointer that never frees, so a buffer stream's teardown is
+            // still nothing — but a stepped one owns a cell, and cells come from
+            // a fixed slab of 65536 that a leak would exhaust. Which of the two
+            // it is, is the tag.
             "close" if args.len() == 1 => {
-                self.expr(m, b, &args[0])?;
-                b.ins(&Instruction::Drop);
+                let got = self.expr(m, b, &args[0])?;
+                if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
+                    return unsupported(&format!("`close` of `{got}`"), line);
+                }
+                let s = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(s));
+                self.stream_release(b, Place::Local(s), line)?;
                 return Ok(Type::Unit);
             }
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
@@ -5948,6 +6003,315 @@ impl Fn_<'_> {
         Ok(self.layout_of(elem, line)?.size)
     }
 
+    // ---- RFC-0075 M2b: `Stream<T>` as a producer ---------------------------
+
+    /// The six-word header, whatever the element type — the layout is a function
+    /// of the SHAPE, and every stream shares it.
+    fn stream_layout(&self, line: usize) -> Result<Layout, String> {
+        self.layout_of(&Type::Stream(Box::new(Type::Int)), line)
+    }
+
+    /// `fromArray(xs)`: the array's three words into a buffer-tagged header.
+    fn stream_from_array(
+        &mut self,
+        b: &mut Frame,
+        inner: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let arr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(arr));
+        let al = self.layout_of(&Type::Array(Box::new(inner.clone())), line)?;
+        let sl = self.stream_layout(line)?;
+        let off = b.alloc(sl.size, sl.align);
+        b.slot(off + sl.fields[0]);
+        b.ins(&Instruction::LocalGet(arr));
+        b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + sl.fields[1]);
+        b.ins(&Instruction::LocalGet(arr));
+        b.ins(&Instruction::I64Load(at(al.fields[1])));
+        b.ins(&Instruction::I64Store(word8()));
+        // tag = -1 (a buffer, for the rest of this stream's life), and the three
+        // words a buffer does not use.
+        for (i, v) in [(2usize, -1i64), (3, 0), (4, 0), (5, 0)] {
+            b.slot(off + sl.fields[i]);
+            b.ins(&Instruction::I64Const(v));
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(Type::Stream(Box::new(inner.clone())))
+    }
+
+    /// `fromStep(seed, step)`: the step's two words and the cursor cell's two,
+    /// each written straight into the pair of header fields that IS that value.
+    fn stream_from_step(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        // The step first, because its signature names the element type.
+        let fty = self.expr(m, b, &args[1])?;
+        let fv = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(fv));
+        let sig = self.cx.resolve(&fty);
+        let elem = match &sig {
+            Type::Fn(_, r) => match self.cx.resolve(r) {
+                Type::Option(i) => *i,
+                other => return unsupported(&format!("a step returning `{other}`"), line),
+            },
+            other => return unsupported(&format!("`fromStep` of `{other}`"), line),
+        };
+        // The loop reconstructs this signature from the element type alone, so a
+        // step registered under any other spelling would dispatch through a
+        // table it is not in. Refuse rather than miscompile.
+        if sig != stream_step_sig(&elem) {
+            return unsupported(&format!("a step of type `{sig}`"), line);
+        }
+        let Repr::Agg(fl) = self.cx.repr(&sig, line)? else {
+            return unsupported("a step value that is not an aggregate", line);
+        };
+        let sl = self.stream_layout(line)?;
+        let off = b.alloc(sl.size, sl.align);
+        b.slot(off + sl.fields[0]);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + sl.fields[1]);
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + sl.fields[2]);
+        b.ins(&Instruction::LocalGet(fv));
+        b.ins(&Instruction::I32Const(fl.size as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        // `cell_new(dest, payload)` writes `{ slot, generation }` at `dest`, and
+        // fields 4 and 5 are adjacent and 8-aligned, so `dest` is that pair.
+        b.slot(off + sl.fields[4]);
+        self.expr_as(m, b, &args[0], &Type::Int)?;
+        self.box_value(b, &Type::Int, line)?;
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::Call(self.cx.rt.cell_new));
+        b.slot(off);
+        Ok(Type::Stream(Box::new(elem)))
+    }
+
+    /// A stream's release. A buffer's is nothing — this backend's allocator is a
+    /// bump pointer that never frees, exactly as for `Stmt::Drop` of an array —
+    /// but a producer owns a cursor cell, and a cell is a slot in a slab of
+    /// 65536 that a leak WOULD exhaust. So the branch is real here even though
+    /// half of it is empty.
+    fn stream_release(
+        &mut self,
+        b: &mut Frame,
+        place: Place,
+        line: usize,
+    ) -> Result<(), String> {
+        // A stream is an aggregate, so a `Place::Local` holding one holds its
+        // ADDRESS — the opposite of what it means for a scalar, and the reason
+        // this does not just call `place.addr`.
+        if let Place::Local(a) = place {
+            return self.stream_release_at(b, a, line);
+        }
+        let a = b.local(ValType::I32);
+        place
+            .addr(b, 0)
+            .ok_or_else(|| gap("a stream with no address", line))?;
+        b.ins(&Instruction::LocalSet(a));
+        self.stream_release_at(b, a, line)
+    }
+
+    fn stream_release_at(&mut self, b: &mut Frame, a: u32, line: usize) -> Result<(), String> {
+        let sl = self.stream_layout(line)?;
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I64Load(at(sl.fields[2])));
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64GeS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I64Load(at(sl.fields[4])));
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I64Load(at(sl.fields[5])));
+        b.ins(&Instruction::Call(self.cx.rt.cell_addr));
+        b.ins(&Instruction::Drop);
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I64Load(at(sl.fields[4])));
+        b.ins(&Instruction::Call(self.cx.rt.cell_release));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        Ok(())
+    }
+
+    /// `for x in <stream>` — the pull loop.
+    ///
+    /// One iteration asks the stream for an element and gets a yes/no back in
+    /// `has`; the two producers answer differently and nothing after the join
+    /// knows which one did. Neither arm branches OUT of itself, which is what
+    /// keeps `self.depth` — and therefore every `break` in the body — honest.
+    fn for_stream(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        var: &str,
+        body: &Block,
+        elem: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        let sl = self.stream_layout(line)?;
+        let s = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(s));
+        let r = self.cx.repr(elem, line)?;
+        let place = self.place_for(b, &r, line)?;
+        let has = b.local(ValType::I32);
+        let stride = self.stride(elem, line)?;
+
+        let brk = self.depth;
+        b.ins(&Instruction::Block(BlockType::Empty));
+        self.depth += 1;
+        let top = self.depth;
+        b.ins(&Instruction::Loop(BlockType::Empty));
+        self.depth += 1;
+
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::LocalSet(has));
+        // Which producer? A negative tag is a buffer.
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Load(at(sl.fields[2])));
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64LtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+
+        // Buffer: cursor < len yields data[cursor] and steps the cursor.
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Load(at(sl.fields[4])));
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Load(at(sl.fields[1])));
+        b.ins(&Instruction::I64LtU);
+        b.ins(&Instruction::If(BlockType::Empty));
+        let addr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Load(at(sl.fields[4])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride as i32));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalSet(addr));
+        match (place, &r) {
+            (Place::Local(l), _) => {
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&load_of(&self.cx.ll(elem), 0, self.cx.signed(elem)));
+                b.ins(&Instruction::LocalSet(l));
+            }
+            (Place::Slot(off), Repr::Agg(el)) => {
+                b.slot(off);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I32Const(el.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            _ => return unsupported("a stream of Unit", line),
+        }
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Load(at(sl.fields[4])));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(sl.fields[4])));
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::LocalSet(has));
+        b.ins(&Instruction::End);
+
+        b.ins(&Instruction::Else);
+
+        // Producer: a stream that ended stays ended, so `len` latches at 1 and
+        // the step is never called again.
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Load(at(sl.fields[1])));
+        b.ins(&Instruction::I64Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        let opt = Type::Option(Box::new(elem.clone()));
+        let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
+            return unsupported("an Option that is not an aggregate", line);
+        };
+        let dsig = self.dispatcher(m, &stream_step_sig(elem), line)?;
+        let ooff = b.alloc(ol.size, ol.align);
+        b.slot(ooff);
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I32Const(sl.fields[2] as i32));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I32Const(sl.fields[4] as i32));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::Call(dsig.index));
+        let oaddr = b.local(ValType::I32);
+        b.slot(ooff);
+        b.ins(&Instruction::LocalSet(oaddr));
+        let sum = Sum::Opt(elem.clone());
+        self.tag_test(b, oaddr, &sum, &Pattern::Some(String::new()), line)?;
+        b.ins(&Instruction::If(BlockType::Empty));
+        let got = self.bind_payload(b, oaddr, &sum, &ol, 0, elem, line)?;
+        match (place, got, &r) {
+            (Place::Local(d), Place::Local(v), _) => {
+                b.ins(&Instruction::LocalGet(v));
+                b.ins(&Instruction::LocalSet(d));
+            }
+            (Place::Slot(d), src, Repr::Agg(el)) => {
+                b.slot(d);
+                src.addr(b, 0).ok_or_else(|| gap("a stream payload in a local", line))?;
+                b.ins(&Instruction::I32Const(el.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            _ => return unsupported("a stream element of this shape", line),
+        }
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::LocalSet(has));
+        b.ins(&Instruction::Else);
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Store(at(sl.fields[1])));
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::End);
+
+        b.ins(&Instruction::End);
+
+        // The join: no element means the loop is over, and the release below is
+        // the one path out that still owns the stream.
+        b.ins(&Instruction::LocalGet(has));
+        b.ins(&Instruction::I32Eqz);
+        let out = self.br_to(brk);
+        b.ins(&Instruction::BrIf(out));
+
+        let mark = self.scope.len();
+        self.scope.push((var.to_string(), place, elem.clone()));
+        // The stream's own release frame, so a `break` or an early `return` out
+        // of the body leaves through it — `emit_releases_above` walks it.
+        self.releases.push(vec![(Place::Local(s), Rel::Stream)]);
+        let cont = self.depth;
+        b.ins(&Instruction::Block(BlockType::Empty));
+        self.depth += 1;
+        // The boundary sits ABOVE the stream's frame: a `break` leaves the loop
+        // through `fend`, which releases it, so releasing it here as well would
+        // be twice. An early `return` releases from 0 and so does include it.
+        self.loops.push((brk, cont, self.releases.len(), self.region_depth));
+        self.block(m, b, body)?;
+        self.loops.pop();
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        self.releases.pop();
+        self.scope.truncate(mark);
+
+        let back = self.br_to(top);
+        b.ins(&Instruction::Br(back));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+
+        // Normal end and `break` both land here.
+        self.stream_release_at(b, s, line)
+    }
+
     /// Take the indexable value on the stack apart into locals.
     ///
     /// Fresh locals rather than scratch: a [`Walk`] outlives the expression that
@@ -5958,10 +6322,11 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalSet(addr));
         let len = b.local(ValType::I64);
         Ok(match self.cx.resolve(ty) {
-            // A `Stream<T>` walks exactly as its `Array<T>` does (RFC-0075): same
-            // three words, same stride, and the loop OWNS it — the linearity that
-            // makes the two types different was settled in movecheck.
-            Type::Array(inner) | Type::Stream(inner) => {
+            // A `Stream<T>` used to share this arm (RFC-0075 M1) and does not any
+            // more: it is a producer now, so it is pulled by `for_stream` rather
+            // than indexed, and it reaches none of `walk`'s other six callers —
+            // nothing indexes, pops or slices a stream.
+            Type::Array(inner) => {
                 let l = self.layout_of(ty, line)?;
                 let data = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(addr));

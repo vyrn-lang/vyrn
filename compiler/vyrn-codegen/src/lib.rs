@@ -207,6 +207,29 @@ entry:
   ret void
 }
 
+define void @__vyrn_stream_close(ptr %s) {
+entry:
+  %tp = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 2
+  %tag = load i64, ptr %tp
+  %isbuf = icmp slt i64 %tag, 0
+  br i1 %isbuf, label %buf, label %stp
+buf:
+  %dp = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 0
+  %d = load ptr, ptr %dp
+  call void @free(ptr %d)
+  ret void
+stp:
+  %sp = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 4
+  %slot = load i64, ptr %sp
+  %gp2 = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 5
+  %gen = load i64, ptr %gp2
+  call void @__vyrn_cell_check(i64 %slot, i64 %gen)
+  %cp = call ptr @__vyrn_cell_ptr(i64 %slot)
+  call void @free(ptr %cp)
+  call void @__vyrn_cell_release_slot(i64 %slot)
+  ret void
+}
+
 ";
 
 /// The strict UTF-8 validator: Björn Höhrmann's DFA over the `@__vyrn_utf8d`
@@ -610,6 +633,22 @@ pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
 
 /// `vyrn_gen.read`'s modes, shared with the host that answers them so the two
 /// spellings of "2 means listDir" are one.
+/// A stream's step signature (RFC-0075 M2b), which is a function of the ELEMENT
+/// type and nothing else — the cursor is a `Ref<Int64>` precisely so that it is.
+/// Both the construction site and the loop that dispatches through it derive the
+/// signature from here, because a stored `fn` value is keyed by its signature and
+/// two spellings of one type would be two dispatchers.
+fn stream_step_sig(elem: &Type) -> Type {
+    Type::Fn(
+        vec![Type::Ref(Box::new(Type::Int))],
+        Box::new(Type::Option(Box::new(elem.clone()))),
+    )
+}
+
+/// A `Stream<T>`'s header (RFC-0075 M2b), spelled once — see `llt_of` for what
+/// each of the six words means under each of the two producer tags.
+const STREAM_LL: &str = "{ ptr, i64, i64, i64, i64, i64 }";
+
 pub const GEN_MODE_READ: i32 = 0;
 pub const GEN_MODE_READ_BYTES: i32 = 1;
 pub const GEN_MODE_LIST: i32 = 2;
@@ -2528,6 +2567,10 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {p})"));
                 self.emit(format!("call void @__vyrn_cell_release_slot(i64 {s})"));
             }
+            DropKind::CloseStream => {
+                // RFC-0075 M2b: one call, and the variant is settled inside it.
+                self.emit(format!("call void @__vyrn_stream_close(ptr {slot})"));
+            }
             DropKind::AfreeArr => {
                 // Auto-afree: free the array's final backing buffer (field 0).
                 let a = self.fresh_tmp();
@@ -2910,14 +2953,20 @@ impl<'a> Gen<'a> {
                 // copied element vector. Both array kinds reduce to (base T*, len).
                 let (av, aty) = self.gen_expr(iter)?;
                 let resolved = self.resolve(&aty);
+                // RFC-0075 M2b: a stream is PULLED. It shared the indexed walk
+                // below while it was a buffer; it is a producer now, and the
+                // difference is the milestone.
+                if let Type::Stream(inner) = &resolved {
+                    let elem = (**inner).clone();
+                    return self.gen_for_stream(var, body, &av, &elem);
+                }
                 // Iterating a String yields each byte as an Int (loaded as i8 and
                 // zero-extended); arrays load their element type directly.
                 let byte_elem = resolved == Type::Str;
                 let elem = match &resolved {
                     Type::Array(inner)
                     | Type::ArrayN(inner, _)
-                    | Type::SmallArray(inner, _)
-                    | Type::Stream(inner) => (**inner).clone(),
+                    | Type::SmallArray(inner, _) => (**inner).clone(),
                     Type::Str => Type::Int,
                     other => return Err(format!("for-loop needs an Array or String, found {other:?}")),
                 };
@@ -2951,20 +3000,6 @@ impl<'a> Gen<'a> {
                         (data, len)
                     }
                 };
-                // RFC-0075: iterating a stream CONSUMES it, so the loop owns the
-                // release. Spill the header to a slot so the same `emit_drop` the
-                // block-exit path uses can reach it, and put that slot in the
-                // loop-variable drop frame — which `emit_all_drops` walks, so an
-                // early `return` from inside the body releases it too. `break`
-                // lands on `end_l`, where the release is emitted below, and the
-                // loop-variable frame sits BELOW `drop_boundary` so
-                // `emit_loop_exit_cleanup` does not free it a second time.
-                let stream_slot = matches!(resolved, Type::Stream(_)).then(|| {
-                    let s = self.fresh_alloca("{ ptr, i64, i64 }");
-                    self.emit(format!("store {{ ptr, i64, i64 }} {av}, ptr {s}"));
-                    s
-                });
-
                 let idx = self.fresh_alloca("i64");
                 self.emit(format!("store i64 0, ptr {idx}"));
                 let cond_l = self.fresh_label("fcond");
@@ -3004,12 +3039,6 @@ impl<'a> Gen<'a> {
                 // stays empty.
                 self.scope.push(Vec::new());
                 self.drop_stack.push(Vec::new());
-                if let Some(s) = &stream_slot {
-                    self.drop_stack
-                        .last_mut()
-                        .unwrap()
-                        .push((s.clone(), DropKind::AfreeArr));
-                }
                 let vslot = self.declare(var, &elem);
                 self.emit(format!("store {ell} {ev}, ptr {vslot}"));
                 // The loop-var frame is already on the stack; `drop_boundary` is
@@ -3041,11 +3070,6 @@ impl<'a> Gen<'a> {
                 self.emit_term(format!("br label %{cond_l}"));
 
                 self.emit_label(&end_l);
-                // Normal end and `break` both land here: run the stream's release
-                // once, on the one path that leaves the loop still owning it.
-                if let Some(s) = &stream_slot {
-                    self.emit_drop(&s.clone(), DropKind::AfreeArr);
-                }
                 Ok(())
             }
             Stmt::Drop { name, .. } => {
@@ -3754,6 +3778,197 @@ impl<'a> Gen<'a> {
             .join(", ");
         self.emit(format!("{res} = phi {ll} {phi}"));
         Ok((res, ty))
+    }
+
+    /// `for x in <stream>` — the pull loop (RFC-0075 M2b).
+    ///
+    /// The shape is `cond → (buffer | step) → body → latch → cond`, and the
+    /// difference from the indexed walk it replaces is that the producer runs
+    /// inside the loop rather than before it. That is what makes `take(n)` over
+    /// an endless feed allocate n: the `break` in `take` leaves through `fend`
+    /// having asked the step n+1 times and no more.
+    ///
+    /// The header is spilled to a slot because both arms WRITE it — the buffer
+    /// arm advances the cursor, the step arm latches the end — and because the
+    /// release then has an address the ordinary drop machinery can reach, which
+    /// is how an early `return` out of the body releases it (M1's arrangement,
+    /// unchanged apart from the kind).
+    fn gen_for_stream(
+        &mut self,
+        var: &str,
+        body: &Block,
+        av: &str,
+        elem: &Type,
+    ) -> Result<(), String> {
+        let ell = self.llt(elem);
+        let sslot = self.fresh_alloca(STREAM_LL);
+        self.emit(format!("store {STREAM_LL} {av}, ptr {sslot}"));
+        // Where each arm parks the element it produced, so the body reads one
+        // place regardless of which arm ran.
+        let stage = self.fresh_alloca(&ell);
+
+        let cond_l = self.fresh_label("fcond");
+        let buf_l = self.fresh_label("fbuf");
+        let step_l = self.fresh_label("fstep");
+        let call_l = self.fresh_label("fcall");
+        let some_l = self.fresh_label("fsome");
+        let yield_l = self.fresh_label("fyield");
+        let ended_l = self.fresh_label("fended");
+        let body_l = self.fresh_label("fbody");
+        let latch_l = self.fresh_label("flatch");
+        let end_l = self.fresh_label("fend");
+
+        let fld = |i: usize| format!("i64 0, i32 {i}");
+        self.emit_term(format!("br label %{cond_l}"));
+
+        // cond: which producer is this? A negative tag is a buffer.
+        self.emit_label(&cond_l);
+        let tp = self.fresh_tmp();
+        let tag = self.fresh_tmp();
+        let isbuf = self.fresh_tmp();
+        self.emit(format!("{tp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(2)));
+        self.emit(format!("{tag} = load i64, ptr {tp}"));
+        self.emit(format!("{isbuf} = icmp slt i64 {tag}, 0"));
+        self.emit_term(format!("br i1 {isbuf}, label %{buf_l}, label %{step_l}"));
+
+        // buffer: cursor < len yields data[cursor] and steps the cursor.
+        self.emit_label(&buf_l);
+        let cp = self.fresh_tmp();
+        let lp = self.fresh_tmp();
+        let i = self.fresh_tmp();
+        let n = self.fresh_tmp();
+        let more = self.fresh_tmp();
+        self.emit(format!("{cp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(4)));
+        self.emit(format!("{lp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(1)));
+        self.emit(format!("{i} = load i64, ptr {cp}"));
+        self.emit(format!("{n} = load i64, ptr {lp}"));
+        self.emit(format!("{more} = icmp ult i64 {i}, {n}"));
+        let take_l = self.fresh_label("fbuftake");
+        self.emit_term(format!("br i1 {more}, label %{take_l}, label %{end_l}"));
+        self.emit_label(&take_l);
+        let dp = self.fresh_tmp();
+        let data = self.fresh_tmp();
+        let ep = self.fresh_tmp();
+        let ev = self.fresh_tmp();
+        let i1 = self.fresh_tmp();
+        self.emit(format!("{dp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(0)));
+        self.emit(format!("{data} = load ptr, ptr {dp}"));
+        self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {i}"));
+        self.emit(format!("{ev} = load {ell}, ptr {ep}"));
+        self.emit(format!("{i1} = add i64 {i}, 1"));
+        self.emit(format!("store i64 {i1}, ptr {cp}"));
+        self.emit(format!("store {ell} {ev}, ptr {stage}"));
+        self.emit_term(format!("br label %{yield_l}"));
+
+        // step: once the producer has said `None` it is never asked again — a
+        // stream that ended stays ended, on every engine.
+        self.emit_label(&step_l);
+        let ep2 = self.fresh_tmp();
+        let over = self.fresh_tmp();
+        let isover = self.fresh_tmp();
+        self.emit(format!("{ep2} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(1)));
+        self.emit(format!("{over} = load i64, ptr {ep2}"));
+        self.emit(format!("{isover} = icmp ne i64 {over}, 0"));
+        self.emit_term(format!("br i1 {isover}, label %{end_l}, label %{call_l}"));
+
+        self.emit_label(&call_l);
+        // `tag`/`pay` and `cur`/`gen` are adjacent 8-aligned pairs, which is why
+        // the fn value and the `Ref` load whole rather than word by word.
+        let fp = self.fresh_tmp();
+        let rp = self.fresh_tmp();
+        let fv = self.fresh_tmp();
+        let rf = self.fresh_tmp();
+        self.emit(format!("{fp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(2)));
+        self.emit(format!("{rp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(4)));
+        self.emit(format!("{fv} = load {{ i64, i64 }}, ptr {fp}"));
+        self.emit(format!("{rf} = load {{ i64, i64 }}, ptr {rp}"));
+        // The dispatcher is keyed on the step's signature, which is a function of
+        // the ELEMENT type alone — the reason the cursor is a `Ref<Int64>`.
+        let sig = self.normalize_sig(&stream_step_sig(elem));
+        let sym = self.fnval_dispatcher_sym(&sig);
+        let optll = self.llt(&Type::Option(Box::new(elem.clone())));
+        let o = self.fresh_tmp();
+        self.emit(format!(
+            "{o} = call {optll} @{sym}({{ i64, i64 }} {fv}, {{ i64, i64 }} {rf})"
+        ));
+        let ot = self.fresh_tmp();
+        self.emit(format!("{ot} = extractvalue {optll} {o}, 0"));
+        self.emit_term(format!("br i1 {ot}, label %{some_l}, label %{ended_l}"));
+        self.emit_label(&some_l);
+        let w0 = self.fresh_tmp();
+        let w1 = self.fresh_tmp();
+        self.emit(format!("{w0} = extractvalue {optll} {o}, 1"));
+        self.emit(format!("{w1} = extractvalue {optll} {o}, 2"));
+        let v = self.decode_payload(&w0, &w1, elem);
+        self.emit(format!("store {ell} {v}, ptr {stage}"));
+        self.emit_term(format!("br label %{yield_l}"));
+
+        self.emit_label(&ended_l);
+        self.emit(format!("store i64 1, ptr {ep2}"));
+        self.emit_term(format!("br label %{end_l}"));
+
+        self.emit_label(&yield_l);
+        self.emit_term(format!("br label %{body_l}"));
+
+        // body: identical to the indexed walk's, including the drop frame that
+        // carries the release out through an early `return`.
+        self.emit_label(&body_l);
+        let staged = self.fresh_tmp();
+        self.emit(format!("{staged} = load {ell}, ptr {stage}"));
+        self.scope.push(Vec::new());
+        self.drop_stack.push(Vec::new());
+        self.drop_stack
+            .last_mut()
+            .unwrap()
+            .push((sslot.clone(), DropKind::CloseStream));
+        let vslot = self.declare(var, elem);
+        self.emit(format!("store {ell} {staged}, ptr {vslot}"));
+        self.loop_ctx.push(LoopCtx {
+            break_label: end_l.clone(),
+            continue_label: latch_l.clone(),
+            drop_boundary: self.drop_stack.len(),
+            region_depth: self.region_depth,
+        });
+        self.gen_block(body)?;
+        self.loop_ctx.pop();
+        self.drop_stack.pop();
+        self.scope.pop();
+        if !self.terminated {
+            self.emit_term(format!("br label %{latch_l}"));
+        }
+
+        self.emit_label(&latch_l);
+        self.emit_term(format!("br label %{cond_l}"));
+
+        // Normal end and `break` both land here, still owning the stream.
+        self.emit_label(&end_l);
+        self.emit_drop(&sslot, DropKind::CloseStream);
+        Ok(())
+    }
+
+    /// Build a `Stream<T>` header value out of its six words (RFC-0075 M2b).
+    /// `data` arrives already typed (`ptr null` or `ptr %t`) because it is the
+    /// one field that is not an `i64`.
+    fn stream_header(
+        &mut self,
+        data: &str,
+        len: &str,
+        tag: &str,
+        pay: &str,
+        cur: &str,
+        gen: &str,
+    ) -> String {
+        let mut cur_v = "undef".to_string();
+        for (i, w) in [data.to_string(), format!("i64 {len}"), format!("i64 {tag}"),
+                       format!("i64 {pay}"), format!("i64 {cur}"), format!("i64 {gen}")]
+            .into_iter()
+            .enumerate()
+        {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = insertvalue {STREAM_LL} {cur_v}, {w}, {i}"));
+            cur_v = t;
+        }
+        cur_v
     }
 
     /// Encode a payload of type `ty` into the single `i64` slot that *enum*
@@ -6893,27 +7108,78 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        // RFC-0075: `close(s)` is the explicit half of the disposal obligation and
-        // `afree(a)` is the same three instructions — the stream's buffer is the
-        // array's. They are separate names because the *types* are separate; when
-        // M2's producer stops being an eager buffer, this is where its teardown
-        // goes and `afree` stays where it is.
-        if name == "afree" || name == "close" {
+        if name == "afree" {
             let (av, _) = self.gen_expr(&args[0])?;
             let data = self.fresh_tmp();
             self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
             self.emit(format!("call void @free(ptr {data})"));
             return Ok((String::new(), Type::Unit));
         }
-        // `fromArray(xs)` moves the array's three words into a `Stream<T>`, which
-        // is the same three words — no instruction at all.
+        // RFC-0075 M2b: `close(s)` is the explicit half of the disposal
+        // obligation, and it is no longer `afree` under another name — which of
+        // the two producers a stream holds is a runtime tag, so the teardown is
+        // the runtime's branch on it.
+        if name == "close" {
+            let (av, _) = self.gen_expr(&args[0])?;
+            let s = self.fresh_alloca(STREAM_LL);
+            self.emit(format!("store {STREAM_LL} {av}, ptr {s}"));
+            self.emit(format!("call void @__vyrn_stream_close(ptr {s})"));
+            return Ok((String::new(), Type::Unit));
+        }
+        // `fromArray(xs)` hands the array's buffer to a stream: the three words
+        // move across, the read cursor starts at 0, and the producer tag is -1,
+        // which is what says "buffer" for the rest of this stream's life.
         if name == "fromArray" {
             let (av, aty) = self.gen_expr(&args[0])?;
             let inner = match self.resolve(&aty) {
                 Type::Array(i) => *i,
                 other => return Err(format!("fromArray of non-Array {other:?}")),
             };
-            return Ok((av, Type::Stream(Box::new(inner))));
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
+            let sv = self.stream_header(&format!("ptr {data}"), &len, "-1", "0", "0", "0");
+            return Ok((sv, Type::Stream(Box::new(inner))));
+        }
+        // `fromStep(seed, step)` (RFC-0075 M2b) is the producer that is not a
+        // buffer: it allocates the cursor cell holding `seed` and parks the step
+        // in the header as an RFC-0037 function value, which is the whole trick —
+        // the step's own closed enum carries the site identity, so nothing about
+        // it has to show up in `Stream<T>`.
+        if name == "fromStep" {
+            let (seed, sty) = self.gen_expr(&args[0])?;
+            let (seed, _) = self.coerce(seed, &sty, &Type::Int)?;
+            let boxed = self.fresh_tmp();
+            self.emit(format!(
+                "{boxed} = call ptr @__vyrn_malloc(i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))"
+            ));
+            self.emit(format!("store i64 {seed}, ptr {boxed}"));
+            let slot = self.fresh_tmp();
+            self.emit(format!("{slot} = call i64 @__vyrn_cell_alloc(ptr {boxed})"));
+            let gen = self.fresh_tmp();
+            self.emit(format!("{gen} = call i64 @__vyrn_cell_getgen(i64 {slot})"));
+            let (fv, fty) = self.gen_expr(&args[1])?;
+            let sig = self.normalize_sig(&fty);
+            let elem = match &sig {
+                Type::Fn(_, r) => match self.resolve(r) {
+                    Type::Option(i) => *i,
+                    other => return Err(format!("fromStep step returns {other:?}")),
+                },
+                other => return Err(format!("fromStep of non-fn {other:?}")),
+            };
+            // The loop rebuilds this signature from the element type alone, so a
+            // step registered under any other spelling would dispatch through a
+            // table it is not in. Refuse rather than miscompile.
+            if sig != self.normalize_sig(&stream_step_sig(&elem)) {
+                return Err(format!("fromStep step of type {sig}"));
+            }
+            let tag = self.fresh_tmp();
+            let pay = self.fresh_tmp();
+            self.emit(format!("{tag} = extractvalue {{ i64, i64 }} {fv}, 0"));
+            self.emit(format!("{pay} = extractvalue {{ i64, i64 }} {fv}, 1"));
+            let sv = self.stream_header("ptr null", "0", &tag, &pay, &slot, &gen);
+            return Ok((sv, Type::Stream(Box::new(elem))));
         }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Loads the `{ptr,len,cap}` header from the binding's slot;
@@ -8746,12 +9012,29 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // (the payload is boxed), so it is a fixed-size handle.
         Type::Ref(_) => "{ i64, i64 }".into(),
         // A growable array is { ptr data, i64 len, i64 cap }.
-        // A `Stream<T>` (RFC-0075) is byte-identical to `Array<T>` here: the
-        // linearity it adds is a *checker* rule, so there is nothing new to lay
-        // out and the array walk, the `afree`, and the wasm column all work on it
-        // unchanged. When M2 replaces `fromArray` with a real state machine this
-        // is the line that changes; nothing in movecheck moves with it.
-        Type::Array(_) | Type::Stream(_) => "{ ptr, i64, i64 }".into(),
+        Type::Array(_) => "{ ptr, i64, i64 }".into(),
+        // A `Stream<T>` (RFC-0075 M2b) is a tagged header over two producers,
+        // and this is the line M2 said would change:
+        //
+        //   { ptr data, i64 len, i64 tag, i64 pay, i64 cur, i64 gen }
+        //
+        // `tag` is the discriminant. Negative means a BUFFER — `data`/`len` are
+        // the array `fromArray` was handed and `cur` is how far the consumer has
+        // read. Non-negative means a STEP: `tag`/`pay` ARE an RFC-0037 function
+        // value, `cur`/`gen` ARE the `Ref<Int64>` cursor cell it is called with,
+        // `len` is 0 until the step answers `None` and 1 after, and `data` is
+        // null.
+        //
+        // The two-word pairs are adjacent and 8-aligned on purpose: `{ i64, i64 }`
+        // is exactly what a fn value and a `Ref` each lower to, so `&s + 16` and
+        // `&s + 32` ARE those values and neither backend has to reassemble one to
+        // make the call.
+        //
+        // Overlaid rather than a union of the widest variant because the two
+        // shapes are 3 and 5 words and a discriminated 6-word header costs less
+        // than a heap box plus an indirection on every `next`. Nothing reads a
+        // field whose variant it has not tested.
+        Type::Stream(_) => "{ ptr, i64, i64, i64, i64, i64 }".into(),
         // A `Map<String, V>` (RFC-0028) is two parallel growable buffers
         // sharing one length/capacity: { ptr keys, ptr values, i64 len,
         // i64 cap }. Keys are `ptr` (String); values are `llt(V)`-stride.
@@ -9810,9 +10093,10 @@ mod tests {
 
     // The always-present runtime contributes exactly RUNTIME_FREES `call void
     // @free` occurrences (one in `__vyrn_region_exit`, one in the
-    // `__vyrn_bytes_dup` NUL path), so an *auto*-free is a free beyond that
+    // `__vyrn_bytes_dup` NUL path, and two in `__vyrn_stream_close` — one per
+    // producer variant, RFC-0075 M2b), so an *auto*-free is a free beyond that
     // baseline.
-    const RUNTIME_FREES: usize = 2;
+    const RUNTIME_FREES: usize = 4;
     fn free_calls(ir: &str) -> usize {
         ir.matches("call void @free(ptr").count()
     }
@@ -9861,19 +10145,31 @@ mod tests {
         &rest[..end]
     }
 
+    /// Every stream release is one call to the variant-aware runtime helper
+    /// (RFC-0075 M2b). Counting THESE rather than `free`s is the re-count M2's
+    /// price list asked for: a buffer stream's `free` now happens inside the
+    /// helper, so a `free` at the call site would mean something had gone back
+    /// to reclaiming a stream as if it were an array.
+    fn stream_closes(ir: &str) -> usize {
+        ir.matches("call void @__vyrn_stream_close(ptr").count()
+    }
+
     #[test]
     fn stream_for_loop_releases_on_normal_exit() {
         let src = format!("{FEED} fn main() -> Int64 {{ for p in feed() {{ print(p) }} return 0 }}");
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(
-            free_calls(&ir),
-            RUNTIME_FREES + 1,
+            stream_closes(&ir),
+            1,
             "the loop should release the stream exactly once: {ir}"
         );
-        // And it must be at the loop's exit block, which is where the zero-element
-        // and the run-to-completion paths both land.
+        // And nothing frees a stream's buffer at the call site any more — which
+        // of the two producers it holds is not knowable there.
+        assert_eq!(free_calls(&ir), RUNTIME_FREES, "{ir}");
+        // The release is at the loop's exit block, which is where the
+        // zero-element, the exhausted-buffer and the `None` paths all land.
         assert!(
-            block_at(&ir, "fend.3").contains("call void @free(ptr"),
+            block_at(&ir, "fend.9").contains("call void @__vyrn_stream_close(ptr"),
             "the release belongs in the loop's end block: {ir}"
         );
     }
@@ -9886,15 +10182,11 @@ mod tests {
         let src =
             format!("{FEED} fn main() -> Int64 {{ for p in feed() {{ print(p) break }} return 0 }}");
         let ir = emit(&check(&src).unwrap()).unwrap();
-        assert_eq!(
-            free_calls(&ir),
-            RUNTIME_FREES + 1,
-            "one release, on the one path out: {ir}"
-        );
-        let end = block_at(&ir, "fend.3");
-        assert!(end.contains("call void @free(ptr"), "{ir}");
+        assert_eq!(stream_closes(&ir), 1, "one release, on the one path out: {ir}");
+        let end = block_at(&ir, "fend.9");
+        assert!(end.contains("call void @__vyrn_stream_close(ptr"), "{ir}");
         assert!(
-            ir.contains("br label %fend.3"),
+            ir.contains("br label %fend.9"),
             "`break` must branch to the releasing block: {ir}"
         );
     }
@@ -9910,13 +10202,15 @@ mod tests {
         );
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(
-            free_calls(&ir),
-            RUNTIME_FREES + 2,
+            stream_closes(&ir),
+            2,
             "the early-return path needs its own release: {ir}"
         );
-        let then = block_at(&ir, "then.4");
+        // The basic block the early `ret` terminates, from its label onward.
+        let upto = &ir[..ir.find("ret i64 7").expect("the early return is in the IR")];
+        let then = &upto[upto.rfind(":\n").expect("a label precedes the early ret")..];
         assert!(
-            then.contains("call void @free(ptr") && then.contains("ret i64 7"),
+            then.contains("call void @__vyrn_stream_close(ptr"),
             "the release must precede the early `ret`: {ir}"
         );
     }
@@ -9926,30 +10220,31 @@ mod tests {
         let src = format!("{FEED} fn main() -> Int64 {{ let s = feed() close(s) return 0 }}");
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(
-            free_calls(&ir),
-            RUNTIME_FREES + 1,
-            "`close` frees the buffer, and nothing frees it a second time: {ir}"
+            stream_closes(&ir),
+            1,
+            "`close` releases it, and nothing releases it a second time: {ir}"
         );
+        assert_eq!(free_calls(&ir), RUNTIME_FREES, "{ir}");
     }
 
     #[test]
-    fn from_array_emits_no_instruction() {
-        // `Stream<T>` and `Array<T>` are the same three words, so producing one is
-        // a move. Pinned by emitting the two producers side by side: byte-identical
-        // bodies, or `llt_of`'s claim that they share a layout has gone stale.
-        let body = |src: &str| {
-            let ir = emit(&check(src).unwrap()).unwrap();
-            let at = ir.find("define { ptr, i64, i64 } @vyrn_feed").unwrap();
-            let rest = &ir[at..];
-            rest[..rest.find("\n}").unwrap()].to_string()
-        };
-        let stream = body(&format!("{FEED} fn main() -> Int64 {{ close(feed()) return 0 }}"));
-        let array = body(
-            "fn feed() -> Array<Int64> { let mut xs: Array<Int64> = array() \
-             xs = push(xs, 1) return xs } \
-             fn main() -> Int64 { afree(feed()) return 0 }",
+    fn a_stepped_stream_calls_its_producer_from_inside_the_loop() {
+        // The milestone in one assertion. `fromStep` builds a producer-tagged
+        // header and the loop dispatches through the step's signature, so the step
+        // runs once per iteration — which is what makes an endless feed a program
+        // rather than a hang. Under M1 there was no call at all: the buffer had to
+        // exist before the loop started.
+        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1)                    return Some(n) }                    fn main() -> Int64 { for v in fromStep(0, tick) { print(v) break } return 0 }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("call i64 @__vyrn_cell_alloc"),
+            "the cursor is a cell the stream owns: {ir}"
         );
-        assert_eq!(stream, array, "fromArray must lower to nothing at all");
+        assert!(
+            block_at(&ir, "fcall.3").contains("call { i1, i64, i64 } @__vyrn_fndispatch_"),
+            "the step must be called from inside the loop: {ir}"
+        );
+        assert_eq!(stream_closes(&ir), 1, "{ir}");
     }
 
     /// RFC-0075 M2's combinator, spelled locally: it takes the obligation in as a
@@ -9969,8 +10264,8 @@ mod tests {
         );
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(
-            free_calls(&ir),
-            RUNTIME_FREES + 2,
+            stream_closes(&ir),
+            2,
             "one release per stream, never two on one path: {ir}"
         );
     }
@@ -9983,7 +10278,7 @@ mod tests {
              {{ print(p) break }} return 0 }}"
         );
         let ir = emit(&check(&src).unwrap()).unwrap();
-        assert_eq!(free_calls(&ir), RUNTIME_FREES + 2, "break path: {ir}");
+        assert_eq!(stream_closes(&ir), 2, "break path: {ir}");
 
         // An early `return` leaves through `emit_all_drops`, so `main` carries a
         // second release — one per exit path, and the early one must precede the
@@ -9994,15 +10289,15 @@ mod tests {
         );
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(
-            free_calls(&ir),
-            RUNTIME_FREES + 3,
+            stream_closes(&ir),
+            3,
             "the early-return path needs its own release: {ir}"
         );
         // The basic block the early `ret` terminates, from its label onward.
         let upto = &ir[..ir.find("ret i64 7").expect("the early return is in the IR")];
         let blk = &upto[upto.rfind(":\n").expect("a label precedes the early ret")..];
         assert!(
-            blk.contains("call void @free(ptr"),
+            blk.contains("call void @__vyrn_stream_close(ptr"),
             "the release must precede the early `ret`: {ir}"
         );
     }
