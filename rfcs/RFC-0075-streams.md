@@ -271,8 +271,8 @@ inherited.
 - **M2c — the combinators are not lazy.** M2b made the *representation* pull,
   and stopped there. `map` and `filter` still drain their source into a buffer,
   so `map(unfold(..), f)` over an endless feed does not return — and `map` over
-  a feed is the first thing anyone writes. `take` escapes only because it
-  `break`s, and `merge` documents its own hang. See below.
+  a feed is the first thing anyone writes. **Shipped** for `map`, `filter` and
+  `take`; `merge` is still eager, for a stated reason. See "As landed — M2c".
 - **M3 — cancellation + conformance.** The normalized signal and the conformance
   suite. **Shipped, and not here**: four of the six rows held after M2b, one is
   struck, and the last came with the transport rather than before it — RFC-0074
@@ -662,6 +662,120 @@ Three smaller things, stated so they are not mistaken for coverage.
 `channel` is unchanged by any of this. It is push-shaped, and the representation
 was never what stood in its way — this RFC adds no concurrency and RFC-0013
 leaves the loop to the host, so there is still no producer to push.
+
+## As landed — M2c
+
+`map`, `filter` and `take` are lazy on all three engines, `examples/streamlazy.vyrn`
+is the evidence, and `merge` is not. Two builtins arrived, `fromWrap` and `pull`,
+and the census went 84 → 86 — the second row is the interesting one, and the
+first thing below.
+
+**A wrapper needed no words at all.** This document says a wrapper "needs its
+source (six words) and its function (two) and has six to put them in", and then
+solves that with a slab slot. The premise is wrong: a wrapper does not need a
+representation of its own, because M2b's producer already has the two things it
+wants. `fromWrap(src, step)` allocates the SAME cursor cell `fromStep` does and
+parks the step in the SAME two header words; the only difference is what the
+cell holds. So a wrapper IS an ordinary producer — `for … in` needed no arm for
+it, the dispatcher no new key, `Stream<T>` no new tag, and the six words are
+still the six words M2b laid out.
+
+What the cell holds is `{ i64 cursor, Stream src }` in one allocation, plus a
+pointer to that second half in a fourth parallel array beside the slab's
+generations, pointers and free list. Three consequences, all of them load-bearing:
+
+- **`take`'s counter is the cursor.** This document imagined "a counter beside
+  the source". It is the cell's first word — the one `fromStep` puts a seed in —
+  so `get(c)`/`set(c, i + 1)` inside `take`'s step are the ORDINARY cell
+  operations, unchanged and unaware. Nothing was added for it.
+- **`pull` needs no new state either.** It is the wrapper's step reading its own
+  cursor cell's other half.
+- **The array doubles as the flag.** Null means an ordinary cell, so `pull` on
+  one traps (`error: no stream behind this cursor`) rather than reading past an
+  8-byte box. `pull` is a builtin and a program can spell it; the trap is
+  pinned in all three engines.
+
+**Slotted, not boxed, and the price list came out one-sided.** Boxing was to be
+priced as "a malloc per combinator application" against the slab's fixed 65 536.
+The comparison is not that: a cursor cell's payload is ALREADY a malloc on the
+native backend, so putting the source in it costs the same one allocation a
+box would — 56 bytes instead of 8. Slotting is therefore the same price plus the
+ceiling, and the ceiling is what makes a missed release trap rather than grow.
+There was nothing to trade.
+
+**`close` became a walk, and the release counts moved — one of them.** A wrapper
+holds its source where no function can name it, so releasing the outermost
+stream has to reach the rest. `@__vyrn_stream_close` is a loop over the chain
+(the wasm backend runs the same loop, spelled with `br_if`; the interpreter's is
+`loop { release; take the source }`), one iteration per stream, and it stops at a
+buffer or at a cell with nothing behind it.
+
+| pin | M1/M2 counted | M2b counts | M2c counts |
+|---|---|---|---|
+| `for … in`, normal exit | 1 free, in `fend` | 1 close, in `fend` | unchanged |
+| `for … in`, `break` | 1 free | 1 close | unchanged |
+| `for … in`, early `return` | 2 frees | 2 closes | unchanged |
+| `close(s)` | 1 free | 1 close | unchanged |
+| combinator chain | 2 frees | 2 closes | **1 close, +1 walked** |
+| chain + `break` / early `return` | 2 / 3 frees | 2 / 3 closes | **1 / 2, +1 walked each** |
+
+Only the chain rows moved, and they moved for a reason worth stating exactly:
+under the eager version the intermediate stream was a local inside `map`, which
+released it with its own `for … in` — so the second release was a second CALL
+SITE. A lazy `map` has no loop and releases nothing; the second release is the
+same release, executed one iteration further down the walk. The site count is
+now a count of streams a function can NAME, and the release count is still one
+per stream. Both halves are pinned:
+`a_lazy_combinator_releases_at_one_site_and_walks_the_rest` asserts the site
+count and that `map`'s own body contains no release at all, and
+`examples/streamlazy.vyrn` runs 30 000 cycles of a three-deep chain — 90 000
+cursor cells out of a slab of 65 536, so a walk that stopped one stream early
+would trap, and one that went round twice would hand a slot back twice and
+hand two live streams the same cursor.
+
+**The step counts, and the one this document got wrong.** `take(map(feed, f), n)`
+asks the feed **exactly n times**, not the n + 1 pinned here. The extra one was
+never laziness's: it was the element the eager `take` read before its `break`
+fired, and a wrapper checks its counter before it asks at all. So M2b's
+`examples/streamunfold.vyrn` numbers changed with this milestone — 6 → 5,
+1001 → 1000, 20001 → 20000 — and the file says so. `filter` admitting one in
+three asks **3n - 2** to yield n, which is exact rather than "roughly kn"
+because the producer is exact.
+
+**A lazy `map` is CHEAPER for a buffer source, not dearer.** The constraint here
+was to accept whatever one implementation cost a buffer stream. It costs it
+nothing: the eager version built an output array of the same length, and the
+wrapper builds nothing. The one real risk was internal — a shared "ask a stream
+for one element" emitter that answered an `Option<T>` would have boxed every
+element wider than a word, putting an allocation (and a leak, since sum payload
+boxes are not reclaimed) inside `for r in fromArray(records)`. So the shared
+emitter answers a staged element and a boolean, and `pull` builds the `Option`
+its own signature owes. One implementation, and the loop pays nothing for it.
+
+**A lambda cannot capture an RFC-0023 `fn` parameter.** Found here, because a
+lazy combinator is exactly the shape that wants to: `map`'s step captures `f`.
+A `fn`-typed parameter is not a value in scope — it is a specialization the
+caller chose — so the LLVM backend emitted a call to an undefined `@vyrn_f` and
+the failure landed at the linker. The one-line fix is in `std/stream` rather
+than in the backend: `let g: fn(T) -> U = f` re-materializes it as an RFC-0037
+stored value, which a lambda captures the ordinary way. It is recorded as a
+compiler hole rather than closed, because closing it means teaching the lambda
+lifter to forward another instance's capture arguments — a change in the
+higher-order machinery, not in this milestone.
+
+**`merge` is still eager, and the reason is structural rather than schedule.** A
+wrapper owns ONE source, because a cursor cell has one stream behind it.
+Interleaving wants two sources and a step that remembers whose turn it is, which
+is a second wrapper shape and a second thing for `close` to walk — not a second
+use of this one. So `merge` with an endless side is still a hang, `std/stream`
+says so in the place it used to say `map` was, and the answer is still `take` on
+the endless side first.
+
+**RFC-0074 M3a is unblocked, and the proof is at the transport.** Its `sse`
+element is an encoded frame partly because mapping a feed hung. `serve.rs` now
+serves `map(unfold(0, nums), frame)`: the frames arrive, the client vanishes, the
+feed stops, and `/probe` traps on the INNER producer's cursor — a cell the host
+never touched, released because the walk reached it.
 
 ## Acceptance
 
