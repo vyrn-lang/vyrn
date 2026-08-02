@@ -7431,7 +7431,7 @@ impl<'a> Gen<'a> {
             // an ordinary variable. `gen_call` re-generates its argument list, so
             // handing it the receiver expression a second time would evaluate the
             // receiver twice and run its effects twice with it. The binding's name
-            // name has an `@` in it, so no program can spell or shadow it — the
+            // has an `@` in it, so no program can spell or shadow it — the
             // same parking `gen_try_fallible` does with an already-emitted value.
             let (recv_ty, args) = match args.first() {
                 Some(Expr::Var { name: v, .. }) => (
