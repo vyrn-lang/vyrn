@@ -1,6 +1,6 @@
 # RFC-0084 — Protocol Dispatch Is Static Everywhere
 
-- **Status:** **M1 shipped.** M2 designed, not started.
+- **Status:** **M1 and M2 shipped.**
 - **Depends on:** RFC-0002 §5 (protocols), RFC-0080 (generic impls, associated
   types — M1 established that selection is a *wider key*, not a new mechanism)
 - **Motivated by:** RFC-0074 M1 and M2, which each paid a spelling cost for the
@@ -160,6 +160,72 @@ above did not have:
 `std/http`'s combinators become methods, and RFC-0074's designed spelling
 becomes the real one. This is the milestone that pays for M1, and it should be
 measured against RFC-0074's own example rather than a synthetic one.
+
+**It does not start there.** The textual backend refuses a receiver that is not
+a variable:
+
+> protocol method `bump` must be called on a variable in this backend
+
+which is fine for `x.show()` and fatal for `get(..).cacheFor(3600).etag()`,
+where every receiver after the first is a call. It is a compile error rather
+than a divergence, and it predates M1 — a scalar receiver fails identically —
+so nothing was hiding it except that no fluent API existed to write.
+
+The direct wasm backend has never had the restriction: it asks `peek` for the
+receiver expression's type. The textual backend has only `lookup`, which
+answers for a variable and nothing else — but `gen_expr` returns
+`(String, Type)`, so the receiver can be emitted once and its type read off the
+same call. The work is threading the already-emitted value into the mangled
+call instead of letting `gen_call` re-generate the argument list, which would
+emit the receiver twice and evaluate its side effects twice with it.
+
+That is M2's first task, and it is the one with a correctness trap in it.
+
+#### As landed
+
+RFC-0074's own line, before and after:
+
+```vyrn
+notFoundWhen(lastModified(etag(cacheFor(GET(byId("/{id}")), 3600)), "created"), |why| ..)
+GET(byId("/{id}")).cacheFor(3600).etag().lastModified("created").notFoundWhen(|why| ..)
+```
+
+The trap was where the text said it was, and the fix is the one the text
+describes: the receiver is emitted once, parked in an `@`-named slot (the same
+parking `gen_try_fallible` already did with an already-emitted value), and
+`gen_call` is handed a variable. A **variable** receiver still takes the old path
+untouched — it has to, since a `modify self` is passed as the caller's own slot,
+and it also means the corpus's IR did not move. `examples/protorec.vyrn` pins the
+single evaluation with a receiver that prints; a test comparing only the value
+would have passed with the receiver evaluated twice.
+
+Four things the text above did not have:
+
+1. **"The direct wasm backend has never had the restriction" was half true.** Its
+   *emitting* path asks `peek` and never cared, which is what the reading found.
+   Its `peek` — the type-only path a `match` arm and a nested call go through —
+   had no case for a protocol method at all, so `b.grow().grow()` failed there
+   with `no lowering for a branch yielding `grow``: exactly the chain shape, and
+   the one place a chain is guaranteed to land. It now peeks the *rewrite* (the
+   mangled call `call` will emit) rather than answering for it, which is what the
+   `fromJson` case beside it does. So both compiled backends needed a change after
+   all, and the direct one's was in the half nobody had looked at.
+2. **The free functions could not stay even as an alias.** A protocol method and a
+   top-level function cannot share a name, so `cacheFor(r, 3600)` and
+   `.cacheFor(3600)` are not two spellings that could coexist — the seven
+   `export fn`s are gone and the seven method call sites in `std`, `examples` and
+   the CLI tests were rewritten.
+3. **A `///` inside a protocol body is dropped.** `MethodSig` has no doc field, so
+   per-method documentation reaches neither `vyrn doc` nor hover — the same
+   reflection gap RFC-0038 recorded for `FnInfo`. Moving the combinators onto a
+   protocol therefore silently deleted 90 lines of published API docs, which is
+   why `Policy`'s seven reasons now live in the protocol's own doc comment under
+   headings. Worth fixing where the gap is, and not worth fixing here.
+4. **`get("/{id}", byId)` is still not the spelling, and never will be.** M2
+   delivers the fluent half of RFC-0074's designed line and not the first term of
+   it: the path pattern has to sit in the *procedure's own* parameter slot for its
+   placeholders to be checked, which is RFC-0074 M1's finding and has nothing to
+   do with dispatch. `GET(byId("/{id}"))` is as left-to-right as that line gets.
 
 ### Not a milestone — validated scalars
 

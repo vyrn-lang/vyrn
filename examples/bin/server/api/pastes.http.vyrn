@@ -7,19 +7,19 @@
 /// POST to the collection, and — M2 — how long each answer is good for. The
 /// derived RPC surface these same procedures already answer on (`/_/pastes/*`)
 /// stays exactly as it was; it is what the pages call, and it needed no file.
-import { cacheFor, createdAt, etag, http, lastModified, notFoundWhen, Route, GET, POST } from "std/http"
+import { http, Policy, Route, GET, POST } from "std/http"
 import { recent, byId, create } from http("./pastes")
 
 export fn routes() -> Array<Route> {
     return [
         // The listing changes whenever anyone posts, so it is cached briefly and
         // revalidated by content: a client polling it mostly gets 304s.
-        etag(cacheFor(GET(recent("/")), 10)),
+        GET(recent("/")).cacheFor(10).etag(),
         // A paste is immutable once stored, so an hour is safe and `created` — the
         // wall-clock stamp the store already writes — is a true `Last-Modified`.
         // `Err("no paste with id …")` is the one absence this resource has.
-        notFoundWhen(lastModified(etag(cacheFor(GET(byId("/{id}")), 3600)), "created"), |why| why.startsWith("no paste with id")),
+        GET(byId("/{id}")).cacheFor(3600).etag().lastModified("created").notFoundWhen(|why| why.startsWith("no paste with id")),
         // 201 with a Location, built from the id the store content-addressed.
-        createdAt(POST(create("/")), "/pastes/{id}"),
+        POST(create("/")).createdAt("/pastes/{id}"),
     ]
 }

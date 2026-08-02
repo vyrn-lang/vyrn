@@ -37,6 +37,28 @@ fn describe<T: Bump>(x: T) -> String {
     return x.label() + " -> " + x.bump().toString()
 }
 
+// ---- M2: a receiver that is not a variable ---------------------------------
+//
+// The shape a fluent chain is made of, and the one the textual backend used to
+// refuse outright (`must be called on a variable in this backend`). A method
+// returning `Self`'s type is what makes the chain possible at all.
+protocol Grow {
+    fn grow(self) -> Box
+}
+
+impl Grow for Box {
+    fn grow(self) -> Box { return Box { n: self.n * 2 } }
+}
+
+// It PRINTS, which is the whole point: the fix threads the already-emitted
+// receiver into the mangled call, and re-generating the argument list instead
+// would evaluate this twice. A test that only compared the number would pass
+// with the receiver evaluated twice; a line of output would not.
+fn loud(b: Box) -> Box {
+    print("loud")
+    return b
+}
+
 fn main() -> Int64 {
     // ---- a method on a record ----------------------------------------------
     let b = Box { n: 4 }
@@ -72,5 +94,11 @@ fn main() -> Int64 {
     let crates: Array<Crate> = [Box { n: 1 }, Box { n: 2 }]
     let first = crates[0]
     print(first.bump()) // 10 — an element learns its name from the array's type
+
+    // ---- a receiver that is a call, and a chain of them ---------------------
+    print(Box { n: 3 }.bump()) // 4 — a literal receiver
+    print(b.grow().grow().bump()) // 17 — every receiver but the first is a call
+    // One `loud`, not two: the receiver is emitted once and read from a slot.
+    print(loud(b).grow().bump()) // loud / 9
     return 0
 }

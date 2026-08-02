@@ -326,9 +326,9 @@ fn main() -> Int64 {
 fn m2_project(tag: &str) -> PathBuf {
     let dir = project_using(
         tag,
-        "cacheFor, createdAt, etag, http, lastModified, notFoundWhen, Route, GET, POST",
-        "[\n        notFoundWhen(lastModified(etag(cacheFor(GET(stamped(\"/{id}\")), 60)), \"at\"), |why| why == \"no such note\"),\n        \
-         createdAt(POST(stamped(\"/\")), \"/notes/{id}\"),\n    ]",
+        "http, Policy, Route, GET, POST",
+        "[\n        GET(stamped(\"/{id}\")).cacheFor(60).etag().lastModified(\"at\").notFoundWhen(|why| why == \"no such note\"),\n        \
+         POST(stamped(\"/\")).createdAt(\"/notes/{id}\"),\n    ]",
     );
     write(&dir, "driver.vyrn", DRIVER);
     dir
@@ -425,8 +425,8 @@ fn the_derived_line_carries_the_policy() {
     // all (see the RFC's M1 note; M2 did not change that).
     let dir = project_using(
         "m2derived",
-        "cacheFor, etag, mount, surface, http, Route, GET, POST",
-        "[etag(cacheFor(GET(byId(\"/{id}\")), 60))]",
+        "mount, surface, http, Policy, Route, GET, POST",
+        "[GET(byId(\"/{id}\")).cacheFor(60).etag()]",
     );
     write(
         &dir,

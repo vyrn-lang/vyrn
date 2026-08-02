@@ -9,9 +9,10 @@
 /// M2 is the policy below, and every line of it is a decision no reflection could
 /// make: how long a lookup may be cached, that it carries a validator, where a
 /// created user lives, and which of `del`'s two errors means the user was never
-/// there. The combinators read outside-in because a method chain would need
-/// `impl Cacheable for Route`, and a protocol cannot be implemented for a record.
-import { cacheFor, createdAt, etag, http, notFoundWhen, vary, Route, DELETE, GET, POST } from "std/http"
+/// there. It reads left to right because `Policy`'s methods are protocol methods
+/// on a record (RFC-0084) — the outside-in nesting this file shipped with was a
+/// spelling cost paid for a dispatch restriction that is gone.
+import { http, Policy, Route, DELETE, GET, POST } from "std/http"
 import { byId, create, del } from http("./users")
 
 export fn routes() -> Array<Route> {
@@ -19,12 +20,12 @@ export fn routes() -> Array<Route> {
         // An hour of caching with a strong validator, so a client that comes back
         // with `If-None-Match` gets a bodyless 304. `Accept` is declared because
         // this URL is JSON here and a page elsewhere (RFC-0072 M4).
-        vary(etag(cacheFor(GET(byId("/{id}")), 3600)), "Accept"),
+        GET(byId("/{id}")).cacheFor(3600).etag().vary("Accept"),
         // 201 with a `Location` built from the created user's own `id`.
-        createdAt(POST(create("/")), "/users/{id}"),
+        POST(create("/")).createdAt("/users/{id}"),
         // `del` reports absence and refusal with different words; only the first
         // is a 404. The other stays a 200 carrying `{"Err":"…"}`, exactly as the
         // RPC surface answers it.
-        notFoundWhen(DELETE(del("/{id}")), |why| why == "no such user"),
+        DELETE(del("/{id}")).notFoundWhen(|why| why == "no such user"),
     ]
 }
