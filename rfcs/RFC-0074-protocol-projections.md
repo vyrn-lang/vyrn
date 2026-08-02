@@ -285,6 +285,106 @@ suffix. What the suffix does do is keep a projection out of the derived surface 
 `pastes.vyrn` without becoming a fourth procedure whose `routes()` returns
 `Array<Route>` onto the wire.
 
+## As landed — M2
+
+Seven combinators in `std/http`, each `Route -> Route`: `cacheFor`, `etag`,
+`lastModified`, `vary`, `status`, `createdAt`, `notFoundWhen`. `Route` gained
+seven plain fields and no type parameter, so the property M1 protected survived
+the milestone that was most likely to break it — the fortieth route with the
+fortieth policy is still one nominal value to the checker.
+
+**The policy is applied in `mount`**, which is the only place holding the route,
+the request and the response at once. That is a design consequence, not a
+convenience: it means no combinator captures anything, and the single stored
+closure in a policy (`notFoundWhen`'s) is a capture-free predicate over a
+`String`. It lowers on all three engines, which M1's codegen finding made worth
+checking before designing rather than after.
+
+**`Response` gained a `headers: Map<String, String>` field**, because it had
+exactly one header channel — `vary` — and M2 needs four more. A field per header
+does not scale; `vary` kept its own because RFC-0072 M4 already shipped it and one
+negotiation channel with one reader beats two. Sixty construction sites across
+std, examples and tests were swept, the same cost RFC-0072 M4 paid.
+
+**The ETag is `FNV-1a-64(contentType + "\n" + body)` in hex, quoted.** It hashes
+the representation — the bytes AND the media type that says how to read them,
+since two `Vary`-selected variants of one URL must not share a validator — and it
+hashes content and nothing else. No clock, no counter, no process identity: two
+processes serving the same bytes emit the same tag, so a client's `If-None-Match`
+still matches after a restart or across a load-balanced pair. A per-process seed
+would have made the whole feature silently inert (always a 200, never a wrong
+answer, never a failing test), which is why a test asserts the tag is identical in
+a second process. At 64 bits a collision serves a 304 for content the client does
+not have; it is the same hash that content-addresses this repo's pastes.
+
+**`Cache-Control` is bare `max-age=N`, neither `public` nor `private`.** `public`
+would tell a shared cache to store the one response it is otherwise forbidden to
+store — the one for a request carrying `Authorization` (RFC 9111 §3.5) — which is
+the cache-poisoning shape. `private` would make `cacheFor` useless for the public
+API a projection exists to publish. The spec's default already refuses the
+credentialed case, so the correct move was to add neither word.
+
+**A 304 carries the validators and `Cache-Control`, no body, and no
+`Content-Type`** — RFC 9110 §15.4.5 lists what a 304 sends and a media type is not
+among them, so the host now omits the field entirely when the type is empty rather
+than writing `Content-Type:` with nothing after it. `If-None-Match` takes
+precedence over `If-Modified-Since` rather than being tried alongside it
+(§13.1.3); getting that backwards would 304 a client whose validator we just said
+does not match. `If-Modified-Since` is compared for exact equality with what we
+would have stamped, not parsed as a date: a missed 304 costs bytes, a wrong one
+costs correctness.
+
+Four things are smaller or differently shaped than the RFC's text:
+
+- **The chain reads outside-in: `etag(cacheFor(GET(byId("/{id}")), 3600))`.** The
+  RFC's `.cacheFor(3600).etag()` needs a method call on a user value, which needs
+  a protocol impl, and `impl P for Route` is refused outright — protocols
+  implement for `Int64`/`Bool`/`String` or an enum, because records erase at
+  runtime. This is the second spelling cost in the series (M1 paid the first) and,
+  like the first, it is a spelling cost and not a structural one.
+- **`createdAt` takes a template, not a closure.** `createdAt(|p| "/pastes/\{p.id}")`
+  takes the procedure's OUTPUT type, and a `Route` that could carry that closure
+  would be `Route<T>` — precisely the type-level chain this RFC exists to refuse.
+  `createdAt(POST(create("/")), "/pastes/{id}")` fills `{id}` from the created
+  object's own field at runtime, unwrapping the `Ok` of a `Result`-returning
+  procedure, and leaves an unknown `{name}` verbatim where it is loud.
+  `notFoundWhen`'s closure survives because its argument is a `String`.
+- **`lastModified` names a field.** Same erasure, same answer: `lastModified(r,
+  "created")` reads a top-level epoch-millis field off the response the codec just
+  wrote and formats the IMF-fixdate of RFC 9110 §5.6.7. A field that is absent,
+  non-numeric or negative writes no header rather than trapping — a validator is
+  an optimization and losing one must not lose the response.
+- **`vyrn routes` still cannot see an explicit route, and M2 did not change
+  that.** M1 said the table has one producer, the generator that emits `//@route`
+  while mounting the derived surface, and this milestone confirms the diagnosis
+  rather than fixing it: `http("./pastes")` runs before the hand-written
+  projection exists as data, so the generator knows the base path and the
+  procedure names but not the method, the sub-path or the policy — it could emit
+  `? /pastes/? byId`, which is worse than nothing. What `derived` DOES carry now
+  is the policy line M1 promised, appended by each combinator (`GET /notes/{id}
+  byId max-age=60 etag`), and its reader is still the shadow diagnostic. Showing
+  the table needs `vyrn routes` to run the mounted router, which is a separate
+  change and not this milestone's.
+
+`examples/rest.vyrn` is the three-engine evidence: interp, native and wasm print
+the same tag, the same 304 and the same `Location`. `examples/bin` declares the
+policy over real data — ten seconds on a listing that changes whenever anyone
+posts, an hour on an immutable paste, `created` as its `Last-Modified`, and
+`Err("no paste with id …")` as the one absence the resource has. `del` in the
+fullstack demo now reports absence and refusal with different words, because a
+projection reads them as two different answers.
+
+One test was written and removed. A `vyrn serve` harness in `tests/http.rs` could
+not read a response from the child it spawned on this host, while the identical
+pattern in `tests/serve.rs` and `tests/rpc.rs` can — so the wire claims (the
+header map on the socket, a 304 with nothing after the header block) are pinned in
+`tests/serve.rs`, where the harness works, and the policy claims are pinned
+in-process in `tests/http.rs`. The end-to-end round trip was verified by hand
+against `vyrn serve examples/bin`: a `GET /pastes/<id>` answering 200 with
+`Cache-Control`, `ETag` and `Last-Modified`, the same request with
+`If-None-Match` answering 304 with an empty body and no `Content-Type`, and an
+unknown id answering 404.
+
 ## Acceptance
 
 - `examples/bin` serves both the derived RPC surface and a public REST API, with

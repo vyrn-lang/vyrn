@@ -21,10 +21,21 @@ A whole mounted subsystem: it takes the request and nothing else, because a
 prefix binds no placeholders. `rpcHandle` and a page router already have this
 shape (the RFC-0016 `handle` convention).
 
+## IsMissing
+
+```vyrn
+type IsMissing = fn(String) -> Bool
+```
+
+`notFoundWhen`'s question, asked of the `Err` payload a procedure returned:
+"is THIS the absence this resource is named after?" A `String` and not the
+procedure's own error type, because `Route` erases the signature — and that
+erasure is the property the whole design exists to keep.
+
 ## Route
 
 ```vyrn
-type Route = { method: String, pattern: String, prefix: Bool, run: Handler, whole: Surface, derived: String }
+type Route = { method: String, pattern: String, prefix: Bool, run: Handler, whole: Surface, derived: String, maxAge: Int64, validator: Bool, modified: String, varyOn: String, ok: Int64, location: String, missing: IsMissing }
 ```
 
 One route: an HTTP method, a full path pattern (base + sub-path), what runs,
@@ -41,6 +52,13 @@ PARAMETER (`|req, ps| run(req)`) lowers to a call on a symbol no module
 defines, so it runs under the interpreter and fails to build natively. Each
 route uses one field and leaves the other at a named never-answers stub,
 which costs a word and no closure at all.
+
+The M2 policy fields below are flat on `Route` rather than nested in a
+`Policy` record, for one reason: nesting would put a `fn` value one level
+deeper inside a record that is copied on every combinator, and M1 already paid
+for finding out which `fn`-in-a-record shapes lower on all three engines. Flat
+costs one `httpCopy` listing thirteen fields; nested would have cost the same
+listing plus a shape nobody has proven.
 
 ## httpRoute
 
@@ -102,6 +120,108 @@ A whole subsystem mounted under `prefix`: the derived RPC surface, a page
 router. It answers with `Some` or declines with `None` — the same
 `handle`-convention shape those already have (RFC-0016) — so mounting one
 costs no adapter at the composition root.
+
+## cacheFor
+
+```vyrn
+fn cacheFor(r: Route, seconds: Int64) -> Route
+```
+
+`Cache-Control: max-age=N` on a successful answer.
+
+Deliberately NOT `public` and not `private`. `public` would tell a shared
+cache to store a response it is otherwise forbidden to store — the one for a
+request that carried `Authorization` (RFC 9111 §3.5) — which is the
+cache-poisoning shape, one user's copy served to the next. `private` would
+make `cacheFor` useless for the public API this projection exists to publish.
+Bare `max-age` gets both: a CDN may cache the anonymous GET, and the spec's
+own default already refuses the credentialed one.
+
+## etag
+
+```vyrn
+fn etag(r: Route) -> Route
+```
+
+A strong `ETag` over the response, and `If-None-Match` answered with 304.
+
+The validator is `FNV-1a-64(contentType + "\n" + body)` in hex. It hashes the
+REPRESENTATION — the bytes plus the media type that says how to read them —
+because two `Vary`-selected variants of one URL are different representations
+and must not share a validator. It hashes CONTENT and nothing else: no clock,
+no counter, no process identity, so two processes serving the same bytes emit
+the same tag and a client's `If-None-Match` still matches after a restart or
+across a load-balanced pair. A per-process seed here would make the whole
+feature silently inert.
+
+64 bits: a collision serves a 304 for content the client does not have. At
+that width it takes ~5 billion distinct representations of one URL for a 50%
+chance, and the same hash already assigns this repo's paste ids.
+
+## lastModified
+
+```vyrn
+fn lastModified(r: Route, field: String) -> Route
+```
+
+`Last-Modified` from a top-level response field carrying epoch milliseconds,
+and `If-Modified-Since` answered with 304.
+
+The field is named rather than selected by a closure for the reason `IsMissing`
+records: `Route` has erased the procedure's output type by the time a
+combinator sees it. A name that no longer exists writes no header rather than
+trapping — a validator is an optimization, and losing one must not lose the
+response.
+
+## vary
+
+```vyrn
+fn vary(r: Route, headers: String) -> Route
+```
+
+The `Vary` header for this route. Writes the `Response.vary` field RFC-0072 M4
+already ships — one negotiation channel with one reader, not a second one
+hidden in the header map.
+
+## status
+
+```vyrn
+fn status(r: Route, code: Int64) -> Route
+```
+
+The status a SUCCESSFUL answer carries (202 for an accepted job, 201 without a
+Location). An error keeps its own: a 422 from `fromJson` is the codec's answer
+and not this route's to relabel.
+
+## createdAt
+
+```vyrn
+fn createdAt(r: Route, template: String) -> Route
+```
+
+`201 Created` with a `Location` built from the response: `"/pastes/{id}"`
+takes `{id}` from the created object's `id` field.
+
+A template and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest
+version of that line: the closure it shows takes the procedure's OUTPUT type,
+and a `Route` that could carry one would be `Route<T>` — the type-level chain
+this RFC exists to refuse. The template is checked at runtime against the
+fields actually present; an unknown `{name}` is left verbatim in the URL,
+where it is loud.
+
+## notFoundWhen
+
+```vyrn
+fn notFoundWhen(r: Route, isMissing: IsMissing) -> Route
+```
+
+Which `Err` payloads are an absence: `notFoundWhen(r, |why| why == "no such
+paste")` turns that one error into a 404 and leaves every other `Err` a 200
+carrying the error the procedure returned.
+
+The lambda captures nothing, which is what makes it lowerable: M1's native
+codegen bug was a lambda CALLING a captured `fn`-typed parameter, and a
+predicate over a `String` has neither.
 
 ## mount
 
