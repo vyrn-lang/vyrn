@@ -20,8 +20,8 @@
 /// ```
 ///
 /// **The chain is value-level, not type-level.** `Route` is `Route` after every
-/// call — `GET(..)` takes a `Route` and hands back a `Route`, and M2's
-/// `cacheFor`/`etag` will do the same. Nothing accumulates in the type, so the
+/// call — `GET(..)` takes a `Route` and hands back a `Route`, and so does every
+/// method of `Policy` below. Nothing accumulates in the type, so the
 /// fortieth route costs the checker one more nominal value rather than a wider
 /// instantiation. That is the property this design exists to keep.
 ///
@@ -246,19 +246,33 @@ export fn surface(prefix: String, run: Surface) -> Route {
 }
 
 // ---- cache and validators (M2) ---------------------------------------------
-//
-// Seven combinators, each `Route -> Route`, so the chain stays value-level: the
-// fortieth route with the fortieth policy is still one nominal value to the
-// checker. They are written PREFIX — `etag(cacheFor(GET(byId("/{id}")), 3600))`,
-// not the RFC's `.cacheFor(3600).etag()` — because a method call on a user value
-// needs a protocol impl, and `impl P for Route` was rejected outright when this
-// shipped: a record had no runtime name for the interpreter to dispatch on. The
-// chain reads outside-in as a result. That is a spelling cost, not a structural
-// one, and it is the second time this milestone series has paid one (M1's
-// `GET(byId("/{id}"))`). RFC-0084 M1 removed the refusal; converting these to
-// methods is RFC-0084 M2, the milestone that pays for it.
 
-/// `Cache-Control: max-age=N` on a successful answer.
+/// The route policy: seven methods, each `Route -> Route`, so the chain stays
+/// value-level — the fortieth route with the fortieth policy is still one
+/// nominal value to the checker, and `Route` gains no type parameter.
+///
+/// They shipped as PREFIX functions (`etag(cacheFor(GET(byId("/{id}")), 3600))`)
+/// because a method call on a user value needs a protocol impl and `impl P for
+/// Route` was refused outright: a record carried no runtime name for the
+/// interpreter to dispatch on. RFC-0084 M1 removed the refusal and M2 lifted the
+/// native backend's variable-receiver rule, which is what a chain actually needs
+/// — every receiver after the first is a call. So this is RFC-0074's own designed
+/// spelling, three milestones late:
+///
+/// ```vyrn
+/// GET(byId("/{id}")).cacheFor(3600).etag().notFoundWhen(|why| why == "no such user")
+/// ```
+///
+/// There are no free-function versions left. Two spellings of one combinator
+/// would be two things to keep in step, and the checker would not have them
+/// anyway: a protocol method and a top-level function cannot share a name.
+///
+/// The seven reasons live here, in the protocol's own doc, and not on the method
+/// signatures below: `MethodSig` carries no doc field, so a `///` inside a
+/// protocol body is dropped by the parser and reaches neither `vyrn doc` nor
+/// hover. That is the same reflection gap RFC-0038 recorded for `FnInfo`.
+///
+/// ### `cacheFor(seconds)` — `Cache-Control: max-age=N` on a successful answer
 ///
 /// Deliberately NOT `public` and not `private`. `public` would tell a shared
 /// cache to store a response it is otherwise forbidden to store — the one for a
@@ -267,14 +281,8 @@ export fn surface(prefix: String, run: Surface) -> Route {
 /// make `cacheFor` useless for the public API this projection exists to publish.
 /// Bare `max-age` gets both: a CDN may cache the anonymous GET, and the spec's
 /// own default already refuses the credentialed one.
-export fn cacheFor(r: Route, seconds: Int64) -> Route {
-    let mut out = httpCopy(r)
-    out.maxAge = seconds
-    out.derived = out.derived + " max-age=\{seconds}"
-    return out
-}
-
-/// A strong `ETag` over the response, and `If-None-Match` answered with 304.
+///
+/// ### `etag()` — a strong `ETag`, and `If-None-Match` answered with 304
 ///
 /// The validator is `FNV-1a-64(contentType + "\n" + body)` in hex. It hashes the
 /// REPRESENTATION — the bytes plus the media type that says how to read them —
@@ -288,76 +296,101 @@ export fn cacheFor(r: Route, seconds: Int64) -> Route {
 /// 64 bits: a collision serves a 304 for content the client does not have. At
 /// that width it takes ~5 billion distinct representations of one URL for a 50%
 /// chance, and the same hash already assigns this repo's paste ids.
-export fn etag(r: Route) -> Route {
-    let mut out = httpCopy(r)
-    out.validator = true
-    out.derived = out.derived + " etag"
-    return out
-}
-
-/// `Last-Modified` from a top-level response field carrying epoch milliseconds,
-/// and `If-Modified-Since` answered with 304.
 ///
-/// The field is named rather than selected by a closure for the reason `IsMissing`
-/// records: `Route` has erased the procedure's output type by the time a
-/// combinator sees it. A name that no longer exists writes no header rather than
-/// trapping — a validator is an optimization, and losing one must not lose the
-/// response.
-export fn lastModified(r: Route, field: String) -> Route {
-    let mut out = httpCopy(r)
-    out.modified = field
-    out.derived = out.derived + " last-modified=" + field
-    return out
-}
-
-/// The `Vary` header for this route. Writes the `Response.vary` field RFC-0072 M4
-/// already ships — one negotiation channel with one reader, not a second one
-/// hidden in the header map.
-export fn vary(r: Route, headers: String) -> Route {
-    let mut out = httpCopy(r)
-    out.varyOn = headers
-    out.derived = out.derived + " vary=" + headers
-    return out
-}
-
-/// The status a SUCCESSFUL answer carries (202 for an accepted job, 201 without a
-/// Location). An error keeps its own: a 422 from `fromJson` is the codec's answer
-/// and not this route's to relabel.
-export fn status(r: Route, code: Int64) -> Route {
-    let mut out = httpCopy(r)
-    out.ok = code
-    out.derived = out.derived + " status=\{code}"
-    return out
-}
-
-/// `201 Created` with a `Location` built from the response: `"/pastes/{id}"`
-/// takes `{id}` from the created object's `id` field.
+/// ### `lastModified(field)` — `Last-Modified` from an epoch-millis field
 ///
-/// A template and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest
-/// version of that line: the closure it shows takes the procedure's OUTPUT type,
-/// and a `Route` that could carry one would be `Route<T>` — the type-level chain
-/// this RFC exists to refuse. The template is checked at runtime against the
-/// fields actually present; an unknown `{name}` is left verbatim in the URL,
-/// where it is loud.
-export fn createdAt(r: Route, template: String) -> Route {
-    let mut out = httpCopy(r)
-    out.location = template
-    out.derived = out.derived + " created-at=" + template
-    return out
-}
-
-/// Which `Err` payloads are an absence: `notFoundWhen(r, |why| why == "no such
-/// paste")` turns that one error into a 404 and leaves every other `Err` a 200
-/// carrying the error the procedure returned.
+/// The field is named rather than selected by a closure for the reason
+/// `IsMissing` records: `Route` has erased the procedure's output type by the
+/// time a combinator sees it. A name that no longer exists writes no header
+/// rather than trapping — a validator is an optimization, and losing one must not
+/// lose the response. `If-Modified-Since` is answered with 304.
 ///
+/// ### `vary(headers)` — the `Vary` header for this route
+///
+/// Writes the `Response.vary` field RFC-0072 M4 already ships — one negotiation
+/// channel with one reader, not a second one hidden in the header map.
+///
+/// ### `status(code)` — the status a SUCCESSFUL answer carries
+///
+/// 202 for an accepted job, 201 without a Location. An error keeps its own: a 422
+/// from `fromJson` is the codec's answer and not this route's to relabel.
+///
+/// ### `createdAt(template)` — `201 Created` with a `Location` from the response
+///
+/// `"/pastes/{id}"` takes `{id}` from the created object's `id` field. A template
+/// and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest version of
+/// that line: the closure it shows takes the procedure's OUTPUT type, and a
+/// `Route` that could carry one would be `Route<T>` — the type-level chain this
+/// RFC exists to refuse. The template is checked at runtime against the fields
+/// actually present; an unknown `{name}` is left verbatim in the URL, where it is
+/// loud.
+///
+/// ### `notFoundWhen(isMissing)` — which `Err` payloads are an absence
+///
+/// `.notFoundWhen(|why| why == "no such paste")` turns that one error into a 404
+/// and leaves every other `Err` a 200 carrying the error the procedure returned.
 /// The lambda captures nothing, which is what makes it lowerable: M1's native
 /// codegen bug was a lambda CALLING a captured `fn`-typed parameter, and a
 /// predicate over a `String` has neither.
-export fn notFoundWhen(r: Route, isMissing: IsMissing) -> Route {
-    let mut out = httpCopy(r)
-    out.missing = isMissing
-    out.derived = out.derived + " not-found-when"
-    return out
+export protocol Policy {
+    fn cacheFor(self, seconds: Int64) -> Route
+    fn etag(self) -> Route
+    fn lastModified(self, field: String) -> Route
+    fn vary(self, headers: String) -> Route
+    fn status(self, code: Int64) -> Route
+    fn createdAt(self, template: String) -> Route
+    fn notFoundWhen(self, isMissing: IsMissing) -> Route
+}
+
+impl Policy for Route {
+    fn cacheFor(self, seconds: Int64) -> Route {
+        let mut out = httpCopy(self)
+        out.maxAge = seconds
+        out.derived = out.derived + " max-age=\{seconds}"
+        return out
+    }
+
+    fn etag(self) -> Route {
+        let mut out = httpCopy(self)
+        out.validator = true
+        out.derived = out.derived + " etag"
+        return out
+    }
+
+    fn lastModified(self, field: String) -> Route {
+        let mut out = httpCopy(self)
+        out.modified = field
+        out.derived = out.derived + " last-modified=" + field
+        return out
+    }
+
+    fn vary(self, headers: String) -> Route {
+        let mut out = httpCopy(self)
+        out.varyOn = headers
+        out.derived = out.derived + " vary=" + headers
+        return out
+    }
+
+    fn status(self, code: Int64) -> Route {
+        let mut out = httpCopy(self)
+        out.ok = code
+        out.derived = out.derived + " status=\{code}"
+        return out
+    }
+
+    fn createdAt(self, template: String) -> Route {
+        let mut out = httpCopy(self)
+        out.location = template
+        out.derived = out.derived + " created-at=" + template
+        return out
+    }
+
+    fn notFoundWhen(self, isMissing: IsMissing) -> Route {
+        let mut out = httpCopy(self)
+        out.missing = isMissing
+        out.derived = out.derived + " not-found-when"
+        return out
+    }
 }
 
 // ---- mounting --------------------------------------------------------------

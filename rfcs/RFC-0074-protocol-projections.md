@@ -342,6 +342,10 @@ Four things are smaller or differently shaped than the RFC's text:
   implement for `Int64`/`Bool`/`String` or an enum, because records erase at
   runtime. This is the second spelling cost in the series (M1 paid the first) and,
   like the first, it is a spelling cost and not a structural one.
+  **No longer true:** RFC-0084 removed the refusal (M1) and the native backend's
+  variable-receiver rule (M2), and the seven combinators are now the methods of
+  `Policy` — `GET(byId("/{id}")).cacheFor(3600).etag()`. Which is the whole of
+  that RFC's argument: the cost was one engine's, not the design's.
 - **`createdAt` takes a template, not a closure.** `createdAt(|p| "/pastes/\{p.id}")`
   takes the procedure's OUTPUT type, and a `Route` that could carry that closure
   would be `Route<T>` — precisely the type-level chain this RFC exists to refuse.

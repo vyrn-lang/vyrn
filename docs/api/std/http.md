@@ -121,13 +121,38 @@ router. It answers with `Some` or declines with `None` — the same
 `handle`-convention shape those already have (RFC-0016) — so mounting one
 costs no adapter at the composition root.
 
-## cacheFor
+## Policy
 
 ```vyrn
-fn cacheFor(r: Route, seconds: Int64) -> Route
+protocol Policy { fn cacheFor(self, Int64) -> Route; fn etag(self) -> Route; fn lastModified(self, String) -> Route; fn vary(self, String) -> Route; fn status(self, Int64) -> Route; fn createdAt(self, String) -> Route; fn notFoundWhen(self, IsMissing) -> Route }
 ```
 
-`Cache-Control: max-age=N` on a successful answer.
+The route policy: seven methods, each `Route -> Route`, so the chain stays
+value-level — the fortieth route with the fortieth policy is still one
+nominal value to the checker, and `Route` gains no type parameter.
+
+They shipped as PREFIX functions (`etag(cacheFor(GET(byId("/{id}")), 3600))`)
+because a method call on a user value needs a protocol impl and `impl P for
+Route` was refused outright: a record carried no runtime name for the
+interpreter to dispatch on. RFC-0084 M1 removed the refusal and M2 lifted the
+native backend's variable-receiver rule, which is what a chain actually needs
+— every receiver after the first is a call. So this is RFC-0074's own designed
+spelling, three milestones late:
+
+```vyrn
+GET(byId("/{id}")).cacheFor(3600).etag().notFoundWhen(|why| why == "no such user")
+```
+
+There are no free-function versions left. Two spellings of one combinator
+would be two things to keep in step, and the checker would not have them
+anyway: a protocol method and a top-level function cannot share a name.
+
+The seven reasons live here, in the protocol's own doc, and not on the method
+signatures below: `MethodSig` carries no doc field, so a `///` inside a
+protocol body is dropped by the parser and reaches neither `vyrn doc` nor
+hover. That is the same reflection gap RFC-0038 recorded for `FnInfo`.
+
+### `cacheFor(seconds)` — `Cache-Control: max-age=N` on a successful answer
 
 Deliberately NOT `public` and not `private`. `public` would tell a shared
 cache to store a response it is otherwise forbidden to store — the one for a
@@ -137,13 +162,7 @@ make `cacheFor` useless for the public API this projection exists to publish.
 Bare `max-age` gets both: a CDN may cache the anonymous GET, and the spec's
 own default already refuses the credentialed one.
 
-## etag
-
-```vyrn
-fn etag(r: Route) -> Route
-```
-
-A strong `ETag` over the response, and `If-None-Match` answered with 304.
+### `etag()` — a strong `ETag`, and `If-None-Match` answered with 304
 
 The validator is `FNV-1a-64(contentType + "\n" + body)` in hex. It hashes the
 REPRESENTATION — the bytes plus the media type that says how to read them —
@@ -158,67 +177,38 @@ feature silently inert.
 that width it takes ~5 billion distinct representations of one URL for a 50%
 chance, and the same hash already assigns this repo's paste ids.
 
-## lastModified
+### `lastModified(field)` — `Last-Modified` from an epoch-millis field
 
-```vyrn
-fn lastModified(r: Route, field: String) -> Route
-```
+The field is named rather than selected by a closure for the reason
+`IsMissing` records: `Route` has erased the procedure's output type by the
+time a combinator sees it. A name that no longer exists writes no header
+rather than trapping — a validator is an optimization, and losing one must not
+lose the response. `If-Modified-Since` is answered with 304.
 
-`Last-Modified` from a top-level response field carrying epoch milliseconds,
-and `If-Modified-Since` answered with 304.
+### `vary(headers)` — the `Vary` header for this route
 
-The field is named rather than selected by a closure for the reason `IsMissing`
-records: `Route` has erased the procedure's output type by the time a
-combinator sees it. A name that no longer exists writes no header rather than
-trapping — a validator is an optimization, and losing one must not lose the
-response.
+Writes the `Response.vary` field RFC-0072 M4 already ships — one negotiation
+channel with one reader, not a second one hidden in the header map.
 
-## vary
+### `status(code)` — the status a SUCCESSFUL answer carries
 
-```vyrn
-fn vary(r: Route, headers: String) -> Route
-```
+202 for an accepted job, 201 without a Location. An error keeps its own: a 422
+from `fromJson` is the codec's answer and not this route's to relabel.
 
-The `Vary` header for this route. Writes the `Response.vary` field RFC-0072 M4
-already ships — one negotiation channel with one reader, not a second one
-hidden in the header map.
+### `createdAt(template)` — `201 Created` with a `Location` from the response
 
-## status
+`"/pastes/{id}"` takes `{id}` from the created object's `id` field. A template
+and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest version of
+that line: the closure it shows takes the procedure's OUTPUT type, and a
+`Route` that could carry one would be `Route<T>` — the type-level chain this
+RFC exists to refuse. The template is checked at runtime against the fields
+actually present; an unknown `{name}` is left verbatim in the URL, where it is
+loud.
 
-```vyrn
-fn status(r: Route, code: Int64) -> Route
-```
+### `notFoundWhen(isMissing)` — which `Err` payloads are an absence
 
-The status a SUCCESSFUL answer carries (202 for an accepted job, 201 without a
-Location). An error keeps its own: a 422 from `fromJson` is the codec's answer
-and not this route's to relabel.
-
-## createdAt
-
-```vyrn
-fn createdAt(r: Route, template: String) -> Route
-```
-
-`201 Created` with a `Location` built from the response: `"/pastes/{id}"`
-takes `{id}` from the created object's `id` field.
-
-A template and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest
-version of that line: the closure it shows takes the procedure's OUTPUT type,
-and a `Route` that could carry one would be `Route<T>` — the type-level chain
-this RFC exists to refuse. The template is checked at runtime against the
-fields actually present; an unknown `{name}` is left verbatim in the URL,
-where it is loud.
-
-## notFoundWhen
-
-```vyrn
-fn notFoundWhen(r: Route, isMissing: IsMissing) -> Route
-```
-
-Which `Err` payloads are an absence: `notFoundWhen(r, |why| why == "no such
-paste")` turns that one error into a 404 and leaves every other `Err` a 200
-carrying the error the procedure returned.
-
+`.notFoundWhen(|why| why == "no such paste")` turns that one error into a 404
+and leaves every other `Err` a 200 carrying the error the procedure returned.
 The lambda captures nothing, which is what makes it lowerable: M1's native
 codegen bug was a lambda CALLING a captured `fn`-typed parameter, and a
 predicate over a `String` has neither.
