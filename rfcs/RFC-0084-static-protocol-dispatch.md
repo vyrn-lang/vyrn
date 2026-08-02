@@ -161,6 +161,26 @@ above did not have:
 becomes the real one. This is the milestone that pays for M1, and it should be
 measured against RFC-0074's own example rather than a synthetic one.
 
+**It does not start there.** The textual backend refuses a receiver that is not
+a variable:
+
+> protocol method `bump` must be called on a variable in this backend
+
+which is fine for `x.show()` and fatal for `get(..).cacheFor(3600).etag()`,
+where every receiver after the first is a call. It is a compile error rather
+than a divergence, and it predates M1 — a scalar receiver fails identically —
+so nothing was hiding it except that no fluent API existed to write.
+
+The direct wasm backend has never had the restriction: it asks `peek` for the
+receiver expression's type. The textual backend has only `lookup`, which
+answers for a variable and nothing else — but `gen_expr` returns
+`(String, Type)`, so the receiver can be emitted once and its type read off the
+same call. The work is threading the already-emitted value into the mangled
+call instead of letting `gen_call` re-generate the argument list, which would
+emit the receiver twice and evaluate its side effects twice with it.
+
+That is M2's first task, and it is the one with a correctness trap in it.
+
 ### Not a milestone — validated scalars
 
 `impl Show for Age` stays refused, with the mechanism above written down. The
