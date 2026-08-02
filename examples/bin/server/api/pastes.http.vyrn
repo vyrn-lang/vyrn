@@ -1,15 +1,25 @@
-/// The public REST API for pastes (RFC-0074 M1) — base path `/pastes`, derived
+/// The public REST API for pastes (RFC-0074 M1/M2) — base path `/pastes`, derived
 /// from this file's stem, so renaming the resource moves its URLs.
 ///
-/// Opt-in and hand-written, because these three decisions are API *design* and
-/// nothing can reflect them: that a listing is `GET /pastes` rather than a POST,
-/// that a lookup carries its id in the path rather than in a body, and that
-/// creation is a POST to the collection. The derived RPC surface these same
-/// procedures already answer on (`/_/pastes/*`) stays exactly as it was — it is
-/// what the pages call, and it needed no file at all.
-import { http, Route, GET, POST } from "std/http"
+/// Opt-in and hand-written, because these decisions are API *design* and nothing
+/// can reflect them: that a listing is `GET /pastes` rather than a POST, that a
+/// lookup carries its id in the path rather than in a body, that creation is a
+/// POST to the collection, and — M2 — how long each answer is good for. The
+/// derived RPC surface these same procedures already answer on (`/_/pastes/*`)
+/// stays exactly as it was; it is what the pages call, and it needed no file.
+import { cacheFor, createdAt, etag, http, lastModified, notFoundWhen, Route, GET, POST } from "std/http"
 import { recent, byId, create } from http("./pastes")
 
 export fn routes() -> Array<Route> {
-    return [GET(recent("/")), GET(byId("/{id}")), POST(create("/"))]
+    return [
+        // The listing changes whenever anyone posts, so it is cached briefly and
+        // revalidated by content: a client polling it mostly gets 304s.
+        etag(cacheFor(GET(recent("/")), 10)),
+        // A paste is immutable once stored, so an hour is safe and `created` — the
+        // wall-clock stamp the store already writes — is a true `Last-Modified`.
+        // `Err("no paste with id …")` is the one absence this resource has.
+        notFoundWhen(lastModified(etag(cacheFor(GET(byId("/{id}")), 3600)), "created"), |why| why.startsWith("no paste with id")),
+        // 201 with a Location, built from the id the store content-addressed.
+        createdAt(POST(create("/")), "/pastes/{id}"),
+    ]
 }

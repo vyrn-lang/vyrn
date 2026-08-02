@@ -395,3 +395,60 @@ fn sequential_default_is_unchanged_for_stateful_handles() {
     let (_, b1) = get(s.port, "/");
     assert_eq!(b1, "hits=1");
 }
+
+/// The response header map and the bodyless answer it exists for (RFC-0074 M2).
+/// A projection is what actually produces these (`etag`/`cacheFor` in
+/// `std/http`, covered in `tests/http.rs`); this is the host end — what the
+/// writer puts on the wire for a `Response` that carries them.
+const HEADER_SRC: &str = r#"
+fn handle(req: Request) -> Response {
+    if req.path == "/cond" {
+        // What `mount` hands back for a matched `If-None-Match`: the validators
+        // stay, the body and the media type go.
+        return Response { status: 304, contentType: "", body: "", vary: "Accept", headers: ["ETag": "\"abc\"", "Cache-Control": "max-age=60"] }
+    }
+    return Response { status: 200, contentType: "text/plain", body: "ok", vary: "", headers: ["ETag": "\"abc\"", "Cache-Control": "max-age=60"] }
+}
+"#;
+
+#[test]
+fn the_response_header_map_reaches_the_wire() {
+    let s = start_server_on(HEADER_SRC, &[]);
+    let (status, raw) = request_raw(
+        s.port,
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK", "{raw}");
+    assert!(raw.contains("\r\nETag: \"abc\"\r\n"), "{raw}");
+    assert!(raw.contains("\r\nCache-Control: max-age=60\r\n"), "{raw}");
+    assert!(raw.contains("\r\nContent-Type: text/plain\r\n"), "{raw}");
+}
+
+#[test]
+fn a_304_carries_its_validators_and_neither_body_nor_content_type() {
+    let s = start_server_on(HEADER_SRC, &[]);
+    let (status, raw) = request_raw(
+        s.port,
+        "GET /cond HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, "HTTP/1.1 304 Not Modified", "{raw}");
+    // RFC 9110 15.4.5: the metadata the 200 would have sent, and no content.
+    assert!(raw.contains("\r\nETag: \"abc\"\r\n"), "{raw}");
+    assert!(raw.contains("\r\nCache-Control: max-age=60\r\n"), "{raw}");
+    assert!(raw.contains("\r\nVary: Accept\r\n"), "{raw}");
+    // An empty content type writes no field at all, rather than a malformed one.
+    assert!(!raw.contains("Content-Type"), "a 304 declares no media type:\n{raw}");
+    assert!(raw.ends_with("\r\n\r\n"), "nothing after the header block:\n{raw}");
+}
+
+/// The whole response text, not just (status, body) — these tests are about the
+/// header block itself.
+fn request_raw(port: u16, raw: &str) -> (String, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.write_all(raw.as_bytes()).expect("write request");
+    stream.flush().ok();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).expect("read response");
+    let status = resp.lines().next().unwrap_or("").to_string();
+    (status, resp)
+}
