@@ -452,3 +452,176 @@ fn request_raw(port: u16, raw: &str) -> (String, String) {
     let status = resp.lines().next().unwrap_or("").to_string();
     (status, resp)
 }
+
+// ---- RFC-0074 M3a: the streaming response, and the disconnect signal --------
+//
+// The one conformance row RFC-0075 left open ("client disconnects mid-stream →
+// producer release runs") could not be tested before there was a transport to
+// disconnect from. It is tested here, in its stronger form: **the release runs
+// before the next event would be produced**.
+//
+// This source is deliberately below `std/http` — it calls `serveStream` and
+// `fromStep` directly, so the pin is on the MECHANISM rather than on the
+// projection that spells it. `std/http`'s `sse` values are pinned in
+// `tests/http.rs`, and `examples/bin` is the live one.
+//
+// Two witnesses, because "the release ran" and "production stopped" are
+// different claims:
+//
+// - `/steps` counts how many times the producer's step function ran. After the
+//   client vanishes it must stop moving — that is the row's own wording.
+// - `/probe` reads the cursor cell the stream owns, through a `Ref` the step
+//   parked in module state. Releasing a stream releases that cell and bumps its
+//   generation, so a later read is the canonical "reference used after release"
+//   trap. A 500 there is the release itself being observed, not inferred.
+const SSE_SRC: &str = r#"
+let mut steps: Int64 = 0
+let mut saved: Ref<Int64> = cell(0)
+
+/// An endless feed: it never answers `None`, so only the client going away can
+/// end it.
+fn tick(c: Ref<Int64>) -> Option<String> {
+    steps = steps + 1
+    saved = c
+    let n = get(c)
+    set(c, n + 1)
+    return Some("id: \{n}\ndata: e\{n}\n\n")
+}
+
+/// A feed with nothing to say — the 204 path.
+fn silent(c: Ref<Int64>) -> Option<String> {
+    steps = steps + 1
+    return None
+}
+
+fn handle(req: Request) -> Response {
+    if req.path == "/live" {
+        serveStream(fromStep(0, tick))
+        return Response { status: 200, contentType: "text/event-stream", body: "retry: 500\n\n", vary: "", headers: [:] }
+    }
+    if req.path == "/empty" {
+        serveStream(fromStep(0, silent))
+        return Response { status: 200, contentType: "text/event-stream", body: "retry: 500\n\n", vary: "", headers: [:] }
+    }
+    if req.path == "/steps" {
+        return Response { status: 200, contentType: "text/plain", body: "\{steps}", vary: "", headers: [:] }
+    }
+    if req.path == "/probe" {
+        return Response { status: 200, contentType: "text/plain", body: "\{get(saved)}", vary: "", headers: [:] }
+    }
+    return Response { status: 404, contentType: "text/plain", body: "no", vary: "", headers: [:] }
+}
+"#;
+
+/// Open `path`, read until at least `want` bytes have arrived (or the read
+/// deadline passes), and hand back the connection still open. Bounded, because a
+/// stream that never ends must not be able to hang the suite.
+fn open_stream(port: u16, path: &str, want: usize) -> (TcpStream, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("write request");
+    stream.flush().ok();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 512];
+    while got.len() < want {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+        }
+    }
+    let text = String::from_utf8_lossy(&got).to_string();
+    (stream, text)
+}
+
+#[test]
+fn a_stream_answers_with_frames_and_no_content_length() {
+    let s = start_server_on(SSE_SRC, &[]);
+    let (live, text) = open_stream(s.port, "/live", 200);
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
+    assert!(text.contains("\r\nContent-Type: text/event-stream\r\n"), "{text}");
+    // A stream's body ends when the connection does; declaring a length would be
+    // declaring a length nobody knows.
+    assert!(!text.contains("Content-Length"), "a stream declares no length:\n{text}");
+    assert!(text.contains("\r\nCache-Control: no-store\r\n"), "{text}");
+    // The `Response.body` is the stream's prologue, written once before the
+    // first frame — SSE's reconnect hint belongs exactly there.
+    let (_, after) = text.split_once("\r\n\r\n").expect("header block");
+    assert!(after.starts_with("retry: 500\n\n"), "prologue first:\n{after}");
+    assert!(after.contains("id: 0\ndata: e0\n\n"), "the first frame:\n{after}");
+    assert!(after.contains("id: 1\ndata: e1\n\n"), "and the second:\n{after}");
+    drop(live);
+}
+
+#[test]
+fn a_producer_with_nothing_to_say_answers_204_rather_than_an_empty_stream() {
+    let s = start_server_on(SSE_SRC, &[]);
+    // 204 is the one status a plain `EventSource` reads as "stop, do not
+    // reconnect" (WHATWG HTML 9.2.5), so a normally-completed feed costs the
+    // client exactly one more request rather than an endless reconnect loop.
+    let (status, raw) = request_raw(
+        s.port,
+        "GET /empty HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, "HTTP/1.1 204 No Content", "{raw}");
+    assert!(!raw.contains("text/event-stream"), "no stream was opened:\n{raw}");
+    // The server is still there: the empty producer was released, not leaked.
+    let (status, body) = get(s.port, "/steps");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(body, "1", "the silent step ran once and was not asked again");
+}
+
+#[test]
+fn a_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
+    let s = start_server_on(SSE_SRC, &[]);
+    let (live, text) = open_stream(s.port, "/live", 200);
+    assert!(text.contains("id: 0\ndata: e0\n\n"), "events were flowing:\n{text}");
+
+    // The disconnect. Nothing tells the server about it; it finds out by
+    // writing to a socket that is no longer there.
+    drop(live);
+
+    // The first `/steps` blocks until the pump notices — which is the write
+    // after the drop — so its answer is already the final count.
+    let (status, settled) = get(s.port, "/steps");
+    assert_eq!(status, "HTTP/1.1 200 OK", "the server survived the disconnect");
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, later) = get(s.port, "/steps");
+    assert_eq!(
+        settled, later,
+        "the producer kept running after the client went away ({settled} -> {later})"
+    );
+
+    // And the release itself: the stream's cursor cell is gone, so reading the
+    // `Ref` the step parked traps. This is the row's evidence rather than its
+    // symptom — production stopping could be a stuck pump; a released cell
+    // could only have come from `close`.
+    let (status, body) = get(s.port, "/probe");
+    assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "cursor still live: {body}");
+    let err = wait_for(&s.stderr, "reference used after release", Duration::from_secs(5));
+    assert!(err.contains("error: reference used after release"), "{err}");
+
+    // One dropped client did not cost the server anything else.
+    let (status, _) = get(s.port, "/steps");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+}
+
+#[test]
+fn many_opened_and_dropped_streams_leave_the_cursor_slab_alone() {
+    // RFC-0075's `#6156` row at transport scale: every one of these opens a
+    // producer and abandons it. The cursor cells come from a slab of 65536, so a
+    // release that did not run would show up as a trap rather than as memory
+    // growth — the same property `examples/streamunfold.vyrn` measures in-process.
+    let s = start_server_on(SSE_SRC, &[]);
+    for _ in 0..200 {
+        let (live, text) = open_stream(s.port, "/live", 120);
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+        drop(live);
+    }
+    let (status, _) = get(s.port, "/steps");
+    assert_eq!(status, "HTTP/1.1 200 OK", "200 opened-and-dropped streams later");
+}

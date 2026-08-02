@@ -7,8 +7,9 @@
 /// POST to the collection, and — M2 — how long each answer is good for. The
 /// derived RPC surface these same procedures already answer on (`/_/pastes/*`)
 /// stays exactly as it was; it is what the pages call, and it needed no file.
-import { http, Policy, Route, GET, POST } from "std/http"
+import { event, http, Live, Policy, Route, sse, Wire, GET, POST } from "std/http"
 import { recent, byId, create } from http("./pastes")
+import * as store from "../store"
 
 export fn routes() -> Array<Route> {
     return [
@@ -22,4 +23,43 @@ export fn routes() -> Array<Route> {
         // 201 with a Location, built from the id the store content-addressed.
         POST(create("/")).createdAt("/pastes/{id}"),
     ]
+}
+
+/// The live tail (RFC-0074 M3a): every paste from the cursor on, encoded as an
+/// SSE frame, then the stream ends and the client comes back two seconds later
+/// with its `Last-Event-ID`.
+///
+/// Ending is not a limitation being papered over — it is what a pull producer
+/// with nothing to say does, and a language that adds no concurrency has nothing
+/// else it could honestly do: a producer that blocked waiting for the next paste
+/// would block the whole single-threaded server. So `retryAfter` is the poll
+/// interval and `resumable` is what makes polling cost one round trip rather than
+/// the whole listing.
+///
+/// The cursor IS the storage position, which is why the id written on each frame
+/// is `i + 1`: the id a client last saw is the index it wants to resume AT.
+fn tailStep(c: Ref<Int64>) -> Option<String> {
+    let i = get(c)
+    if i < 0 || i >= store.pasteCount() {
+        return None
+    }
+    set(c, i + 1)
+    return Some(event("\{i + 1}", "paste", toJson(store.pasteAt(i))))
+}
+
+/// `fromStep` and not `std/stream`'s `unfold`, which is the spelling this should
+/// have: `std/arrays` and `std/stream` both export a `map` and a `filter`, and
+/// top-level names are unique across a linked program — so no program can import
+/// both, and this app already imports the first. `unfold` is a three-line wrapper
+/// over exactly this call, so the dogfood loses nothing but the better name.
+fn tail(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
+    return fromStep(since, tailStep)
+}
+
+/// The streams this projection publishes. A separate list from `routes()`
+/// because a stream is a separate value with a separate protocol — none of
+/// `cacheFor`/`etag`/`lastModified` means anything to a feed, and RFC-0074's rule
+/// is that such an option is absent rather than ignored.
+export fn feeds() -> Array<Live> {
+    return [sse("/pastes/live", tail).retryAfter(2000).resumable()]
 }

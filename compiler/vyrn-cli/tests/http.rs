@@ -160,7 +160,7 @@ fn under(req: Request) -> Option<Response> {
 
 fn hit(method: String, path: String) -> String {
     let groups: Array<Array<Route>> = [[surface(\"/_\", under)], api.routes()]
-    return match mount(Request { method: method, path: path, headers: [:], body: \"\" }, groups) {
+    return match mount(Request { method: method, path: path, headers: [:], body: \"\" }, groups, []) {
         Some(r) => \"\\{r.status} \\{r.body}\",
         None => \"none\",
     }
@@ -289,7 +289,7 @@ import { mount, Route } from \"std/http\"
 import * as api from \"./notes.http\"
 
 fn hit(method: String, path: String, body: String, headers: Map<String, String>) -> Response {
-    return match mount(Request { method: method, path: path, headers: headers, body: body }, [api.routes()]) {
+    return match mount(Request { method: method, path: path, headers: headers, body: body }, [api.routes()], []) {
         Some(r) => r,
         None => Response { status: 0, contentType: \"\", body: \"\", vary: \"\", headers: [:] },
     }
@@ -437,7 +437,7 @@ fn the_derived_line_carries_the_policy() {
          fn all(req: Request) -> Option<Response> {\n    return None\n}\n\
          \n\
          fn main() -> Int64 {\n    \
-         let r = mount(Request { method: \"GET\", path: \"/x\", headers: [:], body: \"\" }, [[surface(\"/\", all)], api.routes()])\n    \
+         let r = mount(Request { method: \"GET\", path: \"/x\", headers: [:], body: \"\" }, [[surface(\"/\", all)], api.routes()], [])\n    \
          return 0\n}\n",
     );
     let (ok, out) = run(&dir, "root.vyrn");
@@ -453,3 +453,85 @@ fn the_derived_line_carries_the_policy() {
 // this host, while the identical pattern in `serve.rs` and `rpc.rs` can. Rather
 // than ship a test that fails for a reason that is not about `std/http`, the
 // wire claims live in one place and the policy claims live here.
+
+// ---- M3a: `sse` is not a `Route`, and `mount` takes both --------------------
+//
+// The wire end of this — the header block, the frames, the 204, and the
+// disconnect — is pinned in `tests/serve.rs`, over the serve harness that file
+// owns (see the note above). What is pinned here is what `std/http` VALUES do:
+// that a stream resolves before the buffered groups, that `retryAfter` and
+// `resumable` reach the answer, that `Last-Event-ID` becomes the producer's
+// seed, and that `event` writes the frame SSE actually specifies.
+
+/// A root that mounts one buffered group and one stream, and prints what a
+/// request resolves to. `serveStream` is a serving-host call, so a `vyrn run`
+/// cannot pull the stream — but it CAN show which shape answered and with what
+/// prologue, which is the routing claim.
+const LIVE_ROOT: &str = "\
+import { mount, surface, event, sse, Live, Route, Wire } from \"std/http\"
+import * as api from \"./notes.http\"
+
+fn under(req: Request) -> Option<Response> {
+    return None
+}
+
+fn feedStep(c: Ref<Int64>) -> Option<String> {
+    let n = get(c)
+    if n >= 3 {
+        return None
+    }
+    set(c, n + 1)
+    return Some(event(\"\\{n}\", \"note\", \"line\\{n}\"))
+}
+
+fn feed(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
+    return fromStep(since, feedStep)
+}
+
+fn feeds() -> Array<Live> {
+    return [sse(\"/notes/live\", feed).retryAfter(2500).resumable()]
+}
+
+fn hit(path: String, lastId: String) -> String {
+    let req = Request { method: \"GET\", path: path, headers: [\"last-event-id\": lastId], body: \"\" }
+    return match mount(req, [[surface(\"/_\", under)], api.routes()], feeds()) {
+        Some(r) => \"\\{r.status} \\{r.contentType} [\\{r.body}]\",
+        None => \"none\",
+    }
+}
+
+fn main() -> Int64 {
+    print(feeds()[0].derived)
+    print(event(\"7\", \"note\", \"a\\nb\"))
+    print(hit(\"/notes\", \"\"))
+    return 0
+}
+";
+
+#[test]
+fn a_stream_carries_its_own_vocabulary_and_never_policys() {
+    let dir = project_using("live", "http, Route, GET, POST", "[GET(recent(\"/\"))]");
+    write(&dir, "root.vyrn", LIVE_ROOT);
+    let (ok, out) = run(&dir, "root.vyrn");
+    assert!(ok, "the live root must run:\n{out}");
+    // `derived` is the stream's own line: no `max-age`, no `etag`, because a
+    // `Live` has no `Policy` to write one with.
+    assert!(out.contains("SSE /notes/live retry=2500 resumable"), "{out}");
+    // The frame SSE specifies: a field per line, a `data:` per payload line
+    // (a raw newline inside one would end the event), and a blank line to close.
+    assert!(out.contains("id: 7\nevent: note\ndata: a\ndata: b\n"), "{out}");
+    // The buffered group still answers everything it did before.
+    assert!(out.contains("200 application/json"), "{out}");
+}
+
+#[test]
+fn a_stream_route_that_shadows_a_buffered_one_is_a_startup_error() {
+    // The stream resolves first, so `/notes/{id}` behind it would be dead for
+    // every id — which is exactly the shape `mount` refuses between groups.
+    let dir = project_using("liveshadow", "http, Route, GET, POST", "[GET(byId(\"/{id}\"))]");
+    write(&dir, "root.vyrn", &LIVE_ROOT.replace("\"/notes/live\"", "\"/notes/{id}\""));
+    let (ok, out) = run(&dir, "root.vyrn");
+    assert!(!ok, "the shadowed route must trap:\n{out}");
+    assert!(out.contains("is unreachable"), "{out}");
+    assert!(out.contains("the stream route /notes/{id}"), "{out}");
+}

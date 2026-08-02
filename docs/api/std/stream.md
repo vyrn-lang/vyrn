@@ -47,6 +47,13 @@ fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U>
 
 Apply `f` to every element. `s` is consumed; the result is a new obligation.
 
+**Eager, and that is a hang over an endless source.** M2b made the
+representation pull-based; it did not make this function lazy. It drains `s`
+into a buffer and hands back a buffer stream, so `map(unfold(..), f)` never
+returns. `take` is the one combinator that escapes, and only because it
+`break`s. Put a `take` between an endless producer and this: see "The
+combinators are not lazy" in RFC-0075.
+
 ## filter
 
 ```vyrn
@@ -54,6 +61,11 @@ fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T>
 ```
 
 Keep only the elements for which `pred` holds.
+
+**Eager**, exactly as `map` is, and with the same consequence: it drains its
+source, so an endless one never comes back. A filter is the worse of the two
+to make lazy, since a lazy `filter` may ask its source any number of times
+for one element of its own.
 
 ## take
 

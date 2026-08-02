@@ -3087,7 +3087,7 @@ impl Fn_<'_> {
                 n if self.gen_peek(n, args).is_some() => {
                     self.gen_peek(n, args).expect("guarded above")
                 }
-                "panic" => Type::Never,
+                "panic" | "serveStream" => Type::Never,
                 "@str" | "@concat" | "jsonSchema" | "toJson" => Type::Str,
                 "floatBits" => Type::IntN { bits: 64, signed: false },
                 "floatFromBits" => Type::Float,
@@ -4050,6 +4050,18 @@ impl Fn_<'_> {
                     .ins(&Instruction::Call(self.cx.rt.trap));
                 // The stack goes polymorphic here, which is what lets a `panic`
                 // arm sit inside a `block (result T)` owing no value.
+                b.ins(&Instruction::Unreachable);
+                return Ok(Type::Never);
+            }
+            // RFC-0074 M3a. The same runtime trap the LLVM emitter writes, from
+            // the same constant: a compiled wasm module is not `vyrn serve`, and
+            // `std/http`'s `mount` reaches this arm whether or not the program
+            // mounts a live route. The argument is not emitted — the producer it
+            // names has nobody to pull it here.
+            "serveStream" => {
+                let msg = self.cx.rt.intern(m, crate::SERVE_STREAM_TRAP);
+                b.ins(&Instruction::I32Const(msg as i32))
+                    .ins(&Instruction::Call(self.cx.rt.trap));
                 b.ins(&Instruction::Unreachable);
                 return Ok(Type::Never);
             }

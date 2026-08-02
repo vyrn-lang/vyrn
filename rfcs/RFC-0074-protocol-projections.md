@@ -192,7 +192,52 @@ mounted groups as a startup error rather than shadowing silently.
 - **M2 — cache and validators.** `cacheFor`, `etag`, `lastModified`, `vary`,
   `status`, `createdAt`, `notFoundWhen`, conditional-request handling
   (`If-None-Match` → 304).
-- **M3 — streaming projections.** `sse` and `ws` over RFC-0075 streams.
+- **M3 — streaming projections.** `sse` and `ws` over RFC-0075 streams. **Split:
+  M3a is `sse` (shipped — see "As landed — M3a"), M3b is `ws`** — see below.
+  RFC-0075 M4 named the same work and has given it up; what stays there is the
+  conformance contract these adapters must meet, and M3a closed its last open
+  row.
+
+### M3a — `sse`, and the disconnect signal
+
+**The signal is the write.** `#6204`/`#6343`/`#6842` burned eight months and
+five PRs guessing which host event means "the client is gone" — `res.close` on
+one deployment, `req.close` on another, none on a third, no `socket` at all on
+two more. Vyrn does not guess: **the server learns the client is gone by trying
+to write to it and failing.** That is the one mechanism every host implements
+identically, because it is the socket rather than the framework, and it is what
+makes the conformance row testable rather than deployment-specific.
+
+So the loop is: produce one event, write it, and if the write fails, `close` the
+stream. RFC-0075's "release runs within 100 ms" becomes the stronger and simpler
+"release runs before the next event would be produced".
+
+**A streaming response is a second shape, not a flag on the first.**
+`ServeResponse` is a buffered `body: String` and must stay one — a `Vary`
+header and a 304 are about a response that exists all at once. The handler
+answers either that or a stream handle, and the server pumps the handle by
+calling back into the interpreter for each element. Nothing about the buffered
+path changes.
+
+**`sse` does not return a `Route`.** This RFC says options meaningless to one
+transport are *absent* from the other rather than ignored, and `Route` carries
+`Policy` — `cacheFor`, `etag`, `lastModified`, the conditional-request
+machinery — every one of which is meaningless on an event stream. So `sse`
+returns its own record with its own protocol (`retryAfter`, `keepAlive`,
+`resumable`), and `mount` accepts both. That separation is only spellable
+because RFC-0084 M1 made a record a legal protocol target; before it, both would
+have had to be the same record and the options would have had to be ignored.
+
+**`resumable` is the cursor.** RFC-0075 M2b made the seed the resume token, so
+`Last-Event-ID` is the seed handed to `unfold` and nothing new is needed to
+support replay — the id written beside each event is the cursor that produced
+it.
+
+### M3b — `ws`
+
+A second adapter, and the real test of whether the signal generalises: it must
+pass the same conformance file `sse` does. It additionally needs an upgrade
+handshake and a frame codec, which is why it is not in the same milestone.
 - **M4 — schema overrides.** `graphql(...).mutations(...).lazy(...)`; the same
   override surface for `std/openapi`.
 
@@ -388,6 +433,160 @@ against `vyrn serve examples/bin`: a `GET /pastes/<id>` answering 200 with
 `Cache-Control`, `ETag` and `Last-Modified`, the same request with
 `If-None-Match` answering 304 with an empty body and no `Content-Type`, and an
 unknown id answering 404.
+
+## As landed — M3a
+
+`sse` is in `std/http`, `serveStream` is the one builtin the milestone added, and
+`examples/bin` has a live tail: `GET /pastes/live` with a `Last-Event-ID` streams
+the pastes that client has not seen, one `id:`/`event:`/`data:` frame each, and
+ends when it catches up. RFC-0075's last open conformance row is closed by
+`tests/serve.rs`. Nothing about the buffered path changed — `ServeResponse` is
+still a `body: String`, and the same `examples/bin` answers `GET /pastes` with a
+`max-age`, an `ETag` and a 304 exactly as it did before.
+
+**The signal is the write, and that turned out to cost less than the design
+feared.** The pump is one loop in the host: pull a frame, write it, flush, and the
+first time any of those fails, `Close` — which runs RFC-0075's release path. There
+is no host-event subscription, no abort signal threaded through the interpreter,
+and no per-deployment special case, because a failing `write_all` is the socket
+rather than the framework. TCP supplies the backpressure for free — a slow client
+fills the send buffer and the pump blocks in `write_all` — so the "pull-based, the
+producer runs only when the consumer asks" property RFC-0075 argues for is the
+socket's property here rather than a scheduler's.
+
+**The discriminator is the open producer, not a field of the response.** `handle`
+answers a `Response` in both cases; what makes one of them a stream is that a
+producer is still parked in the interpreter behind it. So `ServeResponse` needed
+no flag, no status convention and no content-type sniffing, and the second shape
+lives where the RFC said it should — at the host boundary, as
+`ServeAnswer::Buffered` beside `ServeAnswer::Live`. The host's question grew from
+one to three (`Handle`, `Next`, `Close`), which is the only change to the serve API
+and the only one the buffered path notices at all: it takes the same request and
+returns the same struct.
+
+The `Response` a live route hands back is a **header block plus a prologue**. Its
+`body` is written once, after the header block and before the first frame, which
+is exactly where SSE's `retry:` line belongs and is the only thing in a stream
+that is not a frame. There is no `Content-Length` — the body ends when the
+connection does — so `write_response_vary` could not have written it, which is
+itself the argument for the second shape.
+
+**The first frame is pulled before the header block goes out, and that is what
+makes a completed stream terminate.** oRPC's documented caveat is that its
+completion signal is non-standard, so plain `EventSource` clients reconnect
+forever. The standard answer is `204 No Content`, the one status the WHATWG
+algorithm reads as "stop, do not reconnect" — and a status has to be chosen before
+any byte is written. So the pump asks the producer for one element first: `Some`
+opens a 200 and streams, `None` answers 204 and the client stops. A feed that
+drains therefore costs a reconnecting client exactly one more request, and
+`examples/bin` demonstrates both halves against a real store.
+
+**`keepAlive` is absent, and it is the milestone's one refusal.** The RFC lists
+`retryAfter`, `keepAlive` and `resumable` as `sse`'s vocabulary. Two of them are
+here. A pull producer answers `Some(v)` or `None`; it has no way to say "nothing
+yet", and RFC-0075 states outright that this language adds no concurrency, so a
+producer that blocked waiting for the next event would block the single-threaded
+server rather than idling politely. There is no idle connection for a keep-alive
+comment to hold open — which means `keepAlive` is not deferred work, it is an
+option with nothing under it, and shipping it as a field that writes a `derived`
+line and does nothing else would be exactly the meaningless-option-quietly-ignored
+this RFC refuses. What it changes about its neighbour is worth stating plainly:
+**`retryAfter` is the poll interval, not a failure hint.** A feed catches up, ends,
+and the client comes back with its cursor.
+
+**`resumable` needed nothing, as promised.** `Last-Event-ID` is parsed to an
+`Int64` and handed to the producer as its seed; the id written beside each frame
+is the cursor that produced it. In `examples/bin` the cursor is the storage
+position and the store is append-only, so `id: 5` is the index the next connection
+resumes at, and replay is `fromStep(since, tailStep)` with a different number in
+it. Without `.resumable()` the seed is always `0`.
+
+Four things are shaped differently from the design, and one of them is a finding
+about the checker rather than about HTTP.
+
+- **A `fn` type mentioning a stream was rejected, and should not have been.**
+  `std/http`'s `Feed` is `fn(Request, Map<String, String>, Int64) -> Stream<String>`,
+  and `contains_stream` — the walk behind RFC-0075 M1's "nothing may store a
+  stream" — descended into `Type::Fn`, so every declaration mentioning `Feed`
+  failed. It is wrong for a reason M1 already wrote down: a `fn` type's parameters
+  and its return ARE the two positions M1 declares legal, so `fn(..) -> Stream<T>`
+  stores no stream — it describes a call that produces one, and the caller owes it
+  the moment it exists. The arm answers `false` now. Descending was safe only while
+  nothing in the corpus had such a type, which is the same shape as M2's "M1 left
+  `Stream` out of every generic walk" lesson: a new type variant's walks are wrong
+  in whichever direction the milestone that added it had no use for.
+- **`mount` grew a third parameter rather than a union.** "`mount` accepts both"
+  has no other spelling: Vyrn has no sum over two record types, and wrapping the
+  existing groups in an enum would have changed every call site anyway. So it is
+  `mount(req, groups, live)`, five call sites in the repo, and `[]` where an app
+  has no streams. Streams resolve BEFORE the buffered groups, because a stream's
+  path is exact and `/pastes/{id}` is precisely the pattern that would swallow one;
+  a stream that shadows a buffered route is the startup trap M1's check already
+  had, worded for the stream.
+- **`sse` takes its pattern directly, and this is not a weaker `GET(byId("/{id}"))`.**
+  M1's placeholder check works by putting the pattern in the *procedure's own*
+  parameter slot, so the generated `String where value =~ …` can be built from that
+  procedure's input record. A feed takes the request rather than a decoded record,
+  so there are no fields to check placeholders against — the rule is the same and
+  there is nothing for it to do. `sse("/", tail)` is the RFC's own spelling, which
+  it gets to keep for the reason M1 had to give it up.
+- **The element is an encoded frame, `Stream<String>`, not `Stream<Event>`.** The
+  natural design is a record stream that `std/http` maps into frames, and it is
+  unbuildable today for a reason that belongs to RFC-0075: `map` and `filter` are
+  eager walks that build a buffer, so mapping an endless feed would materialise it
+  — `#6156` arriving through the library written to prevent it. The producer
+  encodes as it goes with `event(id, name, data)`, which owns the whole of SSE's
+  syntax including the rule that a newline in the payload becomes a second `data:`
+  line rather than ending the event. When the combinators become lazy,
+  `Stream<Event>` is a one-line change on this side.
+
+**A compiled build traps.** `serveStream` reaches the host's accept loop and a
+native or wasm binary has none, so both backends emit the same runtime trap from
+one shared constant. It is a runtime trap rather than a compile error because
+`mount` reaches that arm whether or not a program mounts a live route, and
+refusing at compile time would make every REST projection unbuildable to serve a
+feature it does not use — `examples/rest.vyrn` builds and runs on all three
+engines with the trap emitted and unreached. The consequence for evidence is
+stated rather than hidden: **there can be no three-way parity example for `sse`**,
+since the interpreter serves it and the other two engines are required to trap,
+and an example whose engines are supposed to differ is not a parity example. The
+evidence is `tests/serve.rs` (the wire and the disconnect), `tests/http.rs` (the
+values and the mount order), and `examples/bin` (the live tail against a real
+store). Parity is 105 checked, 7 skipped, 0 failed — unchanged.
+
+**The disconnect pin, and what it actually asserts.** RFC-0075's row is "client
+disconnects mid-stream → producer release runs", and this RFC promised the
+stronger "release runs before the next event would be produced". The test opens
+`/live` against an endless producer, reads two frames, drops the socket, and then
+asserts two different things, because "production stopped" and "the release ran"
+are two claims and only one of them is the row:
+
+- `/steps` reports how many times the step function ran. It is read once after the
+  drop — that request blocks until the pump notices, so its answer is already
+  final — and again 300 ms later, and the two must be equal. That is the row's own
+  wording: no further element was produced.
+- `/probe` reads the stream's cursor cell through a `Ref` the step parked in module
+  state. `close` releases that cell and bumps its generation, so the read is the
+  canonical `reference used after release` trap and the route answers 500. A stuck
+  pump would also stop producing; only a release can invalidate the cell.
+
+A third test opens and abandons 200 streams and then asks the server for
+something, which is `#6156` at transport scale: the cursor cells come from a slab
+of 65536, so a release that did not run would eventually trap rather than merely
+grow. The pin is written below `std/http` on purpose — it calls `serveStream` and
+`fromStep` directly — so it is about the mechanism rather than about the
+projection that spells it, which is what `ws` will have to pass in M3b.
+
+Two smaller things, so they are not mistaken for coverage. **A stream monopolises
+the sequential server while it drains** — `serve_one` handles one connection at a
+time, which is RFC-0013's host-owns-the-loop arrangement and not new, but it is
+newly visible: a feed that ended is the thing that lets the next request in, and
+`--workers` is the answer for an app that needs more. And the dogfood calls
+`fromStep` where it wanted `std/stream`'s `unfold`, because **`std/arrays` and
+`std/stream` both export `map` and `filter`** and top-level names are unique across
+a linked program, so no program can import both. That is a std naming collision
+this milestone found rather than caused; `unfold` is a three-line wrapper over the
+same call, so the dogfood loses the better name and nothing else.
 
 ## Acceptance
 

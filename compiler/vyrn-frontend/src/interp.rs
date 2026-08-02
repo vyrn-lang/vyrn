@@ -960,6 +960,36 @@ pub struct ServeResponse {
     pub headers: Vec<(String, String)>,
 }
 
+/// What the host asks the interpreter for (RFC-0074 M3a). Until M3a there was
+/// one question and it needed no name; a streaming answer adds two more, because
+/// the stream it opens is pulled AFTER the call that opened it returned.
+pub enum ServeCall {
+    /// One request off the wire.
+    Handle(ServeRequest),
+    /// The next frame of the stream the last [`ServeAnswer::Live`] opened.
+    Next,
+    /// Release that stream. The host sends this the first time a write fails —
+    /// which is how it learns the client is gone — and when the stream ends.
+    Close,
+}
+
+/// What the interpreter answers. `Buffered` is the only shape that existed
+/// before M3a and it is unchanged: a response that exists all at once, with the
+/// `Vary` header and the conditional-request machinery that only make sense for
+/// one. A streaming answer is a SECOND shape rather than a flag on the first.
+pub enum ServeAnswer {
+    /// A complete response. The answer to a `Handle` that opened no stream.
+    Buffered(ServeResponse),
+    /// A stream's header block: status, content type and headers, plus a `body`
+    /// the host writes once as the stream's prologue (SSE's `retry:` line).
+    /// Frames follow, one `Next` at a time.
+    Live(ServeResponse),
+    /// The answer to `Next`: one frame, or `None` when the producer ended.
+    Frame(Option<String>),
+    /// The answer to `Close`.
+    Released,
+}
+
 /// Run a served program (RFC-0016) under the interpreter: build ONE interpreter,
 /// initialize module state, run `main` once (the setup hook — optional; a
 /// nonzero return aborts the serve), then hand the caller a handler closure it
@@ -976,7 +1006,7 @@ pub struct ServeResponse {
 /// thread like `run`/`run_tests`, so deep `handle` recursion cannot overflow.
 pub fn serve<F>(program: &Program, run_loop: F) -> Result<(), String>
 where
-    F: FnOnce(&mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) -> Result<(), String>
+    F: FnOnce(&mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>) -> Result<(), String>
         + Send,
 {
     std::thread::scope(|s| {
@@ -991,7 +1021,7 @@ where
 
 fn serve_inner<F>(program: &Program, run_loop: F) -> Result<(), String>
 where
-    F: FnOnce(&mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) -> Result<(), String>,
+    F: FnOnce(&mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>) -> Result<(), String>,
 {
     let interp = new_interp(program, &[])?;
     if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
@@ -1008,14 +1038,63 @@ where
             Err(Ctrl::Return(_)) => return Err("internal: `?` propagated past main".into()),
         }
     }
-    let mut handler = |req: ServeRequest| handle_request(&interp, req);
+    let mut handler = |call: ServeCall| serve_call(&interp, call);
     run_loop(&mut handler)
+}
+
+/// Route one host question (RFC-0074 M3a). `Handle` is [`handle_request`]
+/// unchanged; `Next` and `Close` reach the stream that call parked.
+fn serve_call(interp: &Interp<'_>, call: ServeCall) -> Result<ServeAnswer, String> {
+    match call {
+        ServeCall::Handle(req) => handle_request(interp, req),
+        // The stream is taken OUT of its cell for the duration of the step: the
+        // step is ordinary Vyrn and may reach anything, including `serveStream`
+        // itself, and a producer running under a borrow of the cell it lives in
+        // is a panic waiting for the program that does it.
+        ServeCall::Next => {
+            let taken = interp.live.borrow_mut().take();
+            let Some(mut s) = taken else {
+                return Err("internal: no stream is open".into());
+            };
+            let got = interp.stream_next(&mut s);
+            match got {
+                Ok(v) => {
+                    *interp.live.borrow_mut() = Some(s);
+                    match v {
+                        None => Ok(ServeAnswer::Frame(None)),
+                        Some(Val::Str(f)) => Ok(ServeAnswer::Frame(Some((*f).clone()))),
+                        Some(other) => {
+                            Err(format!("a served stream yielded {other:?}, expected a String"))
+                        }
+                    }
+                }
+                // A trapping producer releases before the trap surfaces, exactly
+                // as `for … in` does on the same path.
+                Err(e) => {
+                    let _ = interp.release_stream(&s);
+                    Err(match e {
+                        Ctrl::Err(m) => m,
+                        Ctrl::Return(_) => "internal: `?` propagated past a stream step".into(),
+                    })
+                }
+            }
+        }
+        ServeCall::Close => {
+            let taken = interp.live.borrow_mut().take();
+            if let Some(s) = taken {
+                if let Err(Ctrl::Err(m)) = interp.release_stream(&s) {
+                    return Err(m);
+                }
+            }
+            Ok(ServeAnswer::Released)
+        }
+    }
 }
 
 /// Marshal one host request into a `Request` record, call `handle` on this
 /// interpreter, and read the `Response` record back out — the shared body of
 /// [`serve`] (one interpreter) and [`serve_pool`] (one per worker, RFC-0025).
-fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeResponse, String> {
+fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeAnswer, String> {
     let headers = Val::Map(
         req.headers
             .into_iter()
@@ -1064,19 +1143,38 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
                     )
                 }
             };
-            Ok(ServeResponse {
+            let resp = ServeResponse {
                 status,
                 content_type,
                 body,
                 vary,
                 headers,
-            })
+            };
+            // The discriminator is the stream, not a field of the response
+            // (RFC-0074 M3a): `handle` answered with a `Response` either way, and
+            // what makes this a second shape is that a producer is still open
+            // behind it. The response is then a header block and a prologue.
+            if interp.live.borrow().is_some() {
+                return Ok(ServeAnswer::Live(resp));
+            }
+            Ok(ServeAnswer::Buffered(resp))
         }
         Ok(other) => Err(format!(
             "handle returned {other:?}, expected a Response record"
         )),
-        Err(Ctrl::Err(s)) => Err(s),
-        Err(Ctrl::Return(_)) => Err("internal: `?` propagated past handle".into()),
+        // A trap after `serveStream` leaves a producer nobody will pull: release
+        // it here, since the host never hears about a stream it was not told to
+        // write.
+        Err(e) => {
+            let taken = interp.live.borrow_mut().take();
+            if let Some(s) = taken {
+                let _ = interp.release_stream(&s);
+            }
+            Err(match e {
+                Ctrl::Err(s) => s,
+                Ctrl::Return(_) => "internal: `?` propagated past handle".into(),
+            })
+        }
     }
 }
 
@@ -1113,7 +1211,7 @@ pub fn serve_pool<W, A>(
     accept: A,
 ) -> Result<(), String>
 where
-    W: Fn(usize, &mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) + Send + Sync,
+    W: Fn(usize, &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>) + Send + Sync,
     A: FnOnce() -> Result<(), String> + Send,
 {
     std::thread::scope(|s| {
@@ -1163,7 +1261,7 @@ where
                         eprintln!("error: worker {i}: {e}");
                         return;
                     }
-                    let mut handler = |req: ServeRequest| handle_request(&interp, req);
+                    let mut handler = |call: ServeCall| serve_call(&interp, call);
                     worker(i, &mut handler);
                 })
                 .expect("failed to spawn worker interpreter thread");
@@ -1509,6 +1607,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         globals: RefCell::new(Frame::default()),
         args: prog_args.to_vec(),
         mono_counter: std::cell::Cell::new(0),
+        live: RefCell::new(None),
         gen: None,
     };
     Ok(interp)
@@ -1556,6 +1655,12 @@ struct Interp<'a> {
     /// mirroring the C shim exactly so successive readings are byte-identical
     /// across the three backends.
     mono_counter: std::cell::Cell<i64>,
+    /// The stream a request handed to the host (RFC-0074 M3a `serveStream`).
+    /// Parked here between the call that opened it and the host's pulls, because
+    /// a streaming answer outlives the `handle` that produced it — which is the
+    /// one thing RFC-0075's linearity otherwise forbids, and why the host owes it
+    /// a `close`. At most one per request: a second `serveStream` traps.
+    live: RefCell<Option<StreamVal>>,
     /// Set only while running a `gen fn` as a generation target (RFC-0021). When
     /// present: `readFile`/`listDir`/`moduleInterface` route through the loader's
     /// resolver (path-scoped + recorded as cache inputs), and every statement
@@ -4180,6 +4285,23 @@ impl<'a> Interp<'a> {
                         }
                         other => Err(format!("close of non-Stream {other:?}").into()),
                     },
+                    // RFC-0074 M3a. The handoff: the stream stops being this
+                    // call's obligation and becomes the host's, which will pull
+                    // it, write each frame, and `close` it the first time a write
+                    // fails. Two in one request would leave the first with nobody
+                    // to release it, so it traps rather than silently dropping.
+                    "serveStream" => match vals.remove(0) {
+                        Val::Stream(s) => {
+                            if self.live.borrow().is_some() {
+                                return Err(
+                                    "serveStream: this request already opened a stream".into()
+                                );
+                            }
+                            *self.live.borrow_mut() = Some(*s);
+                            Ok(Val::Unit)
+                        }
+                        other => Err(format!("serveStream of non-Stream {other:?}").into()),
+                    },
                     // value(x) -> Value: box a scalar into the interpolation enum.
                     "value" => {
                         let v = vals.remove(0);
@@ -5345,6 +5467,17 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// A stream's release path (RFC-0075): a buffer has nothing the host does not
+    /// reclaim anyway, a producer owns a cursor cell out of a finite slab. One
+    /// function so `for … in`, `close` and the host's disconnect (RFC-0074 M3a)
+    /// run the same one rather than three that agree.
+    fn release_stream(&self, s: &StreamVal) -> Result<(), Ctrl> {
+        if let StreamVal::Step { slot, gen, .. } = *s {
+            self.cell_release(slot, gen)?;
+        }
+        Ok(())
+    }
+
     /// `for x in <stream>` — the pull loop. The stream is a local here, so the
     /// release below runs on every way out, including the `?` on a trapping body.
     fn for_stream(
@@ -5354,12 +5487,7 @@ impl<'a> Interp<'a> {
         body: &Block,
         scope: &mut Vec<Frame>,
     ) -> Result<Flow, Ctrl> {
-        let release = |s: &StreamVal| -> Result<(), Ctrl> {
-            if let StreamVal::Step { slot, gen, .. } = *s {
-                self.cell_release(slot, gen)?;
-            }
-            Ok(())
-        };
+        let release = |s: &StreamVal| -> Result<(), Ctrl> { self.release_stream(s) };
         loop {
             let item = match self.stream_next(&mut s) {
                 Ok(Some(v)) => v,

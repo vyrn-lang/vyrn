@@ -160,6 +160,12 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("fromArray", Memory, "Stream: the array's buffer, moved into a buffer-tagged header"),
     ("fromStep", Memory, "Stream: a cursor cell plus a step, pulled once per element"),
     ("close", Memory, "Stream: variant-aware reclamation (a buffer, or a cursor cell)"),
+    // RFC-0074 M3a. `Syscall` rather than `Memory`: it is not about the stream's
+    // storage, it is the one call that reaches the host's accept loop, which is
+    // the same argument `print` makes one row down. It is also the only way a
+    // stream leaves the call that made it — which is the point, since the host
+    // then owes it the `close` above.
+    ("serveStream", Syscall, "the host's socket: hand a producer to the accept loop, which pulls and closes it"),
     ("cell", Memory, "the slot table: allocate a slot and a generation"),
     ("get", Memory, "the slot table: generation-checked read"),
     ("set", Memory, "the slot table: generation-checked write"),
@@ -452,8 +458,11 @@ fn the_census_is_the_code() {
     // when RFC-0075 M2b added `fromStep`: one `Memory` row for the producer a
     // stream can now hold, beside the buffer it always could. No row for `next` —
     // the pull is emitted inside `for … in` rather than named, so there is no
-    // dispatch here to census.
-    assert_eq!(found.len(), 83, "the primitive core changed size");
+    // dispatch here to census. 83 -> 84 when RFC-0074 M3a added `serveStream`:
+    // one `Syscall` row for the handoff, and none for the pull or the release —
+    // the host asks for those through the serve API rather than through a name a
+    // program can write, so there is again no dispatch here to census.
+    assert_eq!(found.len(), 84, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

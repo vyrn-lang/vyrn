@@ -197,6 +197,9 @@ pub const RESERVED: &[&str] = &[
     "fromArray",
     "fromStep",
     "close",
+    // RFC-0074 M3a: the handoff. A stream a request opened outlives the answer
+    // that opened it, so it goes to the host rather than being consumed here.
+    "serveStream",
     "Int",
     "Int64",
     "Int32",
@@ -1185,9 +1188,15 @@ impl<'a> Checker<'a> {
                 Type::Enum(vs) => vs
                     .iter()
                     .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                Type::Fn(ps, r) => {
-                    ps.iter().any(|p| walk(p, types, seen)) || walk(r, types, seen)
-                }
+                // NOT a storing position, and this is RFC-0074 M3a's finding: a
+                // `fn` type's parameters and return ARE the two places M1 declared
+                // legal, so `fn(Request) -> Stream<String>` stores no stream — it
+                // describes a call that produces one, and the caller owes it the
+                // moment it exists. Descending here was safe only while nothing in
+                // the corpus had a `fn` type mentioning a stream; `std/http`'s
+                // `Feed` is one, and rejecting it would forbid the shape M1's own
+                // rules already permit twice over.
+                Type::Fn(_, _) => false,
                 Type::Named(n) | Type::App(n, _) => {
                     let args = match ty {
                         Type::App(_, a) => a.as_slice(),
@@ -5614,6 +5623,43 @@ impl<'a> Checker<'a> {
             }
             if !matches!(at, Type::Stream(_)) {
                 return Err(format!("line {line}: `close` needs a `Stream<T>`, found {at}"));
+            }
+            return Ok(Type::Unit);
+        }
+        // RFC-0074 M3a. `serveStream(s)` hands a producer to the HOST: the
+        // request that opened it returns an ordinary `Response` carrying only the
+        // header block, and the host then pulls one element at a time, writes it,
+        // and `close`s the stream the first time a write fails. That is the whole
+        // disconnect mechanism — the socket rather than a host event — and it is
+        // why this is a builtin rather than a library function: a stream must
+        // escape the call that made it, which is the one thing M1's linearity
+        // otherwise forbids, and `close` on the far side is what discharges it.
+        //
+        // `Stream<String>` and not `Stream<Event>`: the element is one already
+        // encoded frame, so every byte of SSE's syntax stays in `std/http` where
+        // the vocabulary belongs, and the host learns nothing about the protocol
+        // beyond "write this, flush, ask again". `ws` (M3b) is the same handoff
+        // with a different encoder.
+        if name == "serveStream" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `serveStream` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let at = self.base(&at);
+            if matches!(at, Type::Err) {
+                return Ok(Type::Unit);
+            }
+            let ok = match &at {
+                Type::Stream(inner) => self.base(inner) == Type::Str,
+                _ => false,
+            };
+            if !ok {
+                return Err(format!(
+                    "line {line}: `serveStream` needs a `Stream<String>` of encoded frames, found {at}"
+                ));
             }
             return Ok(Type::Unit);
         }

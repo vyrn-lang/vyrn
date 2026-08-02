@@ -213,10 +213,105 @@ The lambda captures nothing, which is what makes it lowerable: M1's native
 codegen bug was a lambda CALLING a captured `fn`-typed parameter, and a
 predicate over a `String` has neither.
 
+## Feed
+
+```vyrn
+type Feed = fn(Request, Map<String, String>, Int64) -> Stream<String>
+```
+
+What a mounted stream route runs: the request, the placeholder bindings, and
+the CURSOR — the seed the producer resumes from, which is a reconnecting
+client's `Last-Event-ID` when the route is `resumable` and `0` otherwise.
+
+It hands back a `Stream<String>` of already-encoded frames (build them with
+`event` below). The element is a frame rather than a record for a reason that
+is about `std/stream` rather than about taste: `map` and `filter` are eager
+walks over a buffer, so mapping a record stream into a frame stream would
+materialise the feed — which is `#6156`, the incident RFC-0075 quotes,
+arriving through the library written to prevent it. The producer encodes as
+it goes, and stays lazy.
+
+## Live
+
+```vyrn
+type Live = { pattern: String, feed: Feed, retry: Int64, resume: Bool, derived: String }
+```
+
+A mounted event stream — and NOT a `Route`, which is the whole point.
+
+`Route` carries `Policy`, and every one of its seven — `cacheFor`, `etag`,
+`lastModified`, `vary`, `status`, `createdAt`, `notFoundWhen` — is about a
+response that exists all at once. A validator for bytes that have not been
+produced yet is not a thing, and a 304 for a feed is not either. This RFC's
+rule is that an option meaningless to a transport is ABSENT from it rather
+than ignored, so a stream is a different record with a different protocol, and
+`mount` takes both. That separation is only spellable since RFC-0084 M1 made a
+record a legal protocol target; before it, both would have had to be one
+record with the options quietly doing nothing.
+
+## sse
+
+```vyrn
+fn sse(pattern: String, feed: Feed) -> Live
+```
+
+`sse(pattern, feed)` — mount `feed` as an event stream at `pattern`.
+
+The pattern is written here rather than in the procedure's own parameter slot,
+which is where M1 put it and why: that trick exists to check `{id}` against a
+procedure's INPUT RECORD, and a feed takes the request rather than a decoded
+record — there are no fields to check the placeholders against. So `sse` is
+the RFC's own `sse("/", tail)` spelling, and it is not a weaker version of
+`GET(byId("/{id}"))`; it is the same rule with nothing to check.
+
+## Wire
+
+```vyrn
+protocol Wire { fn retryAfter(self, Int64) -> Live; fn resumable(self) -> Live }
+```
+
+A stream's policy, and it has nothing in common with `Policy`'s.
+
+### `retryAfter(ms)` — the reconnect hint, `retry: N` before the first frame
+
+A pull producer answers `Some` or `None`; it has no way to say "nothing yet".
+So a feed that catches up ENDS, the connection closes, and the client comes
+back `ms` later — with its `Last-Event-ID` if the route is `resumable`. That
+makes `retryAfter` the poll interval rather than a failure hint, and it is the
+honest shape for a language with no concurrency: the alternative is a producer
+blocking the single-threaded server while it waits for something to happen.
+
+### `resumable()` — `Last-Event-ID` becomes the producer's seed
+
+RFC-0075 M2b made a stream's cursor its resume token, so replay is not a
+feature: the header's value is handed to the feed as its seed and the ordinary
+code path produces exactly what the client has not seen. Write that cursor as
+each frame's `id`, which is what `event` takes it for. Without `resumable` the
+seed is always `0` and a reconnecting client gets the feed from the top.
+
+`keepAlive` is NOT here, and its absence is the same rule as `Policy`'s
+absence: a pull producer that has nothing to say ends rather than idling, so
+there is no idle connection for a keep-alive comment to hold open. The RFC
+lists it beside the other two; there is nothing under it to build.
+
+## event
+
+```vyrn
+fn event(id: String, name: String, data: String) -> String
+```
+
+One SSE frame: `id:`, `event:`, the `data:` lines, and the blank line that
+ends it. An empty `id` or `name` writes no field rather than an empty one.
+
+`data` is split on newlines because the wire format has no other way to carry
+one — a raw `\n` inside a `data:` line would end the field, and a JSON payload
+with a newline in it would silently become two events. Every `\n` in the
+payload therefore becomes a second `data:` line, which the client rejoins.
+
 ## mount
 
 ```vyrn
-fn mount(req: Request, groups: Array<Array<Route>>) -> Option<Response>
+fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>) -> Option<Response>
 ```
 
 Resolve `req` against the mounted groups, in order, first match wins.

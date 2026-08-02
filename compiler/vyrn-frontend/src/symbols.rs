@@ -2964,6 +2964,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
     BuiltinMethod { name: "fromStep", detail: "fromStep(seed, step) -> Stream<T> — a stream that pulls from `step: fn(Ref<Int64>) -> Option<T>`; `std/stream`'s `unfold` is the one to call" },
     BuiltinMethod { name: "close", detail: "close(stream) -> Unit — discharge a stream's disposal obligation without consuming it" },
+    BuiltinMethod { name: "serveStream", detail: "serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails (RFC-0074 M3a); `std/http`'s `sse` is the one to call" },
     BuiltinMethod { name: "pop", detail: "array.pop() -> Option<T> — remove and return the last element (None if empty)" },
     BuiltinMethod { name: "swapRemove", detail: "array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot" },
     BuiltinMethod { name: "has", detail: "map.has(key) -> Bool — whether the map contains the key (RFC-0028)" },
