@@ -11,16 +11,33 @@ therefore fails to compile for precisely the reason an abandoned
 `fromArray(...)` does; there is no combinator-shaped hole to plug because
 there is no combinator-shaped rule.
 
-**These four and no more.** `unfold`, `merge`-by-arrival and `channel` are
-NOT here, and the reason is the representation, not the effort: a
-`Stream<T>` is `Array<T>`'s three words on all three engines (RFC-0075 M1,
-"As landed"), so a stream is a buffer that already exists. Everything below
-is expressible as a walk over that buffer producing another one. A producer
-whose length is not known — the `unfold` in the RFC's own example — is not,
-and faking it by running the step function to exhaustion at construction
-time would turn "stream an unbounded feed" into "materialize an unbounded
-feed", which is the `#6156` heap growth this RFC exists to prevent. See
-"As landed — M2" in the RFC for what changing the representation costs.
+**Five, and two refused.** M2b made `Stream<T>` a producer rather than a
+buffer, so `unfold` is here now: it is the reason the representation
+changed. `merge`-by-arrival and `channel` are still absent, and not for want
+of a representation — both need to know which of several sources has a value
+READY, and this RFC states outright that it adds no concurrency while
+RFC-0013 leaves the loop to the host. There is nothing to ask.
+
+## unfold
+
+```vyrn
+fn unfold<T>(seed: Int64, step: fn(Ref<Int64>) -> Option<T>) -> Stream<T>
+```
+
+A stream from a step function and a starting cursor (RFC-0075 M2b).
+
+`step` is handed the stream's own cursor cell once per element: read it with
+`get`, write the next cursor with `set`, and answer `Some(v)` to yield or
+`None` to end. Nothing runs until a consumer asks, so a step that never
+answers `None` is an endless feed rather than a hang — `take(unfold(..), n)`
+over one allocates n.
+
+The cursor is the resume token RFC-0074's `.resumable()` wants: hand a
+reconnecting client's `Last-Event-ID` in as `seed` and replay is the ordinary
+path. It is an `Int64` because the step's SIGNATURE is what a stream
+dispatches through, and a seed type in that signature would be a seed type
+in `Stream<T>` — which is exactly what M2 could not hide. Producer state that
+is not one integer goes in a second cell the step closes over.
 
 ## map
 
@@ -47,9 +64,11 @@ fn take<T>(s: Stream<T>, n: Int64) -> Stream<T>
 The first `n` elements (fewer if the stream is shorter; none if `n <= 0`).
 
 The `break` is the point: it leaves the loop early, and M1's release still
-runs on that path — one `free`, never two. Over the eager representation the
-early exit buys nothing but the pin, since the buffer is already built; over
-a pull-based one it is the whole reason `take` exists.
+runs on that path — one release, never two. Over M1's eager representation
+the early exit bought nothing but the pin, since the buffer was already
+built. Over M2b's it is the whole reason `take` exists: `take(unfold(..), n)`
+asks the producer n + 1 times and stops, which is what makes an endless feed
+a program rather than a hang.
 
 ## merge
 
@@ -65,5 +84,7 @@ it states outright that it does not add concurrency, so "whichever source
 has a value ready" is not a question the language can ask. Turn-taking is
 what a pull-based merge would do anyway when both sides are ready, so the
 observable sequence is the same one a lazy implementation would produce for
-any stream that terminates. What is lost is merging an endless source with
-a finite one, and nothing in the language can build an endless source yet.
+any stream that terminates. What is lost is merging an endless source with a
+finite one — and since M2b an endless source EXISTS, so `merge(unfold(..), b)`
+is now a hang rather than a thing the language cannot spell. Wrap the endless
+side in `take` first; a merge that stops on its own needs both sides to.
