@@ -2962,6 +2962,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     // RFC-0075. `close` is offered on a `Stream<T>` below; `fromArray` is here
     // for hover only, since it takes an Array and produces the stream.
     BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
+    BuiltinMethod { name: "fromStep", detail: "fromStep(seed, step) -> Stream<T> — a stream that pulls from `step: fn(Ref<Int64>) -> Option<T>`; `std/stream`'s `unfold` is the one to call" },
     BuiltinMethod { name: "close", detail: "close(stream) -> Unit — discharge a stream's disposal obligation without consuming it" },
     BuiltinMethod { name: "pop", detail: "array.pop() -> Option<T> — remove and return the last element (None if empty)" },
     BuiltinMethod { name: "swapRemove", detail: "array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot" },

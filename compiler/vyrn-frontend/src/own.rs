@@ -49,6 +49,13 @@ pub enum DropKind {
     /// A `Map<String, V>` (RFC-0028) — free both parallel backing buffers
     /// (keys and values). Elements are a safe leak, exactly as for arrays.
     FreeMap,
+    /// A `Stream<T>` (RFC-0075 M2b) — the release is variant-aware, so it is one
+    /// call to `@__vyrn_stream_close` rather than an inline `free`: a buffer
+    /// stream frees its buffer and a stepped one releases its cursor cell, and
+    /// which is which is a runtime tag. Keeping the branch in a runtime function
+    /// also keeps every drop SITE straight-line, which the early-return path
+    /// (`emit_all_drops`, mid-block) depends on.
+    CloseStream,
 }
 
 /// Whole-program ownership facts.

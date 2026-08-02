@@ -200,6 +200,29 @@ pub enum Val {
     /// away entirely — this variant is the interpreter's dynamic stand-in, kept
     /// semantically identical by materializing captures at the outer call site.
     Fn(Box<FnVal>),
+    /// A `Stream<T>` (RFC-0075 M2b). Until M2b this was a [`Val::Array`] under a
+    /// different static type; it is now a producer, which is the whole milestone
+    /// — an endless one exists, and `take(n)` over it reads n+1 elements rather
+    /// than all of them.
+    Stream(Box<StreamVal>),
+}
+
+/// The two shapes a [`Val::Stream`] can take (RFC-0075 M2b) — the interpreter's
+/// spelling of the tagged header the two compiled backends lay out in six words.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamVal {
+    /// `fromArray(xs)`: a buffer that already exists, plus how far the consumer
+    /// has read it.
+    Buf(std::rc::Rc<Vec<Val>>, usize),
+    /// `fromStep(seed, f)`: a cursor cell holding the seed, the step, and whether
+    /// the step has already answered `None` (after which it is never called
+    /// again — a stream that ended stays ended).
+    Step {
+        slot: usize,
+        gen: u64,
+        step: Box<FnVal>,
+        done: bool,
+    },
 }
 
 /// One piece of a [`Val::Code`] fragment (RFC-0054). Either plain rendered text
@@ -2792,7 +2815,12 @@ impl<'a> Interp<'a> {
             Stmt::ForIn {
                 var, iter, body, ..
             } => {
+                // RFC-0075 M2b: a stream is pulled, not walked. The producer runs
+                // once per iteration and the loop OWNS the stream, so leaving by
+                // any route — falling off the end, `break`, `return` — releases it
+                // on the way out, which is the same guarantee M1 gave a buffer.
                 let items = match self.expr(iter, scope)? {
+                    Val::Stream(s) => return self.for_stream(*s, var, body, scope),
                     Val::Array(items) => items,
                     // Iterating a String yields each byte as an Int.
                     Val::Str(s) => s.as_bytes().iter().map(|b| Val::Int(*b as i64)).collect::<Vec<_>>().into(),
@@ -4116,18 +4144,40 @@ impl<'a> Interp<'a> {
                         Val::Array(_) => Ok(Val::Unit),
                         other => Err(format!("afree of non-Array {other:?}").into()),
                     },
-                    // RFC-0075. A `Stream<T>` shares `Array<T>`'s representation
-                    // in all three engines, so producing one is the identity and
-                    // closing one is `afree` under a different name — the two
-                    // agree on output and exit code, and the linearity that makes
-                    // a stream different from an array was settled before this
-                    // ran, in movecheck.
-                    "fromArray" => match &vals[0] {
-                        Val::Array(_) => Ok(vals.remove(0)),
+                    // RFC-0075. The two producers and the release. `close` is
+                    // variant-aware (M2b): a buffer stream has nothing the host
+                    // does not reclaim anyway, but a stepped one owns a cursor
+                    // cell, and that cell is a slot in a slab of 65536 — the one
+                    // resource an interpreter CAN exhaust, so releasing it is
+                    // observable here exactly as the `free` is natively.
+                    "fromArray" => match vals.remove(0) {
+                        Val::Array(a) => Ok(Val::Stream(Box::new(StreamVal::Buf(a, 0)))),
                         other => Err(format!("fromArray of non-Array {other:?}").into()),
                     },
+                    "fromStep" => {
+                        let seed = vals.remove(0);
+                        let step = match vals.remove(0) {
+                            Val::Fn(f) => f,
+                            other => return Err(format!("fromStep of non-fn {other:?}").into()),
+                        };
+                        let (slot, gen) = match self.cell_alloc(seed)? {
+                            Val::Ref { slot, gen } => (slot, gen),
+                            other => return Err(format!("cell of {other:?}").into()),
+                        };
+                        Ok(Val::Stream(Box::new(StreamVal::Step {
+                            slot,
+                            gen,
+                            step,
+                            done: false,
+                        })))
+                    }
                     "close" => match &vals[0] {
-                        Val::Array(_) => Ok(Val::Unit),
+                        Val::Stream(s) => {
+                            if let StreamVal::Step { slot, gen, .. } = **s {
+                                self.cell_release(slot, gen)?;
+                            }
+                            Ok(Val::Unit)
+                        }
                         other => Err(format!("close of non-Stream {other:?}").into()),
                     },
                     // value(x) -> Value: box a scalar into the interpolation enum.
@@ -5257,6 +5307,90 @@ impl<'a> Interp<'a> {
     /// generational references (native prints a message and exits 1 to match).
     fn stale() -> Ctrl {
         Ctrl::Err("reference used after release".into())
+    }
+
+    /// One element from a stream, advancing it (RFC-0075 M2b). `None` ends the
+    /// loop; a stepped stream that has ended is never stepped again.
+    fn stream_next(&self, s: &mut StreamVal) -> Result<Option<Val>, Ctrl> {
+        match s {
+            StreamVal::Buf(items, i) => {
+                let v = items.get(*i).cloned();
+                if v.is_some() {
+                    *i += 1;
+                }
+                Ok(v)
+            }
+            StreamVal::Step {
+                slot,
+                gen,
+                step,
+                done,
+            } => {
+                if *done {
+                    return Ok(None);
+                }
+                let cursor = Val::Ref {
+                    slot: *slot,
+                    gen: *gen,
+                };
+                match self.call_fnval(step, &[cursor])? {
+                    Val::Option(Some(v)) => Ok(Some(*v)),
+                    Val::Option(None) => {
+                        *done = true;
+                        Ok(None)
+                    }
+                    other => Err(format!("a stream step answered {other:?}").into()),
+                }
+            }
+        }
+    }
+
+    /// `for x in <stream>` — the pull loop. The stream is a local here, so the
+    /// release below runs on every way out, including the `?` on a trapping body.
+    fn for_stream(
+        &self,
+        mut s: StreamVal,
+        var: &str,
+        body: &Block,
+        scope: &mut Vec<Frame>,
+    ) -> Result<Flow, Ctrl> {
+        let release = |s: &StreamVal| -> Result<(), Ctrl> {
+            if let StreamVal::Step { slot, gen, .. } = *s {
+                self.cell_release(slot, gen)?;
+            }
+            Ok(())
+        };
+        loop {
+            let item = match self.stream_next(&mut s) {
+                Ok(Some(v)) => v,
+                Ok(None) => break,
+                Err(e) => {
+                    release(&s)?;
+                    return Err(e);
+                }
+            };
+            scope.push(Frame::default());
+            scope
+                .last_mut()
+                .unwrap()
+                .insert(var.to_string(), Slot::untyped(item));
+            let flow = self.block(body, scope);
+            scope.pop();
+            match flow {
+                Ok(Flow::Return(v)) => {
+                    release(&s)?;
+                    return Ok(Flow::Return(v));
+                }
+                Ok(Flow::Break) => break,
+                Ok(Flow::Continue | Flow::Normal) => {}
+                Err(e) => {
+                    release(&s)?;
+                    return Err(e);
+                }
+            }
+        }
+        release(&s)?;
+        Ok(Flow::Normal)
     }
 
     fn cell_alloc(&self, v: Val) -> Result<Val, Ctrl> {
@@ -7891,5 +8025,34 @@ mod tests {
         // these four words ARE the line the direct backend's `malloc` traps
         // with, which is in turn the native shim's. Asserting against the shim's
         // constant is not possible in the direction the crates depend.
+    }
+
+    #[test]
+    fn a_stepped_stream_runs_its_producer_only_when_asked() {
+        // RFC-0075 M2b, in the engine with no IR to inspect. `tick` never answers
+        // `None`, so this program does not terminate under the representation M1
+        // shipped — it terminates here, and the count is the reason: eight `next`
+        // calls out of a feed with no end.
+        let src = "let mut steps = 0 \
+                   fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1) \
+                   steps = steps + 1 return Some(n) } \
+                   fn main() -> Int64 { \
+                     let mut seen = 0 \
+                     for v in fromStep(0, tick) { seen = seen + v if v == 7 { break } } \
+                     return steps }";
+        assert_eq!(crate::run(src), Ok(8));
+    }
+
+    #[test]
+    fn a_released_stream_hands_its_cursor_cell_back() {
+        // The slab is 65536 slots on every engine, so a `close` that did not
+        // release would trap here rather than merely grow — which is what makes
+        // RFC-0075's "10 000 open-then-abandon cycles" row observable at all.
+        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1) \
+                   return Some(n) } \
+                   fn main() -> Int64 { let mut i = 0 \
+                     while i < 100000 { let s = fromStep(i, tick) close(s) i = i + 1 } \
+                     return i }";
+        assert_eq!(crate::run(src), Ok(100000));
     }
 }

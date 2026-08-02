@@ -598,9 +598,9 @@ mod streams {
 
     pub fn check(program: &Program) -> Vec<Diagnostic> {
         // Functions whose return type is a stream, with the rendering the
-        // diagnostic quotes. `fromArray` is the builtin producer and carries no
-        // element type here — this pass has no types — so a stream from it is
-        // spelled plainly `Stream`.
+        // diagnostic quotes. `fromArray`/`fromStep` are the builtin producers and
+        // carry no element type here — this pass has no types — so a stream from
+        // one of them is spelled plainly `Stream`.
         let producers: HashMap<&str, String> = program
             .functions
             .iter()
@@ -721,7 +721,9 @@ mod streams {
             return Some(t.to_string());
         }
         match value {
-            Expr::Call { name, .. } if name == "fromArray" => Some("Stream".to_string()),
+            Expr::Call { name, .. } if name == "fromArray" || name == "fromStep" => {
+                Some("Stream".to_string())
+            }
             Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
             // `let t = s` moves the stream; `t` inherits both the obligation and
             // the rendering, and the mention of `s` discharges `s`'s.
@@ -1152,6 +1154,24 @@ mod tests {
         // The milestone's whole claim: the `#6193` shape is a compile error.
         let e = stream("let events = feed() return 0").unwrap_err();
         assert!(e.contains("`events` is a `Stream<Int64>` and is never disposed"), "{e}");
+    }
+
+    #[test]
+    fn a_stepped_producer_carries_the_same_obligation() {
+        // RFC-0075 M2b's producer is a second builtin, and this pass keys on the
+        // NAME — so an abandoned `fromStep` result had to be added here or the
+        // one stream the language cannot materialise would be the one it lets
+        // leak. Its endlessness is the checker's business, not this pass's: the
+        // obligation is the same obligation.
+        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1) \
+                   return Some(n) } \
+                   fn main() -> Int64 { let s = fromStep(0, tick) return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`s` is a `Stream` and is never disposed"), "{e}");
+        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1) \
+                   return Some(n) } \
+                   fn main() -> Int64 { let s = fromStep(0, tick) close(s) return 0 }";
+        assert!(run(src).is_ok());
     }
 
     #[test]
