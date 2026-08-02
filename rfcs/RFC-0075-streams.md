@@ -225,10 +225,49 @@ inherited.
   **Shipped in part** — four of the seven; `unfold` and `channel` are the
   representation change M1 did not make, and `merge` shipped as sequence
   interleave. See "As landed — M2".
+- **M2b — the pull representation.** `Stream<T>` stops being a buffer. The
+  price is itemised in "As landed — M2" and those four items are the four
+  deliverables; see below for why this is now on the critical path rather than
+  a nicety.
 - **M3 — cancellation + conformance.** The normalized signal; the conformance
   suite; native and wasm adapters passing it.
 - **M4 — transports.** `sse` and `ws` projections; resumability via seed;
   the raw-`EventSource` completion test; a live tail in `examples/bin`.
+  (RFC-0074 M3 names the same work. One of the two should give it up when it is
+  built; they are the same adapters and the same evidence.)
+
+### M2b — the pull representation
+
+**What forced it.** RFC-0074 M3 spells `sse("/", tail).retryAfter(3000)` where
+`tail` yields a live feed. A `Stream<T>` is `Array<T>`'s three words, so that
+call materialises the entire feed before the first byte reaches the client —
+which is `#6156`, the incident this RFC quotes, arriving through the library
+written to prevent it. The eager representation was the right M1 decision and it
+is now the thing standing between this RFC and its own transports milestone.
+
+**The deliverables are the price list**, already itemised above and repeated
+here as work: `Stream<T>` becomes a tagged union across the interpreter, the
+LLVM emitter and the direct wasm backend; `fromArray` stops emitting nothing and
+`from_array_emits_no_instruction` is **deleted rather than adjusted**; `close`
+becomes variant-aware and M1's four release-path pins are re-counted in the IR;
+`for … in` over a stream stops sharing `direct.rs`'s indexed-array arm and
+becomes a `next`-until-`Done` loop. The mechanism is RFC-0037's: defunctionalise
+the producer into a closed enum with one variant per `unfold` site and make
+`next` an `@dispatch` match, which is how the seed type `S` gets hidden without
+an existential.
+
+**The pin is a measurement, not a shape.** An unbounded producer consumed by
+`take(n)` must allocate O(n), not O(feed) — and the eager version passes any
+assertion about the *values* while failing that one. Something that cannot
+terminate under the old representation is the only honest evidence, so the
+example must be a producer with no end rather than a large finite one.
+
+**The alternative, and why not.** `sse` could take a procedure the runtime calls
+once per event, and then no representation changes at all. It is refused because
+each adapter would hand-roll its own cleanup and its own disconnect handling —
+the two things `Stream<T>` exists to supply once. A second transport would write
+them a second time, differently, which is the shape of every bug M1's linearity
+was built to make unspellable.
 
 ## As landed — M1
 
