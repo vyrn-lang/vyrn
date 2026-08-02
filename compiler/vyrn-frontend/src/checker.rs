@@ -191,12 +191,15 @@ pub const RESERVED: &[&str] = &[
     "assertEq",
     "blackBox",
     "panic",
-    // RFC-0075: the only three ways to make and unmake a `Stream<T>`. Reserved
+    // RFC-0075: the only ways to make and unmake a `Stream<T>`. Reserved
     // for the reason every other builtin here is — they are dispatched before
     // user functions, so a user `fn close` would be silently unreachable.
     "fromArray",
     "fromStep",
     "close",
+    // RFC-0075 M2c: the wrapper and the pull it is written in terms of.
+    "fromWrap",
+    "pull",
     // RFC-0074 M3a: the handoff. A stream a request opened outlives the answer
     // that opened it, so it goes to the host rather than being consumed here.
     "serveStream",
@@ -5608,6 +5611,86 @@ impl<'a> Checker<'a> {
                 ));
             };
             return Ok(Type::Stream(inner));
+        }
+        // RFC-0075 M2c. `fromWrap(src, step)` is `fromStep` with a source: the
+        // wrapper allocates the same cursor cell, parks the same
+        // `fn(Ref<Int64>) -> Option<U>` step in the same two header words, and
+        // additionally MOVES `src` into that cell, where `pull` finds it and
+        // `close` releases it. A wrapper is therefore an ordinary producer —
+        // `for … in` needs no arm for it, the dispatcher no new key, and the
+        // release path counts it the way it counts every other stream. It is
+        // what makes `map` a stream rather than a drain.
+        if name == "fromWrap" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `fromWrap` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let st = self.expr(&args[0], scope, None, fn_ret)?;
+            let st = self.base(&st);
+            if matches!(st, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if !matches!(st, Type::Stream(_)) {
+                return Err(format!(
+                    "line {line}: `fromWrap` needs a `Stream<T>` source, found {st}"
+                ));
+            }
+            let ft = self.expr(&args[1], scope, None, fn_ret)?;
+            let want = "fn(Ref<Int64>) -> Option<U>";
+            let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
+                return Err(format!(
+                    "line {line}: `fromWrap` needs a `{want}` step, found {ft}"
+                ));
+            };
+            if ps.len() != 1 || self.base(&ps[0]) != Type::Ref(Box::new(Type::Int)) {
+                return Err(format!(
+                    "line {line}: `fromWrap` needs a `{want}` step, found {ft}"
+                ));
+            }
+            let Type::Option(inner) = self.base(&ret) else {
+                return Err(format!(
+                    "line {line}: `fromWrap` needs a `{want}` step, found {ft}"
+                ));
+            };
+            return Ok(Type::Stream(inner));
+        }
+        // RFC-0075 M2c. `pull(c)` is one element from the stream behind this
+        // cursor — the operation a wrapper's step is written in terms of.
+        //
+        // Its element type comes from the ANNOTATION, because nothing in the
+        // call carries it: the cursor is a `Ref<Int64>` for every stream (M2b),
+        // which is exactly the property that keeps the seed type out of
+        // `Stream<T>` and exactly what leaves `pull` with nothing to infer
+        // from. `let x: Option<T> = pull(c)` is the spelling, and the error
+        // below is what an unannotated one gets.
+        if name == "pull" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `pull` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let ct = self.expr(&args[0], scope, Some(&Type::Ref(Box::new(Type::Int))), fn_ret)?;
+            let ct = self.base(&ct);
+            if !matches!(ct, Type::Err) && ct != Type::Ref(Box::new(Type::Int)) {
+                return Err(format!(
+                    "line {line}: `pull` needs a `Ref<Int64>` cursor, found {ct}"
+                ));
+            }
+            let Some(exp) = expected else {
+                return Err(format!(
+                    "line {line}: `pull` needs the element type from context — \
+                     write `let x: Option<T> = pull(c)`"
+                ));
+            };
+            if !matches!(self.base(exp), Type::Option(_)) {
+                return Err(format!(
+                    "line {line}: `pull` answers an `Option<T>`, not {exp}"
+                ));
+            }
+            return Ok(exp.clone());
         }
         if name == "close" {
             if args.len() != 1 {
