@@ -475,6 +475,8 @@ fn request_raw(port: u16, raw: &str) -> (String, String) {
 //   generation, so a later read is the canonical "reference used after release"
 //   trap. A 500 there is the release itself being observed, not inferred.
 const SSE_SRC: &str = r#"
+import { unfold, map } from "std/stream"
+
 let mut steps: Int64 = 0
 let mut saved: Ref<Int64> = cell(0)
 
@@ -488,6 +490,22 @@ fn tick(c: Ref<Int64>) -> Option<String> {
     return Some("id: \{n}\ndata: e\{n}\n\n")
 }
 
+/// The same feed, unencoded, plus the encoder — which is what a `map` over a
+/// live feed is for, and what RFC-0075 M2c made possible: mapping one was a hang
+/// until the combinators became lazy, and M3a's element is an encoded frame
+/// partly because of it.
+fn nums(c: Ref<Int64>) -> Option<Int64> {
+    steps = steps + 1
+    saved = c
+    let n = get(c)
+    set(c, n + 1)
+    return Some(n)
+}
+
+fn frame(n: Int64) -> String {
+    return "id: \{n}\ndata: e\{n}\n\n"
+}
+
 /// A feed with nothing to say — the 204 path.
 fn silent(c: Ref<Int64>) -> Option<String> {
     steps = steps + 1
@@ -497,6 +515,10 @@ fn silent(c: Ref<Int64>) -> Option<String> {
 fn handle(req: Request) -> Response {
     if req.path == "/live" {
         serveStream(fromStep(0, tick))
+        return Response { status: 200, contentType: "text/event-stream", body: "retry: 500\n\n", vary: "", headers: [:] }
+    }
+    if req.path == "/mapped" {
+        serveStream(map(unfold(0, nums), frame))
         return Response { status: 200, contentType: "text/event-stream", body: "retry: 500\n\n", vary: "", headers: [:] }
     }
     if req.path == "/empty" {
@@ -608,6 +630,37 @@ fn a_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
     // One dropped client did not cost the server anything else.
     let (status, _) = get(s.port, "/steps");
     assert_eq!(status, "HTTP/1.1 200 OK");
+}
+
+#[test]
+fn a_mapped_feed_streams_and_its_release_walks_the_chain() {
+    // RFC-0075 M2c, at the transport this milestone exists to unblock. Two
+    // streams are alive here — the feed and the `map` that wraps it — and only
+    // the wrapper has a name the host can hold, so the release has to walk from
+    // it to the feed's cursor cell. The `/probe` trap is that walk being
+    // observed: `saved` is the INNER producer's cursor, one the host never
+    // touched.
+    let s = start_server_on(SSE_SRC, &[]);
+    let (live, text) = open_stream(s.port, "/mapped", 200);
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
+    let (_, after) = text.split_once("\r\n\r\n").expect("header block");
+    assert!(after.contains("id: 0\ndata: e0\n\n"), "a mapped frame:\n{after}");
+    assert!(after.contains("id: 1\ndata: e1\n\n"), "and the next:\n{after}");
+
+    drop(live);
+    let (status, settled) = get(s.port, "/steps");
+    assert_eq!(status, "HTTP/1.1 200 OK", "the server survived the disconnect");
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, later) = get(s.port, "/steps");
+    assert_eq!(
+        settled, later,
+        "the feed kept running behind the map after the client went away ({settled} -> {later})"
+    );
+
+    let (status, body) = get(s.port, "/probe");
+    assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "cursor still live: {body}");
+    let err = wait_for(&s.stderr, "reference used after release", Duration::from_secs(5));
+    assert!(err.contains("error: reference used after release"), "{err}");
 }
 
 #[test]
