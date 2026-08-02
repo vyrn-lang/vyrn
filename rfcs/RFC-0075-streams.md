@@ -7,9 +7,12 @@
   runs the step n + 1 times (`examples/streamunfold.vyrn`). `std/stream` ships
   `unfold`, `map`, `filter`, `take` and `merge`; `channel` and arrival-order
   `merge` stay **refused**, and not for want of a representation — see "As
-  landed — M2". M3–M4 unstarted; **M4 additionally depends on RFC-0074, which
-  has no implementation at all.** One claim in this document is known false —
-  see "As landed — M1" on the trap row.
+  landed — M2". **M3's conformance table is four-sixths true already**: one row
+  is struck (it asks for behaviour during an unwind Vyrn does not have), one
+  needed nothing (a fallible producer yields `Stream<Result<T, E>>`, so the
+  error is an element), and the only one left needs a transport to disconnect
+  from. **M4 is given up to RFC-0074 M3**, which owns `Route` and spells the
+  adapters as projections; what stays here is the contract they must meet.
 - **Depends on:** RFC-0074 (`sse` / `ws` projections — the transports that
   consume streams), RFC-0072 (audience, derived RPC), RFC-0037 (stored closures
   / defunctionalization — the producer state below), RFC-0060 (`break` /
@@ -168,18 +171,40 @@ suite.
 Every host adapter — the native server, the wasm/WASI server, SSE, WebSocket,
 and any third-party adapter — must pass a shared suite:
 
-| test | requirement |
-|---|---|
-| client disconnects mid-stream | producer release runs within 100 ms |
-| consumer `break`s | release runs before the loop's next statement |
-| consumer traps | release runs during unwind — **unachievable as written; see "As landed"** |
-| producer raises | release runs; the error surfaces to the consumer |
-| stream is dropped unconsumed | compile error, not a runtime condition |
-| 10 000 open-then-abandon cycles | steady-state memory within 5% of baseline |
+| test | requirement | state after M2b |
+|---|---|---|
+| client disconnects mid-stream | producer release runs within 100 ms | needs a transport |
+| consumer `break`s | release runs before the loop's next statement | **holds** — M1's pin, re-counted in M2b |
+| consumer traps | release runs during unwind | **struck; see below** |
+| producer raises | release runs; the error surfaces to the consumer | **holds, and needed nothing** |
+| stream is dropped unconsumed | compile error, not a runtime condition | **holds** — `examples/stream_abandoned.vyrn` |
+| 10 000 open-then-abandon cycles | steady-state memory within 5% of baseline | **holds, and stronger** — M2b |
 
 The last row is `#6156` as a regression test. The suite is a public part of
 `std/stream`, so a third-party adapter proves itself with the same file the
 built-in adapters run.
+
+**"Consumer traps" is struck rather than deferred.** Vyrn has no unwinding —
+every trap on every engine is `fputs(stderr); exit(1); unreachable`, checked in
+the emitted IR of all three. A row demanding behaviour during an unwind that
+does not exist is not a test an adapter can pass or fail, so it is not a
+conformance row; it is a request for a different language. What replaces it is
+the true statement: a trap ends the process, and the process ending closes the
+sockets and file descriptors a producer was holding. The resource class that
+survives a process exit — a row in someone else's database, a lock in a
+different service — is not reachable by any release path this RFC could
+specify, so it belongs to the program rather than to the stream.
+
+**"Producer raises" needs no error channel, and adding one would be the
+mistake.** M2b's step is `fn(Ref<Int64>) -> Option<T>` with no way to report
+failure, which reads at first like a gap in the signature. It is not: a producer
+that can fail yields `Stream<Result<T, E>>`, so the error **is an element**. The
+consumer matches it in the ordinary `for … in`, the release path is the same one
+every other element takes, and "the error surfaces to the consumer" is satisfied
+by the type rather than by a mechanism. Widening the step to
+`Result<Option<T>, E>` would add a second failure channel that says the same
+thing, force every dispatcher and both backends through a wider return, and give
+`map`/`filter`/`take` two error stories to compose instead of one.
 
 ## Resumability
 
@@ -229,12 +254,16 @@ inherited.
 - **M2b — the pull representation.** `Stream<T>` stops being a buffer.
   **Shipped** — the four deliverables M2's price list itemised, plus `unfold`.
   See "As landed — M2b".
-- **M3 — cancellation + conformance.** The normalized signal; the conformance
-  suite; native and wasm adapters passing it.
-- **M4 — transports.** `sse` and `ws` projections; resumability via seed;
-  the raw-`EventSource` completion test; a live tail in `examples/bin`.
-  (RFC-0074 M3 names the same work. One of the two should give it up when it is
-  built; they are the same adapters and the same evidence.)
+- **M3 — cancellation + conformance.** The normalized signal and the conformance
+  suite. **Four of the six rows already hold after M2b**, one is struck, and the
+  one left — client disconnect — cannot be tested without something a client can
+  disconnect *from*. So M3 does not come before the transport; it comes with it.
+- **M4 — transports.** **Given up to RFC-0074 M3**, which spells `sse` and `ws`
+  as projections and owns `Route`. They were always the same adapters and the
+  same evidence, and two RFCs claiming one deliverable is how it gets built
+  twice or not at all. What stays here is the *contract* the adapters must meet:
+  the conformance table above, resumability via the cursor (M2b made the seed
+  the resume token), and the `#6156` cycle count.
 
 ### M2b — the pull representation
 
