@@ -118,14 +118,22 @@ done:
 /// generation against the slot's current one and traps on a mismatch, so a
 /// reference used after `release` fails a cheap check instead of dangling. A
 /// released slot is reused with a bumped generation, invalidating old references.
+///
+/// A fourth array arrived with RFC-0075 M2c: `src`, the stream a `fromWrap` put
+/// behind a cursor. It is null for every ordinary cell, which is what makes
+/// `pull` on one a trap rather than a read of whatever follows an 8-byte box,
+/// and non-null for a wrapper — where it points into that wrapper's own cell
+/// payload, so a wrapper costs one `malloc`, not two. `close` walks it.
 const CELL_RUNTIME: &str = "\
 @__vyrn_cell_gen = global [65536 x i64] zeroinitializer
 @__vyrn_cell_ptr_arr = global [65536 x ptr] zeroinitializer
+@__vyrn_cell_src_arr = global [65536 x ptr] zeroinitializer
 @__vyrn_cell_top = global i64 0
 @__vyrn_cell_free = global [65536 x i64] zeroinitializer
 @__vyrn_cell_freetop = global i64 0
 @.fmt.uaf = private unnamed_addr constant [37 x i8] c\"error: reference used after release\\0A\\00\"
 @.fmt.oom = private unnamed_addr constant [31 x i8] c\"error: out of reference cells\\0A\\00\"
+@.fmt.nos = private unnamed_addr constant [37 x i8] c\"error: no stream behind this cursor\\0A\\00\"
 
 define void @__vyrn_cell_trap() {
 entry:
@@ -163,7 +171,31 @@ done:
   %slot = phi i64 [ %rslot, %reuse ], [ %top, %ok ]
   %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_ptr_arr, i64 0, i64 %slot
   store ptr %p, ptr %pp
+  %sp0 = getelementptr [65536 x ptr], ptr @__vyrn_cell_src_arr, i64 0, i64 %slot
+  store ptr null, ptr %sp0
   ret i64 %slot
+}
+
+define ptr @__vyrn_cell_src(i64 %slot) {
+entry:
+  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_src_arr, i64 0, i64 %slot
+  %p = load ptr, ptr %pp
+  ret ptr %p
+}
+
+define void @__vyrn_cell_setsrc(i64 %slot, ptr %p) {
+entry:
+  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_src_arr, i64 0, i64 %slot
+  store ptr %p, ptr %pp
+  ret void
+}
+
+define void @__vyrn_cell_nostream() {
+entry:
+  %e = call ptr @__vyrn_stderr()
+  %r = call i32 @fputs(ptr @.fmt.nos, ptr %e)
+  call void @exit(i32 1)
+  unreachable
 }
 
 define i64 @__vyrn_cell_getgen(i64 %slot) {
@@ -209,25 +241,44 @@ entry:
 
 define void @__vyrn_stream_close(ptr %s) {
 entry:
-  %tp = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 2
-  %tag = load i64, ptr %tp
+  %d0 = load ptr, ptr %s
+  %t0p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 2
+  %t0 = load i64, ptr %t0p
+  %c0p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 4
+  %c0 = load i64, ptr %c0p
+  %g0p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 5
+  %g0 = load i64, ptr %g0p
+  br label %loop
+loop:
+  %d = phi ptr [ %d0, %entry ], [ %d1, %walk ]
+  %tag = phi i64 [ %t0, %entry ], [ %t1, %walk ]
+  %slot = phi i64 [ %c0, %entry ], [ %c1, %walk ]
+  %gen = phi i64 [ %g0, %entry ], [ %g1, %walk ]
   %isbuf = icmp slt i64 %tag, 0
   br i1 %isbuf, label %buf, label %stp
 buf:
-  %dp = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 0
-  %d = load ptr, ptr %dp
   call void @free(ptr %d)
   ret void
 stp:
-  %sp = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 4
-  %slot = load i64, ptr %sp
-  %gp2 = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 5
-  %gen = load i64, ptr %gp2
   call void @__vyrn_cell_check(i64 %slot, i64 %gen)
   %cp = call ptr @__vyrn_cell_ptr(i64 %slot)
-  call void @free(ptr %cp)
+  %src = call ptr @__vyrn_cell_src(i64 %slot)
   call void @__vyrn_cell_release_slot(i64 %slot)
+  %wrapped = icmp ne ptr %src, null
+  br i1 %wrapped, label %walk, label %plain
+plain:
+  call void @free(ptr %cp)
   ret void
+walk:
+  %d1 = load ptr, ptr %src
+  %t1p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %src, i64 0, i32 2
+  %t1 = load i64, ptr %t1p
+  %c1p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %src, i64 0, i32 4
+  %c1 = load i64, ptr %c1p
+  %g1p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %src, i64 0, i32 5
+  %g1 = load i64, ptr %g1p
+  call void @free(ptr %cp)
+  br label %loop
 }
 
 ";
@@ -3790,49 +3841,44 @@ impl<'a> Gen<'a> {
         Ok((res, ty))
     }
 
-    /// `for x in <stream>` — the pull loop (RFC-0075 M2b).
+    /// One element from a stream: `(has, slot)` — an `i1` saying whether there
+    /// was one, and the slot it was staged in (RFC-0075 M2c).
     ///
-    /// The shape is `cond → (buffer | step) → body → latch → cond`, and the
-    /// difference from the indexed walk it replaces is that the producer runs
-    /// inside the loop rather than before it. That is what makes `take(n)` over
-    /// an endless feed allocate n: the `break` in `take` leaves through `fend`
-    /// having asked the step n+1 times and no more.
+    /// Both readers of a stream go through here — `for … in` below, and `pull`,
+    /// which is what a lazy combinator's step is written in terms of. The two
+    /// asked the same two questions in two spellings until M2c needed the second
+    /// reader; the buffer arm's cursor advance and the producer arm's "a stream
+    /// that ended stays ended" latch are exactly the kind of agreement that
+    /// stops being true in one of two copies.
     ///
-    /// The header is spilled to a slot because both arms WRITE it — the buffer
-    /// arm advances the cursor, the step arm latches the end — and because the
-    /// release then has an address the ordinary drop machinery can reach, which
-    /// is how an early `return` out of the body releases it (M1's arrangement,
-    /// unchanged apart from the kind).
-    fn gen_for_stream(
+    /// It answers a staged element rather than an `Option<T>` on purpose. An
+    /// `Option` payload wider than a word is boxed, so a shared emitter that
+    /// answered one would have put a `malloc` in every `for x in fromArray(rs)`
+    /// over a record — a per-element box, never reclaimed, in the loop this RFC
+    /// exists to keep flat. `pull` builds the `Option` its own signature demands
+    /// and pays for it exactly there.
+    ///
+    /// `sslot` is the header's ADDRESS, because answering writes to it.
+    fn emit_stream_next(
         &mut self,
-        var: &str,
-        body: &Block,
-        av: &str,
+        sslot: &str,
         elem: &Type,
-    ) -> Result<(), String> {
+    ) -> Result<(String, String), String> {
         let ell = self.llt(elem);
-        let sslot = self.fresh_alloca(STREAM_LL);
-        self.emit(format!("store {STREAM_LL} {av}, ptr {sslot}"));
-        // Where each arm parks the element it produced, so the body reads one
-        // place regardless of which arm ran.
+        let optll = self.llt(&Type::Option(Box::new(elem.clone())));
         let stage = self.fresh_alloca(&ell);
 
-        let cond_l = self.fresh_label("fcond");
-        let buf_l = self.fresh_label("fbuf");
-        let step_l = self.fresh_label("fstep");
-        let call_l = self.fresh_label("fcall");
-        let some_l = self.fresh_label("fsome");
-        let yield_l = self.fresh_label("fyield");
-        let ended_l = self.fresh_label("fended");
-        let body_l = self.fresh_label("fbody");
-        let latch_l = self.fresh_label("flatch");
-        let end_l = self.fresh_label("fend");
+        let buf_l = self.fresh_label("nbuf");
+        let take_l = self.fresh_label("nbuftake");
+        let step_l = self.fresh_label("nstep");
+        let call_l = self.fresh_label("ncall");
+        let some_l = self.fresh_label("nsome");
+        let ended_l = self.fresh_label("nended");
+        let empty_l = self.fresh_label("nempty");
+        let done_l = self.fresh_label("ndone");
 
         let fld = |i: usize| format!("i64 0, i32 {i}");
-        self.emit_term(format!("br label %{cond_l}"));
-
-        // cond: which producer is this? A negative tag is a buffer.
-        self.emit_label(&cond_l);
+        // Which producer is this? A negative tag is a buffer.
         let tp = self.fresh_tmp();
         let tag = self.fresh_tmp();
         let isbuf = self.fresh_tmp();
@@ -3853,8 +3899,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("{i} = load i64, ptr {cp}"));
         self.emit(format!("{n} = load i64, ptr {lp}"));
         self.emit(format!("{more} = icmp ult i64 {i}, {n}"));
-        let take_l = self.fresh_label("fbuftake");
-        self.emit_term(format!("br i1 {more}, label %{take_l}, label %{end_l}"));
+        self.emit_term(format!("br i1 {more}, label %{take_l}, label %{empty_l}"));
         self.emit_label(&take_l);
         let dp = self.fresh_tmp();
         let data = self.fresh_tmp();
@@ -3868,7 +3913,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("{i1} = add i64 {i}, 1"));
         self.emit(format!("store i64 {i1}, ptr {cp}"));
         self.emit(format!("store {ell} {ev}, ptr {stage}"));
-        self.emit_term(format!("br label %{yield_l}"));
+        self.emit_term(format!("br label %{done_l}"));
 
         // step: once the producer has said `None` it is never asked again — a
         // stream that ended stays ended, on every engine.
@@ -3879,7 +3924,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("{ep2} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(1)));
         self.emit(format!("{over} = load i64, ptr {ep2}"));
         self.emit(format!("{isover} = icmp ne i64 {over}, 0"));
-        self.emit_term(format!("br i1 {isover}, label %{end_l}, label %{call_l}"));
+        self.emit_term(format!("br i1 {isover}, label %{empty_l}, label %{call_l}"));
 
         self.emit_label(&call_l);
         // `tag`/`pay` and `cur`/`gen` are adjacent 8-aligned pairs, which is why
@@ -3896,7 +3941,6 @@ impl<'a> Gen<'a> {
         // the ELEMENT type alone — the reason the cursor is a `Ref<Int64>`.
         let sig = self.normalize_sig(&stream_step_sig(elem));
         let sym = self.fnval_dispatcher_sym(&sig);
-        let optll = self.llt(&Type::Option(Box::new(elem.clone())));
         let o = self.fresh_tmp();
         self.emit(format!(
             "{o} = call {optll} @{sym}({{ i64, i64 }} {fv}, {{ i64, i64 }} {rf})"
@@ -3904,6 +3948,7 @@ impl<'a> Gen<'a> {
         let ot = self.fresh_tmp();
         self.emit(format!("{ot} = extractvalue {optll} {o}, 0"));
         self.emit_term(format!("br i1 {ot}, label %{some_l}, label %{ended_l}"));
+
         self.emit_label(&some_l);
         let w0 = self.fresh_tmp();
         let w1 = self.fresh_tmp();
@@ -3911,14 +3956,56 @@ impl<'a> Gen<'a> {
         self.emit(format!("{w1} = extractvalue {optll} {o}, 2"));
         let v = self.decode_payload(&w0, &w1, elem);
         self.emit(format!("store {ell} {v}, ptr {stage}"));
-        self.emit_term(format!("br label %{yield_l}"));
+        self.emit_term(format!("br label %{done_l}"));
 
         self.emit_label(&ended_l);
         self.emit(format!("store i64 1, ptr {ep2}"));
-        self.emit_term(format!("br label %{end_l}"));
+        self.emit_term(format!("br label %{empty_l}"));
 
-        self.emit_label(&yield_l);
-        self.emit_term(format!("br label %{body_l}"));
+        self.emit_label(&empty_l);
+        self.emit_term(format!("br label %{done_l}"));
+
+        self.emit_label(&done_l);
+        let has = self.fresh_tmp();
+        self.emit(format!(
+            "{has} = phi i1 [ true, %{take_l} ], [ true, %{some_l} ], [ false, %{empty_l} ]"
+        ));
+        Ok((has, stage))
+    }
+
+    /// `for x in <stream>` — the pull loop (RFC-0075 M2b).
+    ///
+    /// The shape is `cond → ask → body → latch → cond`, and the difference from
+    /// the indexed walk it replaces is that the producer runs inside the loop
+    /// rather than before it. That is what makes `take(n)` over an endless feed
+    /// allocate n: since M2c `take` is itself a producer, one that stops asking,
+    /// and the loop leaves through `fend` the first time it is answered `None`.
+    ///
+    /// The header is spilled to a slot because answering WRITES it — the buffer
+    /// arm advances the cursor, the step arm latches the end — and because the
+    /// release then has an address the ordinary drop machinery can reach, which
+    /// is how an early `return` out of the body releases it (M1's arrangement,
+    /// unchanged apart from the kind).
+    fn gen_for_stream(
+        &mut self,
+        var: &str,
+        body: &Block,
+        av: &str,
+        elem: &Type,
+    ) -> Result<(), String> {
+        let ell = self.llt(elem);
+        let sslot = self.fresh_alloca(STREAM_LL);
+        self.emit(format!("store {STREAM_LL} {av}, ptr {sslot}"));
+
+        let cond_l = self.fresh_label("fcond");
+        let body_l = self.fresh_label("fbody");
+        let latch_l = self.fresh_label("flatch");
+        let end_l = self.fresh_label("fend");
+
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&cond_l);
+        let (has, stage) = self.emit_stream_next(&sslot, elem)?;
+        self.emit_term(format!("br i1 {has}, label %{body_l}, label %{end_l}"));
 
         // body: identical to the indexed walk's, including the drop frame that
         // carries the release out through an early `return`.
@@ -7204,6 +7291,110 @@ impl<'a> Gen<'a> {
             let sv = self.stream_header("ptr null", "0", &tag, &pay, &slot, &gen);
             return Ok((sv, Type::Stream(Box::new(elem))));
         }
+        // `fromWrap(src, step)` (RFC-0075 M2c) is `fromStep` with a source. The
+        // cell payload is `{ i64 cursor, Stream src }` in ONE malloc — the same
+        // box a plain producer's cursor lives in, with the wrapped stream behind
+        // it — so `get`/`set` inside the step are the ordinary cell operations
+        // (that is `take`'s counter) and `src[slot]` points at the second half.
+        // Non-null is what makes a cell a wrapper: `pull` reads it, `close`
+        // walks it, and a cell without one traps rather than reading past an
+        // 8-byte box.
+        if name == "fromWrap" {
+            let (src, _) = self.gen_expr(&args[0])?;
+            let payll = format!("{{ i64, {STREAM_LL} }}");
+            let boxed = self.fresh_tmp();
+            self.emit(format!(
+                "{boxed} = call ptr @__vyrn_malloc(i64 ptrtoint (ptr getelementptr ({payll}, ptr null, i64 1) to i64))"
+            ));
+            self.emit(format!("store i64 0, ptr {boxed}"));
+            let sp = self.fresh_tmp();
+            self.emit(format!(
+                "{sp} = getelementptr {payll}, ptr {boxed}, i64 0, i32 1"
+            ));
+            self.emit(format!("store {STREAM_LL} {src}, ptr {sp}"));
+            let slot = self.fresh_tmp();
+            self.emit(format!("{slot} = call i64 @__vyrn_cell_alloc(ptr {boxed})"));
+            // After the allocation, which clears whatever the recycled slot held.
+            self.emit(format!(
+                "call void @__vyrn_cell_setsrc(i64 {slot}, ptr {sp})"
+            ));
+            let gen = self.fresh_tmp();
+            self.emit(format!("{gen} = call i64 @__vyrn_cell_getgen(i64 {slot})"));
+            let (fv, fty) = self.gen_expr(&args[1])?;
+            let sig = self.normalize_sig(&fty);
+            let elem = match &sig {
+                Type::Fn(_, r) => match self.resolve(r) {
+                    Type::Option(i) => *i,
+                    other => return Err(format!("fromWrap step returns {other:?}")),
+                },
+                other => return Err(format!("fromWrap of non-fn {other:?}")),
+            };
+            if sig != self.normalize_sig(&stream_step_sig(&elem)) {
+                return Err(format!("fromWrap step of type {sig}"));
+            }
+            let tag = self.fresh_tmp();
+            let pay = self.fresh_tmp();
+            self.emit(format!("{tag} = extractvalue {{ i64, i64 }} {fv}, 0"));
+            self.emit(format!("{pay} = extractvalue {{ i64, i64 }} {fv}, 1"));
+            let sv = self.stream_header("ptr null", "0", &tag, &pay, &slot, &gen);
+            return Ok((sv, Type::Stream(Box::new(elem))));
+        }
+        // `pull(c)` (RFC-0075 M2c) — one element from the stream behind this
+        // cursor, which is the whole of what a wrapper's step can do that an
+        // ordinary producer's cannot. The element type is the annotation's: the
+        // cursor is a `Ref<Int64>` for every stream, so the call carries nothing
+        // to infer from (the checker says the same thing in its own words).
+        if name == "pull" {
+            let elem = match self.expect.last().map(|t| self.resolve(t)) {
+                Some(Type::Option(i)) => *i,
+                other => return Err(format!("`pull` needs an `Option<T>` context, found {other:?}")),
+            };
+            let (rv, _) = self.gen_expr(&args[0])?;
+            let slot = self.fresh_tmp();
+            let gen = self.fresh_tmp();
+            self.emit(format!("{slot} = extractvalue {{ i64, i64 }} {rv}, 0"));
+            self.emit(format!("{gen} = extractvalue {{ i64, i64 }} {rv}, 1"));
+            self.emit(format!("call void @__vyrn_cell_check(i64 {slot}, i64 {gen})"));
+            let sp = self.fresh_tmp();
+            self.emit(format!("{sp} = call ptr @__vyrn_cell_src(i64 {slot})"));
+            let bare = self.fresh_tmp();
+            let bad_l = self.fresh_label("pnone");
+            let ok_l = self.fresh_label("pok");
+            self.emit(format!("{bare} = icmp eq ptr {sp}, null"));
+            self.emit_term(format!("br i1 {bare}, label %{bad_l}, label %{ok_l}"));
+            self.emit_label(&bad_l);
+            self.emit("call void @__vyrn_cell_nostream()".into());
+            self.emit_term("unreachable".into());
+            self.emit_label(&ok_l);
+            let (has, stage) = self.emit_stream_next(&sp, &elem)?;
+            let ell = self.llt(&elem);
+            let optll = self.llt(&Type::Option(Box::new(elem.clone())));
+            let some_l = self.fresh_label("psome");
+            let none_l = self.fresh_label("pnone");
+            let join_l = self.fresh_label("pjoin");
+            self.emit_term(format!("br i1 {has}, label %{some_l}, label %{none_l}"));
+            self.emit_label(&some_l);
+            let ev = self.fresh_tmp();
+            self.emit(format!("{ev} = load {ell}, ptr {stage}"));
+            let (w0, w1) = self.encode_payload(&ev, &elem);
+            let a = self.fresh_tmp();
+            let bb = self.fresh_tmp();
+            let cc = self.fresh_tmp();
+            self.emit(format!("{a} = insertvalue {optll} undef, i1 1, 0"));
+            self.emit(format!("{bb} = insertvalue {optll} {a}, i64 {w0}, 1"));
+            self.emit(format!("{cc} = insertvalue {optll} {bb}, i64 {w1}, 2"));
+            self.emit_term(format!("br label %{join_l}"));
+            self.emit_label(&none_l);
+            let nv = self.fresh_tmp();
+            self.emit(format!("{nv} = insertvalue {optll} undef, i1 0, 0"));
+            self.emit_term(format!("br label %{join_l}"));
+            self.emit_label(&join_l);
+            let res = self.fresh_tmp();
+            self.emit(format!(
+                "{res} = phi {optll} [ {cc}, %{some_l} ], [ {nv}, %{none_l} ]"
+            ));
+            return Ok((res, Type::Option(Box::new(elem))));
+        }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Loads the `{ptr,len,cap}` header from the binding's slot;
         // on `len == 0` yields `None`, otherwise loads element `len-1`, writes
@@ -10122,10 +10313,12 @@ mod tests {
 
     // The always-present runtime contributes exactly RUNTIME_FREES `call void
     // @free` occurrences (one in `__vyrn_region_exit`, one in the
-    // `__vyrn_bytes_dup` NUL path, and two in `__vyrn_stream_close` — one per
-    // producer variant, RFC-0075 M2b), so an *auto*-free is a free beyond that
-    // baseline.
-    const RUNTIME_FREES: usize = 4;
+    // `__vyrn_bytes_dup` NUL path, and three in `__vyrn_stream_close`: a
+    // buffer's data, and a cursor cell's payload on each of the two ways out of
+    // the walk M2c made that function — the chain continues, or it stops. Three
+    // sites, still one per stream released), so an *auto*-free is a free beyond
+    // that baseline.
+    const RUNTIME_FREES: usize = 5;
     fn free_calls(ir: &str) -> usize {
         ir.matches("call void @free(ptr").count()
     }
@@ -10164,6 +10357,16 @@ mod tests {
     /// The block a label introduces, up to the next label. Used instead of a bare
     /// free COUNT because a count cannot tell "released on the break path" from
     /// "released somewhere else in the function" — which is the entire question.
+    /// The first label with this prefix. A prefix rather than the exact
+    /// `fend.9`: the numbering moves whenever the emitter's label counter does,
+    /// which it did in M2c when the loop and `pull` became one asker.
+    fn label_like(ir: &str, prefix: &str) -> String {
+        ir.lines()
+            .find(|l| l.starts_with(prefix) && l.ends_with(':'))
+            .map(|l| l.trim_end_matches(':').to_string())
+            .unwrap_or_else(|| panic!("no `{prefix}` label in IR"))
+    }
+
     fn block_at<'a>(ir: &'a str, label: &str) -> &'a str {
         let start = ir.find(&format!("\n{label}:\n")).expect("label not in IR");
         let rest = &ir[start + 1..];
@@ -10198,7 +10401,7 @@ mod tests {
         // The release is at the loop's exit block, which is where the
         // zero-element, the exhausted-buffer and the `None` paths all land.
         assert!(
-            block_at(&ir, "fend.9").contains("call void @__vyrn_stream_close(ptr"),
+            block_at(&ir, &label_like(&ir, "fend")).contains("call void @__vyrn_stream_close(ptr"),
             "the release belongs in the loop's end block: {ir}"
         );
     }
@@ -10212,10 +10415,11 @@ mod tests {
             format!("{FEED} fn main() -> Int64 {{ for p in feed() {{ print(p) break }} return 0 }}");
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(stream_closes(&ir), 1, "one release, on the one path out: {ir}");
-        let end = block_at(&ir, "fend.9");
+        let fend = label_like(&ir, "fend");
+        let end = block_at(&ir, &fend);
         assert!(end.contains("call void @__vyrn_stream_close(ptr"), "{ir}");
         assert!(
-            ir.contains("br label %fend.9"),
+            ir.contains(&format!("br label %{fend}")),
             "`break` must branch to the releasing block: {ir}"
         );
     }
@@ -10270,7 +10474,7 @@ mod tests {
             "the cursor is a cell the stream owns: {ir}"
         );
         assert!(
-            block_at(&ir, "fcall.3").contains("call { i1, i64, i64 } @__vyrn_fndispatch_"),
+            block_at(&ir, &label_like(&ir, "ncall")).contains("call { i1, i64, i64 } @__vyrn_fndispatch_"),
             "the step must be called from inside the loop: {ir}"
         );
         assert_eq!(stream_closes(&ir), 1, "{ir}");
@@ -10328,6 +10532,99 @@ mod tests {
         assert!(
             blk.contains("call void @__vyrn_stream_close(ptr"),
             "the release must precede the early `ret`: {ir}"
+        );
+    }
+
+    /// RFC-0075 M2c's combinator, spelled locally, as `std/stream`'s `map` is:
+    /// no `for … in` at all, a step that reads its source with `pull`, and a
+    /// wrapper that owns it. The `let g = f` is load-bearing and not decoration
+    /// — a lambda cannot capture an RFC-0023 `fn` parameter, so the parameter is
+    /// re-materialized as a stored value first.
+    const LMAP: &str = "fn lmap(s: Stream<Int64>, f: fn(Int64) -> Int64) -> Stream<Int64> { \
+                        let g: fn(Int64) -> Int64 = f \
+                        let step: fn(Ref<Int64>) -> Option<Int64> = |c| { \
+                        let x: Option<Int64> = pull(c) \
+                        if let Some(v) = x { return Some(g(v)) } return None } \
+                        return fromWrap(s, step) }";
+
+    #[test]
+    fn a_lazy_combinator_releases_at_one_site_and_walks_the_rest() {
+        // The M2c re-count, against M2b's table. An eager `map` had a `for … in`
+        // of its own, so a chain of two streams was TWO release sites, one per
+        // owning function. A wrapper owns its source inside a cursor cell
+        // instead, where no function can name it — so the chain is ONE site, and
+        // the second release happens inside `@__vyrn_stream_close`, which walks
+        // from the wrapper to what it wraps.
+        //
+        // One site is therefore not one release: it is one per stream, counted
+        // at run time by `examples/streamlazy.vyrn`, whose 30 000 cycles of a
+        // three-deep chain would exhaust the 65 536-slot slab if the walk stopped
+        // early and would double-free if it went round twice.
+        let src = format!(
+            "{FEED} {LMAP} fn double(n: Int64) -> Int64 {{ return n * 2 }} \
+             fn main() -> Int64 {{ for p in lmap(feed(), double) {{ print(p) }} return 0 }}"
+        );
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            stream_closes(&ir),
+            1,
+            "a wrapper chain is released from the one place that can name it: {ir}"
+        );
+        // And `lmap` itself releases nothing — it has no stream to release, which
+        // is the whole difference from the eager version.
+        let body = ir
+            .split("\ndefine ")
+            .find(|d| d.lines().next().is_some_and(|l| l.contains("@vyrn_lmap")))
+            .expect("lmap is in the IR");
+        assert!(
+            !body.contains("@__vyrn_stream_close"),
+            "a lazy combinator consumes nothing, so it releases nothing: {ir}"
+        );
+        // The wrapper's source lives in its cursor cell's second half.
+        assert!(
+            ir.contains("call void @__vyrn_cell_setsrc"),
+            "the source goes behind the cursor: {ir}"
+        );
+    }
+
+    #[test]
+    fn a_lazy_chain_keeps_the_early_return_and_break_counts() {
+        // M1's numbers, unchanged by laziness: `break` leaves through the block
+        // that releases, and an early `return` carries its own release.
+        let src = format!(
+            "{FEED} {LMAP} fn double(n: Int64) -> Int64 {{ return n * 2 }} \
+             fn main() -> Int64 {{ for p in lmap(feed(), double) {{ print(p) break }} return 0 }}"
+        );
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(stream_closes(&ir), 1, "break path: {ir}");
+
+        let src = format!(
+            "{FEED} {LMAP} fn double(n: Int64) -> Int64 {{ return n * 2 }} \
+             fn main() -> Int64 {{ for p in lmap(feed(), double) \
+             {{ if p == 2 {{ return 7 }} }} return 0 }}"
+        );
+        let ir = emit(&check(&src).unwrap()).unwrap();
+        assert_eq!(
+            stream_closes(&ir),
+            2,
+            "the early-return path needs its own release: {ir}"
+        );
+    }
+
+    #[test]
+    fn pull_traps_on_a_cursor_with_no_stream_behind_it() {
+        // `pull` is a builtin, so nothing stops a program from calling it on an
+        // ordinary `cell`. The fourth slab array is what makes that a trap with
+        // the interpreter's own wording rather than a read of whatever follows an
+        // 8-byte box.
+        let src = "fn main() -> Int64 { let c = cell(0) \
+                   let x: Option<Int64> = pull(c) release(c) return 0 }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("call ptr @__vyrn_cell_src"), "{ir}");
+        assert!(ir.contains("call void @__vyrn_cell_nostream()"), "{ir}");
+        assert!(
+            ir.contains("error: no stream behind this cursor"),
+            "the wording is the interpreter's: {ir}"
         );
     }
 
