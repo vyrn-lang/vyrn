@@ -3199,6 +3199,23 @@ impl Fn_<'_> {
                 _ if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()) => {
                     Type::Named(name.clone())
                 }
+                // A protocol method (RFC-0084 M2). The receiver's own type picks
+                // the impl, so this peeks the REWRITE — the mangled call `call`
+                // will emit — rather than answering for it here. Reached by a
+                // fluent chain, where every receiver after the first is one of
+                // these, and by any `match` arm that ends in a method call.
+                _ if self.cx.protocol_methods.contains_key(name) && !args.is_empty() => {
+                    let proto = self.cx.protocol_methods[name].clone();
+                    let rty = self.cx.sub(&self.peek(&args[0], line)?);
+                    let key = ftypes::type_key(&rty)
+                        .ok_or_else(|| gap(&format!("`{name}` dispatched on `{rty}`"), line))?;
+                    let e = Expr::Call {
+                        name: ftypes::impl_method_name(&proto, &key, name),
+                        args: args.clone(),
+                        line,
+                    };
+                    self.peek(&e, line)?
+                }
                 // An `extern fn` (RFC-0012) in a branch. Its declared return type,
                 // which is the same thing `call` hands back — the declaration is
                 // the only source there is.

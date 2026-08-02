@@ -4035,8 +4035,9 @@ impl<'a> Gen<'a> {
     /// `extractvalue`.
     ///
     /// The value is parked in a scope slot rather than passed as a bare register,
-    /// because protocol dispatch in this backend resolves the receiver's type from
-    /// a *variable* (`gen_call`'s `must be called on a variable` rule). That is
+    /// because there is no `Expr` to hand `gen_call` for a register that is
+    /// already emitted — the same parking the receiver of a chained protocol call
+    /// gets (`gen_call`'s protocol branch, RFC-0084 M2). That is
     /// also what lets the two calls reuse `gen_call` whole, including its generic
     /// path — a generic impl monomorphizes here with nothing new written. The slot
     /// is `declare`d, not registered on `drop_stack`, so the propagated aggregate
@@ -7421,16 +7422,36 @@ impl<'a> Gen<'a> {
         // impl for the receiver's concrete type (after monomorphization), then
         // emit a call to that mangled impl function.
         if let Some(proto) = self.protocol_methods.get(name).cloned() {
-            let recv_ty = match args.first() {
-                Some(Expr::Var { name: v, .. }) => self
-                    .lookup(v)
-                    .map(|(_, t)| t)
-                    .ok_or_else(|| format!("unbound receiver `{v}`"))?,
-                _ => {
-                    return Err(format!(
-                        "protocol method `{name}` must be called on a variable in this backend"
-                    ))
+            // The receiver's static type, and the argument list the mangled call
+            // gets. A variable answers from `lookup` and travels unchanged — it
+            // has to, since a `modify self` is passed as the caller's own slot.
+            //
+            // Anything else (`get(..).cacheFor(3600)`, RFC-0084 M2) is emitted
+            // HERE, exactly once, and parked in a slot the mangled call reads as
+            // an ordinary variable. `gen_call` re-generates its argument list, so
+            // handing it the receiver expression a second time would evaluate the
+            // receiver twice and run its effects twice with it. The binding's name
+            // name has an `@` in it, so no program can spell or shadow it — the
+            // same parking `gen_try_fallible` does with an already-emitted value.
+            let (recv_ty, args) = match args.first() {
+                Some(Expr::Var { name: v, .. }) => (
+                    self.lookup(v)
+                        .map(|(_, t)| t)
+                        .ok_or_else(|| format!("unbound receiver `{v}`"))?,
+                    args.to_vec(),
+                ),
+                Some(recv) => {
+                    let line = Expr::line(recv);
+                    let (v, ty) = self.gen_expr(recv)?;
+                    let ll = self.llt(&ty);
+                    let name = format!("@recv.{}", self.tmp);
+                    let slot = self.declare(&name, &ty);
+                    self.emit(format!("store {ll} {v}, ptr {slot}"));
+                    let mut rest = args.to_vec();
+                    rest[0] = Expr::Var { name, line };
+                    (ty, rest)
                 }
+                None => return Err(format!("protocol method `{name}` has no receiver")),
             };
             // Substitute generic params (monomorphization) but keep named types,
             // so an enum receiver keys on its name rather than its aggregate.
@@ -7438,7 +7459,7 @@ impl<'a> Gen<'a> {
             let key = vyrn_frontend::types::type_key(&concrete)
                 .ok_or_else(|| format!("cannot dispatch `{name}` on {recv_ty:?}"))?;
             let mangled = vyrn_frontend::types::impl_method_name(&proto, &key, name);
-            return self.gen_call(&mangled, args);
+            return self.gen_call(&mangled, &args);
         }
 
         // `extern` call (RFC-0012): emit the real host call. This is the one
