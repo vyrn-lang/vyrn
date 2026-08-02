@@ -3110,9 +3110,10 @@ fn dev_serve_one(
     stream: &mut std::net::TcpStream,
     assets: &DevAssets,
     call_handle: &mut dyn FnMut(
-        vyrn_frontend::interp::ServeRequest,
-    ) -> Result<vyrn_frontend::interp::ServeResponse, String>,
+        vyrn_frontend::interp::ServeCall,
+    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
 ) {
+    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
     let req = match parse_request(stream) {
         Ok(r) => r,
         Err(ParseError::Chunked { method, path }) => {
@@ -3145,8 +3146,12 @@ fn dev_serve_one(
     // Otherwise: into Vyrn's `handle` (rpcHandle + the app's own routes).
     let method = req.method.clone();
     let path = req.path.clone();
-    match call_handle(req) {
-        Ok(resp) => {
+    match call_handle(ServeCall::Handle(req)) {
+        Ok(ServeAnswer::Live(head)) => {
+            eprintln!("{method} {path} -> {} (stream)", head.status);
+            pump_stream(stream, &head, call_handle);
+        }
+        Ok(ServeAnswer::Buffered(resp)) => {
             eprintln!("{method} {path} -> {}", resp.status);
             write_response_vary(
                 stream,
@@ -3156,6 +3161,10 @@ fn dev_serve_one(
                 &resp.headers,
                 resp.body.as_bytes(),
             );
+        }
+        Ok(_) => {
+            eprintln!("{method} {path} -> 500");
+            write_response(stream, 500, "text/plain", b"internal error");
         }
         Err(msg) => {
             eprintln!("error: {msg}");
@@ -3181,15 +3190,20 @@ enum ParseError {
 fn serve_one(
     stream: &mut std::net::TcpStream,
     call_handle: &mut dyn FnMut(
-        vyrn_frontend::interp::ServeRequest,
-    ) -> Result<vyrn_frontend::interp::ServeResponse, String>,
+        vyrn_frontend::interp::ServeCall,
+    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
 ) {
+    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
     match parse_request(stream) {
         Ok(req) => {
             let method = req.method.clone();
             let path = req.path.clone();
-            match call_handle(req) {
-                Ok(resp) => {
+            match call_handle(ServeCall::Handle(req)) {
+                Ok(ServeAnswer::Live(head)) => {
+                    eprintln!("{method} {path} -> {} (stream)", head.status);
+                    pump_stream(stream, &head, call_handle);
+                }
+                Ok(ServeAnswer::Buffered(resp)) => {
                     eprintln!("{method} {path} -> {}", resp.status);
                     write_response_vary(
                         stream,
@@ -3199,6 +3213,10 @@ fn serve_one(
                         &resp.headers,
                         resp.body.as_bytes(),
                     );
+                }
+                Ok(_) => {
+                    eprintln!("{method} {path} -> 500");
+                    write_response(stream, 500, "text/plain", b"internal error");
                 }
                 Err(msg) => {
                     // Canonical trap wording to stderr, then a generic 500.
@@ -3346,6 +3364,95 @@ fn reason_phrase(status: i64) -> &'static str {
         503 => "Service Unavailable",
         _ => "",
     }
+}
+
+/// Pump one open stream onto the wire (RFC-0074 M3a) — the second response
+/// shape, written here rather than by [`write_response_vary`] because nothing it
+/// does applies: there is no `Content-Length` (the body ends when the connection
+/// does), and a `Vary`/`ETag`/304 is about a representation that exists all at
+/// once.
+///
+/// **The disconnect signal is the write.** The loop is: pull one frame, write it,
+/// flush, and the FIRST time any of those fails, `Close` — which runs RFC-0075's
+/// release path for the producer. Nothing here asks the host which event means
+/// "the client is gone", because that question has a different answer on every
+/// deployment; a failing write is the socket rather than the framework, so it is
+/// the same everywhere. The consequence is the strong form of RFC-0075's
+/// conformance row: the release runs before the next frame would be produced,
+/// since the next pull is the statement after the one that failed.
+///
+/// The first frame is pulled BEFORE the header block goes out, for one reason
+/// that is worth the round trip: a producer with nothing to say answers `204 No
+/// Content`, which is the one status a plain `EventSource` treats as "stop, do
+/// not reconnect" (WHATWG HTML §9.2.5). So a stream that ends normally is not an
+/// infinite reconnect loop — the client comes back once, is told 204, and stops.
+fn pump_stream(
+    stream: &mut std::net::TcpStream,
+    head: &vyrn_frontend::interp::ServeResponse,
+    call_handle: &mut dyn FnMut(
+        vyrn_frontend::interp::ServeCall,
+    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+) {
+    use std::io::Write;
+    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
+
+    // Pull, and let a trapping producer end the connection the way a trapping
+    // handler ends a request: logged, and the server keeps running.
+    let pull = |call_handle: &mut dyn FnMut(
+        ServeCall,
+    ) -> Result<ServeAnswer, String>|
+     -> Option<String> {
+        match call_handle(ServeCall::Next) {
+            Ok(ServeAnswer::Frame(f)) => f,
+            Ok(_) => None,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                None
+            }
+        }
+    };
+
+    let first = pull(call_handle);
+    let Some(first) = first else {
+        let _ = call_handle(ServeCall::Close);
+        write_response(stream, 204, "", b"");
+        return;
+    };
+
+    let mut extra = String::new();
+    for (name, value) in &head.headers {
+        extra.push_str(&format!("{name}: {value}\r\n"));
+    }
+    let reason = reason_phrase(head.status);
+    let header = format!(
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nCache-Control: no-store\r\n{extra}Connection: close\r\n\r\n",
+        head.status, head.content_type
+    );
+    // `body` is the stream's PROLOGUE, not a response: `retry:` belongs before
+    // the first event and after the header block, and it is the one thing the
+    // program writes that is not a frame.
+    let opened = stream
+        .write_all(header.as_bytes())
+        .and_then(|_| stream.write_all(head.body.as_bytes()))
+        .and_then(|_| stream.write_all(first.as_bytes()))
+        .and_then(|_| stream.flush());
+    if opened.is_err() {
+        let _ = call_handle(ServeCall::Close);
+        return;
+    }
+    loop {
+        let Some(frame) = pull(call_handle) else {
+            break;
+        };
+        if stream
+            .write_all(frame.as_bytes())
+            .and_then(|_| stream.flush())
+            .is_err()
+        {
+            break;
+        }
+    }
+    let _ = call_handle(ServeCall::Close);
 }
 
 /// Write one HTTP/1.1 response: status line, `Content-Type`, `Content-Length`,

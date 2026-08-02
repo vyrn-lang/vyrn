@@ -393,6 +393,178 @@ impl Policy for Route {
     }
 }
 
+// ---- streaming (M3a) --------------------------------------------------------
+
+/// What a mounted stream route runs: the request, the placeholder bindings, and
+/// the CURSOR — the seed the producer resumes from, which is a reconnecting
+/// client's `Last-Event-ID` when the route is `resumable` and `0` otherwise.
+///
+/// It hands back a `Stream<String>` of already-encoded frames (build them with
+/// `event` below). The element is a frame rather than a record for a reason that
+/// is about `std/stream` rather than about taste: `map` and `filter` are eager
+/// walks over a buffer, so mapping a record stream into a frame stream would
+/// materialise the feed — which is `#6156`, the incident RFC-0075 quotes,
+/// arriving through the library written to prevent it. The producer encodes as
+/// it goes, and stays lazy.
+export type Feed = fn(Request, Map<String, String>, Int64) -> Stream<String>
+
+/// A mounted event stream — and NOT a `Route`, which is the whole point.
+///
+/// `Route` carries `Policy`, and every one of its seven — `cacheFor`, `etag`,
+/// `lastModified`, `vary`, `status`, `createdAt`, `notFoundWhen` — is about a
+/// response that exists all at once. A validator for bytes that have not been
+/// produced yet is not a thing, and a 304 for a feed is not either. This RFC's
+/// rule is that an option meaningless to a transport is ABSENT from it rather
+/// than ignored, so a stream is a different record with a different protocol, and
+/// `mount` takes both. That separation is only spellable since RFC-0084 M1 made a
+/// record a legal protocol target; before it, both would have had to be one
+/// record with the options quietly doing nothing.
+export type Live = {
+    pattern: String,
+    feed: Feed,
+    // `retry: N` (milliseconds), written once before the first frame; `0` writes
+    // no hint and leaves the client's own default (`retryAfter`).
+    retry: Int64,
+    // Whether `Last-Event-ID` seeds the producer (`resumable`).
+    resume: Bool,
+    derived: String,
+}
+
+/// `sse(pattern, feed)` — mount `feed` as an event stream at `pattern`.
+///
+/// The pattern is written here rather than in the procedure's own parameter slot,
+/// which is where M1 put it and why: that trick exists to check `{id}` against a
+/// procedure's INPUT RECORD, and a feed takes the request rather than a decoded
+/// record — there are no fields to check the placeholders against. So `sse` is
+/// the RFC's own `sse("/", tail)` spelling, and it is not a weaker version of
+/// `GET(byId("/{id}"))`; it is the same rule with nothing to check.
+export fn sse(pattern: String, feed: Feed) -> Live {
+    return Live {
+        pattern: httpTidy(pattern),
+        feed: feed,
+        retry: 0,
+        resume: false,
+        derived: "SSE " + httpTidy(pattern),
+    }
+}
+
+/// A stream's policy, and it has nothing in common with `Policy`'s.
+///
+/// ### `retryAfter(ms)` — the reconnect hint, `retry: N` before the first frame
+///
+/// A pull producer answers `Some` or `None`; it has no way to say "nothing yet".
+/// So a feed that catches up ENDS, the connection closes, and the client comes
+/// back `ms` later — with its `Last-Event-ID` if the route is `resumable`. That
+/// makes `retryAfter` the poll interval rather than a failure hint, and it is the
+/// honest shape for a language with no concurrency: the alternative is a producer
+/// blocking the single-threaded server while it waits for something to happen.
+///
+/// ### `resumable()` — `Last-Event-ID` becomes the producer's seed
+///
+/// RFC-0075 M2b made a stream's cursor its resume token, so replay is not a
+/// feature: the header's value is handed to the feed as its seed and the ordinary
+/// code path produces exactly what the client has not seen. Write that cursor as
+/// each frame's `id`, which is what `event` takes it for. Without `resumable` the
+/// seed is always `0` and a reconnecting client gets the feed from the top.
+///
+/// `keepAlive` is NOT here, and its absence is the same rule as `Policy`'s
+/// absence: a pull producer that has nothing to say ends rather than idling, so
+/// there is no idle connection for a keep-alive comment to hold open. The RFC
+/// lists it beside the other two; there is nothing under it to build.
+export protocol Wire {
+    fn retryAfter(self, ms: Int64) -> Live
+    fn resumable(self) -> Live
+}
+
+impl Wire for Live {
+    fn retryAfter(self, ms: Int64) -> Live {
+        return Live {
+            pattern: self.pattern,
+            feed: self.feed,
+            retry: ms,
+            resume: self.resume,
+            derived: self.derived + " retry=\{ms}",
+        }
+    }
+
+    fn resumable(self) -> Live {
+        return Live {
+            pattern: self.pattern,
+            feed: self.feed,
+            retry: self.retry,
+            resume: true,
+            derived: self.derived + " resumable",
+        }
+    }
+}
+
+/// One SSE frame: `id:`, `event:`, the `data:` lines, and the blank line that
+/// ends it. An empty `id` or `name` writes no field rather than an empty one.
+///
+/// `data` is split on newlines because the wire format has no other way to carry
+/// one — a raw `\n` inside a `data:` line would end the field, and a JSON payload
+/// with a newline in it would silently become two events. Every `\n` in the
+/// payload therefore becomes a second `data:` line, which the client rejoins.
+export fn event(id: String, name: String, data: String) -> String {
+    let mut out = ""
+    if id != "" {
+        out = out + "id: " + id + "\n"
+    }
+    if name != "" {
+        out = out + "event: " + name + "\n"
+    }
+    return out + "data: " + joinWith(split(data, "\n"), "\ndata: ") + "\n\n"
+}
+
+/// The route a stream shadows, for the mount check: a stream answers a GET at
+/// exactly one path, so `httpSubsumes` can be asked about it the same way.
+fn httpLiveRoute(l: Live) -> Route {
+    return httpRoute(l.pattern, httpNoRun, l.derived)
+}
+
+/// Open the stream: hand the producer to the HOST and answer with the header
+/// block it will write in front of the frames.
+///
+/// `serveStream` is the one builtin this milestone added, and it is the only way
+/// a stream leaves the call that made it — RFC-0075's linearity forbids storing
+/// one anywhere else, which is precisely what makes "the host owes it a `close`"
+/// a fact rather than a convention. The host then pulls, writes, and closes the
+/// first time a write fails; that failing write IS the disconnect signal, because
+/// it is the socket rather than the framework and is therefore the same on every
+/// deployment.
+///
+/// The `body` here is the stream's PROLOGUE, not a response. It is the one thing
+/// written between the header block and the first frame.
+fn httpOpen(l: Live, req: Request, ps: Map<String, String>) -> Response {
+    let seed = if l.resume { httpLastEventId(req) } else { 0 }
+    serveStream(httpFeed(l.feed, req, ps, seed))
+    let prologue = if l.retry > 0 { "retry: \{l.retry}\n\n" } else { "" }
+    return Response {
+        status: 200,
+        contentType: "text/event-stream",
+        body: prologue,
+        vary: "",
+        headers: [:],
+    }
+}
+
+/// Call the stored feed. RFC-0037 calls a `fn` value by NAME, so the field binds
+/// to a parameter first — the same reason `httpInvoke` exists. Returning the
+/// stream forwards the obligation to `serveStream`'s caller, which hands it on.
+fn httpFeed(f: Feed, req: Request, ps: Map<String, String>, seed: Int64) -> Stream<String> {
+    return f(req, ps, seed)
+}
+
+/// The cursor a reconnecting client is asking to resume from. Absent, empty or
+/// non-integer reads as `0` — a client that lost its place gets the feed from the
+/// top, which is worse than resuming and better than nothing.
+fn httpLastEventId(req: Request) -> Int64 {
+    return match parse(httpHeader(req, "last-event-id")) {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
 // ---- mounting --------------------------------------------------------------
 
 /// Resolve `req` against the mounted groups, in order, first match wins.
@@ -408,8 +580,18 @@ impl Policy for Route {
 /// before it showed up next to a JSON decode. `vyrn serve` runs `main` at
 /// startup, so an app that touches `handle` there sees the trap at startup, which
 /// is where it belongs.
-export fn mount(req: Request, groups: Array<Array<Route>>) -> Option<Response> {
-    httpCheckMount(groups)
+export fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>) -> Option<Response> {
+    httpCheckMount(groups, live)
+    // Stream routes resolve BEFORE the buffered groups, and the reason is the
+    // same one that makes them a separate list: a stream's path is exact, while
+    // the patterns it would otherwise be filed behind (`/pastes/{id}`) are the
+    // kind that swallow one. Nothing can shadow a stream; a stream shadowing a
+    // buffered route is what `httpCheckMount` traps on.
+    for l in live {
+        if let Some(ps) = httpLiveMatch(l, req) {
+            return Some(httpOpen(l, req, ps))
+        }
+    }
     for g in groups {
         for r in g {
             if let Some(ps) = httpMatch(r, req) {
@@ -762,9 +944,32 @@ fn httpPlaceholderName(seg: String) -> String {
     return substring(seg, 1, seg.byteLength - 1)
 }
 
+/// Whether `req` is this stream's — a GET at exactly its pattern, placeholders
+/// bound the ordinary way. `Route`'s matcher does the work; only the method rule
+/// differs, because a stream has one.
+fn httpLiveMatch(l: Live, req: Request) -> Option<Map<String, String>> {
+    if req.method != "GET" {
+        return None
+    }
+    return httpMatch(httpWithMethod(httpLiveRoute(l), "GET"), req)
+}
+
 /// Trap on any route a later group could never reach, and on any route that never
 /// got a method.
-fn httpCheckMount(groups: Array<Array<Route>>) {
+fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>) {
+    // A stream resolves first, so it is the one thing that can shadow rather than
+    // be shadowed. Reported at startup for the same reason the group check is: an
+    // unreachable route is what nobody notices until production.
+    for l in live {
+        let a = httpWithMethod(httpLiveRoute(l), "GET")
+        for g in groups {
+            for b in g {
+                if httpSubsumes(a, b) {
+                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable — the stream route " + l.pattern + " already answers it")
+                }
+            }
+        }
+    }
     let mut gi = 0
     for g in groups {
         for r in g {

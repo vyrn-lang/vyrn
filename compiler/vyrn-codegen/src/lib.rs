@@ -905,6 +905,16 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str(
         "@.panic.fmt = private unnamed_addr constant [11 x i8] c\"error: %s\\0A\\00\"\n\n",
     );
+    // RFC-0074 M3a. `serveStream` hands a producer to the HOST's accept loop, and
+    // a compiled binary has no accept loop to hand it to — `vyrn serve` is the
+    // interpreter. A build is still legal, because `std/http`'s `mount` reaches
+    // this arm whether or not the program mounts a live route, and refusing at
+    // compile time would make every REST projection unbuildable to serve a
+    // feature it does not use. So it is a runtime trap on the path nothing takes.
+    out.push_str(&{
+        let (escaped, len) = llvm_str(SERVE_STREAM_TRAP);
+        format!("@.trap.serve = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n\n")
+    });
 
     // ---- region / arena runtime (RFC-0004 §4) ---------------------------
     // A `region { .. }` block gives heap allocations a deterministic lifetime:
@@ -6092,6 +6102,19 @@ impl<'a> Gen<'a> {
             self.emit_label(&dead);
             return Ok(("poison".to_string(), Type::Never));
         }
+        // RFC-0074 M3a: see `@.trap.serve`. The argument is deliberately NOT
+        // generated — the producer it names cannot be pulled here, so evaluating
+        // it would only run a step whose values nothing can read.
+        if name == "serveStream" {
+            let e = self.fresh_tmp();
+            self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
+            self.emit(format!("call i32 @fputs(ptr @.trap.serve, ptr {e})"));
+            self.emit("call void @exit(i32 1)".into());
+            self.emit_term("unreachable".into());
+            let dead = self.fresh_label("serve.dead");
+            self.emit_label(&dead);
+            return Ok(("poison".to_string(), Type::Never));
+        }
         if name == "print" {
             let (v, ty) = self.gen_expr(&args[0])?;
             match self.resolve(&ty) {
@@ -8126,6 +8149,12 @@ fn pattern_binding(p: &Pattern) -> Option<&str> {
 
 /// LLVM byte-string escaping: printable ASCII as-is, everything else `\NN`,
 /// plus a trailing NUL. Returns (escaped, total byte length).
+/// The wording both compiling backends print for `serveStream` (RFC-0074 M3a).
+/// One constant so the two engines cannot drift, which is the rule every trap
+/// message in this project follows.
+pub(crate) const SERVE_STREAM_TRAP: &str =
+    "error: serveStream: a compiled build has no accept loop — a live route needs `vyrn serve`\n";
+
 fn llvm_str(s: &str) -> (String, usize) {
     let mut out = String::new();
     for b in s.bytes() {

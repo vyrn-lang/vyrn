@@ -117,6 +117,17 @@ export fn pasteCount() -> Int64 {
     return store.pastes.length
 }
 
+/// The paste at storage position `i`, oldest first — the live tail's cursor is
+/// this index, and the store is append-only, so position `i` names the same paste
+/// forever. That is what makes a reconnecting client's `Last-Event-ID` a resume
+/// token rather than a guess (RFC-0074 M3a, RFC-0075 M2b).
+///
+/// A copy, for the reason `listPastes` makes one: nothing may take ownership of
+/// module state.
+export fn pasteAt(i: Int64) -> Paste {
+    return copyPaste(store.pastes[i])
+}
+
 // ---- tests -------------------------------------------------------------------
 
 test "deriveId is stable and content-addressed (same content => same prefix)" {
