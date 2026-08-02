@@ -1,6 +1,6 @@
 # RFC-0084 — Protocol Dispatch Is Static Everywhere
 
-- **Status:** **Draft.** Designed, not started.
+- **Status:** **M1 shipped.** M2 designed, not started.
 - **Depends on:** RFC-0002 §5 (protocols), RFC-0080 (generic impls, associated
   types — M1 established that selection is a *wider key*, not a new mechanism)
 - **Motivated by:** RFC-0074 M1 and M2, which each paid a spelling cost for the
@@ -114,6 +114,46 @@ The name must come from the boundary and not from `construct`: a record built
 from a literal and then coerced into a differently-named type of the same shape
 must dispatch as the type it was coerced to, because that is what the checker
 told the compiled backends.
+
+#### As landed
+
+Pinned by `examples/protorec.vyrn` on three engines and
+`examples/protocol_scalar.vyrn` as the surviving refusal. The compiled backends
+did not change — that part of the design held exactly. Four things the text
+above did not have:
+
+1. **The checker needed one more change than `ok_target`.** A `<T: Bump>` bound
+   is discharged by `type_satisfies`, which asked `type_key` of the **resolved**
+   type — and resolving is precisely what erases the name: `Box` resolves to a
+   bare `Type::Record`, which has no key at all. So a record's own impl worked at
+   a concrete call site and its bound failed. It now asks the type's own key
+   first and the resolved base's second, which is also how a plain alias keeps
+   satisfying the impl on what it aliases. (An enum bound had the same hole and
+   nothing in the corpus reached it.)
+2. **The stamp costs a coercion, and that reopened RFC-0082's quadratic.** A
+   named record type is no longer an identity coercion, so `Array<Cell>` walks —
+   and `rows[i][j] = v` re-coerces the whole row per store. Measured at 16,000
+   writes: 76 ms → **881** at 40x400, and 3,539 at 10x1600, which is the scaling
+   with the row length RFC-0082 M3 removed. The fix is that a coercion whose only
+   work is a name the value **already carries** is not work, decided once for the
+   element type and then a name compare per element: 88 and 122 ms, with
+   `Array<Array<Int64>>` unmoved at 231 → 228. Not 1.0x like its `Int64`
+   sibling — a name compare per element is still per element — and pinned as a
+   ratio by `an_element_store_does_not_restamp_its_row`.
+3. **A literal is born stamped, and `coerce` overwrites it.** `coerce` is the
+   rule, but it is not the only thing that runs: an unannotated
+   `let u = User { .. }` never reaches a typed boundary at all, while native
+   dispatches on the type it inferred. So a record literal carries its own name
+   as a default. The RFC's requirement is about **precedence**, and precedence is
+   what it has — every boundary overwrites it, which is what makes the
+   coerced-into-a-different-name case come out right.
+4. **The native backend still requires a variable receiver.** `Box { n: 4 }.bump()`
+   builds under the interpreter and the direct wasm backend and fails the textual
+   one with `protocol method must be called on a variable in this backend`. That
+   is pre-existing (a scalar receiver fails identically) and it is a compile
+   error, not a divergence — but M2's whole point is chaining
+   `.cacheFor(3600).etag()`, where every receiver but the first is a call.
+   **M2 has to lift it.**
 
 ### M2 — the fluent projection
 

@@ -48,6 +48,12 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "does not bind the associated type `Output`",
     ),
     (
+        "protocol_scalar.vyrn",
+        "a protocol implemented for a validated scalar — the half of the old refusal \
+         RFC-0084 M1 kept, and now the only one it names",
+        "erases to `Int64` at run time",
+    ),
+    (
         "stream_abandoned.vyrn",
         "a `Stream` acquired and abandoned (RFC-0075 M1) — the `trpc#6193` shape",
         "`events` is a `Stream<Int64>` and is never disposed",

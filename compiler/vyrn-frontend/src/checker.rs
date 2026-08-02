@@ -534,16 +534,22 @@ fn check_accum_inner(
                 }
             }
         }
-        // A named target must be an enum: validated/nominal scalars erase to their
-        // base at runtime, so the interpreter could not dispatch them (it would
-        // diverge from native). Records have no runtime identity either.
-        // `Option`/`Result` and a generic enum application keep a distinct runtime
-        // shape, so they dispatch (RFC-0080 M1).
+        // A named target must be an enum or a record. `Option`/`Result` and a
+        // generic enum application keep a distinct runtime shape, so they
+        // dispatch (RFC-0080 M1); a record carries its declared name from the
+        // typed boundary it crossed, so it dispatches too (RFC-0084 M1).
+        //
+        // A validated (nominal) SCALAR still cannot: `Age` is a `Val::Int` with
+        // nowhere to put the name, and a wrapper that gave it one would put a
+        // branch in every arithmetic path in the interpreter. That case needs the
+        // resolution to travel from the checker instead, which needs call-site
+        // identity — designed in RFC-0084 and deliberately not built.
         let ok_target = match &imp.ty {
             Type::Int | Type::Bool | Type::Str | Type::Option(_) | Type::Result(..) => true,
-            Type::Named(n) | Type::App(n, _) => {
-                matches!(types.get(n).map(|d| &d.base), Some(Type::Enum(_)))
-            }
+            Type::Named(n) | Type::App(n, _) => matches!(
+                types.get(n).map(|d| &d.base),
+                Some(Type::Enum(_) | Type::Record(_))
+            ),
             _ => false,
         };
         match crate::types::type_key(&imp.ty) {
@@ -575,14 +581,37 @@ fn check_accum_inner(
                     }
                 }
             }
-            _ => out.push(Diagnostic::from_rendered(
-                format!(
-                    "line {}: `impl {} for {}` is not supported — implement protocols for \
-                     Int64/Bool/String or an enum (validated scalars and records erase at runtime)",
-                    imp.line, imp.protocol, imp.ty
-                ),
-                "check",
-            )),
+            // The two halves of the old refusal are different refusals now
+            // (RFC-0084 M1), so the message names the one that applies. A named
+            // scalar erases to its base — `Age` IS a `Val::Int` — and that is
+            // both the reason and the shape of the way around it.
+            _ => {
+                let named_scalar = match &imp.ty {
+                    Type::Named(n) | Type::App(n, _) => types
+                        .get(n)
+                        .map(|d| &d.base)
+                        .filter(|b| !matches!(b, Type::Enum(_) | Type::Record(_))),
+                    _ => None,
+                };
+                let why = if let Some(base) = named_scalar {
+                    format!(
+                        "`{}` erases to `{base}` at run time, so a value of it carries no name \
+                         to dispatch on; implement `{}` for `{base}`, or give `{}` a record type",
+                        imp.ty, imp.protocol, imp.ty
+                    )
+                } else {
+                    "implement protocols for Int64/Bool/String, a record, an enum, `Option` \
+                     or `Result`"
+                        .to_string()
+                };
+                out.push(Diagnostic::from_rendered(
+                    format!(
+                        "line {}: `impl {} for {}` is not supported — {why}",
+                        imp.line, imp.protocol, imp.ty
+                    ),
+                    "check",
+                ))
+            }
         }
     }
 
@@ -1987,12 +2016,20 @@ impl<'a> Checker<'a> {
                     | Type::Str
             ),
             // A user protocol: satisfied iff the concrete type implements it.
+            //
+            // The type's OWN key first, the resolved base's second. An impl is
+            // keyed on the name it was written for, and resolving first would
+            // erase that name — `Box` resolves to a bare `Type::Record`, which
+            // has no key at all (RFC-0084 M1). The base is still consulted so a
+            // plain alias (`type Meters = Int64`) keeps satisfying the impl on
+            // what it aliases, which is how this read before.
             _ if self.protocol_methods.values().any(|(p, _)| p == bound)
                 || self.impls.iter().any(|(p, _)| p == bound) =>
             {
-                crate::types::type_key(&base)
-                    .map(|k| self.impls.contains(&(bound.to_string(), k)))
-                    .unwrap_or(false)
+                [crate::types::type_key(ty), crate::types::type_key(&base)]
+                    .into_iter()
+                    .flatten()
+                    .any(|k| self.impls.contains(&(bound.to_string(), k)))
             }
             // Unknown bound names: unsatisfiable.
             _ => false,
