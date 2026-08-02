@@ -1,0 +1,148 @@
+/// RFC-0075 M2c — the combinators are not lazy, and then they were.
+///
+/// M2b made the REPRESENTATION pull-based: `take(unfold(..), n)` asks an endless
+/// producer n times and stops. It did not make the library lazy — `map` and
+/// `filter` still drained their source into a buffer, so `map(unfold(..), f)`
+/// never returned, and mapping a feed into wire frames is the first thing anyone
+/// does with a feed. This file is the evidence that they do now.
+///
+/// The pins are counts, not values, for the reason M2b's were: the eager version
+/// passes every assertion about the elements. What it cannot do is come back.
+///
+/// - `take(map(feed, f), n)` asks the feed exactly n times.
+/// - `filter` admitting one in three asks 3n - 2 times to yield n.
+/// - 30 000 cycles of a three-deep chain acquire 90 000 cursor cells out of a
+///   slab of 65 536, so a release that ran once too few would TRAP rather than
+///   merely grow. That is the `#6156` row, through a chain.
+import { unfold, map, filter, take } from "std/stream"
+
+/// How many times the feed's step has run. Module state rather than a capture,
+/// because a closure captures by value at its evaluation site (RFC-0037) and
+/// this has to be read after the loop, from the outside.
+let mut steps = 0
+
+/// The endless one. It never answers `None`, so nothing but a consumer that
+/// stops asking can end it.
+fn naturals(c: Ref<Int64>) -> Option<Int64> {
+    let n = get(c)
+    set(c, n + 1)
+    steps = steps + 1
+    return Some(n)
+}
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn byThree(n: Int64) -> Bool {
+    return n % 3 == 0
+}
+
+fn small(n: Int64) -> Bool {
+    return n < 4
+}
+
+/// The milestone in one number. Under M2b this function does not return: `map`
+/// drains its source, and its source has no end.
+fn mapCost(n: Int64) -> Int64 {
+    steps = 0
+    let mut seen = 0
+    for v in take(map(unfold(0, naturals), double), n) {
+        seen = seen + v
+    }
+    return steps
+}
+
+/// The other half of the same relation, on the harder combinator: one element
+/// out is any number of elements in. Admitting every third of 0, 1, 2, … means
+/// the n-th yield is the element 3(n - 1), so the count is 3n - 2 — exact rather
+/// than "roughly kn", because the producer is exact.
+fn filterCost(n: Int64) -> Int64 {
+    steps = 0
+    let mut seen = 0
+    for v in take(filter(unfold(0, naturals), byThree), n) {
+        seen = seen + v
+    }
+    return steps
+}
+
+/// A three-deep chain over one endless producer is four streams and one release
+/// each. `close` on the outermost is a WALK: it releases the wrapper's own
+/// cursor cell, then the source that cell held, and so on to the feed. Too many
+/// releases would be a double free; too few would exhaust the slab below.
+fn chainCycles(n: Int64) -> Int64 {
+    let mut i = 0
+    while i < n {
+        let s = take(filter(map(unfold(i, naturals), double), small), 2)
+        close(s)
+        i = i + 1
+    }
+    return i
+}
+
+/// An early `return` out of a `for … in` over a chain — the release path M1
+/// counts, now with three streams behind the one the loop owns.
+fn firstOver(limit: Int64) -> Int64 {
+    for v in map(unfold(0, naturals), double) {
+        if v > limit {
+            return v
+        }
+    }
+    return -1
+}
+
+fn main() -> Int64 {
+    // A mapped endless feed, consumed. The values first, so the counts below are
+    // not the only thing proving the chain works.
+    for v in take(map(unfold(0, naturals), double), 5) {
+        print(v) // 0 2 4 6 8
+    }
+    print(mapCost(5)) // 5 — one ask per element, and no more
+    print(mapCost(1000)) // 1000
+    print(mapCost(20000)) // 20000
+
+    // Filtered, with `take` ending it: 0 3 6 9, from asking 0 … 9.
+    for v in take(filter(unfold(0, naturals), byThree), 4) {
+        print(v)
+    }
+    print(filterCost(4)) // 10
+    print(filterCost(100)) // 298
+
+    // The order the wrappers compose in is the order they were written in.
+    for v in take(map(filter(unfold(1, naturals), byThree), double), 3) {
+        print(v) // 6 12 18
+    }
+
+    // `break` straight out of a mapped feed, with no `take` in the way.
+    for v in map(unfold(0, naturals), double) {
+        if v == 6 {
+            break
+        }
+        print(v) // 0 2 4
+    }
+
+    // The early-`return` release path.
+    print(firstOver(7)) // 8
+
+    // A chain over a FINITE source ends by itself, and the filter's ending is
+    // its source's: `small` stops admitting, but the feed stops producing.
+    for v in map(filter(unfold(0, upToFive), small), double) {
+        print(v) // 0 2 4 6
+    }
+
+    // The release, at a scale a leak cannot hide from: 90 000 cells through a
+    // slab of 65 536.
+    print(chainCycles(30000)) // 30000
+
+    return 0
+}
+
+/// A producer that ends, so a chain over it terminates without a `take`.
+fn upToFive(c: Ref<Int64>) -> Option<Int64> {
+    let n = get(c)
+    if n > 5 {
+        return None
+    }
+    set(c, n + 1)
+    return Some(n)
+}

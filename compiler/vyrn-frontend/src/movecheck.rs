@@ -721,7 +721,9 @@ mod streams {
             return Some(t.to_string());
         }
         match value {
-            Expr::Call { name, .. } if name == "fromArray" || name == "fromStep" => {
+            Expr::Call { name, .. }
+                if name == "fromArray" || name == "fromStep" || name == "fromWrap" =>
+            {
                 Some("Stream".to_string())
             }
             Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
@@ -1171,6 +1173,20 @@ mod tests {
         let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1) \
                    return Some(n) } \
                    fn main() -> Int64 { let s = fromStep(0, tick) close(s) return 0 }";
+        assert!(run(src).is_ok());
+    }
+
+    #[test]
+    fn a_wrapper_carries_the_obligation_and_swallows_its_source() {
+        // RFC-0075 M2c's producer is a third builtin, and this pass keys on the
+        // NAME. Both halves matter: an abandoned wrapper is a leak, and the
+        // source it wrapped is DISCHARGED by being passed to it — releasing that
+        // source as well would be the double free the walk in `close` would then
+        // complete.
+        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1)                    return Some(n) }                    fn step(c: Ref<Int64>) -> Option<Int64> { let x: Option<Int64> = pull(c)                    return x }                    fn main() -> Int64 { let s = fromStep(0, tick)                    let w = fromWrap(s, step) return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`w` is a `Stream` and is never disposed"), "{e}");
+        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1)                    return Some(n) }                    fn step(c: Ref<Int64>) -> Option<Int64> { let x: Option<Int64> = pull(c)                    return x }                    fn main() -> Int64 { let s = fromStep(0, tick)                    let w = fromWrap(s, step) close(w) return 0 }";
         assert!(run(src).is_ok());
     }
 

@@ -18,6 +18,13 @@ of a representation — both need to know which of several sources has a value
 READY, and this RFC states outright that it adds no concurrency while
 RFC-0013 leaves the loop to the host. There is nothing to ask.
 
+**Lazy since M2c.** `map`, `filter` and `take` no longer drain their source
+into a buffer. Each is a wrapper: a producer whose cursor cell holds the
+stream it wraps (`fromWrap`), whose step reads that source one element at a
+time (`pull`), and whose `close` releases the source on the way past — one
+release per stream, in a walk down the chain. So `map(unfold(..), f)` is a
+feed rather than a hang, which is the first thing anyone does with a feed.
+
 ## unfold
 
 ```vyrn
@@ -47,12 +54,16 @@ fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U>
 
 Apply `f` to every element. `s` is consumed; the result is a new obligation.
 
-**Eager, and that is a hang over an endless source.** M2b made the
-representation pull-based; it did not make this function lazy. It drains `s`
-into a buffer and hands back a buffer stream, so `map(unfold(..), f)` never
-returns. `take` is the one combinator that escapes, and only because it
-`break`s. Put a `take` between an endless producer and this: see "The
-combinators are not lazy" in RFC-0075.
+**Lazy** (M2c): `f` runs once per element the consumer actually asks for, so
+`map(unfold(..), f)` is a feed rather than a hang and `take(map(feed, f), n)`
+asks the feed n times. Nothing is buffered on the way through — a mapped
+buffer stream allocates less than the eager version did, not more.
+
+The one-line `let g = f` below is not decoration. A lambda captures by value
+(RFC-0037), and an RFC-0023 `fn` PARAMETER is not a value in scope — it is a
+specialization the caller chose — so capturing `f` directly is the one
+spelling the compiled backends do not have. Re-materializing it as a stored
+function value first is what the step captures.
 
 ## filter
 
@@ -62,10 +73,12 @@ fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T>
 
 Keep only the elements for which `pred` holds.
 
-**Eager**, exactly as `map` is, and with the same consequence: it drains its
-source, so an endless one never comes back. A filter is the worse of the two
-to make lazy, since a lazy `filter` may ask its source any number of times
-for one element of its own.
+**Lazy** (M2c), and the harder half of it: one element out is any number of
+elements in, so the loop below is the shape "one `next` in, one `next` out"
+does not have. A predicate admitting one in k therefore asks its source
+about kn times to yield n, and over a source with no end it asks forever if
+nothing ever passes — which is the honest behaviour of a filter, not a bug
+laziness introduced.
 
 ## take
 
@@ -75,12 +88,15 @@ fn take<T>(s: Stream<T>, n: Int64) -> Stream<T>
 
 The first `n` elements (fewer if the stream is shorter; none if `n <= 0`).
 
-The `break` is the point: it leaves the loop early, and M1's release still
-runs on that path — one release, never two. Over M1's eager representation
-the early exit bought nothing but the pin, since the buffer was already
-built. Over M2b's it is the whole reason `take` exists: `take(unfold(..), n)`
-asks the producer n + 1 times and stops, which is what makes an endless feed
-a program rather than a hang.
+**Lazy** (M2c), and the count moved because of it: this asks its source
+exactly n times, not the n + 1 M2b measured. The extra one was the element
+the eager version read before its `break` fired — a wrapper never reads it,
+because the counter is checked before the source is asked at all. `take` is
+no longer the one combinator that escapes an endless feed; it is the one
+that ENDS one, which is a different job and the reason it still exists.
+
+The count lives in the wrapper's own cursor cell — `get`/`set` here are the
+ordinary cell operations, on the cell `fromWrap` allocated.
 
 ## merge
 
@@ -96,7 +112,12 @@ it states outright that it does not add concurrency, so "whichever source
 has a value ready" is not a question the language can ask. Turn-taking is
 what a pull-based merge would do anyway when both sides are ready, so the
 observable sequence is the same one a lazy implementation would produce for
-any stream that terminates. What is lost is merging an endless source with a
-finite one — and since M2b an endless source EXISTS, so `merge(unfold(..), b)`
-is now a hang rather than a thing the language cannot spell. Wrap the endless
-side in `take` first; a merge that stops on its own needs both sides to.
+any stream that terminates.
+
+**Still eager, and therefore still a hang on an endless side** — the one
+combinator M2c did not make lazy, for a stated reason rather than an
+oversight: a wrapper owns ONE source, because a cursor cell has one stream
+behind it. Two sources want a second slot in that cell and a step that
+remembers whose turn it is, which is a second wrapper shape rather than a
+second use of this one. Wrap the endless side in `take` first; a merge that
+stops on its own needs both sides to.

@@ -7,9 +7,12 @@
 /// every element before the first one reached a consumer, which is `#6156`, the
 /// heap growth RFC-0075 quotes as its evidence. So the pin here is not the
 /// values. It is the COUNT: `take(feed, 5)` prints 5 elements and leaves
-/// `steps` at 6 — five yields plus the one `take` reads before its `break`
-/// fires — against a feed with no end. Any number at all, printed after an
+/// `steps` at 5, against a feed with no end. Any number at all, printed after an
 /// endless producer, is the whole milestone.
+///
+/// The number was 6 when this file was written, and M2c took the extra one away:
+/// an eager `take` read one element past its last before its `break` fired, and
+/// a lazy one checks its counter before it asks at all. See "As landed — M2c".
 import { unfold, map, filter, take } from "std/stream"
 
 /// How many times a step function has run. Module state rather than a capture
@@ -66,10 +69,10 @@ fn discard() -> Int64 {
 }
 
 /// The measurement itself, as a relation rather than a single fact: taking `n`
-/// from a feed with no end runs the step `n + 1` times — n yielded and one read
-/// before `take`'s `break` fires — whatever `n` is. The allocation is `take`'s
-/// output array, so it is `n` too. Under the eager representation there is no
-/// number here at all; there is a program that does not terminate.
+/// from a feed with no end runs the step `n` times, whatever `n` is, and since
+/// M2c allocates nothing at all — `take` is a wrapper now, not a buffer. Under
+/// the eager representation there is no number here; there is a program that
+/// does not terminate.
 fn cost(n: Int64) -> Int64 {
     steps = 0
     let mut seen = 0
@@ -99,7 +102,7 @@ fn main() -> Int64 {
     for v in take(unfold(0, naturals), 5) {
         print(v) // 0 1 2 3 4
     }
-    print(steps) // 6 — five yielded, one read then dropped by `break`
+    print(steps) // 5 — one ask per element, and no more (M2c; it was 6)
 
     // A stepped stream that ends by itself.
     for v in unfold(0, upToThree) {
@@ -111,8 +114,9 @@ fn main() -> Int64 {
         print(v) // 1 2 4 8 16 32 64
     }
 
-    // The combinators do not care which variant they were handed: `map` and
-    // `filter` were written against M1's buffer and are untouched by M2b.
+    // The combinators do not care which variant they were handed. They were
+    // written against M1's buffer, were untouched by M2b, and became wrappers in
+    // M2c without any of these lines changing.
     for v in map(take(unfold(0, naturals), 4), double) {
         print(v) // 0 2 4 6
     }
@@ -133,11 +137,13 @@ fn main() -> Int64 {
     print(firstOver(7))
     print(discard())
 
-    // The cost relation: n + 1 steps for n elements, at three sizes, against a
-    // producer that never ends.
-    print(cost(5)) // 6
-    print(cost(1000)) // 1001
-    print(cost(20000)) // 20001
+    // The cost relation: n steps for n elements, at three sizes, against a
+    // producer that never ends. It was n + 1 until M2c — the extra ask was the
+    // element the eager `take` read before its `break` fired, and a lazy one
+    // checks its counter before asking.
+    print(cost(5)) // 5
+    print(cost(1000)) // 1000
+    print(cost(20000)) // 20000
 
     // And the release, at the scale RFC-0075's acceptance names.
     print(cycles(10000)) // 10000

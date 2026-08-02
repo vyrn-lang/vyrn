@@ -159,7 +159,12 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // being `afree` under another name.
     ("fromArray", Memory, "Stream: the array's buffer, moved into a buffer-tagged header"),
     ("fromStep", Memory, "Stream: a cursor cell plus a step, pulled once per element"),
-    ("close", Memory, "Stream: variant-aware reclamation (a buffer, or a cursor cell)"),
+    // RFC-0075 M2c: the wrapper is the same cursor cell with a source moved into
+    // it, so `map` is a stream rather than a drain, and `pull` is the one way to
+    // read what is behind one.
+    ("fromWrap", Memory, "Stream: a cursor cell holding the source it wraps"),
+    ("pull", Memory, "Stream: one element from the stream behind a cursor"),
+    ("close", Memory, "Stream: variant-aware reclamation (a buffer, or a cursor cell and what it holds)"),
     // RFC-0074 M3a. `Syscall` rather than `Memory`: it is not about the stream's
     // storage, it is the one call that reaches the host's accept loop, which is
     // the same argument `print` makes one row down. It is also the only way a
@@ -462,7 +467,13 @@ fn the_census_is_the_code() {
     // one `Syscall` row for the handoff, and none for the pull or the release —
     // the host asks for those through the serve API rather than through a name a
     // program can write, so there is again no dispatch here to census.
-    assert_eq!(found.len(), 84, "the primitive core changed size");
+    // 84 -> 86 when RFC-0075 M2c made the combinators lazy: `fromWrap` for the
+    // wrapper and `pull` for what its step reads. The second row is the one
+    // worth noticing — M2b recorded that the pull needed no row BECAUSE it was
+    // emitted inside `for … in` rather than named, and a lazy `map` is exactly
+    // the thing that has to name it. A combinator written in Vyrn cannot be
+    // written without it.
+    assert_eq!(found.len(), 86, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

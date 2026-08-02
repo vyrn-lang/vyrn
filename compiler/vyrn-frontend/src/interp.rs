@@ -1586,6 +1586,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         droppable,
         cells: RefCell::new(Vec::new()),
         free: RefCell::new(Vec::new()),
+        sources: RefCell::new(HashMap::new()),
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
         log_file,
@@ -1629,6 +1630,13 @@ struct Interp<'a> {
     cells: RefCell<Vec<CellSlot>>,
     /// Free slots available for reuse (their generation was already bumped).
     free: RefCell<Vec<usize>>,
+    /// The second half of a wrapper's cursor cell (RFC-0075 M2c): the source
+    /// stream a `fromWrap` moved in, keyed by the slot that holds its cursor.
+    /// The compiled backends keep it in a fourth parallel array beside the
+    /// slab's generations, pointers and free list; here it is a map, which is
+    /// the same statement — a cell either has a stream behind it or it does
+    /// not, `pull` traps when it does not, and the release walks it.
+    sources: RefCell<HashMap<usize, StreamVal>>,
     /// The logging threshold ordinal (RFC-0008); calls below it are skipped.
     log_level: usize,
     /// Where log records are written (RFC-0008).
@@ -4276,11 +4284,54 @@ impl<'a> Interp<'a> {
                             done: false,
                         })))
                     }
+                    // RFC-0075 M2c. A wrapper is a producer whose cursor cell
+                    // also holds the source it wraps: same header, same step
+                    // signature, same dispatcher, one more thing to release.
+                    "fromWrap" => {
+                        let src = match vals.remove(0) {
+                            Val::Stream(s) => *s,
+                            other => {
+                                return Err(format!("fromWrap of non-Stream {other:?}").into())
+                            }
+                        };
+                        let step = match vals.remove(0) {
+                            Val::Fn(f) => f,
+                            other => return Err(format!("fromWrap of non-fn {other:?}").into()),
+                        };
+                        let (slot, gen) = match self.cell_alloc(Val::Int(0))? {
+                            Val::Ref { slot, gen } => (slot, gen),
+                            other => return Err(format!("cell of {other:?}").into()),
+                        };
+                        self.sources.borrow_mut().insert(slot, src);
+                        Ok(Val::Stream(Box::new(StreamVal::Step {
+                            slot,
+                            gen,
+                            step,
+                            done: false,
+                        })))
+                    }
+                    // `pull(c)` — one element from the stream behind this cursor.
+                    // The generation check is the ordinary one, so a cursor that
+                    // outlived its stream traps here exactly as `get` would.
+                    "pull" => {
+                        let (slot, gen) = self.as_ref(&vals[0])?;
+                        self.cell_get(slot, gen)?;
+                        // Taken out for the duration of the step, which may run
+                        // arbitrary Vyrn code — including, for a chain, another
+                        // `pull` on a different slot.
+                        let Some(mut src) = self.sources.borrow_mut().remove(&slot) else {
+                            return Err("no stream behind this cursor".into());
+                        };
+                        let got = self.stream_next(&mut src);
+                        self.sources.borrow_mut().insert(slot, src);
+                        Ok(match got? {
+                            Some(v) => Val::Option(Some(Box::new(v))),
+                            None => Val::Option(None),
+                        })
+                    }
                     "close" => match &vals[0] {
                         Val::Stream(s) => {
-                            if let StreamVal::Step { slot, gen, .. } = **s {
-                                self.cell_release(slot, gen)?;
-                            }
+                            self.release_stream(s)?;
                             Ok(Val::Unit)
                         }
                         other => Err(format!("close of non-Stream {other:?}").into()),
@@ -5471,11 +5522,22 @@ impl<'a> Interp<'a> {
     /// reclaim anyway, a producer owns a cursor cell out of a finite slab. One
     /// function so `for … in`, `close` and the host's disconnect (RFC-0074 M3a)
     /// run the same one rather than three that agree.
+    /// A wrapper (M2c) holds its source in that cell, so one release is a WALK:
+    /// a chain of three combinators over one producer is four streams and the
+    /// loop below visits each of them once. It is a loop rather than a recursion
+    /// because a chain is a list — the compiled backends run the same loop.
     fn release_stream(&self, s: &StreamVal) -> Result<(), Ctrl> {
-        if let StreamVal::Step { slot, gen, .. } = *s {
+        let mut cur = s.clone();
+        loop {
+            let StreamVal::Step { slot, gen, .. } = cur else {
+                return Ok(());
+            };
             self.cell_release(slot, gen)?;
+            match self.sources.borrow_mut().remove(&slot) {
+                Some(src) => cur = src,
+                None => return Ok(()),
+            }
         }
-        Ok(())
     }
 
     /// `for x in <stream>` — the pull loop. The stream is a local here, so the
@@ -5524,6 +5586,9 @@ impl<'a> Interp<'a> {
     fn cell_alloc(&self, v: Val) -> Result<Val, Ctrl> {
         let mut cells = self.cells.borrow_mut();
         if let Some(slot) = self.free.borrow_mut().pop() {
+            // A recycled slot starts with nothing behind it, as the compiled
+            // backends' `src[slot] = 0` says (RFC-0075 M2c).
+            self.sources.borrow_mut().remove(&slot);
             cells[slot].val = v; // generation already bumped at release
             return Ok(Val::Ref {
                 slot,
@@ -8169,6 +8234,76 @@ mod tests {
                      for v in fromStep(0, tick) { seen = seen + v if v == 7 { break } } \
                      return steps }";
         assert_eq!(crate::run(src), Ok(8));
+    }
+
+    /// RFC-0075 M2c's `map`, spelled the way `std/stream` spells it: no
+    /// `for … in` at all, a step that reads its source with `pull`, and a
+    /// wrapper that owns it.
+    const LMAP: &str = "fn lmap<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> { \
+                        let g: fn(T) -> U = f \
+                        let step: fn(Ref<Int64>) -> Option<U> = |c| { \
+                        let x: Option<T> = pull(c) \
+                        if let Some(v) = x { return Some(g(v)) } return None } \
+                        return fromWrap(s, step) } ";
+
+    #[test]
+    fn a_wrapper_asks_its_source_once_per_element_it_is_asked_for() {
+        // The milestone, in the engine with no IR to inspect: `tick` has no end,
+        // so this program does not terminate if `lmap` drains. It terminates, and
+        // the count says nothing was read ahead — four elements out, four asks
+        // in.
+        let src = format!(
+            "let mut steps = 0 \
+             fn tick(c: Ref<Int64>) -> Option<Int64> {{ let n = get(c) set(c, n + 1) \
+             steps = steps + 1 return Some(n) }} \
+             fn double(n: Int64) -> Int64 {{ return n * 2 }} \
+             {LMAP} \
+             fn main() -> Int64 {{ \
+               let mut seen = 0 \
+               for v in lmap(fromStep(0, tick), double) {{ seen = seen + v \
+                 if v == 6 {{ break }} }} \
+               return steps }}"
+        );
+        assert_eq!(crate::run(&src), Ok(4));
+    }
+
+    #[test]
+    fn releasing_a_chain_hands_back_one_cell_per_stream() {
+        // Three wrappers over one producer is four streams and four cursor cells,
+        // and the slab is 65536 slots — so 40 000 acquisitions through 10 000
+        // cycles trap unless the release WALKS. Releasing twice would be a double
+        // free of the payload rather than a trap, which is why the value below is
+        // checked as well: a slot handed back twice comes out of the free list
+        // twice and two live streams end up sharing a cursor.
+        let src = format!(
+            "fn tick(c: Ref<Int64>) -> Option<Int64> {{ let n = get(c) set(c, n + 1) \
+             return Some(n) }} \
+             fn double(n: Int64) -> Int64 {{ return n * 2 }} \
+             {LMAP} \
+             fn main() -> Int64 {{ let mut i = 0 \
+               while i < 10000 {{ \
+                 let s = lmap(lmap(lmap(fromStep(i, tick), double), double), double) \
+                 close(s) i = i + 1 }} \
+               let mut sum = 0 \
+               for v in lmap(fromStep(3, tick), double) {{ sum = sum + v break }} \
+               return sum }}"
+        );
+        assert_eq!(crate::run(&src), Ok(6));
+    }
+
+    #[test]
+    fn pull_on_a_cursor_with_no_stream_traps() {
+        // `pull` is a builtin, so nothing stops a program from calling it on an
+        // ordinary cell. The wording is the one the compiled backends print.
+        let src = "fn main() -> Int64 { let c = cell(0) \
+                   let x: Option<Int64> = pull(c) release(c) return 0 }";
+        match crate::run(src) {
+            Err(e) => assert!(
+                e.contains("no stream behind this cursor"),
+                "unexpected trap: {e}"
+            ),
+            other => panic!("expected a trap, got {other:?}"),
+        }
     }
 
     #[test]
