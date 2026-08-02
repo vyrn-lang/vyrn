@@ -268,6 +268,11 @@ inherited.
 - **M2b — the pull representation.** `Stream<T>` stops being a buffer.
   **Shipped** — the four deliverables M2's price list itemised, plus `unfold`.
   See "As landed — M2b".
+- **M2c — the combinators are not lazy.** M2b made the *representation* pull,
+  and stopped there. `map` and `filter` still drain their source into a buffer,
+  so `map(unfold(..), f)` over an endless feed does not return — and `map` over
+  a feed is the first thing anyone writes. `take` escapes only because it
+  `break`s, and `merge` documents its own hang. See below.
 - **M3 — cancellation + conformance.** The normalized signal and the conformance
   suite. **Shipped, and not here**: four of the six rows held after M2b, one is
   struck, and the last came with the transport rather than before it — RFC-0074
@@ -279,6 +284,33 @@ inherited.
   twice or not at all. What stays here is the *contract* the adapters must meet:
   the conformance table above, resumability via the cursor (M2b made the seed
   the resume token), and the `#6156` cycle count.
+
+### M2c — the combinators are not lazy
+
+**What M2b actually bought, stated exactly.** A `Stream<T>` is a producer, and
+`take(unfold(..), n)` asks n + 1 times and stops. That is the representation.
+It is not the library: `map` and `filter` are still `for x in s { out.push(..) }
+… fromArray(out)`, which drains the source. So the milestone that exists to make
+an unbounded feed expressible leaves the most obvious thing to do with one —
+`map` it into wire frames — a silent hang, and RFC-0074 M3a hit exactly that
+(its `sse` element is an encoded frame rather than a mapped record because of
+it).
+
+`take` escapes because it `break`s. `merge` documents its hang. `map` and
+`filter` did not, and now do.
+
+**Why this is a milestone and not a patch.** A lazy `map` is a stream whose step
+calls another stream's step. The source is a **linear resource**, so the wrapper
+must own it, and RFC-0037 captures by value — so the source has to live
+somewhere the step can reach without a second owner existing. That is the same
+class of question M2b answered for the seed, and it deserves the same treatment:
+its own evidence, its own pins, and a stated answer for what `close` on a
+wrapped stream releases.
+
+`filter` is the harder half and worth naming separately: a lazy `filter` may ask
+its source any number of times to answer once, so "one `next` in, one `next`
+out" stops being the shape, and the conformance row about a release running
+before the next element would be produced needs re-reading against it.
 
 ### M2b — the pull representation
 
