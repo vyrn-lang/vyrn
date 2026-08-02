@@ -33,12 +33,12 @@ fn main() -> Int64 {
 fn handle(req: Request) -> Response {
     hits = hits + 1
     if req.path == "/health" {
-        return Response { status: 200, contentType: "text/plain", body: "ok", vary: "" }
+        return Response { status: 200, contentType: "text/plain", body: "ok", vary: "", headers: [:] }
     }
     return Response {
         status: 200,
         contentType: "text/html",
-        body: "<h1>hello #\{hits.toString()} via \{req.method}</h1>", vary: "",
+        body: "<h1>hello #\{hits.toString()} via \{req.method}</h1>", vary: "", headers: [:],
     }
 }
 

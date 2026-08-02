@@ -374,7 +374,7 @@ export fn uiNoView() -> Html {
 
 /// The absent raw response. See [`uiNoView`].
 export fn uiNoRespond() -> Response {
-    return Response { status: 404, contentType: "text/plain", body: "", vary: "" }
+    return Response { status: 404, contentType: "text/plain", body: "", vary: "", headers: [:] }
 }
 
 /// The `data` member's alternative-signature indices, as `matchedMember` reports
@@ -465,7 +465,7 @@ export fn uiErrorPayload(status: Int64, props: String) -> String {
 /// without it a shared cache would store whichever came first and hand a page's
 /// JSON to a browser asking for its HTML.
 export fn uiDataResponse(body: String) -> Response {
-    return Response { status: 200, contentType: "application/json", body: body, vary: "Accept" }
+    return Response { status: 200, contentType: "application/json", body: body, vary: "Accept", headers: [:] }
 }
 
 /// The data response for a true miss (no route matched): the themed error page's
@@ -1495,7 +1495,7 @@ fn uiRouteNone(o: Option<Response>) -> Bool {
     }
 }
 fn uiRouteNotFound() -> Response {
-    return Response { status: 404, contentType: "text/html", body: document("Not Found", [], el("main", [], [el("h1", [], [text("404 — Not Found")])])), vary: "" }
+    return Response { status: 404, contentType: "text/html", body: document("Not Found", [], el("main", [], [el("h1", [], [text("404 — Not Found")])])), vary: "", headers: [:] }
 }
 fn uiRouteIssue(iss: Issue) -> Html {
     return el("li", [], [text(iss.path + ": " + iss.message)])
@@ -1745,14 +1745,14 @@ gen fn uiTitleExpr(layoutIdxs: Array<Int64>, pageTitleCall: String, dflt: String
 gen fn uiSuccessResponse(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>) -> String {
     let bodyExpr = uiWrapLayout(uiBodyCall(p, idx), layoutIdxs)
     if uiNeedsThreading(p, layoutIdxs) == false {
-        return "Response { status: 200, contentType: \"text/html\", body: document(" + uiStrLit(p.urlPattern) + ", [], " + bodyExpr + "), vary: \"\" }"
+        return "Response { status: 200, contentType: \"text/html\", body: document(" + uiStrLit(p.urlPattern) + ", [], " + bodyExpr + "), vary: \"\", headers: [:] }"
     }
     let args = uiPageCallArgs(p)
     let pageHeadCall = if p.isVyx { "p" + idx + ".head(" + args + ")" } else { "" }
     let pageTitleCall = if p.isVyx { "p" + idx + ".headTitle(" + args + ")" } else { "" }
     let headE = uiHeadExpr(layoutIdxs, pageHeadCall)
     let titleE = uiTitleExpr(layoutIdxs, pageTitleCall, p.urlPattern)
-    return "Response { status: 200, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\" }"
+    return "Response { status: 200, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\", headers: [:] }"
 }
 
 /// Whether the page dispatches a failure through `uiErrDoc` (a `Result` loader, or
@@ -1775,7 +1775,7 @@ gen fn uiEmitErrDoc(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
     let headE = uiHeadExpr(layoutIdxs, "")
     let titleE = uiTitleExpr(layoutIdxs, "", "Error")
     let mut out = "fn uiErrDoc" + idx + "(uiPe: PageError) -> Response {\n"
-    out = out + "    return Response { status: uiPe.status, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\" }\n}\n"
+    out = out + "    return Response { status: uiPe.status, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\", headers: [:] }\n}\n"
     return out
 }
 
@@ -1811,7 +1811,7 @@ gen fn uiEmitLoadDispatch(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, 
     } else if errorIdx >= 0 {
         out = out + "        Invalid(issues) => uiErrDoc" + idx + "(uiIssuesToError(issues)),\n"
     } else {
-        out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)), vary: \"\" },\n"
+        out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)), vary: \"\", headers: [:] },\n"
     }
     out = out + "    }\n}\n"
     return out

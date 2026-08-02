@@ -55,10 +55,10 @@ fn handle(req: Request) -> Response {
 fn routed(req: Request) -> Response {
     // Baked constants served with their conventional content types.
     if req.method == "GET" && req.path == "/theme.css" {
-        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "" }
+        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "", headers: [:] }
     }
     if req.method == "GET" && req.path == "/openapi.json" {
-        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "" }
+        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "", headers: [:] }
     }
     // The server-only route tree owns its prefix outright; a server root is
     // exactly where "which surface answers which prefix" belongs.

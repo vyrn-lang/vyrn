@@ -1,13 +1,30 @@
-/// The public REST projection of the user procedures (RFC-0074 M1) — base path
-/// `/users`, derived from the stem this file shares with `users.vyrn`.
+/// The public REST projection of the user procedures (RFC-0074 M1/M2) — base
+/// path `/users`, derived from the stem this file shares with `users.vyrn`.
 ///
 /// It colocates with what it projects and does NOT join it: `rpc("./server/api")`
 /// skips a dotted stem, so the derived RPC surface is exactly the three
 /// procedures, unchanged, and this file adds a second surface over the same
 /// three rather than a fourth procedure.
-import { http, Route, GET, POST, DELETE } from "std/http"
+///
+/// M2 is the policy below, and every line of it is a decision no reflection could
+/// make: how long a lookup may be cached, that it carries a validator, where a
+/// created user lives, and which of `del`'s two errors means the user was never
+/// there. The combinators read outside-in because a method chain would need
+/// `impl Cacheable for Route`, and a protocol cannot be implemented for a record.
+import { cacheFor, createdAt, etag, http, notFoundWhen, vary, Route, DELETE, GET, POST } from "std/http"
 import { byId, create, del } from http("./users")
 
 export fn routes() -> Array<Route> {
-    return [GET(byId("/{id}")), POST(create("/")), DELETE(del("/{id}"))]
+    return [
+        // An hour of caching with a strong validator, so a client that comes back
+        // with `If-None-Match` gets a bodyless 304. `Accept` is declared because
+        // this URL is JSON here and a page elsewhere (RFC-0072 M4).
+        vary(etag(cacheFor(GET(byId("/{id}")), 3600)), "Accept"),
+        // 201 with a `Location` built from the created user's own `id`.
+        createdAt(POST(create("/")), "/users/{id}"),
+        // `del` reports absence and refusal with different words; only the first
+        // is a 404. The other stays a 200 carrying `{"Err":"…"}`, exactly as the
+        // RPC surface answers it.
+        notFoundWhen(DELETE(del("/{id}")), |why| why == "no such user"),
+    ]
 }

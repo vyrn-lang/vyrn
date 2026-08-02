@@ -37,7 +37,13 @@
 /// is not.
 import { Json, JsonField, emit } from "std/json"
 import { parseJson } from "std/jsonread"
-import { fromBytesOr, indexOf, joinWith, split, substring } from "std/strings"
+import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
+// The ETag hash and the `Last-Modified` calendar, both already in std and both
+// pure: FNV-1a-64 is what `examples/bin` content-addresses pastes with, and
+// `std/time`'s breakdown is the parity citizen its own docs promise (only `now()`
+// is a host effect, and nothing here calls it).
+import { fnv1aStr } from "std/hash"
+import { civil, fromMillis, hour, minute, second } from "std/time"
 
 // The procedure rule, imported rather than restated: a projection publishes the
 // very procedures the derived RPC surface reflects on, in the same codec, so
@@ -58,6 +64,12 @@ export type Handler = fn(Request, Map<String, String>) -> Option<Response>
 /// shape (the RFC-0016 `handle` convention).
 export type Surface = fn(Request) -> Option<Response>
 
+/// `notFoundWhen`'s question, asked of the `Err` payload a procedure returned:
+/// "is THIS the absence this resource is named after?" A `String` and not the
+/// procedure's own error type, because `Route` erases the signature — and that
+/// erasure is the property the whole design exists to keep.
+export type IsMissing = fn(String) -> Bool
+
 /// One route: an HTTP method, a full path pattern (base + sub-path), what runs,
 /// and the `derived` policy line the diagnostics quote. `prefix` marks a whole
 /// subsystem mounted under `pattern` rather than a single path, and selects
@@ -72,6 +84,13 @@ export type Surface = fn(Request) -> Option<Response>
 /// defines, so it runs under the interpreter and fails to build natively. Each
 /// route uses one field and leaves the other at a named never-answers stub,
 /// which costs a word and no closure at all.
+///
+/// The M2 policy fields below are flat on `Route` rather than nested in a
+/// `Policy` record, for one reason: nesting would put a `fn` value one level
+/// deeper inside a record that is copied on every combinator, and M1 already paid
+/// for finding out which `fn`-in-a-record shapes lower on all three engines. Flat
+/// costs one `httpCopy` listing thirteen fields; nested would have cost the same
+/// listing plus a shape nobody has proven.
 export type Route = {
     method: String,
     pattern: String,
@@ -79,6 +98,20 @@ export type Route = {
     run: Handler,
     whole: Surface,
     derived: String,
+    // `Cache-Control: max-age=N`; `-1` writes no header (`cacheFor`).
+    maxAge: Int64,
+    // Whether to compute an `ETag` and answer conditionals with it (`etag`).
+    validator: Bool,
+    // The response field carrying epoch millis for `Last-Modified`; `""` none.
+    modified: String,
+    // The `Vary` header this route forces; `""` keeps what the handler said.
+    varyOn: String,
+    // A success status that replaces the handler's; `0` keeps it (`status`).
+    ok: Int64,
+    // A `Location` template like `/pastes/{id}`; `""` none (`createdAt`).
+    location: String,
+    // Which `Err` payloads mean 404 (`notFoundWhen`).
+    missing: IsMissing,
 }
 
 /// The `run` of a prefix route, and the `whole` of a path route: never called,
@@ -91,6 +124,13 @@ fn httpNoWhole(req: Request) -> Option<Response> {
     return None
 }
 
+/// The default `notFoundWhen`: nothing is an absence until the route says so. A
+/// named function rather than a `|why| false` lambda, so a fresh `Route` holds a
+/// real `fn` value before any combinator has run.
+fn httpNeverMissing(why: String) -> Bool {
+    return false
+}
+
 /// Build a route with no method yet. What a generated per-procedure constructor
 /// calls; `pattern` is already base-qualified.
 export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
@@ -101,6 +141,34 @@ export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
         run: run,
         whole: httpNoWhole,
         derived: derived,
+        maxAge: -1,
+        validator: false,
+        modified: "",
+        varyOn: "",
+        ok: 0,
+        location: "",
+        missing: httpNeverMissing,
+    }
+}
+
+/// Every field of `r`, so a combinator can set the one it owns and leave the rest
+/// alone. Vyrn has no record-update syntax, so this is written once here instead
+/// of thirteen times in each of the seven combinators.
+fn httpCopy(r: Route) -> Route {
+    return Route {
+        method: r.method,
+        pattern: r.pattern,
+        prefix: r.prefix,
+        run: r.run,
+        whole: r.whole,
+        derived: r.derived,
+        maxAge: r.maxAge,
+        validator: r.validator,
+        modified: r.modified,
+        varyOn: r.varyOn,
+        ok: r.ok,
+        location: r.location,
+        missing: r.missing,
     }
 }
 
@@ -148,14 +216,11 @@ export fn DELETE(r: Route) -> Route {
 }
 
 fn httpWithMethod(r: Route, method: String) -> Route {
-    return Route {
-        method: method,
-        pattern: r.pattern,
-        prefix: r.prefix,
-        run: r.run,
-        whole: r.whole,
-        derived: method + " " + r.pattern + " " + r.derived,
-    }
+    let line = method + " " + r.pattern + " " + r.derived
+    let mut out = httpCopy(r)
+    out.method = method
+    out.derived = line
+    return out
 }
 
 /// A whole subsystem mounted under `prefix`: the derived RPC surface, a page
@@ -170,7 +235,128 @@ export fn surface(prefix: String, run: Surface) -> Route {
         run: httpNoRun,
         whole: run,
         derived: "* " + prefix + " (surface)",
+        maxAge: -1,
+        validator: false,
+        modified: "",
+        varyOn: "",
+        ok: 0,
+        location: "",
+        missing: httpNeverMissing,
     }
+}
+
+// ---- cache and validators (M2) ---------------------------------------------
+//
+// Seven combinators, each `Route -> Route`, so the chain stays value-level: the
+// fortieth route with the fortieth policy is still one nominal value to the
+// checker. They are written PREFIX — `etag(cacheFor(GET(byId("/{id}")), 3600))`,
+// not the RFC's `.cacheFor(3600).etag()` — because a method call on a user value
+// needs a protocol impl, and `impl P for Route` is rejected outright: protocols
+// implement for Int64/Bool/String or an enum, since records erase at runtime.
+// The chain reads outside-in as a result. That is a spelling cost, not a
+// structural one, and it is the second time this milestone series has paid one
+// (M1's `GET(byId("/{id}"))`).
+
+/// `Cache-Control: max-age=N` on a successful answer.
+///
+/// Deliberately NOT `public` and not `private`. `public` would tell a shared
+/// cache to store a response it is otherwise forbidden to store — the one for a
+/// request that carried `Authorization` (RFC 9111 §3.5) — which is the
+/// cache-poisoning shape, one user's copy served to the next. `private` would
+/// make `cacheFor` useless for the public API this projection exists to publish.
+/// Bare `max-age` gets both: a CDN may cache the anonymous GET, and the spec's
+/// own default already refuses the credentialed one.
+export fn cacheFor(r: Route, seconds: Int64) -> Route {
+    let mut out = httpCopy(r)
+    out.maxAge = seconds
+    out.derived = out.derived + " max-age=\{seconds}"
+    return out
+}
+
+/// A strong `ETag` over the response, and `If-None-Match` answered with 304.
+///
+/// The validator is `FNV-1a-64(contentType + "\n" + body)` in hex. It hashes the
+/// REPRESENTATION — the bytes plus the media type that says how to read them —
+/// because two `Vary`-selected variants of one URL are different representations
+/// and must not share a validator. It hashes CONTENT and nothing else: no clock,
+/// no counter, no process identity, so two processes serving the same bytes emit
+/// the same tag and a client's `If-None-Match` still matches after a restart or
+/// across a load-balanced pair. A per-process seed here would make the whole
+/// feature silently inert.
+///
+/// 64 bits: a collision serves a 304 for content the client does not have. At
+/// that width it takes ~5 billion distinct representations of one URL for a 50%
+/// chance, and the same hash already assigns this repo's paste ids.
+export fn etag(r: Route) -> Route {
+    let mut out = httpCopy(r)
+    out.validator = true
+    out.derived = out.derived + " etag"
+    return out
+}
+
+/// `Last-Modified` from a top-level response field carrying epoch milliseconds,
+/// and `If-Modified-Since` answered with 304.
+///
+/// The field is named rather than selected by a closure for the reason `IsMissing`
+/// records: `Route` has erased the procedure's output type by the time a
+/// combinator sees it. A name that no longer exists writes no header rather than
+/// trapping — a validator is an optimization, and losing one must not lose the
+/// response.
+export fn lastModified(r: Route, field: String) -> Route {
+    let mut out = httpCopy(r)
+    out.modified = field
+    out.derived = out.derived + " last-modified=" + field
+    return out
+}
+
+/// The `Vary` header for this route. Writes the `Response.vary` field RFC-0072 M4
+/// already ships — one negotiation channel with one reader, not a second one
+/// hidden in the header map.
+export fn vary(r: Route, headers: String) -> Route {
+    let mut out = httpCopy(r)
+    out.varyOn = headers
+    out.derived = out.derived + " vary=" + headers
+    return out
+}
+
+/// The status a SUCCESSFUL answer carries (202 for an accepted job, 201 without a
+/// Location). An error keeps its own: a 422 from `fromJson` is the codec's answer
+/// and not this route's to relabel.
+export fn status(r: Route, code: Int64) -> Route {
+    let mut out = httpCopy(r)
+    out.ok = code
+    out.derived = out.derived + " status=\{code}"
+    return out
+}
+
+/// `201 Created` with a `Location` built from the response: `"/pastes/{id}"`
+/// takes `{id}` from the created object's `id` field.
+///
+/// A template and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest
+/// version of that line: the closure it shows takes the procedure's OUTPUT type,
+/// and a `Route` that could carry one would be `Route<T>` — the type-level chain
+/// this RFC exists to refuse. The template is checked at runtime against the
+/// fields actually present; an unknown `{name}` is left verbatim in the URL,
+/// where it is loud.
+export fn createdAt(r: Route, template: String) -> Route {
+    let mut out = httpCopy(r)
+    out.location = template
+    out.derived = out.derived + " created-at=" + template
+    return out
+}
+
+/// Which `Err` payloads are an absence: `notFoundWhen(r, |why| why == "no such
+/// paste")` turns that one error into a 404 and leaves every other `Err` a 200
+/// carrying the error the procedure returned.
+///
+/// The lambda captures nothing, which is what makes it lowerable: M1's native
+/// codegen bug was a lambda CALLING a captured `fn`-typed parameter, and a
+/// predicate over a `String` has neither.
+export fn notFoundWhen(r: Route, isMissing: IsMissing) -> Route {
+    let mut out = httpCopy(r)
+    out.missing = isMissing
+    out.derived = out.derived + " not-found-when"
+    return out
 }
 
 // ---- mounting --------------------------------------------------------------
@@ -195,7 +381,7 @@ export fn mount(req: Request, groups: Array<Array<Route>>) -> Option<Response> {
             if let Some(ps) = httpMatch(r, req) {
                 let answer = if r.prefix { httpInvokeWhole(r.whole, req) } else { httpInvoke(r.run, req, ps) }
                 if let Some(resp) = answer {
-                    return Some(resp)
+                    return Some(httpApply(r, req, resp))
                 }
             }
         }
@@ -211,6 +397,288 @@ fn httpInvoke(h: Handler, req: Request, ps: Map<String, String>) -> Option<Respo
 
 fn httpInvokeWhole(h: Surface, req: Request) -> Option<Response> {
     return h(req)
+}
+
+// ---- applying the policy ---------------------------------------------------
+//
+// Policy is applied HERE, in `mount`, and not inside the handler, because this is
+// the one place that holds all three of the route (its policy), the request (its
+// conditionals) and the response (its bytes) at once. That also means no
+// combinator has to capture anything: the only stored `fn` in a policy is
+// `notFoundWhen`'s capture-free predicate.
+
+/// The route's policy over the answer its handler gave.
+fn httpApply(r: Route, req: Request, resp: Response) -> Response {
+    // A mounted subsystem writes its own headers and owns its own caching; a
+    // prefix route has no policy to apply anyway (no combinator returns one).
+    if r.prefix {
+        return resp
+    }
+    let answered = httpMapMissing(r, resp)
+    // Cache directives and validators describe a representation. A 4xx/5xx is not
+    // one, so an error answer leaves with exactly what the codec gave it.
+    if answered.status >= 300 {
+        return answered
+    }
+    let tag = if r.validator { httpEtag(answered.contentType, answered.body) } else { "" }
+    let stamp = if r.modified == "" { "" } else { httpStamp(answered.body, r.modified) }
+    let loc = if r.location == "" { "" } else { httpFill(r.location, answered.body) }
+    let hs = httpHeaders(answered.headers, r, tag, stamp, loc)
+    let varyOn = if r.varyOn == "" { answered.vary } else { r.varyOn }
+    // The client already holds this representation. RFC 9110 §15.4.5: a 304 sends
+    // the metadata that would have gone with the 200 and NO content — so the
+    // validators and `Cache-Control` stay, the body goes, and the media type goes
+    // with it (there is nothing left to describe).
+    if httpFresh(req, tag, stamp) {
+        return Response { status: 304, contentType: "", body: "", vary: varyOn, headers: hs }
+    }
+    return Response {
+        status: httpStatus(r, answered.status, loc),
+        contentType: answered.contentType,
+        body: answered.body,
+        vary: varyOn,
+        headers: hs,
+    }
+}
+
+/// The status a successful answer carries. An explicit `status` wins over
+/// `createdAt`'s implied 201, because it is the author speaking later and more
+/// specifically; with neither, the adapter's own 200/204 stands.
+fn httpStatus(r: Route, given: Int64, loc: String) -> Int64 {
+    if r.ok != 0 {
+        return r.ok
+    }
+    if loc != "" {
+        return 201
+    }
+    return given
+}
+
+/// The response headers: whatever the handler already set, then the policy's.
+fn httpHeaders(base: Map<String, String>, r: Route, tag: String, stamp: String, loc: String) -> Map<String, String> {
+    let mut hs: Map<String, String> = [:]
+    for k in base.keys() {
+        hs[k] = httpAt(base, k)
+    }
+    if r.maxAge >= 0 {
+        hs["Cache-Control"] = "max-age=\{r.maxAge}"
+    }
+    if tag != "" {
+        hs["ETag"] = tag
+    }
+    if stamp != "" {
+        hs["Last-Modified"] = stamp
+    }
+    if loc != "" {
+        hs["Location"] = loc
+    }
+    return hs
+}
+
+/// The strong validator for a representation: the content type and the body,
+/// hashed together. See `etag` for why it is content and nothing else.
+fn httpEtag(contentType: String, body: String) -> String {
+    return "\"" + toHex(fnv1aStr(contentType + "\n" + body)) + "\""
+}
+
+/// Whether the request already holds what this route would answer with.
+///
+/// RFC 9110 §13.1.3: when `If-None-Match` is present, `If-Modified-Since` is
+/// IGNORED — not tried as a second chance. Getting that backwards would 304 a
+/// client whose validator we just said does not match.
+fn httpFresh(req: Request, tag: String, stamp: String) -> Bool {
+    let inm = httpHeader(req, "if-none-match")
+    if inm != "" {
+        return tag != "" && httpAnyMatch(inm, tag)
+    }
+    if stamp == "" {
+        return false
+    }
+    // Exact equality, not "not newer than": a date comparison needs an HTTP-date
+    // PARSER, and this answers 304 only for a client stamped exactly as we would
+    // stamp it. Conservative in the safe direction — a missed 304 costs bytes, a
+    // wrong one costs correctness.
+    return httpHeader(req, "if-modified-since") == stamp
+}
+
+/// One request header, `""` when absent. Names arrive lowercased (RFC-0072 M4
+/// lowercases at the edge, and a hand-written `Request` literal writes lowercase).
+fn httpHeader(req: Request, name: String) -> String {
+    return match req.headers[name] {
+        Some(v) => v,
+        None => "",
+    }
+}
+
+/// Whether an `If-None-Match` field value names `tag`. `*` matches anything the
+/// server has; otherwise it is a comma-separated list compared with the WEAK
+/// comparison function (RFC 9110 §8.8.3.2), so a client that echoes our strong
+/// tag back as `W/"…"` still matches.
+fn httpAnyMatch(field: String, tag: String) -> Bool {
+    if trim(field) == "*" {
+        return true
+    }
+    for one in split(field, ",") {
+        if httpUnweak(trim(one)) == httpUnweak(tag) {
+            return true
+        }
+    }
+    return false
+}
+
+fn httpUnweak(t: String) -> String {
+    return if t.startsWith("W/") { substring(t, 2, t.byteLength) } else { t }
+}
+
+/// `notFoundWhen`'s answer: a procedure that returned `Err(why)` for a reason this
+/// route calls absence is a 404, not a 200 carrying an error object.
+fn httpMapMissing(r: Route, resp: Response) -> Response {
+    if resp.status != 200 {
+        return resp
+    }
+    return match httpErrOf(resp.body) {
+        Some(why) => httpMaybe404(r, resp, why),
+        None => resp,
+    }
+}
+
+fn httpMaybe404(r: Route, resp: Response, why: String) -> Response {
+    if httpAsk(r.missing, why) == false {
+        return resp
+    }
+    // The body stays as the codec wrote it: the client gets the same
+    // `{"Err":"…"}` the RPC surface would have given, at the status REST expects.
+    return Response {
+        status: 404,
+        contentType: resp.contentType,
+        body: resp.body,
+        vary: resp.vary,
+        headers: resp.headers,
+    }
+}
+
+/// Call the stored predicate. RFC-0037 calls a `fn` value by NAME, so the field
+/// binds to a parameter first — the same reason `httpInvoke` exists.
+fn httpAsk(isMissing: IsMissing, why: String) -> Bool {
+    return isMissing(why)
+}
+
+/// The `Err` payload of a body that encodes a `Result`, `None` otherwise.
+///
+/// This reads the RFC-0024 wire form the SAME `toJson` wrote — `{"Err": "…"}` —
+/// rather than a second convention: the one-codec property is what makes the REST
+/// and RPC surfaces byte-identical, and a policy layer that invented its own error
+/// shape would be the first crack in it. A record whose single field is literally
+/// named `Err` and holds a string is indistinguishable here, and would be read as
+/// an error; no such record exists in the dogfoods and the ambiguity is the wire
+/// form's, not this function's.
+fn httpErrOf(body: String) -> Option<String> {
+    return match httpSingle(body, "Err") {
+        Some(v) => httpStrOf(v),
+        None => None,
+    }
+}
+
+fn httpStrOf(v: Json) -> Option<String> {
+    return match v {
+        JStr(s) => Some(s),
+        JNum(n) => None,
+        JBool(b) => None,
+        JNull => None,
+        JArr(xs) => None,
+        JObj(fs) => None,
+    }
+}
+
+/// The value of a single-field object with key `key`, `None` otherwise.
+fn httpSingle(body: String, key: String) -> Option<Json> {
+    return match parseJson(body) {
+        Ok(j) => httpSingleOf(j, key),
+        Err(e) => None,
+    }
+}
+
+fn httpSingleOf(j: Json, key: String) -> Option<Json> {
+    let fs = httpFieldsOf(j)
+    if fs.length != 1 {
+        return None
+    }
+    return if fs[0].key == key { Some(fs[0].value) } else { None }
+}
+
+/// The object a `Location` template and `Last-Modified` read their fields from:
+/// the body, or the payload inside it when the procedure returned `Ok(value)`.
+/// `Result` is how a fallible procedure reports, so unwrapping it here is the
+/// difference between `createdAt` working on the dogfood and not.
+fn httpPayload(body: String) -> Array<JsonField> {
+    return match httpSingle(body, "Ok") {
+        Some(inner) => httpFieldsOf(inner),
+        None => httpBodyFields(body),
+    }
+}
+
+/// The raw text of a top-level payload field, `""` when absent or not scalar.
+fn httpScalar(body: String, key: String) -> String {
+    for f in httpPayload(body) {
+        if f.key == key {
+            return httpText(f.value)
+        }
+    }
+    return ""
+}
+
+fn httpText(v: Json) -> String {
+    return match v {
+        JStr(s) => s,
+        JNum(n) => n,
+        JBool(b) => b.toString(),
+        JNull => "",
+        JArr(xs) => "",
+        JObj(fs) => "",
+    }
+}
+
+/// `"/pastes/{id}"` with each `{name}` replaced by that payload field. An unknown
+/// name is left verbatim: a wrong `Location` should be visible in the URL, not
+/// silently shortened to one that resolves to something else.
+fn httpFill(template: String, body: String) -> String {
+    let mut out = template
+    for f in httpPayload(body) {
+        out = replace(out, "{" + f.key + "}", httpText(f.value))
+    }
+    return out
+}
+
+/// The `Last-Modified` value from the named epoch-millis field, `""` when the
+/// field is absent, non-numeric or negative. Never traps: `Instant` refuses a
+/// negative and a validator is not worth a 500.
+fn httpStamp(body: String, field: String) -> String {
+    return match parse(httpScalar(body, field)) {
+        Some(ms) => httpDate(ms),
+        None => "",
+    }
+}
+
+/// `Thu, 01 Jan 1970 00:00:00 GMT` — the IMF-fixdate of RFC 9110 §5.6.7, the one
+/// format a server is required to send. Built from `std/time`'s pure UTC
+/// breakdown; the weekday is arithmetic (1970-01-01 was a Thursday), which is why
+/// there is no calendar table here beyond the two name lists the format spells
+/// out in English.
+fn httpDate(ms: Int64) -> String {
+    if ms < 0 {
+        return ""
+    }
+    let at = fromMillis(ms)
+    let c = civil(at)
+    let days = ms / 86400000
+    let dow = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    let clock = httpPad2(hour(at)) + ":" + httpPad2(minute(at)) + ":" + httpPad2(second(at))
+    return dow[(days + 4) % 7] + ", " + httpPad2(c.day) + " " + mon[c.month - 1] + " \{c.year} " + clock + " GMT"
+}
+
+fn httpPad2(n: Int64) -> String {
+    return padStart(n.toString(), 2, "0")
 }
 
 /// The placeholder bindings if `r` matches `req`, `None` otherwise.
@@ -544,22 +1012,22 @@ gen fn httpProcedure(f: FnInfo, iface: ModuleInterface, base: String) -> String 
         out = out + "    return match fromJson(" + reqType + ", httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
         if f.ret == "" {
             out = out + "        Valid(input) => " + run + "Unit(input),\n"
-            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\" }),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
             out = out + "    }\n}\n"
             out = out + "fn " + run + "Unit(input: " + reqType + ") -> Option<Response> {\n"
             out = out + "    " + call + "(input)\n"
-            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" })\n}\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
         } else {
-            out = out + "        Valid(input) => Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "(input)), vary: \"\" }),\n"
-            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\" }),\n"
+            out = out + "        Valid(input) => Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "(input)), vary: \"\", headers: [:] }),\n"
+            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
             out = out + "    }\n}\n"
         }
     } else {
         if f.ret == "" {
             out = out + "    " + call + "()\n"
-            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" })\n}\n"
+            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
         } else {
-            out = out + "    return Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "()), vary: \"\" })\n}\n"
+            out = out + "    return Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "()), vary: \"\", headers: [:] })\n}\n"
         }
     }
     out = out + "/// `" + f.name + "` at `" + base + "` + `path`.\n"
