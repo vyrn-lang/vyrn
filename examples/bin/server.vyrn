@@ -16,7 +16,7 @@ import { rpcHandle } from rpc("./server/api")
 import { openapi } from "std/openapi"
 import { openapiJson } from openapi("./server/api/pastes")
 import { pagesThemed } from "std/ui"
-import { route } from pagesThemed("./app/routes", "./theme.json")
+import * as appPages from pagesThemed("./app/routes", "./theme.json")
 import * as rawPages from pagesThemed("./server/routes", "./theme.json")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
@@ -60,26 +60,27 @@ fn routed(req: Request) -> Response {
     if req.method == "GET" && req.path == "/openapi.json" {
         return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "", headers: [:] }
     }
-    // The server-only route tree owns its prefix outright; a server root is
-    // exactly where "which surface answers which prefix" belongs.
-    if req.path.startsWith("/raw/") {
-        return rawPages.route(req)
-    }
-    // The two wire surfaces, mounted in order, first match wins (RFC-0074): the
+    // Every wire surface, mounted in order, first match wins (RFC-0074): the
     // derived RPC surface (/_/*) that the pages call, then the public REST API
-    // written over the same three procedures. `mount` traps at startup if either
-    // could shadow the other, so "which one answers /pastes/x" is not a question
-    // anyone has to hold in their head.
+    // written over the same three procedures, then the two page trees — the
+    // server-only one (/raw/{id}, never bundled) ahead of the universal one.
+    // `mount` traps at startup if any of them could shadow another, so "which one
+    // answers /pastes/x" is not a question anyone has to hold in their head.
     //
-    // Pages stay OUTSIDE the mount and last, because `route` always answers
-    // (`-> Response`, with its own 404 page) — it is the fallback, not a group
-    // that can decline.
-    // The third list is the streams (RFC-0074 M3a). They are not routes and they
-    // do not carry `Policy`; `mount` resolves them first, because a stream's path
-    // is exact and `/pastes/{id}` is exactly the shape that would swallow one.
-    return match mount(req, [[surface("/_", rpcHandle)], pastesHttp.routes()], pastesHttp.feeds(), pastesHttp.sockets()) {
+    // The page trees are groups like any other, and the reason they can be is that
+    // a page DECLINES: `routes()` enumerates one route per page, each matching its
+    // own pattern. What "always answers" is the tree's 404, and that is `route`
+    // below — the fallback, which is where a fallback belongs. The `/raw/` prefix
+    // this root used to test by hand is not a prefix at all: the tree literally
+    // contains `raw/[id].vyrn`, so its route says `/raw/{id}` itself.
+    //
+    // The last two lists are the streams and sockets (RFC-0074 M3a/M3b). They are
+    // not routes and they do not carry `Policy`; `mount` resolves them first,
+    // because a stream's path is exact and `/pastes/{id}` is exactly the shape
+    // that would swallow one.
+    return match mount(req, [[surface("/_", rpcHandle)], pastesHttp.routes(), rawPages.routes(), appPages.routes()], pastesHttp.feeds(), pastesHttp.sockets()) {
         Some(r) => r,
-        None => route(req),
+        None => appPages.route(req),
     }
 }
 

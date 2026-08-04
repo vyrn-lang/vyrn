@@ -226,17 +226,23 @@ fn routes_shows_the_hand_written_projection_beside_the_derived_surface() {
         // handler name, hence `-`.
         "SSE /pastes/live - explicit",
         "WS /pastes/socket - explicit",
+        // Both page trees, mounted as ordinary groups. `convention` and not
+        // `explicit`: the file tree derived these paths, nobody wrote them down.
+        // The procedure column names the page's place in the tree, which is the
+        // only name a page has. `/raw/{id}` is the whole path and not the
+        // tree-relative `/{id}` — the tree contains `raw/[id].vyrn`.
+        "GET / index convention",
+        "GET /about about convention",
+        "GET /p/{id} p/[id] convention",
+        "GET /raw/{id} raw/[id] convention",
     ] {
         assert!(rows.iter().any(|r| r == want), "missing `{want}`:\n{text}");
     }
-    assert_eq!(rows.len(), 8, "{text}");
+    assert_eq!(rows.len(), 12, "{text}");
     // The `surface(\"/_\", rpcHandle)` the same `mount` call carries is NOT a
-    // ninth row: a prefix stands for a subsystem the directives already list
+    // thirteenth row: a prefix stands for a subsystem the directives already list
     // one row at a time, and printing both would double-count it.
     assert!(!text.contains("/_ "), "{text}");
-    // Pages are the one thing still absent, and the usage line says so instead
-    // of claiming them.
-    assert!(!text.contains("/about"), "{text}");
 }
 
 /// RFC-0073 M4: `--json` is the same table plus each route's DECLARATION, read

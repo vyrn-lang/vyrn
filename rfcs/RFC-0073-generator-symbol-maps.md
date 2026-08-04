@@ -525,9 +525,10 @@ directive has nowhere to put the declaration's file, line and column. So `--json
 reads the maps, which is what makes "`vyrn routes --json` and the LSP agree"
 true by construction, and UNIONS them with the directives so a future generator
 emitting only one is not silently dropped. Today the union is the same set.
-`std/ui` emits neither, so page routes are in neither the table nor the JSON —
-the document's example table shows rows no version of this command has ever
-printed.
+`std/ui` emitted neither at the time, so page routes were in neither the table nor
+the JSON — the document's example table showed rows no version of this command had
+ever printed. `std/ui` now emits directives (see the note below), so the table has
+them; it still emits no map, so their `origin` in `--json` is `null`.
 
 > **The `explicit` rows now print; the page rows still do not.** Both channels
 > above read what a GENERATOR wrote, and a hand-written projection has no
@@ -542,6 +543,19 @@ printed.
 > generator knows the tree-relative path and not the prefix the app serves it
 > under, and a directive it emitted would be wrong. Printing pages means giving
 > `std/ui` a route list, not teaching this command another format.
+
+> **Pages, and both reasons they were absent were mistaken.** `std/ui` was given
+> its route list — `routes()`, one `Route` per page — and with it the `//@route`
+> directives the first channel already reads, so the command still knows nothing
+> about pages and `examples/bin` prints twelve rows instead of eight. A page
+> router does always answer, but its PAGES do not: each route matches one pattern
+> and declines the rest, and the 404 that always answers is the tree's fallback,
+> which stays in the composition root's `None` arm. And the prefix was never
+> unknown. A page router matches `req.path` WHOLE against its own tree's segments,
+> so a tree cannot be re-hung under a prefix at all; the `startsWith("/raw/")`
+> above was a hand-written dispatch guard standing in front of a tree that
+> contains `raw/[id].vyrn` and derives `/raw/{id}` by itself. The guard is gone
+> and the tree is a group.
 
 ## Acceptance
 

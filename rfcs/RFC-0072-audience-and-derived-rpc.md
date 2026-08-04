@@ -469,8 +469,17 @@ failure mode RFC-0071 M4 avoided by making the LSP a pure adapter over
 > evaluating that call's arguments. That is not a second implementation either:
 > nothing in the command derives a path, so the rule above survives verbatim —
 > every channel READS what something else wrote, one of them a generator and one
-> of them the router's own input. Page routes remain outside all three, and the
-> usage line says so instead of claiming them.
+> of them the router's own input.
+>
+> Page routes came in later, and on the FIRST channel rather than a fourth one.
+> `std/ui` now emits a `//@route` per page and a `routes()` group `mount` takes,
+> which makes it a generator that mounts a surface — the exact thing the first
+> channel is for — so the command needed no change at all to print pages. The two
+> beliefs that had kept them out were both wrong: a page router "always answers",
+> but its pages do not (only the tree's 404 does, and that is the composition
+> root's fallback, not a route); and the prefix a tree hangs under was never
+> unknown, because a page router matches `req.path` whole against its own segments
+> and so its patterns are already absolute.
 
 **`list` is a reserved name, so this document's own example cannot be written.**
 `server/api/pastes.vyrn :: list` is the illustration used throughout; `list` is
@@ -589,8 +598,7 @@ them from there rather than from the module whose signature merely names them.
 - `examples/bin` has no `contract.vyrn` and no hand-written client stubs.
 - A page importing `server/store.vyrn` is a checker error naming both files and
   citing the `vyrn.json` key.
-- `vyrn routes` lists every derived and explicit path with its source. (Page
-  routes excepted — see the third-channel note in "M3 — as landed".)
+- `vyrn routes` lists every derived, explicit and page path with its source.
 - `vyrn why app/routes/index.vyx` prints audience `universal` and its import
   chains.
 - `curl -H 'Accept: application/json' /p/<id>` returns the payload; the same URL
