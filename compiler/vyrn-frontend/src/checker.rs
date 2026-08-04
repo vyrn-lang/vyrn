@@ -8079,6 +8079,36 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
     }
 }
 
+/// The names a pattern binds — `Some(x)`, `Ok(e)`, `Circle(w, h)`.
+///
+/// A match arm's binder shadows a module global for the length of that arm, and
+/// nothing used to collect these: `JArr(items) => emitArr(items)` in `std/json`
+/// read as a reference to some *other* module's `items` state, so a project that
+/// happened to name a global `items` made every generator reaching `emit`
+/// impure. Naming a binder after a global in a module it cannot see is not a
+/// purity violation; it is a coincidence.
+fn pattern_binders(p: &Pattern) -> Vec<String> {
+    match p {
+        Pattern::Some(n)
+        | Pattern::Ok(n)
+        | Pattern::Err(n)
+        | Pattern::Success(n)
+        | Pattern::Failure(n) => vec![n.clone()],
+        Pattern::Variant(_, ns) => ns.clone(),
+        Pattern::None => Vec::new(),
+    }
+}
+
+/// `local` extended with what `p` binds — the scope of one arm.
+fn locals_with(
+    local: &std::collections::HashSet<String>,
+    p: &Pattern,
+) -> std::collections::HashSet<String> {
+    let mut out = local.clone();
+    out.extend(pattern_binders(p));
+    out
+}
+
 /// Whether a block references a global (reads it via `Var`, or writes it via
 /// `Assign`/`SetField`/`IndexSet`) that no local of the same name shadows.
 fn global_ref_block(
@@ -8114,13 +8144,14 @@ fn global_ref_block(
                     .is_some_and(|eb| global_ref_block(eb, globals, local))
         }
         Stmt::IfLet {
+            pattern,
             scrutinee,
             then_block,
             else_block,
             ..
         } => {
             global_ref_expr(scrutinee, globals, local)
-                || global_ref_block(then_block, globals, local)
+                || global_ref_block(then_block, globals, &locals_with(local, pattern))
                 || else_block
                     .as_ref()
                     .is_some_and(|eb| global_ref_block(eb, globals, local))
@@ -8159,9 +8190,9 @@ fn global_ref_expr(
             scrutinee, arms, ..
         } => {
             global_ref_expr(scrutinee, globals, local)
-                || arms
-                    .iter()
-                    .any(|a| global_ref_expr(&a.body, globals, local))
+                || arms.iter().any(|a| {
+                    global_ref_expr(&a.body, globals, &locals_with(local, &a.pattern))
+                })
         }
         Expr::IfExpr {
             cond,
@@ -8720,6 +8751,34 @@ mod tests {
                        return \"fn x() -> Int64 { return 0 }\" } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// A match arm's binder shadows a module global of the same name, so naming
+    /// one after the other is not a purity violation. Found by RFC-0073 M1:
+    /// `std/json`'s `JArr(items) => emitArr(items)` was read as a reference to
+    /// an example's `let mut items` state, which made every generator that
+    /// reaches `emit` impure in that one project and nowhere else.
+    #[test]
+    fn a_match_binder_named_like_a_global_is_still_pure() {
+        let src = "let mut items: Int64 = 0 \
+                   gen fn g(o: Option<Int64>) -> String { \
+                       let n = match o { Some(items) => items, None => 0 } \
+                       return \"\" } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// The shadowing is scoped: the arm that binds nothing still reads the
+    /// global, and that is impure.
+    #[test]
+    fn a_global_read_in_a_sibling_arm_is_still_impure() {
+        let src = "let mut items: Int64 = 0 \
+                   gen fn g(o: Option<Int64>) -> String { \
+                       let n = match o { Some(items) => items, None => items } \
+                       return \"\" } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("module state"), "{e}");
     }
 
     #[test]

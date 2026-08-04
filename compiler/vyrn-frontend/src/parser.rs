@@ -301,11 +301,46 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // without an import, and filtered out of the LSP by their line-0 origin. The
     // records reference each other and `Schema` by name (resolution is
     // order-independent). A generator consumes these to emit stubs/docs/mocks.
+    //   Origin    { file, line, col, name }
     //   ParamInfo { name, spelling, schema, uncodable }
     //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema, retUncodable,
-    //                mutates }
-    //   TypeInfo   { name, source, module, schema }
+    //                mutates, origin }
+    //   TypeInfo   { name, source, module, schema, origin }
     //   ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
+    // Where a declaration was WRITTEN (RFC-0073 M1) — the file it came from and
+    // the 1-based line/column of its name token, so a generated symbol can be
+    // mapped back to the declaration it stands for. `name` is the declaration's
+    // own name, which is routinely not the generated symbol's (`pastes.list`
+    // stands for `list`), so an origin answers on its own. An unknown position
+    // is `line == 0 && col == 0`, the same "not located" spelling the LSP's
+    // symbol index uses.
+    program.type_decls.push(TypeDecl {
+        name: "Origin".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field {
+                name: "file".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "line".to_string(),
+                ty: Type::Int,
+            },
+            Field {
+                name: "col".to_string(),
+                ty: Type::Int,
+            },
+            Field {
+                name: "name".to_string(),
+                ty: Type::Str,
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
     program.type_decls.push(TypeDecl {
         name: "ParamInfo".to_string(),
         exported: false,
@@ -378,6 +413,13 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
                 name: "mutates".to_string(),
                 ty: Type::Bool,
             },
+            // Where the procedure was declared (RFC-0073 M1) — the half of
+            // `//@origin` that line-granular mapping cannot carry: a generated
+            // stub knows which declaration it stands for, and can say so.
+            Field {
+                name: "origin".to_string(),
+                ty: Type::Named("Origin".to_string()),
+            },
         ]),
         predicate: None,
         line: 0,
@@ -409,6 +451,13 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             Field {
                 name: "schema".to_string(),
                 ty: Type::Named("Schema".to_string()),
+            },
+            // Where the type was declared — the reflected module's file for its
+            // own types, the DECLARING module's for a closure type reached
+            // across an import (RFC-0073 M1).
+            Field {
+                name: "origin".to_string(),
+                ty: Type::Named("Origin".to_string()),
             },
         ]),
         predicate: None,

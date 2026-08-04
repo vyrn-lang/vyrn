@@ -1,6 +1,9 @@
 # RFC-0072 — Audience and Derived RPC: Deleting the Contract File
 
-- **Status:** Draft
+- **Status:** **Implemented.** M1–M5 all landed, each with an "as landed"
+  section below. The line above said `Draft` for long enough that a reader
+  auditing what remained believed M3, M4 and M5 were unstarted — a status line
+  nobody updates is worse than none, because it is read.
 - **Depends on:** RFC-0071 (module contracts — `Api` is the contract this RFC
   attaches), RFC-0019 / `std/rpc` (the generators this RFC re-points),
   RFC-0027 (`import * as ns`), RFC-0069 (universal pages, the payload protocol)

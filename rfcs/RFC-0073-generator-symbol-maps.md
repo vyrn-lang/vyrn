@@ -1,6 +1,7 @@
 # RFC-0073 — Generator Symbol Maps: Rename Across the Boundary
 
-- **Status:** Draft
+- **Status:** M1 landed (reflection origins, `std/symbolmap`, `client()`/`rpc()`
+  maps, `vyrn emit-gen --maps`); M2–M4 draft
 - **Depends on:** RFC-0033 (`//@origin` directives), RFC-0048 (vyx origins),
   RFC-0053 (generated error mapping), RFC-0050 (LSP references),
   RFC-0071 (contracts — members are the symbols this RFC maps),
@@ -182,7 +183,114 @@ cache-integrity error that forces regeneration rather than a silent skip.
 ## Milestones
 
 - **M1 — format + emit.** `std/symbolmap`, the `.map.json` shape, cache
-  integration. `client()` and `rpc()` emit maps.
+  integration. `client()` and `rpc()` emit maps. **Two prerequisites this
+  document does not name, and one thing it should not build; see below.**
+
+### M1 — what it actually needs
+
+**Prerequisite: reflection has no origins.** `originOf(iface, "list")` above
+cannot be written, because `FnInfo` is
+`{ name, params, ret, retSchema, retUncodable, mutates }` — no file, no line, no
+column. The whole RFC is "promote `//@origin` from line granularity to symbol
+granularity", and the symbol half is not in the reflection the generators read.
+
+That is an addition rather than a problem: `retUncodable` arrived with RFC-0071
+M3 and `mutates` with RFC-0074 M4a, both by the same route. `FnInfo.origin`
+is the third, and `TypeInfo` needs one too — the sketch above maps
+`api.pastes.PasteList` back to `shared/wire/paste.vyrn:12:13`.
+
+**The thing not to build: a second generator output.** The sketch writes
+`gen fn client(dir: String) -> Module` and `emitMap([...])`. There is no
+`Module`; a `gen fn` returns `String`, the emitted source, and adding a second
+artifact means a new generator protocol, a new cache entry to keep in step, and
+a new way for the two to disagree.
+
+**The map is the module.** Emit it as an ordinary exported function —
+`symbolMap() -> String`, returning the JSON — and every one of those problems
+disappears: the cache already keys the module by content hash, so a map that
+lives *inside* the module cannot go stale relative to it, and "cache
+integration" stops being a milestone item. The LSP already runs generators as
+compiled wasm (RFC-0076), so reading it costs a call.
+
+`std/symbolmap` then provides the **builder**, not an emitter: `symbol(..)` and
+`mapJson(..)` produce the string every generator bakes in, so the shape is
+shared for the reason the sketch wanted — one library, one format.
+
+The sibling `.map.json` still exists, and is written by the CLI on request
+rather than by the generator. That keeps the RFC's actual requirement — a
+third-party tool reads JSON, not Vyrn — without making a generator responsible
+for a file it cannot invalidate.
+
+### M1 — as landed
+
+`FnInfo` and `TypeInfo` carry an `Origin`, `std/symbolmap` builds the document,
+`client()` and `rpc()` bake a `symbolMap()` into what they emit, and
+`vyrn emit-gen --maps` prints it as JSON. Six places where the implementation is
+not what this document said, and why.
+
+**The origin cost a lexer pass, not a span rewrite.** The AST carries a `line`
+per declaration and no column at all — `symbols.rs` says why: threading spans
+through every node construction site is high churn for something two consumers
+want, so the LSP recovers a declaration's name column from the lexer's per-token
+`(line, col)` instead. Reflection now does the same, once per module rather than
+once per lookup: `Origins` lexes each module the reflected link read and indexes
+the first identifier of each `(line, name)`. The sources were already in hand —
+`gen_module_interface_lit` records every module the link touched so a closure
+type's defining file joins the generator's cache inputs (RFC-0031) — so the index
+is built from the same reads, and a module reflected is a module indexed by
+construction. Re-lexing is also what keeps a comment or a string containing the
+name from being mistaken for it, which a substring search would not.
+
+**`Origin` carries a `name`, and it is not a restatement.** The record is
+`{ file, line, col, name }`, where `name` is the DECLARATION's name — routinely
+not the generated symbol's. `client()` exports `pastesCreate` and `rpc()`
+dispatches to `rpcHandlePastesCreate`; both stand for `create` in
+`server/api/pastes.vyrn`. That is the sketch's own `"name": "list"` field, and it
+is what lets a consumer holding one origin render `pastes.vyrn:28:15 (create)`
+without also holding the `FnInfo` it came from.
+
+**The map-inside-the-module decision held, and it removed work rather than
+adding it.** No new generator protocol, no second cache entry, no atomicity rule
+to enforce: the map is an export of the module, so a cache hit that restores the
+code restores the map, and the "cache integration" milestone item and the
+"partial artifact set forces regeneration" acceptance line are both moot. The
+generator side is one call — `symbolMapFn(module, symbols)` appended to the
+emitted source — and the JSON is baked as a string literal through an RFC-0054
+code quote, so the compiler's own escaping does the second layer rather than a
+hand-rolled escaper free to disagree with the lexer.
+
+**The CLI surface is `vyrn emit-gen --maps`, and it writes no file.** The
+smallest thing that satisfies the requirement — a third-party tool reads JSON,
+not Vyrn — is a flag on the command that already runs every generator and already
+banners its output. It prints one compact document per line, banners on stderr,
+so `> api.map.json` produces the sibling file without this command inventing a
+NAME for it. That is the part worth not guessing: a name would have to be a slug
+of a generator CALL (`client("../server/api")`), and `vyrn routes --json` in M4
+will decide how the maps are addressed with the merged table in hand. Reading is
+a parse, not a run: the map is a string literal the generator baked in.
+
+**`rpc()`'s mapped symbols are its internal handlers, which the sketch's "each
+exported symbol" does not cover.** The router exports exactly one function,
+`rpcHandle`, so mapping only exports would map nothing on the server side. Each
+`rpcHandlePastesCreate` stands for exactly one declaration, and both maps name
+that declaration at the same file, line and column — which is the property the
+cross-boundary rename in M4 needs, and is under test. `client()` maps its
+procedure stubs AND its re-emitted types: a re-emitted `type` has lost its file
+in the generated source, so the map is the only place that still says
+`PasteList` came from `shared/wire/paste.vyrn`. That is the sketch's third row,
+and the reason `TypeInfo` needed an origin as well as `FnInfo`.
+
+**It found a comptime-purity bug that had nothing to do with symbol maps.**
+`std/symbolmap` reaches `std/json`'s `emit`, whose body is
+`JArr(items) => emitArr(items)` — and the purity analysis collected `let` and
+`for` binders as locals but never a match arm's pattern binding. So `items` read
+as a reference to module state, and in the one example that happens to declare
+`let mut items` (`examples/rpcsplit`) every generator reaching `emit` became
+impure. Naming a binder after a global in a module it cannot see is a
+coincidence, not an effect. The fix is scoped rather than flat — an arm's binders
+shadow inside that arm and not in its siblings — and `if let` was missing the
+same thing.
+
 - **M2 — typed `Params`.** Generated per-route `Params` records with mapped
   fields; placeholder checking in REST projections; the string-lookup form
   removed.
