@@ -6,7 +6,8 @@
 //! `fn`/`type`/`protocol` exports, a ` ```mermaid ` fence (passed through
 //! verbatim), an UNCLOSED fence (the tool never eats content), a `///` block
 //! detached from its declaration by a blank line (must NOT attach), a private
-//! declaration (omitted), and a `test` block (omitted).
+//! declaration (omitted), a `test` block (omitted), and a protocol with one
+//! documented method (gets a `###` section) beside one undocumented (does not).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -46,7 +47,10 @@ export type Shape = { width: Int64, height: Int64 }
 
 /// Things that can render themselves to a `String`.
 export protocol Show {
+    /// The one-line form — for a log line or a table cell.
     fn show(self) -> String
+
+    fn debug(self) -> String
 }
 
 /// This block is DETACHED from the declaration below by a blank line.
@@ -105,10 +109,14 @@ unclosed fence on purpose
 ## Show
 
 ```vyrn
-protocol Show { fn show(self) -> String }
+protocol Show { fn show(self) -> String; fn debug(self) -> String }
 ```
 
 Things that can render themselves to a `String`.
+
+### `fn show(self) -> String`
+
+The one-line form — for a log line or a table cell.
 
 ## area
 

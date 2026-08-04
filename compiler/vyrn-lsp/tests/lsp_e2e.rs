@@ -3259,3 +3259,46 @@ fn a_widening_import_squiggles_in_the_editor() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ===========================================================================
+// A `///` above a method inside a `protocol` body reaches hover — on the
+// signature itself and on a call through an `impl` (whose body repeats no
+// prose). `std/http`'s `Policy` is the module this was found on.
+// ===========================================================================
+
+const PROTOCOL_DOC_SRC: &str = "type Route = { ok: Bool }\n\
+protocol Policy {\n\
+    /// `Cache-Control: max-age=N` on a successful answer.\n\
+    fn cacheFor(self, seconds: Int64) -> Route\n\
+}\n\
+impl Policy for Route {\n\
+    fn cacheFor(self, seconds: Int64) -> Route { return self }\n\
+}\n\
+fn main() -> Int64 {\n\
+    let r = Route { ok: true }\n\
+    let out = r.cacheFor(60)\n\
+    return 0\n\
+}\n";
+
+#[test]
+fn hover_shows_a_protocol_methods_doc_comment() {
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_protodoc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("p.vyrn"), PROTOCOL_DOC_SRC).unwrap();
+    let uri = file_uri(&dir.join("p.vyrn"));
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", PROTOCOL_DOC_SRC);
+
+    // The signature inside the protocol body.
+    let (l, c) = pos_after(PROTOCOL_DOC_SRC, "fn cacheFor");
+    let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the signature");
+    assert!(hover.contains("max-age=N"), "signature hover carries the doc: {hover}");
+
+    // The call site, which resolves through the impl.
+    let (l, c) = pos_after(PROTOCOL_DOC_SRC, "r.cacheFor");
+    let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the call");
+    assert!(hover.contains("max-age=N"), "call-site hover carries the doc: {hover}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

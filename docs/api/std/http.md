@@ -148,70 +148,80 @@ There are no free-function versions left. Two spellings of one combinator
 would be two things to keep in step, and the checker would not have them
 anyway: a protocol method and a top-level function cannot share a name.
 
-The seven reasons live here, in the protocol's own doc, and not on the method
-signatures below: `MethodSig` carries no doc field, so a `///` inside a
-protocol body is dropped by the parser and reaches neither `vyrn doc` nor
-hover. That is the same reflection gap RFC-0038 recorded for `FnInfo`.
+### `fn cacheFor(self, Int64) -> Route`
 
-### `cacheFor(seconds)` — `Cache-Control: max-age=N` on a successful answer
+`Cache-Control: max-age=N` on a successful answer.
 
 Deliberately NOT `public` and not `private`. `public` would tell a shared
-cache to store a response it is otherwise forbidden to store — the one for a
-request that carried `Authorization` (RFC 9111 §3.5) — which is the
+cache to store a response it is otherwise forbidden to store — the one for
+a request that carried `Authorization` (RFC 9111 §3.5) — which is the
 cache-poisoning shape, one user's copy served to the next. `private` would
-make `cacheFor` useless for the public API this projection exists to publish.
-Bare `max-age` gets both: a CDN may cache the anonymous GET, and the spec's
-own default already refuses the credentialed one.
+make `cacheFor` useless for the public API this projection exists to
+publish. Bare `max-age` gets both: a CDN may cache the anonymous GET, and
+the spec's own default already refuses the credentialed one.
 
-### `etag()` — a strong `ETag`, and `If-None-Match` answered with 304
+### `fn etag(self) -> Route`
 
-The validator is `FNV-1a-64(contentType + "\n" + body)` in hex. It hashes the
-REPRESENTATION — the bytes plus the media type that says how to read them —
-because two `Vary`-selected variants of one URL are different representations
-and must not share a validator. It hashes CONTENT and nothing else: no clock,
-no counter, no process identity, so two processes serving the same bytes emit
-the same tag and a client's `If-None-Match` still matches after a restart or
-across a load-balanced pair. A per-process seed here would make the whole
-feature silently inert.
+A strong `ETag`, and `If-None-Match` answered with 304.
+
+The validator is `FNV-1a-64(contentType + "\n" + body)` in hex. It hashes
+the REPRESENTATION — the bytes plus the media type that says how to read
+them — because two `Vary`-selected variants of one URL are different
+representations and must not share a validator. It hashes CONTENT and
+nothing else: no clock, no counter, no process identity, so two processes
+serving the same bytes emit the same tag and a client's `If-None-Match`
+still matches after a restart or across a load-balanced pair. A
+per-process seed here would make the whole feature silently inert.
 
 64 bits: a collision serves a 304 for content the client does not have. At
-that width it takes ~5 billion distinct representations of one URL for a 50%
-chance, and the same hash already assigns this repo's paste ids.
+that width it takes ~5 billion distinct representations of one URL for a
+50% chance, and the same hash already assigns this repo's paste ids.
 
-### `lastModified(field)` — `Last-Modified` from an epoch-millis field
+### `fn lastModified(self, String) -> Route`
+
+`Last-Modified` from an epoch-millis field.
 
 The field is named rather than selected by a closure for the reason
 `IsMissing` records: `Route` has erased the procedure's output type by the
 time a combinator sees it. A name that no longer exists writes no header
-rather than trapping — a validator is an optimization, and losing one must not
-lose the response. `If-Modified-Since` is answered with 304.
+rather than trapping — a validator is an optimization, and losing one must
+not lose the response. `If-Modified-Since` is answered with 304.
 
-### `vary(headers)` — the `Vary` header for this route
+### `fn vary(self, String) -> Route`
 
-Writes the `Response.vary` field RFC-0072 M4 already ships — one negotiation
-channel with one reader, not a second one hidden in the header map.
+The `Vary` header for this route.
 
-### `status(code)` — the status a SUCCESSFUL answer carries
+Writes the `Response.vary` field RFC-0072 M4 already ships — one
+negotiation channel with one reader, not a second one hidden in the header
+map.
 
-202 for an accepted job, 201 without a Location. An error keeps its own: a 422
-from `fromJson` is the codec's answer and not this route's to relabel.
+### `fn status(self, Int64) -> Route`
 
-### `createdAt(template)` — `201 Created` with a `Location` from the response
+The status a SUCCESSFUL answer carries.
 
-`"/pastes/{id}"` takes `{id}` from the created object's `id` field. A template
-and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest version of
-that line: the closure it shows takes the procedure's OUTPUT type, and a
-`Route` that could carry one would be `Route<T>` — the type-level chain this
-RFC exists to refuse. The template is checked at runtime against the fields
-actually present; an unknown `{name}` is left verbatim in the URL, where it is
-loud.
+202 for an accepted job, 201 without a Location. An error keeps its own: a
+422 from `fromJson` is the codec's answer and not this route's to relabel.
 
-### `notFoundWhen(isMissing)` — which `Err` payloads are an absence
+### `fn createdAt(self, String) -> Route`
 
-`.notFoundWhen(|why| why == "no such paste")` turns that one error into a 404
-and leaves every other `Err` a 200 carrying the error the procedure returned.
-The lambda captures nothing at all, which is the cheapest thing it can be —
-no capture block, no dispatch.
+`201 Created` with a `Location` built from the response.
+
+`"/pastes/{id}"` takes `{id}` from the created object's `id` field. A
+template and not the RFC's `|p| "/pastes/\{p.id}"`, and this is the honest
+version of that line: the closure it shows takes the procedure's OUTPUT
+type, and a `Route` that could carry one would be `Route<T>` — the
+type-level chain this RFC exists to refuse. The template is checked at
+runtime against the fields actually present; an unknown `{name}` is left
+verbatim in the URL, where it is loud.
+
+### `fn notFoundWhen(self, IsMissing) -> Route`
+
+Which `Err` payloads are an absence.
+
+`.notFoundWhen(|why| why == "no such paste")` turns that one error into a
+404 and leaves every other `Err` a 200 carrying the error the procedure
+returned. The lambda captures nothing at all, which is the cheapest thing
+it can be — no capture block, no dispatch.
 
 ## Feed
 
@@ -272,27 +282,33 @@ protocol Wire { fn retryAfter(self, Int64) -> Live; fn resumable(self) -> Live }
 
 A stream's policy, and it has nothing in common with `Policy`'s.
 
-### `retryAfter(ms)` — the reconnect hint, `retry: N` before the first frame
-
-A pull producer answers `Some` or `None`; it has no way to say "nothing yet".
-So a feed that catches up ENDS, the connection closes, and the client comes
-back `ms` later — with its `Last-Event-ID` if the route is `resumable`. That
-makes `retryAfter` the poll interval rather than a failure hint, and it is the
-honest shape for a language with no concurrency: the alternative is a producer
-blocking the single-threaded server while it waits for something to happen.
-
-### `resumable()` — `Last-Event-ID` becomes the producer's seed
-
-RFC-0075 M2b made a stream's cursor its resume token, so replay is not a
-feature: the header's value is handed to the feed as its seed and the ordinary
-code path produces exactly what the client has not seen. Write that cursor as
-each frame's `id`, which is what `event` takes it for. Without `resumable` the
-seed is always `0` and a reconnecting client gets the feed from the top.
-
 `keepAlive` is NOT here, and its absence is the same rule as `Policy`'s
 absence: a pull producer that has nothing to say ends rather than idling, so
 there is no idle connection for a keep-alive comment to hold open. The RFC
 lists it beside the other two; there is nothing under it to build.
+
+### `fn retryAfter(self, Int64) -> Live`
+
+The reconnect hint: `retry: N` before the first frame.
+
+A pull producer answers `Some` or `None`; it has no way to say "nothing
+yet". So a feed that catches up ENDS, the connection closes, and the
+client comes back `ms` later — with its `Last-Event-ID` if the route is
+`resumable`. That makes `retryAfter` the poll interval rather than a
+failure hint, and it is the honest shape for a language with no
+concurrency: the alternative is a producer blocking the single-threaded
+server while it waits for something to happen.
+
+### `fn resumable(self) -> Live`
+
+`Last-Event-ID` becomes the producer's seed.
+
+RFC-0075 M2b made a stream's cursor its resume token, so replay is not a
+feature: the header's value is handed to the feed as its seed and the
+ordinary code path produces exactly what the client has not seen. Write
+that cursor as each frame's `id`, which is what `event` takes it for.
+Without `resumable` the seed is always `0` and a reconnecting client gets
+the feed from the top.
 
 ## event
 

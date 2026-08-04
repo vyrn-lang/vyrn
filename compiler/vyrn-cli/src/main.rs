@@ -1570,8 +1570,9 @@ fn render_doc_index(modules: &[DocModule]) -> String {
 
 /// Render one module page (RFC-0065): the `# name` title, the header doc block,
 /// then every export as a `## name` heading, a ` ```vyrn ` signature fence, and
-/// its `///` block verbatim. Blocks are separated by a single blank line; the
-/// page ends in exactly one newline.
+/// its `///` block verbatim — followed, for a protocol, by a `###` section per
+/// DOCUMENTED method. Blocks are separated by a single blank line; the page ends
+/// in exactly one newline.
 fn render_doc_page(name: &str, doc: &vyrn_frontend::ModuleDoc) -> String {
     let mut blocks: Vec<String> = vec![format!("# {name}")];
     if let Some(h) = &doc.header_doc {
@@ -1586,6 +1587,12 @@ fn render_doc_page(name: &str, doc: &vyrn_frontend::ModuleDoc) -> String {
             format!("```vyrn\n{}\n```", e.signature),
         ];
         if let Some(d) = &e.doc {
+            parts.push(d.clone());
+        }
+        // A documented protocol method gets its own `###` section under the
+        // protocol, so its prose sits with the signature it describes.
+        for (sig, d) in &e.members {
+            parts.push(format!("### `{sig}`"));
             parts.push(d.clone());
         }
         blocks.push(parts.join("\n\n"));

@@ -215,12 +215,18 @@ Four things the text above did not have:
    `.cacheFor(3600)` are not two spellings that could coexist — the seven
    `export fn`s are gone and the seven method call sites in `std`, `examples` and
    the CLI tests were rewritten.
-3. **A `///` inside a protocol body is dropped.** `MethodSig` has no doc field, so
-   per-method documentation reaches neither `vyrn doc` nor hover — the same
+3. **A `///` inside a protocol body was dropped.** `MethodSig` had no doc field,
+   so per-method documentation reached neither `vyrn doc` nor hover — the same
    reflection gap RFC-0038 recorded for `FnInfo`. Moving the combinators onto a
-   protocol therefore silently deleted 90 lines of published API docs, which is
-   why `Policy`'s seven reasons now live in the protocol's own doc comment under
-   headings. Worth fixing where the gap is, and not worth fixing here.
+   protocol therefore silently deleted 90 lines of published API docs, and
+   `Policy`'s seven reasons shipped folded into the protocol's own doc comment
+   under headings. That was fixed where the gap is rather than here, and the
+   nine blocks (`Policy`'s seven, `Wire`'s two) are back above the signatures
+   they describe. The half the field alone did not cover: an impl body carries no
+   `///`, and a bare method name hovers on the LAST declaration of it, which is
+   the impl — so both the member table and the symbol index let an undocumented
+   implementation borrow the signature's doc, and `.cacheFor(..)` hovers with the
+   prose at the call site.
 4. **`get("/{id}", byId)` is still not the spelling, and never will be.** M2
    delivers the fluent half of RFC-0074's designed line and not the first term of
    it: the path pattern has to sit in the *procedure's own* parameter slot for its

@@ -1454,7 +1454,7 @@ impl Parser {
         let mut assoc: Vec<String> = Vec::new();
         let outer_aliases = std::mem::take(&mut self.type_aliases);
         while *self.peek() != Tok::RBrace {
-            self.take_docs(); // method-level docs (not retained yet)
+            let doc = self.take_docs(); // retained on the signature it sits above
             if *self.peek() == Tok::RBrace {
                 break;
             }
@@ -1515,6 +1515,7 @@ impl Parser {
             self.eat_semi();
             methods.push(MethodSig {
                 name: mname,
+                doc,
                 params,
                 ret,
                 line: mline,
@@ -5400,6 +5401,25 @@ mod tests {
         let p = parse_src("/// Header.\n\n/// The real doc.\nfn f() -> Int64 { return 0; }\nfn main() -> Int64 { return 0; }");
         let f = p.functions.iter().find(|f| f.name == "f").unwrap();
         assert_eq!(f.doc.as_deref(), Some("The real doc."));
+    }
+
+    /// A `///` above a method inside a `protocol` body attaches to that method
+    /// (RFC-0084 M2 shipped its prose folded into the protocol's own doc because
+    /// this was dropped). The blank-line detachment rule applies here too.
+    #[test]
+    fn attaches_doc_comments_to_protocol_methods() {
+        let p = parse_src(
+            "protocol P {\n/// what show does\nfn show(self) -> String;\n\
+             /// detached\n\nfn debug(self) -> String;\nfn plain(self) -> String;\n}\n\
+             fn main() -> Int64 { return 0; }",
+        );
+        let proto = p.protocols.iter().find(|p| p.name == "P").unwrap();
+        let doc = |n: &str| {
+            proto.methods.iter().find(|m| m.name == n).unwrap().doc.clone()
+        };
+        assert_eq!(doc("show").as_deref(), Some("what show does"));
+        assert_eq!(doc("debug"), None, "a blank line detaches the block");
+        assert_eq!(doc("plain"), None);
     }
 
     #[test]
