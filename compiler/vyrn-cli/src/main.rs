@@ -417,25 +417,6 @@ fn real_main() -> ExitCode {
     }
 }
 
-/// The JSON a generated module's `symbolMap()` returns (RFC-0073 M1), or `None`
-/// for a generator that emits no map.
-///
-/// Read out of the SOURCE rather than run: the map is a string literal the
-/// generator baked in, so parsing is the whole of what reading it costs, and the
-/// map a reader gets is by construction the one that shipped inside the module.
-fn symbol_map_of(src: &str) -> Option<String> {
-    let tokens = vyrn_frontend::lexer::lex(src).ok()?;
-    let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
-    let f = program.functions.iter().find(|f| f.name == "symbolMap")?;
-    match f.body.stmts.first() {
-        Some(vyrn_frontend::ast::Stmt::Return {
-            value: Some(vyrn_frontend::ast::Expr::Str(s)),
-            ..
-        }) => Some(s.clone()),
-        _ => None,
-    }
-}
-
 /// `vyrn emit-gen [file] [--maps]` (RFC-0021) — run every generator import the
 /// file reaches and print the synthesized module source, each under a banner
 /// naming its generator call site. Nothing is printed for a file with no
@@ -461,7 +442,7 @@ fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
             if maps {
                 let mut any = false;
                 for (banner, src) in mods {
-                    if let Some(json) = symbol_map_of(&src) {
+                    if let Some(json) = vyrn_frontend::symbolmap::json_of(&src) {
                         eprintln!("// ==== {banner} ====");
                         println!("{json}");
                         any = true;

@@ -32,6 +32,7 @@ pub mod parser;
 pub mod regex;
 pub mod schema;
 pub mod schema_reflect;
+pub mod symbolmap;
 pub mod symbols;
 pub mod types;
 

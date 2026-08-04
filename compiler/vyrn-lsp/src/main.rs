@@ -56,6 +56,7 @@ use vyrn_frontend::{
     resolve, string_literal_completions, Analysis, Completion, RefRange, SemKind, SemMods,
     SymbolKind,
 };
+use vyrn_frontend::symbolmap::MappedSymbol;
 
 use templates::VyxCursor;
 
@@ -319,6 +320,7 @@ fn main() {
                 synth_cache: RefCell::new(HashMap::new()),
                 css_cache: RefCell::new(HashMap::new()),
                 contract_cache: RefCell::new(HashMap::new()),
+                route_facts: RefCell::new(HashMap::new()),
             };
             // `initialize` is a special handshake: read it, reply with
             // capabilities, then enter the main loop. EOF here just means the
@@ -378,6 +380,14 @@ struct Server {
     /// `std/ui.vyrn` is picked up without restarting the server, and a keystroke
     /// in a page re-reads nothing.
     contract_cache: RefCell<HashMap<std::path::PathBuf, contracts::ContractIndex>>,
+    /// RFC-0073 M3: per api-module path, the mapped symbols a generating root
+    /// claims for it — the answer to "what is this procedure mounted at" for a
+    /// file that reaches no generator itself. The empty answer is cached too, so
+    /// a module nothing mounts costs one probe rather than one per hover.
+    /// Refreshed by [`install_root`] whenever a root that mounts a surface is
+    /// analyzed — the authority on the answer, and the only invalidation this
+    /// needs (see the note there).
+    route_facts: RefCell<HashMap<String, Rc<Vec<MappedSymbol>>>>,
 }
 
 /// RFC-0052: one app root's discovered stylesheets, with the signature they were
@@ -599,6 +609,13 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         // render the "▶ Run dev server" CodeLens. Always answers a bool (never
         // leaves the client waiting).
         "vyrn/isDevEntry" => Response::new_ok(req.id, Some(handle_is_dev_entry(server, req.params))),
+        // RFC-0073 M3: the derived route of every procedure this document
+        // declares, for the CodeLens above each one. A custom request and not a
+        // `code_lens_provider`, because every lens this editor shows — the
+        // RFC-0064 dev entry, the RFC-0055 bench lenses, the run lens — is built
+        // in `extension.js` from an answer like this one, and one lens source is
+        // worth more than the capability.
+        "vyrn/routeLenses" => Response::new_ok(req.id, Some(handle_route_lenses(server, req.params))),
         _ => Response {
             id: req.id,
             result: None,
@@ -631,6 +648,42 @@ fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
         Some(text) => is_dev_entry(&text),
         None => false,
     }
+}
+
+/// RFC-0073 M3: `vyrn/routeLenses` — one entry per procedure `params
+/// .textDocument.uri` declares that a generator mounts, as
+/// `{ line, title, method, path, source }` with a 0-based `line` (the editor's
+/// own convention). Empty for a file no root generates over.
+fn handle_route_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(uri) = params
+        .pointer("/textDocument/uri")
+        .and_then(|v| v.as_str())
+        .and_then(|u| Url::parse(u).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut seen: Vec<(usize, String)> = Vec::new();
+    for m in route_facts(server, &uri).iter() {
+        let (Some(path), Some(title)) = (m.derived("path"), m.route_line()) else { continue };
+        // A procedure is mapped twice — once by the client's stub, once by the
+        // server's handler — and they name the same declaration at the same
+        // place. One lens per declaration, not one per generated symbol.
+        let key = (m.line, path.to_string());
+        if m.line == 0 || seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(serde_json::json!({
+            "line": m.line - 1,
+            "title": title.replace('`', ""),
+            "method": m.derived("method").unwrap_or("POST"),
+            "path": path,
+            "source": m.derived("source").unwrap_or("convention"),
+        }));
+    }
+    out.sort_by_key(|v| v.get("line").and_then(|l| l.as_u64()).unwrap_or(0));
+    out
 }
 
 /// The dev-entry predicate (RFC-0064): the root module imports `std/rpc` **and**
@@ -681,7 +734,17 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     // Computed first because in a `.vyx` there may be no ordinary hover to
     // attach it to — a `<script>`'s own declarations are not template
     // expressions, so the forward map has nothing for them.
-    let note = contract_hover_note(server, uri, line, col);
+    // RFC-0073 M3: the derived wire facts of a procedure DECLARATION, which only
+    // a root that generates over its module can supply. Computed after the
+    // contract note and joined with it, so a declaration that is both a contract
+    // member and a mounted procedure says both.
+    let note = match (
+        contract_hover_note(server, uri, line, col),
+        derived_hover_note(server, uri, line, col),
+    ) {
+        (Some(c), Some(d)) => Some(format!("{c}\n\n{d}")),
+        (c, d) => c.or(d),
+    };
     let ordinary = if is_vyrn_uri(uri) {
         lookup(server, uri).and_then(|(analysis, _)| match resolve(analysis, line, col) {
             Some(r) => Some(r.hover),
@@ -2194,6 +2257,26 @@ fn install_root(
     if let Some(c) = connection {
         publish_remapped(c, server, &analysis);
     }
+    // RFC-0073 M3: a root that mounts a surface is the authority on where its
+    // procedures live, so installing one REFRESHES the route facts for every
+    // module it maps. This is also the only invalidation the cache has, and it
+    // is enough: an entry can go stale only by its declaration moving, and the
+    // hover matches on name AND line, so a stale entry makes a route note
+    // disappear until the root is re-analyzed — never appear on the wrong
+    // declaration.
+    if !analysis.symbol_maps.is_empty() {
+        let mut grouped: HashMap<String, Vec<MappedSymbol>> = HashMap::new();
+        for m in &analysis.symbol_maps {
+            grouped
+                .entry(vyrn_frontend::origin::OriginMaps::norm_path_key(&m.file))
+                .or_default()
+                .push(m.clone());
+        }
+        let mut cache = server.route_facts.borrow_mut();
+        for (k, v) in grouped {
+            cache.insert(k, Rc::new(v));
+        }
+    }
     // A re-analysis of this owner invalidates any cached generation for it.
     server.synth_cache.borrow_mut().remove(root_uri);
     server.analyses.insert(root_uri.clone(), analysis);
@@ -2272,8 +2355,26 @@ fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Ur
 /// the first whose synthesized origins claim it, with its analysis. Pure: it
 /// mutates nothing on the server (the caller wires the winner).
 fn probe_owner(server: &Server, vyx_path: &str) -> Option<(Url, Analysis)> {
+    // Compare normalized: `vyx_path` came from a URI (lower-cased drive on
+    // Windows), the origin paths from the loader (`N:/…`).
+    let want = vyrn_frontend::origin::OriginMaps::norm_path_key(vyx_path);
+    probe_roots(server, vyx_path, |a| {
+        a.origins
+            .input_files()
+            .iter()
+            .any(|f| vyrn_frontend::origin::OriginMaps::norm_path_key(f) == want)
+    })
+}
+
+/// Analyze the ranked `.vyrn` roots near `path` until one `claims` it. Pure: it
+/// mutates nothing on the server.
+fn probe_roots(
+    server: &Server,
+    path: &str,
+    claims: impl Fn(&Analysis) -> bool,
+) -> Option<(Url, Analysis)> {
     let overlays = overlays_of(server);
-    for cand in candidate_owners(vyx_path) {
+    for cand in candidate_owners(path) {
         let text = match server
             .docs
             .get(&cand)
@@ -2284,19 +2385,133 @@ fn probe_owner(server: &Server, vyx_path: &str) -> Option<(Url, Analysis)> {
             None => continue,
         };
         let analysis = analyze_doc(&cand, &text, &overlays);
-        // Compare normalized: `vyx_path` came from a URI (lower-cased drive on
-        // Windows), the origin paths from the loader (`N:/…`).
-        let want = vyrn_frontend::origin::OriginMaps::norm_path_key(vyx_path);
-        if analysis
-            .origins
-            .input_files()
-            .iter()
-            .any(|f| vyrn_frontend::origin::OriginMaps::norm_path_key(f) == want)
-        {
+        if claims(&analysis) {
             return Some((cand, analysis));
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0073 M3 — a declaration's derived wire facts.
+//
+// `server/api/pastes.vyrn` reaches no generator: it is what a generator reads,
+// not what reads one. So the file open in the editor can never say what `create`
+// is mounted at — only a ROOT that calls `rpc(..)` or `client(..)` can, and its
+// answer is M1's symbol map. This is the `.vyx` owner bargain pointed the other
+// way: find a root whose maps name this file, and remember the answer.
+//
+// Roots already analyzed are consulted first, and they usually suffice — in a
+// full-stack project the server root or the client boot is open. The ranked
+// probe is the fallback, and it is what makes the facts appear in a window that
+// has only the api module open.
+// ---------------------------------------------------------------------------
+
+/// Every mapped symbol whose origin is `path`, from a root that generates over
+/// it. Cached per file — including the empty answer, so a module nothing mounts
+/// is probed once rather than once per hover.
+fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
+    if let Some(hit) = server.route_facts.borrow().get(path) {
+        return hit.clone();
+    }
+    let claims = |a: &Analysis| {
+        a.symbol_maps.iter().any(|m| vyrn_frontend::symbolmap::same_file(&m.file, path))
+    };
+    let probed = if server.analyses.values().any(claims) {
+        None
+    } else {
+        // Nothing open claims this file. Analyze the roots near it that CALL a
+        // map-emitting generator — a handful in a real project, and none at all
+        // in a directory that mounts nothing, which is what keeps a hover in an
+        // ordinary module from paying for this at all.
+        mounting_roots(path).into_iter().find_map(|cand| {
+            let text = server
+                .docs
+                .get(&cand)
+                .cloned()
+                .or_else(|| uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok()))?;
+            let a = analyze_doc(&cand, &text, &overlays_of(server));
+            claims(&a).then_some(a)
+        })
+    };
+    // Cache what these analyses say about EVERY file they map, not just the one
+    // asked for: a client's map covers the whole api directory, so the second
+    // procedure hovered is free even in another module. The requested path is
+    // inserted either way, so an unmounted module is probed once and not again.
+    let mut grouped: HashMap<String, Vec<MappedSymbol>> = HashMap::new();
+    grouped.insert(path.to_string(), Vec::new());
+    for a in probed.iter().chain(server.analyses.values()) {
+        for m in &a.symbol_maps {
+            grouped
+                .entry(vyrn_frontend::origin::OriginMaps::norm_path_key(&m.file))
+                .or_default()
+                .push(m.clone());
+        }
+    }
+    let mut cache = server.route_facts.borrow_mut();
+    for (k, v) in grouped {
+        cache.insert(k, Rc::new(v));
+    }
+    cache.get(path).cloned().unwrap_or_else(|| Rc::new(Vec::new()))
+}
+
+/// The `.vyrn` roots near `path` that call a generator which emits a symbol map
+/// (`rpc`/`rpcServer`/`client`/`rpcClient`/`rpcInProcess`), nearest first.
+///
+/// A textual filter and not an analysis: the point is to analyze as few roots as
+/// possible, and a root that never calls one of these cannot map anything.
+fn mounting_roots(path: &str) -> Vec<Url> {
+    let file = std::path::Path::new(path);
+    let Some(dir) = file.parent() else { return Vec::new() };
+    let app_root = app_root_for(dir);
+    let mut files = Vec::new();
+    collect_vyrn(&app_root, &app_root, 0, &mut files);
+    let mut scored: Vec<(usize, std::path::PathBuf)> = files
+        .into_iter()
+        .filter(|p| {
+            let src = std::fs::read_to_string(p).unwrap_or_default();
+            ["rpc(", "rpcServer(", "client(", "rpcClient(", "rpcInProcess("]
+                .iter()
+                .any(|g| src.contains(g))
+        })
+        .map(|p| (path_distance(&p, dir), p))
+        .collect();
+    scored.sort_by_key(|(d, _)| *d);
+    scored.into_iter().filter_map(|(_, p)| Url::from_file_path(p).ok()).collect()
+}
+
+/// The mapped symbols for the document `uri`, in declaration order — what a
+/// route CodeLens renders and what the declaration hover reads.
+fn route_facts(server: &Server, uri: &Url) -> Rc<Vec<MappedSymbol>> {
+    if !is_vyrn_uri(uri) {
+        return Rc::new(Vec::new());
+    }
+    match uri_path(uri) {
+        Some(p) => route_facts_for_file(server, &p),
+        None => Rc::new(Vec::new()),
+    }
+}
+
+/// RFC-0073 M3: the derived wire facts appended to a procedure DECLARATION's
+/// hover — `POST /_/pastes/create · convention`, the thing a reader otherwise
+/// has to remember the convention to know.
+///
+/// Gated on the cursor sitting on the declaration's own name, so hovering a call
+/// to `create` inside the same module is unaffected: the note is about where a
+/// declaration is MOUNTED, which is a fact about the declaration and not about
+/// every use of the name.
+fn derived_hover_note(server: &Server, uri: &Url, line: usize, col: usize) -> Option<String> {
+    if !is_vyrn_uri(uri) {
+        return None;
+    }
+    let (analysis, _) = lookup(server, uri)?;
+    let decl = analysis.symbols.iter().find(|s| {
+        s.file.is_none() && s.line == line && s.col > 0 && col >= s.col && col <= s.end_col
+    })?;
+    let name = decl.name.clone();
+    let facts = route_facts(server, uri);
+    let m = facts.iter().find(|m| m.decl == name && m.line == line && m.route_line().is_some())?;
+    m.route_line()
 }
 
 /// The `.vyrn` roots to try as owners of `vyx_path`, most-likely first. Finds the
