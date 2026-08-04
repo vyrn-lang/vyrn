@@ -23,17 +23,17 @@ export fn byId(req: IdReq) -> BookResult {
 }
 
 /// Add a book (title/url/tags already validated by `fromJson`); returns the copy.
-export fn add(req: AddBookReq) -> BookResult {
+export mut fn add(req: AddBookReq) -> BookResult {
     return store.addBook(req)
 }
 
 /// Delete a book by id. The seed book (id 0) is refused — an application outcome.
-export fn del(req: IdReq) -> DeleteResult {
+export mut fn del(req: IdReq) -> DeleteResult {
     return store.deleteBook(req)
 }
 
 /// Set a book's rating (already validated 1..5); `Err` when the book is absent.
-export fn rate(req: RateReq) -> BookResult {
+export mut fn rate(req: RateReq) -> BookResult {
     return store.rateBook(req)
 }
 

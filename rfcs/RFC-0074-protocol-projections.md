@@ -274,7 +274,7 @@ the same stated reason.
 have no such problem.
 - **M4 — schema overrides.** `graphql(...).mutations(...).lazy(...)`; the same
   override surface for `std/openapi`. **Not buildable as spelled — split; see
-  below.**
+  below.** M4a (`mut fn`) **landed**; the resolver override waits on an executor.
 
 ### M4, read against what shipped
 
@@ -749,6 +749,87 @@ newly visible: a feed that ended is the thing that lets the next request in, and
 a linked program, so no program can import both. That is a std naming collision
 this milestone found rather than caused; `unfold` is a three-line wrapper over the
 same call, so the dogfood loses the better name and nothing else.
+
+## As landed — M4a
+
+`mut fn` is in the grammar, in `FnInfo`, in hover, and in `std/graphql`;
+`gqlIsQuery` and its test are gone. Five places where the implementation is not
+what this document said, and why.
+
+**`mut` was already a keyword, so nothing is contextual about it.** This document
+promised the `gen fn` / `extern fn` trick — recognize the word only before `fn`,
+so a variable named `mut` survives. There are no variables named `mut`: `let mut`
+has owned the word since the language had bindings, and the lexer emits
+`Tok::Mut`. So `mut fn` is a new production at declaration position and not a new
+reserved word, which is the property the section actually wanted and a weaker
+change than the one it described. A top-level `mut` not followed by `fn` was
+already a parse error and still is.
+
+**`export mut fn`, with `export` outermost, and that is the only order.** It is
+where `export gen fn` and `export extern fn` already put it, and the alternative
+buys nothing: two legal spellings of one declaration is a thing every reader has
+to learn and every formatter has to pick between. `export`'s own diagnostic now
+lists `mut fn` beside them.
+
+**The field is `FnInfo.mutates`, and it is a `Bool`.** `mut` cannot be a record
+field name, and the honest reading of the marker at the consuming end is a
+question about the procedure rather than a restatement of its syntax —
+`if f.mutates` is what `std/graphql` says. It sits beside `retUncodable`, which
+RFC-0071 M3 added for the same reason: a generator that would otherwise guess
+asks the compiler instead. `std/vyx` hand-builds `FnInfo` in two places and takes
+`mutates: false` there, alongside the `""` it already passes for the codability
+verdicts — a component renders, and nothing projects one onto a protocol that
+would ask.
+
+**Hover shows `mut fn`.** `function_detail` already prefixed `extern fn` and
+`export extern fn` for the same reason and this joins them: a reader who cannot
+see the marker on hover is back where the naming convention left them. `gen fn`
+is still not shown, which is a pre-existing gap this did not widen.
+
+**The default is a Query, by declaration, and no diagnostic.** An unmarked
+procedure is read as not changing state — the same answer the omission gave
+before, now with a stated reason. Making an unmarked export in an `api` role a
+diagnostic is a real option and belongs to RFC-0071's contract machinery, which
+owns role attachment and the "module must export …" family of messages; this
+milestone owns one bit and one generator, and adding a compulsory annotation to
+every procedure in the corpus is a much larger change than deleting a naming
+convention. The asymmetry is deliberate and is the reason the default is the safe
+direction: an unmarked mutation shows up as a Mutation missing from the schema,
+which a client notices, rather than as a Query that silently writes.
+
+**The RFC's census was right: `gqlIsQuery` was the only such guess in `std/`.**
+`std/openapi`, `std/connect` and `std/rpc` each read a name, but only to take the
+`.vyrn` off a path stem or to derive a route from a module's api-relative path —
+none derives *semantics* from spelling. The other `startsWith` calls in `std/`
+are over type *spellings* (`Stream<`, `Result<`, `Option<`), which is reflection
+reading its own output rather than a convention.
+
+**`std/openapi` does not consume the bit yet, and should not have here.** The
+document names three consumers, and the second one would have to change the
+derived surface's HTTP method — every procedure is `POST /rpc/<name>` today, and
+a GET for the unmarked ones moves the request body into a query string, which is
+a wire change with a client on the other end. The bit is available for the day
+that is designed; M4a's deliverable was deleting the guess, not spending it three
+times.
+
+**What the corpus change looks like.** `add`, `del` and `rate` in
+`examples/shelf/server/api/books.vyrn`, `create` in `examples/bin`, `create` and
+`del` in `examples/fullstack`. Shelf is the evidence: **all six** of its
+procedures were Mutations before, because not one of `browse`, `byId`, `add`,
+`del`, `rate`, `tags` starts with `get` or `list` — the schema it published had an
+empty `Query` with a `_placeholder` field. It now reads
+
+```graphql
+type Query   { browse, byId(input: IdReqInput!), tags }
+type Mutation { add(input: AddBookReqInput!), del(input: IdReqInput!), rate(input: RateReqInput!) }
+```
+
+which is what it always meant. The generators' own store procedures
+(`store.addBook` and friends) are unmarked: the marker states a fact a projection
+reads, and nothing projects `store`. The golden in `compiler/vyrn-cli/tests/exports.rs`
+pins the new rule with a procedure named `shape` — no prefix, no `mut`, in
+`Query` — which the deleted convention would have filed under `Mutation`, plus a
+count that the `mut fn` is the only Mutation there.
 
 ## Acceptance
 
