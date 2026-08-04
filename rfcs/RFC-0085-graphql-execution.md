@@ -74,9 +74,22 @@ can observe, and the RFC-0074 example that motivates it stops making sense.
   arguments, no aliases, no nesting past the first level. Errors as GraphQL's
   `{"errors": [...]}` shape rather than an HTTP status, because that is what a
   client reads.
-- **M2 — arguments and nesting.** Field arguments decoded into the procedure's
-  input record (the same `fromJson` path the RPC surface uses), aliases, nested
-  selection into record-valued fields.
+- **M2 — arguments, aliases, and the type graph they bring with them.** Nesting
+  landed in M1 (see its "as landed" — once the projector walks an array, walking
+  an object is three lines). What is left is field arguments decoded into the
+  procedure's input record, via the same `fromJson` path the RPC surface uses,
+  and aliases.
+
+  **The reason those belong together with M1's two open holes** is that an
+  argument cannot be decoded without knowing the input record's *type*. M1's
+  projector has only the value, which is why a selected member the value lacks
+  answers `null` rather than an error, and why a selection on a scalar is
+  unrefused: `toJson` omits a `None` `Option`, so absence-in-value and
+  absence-from-schema are indistinguishable when all you hold is JSON.
+  Decoding an argument forces the type graph into the executor — and once it is
+  there, both holes close for free. Closing them in M3 instead would mean
+  carrying the type graph in for arguments and then not using it for a
+  milestone.
 - **M3 — the error model.** Partial data with a populated `errors` array, path
   attribution, and the `null`-bubbling rule for non-null fields. This is the part
   every GraphQL implementation gets wrong first; it deserves its own milestone
