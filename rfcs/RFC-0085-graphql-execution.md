@@ -123,7 +123,46 @@ can observe, and the RFC-0074 example that motivates it stops making sense.
   markers say how far the `null` must climb.
 - **M4 — RFC-0074 M4b.** `.mutations(..)` is already answered by `mut fn`;
   `.lazy(field, resolver)` becomes buildable, and this is where "omit" versus
-  "never computed" earns its distinction.
+  "never computed" earns its distinction. **Blocked on a decision, and it is the
+  same wall `.mutations(..)` hit — see below.**
+
+### M4 — `.lazy(..)` cannot reach a generator either
+
+`graphql("./pastes").lazy(|p: Paste| p.body, |p| store.loadBody(p.id))` passes
+two closures to a `gen fn`, and the checker refuses one that takes a `fn`-typed
+parameter (RFC-0023, verified again 2026-08-05). That is precisely the wall
+RFC-0074 M4a found under `.mutations([create])`, and the answer there is the
+precedent: **the fact moved to where it lives.** Mutation-ness is a property of
+the procedure, so `mut fn` declares it once and every projection reads it.
+
+So the question for M4 is not "how do we pass a closure to a generator" — it is
+**where does laziness live?** Three candidates, none free:
+
+- **On the field.** `type Book = { title: String, body: lazy String }`. This is
+  the closest analogue of `mut fn`: expensive-to-load is a property of the data,
+  not of the GraphQL projection, and OpenAPI and the RPC surface would want the
+  same fact. It is a language change, and it leaves the resolver unassociated —
+  something still has to say *how* `body` is filled.
+- **As an `Option` the schema promises to fill.** `body: Option<String>`, the
+  procedure returns `None`, and a resolver supplies it when selected. This needs
+  no new field syntax and it is honest about the value being absent — but
+  `Option` already means "may legitimately be empty", and overloading it makes
+  those two indistinguishable in exactly the place M2's holes were:
+  absence-in-value versus absence-by-design.
+- **On a contract.** RFC-0071 contracts already declare a module's exports with
+  types, and an open rule (`fn *(_: Book) -> String`) could name a resolver
+  module without a naming convention. Most machinery, least language change.
+
+**What must not be chosen is a fourth option that looks cheapest**: passing the
+field's *name* as a string. RFC-0074 rules that out by name — "declared in real
+symbols rather than strings" — and it is the reason `.mutations([create])` was
+not solved that way.
+
+**Until this is decided, M1's distinction is unearned but not wrong.**
+`gqlProject`'s comment says the value arrives fully computed and the executor
+omits; that is exactly true today, and it stays true until something can be
+declared lazy. The comment is a marker for where this milestone will cut, not a
+claim about behaviour that does not exist.
 
 ## Acceptance
 
