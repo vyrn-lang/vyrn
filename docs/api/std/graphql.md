@@ -42,13 +42,15 @@ Mapping rules (documented and DUMB on purpose — RFC-0038):
     are NOT in `moduleInterface` reflection, so operation descriptions are
     absent (gap recorded in RFC-0038).
 
-The EXECUTOR (RFC-0085 M1/M2) lives at the bottom of this file:
+The EXECUTOR (RFC-0085 M1–M3) lives at the bottom of this file:
 `graphqlServer` emits a `graphqlHandle(req) -> Option<Response>` answering
 `POST /graphql` over the SAME `iface.functions` walk the SDL reads, so a field
 the schema declares and a field the executor dispatches are one list. It bakes
 the SDL's TYPE GRAPH beside the resolver table, out of the same `gqlMembers`
 reading of each declaration the `type` definitions above are emitted from —
-so an object type's fields are one set, not two that agree.
+so an object type's fields are one set, not two that agree. The graph carries
+each field's full type REFERENCE, `!` markers included, because those are what
+say how far a `null` climbs when something faults under them (M3).
 
 Inspect the synthesized module with:  vyrn emit-gen <file>
 
@@ -101,13 +103,39 @@ Parse one executable operation: an optional `query`/`mutation` keyword and
 operation name, then a selection set. Anything past it is a second operation,
 which needs `operationName` to choose between — RFC-0085 M2.
 
+## GqlErr
+
+```vyrn
+type GqlErr = { message: String, path: Array<Json> }
+```
+
+One GraphQL error: its message and the RESPONSE PATH it happened at — the
+response keys and list indices from the root down to the position that
+faulted (RFC-0085 M3), which is how a client finds it inside a partial `data`.
+
+A path element is a NAME or an INDEX in ONE array, and the value tree says
+that directly: a `JStr` and a `JNum` in a single `JArr`. Nothing had to be
+invented for the mixed array and no index is stringified to fit.
+
+## GqlOut
+
+```vyrn
+type GqlOut = { value: Json, errs: Array<GqlErr>, failed: Bool }
+```
+
+A completed field position: its value, every error found at or below it, and
+whether the `null` is still CLIMBING (`failed`) — which is what a NON-NULL
+position does with a fault, because `null` may not sit there.
+
 ## gqlProject
 
 ```vyrn
-fn gqlProject(v: Json, sels: Array<GqlSel>, ty: String, schema: fn(String, String) -> String) -> Result<Json, String>
+fn gqlProject(v: Json, sels: Array<GqlSel>, tref: String, path: Array<Json>, schema: fn(String, String) -> String) -> GqlOut
 ```
 
-Project `sels` out of `v`, whose named GraphQL type is `ty`.
+Complete one field position: project `sels` out of `v` at response `path`,
+against `tref` — the field's GraphQL type REFERENCE, list and non-null
+wrappers included.
 
 **Field selection is a projection over a value the procedure ALREADY
 returned, not a fetch plan.** `v` arrives here fully computed — every field of
@@ -120,9 +148,14 @@ to break: a lazy field is the single case where omission must ALSO mean the
 work was never done. Stated here because if it is only stated then, `.lazy(..)`
 is an optimisation nobody can observe and there is nothing to point at.
 
+**Null-bubbling (RFC-0085 M3).** A fault does not fail the request: it becomes
+a `null` at the position it happened, and the SDL's own `!` markers say how far
+that `null` has to climb. This function is the ONE place a climb stops — when
+the position it is passing through may hold a `null`. Everything below just
+reports `failed` upward, so the rule is read in one place rather than
+re-decided at each shape.
+
 An empty selection set means "this field is a leaf" — take the value whole.
-A list is walked transparently: `[Book]` and `Book` ask `schema` the same
-question, which is why only the NAMED type is carried.
 
 ## gqlQueryText
 
@@ -135,25 +168,20 @@ JSON envelope, or — when the body is not such an envelope — the body itself,
 which is what an `application/graphql` request sends. A GraphQL document is
 not valid JSON, so the two cannot be confused.
 
-## gqlDataBody
-
-```vyrn
-fn gqlDataBody(field: String, value: Json) -> String
-```
-
-`{"data":{"<field>":…}}` — the answer.
-
 ## gqlErrorBody
 
 ```vyrn
 fn gqlErrorBody(message: String) -> String
 ```
 
-`{"errors":[{"message":"…"}]}` — an error a GraphQL client can read.
+`{"errors":[{"message":"…"}]}` — a REQUEST fault, and the only reply with no
+`data` entry at all.
 
 A GraphQL client reads the `errors` array, not the status line, so the reply
-stays a 200 `application/json`. Path attribution and partial `data` beside a
-populated `errors` are RFC-0085 M3.
+stays a 200 `application/json`. This shape is for the faults that land BEFORE
+execution — an unparseable document, a second operation — where no field was
+ever reached, so there is no position to attribute and no partial `data` to
+carry. Everything reached during execution goes through `gqlExecBody`.
 
 ## GqlArg
 
@@ -213,9 +241,12 @@ from the contract's reflection: `resolve` (`(root, field, args) -> the encoded
 value, or why not`) and `schema`, the type graph the projection is checked
 against.
 
-One root field per request: a second one immediately raises partial `data`
-beside a populated `errors` when only one of them resolves, which is the whole
-of RFC-0085 M3 and is not worth half-building here.
+**Every root field the operation selects** (RFC-0085 M3). Each is resolved and
+completed on its own, so one of them faulting leaves the others in `data` and
+puts its own message in `errors` at its own path. `data` goes `null` only when
+a fault climbs past a NON-NULL root field — which this generator's own SDL
+never declares, since a root field is nullable by construction precisely so a
+sibling's answer survives.
 
 ## graphqlServer
 

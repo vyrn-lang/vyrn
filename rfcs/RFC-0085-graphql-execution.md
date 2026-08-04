@@ -1,6 +1,6 @@
 # RFC-0085 — Answering a GraphQL Query
 
-- **Status:** M1, M2 shipped. M3–M4 designed.
+- **Status:** M1, M2, M3 shipped. M4 designed.
 - **Depends on:** RFC-0038 (`std/graphql` — the SDL this executes against),
   RFC-0074 (protocol projections — M4b is the consumer), RFC-0021 (`gen fn`),
   RFC-0031 (`moduleInterface` reachable type closure), RFC-0059 (`std/json`)
@@ -326,3 +326,99 @@ attribution, partial `data` beside a populated `errors`, and the `null`-bubbling
 rule are, and none of them got cheaper.
 
 110 examples, three engines.
+
+---
+
+## M3 — as landed
+
+`{ browse { books { title } } nope }` answers `browse` in `data`, reports `nope`
+in `errors` at `["nope"]`, and neither hides the other. Every error carries the
+path it happened at; a fault under a non-null field makes the `null` climb until
+it reaches a position that may hold one. `examples/graphql.vyrn` asserts each of
+those and `examples/shelf` answers them over the wire.
+
+### The type graph did not carry nullability, and it cost one call to fix
+
+M2 baked `gqlNamed(m.ref)` into `gqlSchema` — the NAMED type, with the list and
+non-null wrappers stripped off — so the `!` markers were being generated,
+published in the SDL, and then discarded at precisely the point the projector
+needed them. They are the whole of the bubbling rule: `Array<Book>` maps to
+`[Book!]!` and that string is the answer to "how far does this `null` climb".
+
+The fix is one `gqlNamed` call deleted from the emitter and three added at the
+places that want a name rather than a reference. So M2's honest note — that M3
+"is not closer for the type graph being here" — was half wrong: the graph carried
+the wrong half of what it already knew, and the milestone's hardest rule was one
+edit away from having its input. What M2 got right is that the two lines looping
+`gqlAnswerOne` really were not the milestone.
+
+### A path is a mixed array, and `std/json` already had one
+
+GraphQL's `path` is field names and list indices in one array, which is a shape a
+JSON tree either has or has to fake. `std/json`'s does have it: `JArr` holds
+`Array<Json>`, so `["browse", "books", 0, "title"]` is `JStr`s and a `JNum` in the
+same list and `emit` writes the index unquoted with no special case. `GqlErr` is
+`{ message: String, path: Array<Json> }` and nothing converts an index to a
+string to make it fit.
+
+### The rule, and the one place it is decided
+
+Every fault becomes a `null` at the position it happened. `gqlProject` completes
+one position: it strips the outer `!`, walks the shape below, and then — and only
+then — asks whether the position it is standing on may hold a `null`. If it may,
+the climb stops there; if it may not, `failed` goes up and the parent asks the
+same question. A list is a position whose elements are positions, so a faulting
+`Book!` takes `[Book!]!` with it. Nothing below re-decides the rule: `gqlPick` and
+`gqlProjectEach` only report `failed` upward, so there is one line in the file
+where a `null` is allowed to settle.
+
+**Every element is still walked after one faults.** A fault that repeats down a
+list is reported at each index rather than once, which is what makes the index in
+the path load-bearing rather than decorative.
+
+**A position with no declared type is nullable.** An undeclared field has no
+type reference, so nothing says a `null` may not sit at it — and that is exactly
+why `{ browse { .. } nope }` leaves `browse`'s answer in `data`. Had the missing
+type been read as non-null, the headline case of this milestone would have nulled
+the whole reply, which is the wrong answer arrived at from the right rule.
+
+### Where the climb stops, and the shape shelf cannot produce
+
+A root field is nullable by construction — `gqlRootField` strips the `!` in the
+document and `gqlRootMembers` strips it in the graph — so a climb that starts
+under `browse` ends at `browse`: `{"data": {"browse": null}}` with the errors
+beside it. That is the right default and it is the reason a sibling survives at
+all; a non-null root field would discard an answer that was already computed.
+
+It also means **`examples/shelf` cannot produce `"data": null`**. Every climb has
+a nullable position waiting for it at the root. Rather than assert a case the
+corpus cannot reach, `examples/graphql.vyrn` declares a stand-in type graph whose
+root field is `Book!` and drives the same `gqlAnswer` the generated handler calls,
+which is the only shape where the `null` runs out of positions. Shelf produces
+the other two on its own: `Title!` inside `[Book!]!` climbs past three positions
+to stop at `browse`, and `BookResult`'s `Ok` — nullable, because a tagged union
+has exactly one arm non-null at a time — stops a climb one level below the root.
+
+### What did not become an error
+
+The taxonomy above held with nothing added to it. A resolver's `Err` is still a
+value in `data`; a trap is still a dead request. One candidate the executor could
+now see was refused: GraphQL's "Cannot return null for non-nullable field" — a
+value that is absent where the schema says non-null. `toJson` omits a `None`
+`Option`, so this executor sees that shape routinely and reporting it would be an
+error policy invented in M3 rather than a request fault attributed by it.
+Bubbling is driven by faults only, and an incidentally-absent value stays the
+`null` M2 already made it.
+
+### The suites nothing was running
+
+`std/graphql.vyrn` and `examples/graphql.vyrn` both carried `test` blocks that no
+Rust test executed: the parity harness runs an example's `main` on three engines
+and never its tests, and the per-std-module `vyrn test` runners other modules have
+had never been written for this one. So M1's and M2's assertions were green
+because someone ran them by hand. `exports.rs` now runs both suites and asserts a
+floor on how many blocks ran, since a suite that stops being discovered otherwise
+passes.
+
+23 blocks in `std/graphql.vyrn` and 11 in `examples/graphql.vyrn`, now run; 110
+examples, three engines.
