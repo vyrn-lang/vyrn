@@ -1,0 +1,265 @@
+/// Explicit SIMD, the wide float width — `F64x2`, two `Float64` lanes as one
+/// value (RFC-0083 M4).
+///
+/// **This is the width explicit SIMD is actually for, and the measurement is the
+/// milestone.** M3 shipped `I32x4` and then found that a scalar `Int32` sum beats
+/// the hand-written vector one by 2x, because integer addition associates and
+/// LLVM is allowed to vectorise the reduction itself. Float addition does not
+/// associate, so no optimiser may do the same here — and measured rather than
+/// assumed, `sumWide` in `examples/simdbench.vyrn` is **1.9x** faster than the
+/// scalar loop over the same array. That gap is the whole justification for this
+/// width, and it is the one number M4 would have been withdrawn over.
+///
+/// Two lanes of 64 bits, so:
+///
+/// - **The mask is `Mask64x2`, a second type.** A mask is N booleans about N
+///   lanes and nothing in it remembers what compared them, so what characterises
+///   one is the lane COUNT and the lane WIDTH — which is exactly what this width
+///   changes and what `I32x4` did not. It inherits `anyTrue`/`allTrue` (wasm
+///   spells the second `i64x2.all_true`, a different opcode at the same shape)
+///   and `& | ^ ~`. A `Mask32x4` and a `Mask64x2` do not combine, because they
+///   are two answers and three answers about different things.
+/// - **A lane index is `0..1`.** Same compile-time-constant rule, one lane fewer,
+///   and `v.lane(2)` is a compile error rather than a trap.
+/// - **`load`/`store` move TWO elements behind one bounds check**, at an 8-byte
+///   stride. The trap names `i + 1` where the narrow widths name `i + 3`.
+/// - **`/` is here**, unlike the integer width: `f64x2.div` exists.
+///
+/// `min`/`max`/`sqrt` ship and the four roundings do not, which is a scope
+/// decision rather than an encoder refusal — `f64x2.ceil` and the rest all
+/// exist. What earns the three is what earned them at 32 bits: `min` and `max`
+/// are the NaN rule and the signed zero, twenty lines of `floatBits` a program
+/// would have to get right, and `sqrt` is the one operation in this RFC that is
+/// not writable in Vyrn at all. A rounding is neither, and the four `F32x4`
+/// rounding rows are already this RFC's weakest block.
+///
+/// Every line below that has a scalar twin prints the twin first. A lane that
+/// diverged from the scalar spelling of the same operation would be two
+/// different numbers rather than a claim.
+
+/// Both lanes of `v`, one per line — also the ABI test: a vector crosses a
+/// function boundary here on all three engines.
+fn lanes(v: F64x2) {
+    print(v.lane(0))
+    print(v.lane(1))
+}
+
+fn both(m: Mask64x2) {
+    print(m.lane(0))
+    print(m.lane(1))
+}
+
+/// IEEE-754-2019 `minimum` on one `Float64`, which is what `F64x2.min` has to
+/// agree with lane for lane: NaN in either operand propagates, and `-0.0` orders
+/// strictly below `+0.0`. The zero case needs the sign BIT — `-0.0 < 0.0` is
+/// false, so no comparison separates them — and `floatBits` is the only view of
+/// one there is. This width needs no widening to reach it, unlike `Float32`.
+fn min1(a: Float64, b: Float64) -> Float64 {
+    if a != a {
+        return a
+    }
+    if b != b {
+        return b
+    }
+    if a == b {
+        let sign: UInt64 = 9223372036854775808
+        if floatBits(a) >= sign {
+            return a
+        }
+        return b
+    }
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn max1(a: Float64, b: Float64) -> Float64 {
+    if a != a {
+        return a
+    }
+    if b != b {
+        return b
+    }
+    if a == b {
+        let sign: UInt64 = 9223372036854775808
+        if floatBits(a) >= sign {
+            return b
+        }
+        return a
+    }
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn main() -> Int64 {
+    // ---- construction, splat, and the four operations --------------------
+    let a = F64x2(1.0, 2.0)
+    let b = F64x2.splat(0.5)
+
+    lanes(a + b) // 1.5 2.5
+    lanes(a - b) // 0.5 1.5
+    lanes(a * b) // 0.5 1.0
+    lanes(a / b) // 2.0 4.0
+
+    // A lane is a full `Float64`, which is the point of the width: 2^24 + 1 is
+    // exact here where `F32x4.splat` rounds it away.
+    lanes(F64x2.splat(16777217.0)) // 16777217.000000 x2
+    // And 2^53 + 1 is where a `Float64` itself stops being exact, so the vector
+    // rounds exactly where the scalar does.
+    print(9007199254740993.0)
+    lanes(F64x2.splat(9007199254740993.0))
+
+    // ---- the values the engines are supposed to disagree about -----------
+    // Built by arithmetic rather than written down: the language has no NaN or
+    // infinity literal, and a runtime division is also what stops `consteval`
+    // folding the answer with the compiler's arithmetic instead of the engine's.
+    let z: Float64 = 0.0
+    let o: Float64 = 1.0
+    let neg = 0.0 - o
+    let nan = z / z
+    let inf = o / z
+    let ninf = neg / z
+    let nzero = neg * z
+    // A `Float64` subnormal, reached by repeated squaring because there is no
+    // exponent literal and 1e-320 written out is 320 zeros. `sub / sub` is the
+    // flush-to-zero probe: an engine that flushed denormals would compute 0/0
+    // and say NaN where all three say 1.
+    let e8: Float64 = 0.00000001
+    let e16 = e8 * e8
+    let e32 = e16 * e16
+    let e64 = e32 * e32
+    let e128 = e64 * e64
+    let e256 = e128 * e128
+    let sub = e256 * e64
+
+    lanes(F64x2(nzero, inf)) // -0.000000 inf
+    lanes(F64x2(ninf, sub)) // -inf 0.000000
+    print(sub / sub) // 1.000000  (no flush to zero)
+
+    // NaN in each lane position, through every operator. The propagation rule is
+    // loose in wasm, fixed differently in LLVM and differently again in Rust —
+    // what makes them agree is the six-decimal formatter, which reads the
+    // exponent and fraction fields and answers `NaN` for any payload and either
+    // sign. A NaN's IDENTITY is not observable in Vyrn, only its NaN-ness.
+    let ones = F64x2.splat(1.0)
+    lanes(F64x2(nan, o) + ones) // NaN 2
+    lanes(F64x2(o, nan) - ones) // 0 NaN
+    lanes(F64x2(nan, o) * ones) // NaN 1
+    lanes(F64x2(o, nan) / ones) // 1 NaN
+
+    // Infinity arithmetic is IEEE's, not a trap.
+    print(inf - inf)
+    lanes(F64x2(inf, ninf) - F64x2.splat(inf)) // NaN -inf
+    print(nzero * inf)
+    lanes(F64x2(nzero, o) * F64x2(inf, inf)) // NaN inf
+    lanes(F64x2(o, nzero) / F64x2.splat(z)) // inf NaN
+
+    // ---- writing one lane back ------------------------------------------
+    lanes(a.replaceLane(0, 9.0)) // 9 2
+    // Both lanes replaced in turn is the constructor again, which is the lane-
+    // ORDER pin: a backend that numbered lanes the other way would still print
+    // two right-looking values for a single replace.
+    lanes(a.replaceLane(0, 7.0).replaceLane(1, 8.0)) // 7 8
+    lanes(a.replaceLane(1, nan)) // 1 NaN
+
+    // ---- negation is a sign-bit flip, not a subtraction ------------------
+    lanes(-a) // -1 -2
+    // Lane 0 is the whole reason `-v` exists: `-(+0.0)` is `-0.0`, while
+    // `0.0 - 0.0` is `+0.0`. The two lines below differ there and nowhere else.
+    lanes(-F64x2(z, ninf)) // -0 inf
+    lanes(F64x2.splat(z) - F64x2(z, ninf)) // 0 inf
+    lanes(-(-F64x2(nzero, sub))) // -0 sub
+
+    // ---- min and max: the NaN rule and the signed zero --------------------
+    // These are the two operations that would have split the three engines if
+    // each had been left to its own default. `llvm.minnum` and Rust's `f64::min`
+    // return the NON-NaN operand, where wasm's `f64x2.min` propagates — and the
+    // formatter shows that difference, unlike a NaN payload difference. The
+    // scalar twin above each line is IEEE-754-2019 `minimum` written out in Vyrn.
+    print(min1(nan, o))
+    lanes(F64x2.min(F64x2(nan, o), F64x2(o, nan))) // NaN NaN
+    print(max1(nan, o))
+    lanes(F64x2.max(F64x2(nan, o), F64x2(o, nan))) // NaN NaN
+    // `-0.0` orders strictly BELOW `+0.0`, in both operand orders, which is the
+    // half of the rule a comparison cannot express at all.
+    print(min1(nzero, z))
+    print(min1(z, nzero))
+    lanes(F64x2.min(F64x2(nzero, z), F64x2(z, nzero))) // -0 -0
+    print(max1(nzero, z))
+    print(max1(z, nzero))
+    lanes(F64x2.max(F64x2(nzero, z), F64x2(z, nzero))) // 0 0
+    // The ordinary cases, and the infinities.
+    print(min1(o, 2.0))
+    lanes(F64x2.min(F64x2(o, 2.0), F64x2(2.0, o))) // 1 1
+    lanes(F64x2.max(F64x2(inf, ninf), F64x2(ninf, inf))) // inf inf
+    lanes(F64x2.min(F64x2(inf, ninf), F64x2(ninf, inf))) // -inf -inf
+
+    // ---- sqrt: the one operation no Vyrn arithmetic can replace -----------
+    // A Newton iteration differs in the last bits, and under a byte-identical
+    // promise that is a different program. The sign of a zero is kept, a
+    // negative answers NaN, and a subnormal is not flushed on the way in.
+    lanes(F64x2.sqrt(F64x2(2.0, 4.0))) // 1.414214 2
+    lanes(F64x2.sqrt(F64x2(nzero, z))) // -0 0
+    lanes(F64x2.sqrt(F64x2(neg, inf))) // NaN inf
+    lanes(F64x2.sqrt(F64x2(nan, sub))) // NaN 0.000000
+
+    // ---- comparison: two answers, in a mask of their own ------------------
+    let pair = F64x2(o, 2.0)
+    let m = pair < F64x2.splat(1.5)
+    both(m) // true false
+    print(m.anyTrue())
+    print(m.allTrue())
+    both(pair > F64x2.splat(1.5)) // false true
+    print((pair == pair).allTrue())
+    print((pair != pair).anyTrue())
+    // A NaN-derived mask is not an empty mask: `NaN != NaN` is TRUE while every
+    // ordered comparison against one is false. Both reductions read the same
+    // 128 bits, and `allTrue` reads them as TWO lanes here — a reduction using
+    // the four-lane opcode would answer all-true and all-false correctly and
+    // diverge only on a mixed mask, which is the line below it.
+    let nv = F64x2.splat(nan)
+    print((nv != nv).allTrue())
+    print((nv == nv).anyTrue())
+    print((nv < nv).anyTrue())
+    // One true lane at a time: the lane-order and lane-WIDTH pin.
+    print((F64x2(o, 2.0) < F64x2(2.0, o)).anyTrue())
+    print((F64x2(o, 2.0) < F64x2(2.0, o)).allTrue())
+    print((F64x2(2.0, o) < F64x2(o, 2.0)).anyTrue())
+    print((F64x2(2.0, o) < F64x2(o, 2.0)).allTrue())
+
+    // ---- combining masks --------------------------------------------------
+    let n = pair > F64x2.splat(0.5)
+    both(m & n) // true false
+    both(m | n) // true true
+    both(m ^ n) // false true
+    both(~m) // false true
+    // De Morgan lane-wise. It holds for a whole-vector complement only because
+    // each lane complements independently, and it fails on any lane the two
+    // sides disagree about — `m` is mixed, which is where it would.
+    both(~(m & n)) // false true
+    both(~m | ~n) // the same two
+    both(m ^ m) // false false
+    both(m ^ ~m) // true true
+
+    // ---- load and store: one bounds check for two elements ----------------
+    // `Array<Float64>` at an 8-byte stride, which is the one place this width is
+    // not the narrow one with wider opcodes: the span is 2, so the check is
+    // `len - 2` and the trap would name `i + 1`.
+    let xs: Array<Float64> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    lanes(F64x2.load(xs, 0)) // 1 2
+    lanes(F64x2.load(xs, 1)) // 2 3
+    lanes(F64x2.load(xs, 4)) // 5 6
+    // The awkward values survive a round trip through memory, which is the only
+    // place a wrong stride or a wrong lane order shows up as data.
+    F64x2.store(xs, 2, F64x2(nzero, inf))
+    lanes(F64x2.load(xs, 2)) // -0 inf
+    print(xs[1])
+    print(xs[2])
+    print(xs[3])
+    print(xs[4])
+
+    return 0
+}

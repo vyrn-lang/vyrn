@@ -151,6 +151,12 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // element type.
     ("@i32x4Load", Memory, "Array<Int32>: four consecutive elements, one bounds check"),
     ("@i32x4Store", Memory, "Array<Int32>: the same four written back"),
+    // RFC-0083 M4, the same pair at the wide width — and the first where the SPAN
+    // is not four. Two elements at an 8-byte stride behind the one check, which
+    // is why the span became a parameter of the check rather than a constant in
+    // it on all three engines.
+    ("@f64x2Load", Memory, "Array<Float64>: two consecutive elements, one bounds check"),
+    ("@f64x2Store", Memory, "Array<Float64>: the same two written back"),
     // RFC-0075. The three ways to make and unmake a `Stream<T>`, and they are
     // separate names precisely because the TYPES are separate: nothing else can
     // make or unmake a stream, which is what makes "disposed exactly once"
@@ -218,6 +224,12 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // is nothing left for a builtin to be faster at.
     ("I32x4", View, "RFC-0083 M3: four Int32 lanes into one value"),
     ("@i32x4Splat", View, "RFC-0083 M3: one value into all four lanes"),
+    // RFC-0083 M4, the third width and the same two rows. `@lane` and
+    // `@replaceLane` again serve it from the arms they already had — a lane
+    // accessor is about the lane INDEX, and the only thing that changed is the
+    // range the checker proves it against.
+    ("F64x2", View, "RFC-0083 M4: two Float64 lanes into one value"),
+    ("@f64x2Splat", View, "RFC-0083 M4: one value into both lanes"),
     // ---- Control: abort, and waiting -----------------------------------------
     ("panic", Control, "RFC-0079: the abort itself, and the only irreducible row here"),
     ("assert", Control, "RFC-0015: traps the current test"),
@@ -252,6 +264,10 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // result. A Newton iteration differs in the last bits, which under this
     // project's byte-identical promise is a different program.
     ("@f32x4Sqrt", Semantics, "a Vyrn Newton iteration is not the correctly-rounded IEEE result"),
+    // RFC-0083 M4: the same argument at the wide lane, and it is the same
+    // argument rather than a similar one — the reason has nothing to do with the
+    // width.
+    ("@f64x2Sqrt", Semantics, "as `@f32x4Sqrt`, at 64 bits"),
     // ---- Movable, refused on a measured cost --------------------------------
     // The float half LEFT via RFC-0081: `std/num`'s `f64Str` is the one
     // implementation, native and wasm route to it, and `direct.rs`'s 511 lines
@@ -267,6 +283,16 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // the vector type exists to replace, which is why the ratios are what they are.
     ("@f32x4Min", Measured, "3.6x native (44.4 us against 12.3 us per 65536 lanes); Vyrn needs floatBits for -0.0"),
     ("@f32x4Max", Measured, "3.7x native (44.1 us against 12.1 us per 65536 lanes), the mirror of `min`"),
+    // RFC-0083 M4's pair, taken the same way against `minWv`/`maxWv` in
+    // `simdbench.vyrn`. The ratio is what the narrow width's is and for the same
+    // reason: what the Vyrn version has to reproduce is the NaN rule and the sign
+    // of a zero, twenty lines with a `floatBits` in them, and none of that gets
+    // cheaper at 64 bits. These are the ONLY named operations the wide width
+    // takes besides `sqrt` — the four roundings exist as `f64x2` opcodes and were
+    // left out, because a rounding row is this RFC's weakest kind and four more
+    // of them would be symmetry rather than evidence.
+    ("@f64x2Min", Measured, "2.5x native (39.0 us against 15.2 us per 65536 lanes); the Vyrn version needs floatBits for -0.0"),
+    ("@f64x2Max", Measured, "2.5x native (38.7 us against 15.0 us per 65536 lanes), the mirror of `min`"),
     // (`@f32x4Abs` was here, claiming "1.0x native but 3.5x wasm". RFC-0083 M4
     // re-took that number against an INLINE Vyrn spelling and it is 1.07x on wasm
     // (54 ms against 58 ms per 102 M lanes) and 1.00x natively — the 3.5x was four
@@ -473,7 +499,16 @@ fn the_census_is_the_code() {
     // emitted inside `for … in` rather than named, and a lazy `map` is exactly
     // the thing that has to name it. A combinator written in Vyrn cannot be
     // written without it.
-    assert_eq!(found.len(), 86, "the primitive core changed size");
+    // 86 -> 93 when RFC-0083 M4 added the third width: two `View` rows for
+    // building an `F64x2`, two `Memory` rows for moving one, `sqrt` as
+    // `Semantics` for the reason the narrow one is, and `min`/`max` as the only
+    // two `Measured` rows — at 2.5x, which is the narrow width's ratio and the
+    // narrow width's reason. Seven rows and not eleven: the four roundings exist
+    // at `f64x2` and were deliberately not taken. What did NOT need a row is the
+    // whole of the rest — every operator is a `BinOp` or a `UnOp`, and both lane
+    // accessors serve the new width from the arm they already had, since a lane
+    // accessor is about the lane index and only the RANGE changed.
+    assert_eq!(found.len(), 93, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

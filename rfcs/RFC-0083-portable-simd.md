@@ -1,11 +1,16 @@
 # RFC-0083 — Portable SIMD, Without `unsafe` and Without Breaking Parity
 
-- **Status:** **Accepted.** **M1, M2 and M3 shipped** (`examples/simd.vyrn`,
+- **Status:** **Accepted.** **M1, M2, M3 and M4 shipped** (`examples/simd.vyrn`,
   `examples/simdmem.vyrn`, `examples/simdround.vyrn`, `examples/simdint.vyrn`,
-  three-engine byte-identical including NaN, the exact halves and both ends of
-  `Int32` — see the three "As landed" notes). M3 took **`I32x4` only**, on the
-  licence the milestone gave itself; `F64x2` and `I64x2` are priced and refused
-  in its note.
+  `examples/simdwide.vyrn`, three-engine byte-identical including NaN, the exact
+  halves, both ends of `Int32` and both signed zeros — see the "As landed"
+  notes). M3 took **`I32x4` only**, on the licence the milestone gave itself; M4
+  took **`F64x2` and `Mask64x2`** after measuring the gate it set itself, at
+  **2.0x** against the scalar reduction. `I64x2` stays refused.
+- **"M4" names two things**, and saying so is cheaper than renumbering: a
+  re-timing pass that deleted `F32x4.abs` took the number while `F64x2` was
+  still being priced, so there are two "As landed — M4" notes below. The first
+  is the re-timing; the second is the width.
 - **Depends on:** RFC-0077 (the direct wasm backend — `wasm-encoder` is what
   emits the instructions), RFC-0078 (the census — `View` is the category these
   join), RFC-0082 (the capability boundary this narrows by one row)
@@ -209,8 +214,10 @@ over `Type` and both were in the textual backend.
     them. That is a gap in the *current* surface rather than an M3 item, and it
     is the cheapest useful thing left in this RFC. **Closed** — `anyTrue` and
     `allTrue` are in M2's "As landed" above, `bitmask` is refused there with its
-    reason, and M3's `Mask64x2` inherits both the spelling and the
-    closed-inhabitants argument the lowering rests on.
+    reason, and M4's `Mask64x2` inherits both the spelling and the
+    closed-inhabitants argument the lowering rests on — though see M4's note,
+    where that argument turns out to make the *width* of the `all_true` opcode
+    unobservable rather than merely safe.
 
   Also noted and deliberately not taken: `F32x4PMin`/`PMax` exist beside
   `Min`/`Max`. They are the "pseudo-minimum" pair with different NaN behaviour,
@@ -607,6 +614,9 @@ point of M3's finding is that assuming is how you ship a 2x regression — then
 this milestone is a table entry with no user, and the honest outcome is to say
 so rather than ship it.
 
+**Taken, and the gate answered 2.0x** — see the "As landed — M4 (`F64x2`)"
+note below.
+
 `I64x2` stays refused: it has no `min`/`max` at all, no `MulHigh`, and no
 `AllTrue` before the relaxed proposal, and after M3's finding there is nothing
 left in it but the representation.
@@ -822,6 +832,133 @@ simd=n,relaxed-simd=n` still answers `SIMD support is not enabled` — the posit
 proof that the roundings are the instructions and not a scalar emulation the
 sweep would have been equally happy with. `simdround.vyrn` is untouched: it uses
 the four roundings and no `abs`, and its output did not move by a byte.
+
+### As landed — M4 (`F64x2` and `Mask64x2`)
+
+```vyrn
+let a = F64x2(1.0, 2.0)            // + - * / — the float set, `/` included
+let b = F64x2.splat(0.5)
+let m = a < b                      // Mask64x2 — a SECOND mask, two lanes wide
+let v = F64x2.load(xs, i)          // xs: Array<Float64>, TWO elements, ONE check
+F64x2.store(xs, i, v)
+a.lane(0)  a.replaceLane(1, 9.0)   // the same constant-index rule, range 0..1
+F64x2.min(a, b)  F64x2.max(a, b)  F64x2.sqrt(a)
+```
+
+**The gate is the milestone, and it answered 2.0x.** The same `Float64`
+reduction over 65536 elements, written scalar and written two lanes wide, both
+native at `-O2`, both with `blackBox` on the threshold and on the array:
+
+| | min | median |
+|---|---|---|
+| scalar `acc = acc + xs[i] * t` | 24.22 µs | 24.32 µs |
+| `F64x2.load` + `*` + `+`, lanes summed at the end | **12.03 µs** | **12.09 µs** |
+
+That is the mirror image of the integer measurement two sections up, and it is
+the same optimiser deciding both. LLVM vectorises the `Int32` sum and beats the
+hand-written `I32x4` by 2x; it is *forbidden* from vectorising this one, because
+a two-lane accumulator adds the array in a different order and float addition
+does not associate. **So the two widths are not a matter of degree: `I32x4` is
+the width you should not reach for to make a loop fast, and `F64x2` is the width
+you must.** Both benches build their array inside the timed region, as every
+other bench in `simdbench.vyrn` does, so 2.0x is a lower bound on the walks
+themselves.
+
+Had it come back at 1.0x the honest outcome was to say so and ship nothing;
+recording that here matters more than the number, because the number is the
+easy half.
+
+**`Mask64x2` cost one enum variant per engine and one argument that used to be a
+constant.** The type decision was the one this milestone was warned about and it
+held: a mask is characterised by lane count and lane width, `I32x4` changed
+neither and `F64x2` changes both, so this is a second type rather than a
+generalisation. Vyrn has no const generics, there is no `Mask<N>` to write, and
+two inhabitants do not justify inventing them. It carries `anyTrue`/`allTrue`,
+`& | ^ ~`, and `.lane(k)`, and it does **not** combine with a `Mask32x4` — two
+answers and four answers about different things, which the checker's `l == r`
+already refused without an arm being written for it. `bitmask` stays refused for
+the reason M2 gave.
+
+**One inherited claim is wrong, and it is worth correcting because it is the
+kind that reads as evidence.** M2 justified `i32x4.all_true` on the argument
+that a wrong-width reduction "would answer all-true and all-false correctly and
+diverge only [on a mixed mask]", and M4's brief carried that forward to the
+wider one. **At this width it cannot diverge at all.** A `Mask64x2` lane is
+all-ones or all-zeros, so every 64-bit lane is exactly two all-ones or two
+all-zeros 32-bit lanes, and `i32x4.all_true` and `i64x2.all_true` agree on every
+inhabitant the type has. `i64x2.all_true` is emitted because it is the one that
+*means* the right thing, but no test can catch the other, and no test here
+claims to. The closed-inhabitants argument the lowering rests on turns out to be
+strong enough to make the lowering's own choice unobservable — which is a fact
+about the argument, not a licence to stop making it.
+
+**The span is the one thing that was not a table entry**, and the RFC's
+"`F64x2.*` is largely a table entry rather than new machinery" is right about
+everything else. Two `Float64` lanes read *two* elements, so the four that was a
+constant in three bounds checks — `len - 4`, `i + 3`, and the interpreter's trap
+message — became a parameter in all three. It is invisible in output in one
+direction and loud in the other: a span that is too large refuses the last legal
+index, which `examples/simdwide.vyrn` reads, while a span that is too small
+accepts every legal program *and* a read one element past the end, which nothing
+prints. `the_wide_load_spans_two_elements_and_is_still_checked_once` counts the
+limit in the IR for that half. The address arithmetic needed nothing at all: a
+`getelementptr double` steps eight bytes because the element type says so, and
+wasm's `elem_addr` scales by the element size the array already carries.
+
+**The two backends agreed, with one asymmetry worth naming** — it is RFC-0084
+M2's shape, one milestone later and much smaller. The textual backend reads a
+value's width off the type it just generated; the direct one has to `peek`,
+because it emits into a stack machine and must know the width *before* pushing
+the operand. So `@lane`, `@replaceLane` and the two mask reductions each grew a
+`peek` in `direct.rs` where the textual side grew nothing, and the reductions in
+particular had been passing `&Type::Mask32x4` as a literal expectation that
+happened to be the only mask there was. **A hardcoded type used as an
+expectation is exactly what a second inhabitant finds**, and it is the one place
+adding a width could have silently mis-lowered rather than failed to compile.
+
+**`min`, `max` and `sqrt` ship; the four roundings do not, and that is a
+decision rather than an encoder refusal.** `f64x2.ceil`, `floor`, `trunc` and
+`nearest` all exist. What earns the three is exactly what earned them at 32
+bits: `min`/`max` are the NaN rule and the signed zero — twenty lines with a
+`floatBits` in them, measured at **2.5x** against `minWv`/`maxWv` (39.0 µs
+against 15.2 µs, and 38.7 against 15.0, per 65536 lanes) — and `sqrt` is the one
+operation in this RFC that is not writable in Vyrn at any width. A rounding is
+neither, and the four `F32x4` rounding rows are already the weakest block here,
+one of them a native *loss* kept on symmetry. Four more `Measured` rows on a
+width whose justification is a reduction loop would be the census justifying
+itself by symmetry, which is the thing it exists to prevent. `F64x2.ceil`
+reports itself by name (`` `F64x2` has no `ceil` ``) so the absence is a
+decision a reader meets rather than a gap they infer.
+
+**Seven census rows, 86 → 93**, and the shape is M3's: two `View` (the
+constructor and the splat — the whole of the representation), two `Memory` (the
+load and the store, a bounds trap as `at` is), one `Semantics` (`sqrt`) and two
+`Measured` (`min`/`max`). Everything else is free. Every operator is a `BinOp`
+or a `UnOp` the interpreter's `Call` dispatch never sees, and both lane
+accessors serve the third width from the arm they already had — a lane accessor
+is about the lane *index*, and the only thing that changed is the range the
+checker proves it against, which is now the receiver's rather than a literal 4.
+
+**Three engines byte-identical on `examples/simdwide.vyrn`** — 120 lines:
+construction, splat, both lane accessors with each lane replaced in turn, all
+four operators, `2^24 + 1` (exact here, rounded away at `F32x4`) and `2^53 + 1`
+(where a `Float64` itself stops being exact, so the vector rounds where the
+scalar does), NaN in each lane position through every operator, both infinities,
+both signed zeros, a `Float64` subnormal reached by repeated squaring with
+`sub / sub` as the flush-to-zero probe, `-v` beside `splat(0.0) - v` at a zero
+lane, `min`/`max` against NaN in both operand orders and against `±0.0` in both
+— each with the IEEE-754-2019 rule written out in Vyrn on the line above —
+`sqrt` of a negative, of `-0.0`, of an infinity and of a subnormal, all six
+comparisons, both reductions on all-true / all-false / one-true / one-false and
+on NaN-derived masks, the three combinators with De Morgan lane-wise, and a
+load/store round trip carrying `-0.0` and an infinity through memory. The full
+sweep is **109 examples checked, 10 skipped, 0 failed**, wasm column present.
+`wasmtime -W simd=n,relaxed-simd=n` rejects the module with `SIMD support is not
+enabled`, which is the positive proof these are the vector instructions.
+
+Verification: `cargo test --workspace` (1393 passed), `vyrn-lsp` separately (71,
+excluded crate, own resolve), `--features wasm-gen --test genwasm` (11), the
+corpus parity sweep serially, and `vyrn fmt --check` on both touched examples.
 
 ## The upgrade path, taken — and the flag that made it safe to take
 

@@ -841,6 +841,16 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // crossing function boundaries, and these never leave the block.
     out.push_str("declare i1 @llvm.vector.reduce.or.v4i1(<4 x i1>)\n");
     out.push_str("declare i1 @llvm.vector.reduce.and.v4i1(<4 x i1>)\n");
+    // RFC-0083 M4's wide width. `minimum`/`maximum` again and for the same
+    // reason — `llvm.minnum.v2f64` would return the non-NaN operand where wasm's
+    // `f64x2.min` propagates, and the formatter shows that difference at 64 bits
+    // exactly as it does at 32. The four roundings have no `v2f64` declaration
+    // here because M4 did not ship them; see the RFC's note.
+    out.push_str("declare <2 x double> @llvm.minimum.v2f64(<2 x double>, <2 x double>)\n");
+    out.push_str("declare <2 x double> @llvm.maximum.v2f64(<2 x double>, <2 x double>)\n");
+    out.push_str("declare <2 x double> @llvm.sqrt.v2f64(<2 x double>)\n");
+    out.push_str("declare i1 @llvm.vector.reduce.or.v2i1(<2 x i1>)\n");
+    out.push_str("declare i1 @llvm.vector.reduce.and.v2i1(<2 x i1>)\n");
     // Worker threads (RFC-0025): `spawn f(args)` packs its evaluated arguments
     // into a heap frame and hands the shim a per-spawn-site thunk SYMBOL plus
     // that frame; the shim runs the thunk on a real OS thread natively (Win32 /
@@ -3254,6 +3264,9 @@ impl<'a> Gen<'a> {
                     UnOp::Neg if self.resolve(&ty) == Type::F32x4 => {
                         self.emit(format!("{t} = fneg <4 x float> {v}"))
                     }
+                    UnOp::Neg if self.resolve(&ty) == Type::F64x2 => {
+                        self.emit(format!("{t} = fneg <2 x double> {v}"))
+                    }
                     // `~m` complements every lane. The constant is spelled out
                     // rather than written `splat (i32 -1)` because the elementwise
                     // form is what every LLVM this project has built against
@@ -3268,6 +3281,10 @@ impl<'a> Gen<'a> {
                         self.emit(format!(
                             "{t} = xor <4 x i32> {v}, <i32 -1, i32 -1, i32 -1, i32 -1>"
                         ))
+                    }
+                    // The wide mask, two lanes of all-ones.
+                    UnOp::BitNot if self.resolve(&ty) == Type::Mask64x2 => {
+                        self.emit(format!("{t} = xor <2 x i64> {v}, <i64 -1, i64 -1>"))
                     }
                     // Two's-complement negation, four lanes wide: `-Int32.min` is
                     // `Int32.min`, the same wrap the scalar `sub {w} 0, {v}` below
@@ -4494,7 +4511,7 @@ impl<'a> Gen<'a> {
         let t = self.fresh_tmp();
         let instr = if matches!(
             self.resolve(&lty),
-            Type::Float | Type::Float32 | Type::F32x4
+            Type::Float | Type::Float32 | Type::F32x4 | Type::F64x2
         ) {
             // Floating-point ops (Float64 → `double`, Float32 → `float`). A vector
             // (RFC-0083) rides the same arms: `fadd <4 x float>` is the same
@@ -4504,6 +4521,7 @@ impl<'a> Gen<'a> {
             let f = match self.resolve(&lty) {
                 Type::Float32 => "float",
                 Type::F32x4 => "<4 x float>",
+                Type::F64x2 => "<2 x double>",
                 _ => "double",
             };
             match op {
@@ -4632,15 +4650,20 @@ impl<'a> Gen<'a> {
         // Only a COMPARISON widens. `I32x4`'s `& | ^` are already `<4 x i32>` in
         // and out, which is the whole reason the integer width reaches them
         // without going through a mask at all.
-        if matches!(self.resolve(&lty), Type::F32x4 | Type::I32x4)
-            && matches!(
-                op,
-                BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq
-            )
-        {
+        let cmp = matches!(
+            op,
+            BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq
+        );
+        if matches!(self.resolve(&lty), Type::F32x4 | Type::I32x4) && cmp {
             let m = self.fresh_tmp();
             self.emit(format!("{m} = sext <4 x i1> {t} to <4 x i32>"));
             return Ok((m, Type::Mask32x4));
+        }
+        // The same widening at the wide lane, into the mask that width yields.
+        if self.resolve(&lty) == Type::F64x2 && cmp {
+            let m = self.fresh_tmp();
+            self.emit(format!("{m} = sext <2 x i1> {t} to <2 x i64>"));
+            return Ok((m, Type::Mask64x2));
         }
         let result_ty = match op {
             // Arithmetic and bitwise keep the operand's integer type (Int or
@@ -5955,27 +5978,46 @@ impl<'a> Gen<'a> {
         // is a defined value is one less thing a reader has to prove.
         if matches!(
             name,
-            "F32x4" | "@f32x4Splat" | "I32x4" | "@i32x4Splat" | "@lane" | "@replaceLane"
+            "F32x4"
+                | "@f32x4Splat"
+                | "I32x4"
+                | "@i32x4Splat"
+                | "F64x2"
+                | "@f64x2Splat"
+                | "@lane"
+                | "@replaceLane"
         ) {
-            // The width these four share, and the two spellings it settles: the
-            // vector's IR type and its lane's. M3's whole shape in one line —
-            // `insertelement` and `extractelement` do not care which it is.
+            // The width these share, and the three spellings it settles: the
+            // vector's IR type, its lane's, and how many lanes there are. M3's
+            // whole shape was the first two; M4 added the third, because
+            // `insertelement` and `extractelement` do not care which width they
+            // are in but a SPLAT has to know how many times to write.
+            let wide = name.starts_with("@f64x2") || name == "F64x2";
             let int = name.starts_with("@i32x4") || name == "I32x4";
-            let (vec_ty, vt, lt, lane_ty) = if int {
-                (Type::I32x4, "<4 x i32>", "i32", INT32)
+            let (vec_ty, vt, lt, lane_ty, n) = if int {
+                (Type::I32x4, "<4 x i32>", "i32", INT32, 4)
+            } else if wide {
+                (Type::F64x2, "<2 x double>", "double", Type::Float, 2)
             } else {
-                (Type::F32x4, "<4 x float>", "float", Type::Float32)
+                (Type::F32x4, "<4 x float>", "float", Type::Float32, 4)
+            };
+            // The two lane accessors read their WIDTH off the receiver rather than
+            // off the name, because they are value methods and one arm serves
+            // every width.
+            let of_recv = |ty: &Type| -> (&'static str, &'static str, Type, i64) {
+                match ty {
+                    Type::I32x4 => ("<4 x i32>", "i32", INT32, 4),
+                    Type::F64x2 => ("<2 x double>", "double", Type::Float, 2),
+                    Type::Mask64x2 => ("<2 x i64>", "i64", Type::Bool, 2),
+                    Type::Mask32x4 => ("<4 x i32>", "i32", Type::Bool, 4),
+                    _ => ("<4 x float>", "float", Type::Float32, 4),
+                }
             };
             if name == "@replaceLane" {
                 let (v, vty) = self.gen_expr(&args[0])?;
-                let int = self.resolve(&vty) == Type::I32x4;
-                let (vt, lt, lane_ty) = if int {
-                    ("<4 x i32>", "i32", INT32)
-                } else {
-                    ("<4 x float>", "float", Type::Float32)
-                };
-                let k = vyrn_frontend::types::const_lane(&args[1], 4)
-                    .ok_or("a lane index must be a compile-time constant in 0..3")?;
+                let (vt, lt, lane_ty, lanes) = of_recv(&self.resolve(&vty));
+                let k = vyrn_frontend::types::const_lane(&args[1], lanes)
+                    .ok_or("a lane index must be a compile-time constant")?;
                 let (x, xt) = self.gen_expr(&args[2])?;
                 let (x, _) = self.coerce(x, &xt, &lane_ty)?;
                 let t = self.fresh_tmp();
@@ -5984,27 +6026,24 @@ impl<'a> Gen<'a> {
             }
             if name == "@lane" {
                 let (v, vty) = self.gen_expr(&args[0])?;
+                let (vt, lt, out, lanes) = of_recv(&self.resolve(&vty));
                 // Proven constant and in range by the checker, so no bounds check
                 // is emitted here and none is missing.
-                let k = vyrn_frontend::types::const_lane(&args[1], 4)
-                    .ok_or("a lane index must be a compile-time constant in 0..3")?;
+                let k = vyrn_frontend::types::const_lane(&args[1], lanes)
+                    .ok_or("a lane index must be a compile-time constant")?;
                 let t = self.fresh_tmp();
                 // A mask lane is `0` or `-1`; `Bool` is `i1`, so the read is an
                 // extract plus a test against zero rather than a truncation —
                 // `trunc i32 -1 to i1` is `true` only because the low bit is set,
                 // which is an accident of the encoding rather than its meaning.
-                if self.resolve(&vty) == Type::Mask32x4 {
+                if out == Type::Bool {
                     let e = self.fresh_tmp();
-                    self.emit(format!("{e} = extractelement <4 x i32> {v}, i32 {k}"));
-                    self.emit(format!("{t} = icmp ne i32 {e}, 0"));
+                    self.emit(format!("{e} = extractelement {vt} {v}, i32 {k}"));
+                    self.emit(format!("{t} = icmp ne {lt} {e}, 0"));
                     return Ok((t, Type::Bool));
                 }
-                if self.resolve(&vty) == Type::I32x4 {
-                    self.emit(format!("{t} = extractelement <4 x i32> {v}, i32 {k}"));
-                    return Ok((t, INT32));
-                }
-                self.emit(format!("{t} = extractelement <4 x float> {v}, i32 {k}"));
-                return Ok((t, Type::Float32));
+                self.emit(format!("{t} = extractelement {vt} {v}, i32 {k}"));
+                return Ok((t, out));
             }
             let mut lanes = Vec::new();
             for a in args {
@@ -6012,11 +6051,12 @@ impl<'a> Gen<'a> {
                 let (v, _) = self.coerce(v, &ty, &lane_ty)?;
                 lanes.push(v);
             }
-            // A splat writes the one value into all four lanes. `shufflevector`
-            // would be the idiom; four `insertelement`s are the same instruction
-            // sequence after `-O3` and share this path instead of forking it.
+            // A splat writes the one value into every lane. `shufflevector`
+            // would be the idiom; the `insertelement` chain is the same
+            // instruction sequence after `-O3` and shares this path instead of
+            // forking it.
             if lanes.len() == 1 {
-                lanes = vec![lanes[0].clone(); 4];
+                lanes = vec![lanes[0].clone(); n];
             }
             let mut acc = "zeroinitializer".to_string();
             for (i, l) in lanes.iter().enumerate() {
@@ -6033,13 +6073,22 @@ impl<'a> Gen<'a> {
         // against `-1` would be reading the storage. `-O2` folds both spellings to
         // the same `movmskps`, so the readable one costs nothing.
         if matches!(name, "@anyTrue" | "@allTrue") {
-            let (mv, _) = self.gen_expr(&args[0])?;
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            // Which mask decides the vector width and the reduction's suffix, and
+            // nothing else: the "test each lane against zero, then fold" shape is
+            // the same one at both.
+            let (vt, v) = if self.resolve(&mty) == Type::Mask64x2 {
+                ("<2 x i64>", "v2i1")
+            } else {
+                ("<4 x i32>", "v4i1")
+            };
             let ne = self.fresh_tmp();
             let t = self.fresh_tmp();
-            self.emit(format!("{ne} = icmp ne <4 x i32> {mv}, zeroinitializer"));
+            self.emit(format!("{ne} = icmp ne {vt} {mv}, zeroinitializer"));
             let op = if name == "@anyTrue" { "or" } else { "and" };
             self.emit(format!(
-                "{t} = call i1 @llvm.vector.reduce.{op}.v4i1(<4 x i1> {ne})"
+                "{t} = call i1 @llvm.vector.reduce.{op}.{v}(<{} x i1> {ne})",
+                if v == "v2i1" { 2 } else { 4 }
             ));
             return Ok((t, Type::Bool));
         }
@@ -6082,6 +6131,29 @@ impl<'a> Gen<'a> {
             ));
             return Ok((t, Type::F32x4));
         }
+        // The wide width's three (RFC-0083 M4), the same intrinsics at `v2f64`.
+        // `llvm.minimum` and not `llvm.minnum` for the reason declared in the
+        // prologue — the rule does not change with the lane width, and neither
+        // does the way native would drift from wasm if it were left to a default.
+        if matches!(name, "@f64x2Min" | "@f64x2Max" | "@f64x2Sqrt") {
+            let (a, _) = self.gen_expr(&args[0])?;
+            let t = self.fresh_tmp();
+            let (f, rest) = match name {
+                "@f64x2Min" => ("llvm.minimum.v2f64", true),
+                "@f64x2Max" => ("llvm.maximum.v2f64", true),
+                _ => ("llvm.sqrt.v2f64", false),
+            };
+            let second = if rest {
+                let (b, _) = self.gen_expr(&args[1])?;
+                format!(", <2 x double> {b}")
+            } else {
+                String::new()
+            };
+            self.emit(format!(
+                "{t} = call <2 x double> @{f}(<2 x double> {a}{second})"
+            ));
+            return Ok((t, Type::F64x2));
+        }
         // (`@i32x4Min`/`Max`/`Abs` were here, as `llvm.smin`/`smax`/`abs.v4i32`,
         // and were deleted on their measurement — LLVM compiles the Vyrn
         // `if a < b` into the same `pminsd`, so the intrinsic bought 1.0x. See the
@@ -6091,14 +6163,28 @@ impl<'a> Gen<'a> {
         // bytes at element `i` of an `Array<Float32>`, behind ONE bounds check
         // rather than four. That amortisation is the milestone's point; the
         // structural pin in `vyrn-cli/tests/simd.rs` counts the branch.
-        if matches!(name, "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store") {
-            // Element type and vector type; the check, the address arithmetic and
-            // the trap are identical, which is why the two widths share the arm.
-            let int = name.starts_with("@i32x4");
-            let (et, vt, vec_ty) = if int {
-                ("i32", "<4 x i32>", Type::I32x4)
+        if matches!(
+            name,
+            "@f32x4Load"
+                | "@f32x4Store"
+                | "@i32x4Load"
+                | "@i32x4Store"
+                | "@f64x2Load"
+                | "@f64x2Store"
+        ) {
+            // Element type, vector type and SPAN; the check, the address
+            // arithmetic and the trap are identical, which is why the widths share
+            // the arm. The span is the only thing M4 added: two `Float64` lanes
+            // read two elements, so the limit is `len - 2` and the trap names
+            // `i + 1`. The address arithmetic needs no change at all — a
+            // `getelementptr` over `double` steps 8 bytes because the element type
+            // says so.
+            let (et, vt, vec_ty, span) = if name.starts_with("@i32x4") {
+                ("i32", "<4 x i32>", Type::I32x4, 4)
+            } else if name.starts_with("@f64x2") {
+                ("double", "<2 x double>", Type::F64x2, 2)
             } else {
-                ("float", "<4 x float>", Type::F32x4)
+                ("float", "<4 x float>", Type::F32x4, 4)
             };
             let (av, _) = self.gen_expr(&args[0])?;
             let (iv, _) = self.gen_expr(&args[1])?;
@@ -6116,7 +6202,7 @@ impl<'a> Gen<'a> {
             let hi = self.fresh_tmp();
             let bad = self.fresh_tmp();
             self.emit(format!("{lo} = icmp slt i64 {iv}, 0"));
-            self.emit(format!("{lim} = sub nsw i64 {len}, 4"));
+            self.emit(format!("{lim} = sub nsw i64 {len}, {span}"));
             self.emit(format!("{hi} = icmp sgt i64 {iv}, {lim}"));
             self.emit(format!("{bad} = or i1 {lo}, {hi}"));
             let bad_l = self.fresh_label("vec.oob");
@@ -6130,7 +6216,7 @@ impl<'a> Gen<'a> {
             let hi3 = self.fresh_tmp();
             let k = self.fresh_tmp();
             let e = self.fresh_tmp();
-            self.emit(format!("{hi3} = add i64 {iv}, 3"));
+            self.emit(format!("{hi3} = add i64 {iv}, {}", span - 1));
             self.emit(format!("{k} = select i1 {lo}, i64 {iv}, i64 {hi3}"));
             self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
             self.emit(format!(
@@ -6142,8 +6228,9 @@ impl<'a> Gen<'a> {
             let ep = self.fresh_tmp();
             self.emit(format!("{ep} = getelementptr {et}, ptr {data}, i64 {iv}"));
             // `align 4`, not the vector's natural 16: the buffer is an array of
-            // 4-byte elements, so nothing guarantees more, and claiming 16 would be
-            // a promise the allocator never made.
+            // elements, so nothing guarantees more, and claiming 16 would be a
+            // promise the allocator never made. Understating it is always legal,
+            // which is why the wide width does not need its own number here.
             if name.ends_with("Load") {
                 let t = self.fresh_tmp();
                 self.emit(format!("{t} = load {vt}, ptr {ep}, align 4"));
@@ -9141,6 +9228,8 @@ fn mangle_ty(t: &Type) -> String {
         Type::F32x4 => "F32x4".into(),
         Type::I32x4 => "I32x4".into(),
         Type::Mask32x4 => "Mask32x4".into(),
+        Type::F64x2 => "F64x2".into(),
+        Type::Mask64x2 => "Mask64x2".into(),
         // A function-value type (RFC-0023) mangles by shape — used only when a
         // generic instance's own type argument mentions one (rare); the
         // higher-order specialization keys are formed separately.
@@ -9237,6 +9326,12 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // function boundaries here like any other value. The `sext`/`trunc` pair
         // that costs is folded away by `-O2` at every use, which was checked.
         Type::Mask32x4 => "<4 x i32>".into(),
+        // M4's wide float width and its own mask, on the same two rules: the
+        // vector is LLVM's own so the arithmetic is one instruction, and the mask
+        // is all-ones/all-zeros at the LANE width — `<2 x i64>` and not `<2 x i1>`
+        // — so the two backends carry the same bit pattern here as they do at 32.
+        Type::F64x2 => "<2 x double>".into(),
+        Type::Mask64x2 => "<2 x i64>".into(),
         Type::Bool => "i1".into(),
         Type::Str => "ptr".into(),
         // `Never` (RFC-0079) carries no value, so it lowers like `Unit`: a

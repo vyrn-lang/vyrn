@@ -644,6 +644,18 @@ pub enum Type {
     /// belongs to the operand and not to the operation — and nothing asks for
     /// one. Arithmetic WRAPS at 32 bits, as scalar `Int32` does.
     I32x4,
+    /// Two `Float64` lanes as one value (RFC-0083 M4). [`Type::F32x4`]'s table
+    /// with the lane widened and the count halved — `<2 x double>` textually, a
+    /// wasm `v128` — and it keeps everything the float width has, `/` and `sqrt`
+    /// included, because `f64x2` has every one of those opcodes.
+    ///
+    /// This is the width explicit SIMD is actually FOR, and the reason is in the
+    /// RFC's opening: a `Float64` reduction is the one an optimiser may not
+    /// vectorise, since float addition does not associate and reassociating it
+    /// changes bits. The integer width measured *slower* than the scalar loop
+    /// LLVM was allowed to vectorise; this one is 1.9x faster than its scalar
+    /// twin, measured before it shipped.
+    F64x2,
     /// Four `Bool` lanes as one value — what a lane-wise comparison of two
     /// [`Type::F32x4`]s (or two [`Type::I32x4`]s) yields (RFC-0083 M2).
     ///
@@ -654,6 +666,17 @@ pub enum Type {
     /// ask what happens. There is no answer to that question the three engines
     /// would agree on for free, and a type is cheaper than a normalisation.
     Mask32x4,
+    /// Two `Bool` lanes — what a comparison of two [`Type::F64x2`]s yields
+    /// (RFC-0083 M4). A SECOND type rather than a generalisation of
+    /// [`Type::Mask32x4`], and the argument is short: a mask is N booleans about
+    /// N lanes and nothing in it remembers what compared them, so what
+    /// characterises one is the lane COUNT and the lane WIDTH — which is exactly
+    /// what this width changes and what `I32x4` did not. Vyrn has no const
+    /// generics, so there is no `Mask<N>` to write, and inventing one for two
+    /// inhabitants would be machinery serving a count.
+    ///
+    /// `<2 x i64>` of all-ones/all-zeros, and a `v128` again.
+    Mask64x2,
     Bool,
     /// An immutable, statically-allocated string (v0.1: literals only).
     Str,
@@ -793,6 +816,8 @@ impl std::fmt::Display for Type {
             Type::F32x4 => write!(f, "F32x4"),
             Type::I32x4 => write!(f, "I32x4"),
             Type::Mask32x4 => write!(f, "Mask32x4"),
+            Type::F64x2 => write!(f, "F64x2"),
+            Type::Mask64x2 => write!(f, "Mask64x2"),
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),

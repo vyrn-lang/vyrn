@@ -162,6 +162,49 @@ fn nearest1(x: Float32) -> Float32 {
     return up
 }
 
+/// The wide width's `minimum` on one lane (RFC-0083 M4) — the same rule as
+/// `min1` and three lines shorter, because a `Float64` reaches `floatBits`
+/// without being widened first.
+fn min1w(a: Float64, b: Float64) -> Float64 {
+    if a != a {
+        return a
+    }
+    if b != b {
+        return b
+    }
+    if a == b {
+        let sign: UInt64 = 9223372036854775808
+        if floatBits(a) >= sign {
+            return a
+        }
+        return b
+    }
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn max1w(a: Float64, b: Float64) -> Float64 {
+    if a != a {
+        return a
+    }
+    if b != b {
+        return b
+    }
+    if a == b {
+        let sign: UInt64 = 9223372036854775808
+        if floatBits(a) >= sign {
+            return b
+        }
+        return a
+    }
+    if a > b {
+        return a
+    }
+    return b
+}
+
 fn minV(a: F32x4, b: F32x4) -> F32x4 {
     return F32x4(
         min1(a.lane(0), b.lane(0)),
@@ -228,6 +271,18 @@ fn sum(v: F32x4) -> Float32 {
     return v.lane(0) + v.lane(1) + v.lane(2) + v.lane(3)
 }
 
+fn minWv(a: F64x2, b: F64x2) -> F64x2 {
+    return F64x2(min1w(a.lane(0), b.lane(0)), min1w(a.lane(1), b.lane(1)))
+}
+
+fn maxWv(a: F64x2, b: F64x2) -> F64x2 {
+    return F64x2(max1w(a.lane(0), b.lane(0)), max1w(a.lane(1), b.lane(1)))
+}
+
+fn sumW(v: F64x2) -> Float64 {
+    return v.lane(0) + v.lane(1)
+}
+
 fn data(n: Int64) -> Array<Float32> {
     let mut xs: Array<Float32> = []
     let mut i = 0
@@ -236,6 +291,93 @@ fn data(n: Int64) -> Array<Float32> {
         i = i + 1
     }
     return xs
+}
+
+fn data64(n: Int64) -> Array<Float64> {
+    let mut xs: Array<Float64> = []
+    let mut i = 0
+    while i < n {
+        xs.push(Float64(i) / 1000.0 - 0.03)
+        i = i + 1
+    }
+    return xs
+}
+
+// ---- the M4 gate: is `F64x2` worth having at all? ------------------------
+// The same reduction twice, scalar and vectorised, and the RFC would have been
+// withdrawn if the first won. M3's `I32x4` lost this comparison 2x — LLVM
+// vectorises an integer reduction because integer addition associates — and the
+// whole argument for the wide float width is that it MAY NOT do the same here:
+// reassociating floats changes the last bits, which `-O2` without `-ffast-math`
+// is not allowed to do.
+//
+// The two answers differ, and that is the same fact seen from the other side: a
+// two-lane accumulator sums the array in a different ORDER, so `main` prints two
+// numbers that are close and not equal. An optimiser that produced the second
+// from the first would be the thing this project's whole invariant forbids.
+fn sumScalar(xs: Array<Float64>, n: Int64, t: Float64) -> Float64 {
+    let mut acc = 0.0
+    let mut i = 0
+    while i < n {
+        acc = acc + xs[i] * t
+        i = i + 1
+    }
+    return acc
+}
+
+fn sumWide(xs: Array<Float64>, n: Int64, t: Float64) -> Float64 {
+    let mut acc = F64x2.splat(0.0)
+    let h = F64x2.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F64x2.load(xs, i) * h
+        i = i + 2
+    }
+    return sumW(acc)
+}
+
+fn minWBuiltin(xs: Array<Float64>, n: Int64, t: Float64) -> Float64 {
+    let mut acc = F64x2.splat(0.0)
+    let h = F64x2.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F64x2.min(F64x2.load(xs, i), h)
+        i = i + 2
+    }
+    return sumW(acc)
+}
+
+fn minWVyrn(xs: Array<Float64>, n: Int64, t: Float64) -> Float64 {
+    let mut acc = F64x2.splat(0.0)
+    let h = F64x2.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + minWv(F64x2.load(xs, i), h)
+        i = i + 2
+    }
+    return sumW(acc)
+}
+
+fn maxWBuiltin(xs: Array<Float64>, n: Int64, t: Float64) -> Float64 {
+    let mut acc = F64x2.splat(0.0)
+    let h = F64x2.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + F64x2.max(F64x2.load(xs, i), h)
+        i = i + 2
+    }
+    return sumW(acc)
+}
+
+fn maxWVyrn(xs: Array<Float64>, n: Int64, t: Float64) -> Float64 {
+    let mut acc = F64x2.splat(0.0)
+    let h = F64x2.splat(t)
+    let mut i = 0
+    while i < n {
+        acc = acc + maxWv(F64x2.load(xs, i), h)
+        i = i + 2
+    }
+    return sumW(acc)
 }
 
 // Six walks: two pairs, plus the Vyrn `select` and `abs` whose partners were
@@ -631,6 +773,80 @@ bench "select in Vyrn" {
     drop xs
 }
 
+// The gate, and the pair that has to be read together: same array, same passes,
+// same `blackBox` on the threshold, one loop scalar and one two lanes wide.
+bench "sum scalar Float64" {
+    let xs = data64(1024)
+    let mut r = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + sumScalar(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "sum with F64x2" {
+    let xs = data64(1024)
+    let mut r = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + sumWide(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "wide min builtin" {
+    let xs = data64(1024)
+    let mut r = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + minWBuiltin(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "wide min in Vyrn" {
+    let xs = data64(1024)
+    let mut r = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + minWVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "wide max builtin" {
+    let xs = data64(1024)
+    let mut r = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + maxWBuiltin(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
+bench "wide max in Vyrn" {
+    let xs = data64(1024)
+    let mut r = 0.0
+    let mut k = 0
+    while k < 64 {
+        r = r + maxWVyrn(xs, 1024, blackBox(0.5))
+        k = k + 1
+    }
+    blackBox(r)
+    drop xs
+}
+
 bench "anyTrue builtin" {
     let xs = data(1024)
     let mut r = 0
@@ -709,5 +925,20 @@ fn main() -> Int64 {
     print(allBuiltin(xs, 64, 0.0))
     print(allVyrn(xs, 64, 0.0))
     drop xs
+    // The wide width (RFC-0083 M4). The two sums are the milestone's gate: the
+    // vector one accumulates in two lanes, so it adds the array in a different
+    // ORDER and is a different number in the last bits — which the six-decimal
+    // formatter does not show, and that is the honest shape of it. What all
+    // three engines DO have to agree on is each sum against itself. The
+    // `min`/`max` pairs agree exactly instead, being lane-wise with nothing
+    // reordered.
+    let ws = data64(64)
+    print(sumScalar(ws, 64, 0.5))
+    print(sumWide(ws, 64, 0.5))
+    print(minWBuiltin(ws, 64, 0.5))
+    print(minWVyrn(ws, 64, 0.5))
+    print(maxWBuiltin(ws, 64, 0.5))
+    print(maxWVyrn(ws, 64, 0.5))
+    drop ws
     return 0
 }

@@ -218,6 +218,7 @@ pub const RESERVED: &[&str] = &[
     // parser assigns to method sugar, so a free `fn lane(..)` still resolves.
     "F32x4",
     "I32x4",
+    "F64x2",
     "UInt8",
     "UInt16",
     "UInt32",
@@ -3072,6 +3073,7 @@ impl<'a> Checker<'a> {
                                 | Type::IntN { .. }
                                 | Type::F32x4
                                 | Type::I32x4
+                                | Type::F64x2
                         ) =>
                     {
                         Ok(t)
@@ -3088,7 +3090,11 @@ impl<'a> Checker<'a> {
                     UnOp::BitNot
                         if matches!(
                             t,
-                            Type::Int | Type::IntN { .. } | Type::Mask32x4 | Type::I32x4
+                            Type::Int
+                                | Type::IntN { .. }
+                                | Type::Mask32x4
+                                | Type::Mask64x2
+                                | Type::I32x4
                         ) =>
                     {
                         Ok(t)
@@ -4034,6 +4040,10 @@ impl<'a> Checker<'a> {
             // into `numeric`: that predicate also gates `<`/`==`, and a vector
             // comparison yields a lane MASK, never a `Bool`.
             Add | Sub | Mul | Div if l == Type::F32x4 && r == Type::F32x4 => Ok(l),
+            // The wide float width (RFC-0083 M4) keeps all four: `f64x2.div`
+            // exists where `i32x4.div_s` does not, so this is the float row and
+            // not the integer one.
+            Add | Sub | Mul | Div if l == Type::F64x2 && r == Type::F64x2 => Ok(l),
             // The integer width is the same three operations MINUS division
             // (RFC-0083 M3), and the omission is the instruction set's rather
             // than a deferral: there is no `i32x4.div_s` in wasm and no SIMD
@@ -4063,6 +4073,12 @@ impl<'a> Checker<'a> {
             {
                 Ok(Type::Mask32x4)
             }
+            // Two lanes of 64 bits answer TWO questions, so this is where M2's
+            // warning comes due: the mask is `Mask64x2` and not the one above.
+            // Nothing else about the operators changes.
+            Lt | LtEq | Gt | GtEq | Eq | NotEq if l == r && l == Type::F64x2 => {
+                Ok(Type::Mask64x2)
+            }
             // Combining masks (RFC-0083 M2): `(a < b) & (c < d)` is the lane-wise
             // AND, and `&`/`|`/`^` rather than `&&`/`||` is the one spelling
             // decision here. `&&` and `||` are Vyrn's SHORT-CIRCUIT Bool operators
@@ -4090,7 +4106,7 @@ impl<'a> Checker<'a> {
             // the only binary operator in the language whose right operand must be
             // a literal; nothing measured asked for it.
             BitAnd | BitOr | BitXor
-                if l == r && matches!(l, Type::Mask32x4 | Type::I32x4) =>
+                if l == r && matches!(l, Type::Mask32x4 | Type::Mask64x2 | Type::I32x4) =>
             {
                 Ok(l)
             }
@@ -4230,21 +4246,34 @@ impl<'a> Checker<'a> {
             }
             Ok(None)
         };
-        // The width a `@f32x4*` / `@i32x4*` name belongs to: the vector type, its
-        // lane type, and the spelling to put in a message.
-        let width = |n: &str| -> (Type, Type, &'static str) {
+        // The width a `@f32x4*` / `@i32x4*` / `@f64x2*` name belongs to: the
+        // vector type, its lane type, the spelling to put in a message, and the
+        // LANE COUNT — which M4 is the reason for. Every arm below that used to
+        // write `4` reads this instead, because two of the three widths are four
+        // lanes and getting the third wrong would be a silently accepted index.
+        let width = |n: &str| -> (Type, Type, &'static str, i64) {
             if n.starts_with("@i32x4") || n == "I32x4" {
-                (Type::I32x4, INT32, "I32x4")
+                (Type::I32x4, INT32, "I32x4", 4)
+            } else if n.starts_with("@f64x2") || n == "F64x2" {
+                (Type::F64x2, Type::Float, "F64x2", 2)
             } else {
-                (Type::F32x4, Type::Float32, "F32x4")
+                (Type::F32x4, Type::Float32, "F32x4", 4)
+            }
+        };
+        // The lane count of a vector or mask VALUE, for the two accessors whose
+        // width comes from the receiver rather than from the name.
+        let lanes_of = |t: &Type| -> i64 {
+            match t {
+                Type::F64x2 | Type::Mask64x2 => 2,
+                _ => 4,
             }
         };
         match name {
-            "F32x4" | "I32x4" => {
-                let (vec, lane, what) = width(name);
-                if args.len() != 4 {
+            "F32x4" | "I32x4" | "F64x2" => {
+                let (vec, lane, what, lanes) = width(name);
+                if args.len() as i64 != lanes {
                     return Err(format!(
-                        "line {line}: `{what}(..)` takes 4 lanes, got {}",
+                        "line {line}: `{what}(..)` takes {lanes} lanes, got {}",
                         args.len()
                     ));
                 }
@@ -4255,8 +4284,8 @@ impl<'a> Checker<'a> {
                 }
                 Ok(vec)
             }
-            "@f32x4Splat" | "@i32x4Splat" => {
-                let (vec, lane, what) = width(name);
+            "@f32x4Splat" | "@i32x4Splat" | "@f64x2Splat" => {
+                let (vec, lane, what, _) = width(name);
                 if args.len() != 1 {
                     return Err(format!(
                         "line {line}: `{what}.splat(..)` takes 1 argument, got {}",
@@ -4285,7 +4314,8 @@ impl<'a> Checker<'a> {
                 let out = match v {
                     Type::F32x4 => Type::Float32,
                     Type::I32x4 => INT32,
-                    Type::Mask32x4 => Type::Bool,
+                    Type::F64x2 => Type::Float,
+                    Type::Mask32x4 | Type::Mask64x2 => Type::Bool,
                     other => {
                         return Err(format!(
                             "line {line}: `lane` must be called on a vector or a mask \
@@ -4293,10 +4323,15 @@ impl<'a> Checker<'a> {
                         ))
                     }
                 };
-                if crate::types::const_lane(&args[1], 4).is_none() {
+                // The range is the RECEIVER's lane count, so `v.lane(2)` on an
+                // `F64x2` is the compile error a four-lane rule would have let
+                // through.
+                let lanes = lanes_of(&v);
+                if crate::types::const_lane(&args[1], lanes).is_none() {
                     return Err(format!(
-                        "line {line}: a lane index must be a compile-time constant in 0..3 \
-                         (that is what makes `lane` total — there is no bounds check to fall back on)"
+                        "line {line}: a lane index must be a compile-time constant in 0..{} \
+                         (that is what makes `lane` total — there is no bounds check to fall back on)",
+                        lanes - 1
                     ));
                 }
                 Ok(out)
@@ -4326,6 +4361,7 @@ impl<'a> Checker<'a> {
                 let lane = match v {
                     Type::F32x4 => Type::Float32,
                     Type::I32x4 => INT32,
+                    Type::F64x2 => Type::Float,
                     _ => {
                         return Err(format!(
                             "line {line}: `replaceLane` must be called on a vector \
@@ -4336,12 +4372,14 @@ impl<'a> Checker<'a> {
                 // The same constant-index rule `lane` has, and for the same reason:
                 // a runtime index would need either a bounds check or a memory
                 // round-trip, and both backends' replace-lane opcodes take an
-                // immediate.
-                if crate::types::const_lane(&args[1], 4).is_none() {
+                // immediate. The range is the receiver's, as it is for the read.
+                let lanes = lanes_of(&v);
+                if crate::types::const_lane(&args[1], lanes).is_none() {
                     return Err(format!(
-                        "line {line}: a lane index must be a compile-time constant in 0..3 \
+                        "line {line}: a lane index must be a compile-time constant in 0..{} \
                          (that is what makes `replaceLane` total — there is no bounds check \
-                         to fall back on)"
+                         to fall back on)",
+                        lanes - 1
                     ));
                 }
                 if let Some(e) = lane_arg(&args[2], &lane, "`replaceLane`")? {
@@ -4367,7 +4405,11 @@ impl<'a> Checker<'a> {
                 if matches!(m, Type::Err) {
                     return Ok(Type::Err);
                 }
-                if m != Type::Mask32x4 {
+                // Either mask: `allTrue` is `i32x4.all_true` at one width and
+                // `i64x2.all_true` at the other — a different opcode at the same
+                // shape, which is what makes the second mask a table entry here
+                // rather than a second surface.
+                if !matches!(m, Type::Mask32x4 | Type::Mask64x2) {
                     return Err(format!(
                         "line {line}: `{what}` must be called on a mask \
                          (e.g. `(a < b).{what}()`), found {m}"
@@ -4378,8 +4420,9 @@ impl<'a> Checker<'a> {
             // `F32x4.load(xs, i)` / `F32x4.store(xs, i, v)` — four consecutive
             // `Float32`s of an `Array<Float32>` as one value, `i` counted in
             // ELEMENTS (so `load(xs, 1)` reads `xs[1..4]`), bounds-checked once.
-            "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" => {
-                let (vec, lane, what) = width(name);
+            "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
+            | "@f64x2Store" => {
+                let (vec, lane, what, _) = width(name);
                 let store = name.ends_with("Store");
                 let want = if store { 3 } else { 2 };
                 if args.len() != want {
@@ -4478,14 +4521,30 @@ impl<'a> Checker<'a> {
             // is no rule to reproduce either: clearing the sign bit is one line of
             // `floatBits`, which is why `abs1` in `examples/simdbench.vyrn` is a
             // one-liner where `min1` is twenty.
+            //
+            // `F64x2` takes `min`/`max`/`sqrt` and NOT the four roundings, which
+            // is a scope decision rather than an encoder refusal — `f64x2.ceil`
+            // and the rest all exist. What earns the three is what earned them at
+            // the narrow width: `min`/`max` are the NaN rule and the signed zero,
+            // twenty lines of `floatBits` a program would have to get right, and
+            // `sqrt` is the one operation in this RFC that is not writable in Vyrn
+            // at all. A rounding is neither — the four `F32x4` rows are the
+            // weakest block here (one of them a NATIVE LOSS kept on symmetry), and
+            // four more `Measured` rows on a width whose justification is a
+            // reduction loop would be the census justifying itself by symmetry,
+            // which is the thing it exists to prevent. Named so the absence is a
+            // decision; `F64x2.ceil` reports itself through the arm below.
             "@f32x4Min"
             | "@f32x4Max"
             | "@f32x4Sqrt"
             | "@f32x4Ceil"
             | "@f32x4Floor"
             | "@f32x4Trunc"
-            | "@f32x4Nearest" => {
-                let (vec, _, ty) = width(name);
+            | "@f32x4Nearest"
+            | "@f64x2Min"
+            | "@f64x2Max"
+            | "@f64x2Sqrt" => {
+                let (vec, _, ty, _) = width(name);
                 let m = &name[6..];
                 let want = if m == "Min" || m == "Max" { 2 } else { 1 };
                 let what = m.to_lowercase();
@@ -4511,8 +4570,11 @@ impl<'a> Checker<'a> {
             // The parser capitalized whatever followed the type name; put it back,
             // so the message names the spelling the program used.
             other => {
-                let (_, _, ty) = width(other);
-                let m = other.trim_start_matches("@f32x4").trim_start_matches("@i32x4");
+                let (_, _, ty, _) = width(other);
+                let m = other
+                    .trim_start_matches("@f32x4")
+                    .trim_start_matches("@i32x4")
+                    .trim_start_matches("@f64x2");
                 let mut it = m.chars();
                 let m = match it.next() {
                     Some(c) => c.to_lowercase().collect::<String>() + it.as_str(),
@@ -6008,9 +6070,10 @@ impl<'a> Checker<'a> {
         // is untouched — which is exactly why they are spelled on the type name.
         if matches!(
             name,
-            "F32x4" | "I32x4" | "@lane" | "@replaceLane" | "@anyTrue" | "@allTrue"
+            "F32x4" | "I32x4" | "F64x2" | "@lane" | "@replaceLane" | "@anyTrue" | "@allTrue"
         ) || name.starts_with("@f32x4")
             || name.starts_with("@i32x4")
+            || name.starts_with("@f64x2")
         {
             return self.vector_call(name, args, line, scope, fn_ret);
         }

@@ -214,6 +214,53 @@ fn integer_lane_compare_is_signed_and_the_add_does_not_promise_no_overflow() {
     );
 }
 
+/// The wide width's bounds check spans TWO elements, not four (RFC-0083 M4).
+///
+/// This is the one thing the wider lane genuinely changed, and half of it cannot
+/// be seen in output. A span that is too LARGE shows up immediately — the last
+/// valid index stops loading, which `examples/simdwide.vyrn` reads. A span that
+/// is too small does not show up at all: it accepts every legal program and also
+/// accepts a read one element past the end, which is a check that silently stops
+/// being one. So the limit is counted here.
+///
+/// The intrinsics come along for the ride, for the reason the narrow pair is
+/// pinned above: `llvm.minnum.v2f64` returns the non-NaN operand and would make
+/// native the only engine printing `1.000000` for `min(NaN, 1.0)`.
+#[test]
+fn the_wide_load_spans_two_elements_and_is_still_checked_once() {
+    let body = body_of(
+        "fn read(xs: Array<Float64>, i: Int64) -> Float64 {\n\
+         let v = F64x2.min(F64x2.load(xs, i), F64x2.splat(1.0))\n\
+         return F64x2.max(v, F64x2.sqrt(v)).lane(0) + v.lane(1)\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         let xs: Array<Float64> = [1.0, 2.0, 3.0, 4.0]\n\
+         print(read(xs, 0))\n\
+         return 0\n\
+         }\n",
+        "read",
+    );
+    assert_eq!(checks(&body), 1, "one check for two lanes:\n{body}");
+    assert!(
+        body.contains("sub nsw i64 %") && body.contains(", 2\n"),
+        "the limit is `len - 2`; a `len - 4` refuses the last legal index:\n{body}"
+    );
+    assert!(
+        !body.contains(", 4\n"),
+        "a four-element span is the narrow width's, and here it is wrong \
+         in both directions:\n{body}"
+    );
+    assert!(body.contains("@llvm.minimum.v2f64"), "not minnum:\n{body}");
+    assert!(body.contains("@llvm.maximum.v2f64"), "not maxnum:\n{body}");
+    assert!(body.contains("@llvm.sqrt.v2f64"), "not a vector sqrt:\n{body}");
+    assert!(!body.contains("minnum"), "minNum is the wrong rule:\n{body}");
+    assert_eq!(
+        body.matches("getelementptr double, ptr").count(),
+        1,
+        "one element address, and it steps by 8 because the element type says so:\n{body}"
+    );
+}
+
 /// The mask reductions are ONE reduction over the vector, not four lane reads
 /// and a branch chain — which is the whole reason they are builtins rather than
 /// the Vyrn `||`/`&&` `examples/simdbench.vyrn` prices against them. `-O2` can
