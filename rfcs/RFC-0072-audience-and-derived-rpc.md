@@ -461,6 +461,17 @@ rule that could disagree with the router actually serving traffic — the exact
 failure mode RFC-0071 M4 avoided by making the LSP a pure adapter over
 `vyrn_frontend::contracts`. One producer, one table.
 
+> **A third channel, and the property is the same one.** Directives can only
+> cover what a generator derives, and RFC-0074's projections, streams and
+> sockets are written by hand — so in `examples/bin` this table printed three of
+> the eight paths the app answers and still called itself "every". It now also
+> reads the `Route`/`Live`/`Socket` values the program hands to `mount`, by
+> evaluating that call's arguments. That is not a second implementation either:
+> nothing in the command derives a path, so the rule above survives verbatim —
+> every channel READS what something else wrote, one of them a generator and one
+> of them the router's own input. Page routes remain outside all three, and the
+> usage line says so instead of claiming them.
+
 **`list` is a reserved name, so this document's own example cannot be written.**
 `server/api/pastes.vyrn :: list` is the illustration used throughout; `list` is
 reserved (the removed `list([..])` array form), so the tests spell it `recent`.
@@ -578,7 +589,8 @@ them from there rather than from the module whose signature merely names them.
 - `examples/bin` has no `contract.vyrn` and no hand-written client stubs.
 - A page importing `server/store.vyrn` is a checker error naming both files and
   citing the `vyrn.json` key.
-- `vyrn routes` lists every derived and explicit path with its source.
+- `vyrn routes` lists every derived and explicit path with its source. (Page
+  routes excepted — see the third-channel note in "M3 — as landed".)
 - `vyrn why app/routes/index.vyx` prints audience `universal` and its import
   chains.
 - `curl -H 'Accept: application/json' /p/<id>` returns the payload; the same URL

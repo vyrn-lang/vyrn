@@ -186,9 +186,12 @@ GET   /                    app/routes/index.vyx                convention
 
 > **The table is a second CHANNEL, not a second implementation, and it is not
 > read from the map.** It reads the `//@route` comment directives RFC-0072 M3 had
-> the mounting generator emit; `--json` reads the maps and unions the two.
-> `std/ui` emits neither, so no version of this command has printed the page rows
-> above. See "M4 — as landed".
+> the mounting generator emit; `--json` reads the maps and unions the two. A
+> third channel evaluates the arguments of the program's `mount(..)` call, which
+> is where the `explicit` rows above come from — a projection's paths are
+> written, so nothing derives them and no generator can declare them.
+> `std/ui` emits none of the three, so the PAGE rows above are still rows this
+> command has never printed. See "M4 — as landed".
 
 ## Cache interaction
 
@@ -525,6 +528,20 @@ emitting only one is not silently dropped. Today the union is the same set.
 `std/ui` emits neither, so page routes are in neither the table nor the JSON —
 the document's example table shows rows no version of this command has ever
 printed.
+
+> **The `explicit` rows now print; the page rows still do not.** Both channels
+> above read what a GENERATOR wrote, and a hand-written projection has no
+> generator — so `examples/bin` printed three of the eight paths it answers. A
+> third channel closes it by reading the `Route`/`Live`/`Socket` values the
+> program hands `std/http`'s `mount`, evaluated from that call's argument list.
+> It carries no origin, so those rows' `origin` is `null` in `--json`, which is
+> the state this section already describes rather than a new one. Pages are a
+> producer of a different kind: `std/ui` hands `mount` nothing at all — a page
+> router is a `fn(Request) -> Response` that always answers, mounted in
+> `examples/bin` behind an ordinary `if req.path.startsWith("/raw/")` — so the
+> generator knows the tree-relative path and not the prefix the app serves it
+> under, and a directive it emitted would be wrong. Printing pages means giving
+> `std/ui` a route list, not teaching this command another format.
 
 ## Acceptance
 

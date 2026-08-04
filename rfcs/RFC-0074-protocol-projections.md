@@ -425,6 +425,7 @@ for coverage:
   `pastes.vyrn`, not `pastes.http.vyrn`. Showing them means either a second path
   argument at every call site or `vyrn routes` learning to run the mounted
   router, and neither is worth it before M2 gives the table a policy column.
+  (The second of the two is what eventually landed — see M2's note below.)
 - **`derived` carries the route line, not a policy line**, since M1 has no
   policy. Its one reader today is the shadow diagnostic, which names the
   procedure rather than only the path. M2's combinators append to it.
@@ -546,6 +547,15 @@ Four things are smaller or differently shaped than the RFC's text:
   byId max-age=60 etag`), and its reader is still the shadow diagnostic. Showing
   the table needs `vyrn routes` to run the mounted router, which is a separate
   change and not this milestone's.
+
+  > **That change has since landed.** `vyrn routes` reads the values the program
+  > hands `mount` — the arguments of the `mount(..)` call, evaluated after
+  > module-state init — so `examples/bin` prints its three explicit rows, its
+  > `SSE` row and its `WS` row beside the derived three. The arguments and not an
+  > export named `routes()`: an `Array<Route>` a module exports but nobody mounts
+  > is not on the wire, and the composition root is the only place that knows
+  > which lists were passed. The policy each combinator appended is read and not
+  > yet shown; the `source` column reads `explicit`.
 
 `examples/rest.vyrn` is the three-engine evidence: interp, native and wasm print
 the same tag, the same 304 and the same `Location`. `examples/bin` declares the
