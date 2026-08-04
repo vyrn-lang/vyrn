@@ -191,6 +191,49 @@ fn routes_prints_the_resolved_table_with_its_source() {
     }
 }
 
+/// RFC-0073 M4: `--json` is the same table plus each route's DECLARATION, read
+/// from the symbol map the mounting generator baked in — the same reader the
+/// LSP's hover and route lenses use, which is what makes "`vyrn routes --json`
+/// and the LSP agree" a fact about the source rather than a promise.
+#[test]
+fn routes_json_carries_the_declaration_each_path_came_from() {
+    let dir = scratch("json");
+    project(&dir);
+    write(&dir, "server.vyrn", DRIVER);
+    let out = vyrn().arg("routes").arg(dir.join("server.vyrn")).arg("--json").output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let doc = vyrn_frontend::schema::parse_json(&text).unwrap_or_else(|e| panic!("{e}:
+{text}"));
+    let vyrn_frontend::schema::Json::Arr(rows) = doc else { panic!("an array:
+{text}") };
+    let row = rows
+        .iter()
+        .find(|r| r.get("path").and_then(|v| v.as_str()) == Some("/_/pastes/byId"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(row.get("method").and_then(|v| v.as_str()), Some("POST"));
+    assert_eq!(row.get("source").and_then(|v| v.as_str()), Some("convention"));
+    let origin = row.get("origin").unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(origin.get("name").and_then(|v| v.as_str()), Some("byId"));
+    assert!(
+        origin.get("file").and_then(|v| v.as_str()).is_some_and(|f| f.ends_with("pastes.vyrn")),
+        "{text}"
+    );
+    // A line and a column the text table has nowhere to put — the whole reason
+    // the JSON reads the map rather than re-formatting the directives.
+    assert!(matches!(origin.get("line"), Some(vyrn_frontend::schema::Json::Num(n)) if *n > 0.0), "{text}");
+    assert!(matches!(origin.get("col"), Some(vyrn_frontend::schema::Json::Num(n)) if *n > 0.0), "{text}");
+    // Both channels list the same paths: the JSON is a union, and today the
+    // directives and the maps come from one generator over one route list.
+    let table = vyrn().arg("routes").arg(dir.join("server.vyrn")).output().unwrap();
+    let table = String::from_utf8_lossy(&table.stdout);
+    for r in &rows {
+        let p = r.get("path").and_then(|v| v.as_str()).unwrap();
+        assert!(table.contains(p), "`{p}` is in the JSON but not the table:
+{table}");
+    }
+}
+
 #[test]
 fn a_pinned_path_wins_and_routes_says_it_is_an_override() {
     let dir = scratch("pin");

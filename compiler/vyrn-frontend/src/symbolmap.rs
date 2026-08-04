@@ -1,11 +1,16 @@
 //! Reading the symbol map a generator baked into its module (RFC-0073 M3).
 //!
 //! M1 made every generated module carry its own map: `std/symbolmap` renders an
-//! `export fn symbolMap() -> String` whose single `return` is the whole document
-//! as a JSON string literal, appended last. This is the other end — the Rust
-//! side that reads one back, for the CLI (`emit-gen --maps`, which wants the
+//! `export fn symbolMap<Slug>() -> String` whose single `return` is the whole
+//! document as a JSON string literal, appended last. This is the other end — the
+//! Rust side that reads one back, for the CLI (`emit-gen --maps`, which wants the
 //! text) and for the LSP (hover, go-to-definition and route lenses, which want
 //! the entries).
+//!
+//! The `<Slug>` is M4's correction to M1: a top-level name in Vyrn is
+//! program-wide, so a fixed `symbolMap` made two map-emitting generated modules
+//! in one program a name collision. The declaration now carries a slug of the
+//! generator call, and this reader matches the PREFIX.
 //!
 //! Reading is a PARSE, not a run. The map is a string literal, so nothing has to
 //! execute for a consumer to hold it, and the map a consumer gets is by
@@ -63,10 +68,14 @@ impl MappedSymbol {
 /// The JSON document a generated module's `symbolMap()` returns, or `None` for a
 /// generator that emits no map.
 pub fn json_of(gen_source: &str) -> Option<String> {
-    let start = gen_source.rfind("export fn symbolMap()")?;
+    // By PREFIX, not by exact name: a top-level name is program-wide, so the
+    // declaration carries a slug of the generator call that emitted it
+    // (`symbolMapHttpPastes`) and two generated modules in one program do not
+    // collide.
+    let start = gen_source.rfind("export fn symbolMap")?;
     let tokens = crate::lexer::lex(&gen_source[start..]).ok()?;
     let (program, _) = crate::parser::parse_accum(tokens);
-    let f = program.functions.iter().find(|f| f.name == "symbolMap")?;
+    let f = program.functions.iter().find(|f| f.name.starts_with("symbolMap"))?;
     match f.body.stmts.first() {
         Some(Stmt::Return { value: Some(Expr::Str(s)), .. }) => Some(s.clone()),
         _ => None,
@@ -131,7 +140,7 @@ mod tests {
     /// The shape `std/symbolmap` renders, with the tail this reader relies on.
     const GEN: &str = "fn stub() -> Int64 {\n    return 0\n}\n\
 /// The RFC-0073 symbol map for this generated module.\n\
-export fn symbolMap() -> String {\n    return \"{\\\"module\\\":\\\"client(./api)\\\",\\\"symbols\\\":[{\\\"name\\\":\\\"pastesCreate\\\",\\\"origin\\\":{\\\"file\\\":\\\"server/api/pastes.vyrn\\\",\\\"line\\\":28,\\\"col\\\":15,\\\"name\\\":\\\"create\\\"},\\\"derived\\\":{\\\"kind\\\":\\\"rpc\\\",\\\"method\\\":\\\"POST\\\",\\\"path\\\":\\\"/_/pastes/create\\\",\\\"source\\\":\\\"convention\\\"}},{\\\"name\\\":\\\"PasteList\\\",\\\"origin\\\":{\\\"file\\\":\\\"shared/wire.vyrn\\\",\\\"line\\\":12,\\\"col\\\":13,\\\"name\\\":\\\"PasteList\\\"}}]}\"\n}\n";
+export fn symbolMapClientApi() -> String {\n    return \"{\\\"module\\\":\\\"client(./api)\\\",\\\"symbols\\\":[{\\\"name\\\":\\\"pastesCreate\\\",\\\"origin\\\":{\\\"file\\\":\\\"server/api/pastes.vyrn\\\",\\\"line\\\":28,\\\"col\\\":15,\\\"name\\\":\\\"create\\\"},\\\"derived\\\":{\\\"kind\\\":\\\"rpc\\\",\\\"method\\\":\\\"POST\\\",\\\"path\\\":\\\"/_/pastes/create\\\",\\\"source\\\":\\\"convention\\\"}},{\\\"name\\\":\\\"PasteList\\\",\\\"origin\\\":{\\\"file\\\":\\\"shared/wire.vyrn\\\",\\\"line\\\":12,\\\"col\\\":13,\\\"name\\\":\\\"PasteList\\\"}}]}\"\n}\n";
 
     #[test]
     fn a_baked_map_reads_back_with_its_origins_and_derived_facts() {

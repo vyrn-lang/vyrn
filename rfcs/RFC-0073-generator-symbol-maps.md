@@ -1,8 +1,9 @@
 # RFC-0073 — Generator Symbol Maps: Rename Across the Boundary
 
-- **Status:** M1 landed (reflection origins, `std/symbolmap`, `client()`/`rpc()`
-  maps, `vyrn emit-gen --maps`); M2 struck; M3 landed (LSP hover, go-to-def,
-  route lenses); M4 draft
+- **Status:** Implemented. M1 landed (reflection origins, `std/symbolmap`,
+  `client()`/`rpc()` maps, `vyrn emit-gen --maps`); M2 struck; M3 landed (LSP
+  hover, go-to-def, route lenses); M4 landed (cross-boundary rename,
+  `vyrn routes --json`, `http()` maps)
 - **Depends on:** RFC-0033 (`//@origin` directives), RFC-0048 (vyx origins),
   RFC-0053 (generated error mapping), RFC-0050 (LSP references),
   RFC-0071 (contracts — members are the symbols this RFC maps),
@@ -131,6 +132,11 @@ references through the symbol map: every generated symbol whose `origin` is the
 renamed declaration is itself renamed, and its own references follow. The edit
 spans source files only — generated modules are regenerated, never edited.
 
+> **There was nothing to extend, and the new name has to be predicted rather
+> than looked up.** No rename provider existed at all before M4, and the map
+> cannot supply the generated symbol's NEW name — the module carrying it does not
+> exist until the edit lands. See "M4 — as landed".
+
 The payoff is the one the DX survey says no TypeScript framework can offer.
 Because the client is generated from a checked declaration and then typechecked
 as ordinary code, a missed call site is a **build error**, not a silent `any`.
@@ -177,6 +183,12 @@ GET   /                    app/routes/index.vyx                convention
 ```
 
 `--json` emits the merged map for external tooling.
+
+> **The table is a second CHANNEL, not a second implementation, and it is not
+> read from the map.** It reads the `//@route` comment directives RFC-0072 M3 had
+> the mounting generator emit; `--json` reads the maps and unions the two.
+> `std/ui` emits neither, so no version of this command has printed the page rows
+> above. See "M4 — as landed".
 
 ## Cache interaction
 
@@ -420,6 +432,99 @@ line through the map; nothing here needed it, and a generator diagnostic is not
 an LSP read.
 - **M4 — rename.** Cross-boundary rename with regeneration; `vyrn routes` and
   `--json` over the merged map.
+
+### M4 — as landed
+
+`textDocument/rename` (with `prepareRename`) and `vyrn routes --json` both ship,
+and the acceptance line runs against `examples/bin` rather than a fixture. Five
+things the document did not anticipate.
+
+**There was no rename provider to extend — and the machinery to build one on
+already existed.** RFC-0050 shipped `references`, which resolves the binding
+under a cursor and returns its ACTUAL occurrences: member-position tokens
+attributed to their receiver, bare tokens excluded where an in-scope local
+shadows them, comments never lexed at all. That is exactly a rename's reference
+collection, minus one thing — it is keyed by a CURSOR, and a cross-file rename
+knows a NAME. So the last branch of `references` became `references_to(analysis,
+name, qualifiers)` and `references` now calls it; there is one shadow rule and
+one member rule, not two. `qualifiers` is the addition: a name reached as
+`store.listPastes` counts when `store` names the declaring module and an
+unrelated `other.listPastes` does not, which a cursor-keyed query never had to
+decide.
+
+**The reference set is bounded by imports, and that is what makes a token match
+safe.** Vyrn re-exports nothing implicitly, so a name can only occur in a module
+that imports the module declaring it — which the candidate file's own parsed
+imports settle, resolved through `loader::resolve_spec`. Within such a file the
+occurrences are lexer TOKENS, so `recentRows`, four prose mentions of "recent" in
+comments, and `"recent"` inside a string literal all stay put while the import
+binding and the one call move. A `.vyx` contributes its `<script>` body, whose
+lines map back to the file by addition.
+
+**The declaration → generated name direction has to be PREDICTED, not read.** M3
+inverted stub → declaration by looking the stub up in a map that already existed.
+This direction has no map to read: the module carrying `pastesRecent` will not
+exist until the rename lands and the loader regenerates. So the new name is
+derived the way the generator derives it — a prefix the generator chose, then
+`capFirst` of the declaration — which covers `pastesCreate`, `rpcHandlePastesCreate`,
+`PathCreate` and a same-named re-export with one rule. A generated name that does
+not end in the declaration's name REFUSES the whole rename with the reason,
+because a rename that skipped one symbol would leave a call site pointing at
+something nothing generates any more, and the build error would name the wrong
+file.
+
+**M3's route-facts cache answers a different question than a rename asks.** It
+probes mounting roots and stops at the FIRST that claims the file, which settles
+"what is this mounted at" and is why a declaration hover costs one probe. A
+rename asks "what else is named after this", and stopping early is how you
+rewrite the client's call sites and leave the server's: a procedure in
+`examples/bin` is mapped by three generators in three different roots. So rename
+reads every mounting root and unions, and the M3 path is untouched — the
+keystroke and hover budgets are unchanged (`.vyrn` 183–188 ms and `.vyx`
+477–494 ms with the generator cache off, hover 1.04 s cold and under a
+millisecond warm, all identical before and after; a rename costs ~500 ms once).
+
+**Two things the milestone found that were not in it.**
+
+*The REST projection had no map at all.* `http("./pastes")` re-exports each
+procedure under the DECLARATION's own name, so nothing in the emitted source
+records that the projection's `create` is `pastes.vyrn`'s `create` — and renaming
+one without the other breaks the projection. `http()` now emits a map (origins
+only: a projection's paths are written in the projection file, not derived), and
+that also gives its symbols M3's hover and go-to-definition for free.
+
+*Which immediately exposed an M1 bug.* M1 named the map function `symbolMap` in
+every generated module, invisible while exactly one generator emitted one. A
+top-level name in Vyrn is program-wide, so a server root linking both
+`rpc("./server/api")` and a projection's `http("./pastes")` stopped compiling the
+moment the second map existed. The declaration now carries a slug of the
+generator call (`symbolMapHttpPastes`) and the reader matches the prefix. The bug
+was latent before this milestone and would have been hit by the second
+map-emitting generator whenever it arrived.
+
+**And what a partial rename does, since it is the thing the design leans on.**
+Verified rather than argued: applying only the declaration's edit to
+`examples/bin` and building gives `server/api/pastes.http.vyrn:11: generated by
+http("./pastes") ... does not define 'create'` on the server side and `namespace
+'api' ... has no exported member 'pastesCreate'` on the client. A build error
+naming the call site, on both sides of the boundary — never a silent `any`, and
+never a runtime 404. What the rename cannot reach is therefore loud: a `.vyx`
+TEMPLATE expression (only the script body is lexed; a template calls the page's
+own view helpers, so the corpus has none) and the WIRE itself, since renaming a
+procedure moves its derived path and no external HTTP client is in the tree.
+
+**`vyrn routes` was not a formatter over the map, and `--json` only half is.**
+The text table reads `//@route` COMMENT DIRECTIVES that RFC-0072 M3 had the
+mounting generator emit. That is not a second implementation — the derivation
+happens once, in the generator, and both artifacts come out of the same route
+list — but it is a second CHANNEL, and the channels carry different things: a
+directive has nowhere to put the declaration's file, line and column. So `--json`
+reads the maps, which is what makes "`vyrn routes --json` and the LSP agree"
+true by construction, and UNIONS them with the directives so a future generator
+emitting only one is not silently dropped. Today the union is the same set.
+`std/ui` emits neither, so page routes are in neither the table nor the JSON —
+the document's example table shows rows no version of this command has ever
+printed.
 
 ## Acceptance
 

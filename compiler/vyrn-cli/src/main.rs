@@ -55,7 +55,7 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived and pinned path, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -323,7 +323,9 @@ fn real_main() -> ExitCode {
         return dev_cmd(&args[2..]);
     }
     if cmd == "routes" {
-        return routes_cmd(args.get(2).map(|s| s.as_str()));
+        let json = args[2..].iter().any(|a| a == "--json");
+        let file = args.get(2).filter(|a| !a.starts_with('-')).map(|s| s.as_str());
+        return routes_cmd(file, json);
     }
 
     // The remaining commands take an optional file; without one, the manifest
@@ -816,7 +818,19 @@ fn why_cmd(args: &[String]) -> ExitCode {
 ///
 /// The `source` column reads `convention` or `override`, so drift shows up in
 /// review instead of in production.
-fn routes_cmd(file: Option<&str>) -> ExitCode {
+///
+/// `--json` (RFC-0073 M4) is the same table plus the thing the directive cannot
+/// carry: WHERE each route's procedure is declared. That comes from M1's symbol
+/// map, read with `vyrn_frontend::symbolmap` — the very reader the LSP's hover
+/// and route lenses use, which is what makes the RFC's "`vyrn routes --json` and
+/// the LSP agree" true by construction rather than by care.
+///
+/// The two channels are UNIONED rather than one replacing the other. They come
+/// from the same generator over the same route list today, so the union is the
+/// same set; it costs nothing and it keeps the command honest about a future
+/// generator that emits only one of them (`std/ui` emits neither, which is why
+/// page routes are absent from both).
+fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     let path = match file.map(|s| s.to_string()).or_else(manifest_main) {
         Some(p) => p,
         None => {
@@ -863,6 +877,9 @@ fn routes_cmd(file: Option<&str>) -> ExitCode {
             }
         }
     }
+    if json {
+        return routes_json(&mods, rows);
+    }
     if rows.is_empty() {
         println!("(no derived routes in {root_key})");
         return ExitCode::SUCCESS;
@@ -876,6 +893,92 @@ fn routes_cmd(file: Option<&str>) -> ExitCode {
         println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
     ExitCode::SUCCESS
+}
+
+/// `vyrn routes --json` (RFC-0073 M4) — the merged wire table for external
+/// tooling: every route the mounting generator declared, each carrying the
+/// declaration its symbol map names.
+///
+/// `origin` is `null` for a route whose generator emits directives but no map.
+/// That is a real state and not a defect to hide — the JSON says which routes a
+/// tool can follow back to a declaration and which it cannot.
+fn routes_json(
+    mods: &[(String, String)],
+    directives: Vec<(String, String, String, String)>,
+) -> ExitCode {
+    /// `(method, path, procedure, source, origin)`.
+    type Row = (String, String, String, String, Option<vyrn_frontend::symbolmap::MappedSymbol>);
+    let mut rows: Vec<Row> = directives
+        .into_iter()
+        .map(|(method, path, proc, src)| (method, path, proc, src, None))
+        .collect();
+    for (_, src) in mods {
+        for m in vyrn_frontend::symbolmap::read(src) {
+            let Some(path) = m.derived("path") else { continue };
+            let method = m.derived("method").unwrap_or("POST").to_string();
+            let source = m.derived("source").unwrap_or("convention").to_string();
+            match rows.iter_mut().find(|r| r.0 == method && r.1 == path) {
+                // A procedure is mapped once per generator that mounts it, and
+                // all of them name the same declaration at the same place — the
+                // agreement M1 put under test — so the first one settles it.
+                Some(row) => {
+                    if row.4.is_none() {
+                        row.4 = Some(m);
+                    }
+                }
+                None => {
+                    let path = path.to_string();
+                    let proc = m.decl.clone();
+                    rows.push((method, path, proc, source, Some(m)));
+                }
+            }
+        }
+    }
+    rows.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
+    println!("[");
+    for (i, (method, path, proc, source, origin)) in rows.iter().enumerate() {
+        let comma = if i + 1 == rows.len() { "" } else { "," };
+        let origin = match origin {
+            Some(m) => format!(
+                "{{ \"file\": {}, \"line\": {}, \"col\": {}, \"name\": {} }}",
+                json_str(&m.file),
+                m.line,
+                m.col,
+                json_str(&m.decl)
+            ),
+            None => "null".to_string(),
+        };
+        println!(
+            "  {{ \"method\": {}, \"path\": {}, \"procedure\": {}, \"source\": {}, \"origin\": {} }}{comma}",
+            json_str(method),
+            json_str(path),
+            json_str(proc),
+            json_str(source),
+            origin
+        );
+    }
+    println!("]");
+    ExitCode::SUCCESS
+}
+
+/// A JSON string literal. Paths reach here as the loader keyed them, which on
+/// Windows can still hold a backslash, so escaping is not optional.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// `vyrn why <file>` (RFC-0072 M1) — the audience of a module, the path segment

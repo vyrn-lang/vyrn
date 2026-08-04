@@ -278,6 +278,42 @@ fn a_projection_beside_the_procedures_is_not_mounted_as_one() {
     assert!(!src.contains("users.http/routes"), "{src}");
 }
 
+/// RFC-0073 M4: a projection carries a symbol map, and it does not collide with
+/// the RPC surface's.
+///
+/// M1 named the map function `symbolMap` in every generated module, which was
+/// invisible while exactly one generator emitted one. `examples/rest.vyrn` links
+/// BOTH — `rpc("./fullstack/server/api")` and the projection's
+/// `http("./users")` — and a top-level name in Vyrn is program-wide, so a fixed
+/// name made the two a build error. The name now carries a slug of the generator
+/// call that emitted it.
+#[test]
+fn two_generated_maps_in_one_program_do_not_collide_and_both_read_back() {
+    let example = repo_dir("examples/rest.vyrn");
+    let out = vyrn().arg("emit-gen").arg(&example).arg("--maps").output().expect("vyrn emit-gen");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let docs: Vec<&str> = text.lines().filter(|l| l.starts_with('{')).collect();
+    let http = docs
+        .iter()
+        .find(|d| d.contains("\"module\":\"http("))
+        .unwrap_or_else(|| panic!("a projection map:
+{text}"));
+    // The projection re-exports each procedure under the DECLARATION's own name,
+    // which is exactly why the map is the only record that the two are one thing.
+    assert!(http.contains("\"name\":\"byId\""), "{http}");
+    assert!(http.contains("users.vyrn"), "{http}");
+    assert!(docs.iter().any(|d| d.contains("\"module\":\"rpc(")), "an rpc map too:
+{text}");
+
+    // And the generated sources carry two DIFFERENT map declarations.
+    let src = vyrn().arg("emit-gen").arg(&example).output().expect("vyrn emit-gen");
+    let src = String::from_utf8_lossy(&src.stdout);
+    assert!(src.contains("export fn symbolMapHttpUsers()"), "{src}");
+    assert!(!src.contains("export fn symbolMap()"), "the fixed name is gone:
+{src}");
+}
+
 // ---- M2: cache, validators, conditionals -----------------------------------
 
 /// A driver that mounts the projection and prints one labelled answer per line:

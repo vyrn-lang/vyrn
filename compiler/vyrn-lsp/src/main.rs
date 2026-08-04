@@ -27,6 +27,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 mod contracts;
+mod rename;
 mod templates;
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
@@ -43,12 +44,14 @@ use lsp_types::{
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeParams, InitializeResult, InsertTextFormat, Location, MarkupContent, MarkupKind,
-    OneOf, Position,
-    PublishDiagnosticsParams, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
+    OneOf, Position, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, RenameOptions, RenameParams, SemanticToken,
+    SemanticTokenModifier, SemanticTokenType,
     SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
     SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
     SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    WorkspaceEdit,
 };
 
 use vyrn_frontend::{
@@ -449,6 +452,14 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
         // so registering this overrides VS Code's dumb textual occurrence
         // highlighting — comments and out-of-scope same-named bindings are excluded.
         document_highlight_provider: Some(OneOf::Left(true)),
+        // RFC-0073 M4: cross-boundary rename. `prepare` is advertised because the
+        // refusal is the interesting half — a cursor that is not on a top-level
+        // declaration, or on a generated name at a call site, is told so BEFORE
+        // the user types a replacement, instead of after.
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         // Whole-document formatting (RFC-0017): the handler runs `vyrn_frontend::fmt`
         // and returns one full-range replace. VS Code format-on-save then works.
         document_formatting_provider: Some(OneOf::Left(true)),
@@ -598,6 +609,17 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         "textDocument/codeAction" => {
             Response::new_ok(req.id, handle_code_action(server, req.params))
         }
+        // RFC-0073 M4: rename, and the pre-flight that refuses early. Both
+        // answer an ERROR rather than a null when there is nothing to rename —
+        // the client shows the message, which is the whole point of saying why.
+        "textDocument/prepareRename" => match handle_prepare_rename(server, req.params) {
+            Ok(r) => Response::new_ok(req.id, Some(r)),
+            Err(msg) => Response::new_err(req.id, -32803 /* RequestFailed */, msg),
+        },
+        "textDocument/rename" => match handle_rename(server, req.params) {
+            Ok(e) => Response::new_ok(req.id, Some(e)),
+            Err(msg) => Response::new_err(req.id, -32803, msg),
+        },
         "textDocument/formatting" => Response::new_ok(req.id, handle_formatting(server, req.params)),
         "textDocument/semanticTokens/full" => {
             Response::new_ok(req.id, handle_semantic_tokens_full(server, req.params))
@@ -2424,7 +2446,7 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
         // map-emitting generator — a handful in a real project, and none at all
         // in a directory that mounts nothing, which is what keeps a hover in an
         // ordinary module from paying for this at all.
-        mounting_roots(path).into_iter().find_map(|cand| {
+        mounting_roots(path, RPC_GENERATORS).into_iter().find_map(|cand| {
             let text = server
                 .docs
                 .get(&cand)
@@ -2455,29 +2477,79 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
     cache.get(path).cloned().unwrap_or_else(|| Rc::new(Vec::new()))
 }
 
-/// The `.vyrn` roots near `path` that call a generator which emits a symbol map
-/// (`rpc`/`rpcServer`/`client`/`rpcClient`/`rpcInProcess`), nearest first.
+/// The generators whose maps carry a DERIVED ROUTE — what a hover and a lens are
+/// asking about.
+const RPC_GENERATORS: &[&str] =
+    &["rpc(", "rpcServer(", "client(", "rpcClient(", "rpcInProcess("];
+
+/// Every generator that emits a map at all. The REST projection's is route-less
+/// (its paths are written in the projection file, not derived), so it is useless
+/// to a hover and indispensable to a RENAME — `http("./pastes")` re-exports each
+/// procedure under its own name, and nothing else records that the two `create`s
+/// are the same declaration.
+const MAP_GENERATORS: &[&str] = &[
+    "rpc(",
+    "rpcServer(",
+    "client(",
+    "rpcClient(",
+    "rpcInProcess(",
+    "http(",
+];
+
+/// The `.vyrn` roots near `path` that call one of `gens`, nearest first.
 ///
 /// A textual filter and not an analysis: the point is to analyze as few roots as
 /// possible, and a root that never calls one of these cannot map anything.
-fn mounting_roots(path: &str) -> Vec<Url> {
+fn mounting_roots(path: &str, gens: &[&str]) -> Vec<Url> {
     let file = std::path::Path::new(path);
     let Some(dir) = file.parent() else { return Vec::new() };
     let app_root = app_root_for(dir);
     let mut files = Vec::new();
-    collect_vyrn(&app_root, &app_root, 0, &mut files);
+    collect_vyrn(&app_root, 0, &mut files);
     let mut scored: Vec<(usize, std::path::PathBuf)> = files
         .into_iter()
         .filter(|p| {
             let src = std::fs::read_to_string(p).unwrap_or_default();
-            ["rpc(", "rpcServer(", "client(", "rpcClient(", "rpcInProcess("]
-                .iter()
-                .any(|g| src.contains(g))
+            gens.iter().any(|g| src.contains(g))
         })
         .map(|p| (path_distance(&p, dir), p))
         .collect();
     scored.sort_by_key(|(d, _)| *d);
     scored.into_iter().filter_map(|(_, p)| Url::from_file_path(p).ok()).collect()
+}
+
+/// RFC-0073 M4: every generated symbol standing for a declaration in `path`,
+/// from EVERY generator that maps the file — not just the first one found.
+///
+/// This is where a rename's needs diverge from a hover's. A hover asks "what is
+/// this mounted at" and one answer settles it, so [`route_facts_for_file`] stops
+/// at the first root that claims the file. A rename asks "what else is named
+/// after this", and stopping early is how you rewrite the client's call sites and
+/// leave the server's — a procedure in `examples/bin` is mapped by three
+/// generators (`client`, `rpc`, `http`) living in three different roots, and all
+/// three names have to move together or none of them should.
+fn all_mapped_symbols(server: &Server, path: &str) -> Vec<MappedSymbol> {
+    let mut out: Vec<MappedSymbol> = route_facts_for_file(server, path).as_ref().clone();
+    let overlays = overlays_of(server);
+    for cand in mounting_roots(path, MAP_GENERATORS) {
+        let Some(text) = server
+            .docs
+            .get(&cand)
+            .cloned()
+            .or_else(|| uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok()))
+        else {
+            continue;
+        };
+        let a = analyze_doc(&cand, &text, &overlays);
+        for m in &a.symbol_maps {
+            if vyrn_frontend::symbolmap::same_file(&m.file, path)
+                && !out.iter().any(|o| o.name == m.name && o.line == m.line)
+            {
+                out.push(m.clone());
+            }
+        }
+    }
+    out
 }
 
 /// The mapped symbols for the document `uri`, in declaration order — what a
@@ -2514,6 +2586,70 @@ fn derived_hover_note(server: &Server, uri: &Url, line: usize, col: usize) -> Op
     m.route_line()
 }
 
+// ---------------------------------------------------------------------------
+// RFC-0073 M4 — cross-boundary rename.
+//
+// The declaration is resolved here (it needs the server's cached analysis and
+// the M3 route-facts cache); everything the rename then DOES lives in
+// `rename.rs`, which is pure over what these two hand it.
+// ---------------------------------------------------------------------------
+
+/// The rename target under a `textDocument/{prepareRename,rename}` position, or
+/// the reason there is none.
+///
+/// A generator input (`.vyx`) is refused outright, and says why: its declarations
+/// are not what a generated symbol maps back to, and the file this server would
+/// have to edit is the synthesized module — a build artifact.
+fn rename_target(
+    server: &Server,
+    pos: &TextDocumentPositionParams,
+) -> Result<(rename::Target, Url), String> {
+    let uri = &pos.text_document.uri;
+    if !is_vyrn_uri(uri) {
+        return Err("rename works on a `.vyrn` declaration; a `.vyx` is a generator input".into());
+    }
+    let (line, col) = to_frontend(&pos.position);
+    let path = uri_path(uri).ok_or_else(|| "this document has no file path".to_string())?;
+    let (analysis, _) = lookup(server, uri).ok_or_else(|| {
+        "this document has not been analyzed yet — save it once and try again".to_string()
+    })?;
+    let target = rename::target_at(analysis, &path, line, col)?;
+    Ok((target, uri.clone()))
+}
+
+/// `textDocument/prepareRename` — the range and placeholder, or the refusal.
+fn handle_prepare_rename(
+    server: &Server,
+    params: serde_json::Value,
+) -> Result<PrepareRenameResponse, String> {
+    let p: TextDocumentPositionParams =
+        serde_json::from_value(params).map_err(|e| e.to_string())?;
+    let (target, _) = rename_target(server, &p)?;
+    Ok(rename::prepare(&target))
+}
+
+/// `textDocument/rename` — the edit, spanning SOURCE files only.
+fn handle_rename(server: &Server, params: serde_json::Value) -> Result<WorkspaceEdit, String> {
+    let p: RenameParams = serde_json::from_value(params).map_err(|e| e.to_string())?;
+    let (target, uri) = rename_target(server, &p.text_document_position)?;
+    let overlays = overlays_of(server);
+    // The load options carry the manifest's aliases, so an importing module that
+    // reaches the declaration through a dependency alias resolves the same way
+    // the linker resolves it.
+    let opts = load_context(&uri, &overlays)
+        .map(|(o, _, _)| o)
+        .unwrap_or_else(|| vyrn_frontend::loader::LoadOptions {
+            std_root: std_root(),
+            ..Default::default()
+        });
+    // M1's map, read in the other direction: every symbol a generator maps ONTO
+    // this file, from which the declaration's own are selected.
+    let path = uri_path(&uri).ok_or_else(|| "this document has no file path".to_string())?;
+    let maps = all_mapped_symbols(server, &path);
+    let (analysis, _) = lookup(server, &uri).ok_or_else(|| "no analysis".to_string())?;
+    rename::workspace_edit(&target, &p.new_name, &maps, analysis, &uri, &overlays, &opts)
+}
+
 /// The `.vyrn` roots to try as owners of `vyx_path`, most-likely first. Finds the
 /// app root (nearest ancestor with `vyrn.json`, else the nearest ancestor holding
 /// a generator-importing `.vyrn`, else the `.vyx`'s own directory), collects the
@@ -2527,7 +2663,7 @@ fn candidate_owners(vyx_path: &str) -> Vec<Url> {
     let app_root = app_root_for(vyx_dir);
 
     let mut files = Vec::new();
-    collect_vyrn(&app_root, &app_root, 0, &mut files);
+    collect_vyrn(&app_root, 0, &mut files);
 
     // Score each candidate from a cheap textual read (no analysis yet).
     let mut scored: Vec<(i32, usize, std::path::PathBuf)> = files
@@ -2609,16 +2745,23 @@ fn has_generator_import(src: &str) -> bool {
 
 /// Recursively collect `.vyrn` files under `root` (skipping vendored/hidden and
 /// build dirs), stopping once [`MAX_OWNER_CANDIDATES`] are gathered.
-fn collect_vyrn(
-    root: &std::path::Path,
+fn collect_vyrn(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    collect_sources(dir, depth, MAX_OWNER_CANDIDATES, &["vyrn"], out);
+}
+
+/// The walk itself, over any extension set and any cap — RFC-0073 M4's rename
+/// wants `.vyx` too, and a much higher cap, because a file it fails to visit is
+/// a call site it fails to rename.
+fn collect_sources(
     dir: &std::path::Path,
     depth: usize,
+    cap: usize,
+    exts: &[&str],
     out: &mut Vec<std::path::PathBuf>,
 ) {
-    if out.len() >= MAX_OWNER_CANDIDATES || depth > MAX_WALK_UP {
+    if out.len() >= cap || depth > MAX_WALK_UP {
         return;
     }
-    let _ = root;
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut subdirs = Vec::new();
     for e in entries.flatten() {
@@ -2635,13 +2778,17 @@ fn collect_vyrn(
                 continue;
             }
             subdirs.push(p);
-        } else if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
+        } else if p
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| exts.contains(&x))
+        {
             out.push(p);
         }
     }
     for sub in subdirs {
-        collect_vyrn(root, &sub, depth + 1, out);
-        if out.len() >= MAX_OWNER_CANDIDATES {
+        collect_sources(&sub, depth + 1, cap, exts, out);
+        if out.len() >= cap {
             return;
         }
     }

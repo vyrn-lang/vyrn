@@ -2951,11 +2951,47 @@ pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange>
         .max_by_key(|s| (s.file.is_none(), s.line))
     {
         let (s_line, s_col, s_local) = (sym.line, sym.col, sym.file.is_none());
-        let mut out = Vec::new();
-        for t in &analysis.tokens {
-            if t.text != name || is_member_position(analysis, t) {
+        let mut out = references_to(analysis, &name, &[]);
+        if s_local {
+            for r in &mut out {
+                r.write = r.line == s_line && r.col == s_col;
+            }
+        }
+        return out;
+    }
+
+    // Unresolved (a keyword, an unknown name, a builtin): no binding to
+    // highlight — an empty list, which suppresses the editor's word-match.
+    Vec::new()
+}
+
+/// Every occurrence of the top-level `name` in this document, for a caller that
+/// knows the name but has no cursor on it — the cross-file half of the RFC-0073
+/// M4 rename, where the name is carried in from another file (or derived from a
+/// symbol map) rather than read off a token.
+///
+/// `qualifiers` are the namespace bindings the name is ALSO reached through, so
+/// `store.listPastes` counts when `store` names the declaring module and an
+/// unrelated `other.listPastes` does not. The shadow rule is [`references`]'s
+/// own: a bare occurrence inside a function that binds the same name locally is
+/// the LOCAL, and never a reference to the declaration.
+///
+/// Nothing here is a textual search. The occurrences are lexer TOKENS, so a
+/// mention in a comment, a substring of a longer identifier (`recentRows`), and
+/// the same letters inside a string literal are all excluded by construction —
+/// which is what makes it safe to run over a file this server has not linked.
+pub fn references_to(analysis: &Analysis, name: &str, qualifiers: &[String]) -> Vec<RefRange> {
+    let mut out = Vec::new();
+    for t in &analysis.tokens {
+        if t.text != name {
+            continue;
+        }
+        if is_member_position(analysis, t) {
+            let recv = receiver_before_dot(analysis, t.line, t.col);
+            if !recv.is_some_and(|r| qualifiers.iter().any(|q| *q == r)) {
                 continue;
             }
+        } else {
             let shadowed = enclosing_fn_line(analysis, t.line).is_some_and(|fl| {
                 analysis
                     .locals
@@ -2965,15 +3001,10 @@ pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange>
             if shadowed {
                 continue;
             }
-            let write = s_local && t.line == s_line && t.col == s_col;
-            out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write });
         }
-        return dedup_refs(out);
+        out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write: false });
     }
-
-    // Unresolved (a keyword, an unknown name, a builtin): no binding to
-    // highlight — an empty list, which suppresses the editor's word-match.
-    Vec::new()
+    dedup_refs(out)
 }
 
 /// Drop duplicate ranges (overlapping scopes could otherwise double-list a
