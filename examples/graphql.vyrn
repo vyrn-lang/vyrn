@@ -1,0 +1,113 @@
+/// A GraphQL query is answered (RFC-0085 M1), over the SAME procedures
+/// `examples/shelf` publishes over RPC, Connect, REST and an SDL document —
+/// `examples/shelf/server/api/books.vyrn`, reached here directly so the executor
+/// is an ordinary three-way parity citizen (interp == native == wasm).
+///
+/// `sdl(contract)` has always emitted a schema for these procedures and nothing
+/// could call it. `graphqlServer(contract)` walks the same `iface.functions` and
+/// emits the dispatcher, so what the document declares and what the endpoint
+/// answers are one list, not two.
+///
+/// The line worth reading is the first one printed: `{ browse { books { title } } }`
+/// answers titles and NOTHING else. The store computed each book's id, url, tags
+/// and rating and `toJson` encoded all of them; the projection left them out. That
+/// is the decision RFC-0085 rests on — field selection OMITS, it does not avoid
+/// computing — and it is what RFC-0074 M4b's `.lazy(..)` will later have to break.
+///
+/// Inspect the generated resolver table with:  vyrn emit-gen examples/graphql.vyrn
+import { graphqlServer } from "std/graphql"
+import { graphqlHandle } from graphqlServer("./shelf/server/api/books")
+
+/// `POST /graphql` with `body`, printed with its status.
+fn ask(label: String, body: String) {
+    let req = Request { method: "POST", path: "/graphql", headers: [:], body: body }
+    match graphqlHandle(req) {
+        Some(r) => print("\{label} -> \{r.status} \{r.body}"),
+        None => print("\{label} -> unrouted"),
+    }
+}
+
+fn main() -> Int64 {
+    // The acceptance case. Titles, and nothing else.
+    ask("{ browse { books { title } } }", "{ browse { books { title } } }")
+
+    // The same request as a GraphQL-over-HTTP JSON envelope — what a real client
+    // POSTs — answering identically.
+    ask("envelope", "{\"query\": \"{ browse { books { title } } }\"}")
+
+    // A leaf is taken WHOLE: `books` selects no subfields, so each book arrives
+    // entire. Nothing here is lazy; the difference is only what is kept.
+    ask("{ browse { books } }", "{ browse { books } }")
+
+    // A root field whose type is the JSON scalar (`Map<String, Int64>`).
+    ask("{ tags }", "{ tags }")
+
+    // A field the schema does not declare: a GraphQL error NAMING it, on the
+    // channel a client reads — not a trap and not a 500.
+    ask("{ shelved { title } }", "{ shelved { title } }")
+
+    // `mut fn add` is a Mutation field, read off the author's own declaration
+    // (RFC-0074 M4a) by the same rule that put it under `type Mutation` in the
+    // SDL. Asking for it under `query` names the root it is not on.
+    ask("{ add { title } }", "{ add { title } }")
+
+    // In the table, and refusing by NAME: decoding arguments into the input
+    // record is M2, and a declared field silently missing from the executor is
+    // exactly the divergence the shared walk exists to prevent.
+    ask("mutation { add { title } }", "mutation { add { title } }")
+    ask("{ byId { title } }", "{ byId { title } }")
+
+    // M2's syntax is refused where it is written rather than quietly dropped.
+    ask("alias", "{ shelf: browse { books { title } } }")
+    ask("arguments", "{ byId(id: 1) { title } }")
+
+    // One root field per request: two of them raise partial data beside a
+    // populated `errors`, which is the whole of M3.
+    ask("two roots", "{ browse { books } tags }")
+
+    // The transport's own answers: the wrong method is an HTTP status (nothing
+    // parsed a query), and another path is not ours at all.
+    match graphqlHandle(Request { method: "GET", path: "/graphql", headers: [:], body: "" }) {
+        Some(r) => print("GET /graphql -> \{r.status} \{r.body}"),
+        None => print("GET /graphql -> unrouted"),
+    }
+    match graphqlHandle(Request { method: "POST", path: "/_/books/browse", headers: [:], body: "" }) {
+        Some(r) => print("POST /_/books/browse -> \{r.status}"),
+        None => print("POST /_/books/browse -> unrouted (not our path)"),
+    }
+    return 0
+}
+
+test "the projection omits every field the query did not select" {
+    let r = graphqlHandle(Request {
+            method: "POST",
+            path: "/graphql",
+            headers: [:],
+            body: "{ browse { books { title } } }",
+        })
+    let body = match r {
+        Some(res) => res.body,
+        None => "",
+    }
+    assert(body.contains("\"title\":\"SICP\""))
+    // The absence is the assertion: every one of these was computed and encoded
+    // by the procedure, and the projection dropped it.
+    assert(body.contains("url") == false)
+    assert(body.contains("rating") == false)
+    assert(body.contains("tags") == false)
+    assert(body.contains("\"id\"") == false)
+}
+
+test "an undeclared field is a GraphQL error naming it" {
+    let r = graphqlHandle(Request {
+            method: "POST",
+            path: "/graphql",
+            headers: [:],
+            body: "{ shelved }",
+        })
+    let body = match r {
+        Some(res) => res.body,
+        None => "",
+    }
+    assertEq(body, "{\"errors\":[{\"message\":\"Cannot query field `shelved` on type `Query`.\"}]}")
+}

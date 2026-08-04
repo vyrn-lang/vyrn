@@ -13,8 +13,9 @@ import { connectServer } from "std/connect"
 import { connectHandle } from connectServer("./server/api/books")
 import { openapi } from "std/openapi"
 import { openapiJson } from openapi("./server/api/books")
-import { sdl } from "std/graphql"
+import { sdl, graphqlServer } from "std/graphql"
 import { sdlText } from sdl("./server/api/books")
+import { graphqlHandle } from graphqlServer("./server/api/books")
 import { pages } from "std/ui"
 import { route } from pages("./server/routes")
 import { tw } from "std/tw"
@@ -65,14 +66,19 @@ fn routed(req: Request) -> Response {
     if req.method == "GET" && req.path == "/schema.graphql" {
         return Response { status: 200, contentType: "application/graphql", body: sdlText(), vary: "", headers: [:] }
     }
-    // rpcHandle (the derived /_/* surface) and connectHandle (the Connect
-    // /<service>.<Proc> surface) mount side by side — one api directory, two
-    // protocols; anything else routes.
+    // rpcHandle (the derived /_/* surface), connectHandle (the Connect
+    // /<service>.<Proc> surface) and graphqlHandle (POST /graphql) mount side by
+    // side — one api directory, three protocols; anything else routes. The
+    // schema served above is no longer a description of an API that does not
+    // exist at any endpoint (RFC-0085 M1).
     return match rpcHandle(req) {
         Some(r) => r,
         None => match connectHandle(req) {
             Some(r) => r,
-            None => route(req),
+            None => match graphqlHandle(req) {
+                Some(r) => r,
+                None => route(req),
+            },
         },
     }
 }
@@ -99,5 +105,8 @@ fn main() -> Int64 {
     print("/openapi.json -> \{oa.status} (\{oa.body.byteLength} bytes)")
     let gql = handle(Request { method: "GET", path: "/schema.graphql", headers: [:], body: "" })
     print("/schema.graphql -> \{gql.status} (\{gql.body.byteLength} bytes)")
+    // And the schema is answerable: titles, and nothing else on the wire.
+    let q = handle(Request { method: "POST", path: "/graphql", headers: [:], body: "{ browse { books { title } } }" })
+    print("POST /graphql -> \{q.status}: \{q.body}")
     return 0
 }

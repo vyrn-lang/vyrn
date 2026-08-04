@@ -40,7 +40,10 @@
 ///     are NOT in `moduleInterface` reflection, so operation descriptions are
 ///     absent (gap recorded in RFC-0038).
 ///
-/// Scope: a DOCUMENT, not an executor. A GraphQL executor is deferred (RFC-0038).
+/// The EXECUTOR (RFC-0085 M1) lives at the bottom of this file: `graphqlServer`
+/// emits a `graphqlHandle(req) -> Option<Response>` answering `POST /graphql`
+/// over the SAME `iface.functions` walk the SDL reads, so a field the schema
+/// declares and a field the executor dispatches are one list.
 ///
 /// Inspect the synthesized module with:  vyrn emit-gen <file>
 
@@ -52,6 +55,19 @@
 // ASCII transform / ASCII-boundary rebuild of already-valid UTF-8, so the `Err`
 // arm is unreachable — routed through the one shared `fromBytesOr`.
 import { fromBytesOr } from "std/strings"
+
+// The executor's half (RFC-0085 M1). The value tree is what a projection is
+// written over — see `gqlProject` — and the shared cursor is what the query
+// language is parsed with (RFC-0054).
+import { Json, JsonField, emit } from "std/json"
+import { parseJson } from "std/jsonread"
+import { Scanner, scanner, skipWs, ident, peek, advance, atEnd } from "std/scan"
+
+// THE serializability rule (RFC-0072 M2), shared rather than restated — the
+// executor calls `toJson` on a procedure's return exactly as `std/rpc` and
+// `std/http` do, so it is governed by the same predicate they are. `std/http`
+// imports it for the same reason.
+import { validateContract } from "std/rpc"
 
 /// The bytes `ba[s..e)` as a String ("" on the impossible non-UTF-8 slice).
 fn gqlSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
@@ -554,6 +570,29 @@ fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
 // Root fields.
 // ===========================================================================
 
+/// The ROOT a procedure's field belongs under, lowercase as a GraphQL operation
+/// type is spelled: `"mutation"` for a `mut fn`, `"query"` for everything else.
+///
+/// The author's DECLARATION, read off `FnInfo.mutates` (RFC-0074 M4a) — and read
+/// in ONE place, because the SDL emitter below and the executor's resolver table
+/// (RFC-0085 M1) both need it. Two copies of this two-line rule is exactly the
+/// divergence where a field is declared under one root and answered under the
+/// other.
+fn gqlRootOf(f: FnInfo) -> String {
+    if f.mutates {
+        return "mutation"
+    }
+    return "query"
+}
+
+/// The GraphQL root TYPE name for an operation type (`query` => `Query`).
+export fn gqlRootType(root: String) -> String {
+    if root == "mutation" {
+        return "Mutation"
+    }
+    return "Query"
+}
+
 /// One root field for a procedure: `name(input: <Req>Input): <Ret>` (or no args
 /// for a zero-parameter procedure). A `Unit` return maps to `Boolean`.
 fn gqlRootField(f: FnInfo, iface: ModuleInterface) -> String {
@@ -591,7 +630,7 @@ export gen fn sdl(contract: String) -> String {
     let mut queries = ""
     let mut mutations = ""
     for f in iface.functions {
-        if f.mutates {
+        if gqlRootOf(f) == "mutation" {
             mutations = mutations + gqlRootField(f, iface)
         } else {
             queries = queries + gqlRootField(f, iface)
@@ -619,6 +658,424 @@ export fn sdlText() -> String {
     return \{doc}
 }
 """)
+}
+
+// ===========================================================================
+// The executor (RFC-0085 M1) — RUNTIME code, not generation.
+//
+// Everything above this line runs at comptime and bakes a document. Everything
+// below runs in the served process: it parses one request's query, projects the
+// value a procedure returned, and writes the reply. It lives in this file so the
+// generated module is nothing but an import block and a resolver table — the
+// same division `std/ui` draws when its generated pages import `PageError` back
+// from `std/ui`.
+// ===========================================================================
+
+/// One selected field: its name and whatever it selects in turn.
+///
+/// No alias and no arguments — both are RFC-0085 M2, and the parser REFUSES them
+/// by name rather than dropping them, so a query that means something this
+/// milestone cannot do is never answered as if it meant something else.
+export type GqlSel = { name: String, subs: Array<GqlSel> }
+
+/// A parsed selection set, or the reason it would not parse (`err != ""`).
+type GqlSet = { sels: Array<GqlSel>, err: String }
+
+/// A parsed operation: its root (`"query"` / `"mutation"`), its selected fields,
+/// and the reason it would not parse (`err != ""`).
+export type GqlQuery = { root: String, sels: Array<GqlSel>, err: String }
+
+/// The GraphQL flavor of the shared cursor (RFC-0054): `#` line comments, `"`
+/// strings with `\` escapes, no block comments — the query language's own
+/// lexical rules, so a `{` inside a string argument is never read as structure.
+fn gqlScanner(src: String) -> Scanner {
+    return scanner(src, "#", "", "", 34, -1, 92)
+}
+
+/// Whether the cursor sits on byte `b`.
+fn gqlAt(sc: Scanner, b: UInt8) -> Bool {
+    return peek(sc) == Int64(b)
+}
+
+/// A failed parse carrying `why`.
+fn gqlSetErr(why: String) -> GqlSet {
+    return GqlSet { sels: [], err: why }
+}
+
+/// Parse a selection set, the cursor sitting on its opening `{`.
+///
+/// Commas are insignificant in GraphQL — the spec lists them with whitespace —
+/// so they are skipped rather than required.
+fn gqlSelSet(sc: modify Scanner) -> GqlSet {
+    if gqlAt(sc, '{') == false {
+        return gqlSetErr("expected `{` to open a selection set")
+    }
+    advance(sc)
+    let mut out: Array<GqlSel> = []
+    skipWs(sc)
+    while atEnd(sc) == false && gqlAt(sc, '}') == false {
+        if gqlAt(sc, ',') {
+            advance(sc)
+            skipWs(sc)
+            continue
+        }
+        let name = ident(sc)
+        if name == "" {
+            return gqlSetErr("expected a field name in a selection set")
+        }
+        skipWs(sc)
+        if gqlAt(sc, ':') {
+            return gqlSetErr("field `" + name + "`: aliases are not supported yet (RFC-0085 M2)")
+        }
+        if gqlAt(sc, '(') {
+            return gqlSetErr("field `" + name + "`: field arguments are not supported yet (RFC-0085 M2)")
+        }
+        let mut subs: Array<GqlSel> = []
+        if gqlAt(sc, '{') {
+            let inner = gqlSelSet(sc)
+            if inner.err != "" {
+                return inner
+            }
+            subs = inner.sels
+        }
+        out.push(GqlSel { name: name, subs: subs })
+        skipWs(sc)
+    }
+    if gqlAt(sc, '}') == false {
+        return gqlSetErr("unterminated selection set: expected `}`")
+    }
+    advance(sc)
+    if out.length == 0 {
+        return gqlSetErr("a selection set must select at least one field")
+    }
+    return GqlSet { sels: out, err: "" }
+}
+
+/// Parse one executable operation: an optional `query`/`mutation` keyword and
+/// operation name, then a selection set. Anything past it is a second operation,
+/// which needs `operationName` to choose between — RFC-0085 M2.
+export fn gqlParseQuery(src: String) -> GqlQuery {
+    let mut sc = gqlScanner(src)
+    skipWs(sc)
+    let mut root = "query"
+    if gqlAt(sc, '{') == false {
+        let kw = ident(sc)
+        if kw == "" {
+            return GqlQuery { root: root, sels: [], err: "the request carried no query" }
+        }
+        if kw != "query" && kw != "mutation" {
+            return GqlQuery {
+                root: root,
+                sels: [],
+                err: "expected `{`, `query` or `mutation`, found `" + kw + "`",
+            }
+        }
+        root = kw
+        skipWs(sc)
+        // The operation NAME, which nothing selects between at M1. Variable
+        // definitions ride arguments, so they are refused with them.
+        let _ = ident(sc)
+        skipWs(sc)
+    }
+    let set = gqlSelSet(sc)
+    if set.err != "" {
+        return GqlQuery { root: root, sels: [], err: set.err }
+    }
+    skipWs(sc)
+    if atEnd(sc) == false {
+        return GqlQuery {
+            root: root,
+            sels: [],
+            err: "a document with more than one operation is not supported yet (RFC-0085 M2)",
+        }
+    }
+    return GqlQuery { root: root, sels: set.sels, err: "" }
+}
+
+// ---- projection ------------------------------------------------------------
+
+/// The value of `key` among `fields`, or `JNull`.
+fn gqlMemberOf(fields: Array<JsonField>, key: String) -> Json {
+    for f in fields {
+        if f.key == key {
+            return f.value
+        }
+    }
+    return JNull
+}
+
+/// Project `sels` out of `v`.
+///
+/// **Field selection is a projection over a value the procedure ALREADY
+/// returned, not a fetch plan.** `v` arrives here fully computed — every field of
+/// it, selected or not, was produced by the procedure and encoded before this
+/// function saw it. So at a leaf this OMITS; it does not avoid computing. Nothing
+/// below is lazy and a reader must not read it as if it were.
+///
+/// That distinction is the one RFC-0074 M4b's `.lazy(field, resolver)` later has
+/// to break: a lazy field is the single case where omission must ALSO mean the
+/// work was never done. Stated here because if it is only stated then, `.lazy(..)`
+/// is an optimisation nobody can observe and there is nothing to point at.
+///
+/// An empty selection set means "this field is a leaf" — take the value whole.
+export fn gqlProject(v: Json, sels: Array<GqlSel>) -> Json {
+    if sels.length == 0 {
+        return v
+    }
+    return match v {
+        JArr(items) => JArr(gqlProjectEach(items, sels)),
+        JObj(fields) => JObj(gqlPick(fields, sels)),
+        // A selection on a scalar is a schema error GraphQL names ("field must
+        // not have a selection since type String has no subfields"). Reporting it
+        // needs the type graph rather than the value, so it belongs with the rest
+        // of the error model — RFC-0085 M3. Until then the scalar answers itself.
+        JNull => JNull,
+        JBool(b) => JBool(b),
+        JNum(n) => JNum(n),
+        JStr(s) => JStr(s),
+    }
+}
+
+/// Project the same selection out of every element of a list.
+fn gqlProjectEach(items: Array<Json>, sels: Array<GqlSel>) -> Array<Json> {
+    let mut out: Array<Json> = []
+    for it in items {
+        out.push(gqlProject(it, sels))
+    }
+    return out
+}
+
+/// Keep exactly the selected members, in the order the QUERY asked for them —
+/// GraphQL's response order is the selection's, not the record's.
+///
+/// A selected member the value does not carry answers `null` rather than
+/// vanishing, because a client indexes the reply by the names it wrote. It cannot
+/// be reported as undeclared from here: `toJson` OMITS an `Option` field that is
+/// `None`, so absence in the value and absence from the schema look identical at
+/// this level. The schema is consulted where it is known — the resolver table
+/// below answers for root fields — and carrying the type graph deeper is what
+/// nested validation costs (RFC-0085 M2/M3).
+fn gqlPick(fields: Array<JsonField>, sels: Array<GqlSel>) -> Array<JsonField> {
+    let mut out: Array<JsonField> = []
+    for s in sels {
+        out.push(JsonField { key: s.name, value: gqlProject(gqlMemberOf(fields, s.name), s.subs) })
+    }
+    return out
+}
+
+// ---- the request and the reply ---------------------------------------------
+
+/// The query text of a request body: the `query` member of a GraphQL-over-HTTP
+/// JSON envelope, or — when the body is not such an envelope — the body itself,
+/// which is what an `application/graphql` request sends. A GraphQL document is
+/// not valid JSON, so the two cannot be confused.
+export fn gqlQueryText(body: String) -> String {
+    return match parseJson(body) {
+        Ok(doc) => gqlEnvelopeQuery(doc, body),
+        Err(e) => body,
+    }
+}
+
+/// The `query` string of a parsed envelope, or `fallback`.
+fn gqlEnvelopeQuery(doc: Json, fallback: String) -> String {
+    return match doc {
+        JObj(fields) => gqlStrOr(gqlMemberOf(fields, "query"), fallback),
+        JNull => fallback,
+        JBool(b) => fallback,
+        JNum(n) => fallback,
+        JStr(s) => fallback,
+        JArr(xs) => fallback,
+    }
+}
+
+/// A JSON string's text, or `fallback` for any other value.
+fn gqlStrOr(j: Json, fallback: String) -> String {
+    return match j {
+        JStr(s) => s,
+        JNull => fallback,
+        JBool(b) => fallback,
+        JNum(n) => fallback,
+        JArr(xs) => fallback,
+        JObj(o) => fallback,
+    }
+}
+
+/// `{"data":{"<field>":…}}` — the answer.
+export fn gqlDataBody(field: String, value: Json) -> String {
+    let one: Array<JsonField> = [JsonField { key: field, value: value }]
+    return emit(JObj([JsonField { key: "data", value: JObj(one) }]))
+}
+
+/// `{"errors":[{"message":"…"}]}` — an error a GraphQL client can read.
+///
+/// A GraphQL client reads the `errors` array, not the status line, so the reply
+/// stays a 200 `application/json`. Path attribution and partial `data` beside a
+/// populated `errors` are RFC-0085 M3.
+export fn gqlErrorBody(message: String) -> String {
+    let one: Array<JsonField> = [JsonField { key: "message", value: JStr(message) }]
+    return emit(JObj([JsonField { key: "errors", value: JArr([JObj(one)]) }]))
+}
+
+/// A GraphQL reply carrying `body`.
+fn gqlReply(body: String) -> Response {
+    return Response { status: 200, contentType: "application/json", body: body, vary: "", headers: [:] }
+}
+
+/// Answer one GraphQL request body against `resolve`, the generated resolver
+/// table (`(root, field) -> the encoded value, or why not`).
+///
+/// One root field per request: a second one immediately raises partial `data`
+/// beside a populated `errors` when only one of them resolves, which is the whole
+/// of RFC-0085 M3 and is not worth half-building here.
+export fn gqlAnswer(body: String, resolve: fn(String, String) -> Result<Json, String>) -> Response {
+    let q = gqlParseQuery(gqlQueryText(body))
+    if q.err != "" {
+        return gqlReply(gqlErrorBody(q.err))
+    }
+    if q.sels.length != 1 {
+        return gqlReply(gqlErrorBody(
+                "one root field per request (RFC-0085 M1); this operation selects "
+                + q.sels.length.toString()
+            ))
+    }
+    let sel = q.sels[0]
+    return match resolve(q.root, sel.name) {
+        Ok(v) => gqlReply(gqlDataBody(sel.name, gqlProject(v, sel.subs))),
+        Err(why) => gqlReply(gqlErrorBody(why)),
+    }
+}
+
+// ---- the generator ---------------------------------------------------------
+
+/// The import block the emitted module needs (RFC-0031): the contract's
+/// procedures from the contract itself, each type from the module that DECLARES
+/// it, so a type reached across an import keeps one identity.
+fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
+    let mut specs: Array<String> = [contract]
+    for t in iface.types {
+        if gqlHas(specs, t.module) == false {
+            specs.push(t.module)
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        if spec == contract {
+            for f in iface.functions {
+                names.push(f.name)
+            }
+        }
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name)
+            }
+        }
+        if names.length > 0 {
+            out = out + "import { " + gqlJoin(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+/// Whether `items` already contains `needle`.
+fn gqlHas(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+/// Join `parts` with `sep` between them.
+fn gqlJoin(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// The resolver table: one arm per procedure, over the SAME `iface.functions`
+/// walk `sdl` emits root fields from and the same `gqlRootOf` verdict, so the
+/// schema and the executor cannot disagree about which fields exist or which root
+/// answers them. A field no arm claims is GraphQL's own "Cannot query field" —
+/// an error naming it, not a trap and not a 500.
+///
+/// A procedure that takes an argument is in the table and refuses BY NAME:
+/// decoding a field's arguments into its input record is RFC-0085 M2, and a
+/// declared field silently missing from the executor is the divergence this whole
+/// shape exists to prevent.
+fn gqlResolverTable(iface: ModuleInterface) -> String {
+    let mut out = "/// Decode the procedure's encoded result into the value tree a projection is\n"
+    out = out + "/// written over. The procedure has ALREADY run when this is reached.\n"
+    out = out + "fn gqlValueOf(encoded: String) -> Json {\n"
+    out = out + "    return match parseJson(encoded) {\n"
+    out = out + "        Ok(v) => v,\n"
+    out = out + "        Err(e) => JNull,\n"
+    out = out + "    }\n}\n"
+    out = out + "/// The resolver table, generated from the contract's reflection.\n"
+    out = out + "fn gqlResolve(root: String, field: String) -> Result<Json, String> {\n"
+    for f in iface.functions {
+        let want = gqlRootOf(f)
+        out = out + "    if field == \"" + f.name + "\" {\n"
+        out = out + "        if root != \"" + want + "\" {\n"
+        out = out + "            return Err(\"Cannot query field `" + f.name + "` on type `\" + gqlRootType(root) + \"`.\")\n"
+        out = out + "        }\n"
+        if f.params.length > 0 {
+            out = out + "        return Err(\"Field `" + f.name + "` takes arguments, which are not supported yet (RFC-0085 M2).\")\n"
+        } else if f.ret == "" {
+            out = out + "        return Err(\"Field `" + f.name + "` returns nothing, so there is no value to select from.\")\n"
+        } else {
+            out = out + "        return Ok(gqlValueOf(toJson(" + f.name + "())))\n"
+        }
+        out = out + "    }\n"
+    }
+    out = out + "    return Err(\"Cannot query field `\" + field + \"` on type `\" + gqlRootType(root) + \"`.\")\n}\n"
+    return out
+}
+
+/// `graphqlServer(contract)` — emit a module exposing
+/// `graphqlHandle(req: Request) -> Option<Response>`, answering `POST /graphql`
+/// against the same contract `sdl(contract)` documents (RFC-0085 M1).
+///
+/// It mounts beside `rpcHandle` and `connectHandle` on one `serve` root: a
+/// GraphQL request is an ordinary route over the same procedures and the same
+/// `toJson`, not a second wire. The generator is `graphqlServer` (not
+/// `graphqlHandle`) for the reason `std/rpc` and `std/connect` already record — a
+/// `gen fn` and the module it emits are both linked, and the flat namespace
+/// forbids the clash.
+export gen fn graphqlServer(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    // The SAME `Api` + serializability rule the RPC and REST surfaces apply. The
+    // SDL only reads type SPELLINGS and needs no such check; this generator emits
+    // a `toJson` call per procedure, which is precisely what the rule governs.
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/graphql `graphqlServer` (RFC-0085) — do not edit.\n"
+    out = out + gqlImportBlock(iface, contract)
+    out = out + "import { Json } from \"std/json\"\n"
+    out = out + "import { parseJson } from \"std/jsonread\"\n"
+    out = out + "import { gqlAnswer, gqlRootType } from \"std/graphql\"\n"
+    out = out + gqlResolverTable(iface)
+    out = out + "/// `POST /graphql`. `None` (not our path) for everything else, so this mounts\n"
+    out = out + "/// beside the other projections of the same procedures.\n"
+    out = out + "export fn graphqlHandle(req: Request) -> Option<Response> {\n"
+    out = out + "    if req.path != \"/graphql\" {\n"
+    out = out + "        return None\n"
+    out = out + "    }\n"
+    out = out + "    if req.method != \"POST\" {\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\", headers: [:] })\n"
+    out = out + "    }\n"
+    out = out + "    return Some(gqlAnswer(req.body, gqlResolve))\n}\n"
+    return out
 }
 
 // ===========================================================================
@@ -677,4 +1134,70 @@ test "gqlDescBlock keeps a quote-free body single-line, pads a quote-ending body
     // A body ending in a quote goes on its own line so `..." \"\"\"` cannot form
     // four consecutive quotes.
     assertEq(gqlDescBlock("re \"x\""), "\"\"\"\nre \"x\"\n\"\"\"\n")
+}
+
+// ---- the executor (RFC-0085 M1) -------------------------------------------
+
+/// The shape a shelf `browse` returns, as the value tree a projection sees.
+fn gqlTestValue() -> Json {
+    let book: Array<JsonField> = [
+        JsonField { key: "id", value: JNum("0") },
+        JsonField { key: "title", value: JStr("SICP") },
+        JsonField { key: "url", value: JStr("https://example.com") },
+    ]
+    return JObj([JsonField { key: "books", value: JArr([JObj(book)]) }])
+}
+
+test "gqlParseQuery reads a nested selection set" {
+    let q = gqlParseQuery("{ browse { books { title } } }")
+    assertEq(q.err, "")
+    assertEq(q.root, "query")
+    assertEq(q.sels.length, 1)
+    assertEq(q.sels[0].name, "browse")
+    assertEq(q.sels[0].subs[0].name, "books")
+    assertEq(q.sels[0].subs[0].subs[0].name, "title")
+}
+
+test "gqlParseQuery takes an operation type and treats commas as whitespace" {
+    let q = gqlParseQuery("mutation Add { a, b }")
+    assertEq(q.err, "")
+    assertEq(q.root, "mutation")
+    assertEq(q.sels.length, 2)
+    assertEq(q.sels[1].name, "b")
+}
+
+test "gqlParseQuery refuses M2's syntax by name rather than dropping it" {
+    assert(gqlParseQuery("{ byId(id: 1) { title } }").err.contains("arguments"))
+    assert(gqlParseQuery("{ one: browse { title } }").err.contains("aliases"))
+    assert(gqlParseQuery("{ browse { title }").err.contains("unterminated"))
+    assert(gqlParseQuery("").err.contains("no query"))
+}
+
+test "gqlProject omits what was not selected" {
+    // The whole point: `url` and `id` were computed and encoded, and the
+    // projection leaves them out. Assert the ABSENCE — a projection that returned
+    // the record whole would pass a test that only looked for `title`.
+    let sels = gqlParseQuery("{ browse { books { title } } }").sels
+    let out = emit(gqlProject(gqlTestValue(), sels[0].subs))
+    assertEq(out, "{\"books\":[{\"title\":\"SICP\"}]}")
+    assert(out.contains("url") == false)
+    assert(out.contains("id") == false)
+}
+
+test "gqlProject takes a leaf whole and answers null for a member the value lacks" {
+    let sels = gqlParseQuery("{ browse { books } }").sels
+    assertEq(emit(gqlProject(gqlTestValue(), sels[0].subs)).contains("\"url\""), true)
+    let missing = gqlParseQuery("{ browse { shelved } }").sels
+    assertEq(emit(gqlProject(gqlTestValue(), missing[0].subs)), "{\"shelved\":null}")
+}
+
+test "gqlQueryText reads an envelope or a bare document" {
+    assertEq(gqlQueryText("{\"query\":\"{ browse }\"}"), "{ browse }")
+    assertEq(gqlQueryText("{ browse }"), "{ browse }")
+}
+
+test "gqlErrorBody is the shape a client reads" {
+    assertEq(gqlErrorBody("nope"), "{\"errors\":[{\"message\":\"nope\"}]}")
+    assertEq(gqlRootType("mutation"), "Mutation")
+    assertEq(gqlRootType("query"), "Query")
 }
