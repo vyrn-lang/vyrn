@@ -663,6 +663,409 @@ fn a_mapped_feed_streams_and_its_release_walks_the_chain() {
     assert!(err.contains("error: reference used after release"), "{err}");
 }
 
+// ---- RFC-0074 M3b: the same signal, a second transport --------------------
+//
+// The milestone's pin is that everything ABOVE this comment passes unchanged.
+// M3a wrote its conformance tests below `std/http`, against `serveStream` and
+// `fromStep` directly, precisely so a second adapter would have nothing to
+// rewrite — and nothing was rewritten: `SSE_SRC`, `open_stream` and the four
+// tests over them are as M3a left them.
+//
+// What follows is the same mechanism through WebSocket framing. The witnesses
+// are `SSE_SRC`'s: `/steps` stops moving, and `/probe` traps on a cursor cell
+// only a `close` could have released. The source is below `std/http` for M3a's
+// reason — this is about the mechanism, not about the projection that spells it.
+// `std/http`'s `ws` values are pinned in `tests/http.rs`, and `examples/bin`
+// serves the same paste tail over both transports.
+const WS_SRC: &str = r#"
+import { sha1 } from "std/hash"
+import { base64EncodeBytes } from "std/codecs"
+
+let mut steps: Int64 = 0
+let mut saved: Ref<Int64> = cell(0)
+
+/// An endless feed of PAYLOADS, not frames: RFC-0074's rule is that Vyrn owns
+/// what the user chooses and the host owns what the protocol fixes, and there is
+/// no choice in an opcode, a length or a mask.
+fn tick(c: Ref<Int64>) -> Option<String> {
+    steps = steps + 1
+    saved = c
+    let n = get(c)
+    set(c, n + 1)
+    return Some("e\{n}")
+}
+
+/// One 100-byte message, then the end — the fragmentation and close-code case.
+fn once(c: Ref<Int64>) -> Option<String> {
+    let n = get(c)
+    if n > 0 {
+        return None
+    }
+    set(c, n + 1)
+    let mut s = ""
+    let mut i = 0
+    while i < 10 {
+        s = s + "0123456789"
+        i = i + 1
+    }
+    return Some(s)
+}
+
+fn headerOf(req: Request, name: String) -> String {
+    return match req.headers[name] {
+        Some(v) => v,
+        None => "",
+    }
+}
+
+/// RFC 6455 4.2.2's nonce transform, in ordinary Vyrn: base64(SHA-1(key + GUID)).
+fn accept(req: Request) -> String {
+    let key = headerOf(req, "sec-websocket-key")
+    return base64EncodeBytes(sha1(bytes(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")))
+}
+
+/// The handshake head. `body` is not a prologue — a socket has nothing between
+/// the handshake and the first frame — so it carries the two numbers the host
+/// frames with: the close code and the fragment limit.
+fn upgrade(req: Request, params: String) -> Response {
+    return Response {
+        status: 101,
+        contentType: "",
+        body: params,
+        vary: "",
+        headers: ["Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Accept": accept(req)],
+    }
+}
+
+fn handle(req: Request) -> Response {
+    if req.path == "/socket" {
+        serveStream(fromStep(0, tick))
+        return upgrade(req, "1000 0")
+    }
+    if req.path == "/split" {
+        serveStream(fromStep(0, once))
+        return upgrade(req, "1001 40")
+    }
+    if req.path == "/steps" {
+        return Response { status: 200, contentType: "text/plain", body: "\{steps}", vary: "", headers: [:] }
+    }
+    if req.path == "/probe" {
+        return Response { status: 200, contentType: "text/plain", body: "\{get(saved)}", vary: "", headers: [:] }
+    }
+    return Response { status: 404, contentType: "text/plain", body: "no", vary: "", headers: [:] }
+}
+"#;
+
+/// RFC 6455 §1.3's worked example: this key must produce this accept value. It
+/// pins the SHA-1 written in `std/hash` all the way to the wire.
+const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+const WS_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+
+/// One frame read off the wire.
+struct Frame {
+    fin: bool,
+    opcode: u8,
+    payload: Vec<u8>,
+}
+
+/// Do the upgrade and hand back the still-open socket plus the handshake head.
+fn open_socket(port: u16, path: &str) -> (TcpStream, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+                 Connection: keep-alive, Upgrade\r\nSec-WebSocket-Key: {WS_KEY}\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write upgrade");
+    stream.flush().ok();
+    // Read exactly the header block, byte at a time, so no frame bytes are eaten.
+    let mut head = Vec::new();
+    let mut one = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut one) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => head.push(one[0]),
+        }
+    }
+    (stream, String::from_utf8_lossy(&head).to_string())
+}
+
+/// Read one server frame. Panics on a masked one: §5.1 forbids a server to mask.
+fn read_frame(s: &mut TcpStream) -> Option<Frame> {
+    let mut h = [0u8; 2];
+    s.read_exact(&mut h).ok()?;
+    assert_eq!(h[1] & 0x80, 0, "a server frame must not be masked (RFC 6455 5.1)");
+    let len = match h[1] & 0x7f {
+        126 => {
+            let mut e = [0u8; 2];
+            s.read_exact(&mut e).ok()?;
+            u16::from_be_bytes(e) as usize
+        }
+        127 => {
+            let mut e = [0u8; 8];
+            s.read_exact(&mut e).ok()?;
+            u64::from_be_bytes(e) as usize
+        }
+        n => n as usize,
+    };
+    let mut payload = vec![0u8; len];
+    s.read_exact(&mut payload).ok()?;
+    Some(Frame { fin: h[0] & 0x80 != 0, opcode: h[0] & 0x0f, payload })
+}
+
+/// Read frames until a close arrives, and answer with its code. Bounded, so a
+/// server that never closes fails the test rather than hanging the suite.
+fn read_until_close(s: &mut TcpStream) -> Option<u16> {
+    for _ in 0..64 {
+        let f = read_frame(s)?;
+        if f.opcode == 8 {
+            return Some(u16::from_be_bytes([f.payload[0], f.payload[1]]));
+        }
+    }
+    None
+}
+
+/// A client frame. `mask` false is the protocol violation §5.1 names.
+fn write_client_frame(s: &mut TcpStream, opcode: u8, payload: &[u8], mask: bool) {
+    let mut f = vec![0x80 | opcode];
+    let n = payload.len() as u8;
+    f.push(if mask { 0x80 | n } else { n });
+    if mask {
+        let key = [0x37u8, 0xfa, 0x21, 0x3d];
+        f.extend_from_slice(&key);
+        for (i, b) in payload.iter().enumerate() {
+            f.push(b ^ key[i % 4]);
+        }
+    } else {
+        f.extend_from_slice(payload);
+    }
+    let _ = s.write_all(&f);
+    let _ = s.flush();
+}
+
+#[test]
+fn a_socket_handshake_answers_101_and_the_frames_carry_the_payload() {
+    let s = start_server_on(WS_SRC, &[]);
+    let (mut sock, head) = open_socket(s.port, "/socket");
+    assert!(head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"), "{head}");
+    assert!(head.contains("\r\nUpgrade: websocket\r\n"), "{head}");
+    assert!(head.contains("\r\nConnection: Upgrade\r\n"), "{head}");
+    // The SHA-1 in `std/hash`, on the wire, against RFC 6455's own example.
+    assert!(head.contains(&format!("\r\nSec-WebSocket-Accept: {WS_ACCEPT}\r\n")), "{head}");
+    // The head's `body` is the host's framing parameters and is written nowhere.
+    assert!(head.ends_with("\r\n\r\n"), "nothing after the header block:\n{head}");
+    assert!(!head.contains("1000 0"), "the framing parameters are not written:\n{head}");
+
+    for i in 0..3 {
+        let f = read_frame(&mut sock).expect("a frame");
+        assert_eq!(f.opcode, 1, "a text frame");
+        assert!(f.fin, "unfragmented");
+        assert_eq!(String::from_utf8_lossy(&f.payload), format!("e{i}"));
+    }
+    drop(sock);
+}
+
+#[test]
+fn a_socket_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
+    // RFC-0075's disconnect row, through the second adapter, with the SAME two
+    // witnesses M3a's SSE test uses — which is the whole of what "the signal
+    // generalises" claims. Nothing here asks the host about the client.
+    let s = start_server_on(WS_SRC, &[]);
+    let (mut sock, head) = open_socket(s.port, "/socket");
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    assert_eq!(read_frame(&mut sock).expect("a frame").payload, b"e0", "frames were flowing");
+    read_frame(&mut sock).expect("a second frame");
+
+    drop(sock);
+
+    // Blocks until the pump notices — which is the write after the drop — so this
+    // answer is already the final count.
+    let (status, settled) = get(s.port, "/steps");
+    assert_eq!(status, "HTTP/1.1 200 OK", "the server survived the disconnect");
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, later) = get(s.port, "/steps");
+    assert_eq!(
+        settled, later,
+        "the producer kept running after the client went away ({settled} -> {later})"
+    );
+
+    let (status, body) = get(s.port, "/probe");
+    assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "cursor still live: {body}");
+    let err = wait_for(&s.stderr, "reference used after release", Duration::from_secs(5));
+    assert!(err.contains("error: reference used after release"), "{err}");
+}
+
+#[test]
+fn a_client_close_is_answered_with_a_close_frame() {
+    // §5.5.1. The pump learns about it at the next frame boundary rather than
+    // instantly, because it spends the time in between blocked in the producer —
+    // which is the same fact that refuses `heartbeat`.
+    let s = start_server_on(WS_SRC, &[]);
+    let (mut sock, _) = open_socket(s.port, "/socket");
+    read_frame(&mut sock).expect("a frame");
+    write_client_frame(&mut sock, 8, &1000u16.to_be_bytes(), true);
+    assert_eq!(read_until_close(&mut sock), Some(1000), "the close is answered");
+    // And the producer behind it was released.
+    let (status, _) = get(s.port, "/probe");
+    assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "the cursor was released");
+}
+
+#[test]
+fn an_unmasked_client_frame_closes_with_1002() {
+    // §5.1: every client frame is masked. Server-push has nothing to do with a
+    // client's message, but a frame that breaks the framing rules is a protocol
+    // error rather than something to skip past.
+    let s = start_server_on(WS_SRC, &[]);
+    let (mut sock, _) = open_socket(s.port, "/socket");
+    read_frame(&mut sock).expect("a frame");
+    write_client_frame(&mut sock, 1, b"hello", false);
+    assert_eq!(read_until_close(&mut sock), Some(1002), "a protocol error");
+}
+
+#[test]
+fn max_frame_splits_a_message_and_the_feeds_end_carries_the_programs_close_code() {
+    // `/split` yields one 100-byte message under a 40-byte limit, then ends.
+    // §5.4: the first fragment carries the data opcode with FIN clear, the rest
+    // carry the continuation opcode, and only the last sets FIN.
+    let s = start_server_on(WS_SRC, &[]);
+    let (mut sock, head) = open_socket(s.port, "/split");
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    let a = read_frame(&mut sock).expect("first fragment");
+    let b = read_frame(&mut sock).expect("second fragment");
+    let c = read_frame(&mut sock).expect("last fragment");
+    assert_eq!((a.opcode, a.fin, a.payload.len()), (1, false, 40));
+    assert_eq!((b.opcode, b.fin, b.payload.len()), (0, false, 40));
+    assert_eq!((c.opcode, c.fin, c.payload.len()), (0, true, 20));
+    let whole: Vec<u8> = [a.payload, b.payload, c.payload].concat();
+    assert_eq!(whole.len(), 100, "the message reassembles");
+    // The feed ended, so the host closes with the code the program chose.
+    assert_eq!(read_until_close(&mut sock), Some(1001), "closeCode reached the wire");
+}
+
+#[test]
+fn a_socket_upgrade_the_program_refuses_is_an_ordinary_response() {
+    // Not every 101 path is a stream: a request that is not an upgrade never
+    // reaches `serveStream`, so it answers as a buffered response and the
+    // connection ends. (`std/http`'s `ws` writes the 400/426; here the source
+    // simply has no such path, so the default 404 proves the same thing — a
+    // non-upgrading GET at a socket's URL is not framed.)
+    let s = start_server_on(WS_SRC, &[]);
+    let (status, body) = get(s.port, "/nope");
+    assert_eq!(status, "HTTP/1.1 404 Not Found");
+    assert_eq!(body, "no");
+}
+
+/// The same milestone one level up: `std/http`'s `ws`, mounted, writing its own
+/// handshake. `WS_SRC` above proves the MECHANISM; this proves the projection
+/// that spells it — the handshake `std/http` computes, the subprotocol rule of
+/// §4.2.2 (a server may only select what the client offered), and the two ways an
+/// upgrade is refused without ever opening a stream. It lives here rather than in
+/// `tests/http.rs` for the reason M2 recorded: a `vyrn serve` harness works in
+/// this file and not in that one.
+const WS_MOUNTED_SRC: &str = r#"
+import { Frames, Live, Route, Socket, mount, ws } from "std/http"
+
+fn step(c: Ref<Int64>) -> Option<String> {
+    let n = get(c)
+    if n > 1 {
+        return None
+    }
+    set(c, n + 1)
+    return Some("m\{n}")
+}
+
+fn feed(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
+    return fromStep(since, step)
+}
+
+fn sockets() -> Array<Socket> {
+    return [ws("/chat", feed).closeCode(1001).subprotocol("vyrn.v1")]
+}
+
+fn handle(req: Request) -> Response {
+    let groups: Array<Array<Route>> = []
+    let live: Array<Live> = []
+    return match mount(req, groups, live, sockets()) {
+        Some(r) => r,
+        None => Response { status: 404, contentType: "text/plain", body: "no route", vary: "", headers: [:] },
+    }
+}
+"#;
+
+#[test]
+fn the_ws_projection_writes_its_own_handshake() {
+    let s = start_server_on(WS_MOUNTED_SRC, &[]);
+    let mut sock = TcpStream::connect(("127.0.0.1", s.port)).expect("connect");
+    sock.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    sock.write_all(
+        format!(
+            "GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: keep-alive, Upgrade\r\nSec-WebSocket-Key: {WS_KEY}\r\n\
+             Sec-WebSocket-Protocol: chat, vyrn.v1\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .expect("write upgrade");
+    sock.flush().ok();
+    let mut head = Vec::new();
+    let mut one = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match sock.read(&mut one) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => head.push(one[0]),
+        }
+    }
+    let head = String::from_utf8_lossy(&head).to_string();
+    assert!(head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"), "{head}");
+    assert!(head.contains(&format!("\r\nSec-WebSocket-Accept: {WS_ACCEPT}\r\n")), "{head}");
+    // Offered by the client and chosen by the route, so it is echoed.
+    assert!(head.contains("\r\nSec-WebSocket-Protocol: vyrn.v1\r\n"), "{head}");
+    assert_eq!(read_frame(&mut sock).expect("m0").payload, b"m0");
+    assert_eq!(read_frame(&mut sock).expect("m1").payload, b"m1");
+    // The feed ended, so the close carries the code the projection chose.
+    assert_eq!(read_until_close(&mut sock), Some(1001), "closeCode");
+}
+
+#[test]
+fn a_subprotocol_the_client_did_not_offer_is_not_echoed() {
+    let s = start_server_on(WS_MOUNTED_SRC, &[]);
+    let (_sock, head) = open_socket(s.port, "/chat");
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    // §4.2.2: the server must not select a subprotocol the client did not send.
+    assert!(!head.contains("Sec-WebSocket-Protocol"), "{head}");
+}
+
+#[test]
+fn an_upgrade_the_projection_refuses_never_opens_a_stream() {
+    let s = start_server_on(WS_MOUNTED_SRC, &[]);
+    // §4.4: a version we do not speak is answered 426 naming the one we do.
+    let (status, raw) = request_raw(
+        s.port,
+        &format!(
+            "GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: {WS_KEY}\r\n\
+             Sec-WebSocket-Version: 8\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(status, "HTTP/1.1 426 ", "{raw}");
+    assert!(raw.contains("\r\nSec-WebSocket-Version: 13\r\n"), "{raw}");
+    // A plain GET at the socket's path is not an upgrade at all.
+    let (status, body) = request(
+        s.port,
+        "GET /chat HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Version: 13\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, "HTTP/1.1 400 Bad Request", "{body}");
+    assert_eq!(body, "not a WebSocket upgrade");
+    // And the server is still there: no producer was opened and abandoned.
+    let (status, _) = get(s.port, "/elsewhere");
+    assert_eq!(status, "HTTP/1.1 404 Not Found");
+}
+
 #[test]
 fn many_opened_and_dropped_streams_leave_the_cursor_slab_alone() {
     // RFC-0075's `#6156` row at transport scale: every one of these opens a

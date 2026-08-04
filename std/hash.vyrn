@@ -30,3 +30,144 @@ export fn fnv1a(data: Array<UInt8>) -> UInt64 {
 export fn fnv1aStr(s: String) -> UInt64 {
     return fnv1a(bytes(s))
 }
+
+// ---- SHA-1 (RFC 3174) ------------------------------------------------------
+
+/// **SHA-1 is here as a handshake nonce transform, not as a security
+/// primitive.** RFC 6455 §4.2.2 mandates it for exactly one purpose: the
+/// WebSocket server proves it understood the upgrade by echoing
+/// `base64(SHA-1(key + GUID))`, where the GUID is a published constant and the
+/// key is a nonce the client just sent in the clear. Nothing about that step is
+/// secret and nothing about it is a signature.
+///
+/// **Do not use it for anything else.** SHA-1 is collision-broken in practice
+/// (SHAttered, 2017; chosen-prefix collisions, 2020), so it must not sign, must
+/// not hash a password, must not authenticate a message and must not
+/// content-address anything an adversary can influence. Vyrn ships no
+/// cryptographic hash — for content addressing use [`fnv1a`], and for anything
+/// that has to resist an attacker use a reviewed implementation outside this
+/// module.
+///
+/// The digest is twenty bytes, big-endian, pinned against RFC 3174 §7.3's own
+/// test vectors in `examples/sha1.vyrn`. The mixing runs in `UInt64` masked to
+/// 32 bits rather than in `UInt32`, so every engine agrees without depending on
+/// a narrower type's overflow rule.
+export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
+    let m: UInt64 = 4294967295
+    let mut h0: UInt64 = 1732584193 // 0x67452301
+    let mut h1: UInt64 = 4023233417 // 0xEFCDAB89
+    let mut h2: UInt64 = 2562383102 // 0x98BADCFE
+    let mut h3: UInt64 = 271733878 // 0x10325476
+    let mut h4: UInt64 = 3285377520 // 0xC3D2E1F0
+
+    // The padding of §4: one `1` bit, zeros up to 56 mod 64, then the message
+    // length in BITS as a 64-bit big-endian integer.
+    let mut msg: Array<UInt8> = []
+    for b in data {
+        msg.push(b)
+    }
+    msg.push(128)
+    while msg.length % 64 != 56 {
+        msg.push(0)
+    }
+    let bits: UInt64 = UInt64(data.length) * 8
+    msg.push(UInt8((bits >> 56) & 255))
+    msg.push(UInt8((bits >> 48) & 255))
+    msg.push(UInt8((bits >> 40) & 255))
+    msg.push(UInt8((bits >> 32) & 255))
+    msg.push(UInt8((bits >> 24) & 255))
+    msg.push(UInt8((bits >> 16) & 255))
+    msg.push(UInt8((bits >> 8) & 255))
+    msg.push(UInt8(bits & 255))
+
+    let mut off = 0
+    while off < msg.length {
+        // The message schedule: sixteen big-endian words, extended to eighty.
+        let mut w: Array<UInt64> = []
+        let mut t = 0
+        while t < 16 {
+            let p = off + t * 4
+            w.push((UInt64(msg[p]) << 24) | (UInt64(msg[p + 1]) << 16) | (UInt64(msg[p + 2]) << 8) | UInt64(msg[p + 3]))
+            t = t + 1
+        }
+        while t < 80 {
+            w.push(sha1Rotl1(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]))
+            t = t + 1
+        }
+
+        let mut a = h0
+        let mut b = h1
+        let mut c = h2
+        let mut d = h3
+        let mut e = h4
+        t = 0
+        while t < 80 {
+            // `b ^ m` is the 32-bit complement — every word here is already
+            // masked, so there is no need for a `~` this language does not have.
+            let mut f: UInt64 = b ^ c ^ d
+            let mut k: UInt64 = 1859775393 // 0x6ED9EBA1
+            if t < 20 {
+                f = (b & c) | ((b ^ m) & d)
+                k = 1518500249 // 0x5A827999
+            } else if t >= 40 && t < 60 {
+                f = (b & c) | (b & d) | (c & d)
+                k = 2400959708 // 0x8F1BBCDC
+            } else if t >= 60 {
+                k = 3395469782 // 0xCA62C1D6
+            }
+            let tmp = (sha1Rotl5(a) + f + e + k + w[t]) & m
+            e = d
+            d = c
+            c = sha1Rotl30(b)
+            b = a
+            a = tmp
+            t = t + 1
+        }
+        h0 = (h0 + a) & m
+        h1 = (h1 + b) & m
+        h2 = (h2 + c) & m
+        h3 = (h3 + d) & m
+        h4 = (h4 + e) & m
+        off = off + 64
+    }
+
+    let words: Array<UInt64> = [h0, h1, h2, h3, h4]
+    let mut out: Array<UInt8> = []
+    for w in words {
+        out.push(UInt8((w >> 24) & 255))
+        out.push(UInt8((w >> 16) & 255))
+        out.push(UInt8((w >> 8) & 255))
+        out.push(UInt8(w & 255))
+    }
+    return out
+}
+
+/// The SHA-1 digest of a String's UTF-8 bytes as lowercase hex — the spelling
+/// RFC 3174 §7.3's test vectors are written in. Read [`sha1`]'s warning first.
+export fn sha1Hex(s: String) -> String {
+    let digits = bytes("0123456789abcdef")
+    let mut out: Array<UInt8> = []
+    for b in sha1(bytes(s)) {
+        out.push(digits[Int64(b) / 16])
+        out.push(digits[Int64(b) % 16])
+    }
+    return match stringFromBytes(out) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+}
+
+// The three rotations SHA-1 uses, each with a literal shift: `S^1` in the
+// schedule, `S^5` on `a` and `S^30` on `b`. Every argument is already masked to
+// 32 bits, so the mask is only needed on the way out.
+fn sha1Rotl1(x: UInt64) -> UInt64 {
+    return ((x << 1) | (x >> 31)) & 4294967295
+}
+
+fn sha1Rotl5(x: UInt64) -> UInt64 {
+    return ((x << 5) | (x >> 27)) & 4294967295
+}
+
+fn sha1Rotl30(x: UInt64) -> UInt64 {
+    return ((x << 30) | (x >> 2)) & 4294967295
+}

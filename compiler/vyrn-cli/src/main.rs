@@ -3338,6 +3338,7 @@ fn parse_request(
 /// reason (the space after the code is still required by the grammar).
 fn reason_phrase(status: i64) -> &'static str {
     match status {
+        101 => "Switching Protocols",
         200 => "OK",
         201 => "Created",
         202 => "Accepted",
@@ -3394,25 +3395,17 @@ fn pump_stream(
     ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
 ) {
     use std::io::Write;
-    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
+    use vyrn_frontend::interp::ServeCall;
 
-    // Pull, and let a trapping producer end the connection the way a trapping
-    // handler ends a request: logged, and the server keeps running.
-    let pull = |call_handle: &mut dyn FnMut(
-        ServeCall,
-    ) -> Result<ServeAnswer, String>|
-     -> Option<String> {
-        match call_handle(ServeCall::Next) {
-            Ok(ServeAnswer::Frame(f)) => f,
-            Ok(_) => None,
-            Err(msg) => {
-                eprintln!("error: {msg}");
-                None
-            }
-        }
-    };
+    // A `101` is `ws` (RFC-0074 M3b). The status is the discriminator because the
+    // protocol already made it one: a WebSocket handshake IS a 101, so nothing had
+    // to be invented to tell the two adapters apart.
+    if head.status == 101 {
+        pump_socket(stream, head, call_handle);
+        return;
+    }
 
-    let first = pull(call_handle);
+    let first = pull_frame(call_handle);
     let Some(first) = first else {
         let _ = call_handle(ServeCall::Close);
         write_response(stream, 204, "", b"");
@@ -3441,7 +3434,7 @@ fn pump_stream(
         return;
     }
     loop {
-        let Some(frame) = pull(call_handle) else {
+        let Some(frame) = pull_frame(call_handle) else {
             break;
         };
         if stream
@@ -3453,6 +3446,239 @@ fn pump_stream(
         }
     }
     let _ = call_handle(ServeCall::Close);
+}
+
+/// Ask the open stream for one element. A trapping producer ends the connection
+/// the way a trapping handler ends a request: logged, and the server keeps
+/// running. Shared by both adapters, which is most of what "the signal
+/// generalises" means in code.
+fn pull_frame(
+    call_handle: &mut dyn FnMut(
+        vyrn_frontend::interp::ServeCall,
+    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+) -> Option<String> {
+    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
+    match call_handle(ServeCall::Next) {
+        Ok(ServeAnswer::Frame(f)) => f,
+        Ok(_) => None,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            None
+        }
+    }
+}
+
+/// Pump one open stream onto a WebSocket (RFC-0074 M3b) — the second adapter,
+/// and the test of whether M3a's disconnect signal generalises past one
+/// transport. It does: the loop below is `pump_stream`'s, with `write_all` of a
+/// raw frame replaced by `write_all` of a framed one. Nothing asks the host which
+/// event means the client is gone.
+///
+/// **The host frames and Vyrn yields the payload**, which is RFC-0074's rule that
+/// Vyrn owns what the user chooses and the host owns what the protocol fixes.
+/// There is no choice in an opcode, a length or a mask, so none of them is a
+/// design surface and none of them is spellable in `std/http`.
+///
+/// Two numbers the host cannot choose ride in the head's `body`: the close code
+/// and the fragment limit. A 101 has no prologue — after the handshake everything
+/// is a frame — so that slot carries what the host needs before it can write one.
+///
+/// **Server-push only.** Inbound frames are parsed rather than ignored, because
+/// §5.1 makes a client's frames masked and §5.5.1 makes a close frame something a
+/// server must answer; but there is no handler for a client's message, and there
+/// is nothing in this RFC that would say what one looks like.
+fn pump_socket(
+    stream: &mut std::net::TcpStream,
+    head: &vyrn_frontend::interp::ServeResponse,
+    call_handle: &mut dyn FnMut(
+        vyrn_frontend::interp::ServeCall,
+    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+) {
+    use std::io::Write;
+    use vyrn_frontend::interp::ServeCall;
+
+    // `closeCode` and `maxFrame`, in the slot SSE uses for its prologue.
+    let mut nums = head.body.split_whitespace();
+    let mut close_code: u16 = nums.next().and_then(|s| s.parse().ok()).unwrap_or(1000);
+    let max_frame: usize = nums.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let mut extra = String::new();
+    for (name, value) in &head.headers {
+        extra.push_str(&format!("{name}: {value}\r\n"));
+    }
+    // No `Connection: close` and no `Content-Length`: the connection is the
+    // point, and what follows the header block is frames rather than a body.
+    let handshake = format!("HTTP/1.1 101 Switching Protocols\r\n{extra}\r\n");
+    if stream.write_all(handshake.as_bytes()).and_then(|_| stream.flush()).is_err() {
+        let _ = call_handle(ServeCall::Close);
+        return;
+    }
+
+    let mut inbox: Vec<u8> = Vec::new();
+    loop {
+        let Some(payload) = pull_frame(call_handle) else {
+            break;
+        };
+        if ws_write_message(stream, payload.as_bytes(), max_frame).is_err() {
+            // The disconnect signal, unchanged from `sse`: the write failed, so
+            // the client is gone, so the producer is released — before the next
+            // element would have been produced.
+            let _ = call_handle(ServeCall::Close);
+            return;
+        }
+        match ws_drain(stream, &mut inbox) {
+            WsIn::Open => {}
+            // §5.5.1: a close frame is answered with a close frame.
+            WsIn::Closed => break,
+            // §5.1: a frame from a client that is not masked.
+            WsIn::Protocol => {
+                close_code = 1002;
+                break;
+            }
+        }
+    }
+    let _ = ws_write_frame(stream, 8, true, &close_code.to_be_bytes());
+    let _ = stream.flush();
+    let _ = call_handle(ServeCall::Close);
+}
+
+/// What the inbound half of a socket has to say between two outbound messages.
+/// There is deliberately no "the peer is gone" answer here: **that is the write's
+/// to give.** A reader could see EOF a fraction earlier than the next write fails,
+/// and taking the earlier one would give this adapter a second disconnect signal
+/// — which is exactly the per-deployment ambiguity M3a exists to refuse. So the
+/// inbound half reports only the two things it alone knows.
+enum WsIn {
+    /// Nothing that ends the connection — including EOF and a read error.
+    Open,
+    /// A close frame from the client.
+    Closed,
+    /// A frame that breaks RFC 6455 — close with 1002.
+    Protocol,
+}
+
+/// Read whatever inbound bytes are waiting, without waiting for any.
+///
+/// The socket goes non-blocking for the read alone and back before the next
+/// write, which matters more than it looks: a non-blocking WRITE can answer
+/// `WouldBlock`, and this adapter reads a failed write as "the client is gone".
+/// Making the disconnect signal depend on the socket's mode would be the
+/// deployment-specific behaviour M3a exists to avoid.
+fn ws_drain(stream: &mut std::net::TcpStream, buf: &mut Vec<u8>) -> WsIn {
+    use std::io::Read;
+    let mut tmp = [0u8; 2048];
+    let _ = stream.set_nonblocking(true);
+    let got = stream.read(&mut tmp);
+    let _ = stream.set_nonblocking(false);
+    match got {
+        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+        Err(_) => {}
+    }
+    // Parse every complete frame; leave a partial one for the next call.
+    loop {
+        if buf.len() < 2 {
+            return WsIn::Open;
+        }
+        let opcode = buf[0] & 0x0f;
+        let masked = buf[1] & 0x80 != 0;
+        let short = (buf[1] & 0x7f) as usize;
+        let (len, head) = match short {
+            126 => {
+                if buf.len() < 4 {
+                    return WsIn::Open;
+                }
+                (u16::from_be_bytes([buf[2], buf[3]]) as usize, 4)
+            }
+            127 => {
+                if buf.len() < 10 {
+                    return WsIn::Open;
+                }
+                let mut n = [0u8; 8];
+                n.copy_from_slice(&buf[2..10]);
+                (u64::from_be_bytes(n) as usize, 10)
+            }
+            n => (n, 2),
+        };
+        if !masked {
+            return WsIn::Protocol;
+        }
+        // ponytail: a 16 MiB ceiling on one inbound frame. Server-push has no
+        // inbound message to be large, and an unbounded length would let a peer
+        // name a buffer this loop then waits forever to fill.
+        if len > 16 * 1024 * 1024 {
+            return WsIn::Protocol;
+        }
+        if buf.len() < head + 4 + len {
+            return WsIn::Open;
+        }
+        let key = [buf[head], buf[head + 1], buf[head + 2], buf[head + 3]];
+        let body: Vec<u8> = buf[head + 4..head + 4 + len]
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ key[i % 4])
+            .collect();
+        buf.drain(..head + 4 + len);
+        match opcode {
+            8 => return WsIn::Closed,
+            // §5.5.2: a ping must be answered with a pong carrying its payload.
+            // A failed pong is not reported: the next outbound message will fail
+            // the same way, and that write is the disconnect signal.
+            9 => {
+                let _ = ws_write_frame(stream, 10, true, &body);
+            }
+            // Data and pongs: read off the wire and dropped, because this
+            // milestone is server-push and has nobody to hand them to.
+            _ => {}
+        }
+    }
+}
+
+/// One message as one frame, or as a fragment sequence when `max_frame` splits
+/// it: the first fragment carries the text opcode with FIN clear, the rest carry
+/// the continuation opcode, and the last sets FIN (§5.4). A fragment boundary may
+/// fall inside a UTF-8 sequence — the spec validates the reassembled message, not
+/// the pieces.
+fn ws_write_message(
+    stream: &mut std::net::TcpStream,
+    payload: &[u8],
+    max_frame: usize,
+) -> std::io::Result<()> {
+    if max_frame == 0 || payload.len() <= max_frame {
+        return ws_write_frame(stream, 1, true, payload);
+    }
+    let mut sent = 0;
+    while sent < payload.len() {
+        let end = (sent + max_frame).min(payload.len());
+        let opcode = if sent == 0 { 1 } else { 0 };
+        ws_write_frame(stream, opcode, end == payload.len(), &payload[sent..end])?;
+        sent = end;
+    }
+    Ok(())
+}
+
+/// One frame on the wire, never masked: §5.1 forbids a server to mask.
+fn ws_write_frame(
+    stream: &mut std::net::TcpStream,
+    opcode: u8,
+    fin: bool,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = Vec::with_capacity(payload.len() + 10);
+    f.push(if fin { 0x80 | opcode } else { opcode });
+    let n = payload.len();
+    if n < 126 {
+        f.push(n as u8);
+    } else if n <= u16::MAX as usize {
+        f.push(126);
+        f.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        f.push(127);
+        f.extend_from_slice(&(n as u64).to_be_bytes());
+    }
+    f.extend_from_slice(payload);
+    stream.write_all(&f)?;
+    stream.flush()
 }
 
 /// Write one HTTP/1.1 response: status line, `Content-Type`, `Content-Length`,

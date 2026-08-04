@@ -19,7 +19,7 @@ import { rpcHandle } from rpc("./fullstack/server/api")
 /// public REST API. `mount` traps at startup on any overlap between the two, so
 /// the order below is a stated policy rather than an accident of listing.
 fn handle(req: Request) -> Response {
-    return match mount(req, [[surface("/_", rpcHandle)], usersHttp.routes()], []) {
+    return match mount(req, [[surface("/_", rpcHandle)], usersHttp.routes()], [], []) {
         Some(r) => r,
         None => Response { status: 404, contentType: "text/plain", body: "no route", vary: "", headers: [:] },
     }

@@ -7,7 +7,7 @@
 /// POST to the collection, and — M2 — how long each answer is good for. The
 /// derived RPC surface these same procedures already answer on (`/_/pastes/*`)
 /// stays exactly as it was; it is what the pages call, and it needed no file.
-import { event, http, Live, Policy, Route, sse, Wire, GET, POST } from "std/http"
+import { event, http, Frames, Live, Policy, Route, Socket, sse, Wire, ws, GET, POST } from "std/http"
 import { recent, byId, create } from http("./pastes")
 import * as store from "../store"
 
@@ -62,4 +62,29 @@ fn tail(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
 /// is that such an option is absent rather than ignored.
 export fn feeds() -> Array<Live> {
     return [sse("/pastes/live", tail).retryAfter(2000).resumable()]
+}
+
+/// The same tail as a WebSocket (RFC-0074 M3b), and the ownership rule made
+/// concrete rather than argued: `tailStep` above hands `sse` an ENCODED frame,
+/// because `id:` and `event:` are choices this file makes, while this one hands
+/// `ws` the JSON payload and nothing else, because a frame's opcode, length and
+/// mask are not choices anybody makes. Same store, same cursor, same `fromStep`.
+fn socketStep(c: Ref<Int64>) -> Option<String> {
+    let i = get(c)
+    if i < 0 || i >= store.pasteCount() {
+        return None
+    }
+    set(c, i + 1)
+    return Some(toJson(store.pasteAt(i)))
+}
+
+fn socketTail(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
+    return fromStep(since, socketStep)
+}
+
+/// 1001 ("going away") rather than 1000, because this feed ends by catching up
+/// and the client is meant to come back — the same statement `retryAfter` makes
+/// on the SSE side, in the vocabulary this transport has for it.
+export fn sockets() -> Array<Socket> {
+    return [ws("/pastes/socket", socketTail).closeCode(1001).maxFrame(65536)]
 }

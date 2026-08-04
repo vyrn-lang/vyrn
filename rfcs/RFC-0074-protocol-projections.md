@@ -235,9 +235,43 @@ it.
 
 ### M3b — `ws`
 
-A second adapter, and the real test of whether the signal generalises: it must
-pass the same conformance file `sse` does. It additionally needs an upgrade
-handshake and a frame codec, which is why it is not in the same milestone.
+A second adapter, and the real test of whether the signal generalises: **it must
+pass the conformance file `sse` passes, unchanged.** M3a wrote that file below
+`std/http` on purpose, calling `serveStream`/`fromStep` directly, so there is
+nothing to rewrite. If it needs rewriting, the signal did not generalise and
+that is the finding.
+
+**Scope: server-push.** RFC 6455 is bidirectional and this milestone is not. The
+`ws` in this RFC's own example consumes a `Stream<T>` and its four options are
+all server-side, so a client→server message has no shape here — it would want a
+handler per message, which is a different design and not one this RFC spells.
+Say so rather than half-building it.
+
+**Who owns the bytes: Vyrn owns what the user chooses, the host owns what the
+protocol fixes.** SSE's `data:`, `id:` and `retry:` are a design surface — which
+event name, which id — so `event(id, name, data)` is Vyrn and the host writes
+what it is handed. A WebSocket frame's opcode, length and mask are not a surface;
+there is no choice in them. So the host frames, and Vyrn yields the payload. That
+rule is worth stating because the two adapters look inconsistent without it.
+
+**The handshake needs SHA-1**, and it should be ordinary Vyrn in `std/hash`
+beside `fnv1a` — pure integer work, three-way parity for free, and pinnable
+against RFC 3174's own vectors. Its doc comment must say what it is for:
+RFC 6455 mandates it as a **handshake nonce transform**, not as a security
+primitive, and a `sha1` sitting in a standard library invites exactly the misuse
+that sentence prevents. `base64` is already in `std/codecs`.
+
+**Predict `heartbeat` to fail for `keepAlive`'s reason, then check.** M3a refused
+`keepAlive` because a pull producer says `Some` or `None` and never "nothing
+yet", so there is no idle moment to fill — and the pump blocks in the producer,
+so a timer has nowhere to fire from. A ping is host-generated rather than
+producer-generated, which is the one difference worth testing before assuming
+the answer carries over. If it does carry over, refuse it the same way and for
+the same stated reason.
+
+`closeCode` (the code in the close frame when the stream ends), `subprotocol`
+(echoed in the handshake response) and `maxFrame` (splitting a large payload)
+have no such problem.
 - **M4 — schema overrides.** `graphql(...).mutations(...).lazy(...)`; the same
   override surface for `std/openapi`.
 
@@ -433,6 +467,48 @@ against `vyrn serve examples/bin`: a `GET /pastes/<id>` answering 200 with
 `Cache-Control`, `ETag` and `Last-Modified`, the same request with
 `If-None-Match` answering 304 with an empty body and no `Content-Type`, and an
 unknown id answering 404.
+
+## As landed — M3b
+
+`ws` is in `std/http` beside `sse`, `sha1` is in `std/hash`, and the milestone's
+own question — does M3a's disconnect signal belong to one transport or to the
+design — is answered by a diff: **`tests/serve.rs` has no deletions.** M3a's four
+stream tests are untouched and the socket tests sit beside them, which is what
+"the conformance file passes unchanged" was written to mean. The signal
+generalised.
+
+**`heartbeat` is refused, and the reason is better than the one predicted.**
+This document guessed it would fail for `keepAlive`'s reason with one difference
+worth checking — a ping is HOST-generated where a keep-alive comment would have
+been producer-generated. That difference is real and it does not save the option:
+between frames the host is not idle, it is blocked inside the producer waiting
+for the next payload, so there is no moment for a timer to fire in. The sharper
+half is what the check turned up on the way: **what a heartbeat is FOR is
+detecting a peer that went away without saying so, and the host already learns
+that by writing to it and failing.** So the option is not merely unimplementable
+here; it is redundant with the signal this whole arc is built on, and it costs no
+ping.
+
+**SHA-1 mixes in masked `UInt64`, not `UInt32`.** Every word is masked to 32 bits
+explicitly rather than left to a narrower type's overflow rule, so the three
+engines agree without any of them being asked to round-trip an overflow the same
+way. `examples/sha1.vyrn` is RFC 3174's own vectors as a parity citizen. The doc
+comment says what the function is for — RFC 6455 §4.2.2's handshake nonce
+transform, not a security primitive — because a `sha1` in a standard library
+invites exactly the misuse that sentence prevents.
+
+**One thing the design did not have: base64 could not take bytes.**
+`base64EncodeV` took a `String`, and a twenty-byte digest is not text — it can
+hold a NUL and need not be valid UTF-8, so it cannot make the trip through a
+`String` first. `std/codecs` grew `base64EncodeBytes` and the string form now
+calls it.
+
+**Server-push, said out loud.** RFC 6455 is bidirectional and this is not; a
+client→server message would want a handler per inbound message, which is a
+different design. The host still parses inbound frames — enough to answer a
+client-initiated close with a close frame, and to refuse an unmasked client frame
+with 1002 per §5.1 — because ignoring the bytes a peer sends is not the same as
+not supporting inbound messages.
 
 ## As landed — M3a
 
