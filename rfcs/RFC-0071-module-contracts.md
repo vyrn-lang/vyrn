@@ -1,6 +1,6 @@
 # RFC-0071 — Module Contracts: Conventions You Can See
 
-- **Status:** Draft
+- **Status:** Implemented (M1, M2, M2b, M2c, M3, M4)
 - **Depends on:** RFC-0021 (`gen fn`, comptime interpreter, `moduleInterface`),
   RFC-0031 (`moduleInterface` reachable type closure, `TypeInfo.module`),
   RFC-0026 / RFC-0039 (`std/ui` pages, `std/vyx` components — the two
@@ -391,7 +391,8 @@ other type. Closing the contract cost nothing and bought total typo detection.
 - **M3 — `Api`.** Declare the open contract; wire it in RFC-0072's `api` role.
   Serializability checking for procedure inputs and outputs. Note M2 already
   shipped the variadic open rule (`fn *(..)`) that `Api` needs, for `Component`.
-  **One thing this document could not have known: see below.**
+  **Landed** — see below. **One thing this document could not have known: see
+  the section that follows.**
 
 ### M3 — what `Serializable` has to admit
 
@@ -672,6 +673,96 @@ it would have kept the migration byte-identical at the cost of shipping a page
 that describes a form that no longer exists. It says `data` now, and that single
 line is the only SSR difference across all four examples.
 
+## M3 — as landed
+
+Seven places where the implementation is not what this document said, and why.
+
+**Two of this milestone's three items had already landed, in another RFC.**
+RFC-0072 M2 declares `Api` in `std/rpc`, attaches it through `vyrn.json`'s
+`roles`, and checks serializability on both ends of every procedure; its own
+milestone list says so ("this milestone carries RFC-0071's deferred M3"). What
+was left when M3 was finally reached was the question the section above raises
+and nothing else — so this entry exists to stop a reader concluding the
+declaration was written twice.
+
+**The stream case this document worried about does not exist, and the strict
+rule is the right one.** RFC-0074's `sse` and `ws` do not publish PROCEDURES.
+They take a `Feed` — `fn(Request, Map<String, String>, Int64) -> Stream<String>`
+— which is a closure handed to the mount call, never exported and never
+reflected, and whose element is an already-encoded frame rather than a
+serializable record (the producer encodes as it goes, which is what keeps it
+lazy; see RFC-0075). The modules where feeds live are excluded from the
+procedure scan by the dotted-stem rule that RFC-0072 M3 added for exactly this
+reason. So "output serializable, or a stream whose element is" would have opened
+the door to a shape nobody writes, and opened it into generators that could not
+have served it anyway: every one of them buffers the whole value into a
+`Response.body` through `toJson`, so a `Stream` return would have traded a
+contract error for a `toJson` error inside generated source. A stream is refused on both ends, and no feed in
+the corpus is a compile error, because no feed in the corpus is a procedure.
+
+**What survives from that section is the message, and it is the same message on
+both ends.** A stream is refused BY NAME rather than through the general rule,
+because it is the one unserializable thing with somewhere else to go: the
+objection says to publish it with `sse` or `ws` from a dotted projection module.
+This document expects the input side to need its own wording. It does not — the
+advice is identical, and a procedure that takes a stream and one that returns
+one are the same mistake.
+
+**The check was not total, and the hole was not streams.** `rpcIsSerializable`
+was `isNamedType`, and a record is nameable BY CONSTRUCTION — it is a `type`
+declaration. So `type Cb = { f: fn(Int64) -> Int64 }` satisfied the rule, and the
+failure arrived later as "`toJson` cannot encode `Cb`" — at a line in a module
+nobody wrote, followed by a cascade about a handler not returning `Response` on
+all paths. That is precisely the "admits everything" failure a contract exists to
+prevent, shipped.
+
+**The compiler already had the total answer; a generator could not reach it.**
+`codec::encodable` / `decodable` is structural, recursive, names the offender,
+and is the very predicate that governs `toJson`/`fromJson`. The alternatives
+were to reimplement it in Vyrn (a second rule, free to drift from the first) or
+to scan `TypeInfo.source` for `fn(` (a scanner, which is the practice this RFC
+spent four milestones deleting). So reflection carries the verdict instead:
+`ParamInfo.uncodable` and `FnInfo.retUncodable` hold the first type inside that
+end which cannot cross a wire, or `""`. Two fields rather than one because the
+domains genuinely differ by direction — a fixed `Array<T, N>` encodes and cannot
+be decoded into — and a procedure's parameter is a decode target while its
+return is encoded.
+
+**`Serializable` is two conditions, and the second is why `Array<Paste>` is
+refused.** There is no type by that name and no `fn *(_: Serializable) ->
+Serializable`: the contract grammar states shape, so the declaration is `fn *(..)
+-> R` and the rest is a named predicate in `std/rpc` (RFC-0072 M2 records why).
+Nothing is serializable: a `Unit` return sends nothing, which is the 204.
+Everything else must be **codable** — the compiler's own domain: scalars,
+validated scalars, `String`, a non-nested `Option`, `Array`, `Map<String, V>`,
+records, payload enums and `Result`, recursively; never `Ref`, `fn`, `Task`,
+`Template`, `Logger`, `Stream` or `Validation` — and additionally **nameable** by
+the module's own reflection, because `fromJson(<Type>, body)` and
+`jsonSchema(<Type>)` are emitted as SOURCE TEXT and a generator can only write a
+name it has. The second condition is inherited from RFC-0072 M2 and is why a bare
+`Int64` or an `Array<Paste>` is refused although both encode fine: wrap it in a
+record, which is what `PasteList` is and why it exists.
+
+**Synthesized reflection had to grow the fields, and answers `""` for a reason
+that is not "codable".** `std/vyx` builds `FnInfo`/`ParamInfo` literals by hand
+twice — for a components module's surface, which exists nowhere else before it is
+text, and for a `.vyx` page's `<script>` — and a record literal names every
+field. Both answer `""`, not because a component's props are codable but because
+they never cross a wire: `Component` and `Page` are SHAPE contracts, and
+synthesized reflection carries what the check reads rather than a verdict it
+would have to invent. The precedent is `vyxNoSchema()` sitting beside it.
+
+**A projection is in the `api` role and is not a procedure module.** Role
+attachment is by DIRECTORY, and `pastes.http.vyrn` lives in the api directory, so
+`vyrn why --contract` reports it under `Api` and answers "ok" for a `feeds()`
+returning `Array<Live>` — which no wire could carry. Nothing misfires today:
+`Api` names no members, so there is no completion or hover to be wrong, the open
+rule constrains only shape, and the generator that WOULD object skips the file by
+its dotted stem. But the role and the generator disagree about which files are
+procedure modules, and closing that needs `Role::except` to match a pattern
+rather than a stem, or a `Projection` contract of its own — the same shape as the
+`Layout` contract M2b, M2c and M4 each deferred.
+
 ## M4 — as landed
 
 Seven places where the implementation is not what this document said, and why.
@@ -757,5 +848,8 @@ are pinned together by a test that RUNS the Vyrn one and compares.
 - Hover on `head` names contract `Page` and `std/ui`; go-to-def lands on it.
 - A user-authored generator with its own contract gets identical completion with
   zero LSP changes — proven by an example generator in the test suite.
+- A procedure whose parameter or return cannot cross the wire is an error at the
+  DECLARATION naming the offender, not a `toJson` failure inside generated
+  source; a `Stream` on either end is refused by name and pointed at `sse`/`ws`.
 - Interp == native == wasm parity unaffected (comptime-only change), and the
   bin example's SSR bytes are byte-identical across the migration.
