@@ -6,11 +6,11 @@
 - [std/codecs](std/codecs.md) — std/codecs — hex, base64 and percent encoding, written in Vyrn (RFC-0078 M4b).
 - [std/connect](std/connect.md) — std/connect — Connect wire compatibility as a library (RFC-0038), built
 - [std/contract](std/contract.md) — std/contract — check a module against a module contract (RFC-0071).
-- [std/fallible](std/fallible.md)
+- [std/fallible](std/fallible.md) — `Fallible` — the protocol `?` resolves through for a type that is not
 - [std/graphql](std/graphql.md) — std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
 - [std/hash](std/hash.md) — std/hash — non-cryptographic byte hashing (RFC-0045).
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).
-- [std/http](std/http.md)
+- [std/http](std/http.md) — std/http — the REST projection (RFC-0074 M1), a library over the same
 - [std/i18n](std/i18n.md) — std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
 - [std/json](std/json.md) — std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
 - [std/jsondec](std/jsondec.md) — std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
