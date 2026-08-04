@@ -95,6 +95,60 @@ fn emit_gen_shows_the_synthesized_router() {
     assert!(src.contains("status: 422"), "error-page status:\n{src}");
     // The exported entry point.
     assert!(src.contains("export fn route(req: Request) -> Response"), "route entry:\n{src}");
+
+    // RFC-0074: the tree is mountable, and enumerated. One `//@route` per page on
+    // the same channel `std/rpc` uses — so `vyrn routes` prints a page without
+    // knowing it is one — and a `routes()` group `mount` takes, in dispatch order
+    // so first-match agrees with `route`'s own static-before-dynamic order.
+    for want in [
+        "//@route GET / index convention",
+        "//@route GET /items items convention",
+        "//@route GET /items/{id} items/[id] convention",
+        "//@route GET /users/{id} users/[id] convention",
+        "GET(httpRoute(\"/\", uiPageRun, \"index\")),",
+        "GET(httpRoute(\"/users/{id}\", uiPageRun, \"users/[id]\")),",
+    ] {
+        assert!(src.contains(want), "missing `{want}`:\n{src}");
+    }
+}
+
+/// A page group obeys `mount`'s ordering rules, which is the whole reason to make
+/// one: before this a page tree was a `fn(Request) -> Response` mounted by hand
+/// after everything else, and an API route that swallowed a page path was
+/// invisible until somebody loaded the page.
+///
+/// It can be checked at all because a page DECLINES — `routes()` is one route per
+/// pattern, not one catch-all. Only the tree's 404 always answers, and that stays
+/// the composition root's fallback.
+#[test]
+fn a_page_shadowed_by_an_earlier_group_is_a_startup_error() {
+    let dir = scratch("pageshadow");
+    write(
+        &dir.join("pages/users/[id].vyrn"),
+        "import { el, text, Html } from \"std/html\"\n\
+         export type Params = { id: Int64 }\n\
+         export fn page(p: Params) -> Html { return el(\"main\", [], []) }\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import * as site from pages(\"./pages\")\n\
+         import { mount, surface } from \"std/http\"\n\
+         fn under(req: Request) -> Option<Response> { return None }\n\
+         fn main() -> Int64 {\n\
+         \x20   let req = Request { method: \"GET\", path: \"/\", headers: [:], body: \"\" }\n\
+         \x20   match mount(req, [[surface(\"/users\", under)], site.routes()], [], []) {\n\
+         \x20       Some(r) => print(\"answered\"),\n\
+         \x20       None => print(\"none\"),\n\
+         \x20   }\n\
+         \x20   return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a shadowed page must trap");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("is unreachable"), "{err}");
+    assert!(err.contains("GET /users/{id}"), "the shadowed page is named:\n{err}");
 }
 
 // ---- generation failures each name the offending file ----------------------

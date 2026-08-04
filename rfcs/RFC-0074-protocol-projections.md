@@ -165,27 +165,50 @@ compiler feature.
 ## Composition root
 
 ```vyrn
-import { serve, mount } from "std/http"
+import { mount, surface } from "std/http"
 import { rpc } from "std/rpc"
+import { rpcHandle } from rpc("./server/api")
 import { pagesThemed } from "std/ui"
-import { route } from pagesThemed("./app/routes", "./theme.json")
+import * as appPages from pagesThemed("./app/routes", "./theme.json")
 import * as pastesHttp from "./server/api/pastes.http"
 import * as eventsHttp from "./server/api/events.http"
 import { sdl } from "./server/api/pastes.graphql"
 
 fn handle(req: Request) -> Response {
-    return mount(req, [
-        rpc("./server/api"),          // the derived surface
+    return match mount(req, [
+        [surface("/_", rpcHandle)],   // the derived surface
         pastesHttp.routes(),
         eventsHttp.routes(),
         sdl().endpoint("/graphql"),
-        route,                        // pages last: they own everything else
-    ])
+        appPages.routes(),            // pages last: they own everything else
+    ], [], []) {
+        Some(r) => r,
+        None => appPages.route(req),  // the tree's own 404
+    }
 }
 ```
 
 `mount` resolves in order, first match wins, and reports overlaps between
 mounted groups as a startup error rather than shadowing silently.
+
+The page tree enters as `routes()` and not as `route`, and the difference is the
+one thing that kept pages out of `mount` — and out of `vyrn routes` — for three
+milestones. A page router is a `fn(Request) -> Response` that ALWAYS answers, so
+as a group it could only ever be a catch-all: unorderable, uncheckable, and a
+single opaque row in the table.
+
+But its PAGES do not always answer. `routes()` enumerates one `Route` per page,
+each matching its own pattern and declining everything else, and what always
+answers is the tree's 404 — which is a fallback, and belongs where a fallback
+goes: the `None` arm. Split that way a page is an ordinary route. It obeys the
+ordering rules, `mount` reports an API path that would shadow it, and `vyrn
+routes` prints it beside everything else because nothing downstream knows it is a
+page.
+
+There is no prefix to supply, and never was. A page router matches `req.path`
+whole against its tree's own segments, so a tree cannot be re-hung under a prefix
+and its patterns are already absolute: a tree containing `raw/[id].vyrn` mounts
+`/raw/{id}` and says so.
 
 ## Milestones
 

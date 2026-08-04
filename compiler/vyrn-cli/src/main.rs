@@ -55,7 +55,7 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned and hand-written path the router mounts, with its source; page routes are NOT in it, std/ui declares none; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -844,15 +844,16 @@ fn why_cmd(args: &[String]) -> ExitCode {
 /// `mount` is handed. Nothing here computes a route, so no two of them can
 /// disagree about one.
 ///
-/// PAGE routes are still absent, and now say so in the usage line rather than
-/// hiding behind "every". `std/ui` emits neither directives nor a map, and it
-/// could not emit a truthful directive if it did: `examples/bin` mounts its
-/// server-only page tree behind `if req.path.startsWith("/raw/")` in the
-/// composition root, so the generator knows the tree-relative path and not the
-/// prefix the app serves it under. A router entry is where a prefix becomes a
-/// fact, and a page router is not one — it is a `fn(Request) -> Response` that
-/// always answers. Making pages visible means giving `std/ui` a route list
-/// `mount` can take, which is a language change and not a fix to this command.
+/// PAGE routes arrive on the FIRST channel, which is the whole of this fix here:
+/// `std/ui` now emits a `//@route` per page and a `routes()` group `mount` takes,
+/// so nothing in this command knows a page from a procedure. Two things that were
+/// believed to block it turned out not to exist. A page router "always answers",
+/// but its PAGES do not — only the tree's 404 does, and that is the composition
+/// root's fallback, not a route. And the prefix a tree is served under was never
+/// unknown: a page router matches `req.path` whole against its own segments, so a
+/// tree cannot be re-hung and its patterns are already absolute — `examples/bin`'s
+/// `startsWith("/raw/")` was a hand-written dispatch guard standing in front of a
+/// tree that literally contains `raw/[id].vyrn`.
 fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     let path = match file.map(|s| s.to_string()).or_else(manifest_main) {
         Some(p) => p,
