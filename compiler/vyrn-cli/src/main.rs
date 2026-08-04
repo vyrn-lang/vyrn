@@ -55,7 +55,7 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived and pinned path, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned and hand-written path the router mounts, with its source; page routes are NOT in it, std/ui declares none; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -828,8 +828,31 @@ fn why_cmd(args: &[String]) -> ExitCode {
 /// The two channels are UNIONED rather than one replacing the other. They come
 /// from the same generator over the same route list today, so the union is the
 /// same set; it costs nothing and it keeps the command honest about a future
-/// generator that emits only one of them (`std/ui` emits neither, which is why
-/// page routes are absent from both).
+/// generator that emits only one of them.
+///
+/// A THIRD channel (this fix) covers what no generator can: a hand-written
+/// projection's `Route`/`Live`/`Socket` list (RFC-0074). Its paths are written,
+/// not derived, so the generator that mounts the derived surface never sees them
+/// — the table printed three of `examples/bin`'s eight wire rows and called
+/// itself "every". They are read from the values themselves, by evaluating the
+/// arguments of the program's `mount(..)` call — see
+/// [`vyrn_frontend::interp::mounted_routes`] for why that is the arguments and
+/// not a naming convention, and what it costs.
+///
+/// The one-producer property SURVIVES: no channel re-derives a path. The first
+/// two read what a generator wrote while mounting; the third reads the values
+/// `mount` is handed. Nothing here computes a route, so no two of them can
+/// disagree about one.
+///
+/// PAGE routes are still absent, and now say so in the usage line rather than
+/// hiding behind "every". `std/ui` emits neither directives nor a map, and it
+/// could not emit a truthful directive if it did: `examples/bin` mounts its
+/// server-only page tree behind `if req.path.startsWith("/raw/")` in the
+/// composition root, so the generator knows the tree-relative path and not the
+/// prefix the app serves it under. A router entry is where a prefix becomes a
+/// fact, and a page router is not one — it is a `fn(Request) -> Response` that
+/// always answers. Making pages visible means giving `std/ui` a route list
+/// `mount` can take, which is a language change and not a fix to this command.
 fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     let path = match file.map(|s| s.to_string()).or_else(manifest_main) {
         Some(p) => p,
@@ -877,6 +900,30 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
             }
         }
     }
+    // The hand-written channel. A failure here is reported and survived: the
+    // derived rows above are still true, and a table that is short and says so
+    // beats one that needs the program to start.
+    match vyrn_frontend::load(&source, &root_key, &opts, &resolver)
+        .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
+        .and_then(|p| vyrn_frontend::interp::mounted_routes(&p))
+    {
+        Ok(mounted) => {
+            for r in mounted {
+                // A `surface(..)` stands for a whole subsystem; the directives
+                // above already list its members, one row each.
+                if r.prefix {
+                    continue;
+                }
+                let row = (r.method, r.path, r.procedure, "explicit".to_string());
+                if !rows.iter().any(|x| x.0 == row.0 && x.1 == row.1) {
+                    rows.push(row);
+                }
+            }
+        }
+        Err(e) => eprintln!(
+            "note: only derived routes are listed — the mounted router could not be read: {e}"
+        ),
+    }
     if json {
         return routes_json(&mods, rows);
     }
@@ -884,7 +931,9 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
         println!("(no derived routes in {root_key})");
         return ExitCode::SUCCESS;
     }
-    rows.sort_by(|a, b| a.1.cmp(&b.1));
+    // By path then method: a projection puts two methods on one path, so path
+    // alone no longer orders the table.
+    rows.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
     let w0 = rows.iter().map(|r| r.0.len()).max().unwrap_or(6).max("method".len());
     let w1 = rows.iter().map(|r| r.1.len()).max().unwrap_or(4).max("path".len());
     let w2 = rows.iter().map(|r| r.2.len()).max().unwrap_or(9).max("procedure".len());

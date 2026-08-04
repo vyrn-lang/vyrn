@@ -191,6 +191,54 @@ fn routes_prints_the_resolved_table_with_its_source() {
     }
 }
 
+/// The table says "every" and has to mean it. `examples/bin` is the measure
+/// because it publishes all three producers at once: a derived RPC surface, a
+/// hand-written REST projection over the same three procedures, and a stream and
+/// a socket beside them. Before this it printed the three `/_/*` rows and
+/// nothing else — the missing five were exactly the ones somebody wrote by hand.
+///
+/// The row COUNT is asserted, not just the presence of each row: a table that
+/// grows a phantom is as wrong as one that drops a route, and only the count
+/// catches a group counted twice.
+#[test]
+fn routes_shows_the_hand_written_projection_beside_the_derived_surface() {
+    let bin = repo_dir("examples/bin");
+    let out = vyrn().arg("routes").arg("server.vyrn").current_dir(&bin).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Column widths follow the widest row, so compare on words rather than on
+    // the padding.
+    let rows: Vec<String> =
+        text.lines().skip(1).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    for want in [
+        // The derived surface, unchanged — its rows still come from `//@route`.
+        "POST /_/pastes/byId pastes/byId convention",
+        "POST /_/pastes/create pastes/create convention",
+        "POST /_/pastes/recent pastes/recent convention",
+        // The REST projection: written in `server/api/pastes.http.vyrn`, so no
+        // generator ever saw these and `source` is neither convention nor
+        // override but `explicit`.
+        "GET /pastes recent explicit",
+        "POST /pastes create explicit",
+        "GET /pastes/{id} byId explicit",
+        // RFC-0074 M3a/M3b. `SSE`/`WS` and not `GET`, because that is the word
+        // the value's own `derived` line uses for itself; a `Live` carries no
+        // handler name, hence `-`.
+        "SSE /pastes/live - explicit",
+        "WS /pastes/socket - explicit",
+    ] {
+        assert!(rows.iter().any(|r| r == want), "missing `{want}`:\n{text}");
+    }
+    assert_eq!(rows.len(), 8, "{text}");
+    // The `surface(\"/_\", rpcHandle)` the same `mount` call carries is NOT a
+    // ninth row: a prefix stands for a subsystem the directives already list
+    // one row at a time, and printing both would double-count it.
+    assert!(!text.contains("/_ "), "{text}");
+    // Pages are the one thing still absent, and the usage line says so instead
+    // of claiming them.
+    assert!(!text.contains("/about"), "{text}");
+}
+
 /// RFC-0073 M4: `--json` is the same table plus each route's DECLARATION, read
 /// from the symbol map the mounting generator baked in — the same reader the
 /// LSP's hover and route lenses use, which is what makes "`vyrn routes --json`

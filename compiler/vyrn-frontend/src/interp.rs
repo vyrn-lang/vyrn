@@ -934,6 +934,234 @@ where
     Ok((ok, failed))
 }
 
+/// One entry of a program's mounted router, as the router itself received it.
+///
+/// `method` is the first word of the value's own `derived` line, so a stream
+/// reads `SSE` and a socket `WS` rather than the `GET` they both answer: that is
+/// what the value says it is, and RFC-0074's whole claim is that a stream is a
+/// different protocol and not a flag on a response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MountedRoute {
+    pub method: String,
+    pub path: String,
+    /// The procedure the route answers with, or `"-"` when the value carries no
+    /// name for it — a `Live`/`Socket` is built from a handler passed by value
+    /// and nothing at runtime knows what that handler was called.
+    pub procedure: String,
+    /// A `surface(..)`: a whole subsystem behind a prefix, whose members are
+    /// enumerated by the `//@route` channel instead of by this one.
+    pub prefix: bool,
+}
+
+/// Every `Route`/`Live`/`Socket` the program hands to `std/http`'s `mount`
+/// (RFC-0074's deferred "`vyrn routes` cannot see an explicit route").
+///
+/// A hand-written projection's paths are not derived from anything, so no
+/// generator can emit a directive for them — but they are not unreachable
+/// either: they exist as data the moment `mount` is called, and `Route`,
+/// `Live` and `Socket` each carry the `derived` line their constructor and
+/// combinators wrote. So this reads them from the values themselves.
+///
+/// It reads the arguments of the `mount(..)` CALL rather than calling exports
+/// named `routes`/`feeds`/`sockets`, which is the difference between a fact and
+/// a convention: an `Array<Route>` a module exports but nobody mounts is not on
+/// the wire, and the composition root is the only place that knows which lists
+/// were actually passed. The command therefore does not re-derive anything —
+/// it evaluates the same expressions `mount` is handed and reads the same
+/// fields `mount` routes on, which is the one-producer property the directive
+/// channel has, obtained a different way.
+///
+/// Two honest limits. The arguments are evaluated ONCE, here, after module-state
+/// init — a route list computed from mutable module state could differ on a
+/// later request. And this runs the program's own startup, so a program that
+/// traps or loops on init has no table; the caller keeps the directive rows and
+/// says so rather than failing, which is why `vyrn routes` never prints less
+/// than it did before this existed.
+pub fn mounted_routes(program: &Program) -> Result<Vec<MountedRoute>, String> {
+    let mut calls: Vec<&[Expr]> = Vec::new();
+    for f in &program.functions {
+        mount_calls_block(&f.body, &mut calls);
+    }
+    if calls.is_empty() {
+        return Ok(Vec::new());
+    }
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || mounted_routes_inner(program, &calls))
+            .expect("failed to spawn interpreter thread")
+            .join()
+            .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
+    })
+}
+
+fn mounted_routes_inner(
+    program: &Program,
+    calls: &[&[Expr]],
+) -> Result<Vec<MountedRoute>, String> {
+    let interp = new_interp(program, &[])?;
+    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
+        return Err(s);
+    }
+    let mut out = Vec::new();
+    for args in calls {
+        // Argument 0 is the request; the route lists are everything after it.
+        for a in args.iter().skip(1) {
+            let mut scope: Vec<Frame> = vec![Frame::default()];
+            match interp.expr(a, &mut scope) {
+                Ok(v) => collect_mounted(&v, &mut out),
+                Err(Ctrl::Err(s)) => return Err(s),
+                Err(Ctrl::Return(_)) => {}
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Read one mounted value, recursing through the group arrays `mount` takes.
+fn collect_mounted(v: &Val, out: &mut Vec<MountedRoute>) {
+    match v {
+        Val::Array(xs) => {
+            for x in xs.iter() {
+                collect_mounted(x, out);
+            }
+        }
+        Val::Record(fields, Some(name))
+            if matches!(&**name, "Route" | "Live" | "Socket") =>
+        {
+            let Some(Val::Str(derived)) = fields.get("derived") else { return };
+            // `method path [procedure] [policy..]`, written by the constructor
+            // and appended to by each combinator. A `Route`'s third word is the
+            // procedure the generator seeded it with; a `Live`/`Socket` has none.
+            let mut words = derived.split_whitespace();
+            let (Some(method), Some(path)) = (words.next(), words.next()) else { return };
+            let procedure = match &**name {
+                "Route" => words.next().unwrap_or("-"),
+                _ => "-",
+            };
+            out.push(MountedRoute {
+                method: method.to_string(),
+                path: path.to_string(),
+                procedure: procedure.to_string(),
+                prefix: matches!(fields.get("prefix"), Some(Val::Bool(true))),
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Every `mount(..)` argument list in a block. A plain walk: a missed nesting is
+/// a route silently absent from the table, which is the bug this closes.
+fn mount_calls_block<'a>(b: &'a Block, out: &mut Vec<&'a [Expr]>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::Expr(value) => mount_calls_expr(value, out),
+            Stmt::IndexSet { index, value, .. } => {
+                mount_calls_expr(index, out);
+                mount_calls_expr(value, out);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(e) = value {
+                    mount_calls_expr(e, out);
+                }
+            }
+            Stmt::If { cond, then_block, else_block, .. } => {
+                mount_calls_expr(cond, out);
+                mount_calls_block(then_block, out);
+                if let Some(e) = else_block {
+                    mount_calls_block(e, out);
+                }
+            }
+            Stmt::IfLet { scrutinee, then_block, else_block, .. } => {
+                mount_calls_expr(scrutinee, out);
+                mount_calls_block(then_block, out);
+                if let Some(e) = else_block {
+                    mount_calls_block(e, out);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                mount_calls_expr(cond, out);
+                mount_calls_block(body, out);
+            }
+            Stmt::ForIn { iter, body, .. } => {
+                mount_calls_expr(iter, out);
+                mount_calls_block(body, out);
+            }
+            Stmt::Region { body, .. } => mount_calls_block(body, out),
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+        }
+    }
+}
+
+fn mount_calls_expr<'a>(e: &'a Expr, out: &mut Vec<&'a [Expr]>) {
+    match e {
+        Expr::Call { name, args, .. } => {
+            // Top-level names are unique across a linked program, so `mount` is
+            // `std/http`'s or the program has none.
+            if name == "mount" {
+                out.push(args);
+            }
+            for a in args {
+                mount_calls_expr(a, out);
+            }
+        }
+        Expr::TryConstruct { args, .. } | Expr::Spawn { args, .. } => {
+            for a in args {
+                mount_calls_expr(a, out);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+            mount_calls_expr(expr, out)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            mount_calls_expr(lhs, out);
+            mount_calls_expr(rhs, out);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            mount_calls_expr(scrutinee, out);
+            for a in arms {
+                mount_calls_expr(&a.body, out);
+            }
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            mount_calls_expr(cond, out);
+            mount_calls_expr(then_branch, out);
+            if let Some(b) = else_branch {
+                mount_calls_expr(b, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                mount_calls_expr(v, out);
+            }
+        }
+        Expr::ArrayLit { elems, .. } => {
+            for x in elems {
+                mount_calls_expr(x, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                mount_calls_expr(k, out);
+                mount_calls_expr(v, out);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(x) => mount_calls_expr(x, out),
+            LambdaBody::Block(b) => mount_calls_block(b, out),
+        },
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => {}
+    }
+}
+
 /// One HTTP request handed to a served `handle` (RFC-0016). The host (`vyrn
 /// serve`) fills these from the wire; the interpreter turns each into a
 /// `Request` record before calling `handle`.
