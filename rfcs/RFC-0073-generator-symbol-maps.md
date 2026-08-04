@@ -114,6 +114,15 @@ check runs against the procedure's input type: `get("/{id}", byId)` requires
 `IdReq` to have an `id` field, and `{ID}` is an error listing the available
 fields.
 
+> **This section describes work that happened without it.** `Params` is
+> *declared* and checked against the segments (`std/ui.vyrn:1035`), not
+> generated — a filename carries a segment's name and not its type, and the
+> corpus uses both `Int64` and `String`, so the declaration is the only place
+> the type is stated. REST placeholders are checked by a generated
+> `String where value =~ …` refinement type, which `std/http`'s header notes
+> "needs neither RFC-0073's symbol map nor a compiler rule". The string-lookup
+> form no longer exists. See "M2 — read against what shipped".
+
 ## LSP capabilities
 
 **Rename.** `textDocument/rename` on a procedure declaration collects
@@ -291,9 +300,45 @@ coincidence, not an effect. The fix is scoped rather than flat — an arm's bind
 shadow inside that arm and not in its siblings — and `if let` was missing the
 same thing.
 
-- **M2 — typed `Params`.** Generated per-route `Params` records with mapped
+- **M2 — typed `Params`.** ~~Generated per-route `Params` records with mapped
   fields; placeholder checking in REST projections; the string-lookup form
-  removed.
+  removed.~~ **Struck.** All three are already done, moot, or impossible — see
+  below.
+
+### M2 — read against what shipped
+
+**Field names are already checked against the segments.** `std/ui.vyrn:1035`
+does it at generation time through `moduleInterface`, and the module's own
+header has said so since it was written: *"the field NAMES must match the
+segments exactly."* Rename `[id].vyx` to `[pasteId].vyx` and the declaration
+stops matching — which is precisely the behaviour this milestone was written to
+add.
+
+**Placeholder checking in REST projections shipped without this RFC**, and
+`std/http`'s header says why in as many words: a procedure's generated parameter
+type is a `String where value =~ …` admitting exactly the placeholders its input
+record has fields for, so `byId("/{ID}")` is a checker error at the call site and
+*"needs neither RFC-0073's symbol map nor a compiler rule."* That is a better
+mechanism than the one proposed here — a refinement type the checker already
+understands, rather than a generated table something has to consult.
+
+**The string-lookup form is already gone.** There is nothing left in `std/` or
+the corpus to remove.
+
+**And the one item that is not done cannot be.** "A generated `Params` record
+derived from the filename" would have to invent the field *types*, and a
+filename does not carry them: `[id]` says a segment is named `id` and nothing
+about whether it is an `Int64` or a `String`. The corpus uses both. So the
+declaration is not redundancy to be generated away — **it is the only place the
+type is stated**, and the check against the filename is what keeps it honest.
+
+The milestone was written before any of this existed and reads as though the
+declaration were the problem. It is the answer.
+
+**What genuinely survives** is the diagnostic's *source*: today the mismatch is
+reported by the generator, and M1's symbol map could let it name the file and
+line that declares the conflicting segment. That is a note on M3 (LSP read),
+not a milestone of its own.
 - **M3 — LSP read.** Hover with derived facts, go-to-def onto declarations,
   CodeLens with paths.
 - **M4 — rename.** Cross-boundary rename with regeneration; `vyrn routes` and
