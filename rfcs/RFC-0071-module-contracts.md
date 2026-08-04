@@ -391,6 +391,31 @@ other type. Closing the contract cost nothing and bought total typo detection.
 - **M3 — `Api`.** Declare the open contract; wire it in RFC-0072's `api` role.
   Serializability checking for procedure inputs and outputs. Note M2 already
   shipped the variadic open rule (`fn *(..)`) that `Api` needs, for `Component`.
+  **One thing this document could not have known: see below.**
+
+### M3 — what `Serializable` has to admit
+
+`fn *(_: Serializable) -> Serializable` was written before RFC-0074 M3a/M3b, and
+those shipped `sse` and `ws` over procedures that return **`Stream<T>`** — which
+live in exactly the directory the `api` role attaches to. A stream is not
+serializable and never will be: it is a linear resource with a producer behind
+it, and RFC-0075 exists to stop it being treated as a value.
+
+So the rule is not "output serializable". It is **output serializable, or a
+stream whose element is** — `fn tail(req: TailReq) -> Stream<Paste>` is a
+legitimate procedure with a serializable element and an unserializable return
+type, and that distinction is the whole of what the wire needs to know. Get it
+wrong in the strict direction and M3 makes every feed in the corpus a compile
+error; get it wrong in the loose direction and `Serializable` stops meaning
+anything.
+
+The input side has no such case: a procedure takes a decoded record. A `Stream`
+*parameter* is a stream the caller owns and the wire cannot carry, and should be
+refused by name rather than by falling through a general rule.
+
+Worth stating because the check's value is precisely that it is total: an `api`
+module that returns something the wire cannot carry should not compile, and the
+first thing anyone will put there after this arc is a feed.
 - **M4 — LSP.** Role→contract resolution; completion, hover, go-to-def,
   quick-fix. `vyrn why --contract <file>` prints the resolved contract and every
   export's status. **Landed** — see below.
