@@ -2722,7 +2722,19 @@ impl Fn_<'_> {
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
             Expr::Call { name, args, line } => self.call(m, b, name, args, *line)?,
             Expr::Spawn { name, args, line } => self.spawn(m, b, name, args, *line)?,
-            other => return unsupported(&expr_name(other), Expr::line(other)),
+            // No catch-all. The arms above cover `Expr` exhaustively, and the
+            // `other => unsupported(..)` that used to sit here was dead — it
+            // printed an `unreachable_patterns` warning on every build of the
+            // workspace, which is the kind that teaches a reader to stop reading
+            // warnings.
+            //
+            // Deleting it also moves the obligation to where it belongs: a new
+            // `Expr` variant now fails to COMPILE here, instead of silently
+            // reaching a runtime "unsupported" that says the backend is missing a
+            // lowering. RFC-0077's ladder reached 87 of 87 with exactly one such
+            // hole (`extern`, excluded from the run comparison so nothing ever
+            // built it), and a non-exhaustive match is the cheapest way to not
+            // repeat that. `expr_name` keeps its three other callers.
         })
     }
 
