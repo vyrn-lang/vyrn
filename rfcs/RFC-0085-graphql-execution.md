@@ -158,7 +158,52 @@ field's *name* as a string. RFC-0074 rules that out by name — "declared in rea
 symbols rather than strings" — and it is the reason `.mutations([create])` was
 not solved that way.
 
-**Until this is decided, M1's distinction is unearned but not wrong.**
+### Decided: laziness lives on the field
+
+`type Book = { title: String, body: lazy String }`. The reason is `mut fn`'s:
+expensive-to-load is a property of **the data**, so one declaration serves
+GraphQL, OpenAPI and the RPC surface, and no projection restates it. The other
+two candidates are recorded above with what they cost; this is the one that puts
+the fact where it lives.
+
+Two consequences the decision forces, both worth knowing before anything is
+built.
+
+**The word is already taken, one layer up.** `std/ui` has `Lazy<T>` and a
+`lazy(..)` function for lazy *pages* (RFC-0070): a page whose data arrives after
+the shell, rendering `Loading` first. A `lazy` **field** is a different
+mechanism — computed on first read, of a record, with no `Loading` state and no
+network. Contextually they never meet (`lazy` as a field modifier is in type
+position; `lazy(..)` is a call), so `mut fn`'s trick applies. But the two must be
+named apart in prose wherever both appear, because "lazy" meaning two things one
+layer apart is how a reader learns to distrust a word.
+
+**And it forces the selective encoder M1 refused to write.** M1's executor
+projects by round-tripping through `toJson`: `toJson(browse())` → `parseJson` →
+project → `emit`. If `toJson` **forces** a lazy field — and it must, or the JSON
+it produces is silently incomplete — then a lazy field is computed on every
+GraphQL request whether or not it was selected, and the feature buys exactly
+nothing where it was asked for.
+
+So selection has to reach the value *before* encoding, which is the partial
+encoder M1 declined on the grounds that a second writer would have to agree with
+`toJson` about validated scalars, `Map`s and payload enums. That objection still
+stands — and the answer is that the encoder must be **generated from the same
+reflection walk** rather than hand-written, so there is no second opinion to
+drift.
+
+That is two milestones, and they split the way RFC-0074's M4 did:
+
+- **M4a — `lazy` on the field.** The language feature, with its demonstration
+  *outside* GraphQL, because the entire argument for putting it on the field is
+  that the fact is transport-free. A `lazy` field is a stored nullary closure
+  (RFC-0037 makes those ordinary) computed on first read; the pin is that a
+  field never read is never computed, observed rather than asserted.
+- **M4b — the executor selects before it encodes.** The generated selective
+  encoder, and RFC-0074's `.lazy(..)` example becomes real. Only here does M1's
+  "omit versus never computed" become a distinction with a consequence.
+
+**Until M4a lands, M1's distinction is unearned but not wrong.**
 `gqlProject`'s comment says the value arrives fully computed and the executor
 omits; that is exactly true today, and it stays true until something can be
 declared lazy. The comment is a marker for where this milestone will cut, not a
