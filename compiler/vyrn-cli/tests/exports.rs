@@ -96,7 +96,7 @@ export fn getUser(req: IdReq) -> UserResult {
     return Err("nope")
 }
 /// Create a user.
-export fn createUser(req: CreateReq) -> UserResult {
+export mut fn createUser(req: CreateReq) -> UserResult {
     return Err("nope")
 }
 /// The whole tally.
@@ -104,8 +104,9 @@ export fn listTally() -> Tally {
     let m: Map<String, Int64> = [:]
     return m
 }
-/// Echo the canonical shape.
-export fn getShape() -> Shape {
+/// Echo the canonical shape. Deliberately without a `get`/`list` prefix: the
+/// naming convention RFC-0074 M4a deleted would have made this a Mutation.
+export fn shape() -> Shape {
     return Dot
 }
 "#;
@@ -148,7 +149,7 @@ fn emit_gen_connect_server_shows_the_router_and_dispatchers() {
     let src = emit_gen(&dir.join("connect_server.vyrn"));
     // Imports the procedures (and the contract's own `IdReq`) from the contract,
     // and the closure types from wire.
-    assert!(src.contains("import { getUser, createUser, listTally, getShape"), "procedures imported:\n{src}");
+    assert!(src.contains("import { getUser, createUser, listTally, shape"), "procedures imported:\n{src}");
     assert!(src.contains("} from \"./contract\""), "contract import:\n{src}");
     assert!(src.contains("from \"./wire\""), "wire types imported:\n{src}");
     // The Connect error envelope + the two error builders.
@@ -206,7 +207,7 @@ fn openapi_document_is_wellformed_and_deterministic() {
     let paths = v.get("paths").expect("paths");
     assert_eq!(
         obj_keys(paths),
-        vec!["/rpc/getUser", "/rpc/createUser", "/rpc/listTally", "/rpc/getShape"]
+        vec!["/rpc/getUser", "/rpc/createUser", "/rpc/listTally", "/rpc/shape"]
     );
     // getUser's request refs a component; its 200 refs the Result component; the
     // 422 carries the Issues shape.
@@ -300,13 +301,20 @@ fn graphql_sdl_is_wellformed_and_deterministic() {
     // Map => the documented JSON scalar (named alias => its own scalar).
     assert!(sdl.contains("scalar JSON"), "JSON scalar:\n{sdl}");
     assert!(sdl.contains("scalar Tally"), "named map alias -> scalar:\n{sdl}");
-    // Query/Mutation split: get*/list* -> Query, else Mutation.
+    // Query/Mutation split: a `mut fn` is a Mutation, everything else a Query
+    // (RFC-0074 M4a). `shape` is the pin — no `get`/`list` prefix, so the naming
+    // convention this replaced would have filed it under Mutation.
     let q = sdl.split("type Query {").nth(1).unwrap().split('}').next().unwrap();
     assert!(q.contains("getUser(input: IdReqInput!): UserResult"), "getUser in Query:\n{q}");
     assert!(q.contains("listTally: Tally"), "listTally in Query:\n{q}");
-    assert!(q.contains("getShape: Shape"), "getShape in Query:\n{q}");
+    assert!(q.contains("shape: Shape"), "unprefixed accessor in Query:\n{q}");
     let m = sdl.split("type Mutation {").nth(1).unwrap().split('}').next().unwrap();
     assert!(m.contains("createUser(input: CreateReqInput!): UserResult"), "createUser in Mutation:\n{m}");
+    assert_eq!(
+        m.lines().filter(|l| !l.trim().is_empty()).count(),
+        1,
+        "only the `mut fn` is a Mutation:\n{m}"
+    );
     // A type's /// doc becomes a description block string.
     assert!(sdl.contains("\"\"\"A stored user.\"\"\""), "type doc -> description:\n{sdl}");
 }
