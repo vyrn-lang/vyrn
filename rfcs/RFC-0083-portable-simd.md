@@ -50,6 +50,31 @@ compiler pass.
 Integer auto-vectorisation is a separate matter and remains available — integer
 addition *is* associative — but it is an optimisation question, not this RFC's.
 
+**Measured 2026-08-05, and the answer is stronger than "available".** A scalar
+`Int32` sum over 65536 elements against the same sum written with `I32x4`, both
+native, `blackBox` on input and output:
+
+| | min | median |
+|---|---|---|
+| scalar loop | **3.03 µs** | 3.08 µs |
+| `I32x4.load` + `+` + lane reduce | 6.05 µs | 6.12 µs |
+
+**The scalar loop is 2x faster than the explicit SIMD.** LLVM vectorises the
+reduction — it is allowed to, because integer addition associates — and it does
+it better than the hand-written version, which pays a bounds-checked
+`I32x4.load` per group of four where the auto-vectorised loop pays one check for
+the whole run.
+
+So there is nothing to build here, and the conclusion is not "integer SIMD is
+unnecessary" but something narrower and more useful: **`I32x4` is for work whose
+shape the optimiser cannot see** — the bit-views, the lane shuffles, the
+saturating forms — and **not** for making a bulk arithmetic loop fast. A user
+reaching for it to speed up a sum should be told to write the loop.
+
+This also explains M3's deleted `min`/`max` from the other side: LLVM already
+emitted `pminsd` for the scalar `if a < b`, so the builtin was measured at 1.00x
+and removed. Same optimiser, same reason, two milestones apart.
+
 ## What M1 builds
 
 One type, four operations, three engines. The point of M1 is to prove the whole
