@@ -296,13 +296,21 @@ the plan above got wrong or left out:
   fires rather than letting it surface as `unknown type Output` several lines
   above the binding.
 
-- **Method conformance is still unchecked, and was before this milestone.**
-  Nothing verifies that an impl method's signature matches the protocol's — that
-  was true of M1 and of RFC-0002 §5, and M2 does not change it. What M2 does
-  check is that an impl binds exactly the associated types its protocol declares,
-  in both directions. The binding is not decorative despite that gap: an impl
-  whose `type Output = ..` is wrong fails to type-check in its own body, because
-  the body was parsed against it.
+- **Method conformance was still unchecked, and was before this milestone.**
+  Nothing verified that an impl method's signature matched the protocol's — true
+  of M1 and of RFC-0002 §5, and M2 did not change it. What M2 does check is that
+  an impl binds exactly the associated types its protocol declares, in both
+  directions. The binding was not decorative despite that gap: an impl whose
+  `type Output = ..` is wrong fails to type-check in its own body, because the
+  body was parsed against it.
+
+  Conformance was closed separately in 2026-08 and inherits a limit directly from
+  the bullet three above: an impl's methods never survive the parse with an
+  associated type in them, and `ImplBlock::assoc` keeps only the names it bound,
+  so a signature position naming one has nothing left to compare against and is
+  skipped. `Output` versus `T` in `impl<T> Unwrap for Option<T>` is the same type
+  and no longer says so anywhere. Arity, every other parameter, the return type
+  and a missing method are all checked; see RFC-0002 §5.
 
 ### M3 — `Fallible`, and the operators resolve through it
 

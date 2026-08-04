@@ -230,6 +230,26 @@ Intersection composes protocols cleanly, replacing deep hierarchies:
 fn render(x: Drawable & Serializable) { ... }
 ```
 
+**As built.** Satisfaction is by explicit `impl P for T`, not structural — the
+paragraph above describes the vision and Q3 is why. What "matching" means was
+left unsaid for longer than it should have been: until 2026-08 nothing compared
+an impl's methods against the protocol's declarations at all, and the reason it
+mattered is the bounded generic. Inside `fn total<T: Shape>(x: T)` no impl has
+been selected, so `x.area()` is typed from the **protocol's** signature; a
+divergent impl was then discovered by LLVM, or by the interpreter announcing
+`type error in binop (should have been caught)` — the compiler confessing its own
+checker failed, printed at the user. An impl is now checked where it is written,
+against arity, parameter types and return type, and a method the protocol
+declares but the impl omits is refused there too rather than surfacing as a call
+to a mangled `Shape__Sq__name` at run time. `examples/protocol_conformance.vyrn`
+and `examples/protocol_incomplete.vyrn` are the refusals.
+
+One position is deliberately not compared: a signature naming an associated type
+(RFC-0080 M2). The impl's methods leave the parser with the binding already
+substituted in and the impl retains only the *name* it bound, so `Output` on one
+side and `String` on the other are the same type with nothing left to prove it
+by. Everything else in the signature is still compared.
+
 ## 6. Generics
 
 Practical, constraint-based generics. Constraints are protocols.

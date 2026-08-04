@@ -1,0 +1,38 @@
+// A protocol's methods are all required — RFC-0002 §5.
+//
+// The sibling of `protocol_conformance.vyrn`, and the same rule: what an impl
+// provides is compared against what its protocol declared. Here the divergence
+// is an absence rather than a mismatch, which is the case with the least to go
+// on downstream — there is no wrong signature to trip over, only a name that
+// resolves to nothing at whatever call site happens to reach for it.
+//
+// A bounded `<T: Shape>` is what makes the absence a real promise broken rather
+// than a method nobody calls: `describe` was written against `Shape`, so it may
+// call `name` on any `T` that claims to be one, and `Sq` claims to be one.
+//
+// This file is an INTENTIONAL compile error. It is meant to FAIL `vyrn check`,
+// so the parity harness lists it under EXPECTED_CHECK_FAILURE rather than
+// running it. Observe the diagnostic with:
+//
+//   vyrn check examples/protocol_incomplete.vyrn
+
+type Sq = { side: Int64 }
+
+protocol Shape {
+    fn area(self) -> Int64
+    fn name(self) -> String
+}
+
+// Rejected: `area` is here and conforms; `name` was never written.
+impl Shape for Sq {
+    fn area(self) -> Int64 { return self.side * self.side }
+}
+
+fn describe<T: Shape>(x: T) -> String {
+    return x.name() + " of " + x.area().toString()
+}
+
+fn main() -> Int64 {
+    print(describe(Sq { side: 3 }))
+    return 0
+}
