@@ -378,6 +378,7 @@ fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function
         is_extern: false,
         is_export_extern: false,
         is_gen: false,
+        is_mut: false,
     }
 }
 

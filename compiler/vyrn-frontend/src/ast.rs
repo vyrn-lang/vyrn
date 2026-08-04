@@ -559,6 +559,17 @@ pub struct Function {
     /// the spawn-isolation sibling: no `extern`, `spawn`, module state,
     /// `writeFile`, `readLine`, `args`, or logging sinks.
     pub is_gen: bool,
+    /// `mut fn ..` — this procedure changes state (RFC-0074 M4a). A declaration,
+    /// never an inference: nothing checks that a `mut fn` writes anything or that
+    /// a plain one does not, because Vyrn does not track effects. Its whole value
+    /// is that the fact is stated in a real symbol — it renames, it hovers, and it
+    /// cannot be misspelled into silence the way a `get*`/`list*` naming
+    /// convention can. One bit with per-transport spellings, reflected as
+    /// `FnInfo.mutates`: `std/graphql` reads it as Query vs Mutation, an HTTP
+    /// projection as not-a-`GET`, gRPC ignores it. `mut` is not a new reserved
+    /// word (`let mut` already has it); `export mut fn` is the only combination,
+    /// with `export` outermost like `export gen fn` / `export extern fn`.
+    pub is_mut: bool,
 }
 
 /// A capability declares what a function does with a parameter (RFC-0004):

@@ -72,6 +72,7 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         };
         mc.errors.borrow_mut().clear();
         mc.function(&synthetic);
@@ -98,6 +99,7 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         };
         mc.errors.borrow_mut().clear();
         mc.function(&synthetic);

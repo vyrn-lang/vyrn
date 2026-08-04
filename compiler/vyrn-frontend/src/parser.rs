@@ -302,7 +302,8 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // records reference each other and `Schema` by name (resolution is
     // order-independent). A generator consumes these to emit stubs/docs/mocks.
     //   ParamInfo { name, spelling, schema, uncodable }
-    //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema, retUncodable }
+    //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema, retUncodable,
+    //                mutates }
     //   TypeInfo   { name, source, module, schema }
     //   ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
     program.type_decls.push(TypeDecl {
@@ -367,6 +368,15 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             Field {
                 name: "retUncodable".to_string(),
                 ty: Type::Str,
+            },
+            // `mut fn` — the author declared that this procedure changes state
+            // (RFC-0074 M4a). Never inferred: Vyrn does not track effects, so
+            // this is exactly what the declaration said and nothing more. One
+            // bit, three spellings — `std/graphql` reads it as Mutation vs
+            // Query, an HTTP projection as not-a-`GET`, gRPC ignores it.
+            Field {
+                name: "mutates".to_string(),
+                ty: Type::Bool,
             },
         ]),
         predicate: None,
@@ -1035,10 +1045,16 @@ impl Parser {
                     && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
                 // `export contract Name { .. }` (RFC-0071) — also contextual.
                 let is_export_contract = at_contract_decl(&self.tokens, self.pos);
+                // `export mut fn ..` (RFC-0074 M4a) — `export` is outermost, the
+                // same order `export gen fn` / `export extern fn` already use, so
+                // there is one spelling to read and one to write.
+                let is_export_mut = *self.peek() == Tok::Mut
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
                 if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol)
                     && !is_export_extern
                     && !is_export_gen
                     && !is_export_contract
+                    && !is_export_mut
                 {
                     // `export let` gets its own named diagnostic (RFC-0029):
                     // module state is legal in any module but never exportable —
@@ -1048,7 +1064,7 @@ impl Parser {
                          (a top-level `let` is module-private in every module)"
                     } else {
                         "`export` must be followed by `fn`, `type`, `protocol`, `contract`, \
-                         `extern fn`, or `gen fn`"
+                         `extern fn`, `gen fn`, or `mut fn`"
                     };
                     errors.push(Diagnostic::error(
                         self.line(),
@@ -1104,6 +1120,25 @@ impl Parser {
                         Ok(mut f) => {
                             f.doc = doc;
                             f.exported = exported;
+                            functions.push(f);
+                        }
+                        Err(d) => {
+                            errors.push(d);
+                            self.sync_to_decl();
+                        }
+                    }
+                }
+                // `mut fn ..` — this procedure changes state (RFC-0074 M4a). `mut`
+                // is already a keyword (`let mut`), so this reserves nothing new;
+                // recognize it only when `fn` follows, which is the only place a
+                // top-level `mut` could otherwise appear.
+                Tok::Mut if matches!(self.tokens[self.pos + 1].tok, Tok::Fn) => {
+                    self.advance(); // `mut`
+                    match self.function(false) {
+                        Ok(mut f) => {
+                            f.doc = doc;
+                            f.exported = exported;
+                            f.is_mut = true;
                             functions.push(f);
                         }
                         Err(d) => {
@@ -1321,6 +1356,10 @@ impl Parser {
                     return
                 }
                 Tok::Ident(name) if depth == 0 && name == "logging" => return,
+                // `mut fn ..` is a top-level starter (RFC-0074 M4a) — resume there.
+                Tok::Mut if depth == 0 && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) => {
+                    return
+                }
                 // `extern fn ..` is a top-level starter (RFC-0012) — resume there.
                 // `gen fn ..` likewise (RFC-0021).
                 Tok::Ident(name)
@@ -1838,6 +1877,7 @@ impl Parser {
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         })
     }
 
@@ -2349,6 +2389,8 @@ impl Parser {
             is_extern: false,
             is_export_extern: false,
             is_gen,
+            // Set by the caller when a `mut` modifier preceded `fn` (RFC-0074 M4a).
+            is_mut: false,
         })
     }
 
@@ -2493,6 +2535,7 @@ impl Parser {
                 is_extern: false,
                 is_export_extern: true,
                 is_gen: false,
+                is_mut: false,
             });
         }
         if has_body {
@@ -2518,6 +2561,7 @@ impl Parser {
             is_extern: true,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         })
     }
 
@@ -4900,6 +4944,26 @@ mod tests {
         );
         let g = p.functions.iter().find(|f| f.name == "g").unwrap();
         assert!(g.is_gen && g.exported);
+    }
+
+    #[test]
+    fn mut_fn_parses_and_export_goes_outside() {
+        // RFC-0074 M4a: `mut fn` declares that a procedure changes state.
+        // `export` is outermost, matching `export gen fn` / `export extern fn`.
+        let p = parse_src(
+            "export mut fn create(x: Int64) -> Int64 { return x } \
+             mut fn touch() {} \
+             fn read() -> Int64 { return 0 } \
+             fn main() -> Int64 { let mut n = 0 return n }",
+        );
+        let c = p.functions.iter().find(|f| f.name == "create").unwrap();
+        assert!(c.is_mut && c.exported && !c.is_gen && !c.is_extern);
+        assert!(p.functions.iter().find(|f| f.name == "touch").unwrap().is_mut);
+        assert!(!p.functions.iter().find(|f| f.name == "read").unwrap().is_mut);
+        // A local `let mut` is untouched — `mut` only starts a declaration
+        // directly before `fn`, and only at the top level.
+        assert!(matches!(&p.functions.iter().find(|f| f.name == "main").unwrap().body.stmts[0],
+            Stmt::Let { name, mutable: true, .. } if name == "n"));
     }
 
     #[test]

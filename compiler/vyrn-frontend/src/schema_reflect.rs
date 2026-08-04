@@ -18,7 +18,9 @@
 //! re-emission of contract types); the `Schema` values carry the RFC-0009
 //! reflection (bounds/pattern/length); `uncodable`/`retUncodable` carry
 //! [`crate::codec`]'s verdict on whether that end can cross a JSON wire, so a
-//! generator asks the compiler instead of guessing from a name (RFC-0071 M3).
+//! generator asks the compiler instead of guessing from a name (RFC-0071 M3);
+//! `mutates` is the `mut fn` marker, the same move for "does this change state"
+//! (RFC-0074 M4a) — declared by the author, never inferred.
 //!
 //! RFC-0071 adds the mirror image: `contractOf(Name)` reflects a `contract`
 //! declaration — what a module is *expected* to export — into the same kind of
@@ -277,6 +279,7 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
             ("ret", Expr::Str(ret_spelling)),
             ("retSchema", schema_lit_for_type(&f.ret, types)),
             ("retUncodable", Expr::Str(uncodable_of(&f.ret, types, false))),
+            ("mutates", Expr::Bool(f.is_mut)),
         ],
     )
 }

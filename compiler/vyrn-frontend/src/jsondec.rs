@@ -381,6 +381,7 @@ impl Walk<'_> {
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         });
         ph
     }
