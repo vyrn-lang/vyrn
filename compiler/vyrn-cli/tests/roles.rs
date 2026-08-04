@@ -1,7 +1,8 @@
 //! Integration tests for RFC-0072 M2 — roles and the `Api` contract, driven
 //! through the real `vyrn` binary.
 //!
-//! M2 carries RFC-0071's deferred M3. Three claims are under test:
+//! M2 carries RFC-0071's deferred M3, whose remainder — what `Serializable`
+//! actually admits — landed here too. Four claims are under test:
 //!
 //!   1. `std/rpc` declares `Api`, and a project attaches it by ROLE — so a
 //!      module nobody has generated from yet can still be asked what governs it.
@@ -9,6 +10,9 @@
 //!      `client/api` are different roles rather than one that happened to win.
 //!   3. Serializability is checked on BOTH ends of every procedure, and the
 //!      failure names the rule rather than the symptom.
+//!   4. That check is TOTAL: it is the compiler's own codec rule, reflected, so
+//!      a nameable record whose field cannot be encoded is refused at the
+//!      declaration — and a `Stream` is refused by name, pointing at `sse`/`ws`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -105,7 +109,7 @@ fn a_non_serializable_parameter_is_a_named_error() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("go__parameter_Array_Int64__is_not_serializable"), "{err}");
-    assert!(err.contains("a_procedure_parameter_must_be_an_exported_named_type"), "{err}");
+    assert!(err.contains("it_must_be_an_exported_named_type"), "{err}");
 }
 
 /// And the RETURN, which nothing checked before RFC-0072 M2 — the server would
@@ -129,7 +133,73 @@ fn a_non_serializable_return_is_a_named_error() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("go__return_Array_Int64__is_not_serializable"), "{err}");
-    assert!(err.contains("a_procedure_must_return_an_exported_named_type_or_nothing"), "{err}");
+    assert!(err.contains("it_must_be_an_exported_named_type"), "{err}");
+}
+
+/// RFC-0071 M3. A record is nameable by construction — it is a `type`
+/// declaration — so the name test alone said yes to one whose field is a
+/// function, and the generated module then failed on `toJson`, at a line in
+/// source nobody wrote. Serializability is the compiler's OWN codec rule now,
+/// reflected through `ParamInfo.uncodable` / `FnInfo.retUncodable`, so the
+/// objection arrives at the declaration with the offender named.
+#[test]
+fn a_nameable_record_that_cannot_be_encoded_is_refused_at_the_contract() {
+    let dir = scratch("codable");
+    write(
+        &dir,
+        "api.vyrn",
+        "export type Req = { id: Int64 }\n\
+         export type Cb = { f: fn(Int64) -> Int64 }\n\
+         fn dbl(x: Int64) -> Int64 {\n    return x * 2\n}\n\
+         export fn go(req: Req) -> Cb {\n    return Cb { f: dbl }\n}\n",
+    );
+    write(
+        &dir,
+        "main.vyrn",
+        "import { rpcServer } from \"std/rpc\"\n\
+         import { rpcHandle } from rpcServer(\"./api\")\n\
+         fn main() -> Int64 {\n    return 0\n}\n",
+    );
+    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("go__return_Cb_is_not_serializable__Cb_cannot_cross_a_json_wire"), "{err}");
+    // …and it is the contract that objects, not the generated module.
+    assert!(!err.contains("toJson"), "the objection must arrive before generation: {err}");
+}
+
+/// A stream is refused on BOTH ends, and by name rather than by falling through
+/// the general rule — because it is the one unserializable thing with somewhere
+/// else to go (RFC-0074's `sse`/`ws`, from a dotted projection module).
+#[test]
+fn a_stream_is_refused_by_name_and_pointed_at_sse() {
+    for (tag, decl) in [
+        ("streamret", "export fn go(req: Req) -> Stream<Req> {\n    return unfold(0, step)\n}\n"),
+        ("streamparam", "export fn go(s: Stream<Req>) -> Req {\n    drop s\n    return Req { id: 1 }\n}\n"),
+    ] {
+        let dir = scratch(tag);
+        write(
+            &dir,
+            "api.vyrn",
+            &format!(
+                "import {{ unfold }} from \"std/stream\"\n\
+                 export type Req = {{ id: Int64 }}\n\
+                 fn step(c: Ref<Int64>) -> Option<Req> {{\n    return None\n}}\n{decl}"
+            ),
+        );
+        write(
+            &dir,
+            "main.vyrn",
+            "import { rpcServer } from \"std/rpc\"\n\
+             import { rpcHandle } from rpcServer(\"./api\")\n\
+             fn main() -> Int64 {\n    return 0\n}\n",
+        );
+        let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
+        assert!(!out.status.success(), "{tag}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("Stream_Req__is_a_stream"), "{tag}: {err}");
+        assert!(err.contains("publish_a_feed_with_sse_or_ws"), "{tag}: {err}");
+    }
 }
 
 /// A `Unit` return stays legal: nothing crosses the wire, which is the 204.
