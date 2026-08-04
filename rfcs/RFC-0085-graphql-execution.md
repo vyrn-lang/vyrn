@@ -94,6 +94,33 @@ can observe, and the RFC-0074 example that motivates it stops making sense.
   attribution, and the `null`-bubbling rule for non-null fields. This is the part
   every GraphQL implementation gets wrong first; it deserves its own milestone
   and its own evidence.
+
+  **What an error is here is narrower than GraphQL's general case, and saying so
+  is most of the design.** Three things could produce one, and only the first
+  does:
+
+  - **A request fault** — an undeclared field, a selection on a scalar, an
+    argument that fails `fromJson`. M1 and M2 already answer these; M3's job is
+    to attribute them to a *path* and to let a sibling root field succeed
+    beside them.
+  - **A resolver's `Err`** — and it stays in `data`. `Result<A, B>` already
+    projects as a tagged object with nullable `Ok`/`Err` (RFC-0038), because an
+    `Err` is a **modelled outcome, not a fault**: the schema declared it, the
+    client can select it, and moving it to `errors` would hide a value the type
+    says exists. RFC-0074 made the same call for HTTP — a `200` carrying
+    `{"Err": …}` unless `notFoundWhen` says that particular payload means
+    absence. The GraphQL twin of `notFoundWhen` is a projection decision and
+    belongs with M4's override surface, **not here**. M3 must not invent an error
+    policy.
+  - **A trap** — Vyrn has no unwinding, so a trap ends the process and
+    `vyrn serve` answers `500`. It is a dead request, not a GraphQL error, and
+    nothing in this milestone can catch one.
+
+  So the partial-data case M3 exists to build is real and reachable with the
+  error kinds M1 and M2 already produce: `{ browse { title }, nope }` answers
+  `browse` and reports `nope` at its path. And null-bubbling has a concrete
+  trigger — a fault inside a **non-null** subtree, where the SDL's own `!`
+  markers say how far the `null` must climb.
 - **M4 — RFC-0074 M4b.** `.mutations(..)` is already answered by `mut fn`;
   `.lazy(field, resolver)` becomes buildable, and this is where "omit" versus
   "never computed" earns its distinction.
