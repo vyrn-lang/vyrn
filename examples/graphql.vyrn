@@ -21,10 +21,23 @@
 /// member the schema does not declare and a selection on a scalar are errors
 /// naming them, where M1 could only answer `null` and let them through.
 ///
+/// M3 is the error model: partial `data` beside a populated `errors`, every
+/// error carrying the `path` it happened at, and the `null`-bubbling rule. A fault
+/// no longer fails the request — it becomes a `null` at the position it happened,
+/// and the SDL's own `!` markers say how far that `null` has to climb before a
+/// position is found that may hold it. `Array<Book>` maps to `[Book!]!`, so a
+/// fault inside one book climbs past the book and past the list and stops at
+/// `browse`, which is nullable; a fault beside it under `byId`'s `Ok` — nullable,
+/// because `Result` is a tagged union — stops one level down.
+///
 /// Inspect the generated resolver table and type graph with:
 ///   vyrn emit-gen examples/graphql.vyrn
-import { graphqlServer } from "std/graphql"
+// `gqlAnswer` is the executor the generated handler calls, imported directly for
+// the one case this generator's SDL cannot produce — a NON-NULL root field. See
+// the stand-in at the bottom of the file.
+import { graphqlServer, gqlAnswer } from "std/graphql"
 import { graphqlHandle } from graphqlServer("./shelf/server/api/books")
+import { Json, JsonField } from "std/json"
 
 /// `POST /graphql` with `body`, printed with its status.
 fn ask(label: String, body: String) {
@@ -80,10 +93,6 @@ fn main() -> Int64 {
     // schema, so this names the field instead.
     ask("undeclared member", "{ browse { books { nope } } }")
 
-    // A selection on a scalar. `title` is `Title`, a validated `String` the SDL
-    // publishes as a custom scalar, and a scalar has no subfields to select.
-    ask("selection on a scalar", "{ browse { books { title { nope } } } }")
-
     // A field the schema does not declare: a GraphQL error NAMING it, on the
     // channel a client reads — not a trap and not a 500.
     ask("{ shelved { title } }", "{ shelved { title } }")
@@ -97,9 +106,35 @@ fn main() -> Int64 {
     ask("unknown argument", "{ byId(id: 1) { Ok { title } } }")
     ask("missing argument", "{ byId { Ok { title } } }")
 
-    // One root field per request: two of them raise partial data beside a
-    // populated `errors`, which is the whole of M3.
-    ask("two roots", "{ browse { books } tags }")
+    // ---- M3: partial data, paths, and the climb -----------------------------
+    // Two root fields, both answered — M1 and M2 refused the second one, because
+    // a sibling raises partial data the moment one resolves and the other does
+    // not. Which is the next line.
+    ask("two roots", "{ browse { books { title } } tags }")
+
+    // THE partial-data case. `browse` answers in `data`, `nope` is reported in
+    // `errors` at its own path, and neither hides the other. `nope` has no
+    // declared type, so nothing says a `null` may not sit at its position — which
+    // is why it does not take its sibling with it.
+    ask("a sibling survives", "{ browse { books { title } } nope }")
+
+    // The climb, and how far. This is M2's selection-on-a-scalar refusal —
+    // `title` is a validated `String` the SDL publishes as a custom scalar, and a
+    // scalar has no subfields — now placed. `Title!` may not hold the `null`, so
+    // it climbs to the `Book!` element, which takes the `[Book!]!` list with it,
+    // which takes `books` — and stops at `browse`, the first position that may be
+    // null. `data` keeps the key and answers `null` under it. The path is the
+    // other half: a field name AND a list index in one array.
+    ask("the null climbs to browse", "{ browse { books { title { nope } } } }")
+
+    // The same fault under a NULLABLE ancestor one level down: `BookResult` is
+    // `Result<Book, String>`, a tagged union whose arms are nullable, so the climb
+    // stops at `Ok` and `byId` itself still answers an object.
+    ask("the null stops at Ok", "{ byId(input: { id: 2 }) { Ok { title { nope } } } }")
+
+    // And when there is no nullable position left, `data` itself is `null`.
+    let top = gqlAnswer("{ book { title { nope } } }", topResolve, topSchema)
+    print("a non-null root -> \{top.status} \{top.body}")
 
     // The transport's own answers: the wrong method is an HTTP status (nothing
     // parsed a query), and another path is not ours at all.
@@ -112,6 +147,45 @@ fn main() -> Int64 {
         None => print("POST /_/books/browse -> unrouted (not our path)"),
     }
     return 0
+}
+
+// ---- the one shape the generator never emits -------------------------------
+// A root field is nullable by construction — `gqlRootField` strips the `!` in the
+// SDL and `gqlRootMembers` strips it in the type graph — precisely so a fault
+// under one root field leaves the others' answers in `data`. So shelf's own
+// schema cannot produce `"data": null`: every climb stops at the root field it
+// started under. This stand-in declares `book: Book!` to show the case anyway,
+// against the same `gqlAnswer` the generated handler calls.
+
+/// A type graph with a NON-NULL root field.
+fn topSchema(t: String, field: String) -> String {
+    if t == "Query" {
+        if field == "" {
+            return t
+        }
+        if field == "book" {
+            return "Book!"
+        }
+        return ""
+    }
+    if t == "Book" {
+        if field == "" {
+            return t
+        }
+        if field == "title" {
+            return "Title!"
+        }
+        return ""
+    }
+    return ""
+}
+
+/// The one procedure behind it, already computed — as every resolver's value is.
+fn topResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {
+    if field == "book" {
+        return Ok(JObj([JsonField { key: "title", value: JStr("SICP") }]))
+    }
+    return Err("Cannot query field `" + field + "` on type `Query`.")
 }
 
 /// The reply body for `body`, or "" when nothing routed it.
@@ -134,10 +208,57 @@ test "the projection omits every field the query did not select" {
     assert(body.contains("\"id\"") == false)
 }
 
-test "an undeclared field is a GraphQL error naming it" {
+test "an undeclared field is a GraphQL error naming it, at its own path" {
     assertEq(
         reply("{ shelved }"),
-        "{\"errors\":[{\"message\":\"Cannot query field `shelved` on type `Query`.\"}]}",
+        "{\"errors\":[{\"message\":\"Cannot query field `shelved` on type `Query`.\","
+        + "\"path\":[\"shelved\"]}],\"data\":{\"shelved\":null}}",
+    )
+}
+
+test "a sibling root field answers beside a failing one — M3's partial data" {
+    let body = reply("{ browse { books { title } } nope }")
+    // `browse` answered, in the same reply that reports `nope`.
+    assert(body.contains("\"title\":\"SICP\""))
+    assert(body.contains("\"nope\":null"))
+    assert(body.contains("\"message\":\"Cannot query field `nope` on type `Query`.\""))
+    assert(body.contains("\"path\":[\"nope\"]"))
+    // `data` is an object, not null: nothing said the `null` could not sit at
+    // `nope`'s position, so it did.
+    assert(body.contains("\"data\":null") == false)
+}
+
+test "a path names a field AND a list index" {
+    let body = reply("{ browse { books { title { nope } } } }")
+    assert(body.contains("\"path\":[\"browse\",\"books\",0,\"title\"]"))
+    // One per element, each at its own index — the fault repeats down the list.
+    assert(body.contains("\"path\":[\"browse\",\"books\",1,\"title\"]"))
+}
+
+test "the null climbs past the list and stops at the nullable root field" {
+    // `title` is `Title!`, the element is `Book!` and `books` is `[Book!]!`, so
+    // the `null` cannot sit at any of the three. `browse` is nullable and takes it.
+    let body = reply("{ browse { books { title { nope } } } }")
+    assert(body.contains("\"data\":{\"browse\":null}"))
+}
+
+test "the null stops at a nullable ancestor below the root" {
+    // `Ok` is nullable — `BookResult` is a tagged union and exactly one arm is
+    // non-null at a time — so the climb ends there and `byId` still answers.
+    assertEq(
+        reply("{ byId(input: { id: 2 }) { Ok { title { nope } } } }"),
+        "{\"errors\":[{\"message\":\"Field `title` must not have a selection since type "
+        + "`Title` has no subfields.\",\"path\":[\"byId\",\"Ok\",\"title\"]}],"
+        + "\"data\":{\"byId\":{\"Ok\":null}}}",
+    )
+}
+
+test "a climb with nowhere left to stop makes `data` itself null" {
+    // The shape shelf cannot produce: a NON-NULL root field. See `topSchema`.
+    assertEq(
+        gqlAnswer("{ book { title { nope } } }", topResolve, topSchema).body,
+        "{\"errors\":[{\"message\":\"Field `title` must not have a selection since type "
+        + "`Title` has no subfields.\",\"path\":[\"book\",\"title\"]}],\"data\":null}",
     )
 }
 
@@ -152,7 +273,8 @@ test "an argument reaches the procedure and the right record comes back" {
     // An argument the field does not declare is named, not ignored.
     assertEq(
         reply("{ byId(id: 1) { Ok { title } } }"),
-        "{\"errors\":[{\"message\":\"Unknown argument `id` on field `byId`.\"}]}",
+        "{\"errors\":[{\"message\":\"Unknown argument `id` on field `byId`.\","
+        + "\"path\":[\"byId\"]}],\"data\":{\"byId\":null}}",
     )
 }
 
@@ -167,16 +289,18 @@ test "a selected member the value lacks is an error naming it — M1's first hol
     // M1 answered `{"books":[{"nope":null}, ..]}` here and said so in its own
     // section: `toJson` omits a `None` `Option`, so absence in the value and
     // absence from the schema were the same observation. Asserting the message is
-    // the only way to see that closed.
-    assertEq(
-        reply("{ browse { books { nope } } }"),
-        "{\"errors\":[{\"message\":\"Cannot query field `nope` on type `Book`.\"}]}",
-    )
+    // the only way to see that closed. M3 answers the `null` AND the message —
+    // the difference is that the reply now says which one happened, and where.
+    let body = reply("{ browse { books { nope } } }")
+    assert(body.contains("\"message\":\"Cannot query field `nope` on type `Book`.\""))
+    assert(body.contains("\"path\":[\"browse\",\"books\",2,\"nope\"]"))
 }
 
 test "a selection on a scalar is refused — M1's second hole" {
-    assertEq(
-        reply("{ browse { books { title { nope } } } }"),
-        "{\"errors\":[{\"message\":\"Field `title` must not have a selection since type `Title` has no subfields.\"}]}",
+    let body = reply("{ browse { books { title { nope } } } }")
+    assert(
+        body.contains(
+            "\"message\":\"Field `title` must not have a selection since type `Title` has no subfields.\"",
+        ),
     )
 }

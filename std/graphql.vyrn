@@ -40,13 +40,15 @@
 ///     are NOT in `moduleInterface` reflection, so operation descriptions are
 ///     absent (gap recorded in RFC-0038).
 ///
-/// The EXECUTOR (RFC-0085 M1/M2) lives at the bottom of this file:
+/// The EXECUTOR (RFC-0085 M1–M3) lives at the bottom of this file:
 /// `graphqlServer` emits a `graphqlHandle(req) -> Option<Response>` answering
 /// `POST /graphql` over the SAME `iface.functions` walk the SDL reads, so a field
 /// the schema declares and a field the executor dispatches are one list. It bakes
 /// the SDL's TYPE GRAPH beside the resolver table, out of the same `gqlMembers`
 /// reading of each declaration the `type` definitions above are emitted from —
-/// so an object type's fields are one set, not two that agree.
+/// so an object type's fields are one set, not two that agree. The graph carries
+/// each field's full type REFERENCE, `!` markers included, because those are what
+/// say how far a `null` climbs when something faults under them (M3).
 ///
 /// Inspect the synthesized module with:  vyrn emit-gen <file>
 
@@ -1130,7 +1132,58 @@ fn gqlCheckSel(
     return ""
 }
 
-/// Project `sels` out of `v`, whose named GraphQL type is `ty`.
+/// One GraphQL error: its message and the RESPONSE PATH it happened at — the
+/// response keys and list indices from the root down to the position that
+/// faulted (RFC-0085 M3), which is how a client finds it inside a partial `data`.
+///
+/// A path element is a NAME or an INDEX in ONE array, and the value tree says
+/// that directly: a `JStr` and a `JNum` in a single `JArr`. Nothing had to be
+/// invented for the mixed array and no index is stringified to fit.
+export type GqlErr = { message: String, path: Array<Json> }
+
+/// A completed field position: its value, every error found at or below it, and
+/// whether the `null` is still CLIMBING (`failed`) — which is what a NON-NULL
+/// position does with a fault, because `null` may not sit there.
+export type GqlOut = { value: Json, errs: Array<GqlErr>, failed: Bool }
+
+/// A position that completed with nothing wrong.
+fn gqlOk(v: Json) -> GqlOut {
+    return GqlOut { value: v, errs: [], failed: false }
+}
+
+/// A fault AT one position: `null` here, and it starts climbing when `tref` says
+/// this position may not hold one. Where a climb STOPS is `gqlProject`'s single
+/// decision; this is only where one begins.
+fn gqlFaultAt(message: String, at: Array<Json>, tref: String) -> GqlOut {
+    return GqlOut {
+        value: JNull,
+        errs: [GqlErr { message: message, path: at }],
+        failed: tref.endsWith("!"),
+    }
+}
+
+/// `path` with one more step — a response key or a list index.
+fn gqlStep(path: Array<Json>, step: Json) -> Array<Json> {
+    let mut out: Array<Json> = []
+    for p in path {
+        out.push(p)
+    }
+    out.push(step)
+    return out
+}
+
+/// The ELEMENT reference of a list reference (`[Book!]` => `Book!`), else `r`.
+fn gqlElemRef(r: String) -> String {
+    if r.startsWith("[") && r.endsWith("]") {
+        let ba = bytes(r)
+        return gqlSlice(ba, 1, ba.length - 1)
+    }
+    return r
+}
+
+/// Complete one field position: project `sels` out of `v` at response `path`,
+/// against `tref` — the field's GraphQL type REFERENCE, list and non-null
+/// wrappers included.
 ///
 /// **Field selection is a projection over a value the procedure ALREADY
 /// returned, not a fetch plan.** `v` arrives here fully computed — every field of
@@ -1143,46 +1196,88 @@ fn gqlCheckSel(
 /// work was never done. Stated here because if it is only stated then, `.lazy(..)`
 /// is an optimisation nobody can observe and there is nothing to point at.
 ///
+/// **Null-bubbling (RFC-0085 M3).** A fault does not fail the request: it becomes
+/// a `null` at the position it happened, and the SDL's own `!` markers say how far
+/// that `null` has to climb. This function is the ONE place a climb stops — when
+/// the position it is passing through may hold a `null`. Everything below just
+/// reports `failed` upward, so the rule is read in one place rather than
+/// re-decided at each shape.
+///
 /// An empty selection set means "this field is a leaf" — take the value whole.
-/// A list is walked transparently: `[Book]` and `Book` ask `schema` the same
-/// question, which is why only the NAMED type is carried.
 export fn gqlProject(
     v: Json,
     sels: Array<GqlSel>,
-    ty: String,
+    tref: String,
+    path: Array<Json>,
     schema: fn(String, String) -> String,
-) -> Result<Json, String> {
+) -> GqlOut {
+    let r = gqlProjectCore(v, sels, gqlStripBang(tref), path, schema)
+    if r.failed && tref.endsWith("!") == false {
+        // Nullable: the climb stops here and this position is the `null`.
+        return GqlOut { value: JNull, errs: r.errs, failed: false }
+    }
+    return r
+}
+
+/// The shape-driven half of a position, with the outer non-null wrapper already
+/// off: a list walks its elements, an object picks its members, a leaf answers
+/// itself.
+fn gqlProjectCore(
+    v: Json,
+    sels: Array<GqlSel>,
+    core: String,
+    path: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
     if sels.length == 0 {
-        return Ok(v)
+        return gqlOk(v)
     }
     return match v {
-        JArr(items) => gqlProjectEach(items, sels, ty, schema),
-        JObj(fields) => gqlPick(fields, sels, ty, schema),
+        JArr(items) => gqlProjectEach(items, sels, gqlElemRef(core), path, schema),
+        JObj(fields) => gqlPick(fields, sels, gqlNamed(core), path, schema),
         // `null` with a selection on it is an ordinary nullable object field that
         // came back absent, and it stays `null`. The other three cannot be reached
-        // with a selection: `gqlCheckSel` refused it against `ty` before the walk
-        // descended here. They answer themselves rather than trapping, because a
-        // total match on the value tree is what this is.
-        JNull => Ok(JNull),
-        JBool(b) => Ok(JBool(b)),
-        JNum(n) => Ok(JNum(n)),
-        JStr(s) => Ok(JStr(s)),
+        // with a selection: `gqlCheckSel` refused it against the type before the
+        // walk descended here. They answer themselves rather than trapping,
+        // because a total match on the value tree is what this is.
+        JNull => gqlOk(JNull),
+        JBool(b) => gqlOk(JBool(b)),
+        JNum(n) => gqlOk(JNum(n)),
+        JStr(s) => gqlOk(JStr(s)),
     }
 }
 
-/// Project the same selection out of every element of a list.
+/// Project the same selection out of every element of a list, each under its own
+/// INDEX in the path — the element of the path that is a number.
+///
+/// A faulting element takes the whole list with it, because a list's elements are
+/// `[Book!]` far more often than `[Book]` and a non-null element that could not
+/// be completed is exactly the climb. Every element is still walked, so a fault
+/// that repeats down a list is reported at each index rather than once.
 fn gqlProjectEach(
     items: Array<Json>,
     sels: Array<GqlSel>,
-    ty: String,
+    elem: String,
+    path: Array<Json>,
     schema: fn(String, String) -> String,
-) -> Result<Json, String> {
+) -> GqlOut {
     let mut out: Array<Json> = []
+    let mut errs: Array<GqlErr> = []
+    let mut failed = false
+    let mut i = 0
     for it in items {
-        let one = gqlProject(it, sels, ty, schema)?
-        out.push(one)
+        let r = gqlProject(it, sels, elem, gqlStep(path, JNum(i.toString())), schema)
+        for e in r.errs {
+            errs.push(e)
+        }
+        if r.failed {
+            failed = true
+        }
+        out.push(r.value)
+        i = i + 1
     }
-    return Ok(JArr(out))
+    let v = if failed { JNull } else { JArr(out) }
+    return GqlOut { value: v, errs: errs, failed: failed }
 }
 
 /// Keep exactly the selected members, in the order the QUERY asked for them —
@@ -1191,31 +1286,58 @@ fn gqlProjectEach(
 ///
 /// A member the SCHEMA declares and the value lacks answers `null`, because a
 /// `None` `Option` is exactly that and a client indexes the reply by the names it
-/// wrote. A member the schema does NOT declare is an error naming it. Those were
-/// one case at M1 and are two here.
+/// wrote. A member the schema does NOT declare is an error naming it, at that
+/// member's own path; a member with no declared type has nothing saying `null`
+/// may not sit there, so the `null` sits there and a SIBLING still answers. That
+/// is the partial-data case, and it is why an undeclared field does not take the
+/// whole reply with it.
 fn gqlPick(
     fields: Array<JsonField>,
     sels: Array<GqlSel>,
     ty: String,
+    path: Array<Json>,
     schema: fn(String, String) -> String,
-) -> Result<Json, String> {
+) -> GqlOut {
     let mut out: Array<JsonField> = []
+    let mut errs: Array<GqlErr> = []
+    let mut failed = false
     for s in sels {
-        // Only a root field takes arguments — the SDL declares none anywhere else
-        // — so an argument written at depth names something that is not there.
-        let stray = gqlNoArgs(s.name, s.args)
-        if stray != "" {
-            return Err(stray)
+        let fref = schema(ty, s.name)
+        let at = gqlStep(path, JStr(s.key))
+        let bad = gqlFieldFault(ty, s, fref, schema)
+        let r = if bad != "" {
+            gqlFaultAt(bad, at, fref)
+        } else {
+            gqlProject(gqlMemberOf(fields, s.name), s.subs, fref, at, schema)
         }
-        let ft = schema(ty, s.name)
-        let bad = gqlCheckSel(ty, s.name, ft, s.subs.length > 0, schema)
-        if bad != "" {
-            return Err(bad)
+        for e in r.errs {
+            errs.push(e)
         }
-        let picked = gqlProject(gqlMemberOf(fields, s.name), s.subs, ft, schema)?
-        out.push(JsonField { key: s.key, value: picked })
+        if r.failed {
+            failed = true
+        } else {
+            out.push(JsonField { key: s.key, value: r.value })
+        }
     }
-    return Ok(JObj(out))
+    let v = if failed { JNull } else { JObj(out) }
+    return GqlOut { value: v, errs: errs, failed: failed }
+}
+
+/// "" when `s` may be selected on `owner` as written, else the GraphQL error
+/// refusing it. Only a root field takes arguments — the SDL declares none
+/// anywhere else — so an argument written at depth names something that is not
+/// there.
+fn gqlFieldFault(
+    owner: String,
+    s: GqlSel,
+    tref: String,
+    schema: fn(String, String) -> String,
+) -> String {
+    let stray = gqlNoArgs(s.name, s.args)
+    if stray != "" {
+        return stray
+    }
+    return gqlCheckSel(owner, s.name, gqlNamed(tref), s.subs.length > 0, schema)
 }
 
 // ---- the request and the reply ---------------------------------------------
@@ -1255,20 +1377,46 @@ fn gqlStrOr(j: Json, fallback: String) -> String {
     }
 }
 
-/// `{"data":{"<field>":…}}` — the answer.
-export fn gqlDataBody(field: String, value: Json) -> String {
-    let one: Array<JsonField> = [JsonField { key: field, value: value }]
-    return emit(JObj([JsonField { key: "data", value: JObj(one) }]))
-}
-
-/// `{"errors":[{"message":"…"}]}` — an error a GraphQL client can read.
+/// `{"errors":[{"message":"…"}]}` — a REQUEST fault, and the only reply with no
+/// `data` entry at all.
 ///
 /// A GraphQL client reads the `errors` array, not the status line, so the reply
-/// stays a 200 `application/json`. Path attribution and partial `data` beside a
-/// populated `errors` are RFC-0085 M3.
+/// stays a 200 `application/json`. This shape is for the faults that land BEFORE
+/// execution — an unparseable document, a second operation — where no field was
+/// ever reached, so there is no position to attribute and no partial `data` to
+/// carry. Everything reached during execution goes through `gqlExecBody`.
 export fn gqlErrorBody(message: String) -> String {
     let one: Array<JsonField> = [JsonField { key: "message", value: JStr(message) }]
     return emit(JObj([JsonField { key: "errors", value: JArr([JObj(one)]) }]))
+}
+
+/// The reply body for an EXECUTED operation: whatever the root fields produced,
+/// beside the errors any position faulted with (RFC-0085 M3).
+///
+/// `errors` is written first — the reader wants to know whether anything faulted
+/// before reading a `data` that may be partial, and it is the order the reference
+/// implementation writes. `data` is always present here, `null` only when a fault
+/// climbed past every root field.
+fn gqlExecBody(data: Json, errs: Array<GqlErr>) -> String {
+    let mut top: Array<JsonField> = []
+    if errs.length > 0 {
+        top.push(JsonField { key: "errors", value: gqlErrJson(errs) })
+    }
+    top.push(JsonField { key: "data", value: data })
+    return emit(JObj(top))
+}
+
+/// The `errors` array as the value tree: each error's message, then the path it
+/// happened at.
+fn gqlErrJson(errs: Array<GqlErr>) -> Json {
+    let mut out: Array<Json> = []
+    for e in errs {
+        out.push(JObj([
+                    JsonField { key: "message", value: JStr(e.message) },
+                    JsonField { key: "path", value: JArr(e.path) },
+                ]))
+    }
+    return JArr(out)
 }
 
 /// A GraphQL reply carrying `body`.
@@ -1348,9 +1496,12 @@ export fn gqlArgError(field: String, issues: Array<Issue>) -> String {
 /// value, or why not`) and `schema`, the type graph the projection is checked
 /// against.
 ///
-/// One root field per request: a second one immediately raises partial `data`
-/// beside a populated `errors` when only one of them resolves, which is the whole
-/// of RFC-0085 M3 and is not worth half-building here.
+/// **Every root field the operation selects** (RFC-0085 M3). Each is resolved and
+/// completed on its own, so one of them faulting leaves the others in `data` and
+/// puts its own message in `errors` at its own path. `data` goes `null` only when
+/// a fault climbs past a NON-NULL root field — which this generator's own SDL
+/// never declares, since a root field is nullable by construction precisely so a
+/// sibling's answer survives.
 export fn gqlAnswer(
     body: String,
     resolve: fn(String, String, Array<JsonField>) -> Result<Json, String>,
@@ -1360,35 +1511,64 @@ export fn gqlAnswer(
     if q.err != "" {
         return gqlReply(gqlErrorBody(q.err))
     }
-    if q.sels.length != 1 {
-        return gqlReply(gqlErrorBody(
-                "one root field per request (RFC-0085 M1); this operation selects "
-                + q.sels.length.toString()
-            ))
+    let rootType = gqlRootType(q.root)
+    let mut out: Array<JsonField> = []
+    let mut errs: Array<GqlErr> = []
+    let mut dataNull = false
+    for sel in q.sels {
+        let key = sel.key
+        let r = gqlAnswerOne(rootType, sel, resolve(q.root, sel.name, sel.args), schema)
+        for e in r.errs {
+            errs.push(e)
+        }
+        if r.failed {
+            dataNull = true
+        } else {
+            out.push(JsonField { key: key, value: r.value })
+        }
     }
-    let sel = q.sels[0]
-    return match resolve(q.root, sel.name, sel.args) {
-        Ok(v) => gqlAnswerOne(gqlRootType(q.root), sel, v, schema),
-        Err(why) => gqlReply(gqlErrorBody(why)),
-    }
+    let data = if dataNull { JNull } else { JObj(out) }
+    return gqlReply(gqlExecBody(data, errs))
 }
 
-/// Project one resolved root field and write it under its response key.
+/// Complete one root field at its own path.
+///
+/// A resolver's refusal — an undeclared field, an argument that fails `fromJson`
+/// — is a fault AT this position like any other, so it is attributed and bubbled
+/// by the same rule rather than ending the request. A resolver's `Err` VALUE is a
+/// different thing entirely and never reaches here: `Result<A, B>` is a modelled
+/// outcome the schema declared, and it projects into `data` as the tagged object
+/// it is.
 fn gqlAnswerOne(
     rootType: String,
     sel: GqlSel,
-    v: Json,
+    resolved: Result<Json, String>,
     schema: fn(String, String) -> String,
-) -> Response {
-    let ty = schema(rootType, sel.name)
-    let bad = gqlCheckSel(rootType, sel.name, ty, sel.subs.length > 0, schema)
+) -> GqlOut {
+    let tref = schema(rootType, sel.name)
+    let at: Array<Json> = [JStr(sel.key)]
+    return match resolved {
+        Err(why) => gqlFaultAt(why, at, tref),
+        Ok(v) => gqlAnswerValue(rootType, sel, v, tref, at, schema),
+    }
+}
+
+/// Check the selection against the root type, then project what resolved. A root
+/// field's ARGUMENTS are the resolver's business (the SDL declares them there and
+/// nowhere else), so nothing refuses them here.
+fn gqlAnswerValue(
+    rootType: String,
+    sel: GqlSel,
+    v: Json,
+    tref: String,
+    at: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let bad = gqlCheckSel(rootType, sel.name, gqlNamed(tref), sel.subs.length > 0, schema)
     if bad != "" {
-        return gqlReply(gqlErrorBody(bad))
+        return gqlFaultAt(bad, at, tref)
     }
-    return match gqlProject(v, sel.subs, ty, schema) {
-        Ok(p) => gqlReply(gqlDataBody(sel.key, p)),
-        Err(why) => gqlReply(gqlErrorBody(why)),
-    }
+    return gqlProject(v, sel.subs, tref, at, schema)
 }
 
 // ---- the generator ---------------------------------------------------------
@@ -1504,10 +1684,17 @@ fn gqlResolverArm(f: FnInfo) -> String {
 
 /// The SDL's type graph, baked as one lookup the executor can ask at runtime.
 ///
-/// `gqlSchema(t, field)` is the NAMED GraphQL type of `t`'s `field`, "" when `t`
-/// declares no such field; `gqlSchema(t, "")` is `t` itself when `t` is an OBJECT
-/// type and "" when it is a leaf. Two questions and one table, because they are
-/// the same lookup and a selection asks both.
+/// `gqlSchema(t, field)` is the GraphQL type REFERENCE of `t`'s `field` —
+/// `[Book!]!`, wrappers and all — and "" when `t` declares no such field;
+/// `gqlSchema(t, "")` is `t` itself when `t` is an OBJECT type and "" when it is
+/// a leaf. Two questions and one table, because they are the same lookup and a
+/// selection asks both.
+///
+/// **The reference, not the name** (RFC-0085 M3). M2 baked `gqlNamed(m.ref)` and
+/// threw the `!` markers away at exactly the point the projector needs them: they
+/// are what says how far a `null` climbs. The information was already generated —
+/// `gqlRef` writes it and the SDL document publishes it — so carrying it is one
+/// call less, and the projector strips to the name where it wants the name.
 ///
 /// Emitted from the SAME `gqlMembers` reading of each declaration the `type`
 /// definitions are emitted from, and the same `gqlRootOf` split the roots are:
@@ -1515,9 +1702,11 @@ fn gqlResolverArm(f: FnInfo) -> String {
 /// one set. Only object types get an arm — a leaf is the ABSENCE of one, which is
 /// exactly the answer "has no subfields".
 fn gqlSchemaTable(iface: ModuleInterface) -> String {
-    let mut out = "/// The schema's type graph: `gqlSchema(t, field)` is the named GraphQL type of\n"
-    out = out + "/// `t`'s `field` (\"\" when it declares none), and `gqlSchema(t, \"\")` is `t` itself\n"
-    out = out + "/// when `t` is an object type (\"\" when it is a leaf, which has no subfields).\n"
+    let mut out = "/// The schema's type graph: `gqlSchema(t, field)` is the GraphQL type reference\n"
+    out = out + "/// of `t`'s `field`, non-null markers included (\"\" when it declares none), and\n"
+    out = out + "/// `gqlSchema(t, \"\")` is `t` itself when `t` is an object type (\"\" when it is a\n"
+    out = out + "/// leaf, which has no subfields). The `!` markers are what say how far a `null`\n"
+    out = out + "/// climbs (RFC-0085 M3).\n"
     out = out + "fn gqlSchema(t: String, field: String) -> String {\n"
     out = out + gqlSchemaArm("Query", gqlRootMembers(iface, "query"))
     out = out + gqlSchemaArm("Mutation", gqlRootMembers(iface, "mutation"))
@@ -1537,7 +1726,7 @@ fn gqlSchemaArm(name: String, ms: Array<GqlMember>) -> String {
     out = out + "        if field == \"\" {\n            return t\n        }\n"
     for m in ms {
         out = out + "        if field == \"" + m.name + "\" {\n"
-        out = out + "            return \"" + gqlNamed(m.ref) + "\"\n"
+        out = out + "            return \"" + m.ref + "\"\n"
         out = out + "        }\n"
     }
     return out + "        return \"\"\n    }\n"
@@ -1654,15 +1843,17 @@ fn gqlTestValue() -> Json {
     return JObj([JsonField { key: "books", value: JArr([JObj(book)]) }])
 }
 
-/// A stand-in type graph over that shape, in the shape `gqlSchemaTable` bakes:
-/// `BookList` and `Book` are objects, and everything they name is a leaf.
+/// A stand-in type graph over that shape, in the shape `gqlSchemaTable` bakes —
+/// type REFERENCES, `!` markers included, because those are what the bubbling
+/// rule reads. `books` is `[Book!]!` exactly as `Array<Book>` maps, and `rating`
+/// is the one nullable field, so a climb has somewhere to stop short.
 fn gqlTestSchema(t: String, field: String) -> String {
     if t == "BookList" {
         if field == "" {
             return t
         }
         if field == "books" {
-            return "Book"
+            return "[Book!]!"
         }
         return ""
     }
@@ -1671,13 +1862,13 @@ fn gqlTestSchema(t: String, field: String) -> String {
             return t
         }
         if field == "id" {
-            return "BookId"
+            return "BookId!"
         }
         if field == "title" {
-            return "Title"
+            return "Title!"
         }
         if field == "url" {
-            return "Url"
+            return "Url!"
         }
         if field == "rating" {
             return "Stars"
@@ -1687,14 +1878,16 @@ fn gqlTestSchema(t: String, field: String) -> String {
     return ""
 }
 
-/// One root field's projection as a single string: the emitted JSON, or the error
-/// message — which is the pair of outcomes every assertion below is about.
+/// One root field's completion as a single string: the value it produced beside
+/// the errors it collected, which since M3 is one outcome and not two.
 fn gqlTestProject(query: String) -> String {
     let sels = gqlParseQuery(query).sels
-    return match gqlProject(gqlTestValue(), sels[0].subs, "BookList", gqlTestSchema) {
-        Ok(v) => emit(v),
-        Err(e) => e,
-    }
+    let r = gqlProject(gqlTestValue(), sels[0].subs, "BookList!", [], gqlTestSchema)
+    return emit(JObj([
+                JsonField { key: "value", value: r.value },
+                JsonField { key: "errors", value: gqlErrJson(r.errs) },
+                JsonField { key: "climbing", value: JBool(r.failed) },
+            ]))
 }
 
 test "gqlParseQuery reads a nested selection set" {
@@ -1747,15 +1940,15 @@ test "gqlProject omits what was not selected" {
     // projection leaves them out. Assert the ABSENCE — a projection that returned
     // the record whole would pass a test that only looked for `title`.
     let out = gqlTestProject("{ browse { books { title } } }")
-    assertEq(out, "{\"books\":[{\"title\":\"SICP\"}]}")
+    assertEq(out, "{\"value\":{\"books\":[{\"title\":\"SICP\"}]},\"errors\":[],\"climbing\":false}")
     assert(out.contains("url") == false)
-    assert(out.contains("id") == false)
+    assert(out.contains("\"id\"") == false)
 }
 
 test "gqlProject answers under the alias the query wrote" {
     assertEq(
         gqlTestProject("{ browse { shelf: books { name: title } } }"),
-        "{\"shelf\":[{\"name\":\"SICP\"}]}",
+        "{\"value\":{\"shelf\":[{\"name\":\"SICP\"}]},\"errors\":[],\"climbing\":false}",
     )
 }
 
@@ -1763,29 +1956,54 @@ test "gqlProject takes a leaf whole and answers null for a DECLARED member the v
     assert(gqlTestProject("{ browse { books } }").contains("\"url\""))
     // `rating` is on `Book` and absent from this value — a `None` `Option`, which
     // is `null` and not an error.
-    assertEq(gqlTestProject("{ browse { books { rating } } }"), "{\"books\":[{\"rating\":null}]}")
+    assertEq(
+        gqlTestProject("{ browse { books { rating } } }"),
+        "{\"value\":{\"books\":[{\"rating\":null}]},\"errors\":[],\"climbing\":false}",
+    )
 }
 
 test "gqlProject reports a member the schema does not declare — M1's first hole" {
     // At M1 this answered `{"books":[{"shelved":null}]}`, because `toJson` omits a
     // `None` and the projector held only the value. The type graph tells them apart.
+    // M3 adds the PATH and keeps the reply: the schema declares no type for
+    // `shelved`, so nothing says `null` may not sit there and the fault stays put.
     assertEq(
         gqlTestProject("{ browse { books { shelved } } }"),
-        "Cannot query field `shelved` on type `Book`.",
+        "{\"value\":{\"books\":[{\"shelved\":null}]},\"errors\":[{\"message\":"
+        + "\"Cannot query field `shelved` on type `Book`.\",\"path\":[\"books\",0,\"shelved\"]}],"
+        + "\"climbing\":false}",
     )
 }
 
 test "gqlProject refuses a selection on a scalar — M1's second hole" {
+    // `title` is `Title!`, so the `null` may NOT sit there: it climbs to the
+    // `Book!` element, which takes the `[Book!]!` list with it, which takes
+    // `BookList!` — and this stand-in root is non-null, so it is still climbing
+    // when it runs out of positions. That is the `"data": null` case.
     assertEq(
         gqlTestProject("{ browse { books { title { nope } } } }"),
-        "Field `title` must not have a selection since type `Title` has no subfields.",
+        "{\"value\":null,\"errors\":[{\"message\":\"Field `title` must not have a selection "
+        + "since type `Title` has no subfields.\",\"path\":[\"books\",0,\"title\"]}],"
+        + "\"climbing\":true}",
+    )
+}
+
+test "a null stops at the nearest NULLABLE ancestor and the siblings survive" {
+    // The same fault one field over. `rating` is `Stars` — nullable — so the climb
+    // ends at the position it started on, and `title` beside it still answers.
+    assertEq(
+        gqlTestProject("{ browse { books { title, rating { nope } } } }"),
+        "{\"value\":{\"books\":[{\"title\":\"SICP\",\"rating\":null}]},\"errors\":[{\"message\":"
+        + "\"Field `rating` must not have a selection since type `Stars` has no subfields.\","
+        + "\"path\":[\"books\",0,\"rating\"]}],\"climbing\":false}",
     )
 }
 
 test "gqlProject refuses an argument written where the schema declares none" {
     assertEq(
         gqlTestProject("{ browse { books(first: 2) { title } } }"),
-        "Unknown argument `first` on field `books`.",
+        "{\"value\":null,\"errors\":[{\"message\":\"Unknown argument `first` on field `books`.\","
+        + "\"path\":[\"books\"]}],\"climbing\":true}",
     )
 }
 

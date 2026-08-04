@@ -465,3 +465,46 @@ fn sdl_grammar_sane(sdl: &str) {
         }
     }
 }
+
+// ---- the executor's own suites, which nothing was running -------------------
+
+/// The path of a repo-relative file, in the loader-parseable spelling.
+fn repo_file(rel: &str) -> PathBuf {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    let s = p.to_string_lossy().replace('\\', "/");
+    PathBuf::from(s.strip_prefix("//?/").unwrap_or(&s).to_string())
+}
+
+/// `vyrn test <file>` must be green, and must have run at least `least` blocks —
+/// a suite that silently stops being discovered would otherwise pass.
+fn assert_suite_green(rel: &str, least: usize) {
+    let out = vyrn().arg("test").arg(repo_file(rel)).output().expect("vyrn test");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");
+    assert!(combined.contains("0 failed"), "{rel}:\n{combined}");
+    let ran: usize = combined
+        .split(" passed")
+        .next()
+        .and_then(|s| s.rsplit(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(ran >= least, "{rel}: expected at least {least} tests, ran {ran}:\n{combined}");
+}
+
+/// The executor's projection/parser suite (RFC-0085 M1–M3): the null-bubbling
+/// rule, path attribution and the two type-graph refusals live here, and the SDL
+/// goldens above cannot see any of them.
+#[test]
+fn graphql_executor_unit_tests_run_green() {
+    assert_suite_green("std/graphql.vyrn", 20);
+}
+
+/// The end-to-end half over `examples/shelf`'s real procedures — partial `data`,
+/// a path carrying a list index, and where a `null` stops climbing. The parity
+/// harness runs this example's `main` on three engines but never its `test`
+/// blocks, so without this the assertions are not checked anywhere.
+#[test]
+fn graphql_example_unit_tests_run_green() {
+    assert_suite_green("examples/graphql.vyrn", 10);
+}
