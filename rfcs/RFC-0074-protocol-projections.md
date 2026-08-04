@@ -468,6 +468,48 @@ against `vyrn serve examples/bin`: a `GET /pastes/<id>` answering 200 with
 `If-None-Match` answering 304 with an empty body and no `Content-Type`, and an
 unknown id answering 404.
 
+## As landed — M3b
+
+`ws` is in `std/http` beside `sse`, `sha1` is in `std/hash`, and the milestone's
+own question — does M3a's disconnect signal belong to one transport or to the
+design — is answered by a diff: **`tests/serve.rs` has no deletions.** M3a's four
+stream tests are untouched and the socket tests sit beside them, which is what
+"the conformance file passes unchanged" was written to mean. The signal
+generalised.
+
+**`heartbeat` is refused, and the reason is better than the one predicted.**
+This document guessed it would fail for `keepAlive`'s reason with one difference
+worth checking — a ping is HOST-generated where a keep-alive comment would have
+been producer-generated. That difference is real and it does not save the option:
+between frames the host is not idle, it is blocked inside the producer waiting
+for the next payload, so there is no moment for a timer to fire in. The sharper
+half is what the check turned up on the way: **what a heartbeat is FOR is
+detecting a peer that went away without saying so, and the host already learns
+that by writing to it and failing.** So the option is not merely unimplementable
+here; it is redundant with the signal this whole arc is built on, and it costs no
+ping.
+
+**SHA-1 mixes in masked `UInt64`, not `UInt32`.** Every word is masked to 32 bits
+explicitly rather than left to a narrower type's overflow rule, so the three
+engines agree without any of them being asked to round-trip an overflow the same
+way. `examples/sha1.vyrn` is RFC 3174's own vectors as a parity citizen. The doc
+comment says what the function is for — RFC 6455 §4.2.2's handshake nonce
+transform, not a security primitive — because a `sha1` in a standard library
+invites exactly the misuse that sentence prevents.
+
+**One thing the design did not have: base64 could not take bytes.**
+`base64EncodeV` took a `String`, and a twenty-byte digest is not text — it can
+hold a NUL and need not be valid UTF-8, so it cannot make the trip through a
+`String` first. `std/codecs` grew `base64EncodeBytes` and the string form now
+calls it.
+
+**Server-push, said out loud.** RFC 6455 is bidirectional and this is not; a
+client→server message would want a handler per inbound message, which is a
+different design. The host still parses inbound frames — enough to answer a
+client-initiated close with a close frame, and to refuse an unmasked client frame
+with 1002 per §5.1 — because ignoring the bytes a peer sends is not the same as
+not supporting inbound messages.
+
 ## As landed — M3a
 
 `sse` is in `std/http`, `serveStream` is the one builtin the milestone added, and

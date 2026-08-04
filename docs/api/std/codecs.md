@@ -63,6 +63,16 @@ fn base64EncodeV(s: String) -> String
 A string's UTF-8 bytes as base64: three bytes to four digits, with `=`
 padding for a final group of one or two.
 
+## base64EncodeBytes
+
+```vyrn
+fn base64EncodeBytes(b: Array<UInt8>) -> String
+```
+
+The same, over bytes that are not text. A digest is the case this exists for
+(RFC-0074 M3b's handshake base64s twenty SHA-1 bytes): it can hold a NUL and
+need not be UTF-8, so it cannot make the trip through a `String` first.
+
 ## base64DecodeV
 
 ```vyrn

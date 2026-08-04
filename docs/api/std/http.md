@@ -308,10 +308,60 @@ one — a raw `\n` inside a `data:` line would end the field, and a JSON payload
 with a newline in it would silently become two events. Every `\n` in the
 payload therefore becomes a second `data:` line, which the client rejoins.
 
+## Socket
+
+```vyrn
+type Socket = { pattern: String, feed: Feed, closing: Int64, subproto: String, fragment: Int64, derived: String }
+```
+
+A mounted WebSocket, and — like `Live` — not a `Route`.
+
+**Server-push only.** RFC 6455 is bidirectional; this is not. A `Socket`
+consumes a `Stream<T>` and all four of the RFC's options are server-side, so a
+client→server message has no shape here: it would want a handler per inbound
+message, which is a different design and not one RFC-0074 spells. The host
+still PARSES inbound frames — enough to honour a client-initiated close and
+§5.1's rule that a client's frames are masked — because ignoring the bytes a
+peer sends is not the same as not supporting inbound messages.
+
+`heartbeat` is absent, and it is this milestone's refusal — the same one
+`keepAlive` got from `Wire`, checked rather than assumed. A ping is
+HOST-generated where a keep-alive comment would have been producer-generated,
+which looked like the difference that would save it, and it is not: between
+frames the host is not idle, it is blocked inside the producer waiting for the
+next payload, so there is no moment for a timer to fire in. What a heartbeat
+is FOR is detecting a peer that has gone away without saying so, and the host
+already learns that by writing to it and failing — which is the signal this
+adapter shares with `sse`, and it costs no ping.
+
+## ws
+
+```vyrn
+fn ws(pattern: String, feed: Feed) -> Socket
+```
+
+`ws(pattern, feed)` — mount `feed` as a WebSocket at `pattern`.
+
+The feed's element is the message PAYLOAD, not a frame, and that asymmetry
+with `sse` is the rule rather than an inconsistency: **Vyrn owns what the user
+chooses and the host owns what the protocol fixes.** SSE's `data:`, `id:` and
+`retry:` are a design surface — which event name, which id — so `event(..)` is
+Vyrn and the host writes what it is handed. A frame's opcode, length and mask
+are not a surface; there is no choice in any of them. So the host frames.
+
+## Frames
+
+```vyrn
+protocol Frames { fn closeCode(self, Int64) -> Socket; fn subprotocol(self, String) -> Socket; fn maxFrame(self, Int64) -> Socket }
+```
+
+A socket's policy. Three options, all server-side, all with something under
+them — `heartbeat` is the fourth and is refused; see [`Socket`].
+
 ## mount
 
 ```vyrn
-fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>) -> Option<Response>
+fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> Option<Response>
 ```
 
 Resolve `req` against the mounted groups, in order, first match wins.
@@ -327,6 +377,12 @@ a number that is 5 in `examples/bin` and would have to reach the thousands
 before it showed up next to a JSON decode. `vyrn serve` runs `main` at
 startup, so an app that touches `handle` there sees the trap at startup, which
 is where it belongs.
+
+The fourth parameter is `ws`'s, and it is a fourth parameter for the same
+reason `live` was a third: Vyrn has no sum over two record types, and a
+`Socket` is deliberately not a `Live` — `retryAfter`/`resumable` mean nothing
+to a WebSocket and `closeCode`/`subprotocol`/`maxFrame` mean nothing to an
+event stream. An app with neither writes `[], []` and pays a word.
 
 ## httpInput
 

@@ -77,7 +77,7 @@ fn routed(req: Request) -> Response {
     // The third list is the streams (RFC-0074 M3a). They are not routes and they
     // do not carry `Policy`; `mount` resolves them first, because a stream's path
     // is exact and `/pastes/{id}` is exactly the shape that would swallow one.
-    return match mount(req, [[surface("/_", rpcHandle)], pastesHttp.routes()], pastesHttp.feeds()) {
+    return match mount(req, [[surface("/_", rpcHandle)], pastesHttp.routes()], pastesHttp.feeds(), pastesHttp.sockets()) {
         Some(r) => r,
         None => route(req),
     }

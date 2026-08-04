@@ -42,7 +42,12 @@ import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, to
 // pure: FNV-1a-64 is what `examples/bin` content-addresses pastes with, and
 // `std/time`'s breakdown is the parity citizen its own docs promise (only `now()`
 // is a host effect, and nothing here calls it).
-import { fnv1aStr } from "std/hash"
+import { fnv1aStr, sha1 } from "std/hash"
+// The WebSocket handshake's one transform (RFC-0074 M3b): `base64(SHA-1(key +
+// GUID))`, both halves already in std and both pure. `sha1` is there as a nonce
+// transform rather than as a security primitive, which is the first thing its
+// doc comment says.
+import { base64EncodeBytes } from "std/codecs"
 import { civil, fromMillis, hour, minute, second } from "std/time"
 
 // The procedure rule, imported rather than restated: a projection publishes the
@@ -516,6 +521,201 @@ export fn event(id: String, name: String, data: String) -> String {
     return out + "data: " + joinWith(split(data, "\n"), "\ndata: ") + "\n\n"
 }
 
+// ---- websockets (M3b) -------------------------------------------------------
+
+/// A mounted WebSocket, and — like `Live` — not a `Route`.
+///
+/// **Server-push only.** RFC 6455 is bidirectional; this is not. A `Socket`
+/// consumes a `Stream<T>` and all four of the RFC's options are server-side, so a
+/// client→server message has no shape here: it would want a handler per inbound
+/// message, which is a different design and not one RFC-0074 spells. The host
+/// still PARSES inbound frames — enough to honour a client-initiated close and
+/// §5.1's rule that a client's frames are masked — because ignoring the bytes a
+/// peer sends is not the same as not supporting inbound messages.
+///
+/// `heartbeat` is absent, and it is this milestone's refusal — the same one
+/// `keepAlive` got from `Wire`, checked rather than assumed. A ping is
+/// HOST-generated where a keep-alive comment would have been producer-generated,
+/// which looked like the difference that would save it, and it is not: between
+/// frames the host is not idle, it is blocked inside the producer waiting for the
+/// next payload, so there is no moment for a timer to fire in. What a heartbeat
+/// is FOR is detecting a peer that has gone away without saying so, and the host
+/// already learns that by writing to it and failing — which is the signal this
+/// adapter shares with `sse`, and it costs no ping.
+export type Socket = {
+    pattern: String,
+    feed: Feed,
+    // The code in the close frame the host sends when the feed ends
+    // (`closeCode`); 1000 is RFC 6455 §7.4.1's normal closure.
+    closing: Int64,
+    // Echoed as `Sec-WebSocket-Protocol`, and only when the client offered it
+    // (`subprotocol`); `""` negotiates none.
+    subproto: String,
+    // The largest payload the host puts in one frame, fragmenting anything longer
+    // across continuation frames (`maxFrame`); `0` never fragments.
+    fragment: Int64,
+    derived: String,
+}
+
+/// `ws(pattern, feed)` — mount `feed` as a WebSocket at `pattern`.
+///
+/// The feed's element is the message PAYLOAD, not a frame, and that asymmetry
+/// with `sse` is the rule rather than an inconsistency: **Vyrn owns what the user
+/// chooses and the host owns what the protocol fixes.** SSE's `data:`, `id:` and
+/// `retry:` are a design surface — which event name, which id — so `event(..)` is
+/// Vyrn and the host writes what it is handed. A frame's opcode, length and mask
+/// are not a surface; there is no choice in any of them. So the host frames.
+export fn ws(pattern: String, feed: Feed) -> Socket {
+    return Socket {
+        pattern: httpTidy(pattern),
+        feed: feed,
+        closing: 1000,
+        subproto: "",
+        fragment: 0,
+        derived: "WS " + httpTidy(pattern),
+    }
+}
+
+/// A socket's policy. Three options, all server-side, all with something under
+/// them — `heartbeat` is the fourth and is refused; see [`Socket`].
+export protocol Frames {
+    fn closeCode(self, code: Int64) -> Socket
+    fn subprotocol(self, name: String) -> Socket
+    fn maxFrame(self, size: Int64) -> Socket
+}
+
+impl Frames for Socket {
+    fn closeCode(self, code: Int64) -> Socket {
+        return Socket {
+            pattern: self.pattern,
+            feed: self.feed,
+            closing: code,
+            subproto: self.subproto,
+            fragment: self.fragment,
+            derived: self.derived + " close=\{code}",
+        }
+    }
+
+    fn subprotocol(self, name: String) -> Socket {
+        return Socket {
+            pattern: self.pattern,
+            feed: self.feed,
+            closing: self.closing,
+            subproto: name,
+            fragment: self.fragment,
+            derived: self.derived + " subprotocol=" + name,
+        }
+    }
+
+    fn maxFrame(self, size: Int64) -> Socket {
+        return Socket {
+            pattern: self.pattern,
+            feed: self.feed,
+            closing: self.closing,
+            subproto: self.subproto,
+            fragment: size,
+            derived: self.derived + " max-frame=\{size}",
+        }
+    }
+}
+
+/// RFC 6455 §4.2.2's magic string. Published, constant, and the whole reason the
+/// handshake needs a SHA-1: the server proves it understood the upgrade by
+/// echoing `base64(SHA-1(key + this))`. Nothing here is secret.
+fn httpWsGuid() -> String {
+    return "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+}
+
+/// Open the socket: the handshake response, and the producer handed to the host.
+///
+/// A malformed upgrade never reaches `serveStream`, so it answers as an ordinary
+/// buffered response — 426 with the version we speak when the client asked for a
+/// version we do not (§4.4), 400 otherwise.
+///
+/// The `body` of a 101 is NOT a prologue. `sse` uses that slot for the one thing
+/// it writes between the header block and the first frame, and a WebSocket has no
+/// such thing — after the handshake, everything is a frame. So it carries what the
+/// host needs before it can write one: the close code and the fragment limit, the
+/// two numbers the framing rule above says the host owns but does not get to
+/// choose. The host writes none of it.
+fn httpOpenSocket(w: Socket, req: Request, ps: Map<String, String>) -> Response {
+    if httpHeader(req, "sec-websocket-version") != "13" {
+        return Response {
+            status: 426,
+            contentType: "text/plain",
+            body: "this endpoint speaks WebSocket version 13",
+            vary: "",
+            headers: ["Sec-WebSocket-Version": "13"],
+        }
+    }
+    let key = httpHeader(req, "sec-websocket-key")
+    if key == "" || httpHasToken(httpHeader(req, "upgrade"), "websocket") == false || httpHasToken(httpHeader(req, "connection"), "upgrade") == false {
+        return Response {
+            status: 400,
+            contentType: "text/plain",
+            body: "not a WebSocket upgrade",
+            vary: "",
+            headers: [:],
+        }
+    }
+    let accept = base64EncodeBytes(sha1(bytes(key + httpWsGuid())))
+    let mut headers: Map<String, String> = [
+        "Upgrade": "websocket",
+        "Connection": "Upgrade",
+        "Sec-WebSocket-Accept": accept,
+    ]
+    // §4.2.2: the server may only select a subprotocol the client offered.
+    if w.subproto != "" && httpHasToken(httpHeader(req, "sec-websocket-protocol"), w.subproto) {
+        headers["Sec-WebSocket-Protocol"] = w.subproto
+    }
+    serveStream(httpFeed(w.feed, req, ps, 0))
+    return Response {
+        status: 101,
+        contentType: "",
+        body: "\{w.closing} \{w.fragment}",
+        vary: "",
+        headers: headers,
+    }
+}
+
+/// Whether a comma-separated header value lists `token`, case-insensitively.
+/// `Connection: keep-alive, Upgrade` is one field with two tokens, and a browser
+/// sends exactly that.
+fn httpHasToken(value: String, token: String) -> Bool {
+    for part in split(value, ",") {
+        if lowerOf(trim(part)) == lowerOf(token) {
+            return true
+        }
+    }
+    return false
+}
+
+/// ASCII lowercase. `Connection`'s tokens are case-insensitive (RFC 9110 §7.6.1)
+/// and a header VALUE is not folded at the edge the way a header name is.
+fn lowerOf(s: String) -> String {
+    let mut out: Array<UInt8> = []
+    for b in bytes(s) {
+        if b >= 'A' && b <= 'Z' {
+            out.push(b + 32)
+        } else {
+            out.push(b)
+        }
+    }
+    return fromBytesOr(out, s)
+}
+
+/// The route a socket shadows, for the mount check.
+fn httpSocketRoute(w: Socket) -> Route {
+    return httpRoute(w.pattern, httpNoRun, w.derived)
+}
+
+fn httpSocketMatch(w: Socket, req: Request) -> Option<Map<String, String>> {
+    if req.method != "GET" {
+        return None
+    }
+    return httpMatch(httpWithMethod(httpSocketRoute(w), "GET"), req)
+}
+
 /// The route a stream shadows, for the mount check: a stream answers a GET at
 /// exactly one path, so `httpSubsumes` can be asked about it the same way.
 fn httpLiveRoute(l: Live) -> Route {
@@ -580,8 +780,19 @@ fn httpLastEventId(req: Request) -> Int64 {
 /// before it showed up next to a JSON decode. `vyrn serve` runs `main` at
 /// startup, so an app that touches `handle` there sees the trap at startup, which
 /// is where it belongs.
-export fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>) -> Option<Response> {
-    httpCheckMount(groups, live)
+///
+/// The fourth parameter is `ws`'s, and it is a fourth parameter for the same
+/// reason `live` was a third: Vyrn has no sum over two record types, and a
+/// `Socket` is deliberately not a `Live` — `retryAfter`/`resumable` mean nothing
+/// to a WebSocket and `closeCode`/`subprotocol`/`maxFrame` mean nothing to an
+/// event stream. An app with neither writes `[], []` and pays a word.
+export fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> Option<Response> {
+    httpCheckMount(groups, live, sockets)
+    for w in sockets {
+        if let Some(ps) = httpSocketMatch(w, req) {
+            return Some(httpOpenSocket(w, req, ps))
+        }
+    }
     // Stream routes resolve BEFORE the buffered groups, and the reason is the
     // same one that makes them a separate list: a stream's path is exact, while
     // the patterns it would otherwise be filed behind (`/pastes/{id}`) are the
@@ -956,10 +1167,25 @@ fn httpLiveMatch(l: Live, req: Request) -> Option<Map<String, String>> {
 
 /// Trap on any route a later group could never reach, and on any route that never
 /// got a method.
-fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>) {
+fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) {
     // A stream resolves first, so it is the one thing that can shadow rather than
     // be shadowed. Reported at startup for the same reason the group check is: an
     // unreachable route is what nobody notices until production.
+    for w in sockets {
+        let a = httpWithMethod(httpSocketRoute(w), "GET")
+        for l in live {
+            if httpSubsumes(a, httpWithMethod(httpLiveRoute(l), "GET")) {
+                panic("mount: the stream route " + l.pattern + " (" + l.derived + ") is unreachable — the socket " + w.pattern + " already answers it")
+            }
+        }
+        for g in groups {
+            for b in g {
+                if httpSubsumes(a, b) {
+                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable — the socket " + w.pattern + " already answers it")
+                }
+            }
+        }
+    }
     for l in live {
         let a = httpWithMethod(httpLiveRoute(l), "GET")
         for g in groups {

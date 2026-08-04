@@ -160,7 +160,7 @@ fn under(req: Request) -> Option<Response> {
 
 fn hit(method: String, path: String) -> String {
     let groups: Array<Array<Route>> = [[surface(\"/_\", under)], api.routes()]
-    return match mount(Request { method: method, path: path, headers: [:], body: \"\" }, groups, []) {
+    return match mount(Request { method: method, path: path, headers: [:], body: \"\" }, groups, [], []) {
         Some(r) => \"\\{r.status} \\{r.body}\",
         None => \"none\",
     }
@@ -289,7 +289,7 @@ import { mount, Route } from \"std/http\"
 import * as api from \"./notes.http\"
 
 fn hit(method: String, path: String, body: String, headers: Map<String, String>) -> Response {
-    return match mount(Request { method: method, path: path, headers: headers, body: body }, [api.routes()], []) {
+    return match mount(Request { method: method, path: path, headers: headers, body: body }, [api.routes()], [], []) {
         Some(r) => r,
         None => Response { status: 0, contentType: \"\", body: \"\", vary: \"\", headers: [:] },
     }
@@ -437,7 +437,7 @@ fn the_derived_line_carries_the_policy() {
          fn all(req: Request) -> Option<Response> {\n    return None\n}\n\
          \n\
          fn main() -> Int64 {\n    \
-         let r = mount(Request { method: \"GET\", path: \"/x\", headers: [:], body: \"\" }, [[surface(\"/\", all)], api.routes()], [])\n    \
+         let r = mount(Request { method: \"GET\", path: \"/x\", headers: [:], body: \"\" }, [[surface(\"/\", all)], api.routes()], [], [])\n    \
          return 0\n}\n",
     );
     let (ok, out) = run(&dir, "root.vyrn");
@@ -468,7 +468,7 @@ fn the_derived_line_carries_the_policy() {
 /// cannot pull the stream — but it CAN show which shape answered and with what
 /// prologue, which is the routing claim.
 const LIVE_ROOT: &str = "\
-import { mount, surface, event, sse, Live, Route, Wire } from \"std/http\"
+import { mount, surface, event, sse, ws, Frames, Live, Route, Socket, Wire } from \"std/http\"
 import * as api from \"./notes.http\"
 
 fn under(req: Request) -> Option<Response> {
@@ -492,9 +492,13 @@ fn feeds() -> Array<Live> {
     return [sse(\"/notes/live\", feed).retryAfter(2500).resumable()]
 }
 
+fn sockets() -> Array<Socket> {
+    return [ws(\"/notes/socket\", feed).closeCode(1001).subprotocol(\"notes.v1\").maxFrame(4096)]
+}
+
 fn hit(path: String, lastId: String) -> String {
     let req = Request { method: \"GET\", path: path, headers: [\"last-event-id\": lastId], body: \"\" }
-    return match mount(req, [[surface(\"/_\", under)], api.routes()], feeds()) {
+    return match mount(req, [[surface(\"/_\", under)], api.routes()], feeds(), sockets()) {
         Some(r) => \"\\{r.status} \\{r.contentType} [\\{r.body}]\",
         None => \"none\",
     }
@@ -502,6 +506,7 @@ fn hit(path: String, lastId: String) -> String {
 
 fn main() -> Int64 {
     print(feeds()[0].derived)
+    print(sockets()[0].derived)
     print(event(\"7\", \"note\", \"a\\nb\"))
     print(hit(\"/notes\", \"\"))
     return 0
@@ -517,6 +522,10 @@ fn a_stream_carries_its_own_vocabulary_and_never_policys() {
     // `derived` is the stream's own line: no `max-age`, no `etag`, because a
     // `Live` has no `Policy` to write one with.
     assert!(out.contains("SSE /notes/live retry=2500 resumable"), "{out}");
+    // M3b's line beside it, and the point is which words are NOT in each: a
+    // `Live` has no close code and a `Socket` has no retry hint, because an
+    // option meaningless to a transport is absent from it rather than ignored.
+    assert!(out.contains("WS /notes/socket close=1001 subprotocol=notes.v1 max-frame=4096"), "{out}");
     // The frame SSE specifies: a field per line, a `data:` per payload line
     // (a raw newline inside one would end the event), and a blank line to close.
     assert!(out.contains("id: 7\nevent: note\ndata: a\ndata: b\n"), "{out}");
