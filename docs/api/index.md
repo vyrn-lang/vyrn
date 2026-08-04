@@ -25,6 +25,7 @@
 - [std/stream](std/stream.md) — std/stream — the `Stream<T>` combinators (RFC-0075 M2), written in Vyrn
 - [std/strings](std/strings.md) — std/strings — string helpers, written in Vyrn itself on the `slice` builtin
 - [std/strpred](std/strpred.md) — std/strpred — the string predicates and `slice`, written in Vyrn
+- [std/symbolmap](std/symbolmap.md) — std/symbolmap (RFC-0073 M1) — the shared shape of a generated module's symbol
 - [std/text](std/text.md) — std/text — UTF-8 decoding and byte-offset line/column, written in Vyrn
 - [std/time](std/time.md) — std/time — wall-clock time at the host boundary (RFC-0043).
 - [std/tw](std/tw.md) — std/tw — theme-derived utility classes as a CHECKED TYPE (RFC-0032), a library
