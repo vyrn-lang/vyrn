@@ -4,7 +4,8 @@
 //!   vyrn run     [file.vyrn]            Type-check and interpret; process exits with main's value.
 //!   vyrn check   [file.vyrn]            Type-check only; print "ok" or every diagnostic.
 //!   vyrn emit-ir [file.vyrn]            Print textual LLVM IR to stdout.
-//!   vyrn emit-gen [file.vyrn]           Print every synthesized generator module (RFC-0021).
+//!   vyrn emit-gen [file.vyrn] [--maps]  Print every synthesized generator module (RFC-0021),
+//!                                       or its RFC-0073 symbol map as JSON.
 //!   vyrn build   [file.vyrn] [-o out] [--target wasm]
 //!                                        Compile to a native executable (or wasm) via clang.
 //!   vyrn test    [file.vyrn] [--name <substring>]
@@ -54,7 +55,7 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n\
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -280,6 +281,10 @@ fn real_main() -> ExitCode {
         std::env::set_var("VYRN_NATIVE_TARGET", &v);
         args.drain(i..=i + 1);
     }
+    // `emit-gen --maps` (RFC-0073 M1) — drained here, like `--offline`, so the
+    // "this command takes no extra arguments" check below still holds.
+    let want_maps = args.iter().any(|a| a == "--maps");
+    args.retain(|a| a != "--maps");
     if args.len() < 2 {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -404,7 +409,7 @@ fn real_main() -> ExitCode {
                 }
             }
         }
-        "emit-gen" => emit_gen(path, &source),
+        "emit-gen" => emit_gen(path, &source, want_maps),
         other => {
             eprintln!("unknown command `{other}` (expected run, check, emit-ir, emit-gen, build, test, bench, or serve)");
             ExitCode::from(2)
@@ -412,10 +417,37 @@ fn real_main() -> ExitCode {
     }
 }
 
-/// `vyrn emit-gen [file]` (RFC-0021) — run every generator import the file
-/// reaches and print the synthesized module source, each under a banner naming
-/// its generator call site. Nothing is printed for a file with no generators.
-fn emit_gen(path: &str, source: &str) -> ExitCode {
+/// The JSON a generated module's `symbolMap()` returns (RFC-0073 M1), or `None`
+/// for a generator that emits no map.
+///
+/// Read out of the SOURCE rather than run: the map is a string literal the
+/// generator baked in, so parsing is the whole of what reading it costs, and the
+/// map a reader gets is by construction the one that shipped inside the module.
+fn symbol_map_of(src: &str) -> Option<String> {
+    let tokens = vyrn_frontend::lexer::lex(src).ok()?;
+    let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
+    let f = program.functions.iter().find(|f| f.name == "symbolMap")?;
+    match f.body.stmts.first() {
+        Some(vyrn_frontend::ast::Stmt::Return {
+            value: Some(vyrn_frontend::ast::Expr::Str(s)),
+            ..
+        }) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// `vyrn emit-gen [file] [--maps]` (RFC-0021) — run every generator import the
+/// file reaches and print the synthesized module source, each under a banner
+/// naming its generator call site. Nothing is printed for a file with no
+/// generators.
+///
+/// `--maps` prints each module's RFC-0073 symbol map instead of its source, one
+/// compact JSON document per line, banners on stderr — so a third-party tool
+/// reads JSON without reading Vyrn, and `> api.map.json` produces the sibling
+/// file the RFC asks for without this command inventing a name for it. There is
+/// no second artifact to invalidate: the map is an export of the module, so this
+/// prints what the generator cache already holds.
+fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
@@ -425,6 +457,20 @@ fn emit_gen(path: &str, source: &str) -> ExitCode {
         Ok(mods) => {
             if mods.is_empty() {
                 eprintln!("(no generator imports in {root_key})");
+            }
+            if maps {
+                let mut any = false;
+                for (banner, src) in mods {
+                    if let Some(json) = symbol_map_of(&src) {
+                        eprintln!("// ==== {banner} ====");
+                        println!("{json}");
+                        any = true;
+                    }
+                }
+                if !any {
+                    eprintln!("(no generated module in {root_key} carries a symbol map)");
+                }
+                return ExitCode::SUCCESS;
             }
             for (banner, src) in mods {
                 println!("// ==== {banner} ====");
