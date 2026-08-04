@@ -62,6 +62,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "does not provide `fn name(self) -> String`",
     ),
     (
+        "protocol_extra.vyrn",
+        "an impl providing methods its protocol does not declare (RFC-0002 §5) — a \
+         typo beside the real method, and a plainly extra one; both used to compile \
+         into a mangled symbol nothing could ever dispatch to",
+        "provides `fn aera(self) -> Int64`, which protocol `Shape` does not declare",
+    ),
+    (
         "protocol_scalar.vyrn",
         "a protocol implemented for a validated scalar — the half of the old refusal \
          RFC-0084 M1 kept, and now the only one it names",

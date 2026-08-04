@@ -1,0 +1,53 @@
+// An impl provides the protocol's methods and no others — RFC-0002 §5.
+//
+// The third sibling of `protocol_conformance.vyrn` and `protocol_incomplete.vyrn`,
+// and the one whose damage is quietest. A method the protocol never declared is
+// not an extra piece of surface on the type: protocol-method resolution keys on
+// the names the PROTOCOL declares, so `perimeter` flattens to a
+// `Shape__Sq__perimeter` that nothing can reach, and `s.perimeter()` answers
+// `call to unknown function `perimeter``. It compiled, and it was dead.
+//
+// The typo is the shape that costs an afternoon. `aera` sits next to a working
+// `area`, is accepted, is unreachable, and looks like it did something — so the
+// diagnostic offers the declared name it is one transposition away from.
+//
+// Vyrn has no inherent methods — `impl` always names a protocol — so the answer
+// for a genuine helper is not another block but no block at all: `x.m(..)`
+// falls through to a plain top-level `fn m(x: Sq, ..)`, which is what `bare`
+// below is.
+//
+// This file is an INTENTIONAL compile error. It is meant to FAIL `vyrn check`,
+// so the parity harness lists it under EXPECTED_CHECK_FAILURE rather than
+// running it. Observe both diagnostics with:
+//
+//   vyrn check examples/protocol_extra.vyrn
+
+type Sq = { side: Int64 }
+
+protocol Shape {
+    fn area(self) -> Int64
+}
+
+impl Shape for Sq {
+    fn area(self) -> Int64 { return self.side * self.side }
+
+    // Rejected with a did-you-mean: one transposition from `area`, which is
+    // declared. Nothing else in the file mentions `aera`, and nothing could.
+    fn aera(self) -> Int64 { return self.side * self.side }
+
+    // Rejected on its own terms: near no declared name, so the diagnostic says
+    // where a helper belongs instead.
+    fn perimeter(self) -> Int64 { return self.side * 4 }
+}
+
+// The alternative the diagnostic names, and it needs no impl to work.
+fn bare(x: Sq) -> Int64 {
+    return x.side + x.side
+}
+
+fn main() -> Int64 {
+    let s = Sq { side: 3 }
+    print(s.area().toString())
+    print(bare(s).toString())
+    return 0
+}
