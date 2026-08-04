@@ -182,7 +182,43 @@ cache-integrity error that forces regeneration rather than a silent skip.
 ## Milestones
 
 - **M1 — format + emit.** `std/symbolmap`, the `.map.json` shape, cache
-  integration. `client()` and `rpc()` emit maps.
+  integration. `client()` and `rpc()` emit maps. **Two prerequisites this
+  document does not name, and one thing it should not build; see below.**
+
+### M1 — what it actually needs
+
+**Prerequisite: reflection has no origins.** `originOf(iface, "list")` above
+cannot be written, because `FnInfo` is
+`{ name, params, ret, retSchema, retUncodable, mutates }` — no file, no line, no
+column. The whole RFC is "promote `//@origin` from line granularity to symbol
+granularity", and the symbol half is not in the reflection the generators read.
+
+That is an addition rather than a problem: `retUncodable` arrived with RFC-0071
+M3 and `mutates` with RFC-0074 M4a, both by the same route. `FnInfo.origin`
+is the third, and `TypeInfo` needs one too — the sketch above maps
+`api.pastes.PasteList` back to `shared/wire/paste.vyrn:12:13`.
+
+**The thing not to build: a second generator output.** The sketch writes
+`gen fn client(dir: String) -> Module` and `emitMap([...])`. There is no
+`Module`; a `gen fn` returns `String`, the emitted source, and adding a second
+artifact means a new generator protocol, a new cache entry to keep in step, and
+a new way for the two to disagree.
+
+**The map is the module.** Emit it as an ordinary exported function —
+`symbolMap() -> String`, returning the JSON — and every one of those problems
+disappears: the cache already keys the module by content hash, so a map that
+lives *inside* the module cannot go stale relative to it, and "cache
+integration" stops being a milestone item. The LSP already runs generators as
+compiled wasm (RFC-0076), so reading it costs a call.
+
+`std/symbolmap` then provides the **builder**, not an emitter: `symbol(..)` and
+`mapJson(..)` produce the string every generator bakes in, so the shape is
+shared for the reason the sketch wanted — one library, one format.
+
+The sibling `.map.json` still exists, and is written by the CLI on request
+rather than by the generator. That keeps the RFC's actual requirement — a
+third-party tool reads JSON, not Vyrn — without making a generator responsible
+for a file it cannot invalidate.
 - **M2 — typed `Params`.** Generated per-route `Params` records with mapped
   fields; placeholder checking in REST projections; the string-lookup form
   removed.
