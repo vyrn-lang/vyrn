@@ -25,6 +25,7 @@ use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Tok};
 use crate::movecheck;
 use crate::parser;
+use crate::symbolmap::MappedSymbol;
 
 /// Kind of a top-level symbol or a local binding (returned by [`resolve`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +176,12 @@ pub struct Analysis {
     /// appear in that buffer; they are excluded from [`Self::diagnostics`] (which
     /// stays anchored to the open document).
     pub remapped: Vec<Diagnostic>,
+    /// RFC-0073 M3: every symbol the generated modules reachable from this
+    /// document map back to a declaration, with its derived wire facts. The LSP
+    /// reads it to answer "what is this procedure mounted at" on the
+    /// DECLARATION's own hover — the declaration's file reaches no generator, so
+    /// the facts can only come from a root that does.
+    pub symbol_maps: Vec<crate::symbolmap::MappedSymbol>,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes
@@ -422,6 +429,16 @@ fn analyze_inner(
     };
     pin_diagnostics(&mut diags, &kw_cols, &tok_info);
 
+    // RFC-0073 M3: the symbol map every generated module bakes in, so a symbol
+    // that stands for a declaration resolves to the DECLARATION — its file, its
+    // line, its doc comment, and its derived wire facts. Empty when nothing was
+    // generated, and cheap when something was: a module with no map is a failed
+    // substring search over its source.
+    let origin_index = match linker {
+        Some((_, _, resolver)) if !graph.is_empty() => OriginIndex::build(&graph, resolver),
+        _ => OriginIndex::default(),
+    };
+
     let decl_lines = decl_lines(&program);
     let fn_lines = fn_lines(&program);
     let mut symbols = index_symbols(&program, &tok_info, &decl_lines);
@@ -430,12 +447,12 @@ fn analyze_inner(
     // go-to-definition jumps into the imported module. A no-op without a
     // linker (a plain-`analyze` program has no `module`-tagged decls).
     if let Some(linked) = &checked {
-        symbols.extend(index_imported_symbols(&program, linked));
+        symbols.extend(index_imported_symbols(&program, linked, &origin_index));
     }
     // RFC-0027: namespace bindings and their reachable exports (for `ns.`
     // completion and `ns.member` hover / go-to-definition). Needs the linker to
     // resolve each namespace import to its source module.
-    let namespaces = index_namespaces(&graph, &program, linker);
+    let namespaces = index_namespaces(&graph, &program, linker, &origin_index);
     let locals = index_locals(&program, &tok_info, &let_types);
 
     // Protocol/impl member tables for `.foo` completion (RFC-0002 §5). Impls
@@ -572,6 +589,7 @@ fn analyze_inner(
         namespaces,
         origins,
         remapped,
+        symbol_maps: origin_index.all,
     }
 }
 
@@ -595,6 +613,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         namespaces: Vec::new(),
         origins: crate::origin::OriginMaps::default(),
         remapped: Vec::new(),
+        symbol_maps: Vec::new(),
     }
 }
 
@@ -1670,7 +1689,11 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
 /// Columns are 0 (the foreign file's token stream isn't at hand — jump targets
 /// land on the declaration line), and `file` carries the source module so the
 /// LSP can build a cross-file `Location`.
-fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Symbol> {
+fn index_imported_symbols(
+    root: &ast::Program,
+    linked: &ast::Program,
+    origins: &OriginIndex,
+) -> Vec<Symbol> {
     // Map each imported ORIGINAL decl name to the LOCAL name the root refers to
     // it by (the alias, or the original for a bare import — RFC-0022). Linked
     // decls are matched by original; the emitted symbol is keyed by the local
@@ -1776,6 +1799,21 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
         }
     }
 
+    // RFC-0073 M3: a name imported from a GENERATED module carries a banner as
+    // its "file", which is nowhere to jump to. Where the module's map claims the
+    // symbol, it stands for a real declaration instead — under the ORIGINAL
+    // name, since the map is keyed by what the generator emitted and not by the
+    // alias the importer chose.
+    let original_of: std::collections::HashMap<&str, &str> =
+        local_of.iter().map(|(orig, local)| (*local, *orig)).collect();
+    for s in &mut out {
+        if let Some(module) = s.file.clone() {
+            let generated =
+                original_of.get(s.name.as_str()).copied().unwrap_or(s.name.as_str()).to_string();
+            origins.apply(&module, &generated, s);
+        }
+    }
+
     out
 }
 
@@ -1792,6 +1830,7 @@ fn index_namespaces(
         &crate::loader::LoadOptions,
         &dyn crate::loader::ModuleResolver,
     )>,
+    origins: &OriginIndex,
 ) -> Vec<NamespaceInfo> {
     let Some((root_path, opts, resolver)) = linker else {
         return Vec::new();
@@ -1818,10 +1857,12 @@ fn index_namespaces(
                 .iter()
                 .find(|(k, _, _)| k == target)
                 .and_then(|(_, _, g)| g.as_deref());
-            out.push(NamespaceInfo {
-                name: ns.clone(),
-                members: namespace_members(target, resolver, gen),
-            });
+            let mut members = namespace_members(target, resolver, gen);
+            for m in &mut members {
+                let generated = m.name.clone();
+                origins.apply(target, &generated, m);
+            }
+            out.push(NamespaceInfo { name: ns.clone(), members });
         }
     }
     out
@@ -1916,6 +1957,129 @@ fn namespace_members(
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// generated symbols → their declarations (RFC-0073 M3)
+// ---------------------------------------------------------------------------
+
+/// The symbol maps of every generated module the linked program reached, plus
+/// the `///` on each declaration they name.
+///
+/// A generated stub has no source file and no doc of its own: before this, a
+/// `client()` export hovered as its own signature and went nowhere on
+/// go-to-definition, because the "file" a generated declaration carries is a
+/// banner and not a path. The map is what supplies both halves — where the
+/// declaration is, and what it says about itself.
+///
+/// Docs are read once per ORIGIN FILE rather than once per symbol: a client's
+/// forty stubs come from a handful of api modules, and `client()` is
+/// server-blind, so those modules are not in the linked program to borrow from.
+#[derive(Default)]
+pub(crate) struct OriginIndex {
+    /// Generated module banner → its mapped symbols, by generated name.
+    maps: std::collections::HashMap<String, std::collections::HashMap<String, MappedSymbol>>,
+    /// `(origin file, declaration name)` → its `///`.
+    docs: std::collections::HashMap<(String, String), String>,
+    /// Every mapped symbol, flattened — what [`Analysis::symbol_maps`] exposes.
+    all: Vec<MappedSymbol>,
+}
+
+impl OriginIndex {
+    fn build(graph: &crate::loader::ModuleGraph, resolver: &dyn crate::loader::ModuleResolver) -> Self {
+        let mut out = OriginIndex::default();
+        for (key, _, gen) in graph {
+            let Some(src) = gen else { continue };
+            let syms = crate::symbolmap::read(src);
+            if syms.is_empty() {
+                continue;
+            }
+            let mut by_name = std::collections::HashMap::new();
+            for s in syms {
+                out.all.push(s.clone());
+                by_name.insert(s.name.clone(), s);
+            }
+            out.maps.insert(key.clone(), by_name);
+        }
+        let mut files: Vec<&str> = out.all.iter().map(|s| s.file.as_str()).collect();
+        files.sort_unstable();
+        files.dedup();
+        for file in files {
+            let Ok(text) = resolver.read(file) else { continue };
+            let Ok(tokens) = lexer::lex(&text) else { continue };
+            let (program, _) = parser::parse_accum(tokens);
+            for f in &program.functions {
+                if let Some(d) = &f.doc {
+                    out.docs.insert((file.to_string(), f.name.clone()), d.clone());
+                }
+            }
+            for t in &program.type_decls {
+                if let Some(d) = &t.doc {
+                    out.docs.insert((file.to_string(), t.name.clone()), d.clone());
+                }
+            }
+        }
+        out
+    }
+
+    fn get(&self, module: &str, name: &str) -> Option<&MappedSymbol> {
+        self.maps.get(module)?.get(name)
+    }
+
+    /// Rewrite a generated module's [`Symbol`] to stand for the declaration it
+    /// was generated from: the jump target becomes the declaration, the doc is
+    /// borrowed from it, and the derived wire facts join the detail.
+    fn apply(&self, module: &str, generated_name: &str, sym: &mut Symbol) {
+        let Some(m) = self.get(module, generated_name) else { return };
+        sym.line = m.line;
+        sym.col = m.col;
+        sym.end_col = if m.col == 0 { 0 } else { m.col + m.decl.chars().count() };
+        sym.file = Some(m.file.clone());
+        // The note goes in the DOC and not the detail, so a hover reads
+        // signature → what the declaration says about itself → where it is and
+        // what it is mounted at. A generated stub carries no `///` of its own,
+        // so the borrowed one is almost always the only one.
+        let borrowed = sym
+            .doc
+            .clone()
+            .or_else(|| self.docs.get(&(m.file.clone(), m.decl.clone())).cloned());
+        sym.doc = Some(match borrowed {
+            Some(d) => format!("{}\n\n{}", d.trim_end(), origin_note(m)),
+            None => origin_note(m),
+        });
+    }
+}
+
+/// The hover lines a mapped symbol adds: its derived wire facts, and where the
+/// declaration it stands for is written.
+pub(crate) fn origin_note(m: &MappedSymbol) -> String {
+    let mut out = String::new();
+    if let Some(route) = m.route_line() {
+        out.push_str(&route);
+        out.push_str("\n\n");
+    }
+    let at = if m.line == 0 {
+        short_path(&m.file)
+    } else {
+        format!("{}:{}", short_path(&m.file), m.line)
+    };
+    out.push_str(&format!("— generated from `{}` in {at}", m.decl));
+    out
+}
+
+/// The tail of a module path, for a hover that must fit on a line. The LSP keys
+/// modules by absolute path, and `N:/lang/examples/bin/server/api/pastes.vyrn`
+/// tells a reader nothing the last three segments do not.
+///
+// ponytail: three segments is a guess that happens to be exactly right for an
+// `<app>/server/api/x.vyrn` corpus; a project-relative path would need the
+// project root threaded down here, which nothing else in this module has.
+pub(crate) fn short_path(file: &str) -> String {
+    let parts: Vec<&str> = file.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() <= 3 {
+        return file.to_string();
+    }
+    format!("…/{}", parts[parts.len() - 3..].join("/"))
 }
 
 // ---------------------------------------------------------------------------

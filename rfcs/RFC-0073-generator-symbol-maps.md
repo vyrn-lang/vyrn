@@ -1,7 +1,8 @@
 # RFC-0073 — Generator Symbol Maps: Rename Across the Boundary
 
 - **Status:** M1 landed (reflection origins, `std/symbolmap`, `client()`/`rpc()`
-  maps, `vyrn emit-gen --maps`); M2–M4 draft
+  maps, `vyrn emit-gen --maps`); M2 struck; M3 landed (LSP hover, go-to-def,
+  route lenses); M4 draft
 - **Depends on:** RFC-0033 (`//@origin` directives), RFC-0048 (vyx origins),
   RFC-0053 (generated error mapping), RFC-0050 (LSP references),
   RFC-0071 (contracts — members are the symbols this RFC maps),
@@ -153,6 +154,11 @@ same lens machinery as RFC-0064's dev entry and RFC-0055's bench lenses.
 
 **Go-to-def.** Already works; the symbol map makes it land on the *declaration*
 rather than the generated stub, which is what a reader wants.
+
+> **It did not already work.** A generated symbol had no jumpable file at all —
+> a namespace member carried none and an imported name carried a banner — so
+> go-to-definition returned nothing rather than the stub. The map is not a
+> refinement here; it is the whole of it. See "M3 — as landed".
 
 ## `vyrn routes`
 
@@ -341,6 +347,77 @@ line that declares the conflicting segment. That is a note on M3 (LSP read),
 not a milestone of its own.
 - **M3 — LSP read.** Hover with derived facts, go-to-def onto declarations,
   CodeLens with paths.
+
+### M3 — as landed
+
+All three shipped. The document was wrong about the easiest of them, and the
+hardest one turned out to be a question about *acquisition* rather than about
+hover.
+
+**"Go-to-def already works" was false, and it was the clearest win here.** It
+returned NOTHING. A namespace member of a generated module is built from the
+synthesized source, which has no file, so `namespace_members` set `file: None`
+and `resolve` reported `definition: false`; a selectively imported name carried
+the generated module's BANNER as its file, which `Url::from_file_path` rejects.
+Either way `api.pastesCreate` was a dead end. The map supplies the file, the
+line and — the part the AST could not have given even if it had a file — the
+COLUMN, so the jump lands on the four characters of `byId` rather than on the
+head of its line. Both import forms are fixed at once, because both are
+rewritten by one pass over the symbols an analysis already built.
+
+**Hover proved to be two different problems wearing one name.** At a CALL SITE
+the map is free: the generated source is in hand, the map is a string literal
+inside it, and the origin's `///` is one read of a file the reader is about to
+be sent to anyway. That hover now shows the stub's own signature (it is what you
+call, callback and all), the DECLARATION's doc, the derived route, and where the
+declaration is written.
+
+At the DECLARATION it is not free, and this is the thing the document does not
+say: **`server/api/pastes.vyrn` reaches no generator.** It is what a generator
+reads, not what reads one, so the file open in the editor cannot know what
+`create` is mounted at — only a root that calls `rpc(..)` or `client(..)` can.
+So the facts are acquired the way RFC-0049 acquires a `.vyx`'s owner, pointed
+the other way: consult the roots already analyzed (in a full-stack window the
+server root or the client boot usually is), and otherwise analyze the roots near
+the file that TEXTUALLY call a map-emitting generator, nearest first. One such
+probe costs ~840 ms in `examples/bin` and every hover after it costs under a
+millisecond, because the winning root's map covers the whole api directory and
+is cached for all of it at once.
+
+**The cache's only invalidation is a root being re-analyzed, and that is
+enough.** Clearing it on every `.vyrn` edit was the first version and it was
+wrong: it made an edit-then-hover cycle pay the probe again and again. A cached
+entry can go stale only by its declaration MOVING, and the hover matches on the
+declaration's name AND line, so a stale entry makes a route note quietly
+disappear until the mounting root is re-analyzed — it never appears on the wrong
+declaration. Installing a root refreshes the facts for every module it maps, so
+the accurate answer arrives by the same door the diagnostics do.
+
+**CodeLens is not a server capability in this project, and it stays that way.**
+Every lens the editor shows — the run lens, RFC-0064's dev entry, RFC-0055's
+bench lenses — is built in `extension.js`, and the semantic ones ask the server
+through a custom request. So the route lens does too: `vyrn/routeLenses` answers
+`{ line, title, method, path, source }` per procedure, from the same cache the
+hover reads. One lens per DECLARATION and not per generated symbol, because a
+procedure is mapped twice (the client's stub and the server's handler) and both
+name it at the same place — the very agreement M1 put under test. The lens
+carries no command: a POST endpoint is not something a click can usefully open,
+and the lens exists to make a derived fact visible.
+
+**The reader is a parse of the module's TAIL.** `symbolMapFn` appends the
+declaration last, so `vyrn_frontend::symbolmap` finds `export fn symbolMap()`
+textually and lexes only what follows — a generated client is tens of kilobytes
+and the LSP reads maps on every keystroke. `vyrn emit-gen --maps` now goes
+through the same function, so there is one reader rather than one per consumer.
+Keystroke latency is unchanged: 27.8 ms → 28.1 ms on `examples/bin`'s client
+root, and a `.vyx` in the same app measures 184 ms both before and after the
+change (RFC-0076's budget is about a `.vyx`, and that number is the app's, not
+this milestone's).
+
+**What M2 left as a note on M3 is still a note.** The `Params`/segment mismatch
+is reported by `std/ui` at generation time and could name the declaring file and
+line through the map; nothing here needed it, and a generator diagnostic is not
+an LSP read.
 - **M4 — rename.** Cross-boundary rename with regeneration; `vyrn routes` and
   `--json` over the merged map.
 

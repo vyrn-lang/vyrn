@@ -210,6 +210,33 @@ function registerRun(context, vsc, lspState) {
         if (benchRe.lastIndex === b.index) benchRe.lastIndex++;
       }
 
+      // The derived wire path above each procedure a generator mounts
+      // (RFC-0073 M3). The path is derived from the file's own location and the
+      // export's name, so nothing in the buffer states it — which is exactly
+      // what makes it worth a lens. Semantic, and it comes from the symbol map
+      // the generator baked in, so the server answers it (`vyrn/routeLenses`).
+      //
+      // No command: a POST endpoint is not something a click can usefully open,
+      // and the lens exists to make a derived fact visible rather than to do
+      // anything. `command: ""` is VS Code's own spelling for a lens that is
+      // text.
+      if (lspState.client) {
+        let routes = [];
+        try {
+          routes = await lspState.client.sendRequest("vyrn/routeLenses", {
+            textDocument: { uri: document.uri.toString() },
+          });
+        } catch (_e) {
+          routes = []; // server down / not ready: no route lenses, no error noise.
+        }
+        for (const r of routes || []) {
+          const pos = new vsc.Position(r.line, 0);
+          lenses.push(
+            new vsc.CodeLens(new vsc.Range(pos, pos), { title: r.title, command: "" })
+          );
+        }
+      }
+
       // "▶ Run dev server" (RFC-0064): shown ONLY on a dev-server entry — a root
       // that imports `std/rpc` and has an `rpcServer(...)` call site. That
       // predicate is semantic, so the language server answers it (`vyrn/isDevEntry`)

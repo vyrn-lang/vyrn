@@ -3302,3 +3302,152 @@ fn hover_shows_a_protocol_methods_doc_comment() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ===========================================================================
+// RFC-0073 M3 — the LSP reads the symbol map a generator baked in.
+//
+// A generated stub has no source file and no `///` of its own, so before this a
+// `client()` export hovered as its own signature and go-to-definition returned
+// NOTHING: the "file" a generated declaration carries is a banner, not a path.
+// The map supplies both halves, and the derived route is the fact the buffer
+// never states.
+// ===========================================================================
+
+const M3_WIRE: &str = "/// One note, as it crosses the wire.
+export type Note = { text: String }
+export type NoteReq = { id: Int64 }
+";
+
+const M3_API: &str = "import { Note, NoteReq } from \"../../shared/wire\"
+
+/// Fetch one note by id. The doc a generated stub has to borrow.
+export fn byId(req: NoteReq) -> Note {
+    return Note { text: req.id.toString() }
+}
+";
+
+const M3_BOOT: &str = "import { client } from \"std/rpc\"
+import * as api from client(\"./server/api\")
+
+fn onNote(r: api.RpcReply<api.Note>) {
+}
+
+fn main() -> Int64 {
+    api.notesById(api.NoteReq { id: 1 }, onNote)
+    return 0
+}
+";
+
+/// A scratch full-stack project: a wire module, one api procedure, and a client
+/// root that generates stubs over the api directory.
+fn m3_scratch() -> std::path::PathBuf {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_m3_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("server/api")).unwrap();
+    std::fs::create_dir_all(dir.join("shared")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"m3\", \"client\": \"boot.vyrn\" }
+").unwrap();
+    std::fs::write(dir.join("shared/wire.vyrn"), M3_WIRE).unwrap();
+    std::fs::write(dir.join("server/api/notes.vyrn"), M3_API).unwrap();
+    std::fs::write(dir.join("boot.vyrn"), M3_BOOT).unwrap();
+    dir
+}
+
+#[test]
+fn a_generated_stub_borrows_its_declarations_doc_and_shows_its_derived_route() {
+    let dir = m3_scratch();
+    let uri = file_uri(&dir.join("boot.vyrn"));
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", M3_BOOT);
+
+    let (l, c) = pos_after(M3_BOOT, "api.notesById");
+    let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the generated stub");
+    // The stub's own signature — what you actually call, callback and all.
+    assert!(hover.contains("fn notesById(req: NoteReq"), "{hover}");
+    // The DECLARATION's doc, which the stub does not carry.
+    assert!(hover.contains("Fetch one note by id"), "the origin's doc is borrowed: {hover}");
+    // The derived wire fact, and where the declaration is written.
+    assert!(hover.contains("`POST /_/notes/byId` · convention"), "{hover}");
+    assert!(hover.contains("generated from `byId` in"), "{hover}");
+    assert!(hover.contains("server/api/notes.vyrn:4"), "{hover}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = client.child.kill();
+}
+
+#[test]
+fn go_to_definition_on_a_generated_stub_lands_on_the_declaration() {
+    let dir = m3_scratch();
+    let uri = file_uri(&dir.join("boot.vyrn"));
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", M3_BOOT);
+
+    let (l, c) = pos_after(M3_BOOT, "api.notesById");
+    let id = serde_json::json!("m3def");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": l, "character": c - 1 } }
+    }));
+    let resp = client.read_response(&id);
+    let loc = resp.get("result").cloned().unwrap_or(serde_json::Value::Null);
+    let target = loc.pointer("/uri").and_then(|u| u.as_str()).unwrap_or_default();
+    assert!(target.ends_with("server/api/notes.vyrn"), "lands on the api module: {loc}");
+    // `export fn byId` is line 4 (1-based) → 0-based 3, and `byId` starts at
+    // column 11 (1-based) → 0-based 10. The map is the only thing that knows
+    // the column; the AST carries a line and nothing else.
+    assert_eq!(loc.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(3), "{loc}");
+    assert_eq!(loc.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(10), "{loc}");
+
+    // A re-emitted TYPE has lost its file in the generated source; the map is
+    // the only place that still says it came from `shared/wire.vyrn`.
+    let (tl, tc) = pos_after(M3_BOOT, "api.NoteReq {");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": "m3ty", "method": "textDocument/definition",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": tl, "character": tc - 3 } }
+    }));
+    let resp = client.read_response(&serde_json::json!("m3ty"));
+    let t = resp.pointer("/result/uri").and_then(|u| u.as_str()).unwrap_or_default();
+    assert!(t.ends_with("shared/wire.vyrn"), "a re-emitted type jumps home: {resp}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = client.child.kill();
+}
+
+#[test]
+fn a_procedure_declaration_hovers_with_the_route_it_is_mounted_at() {
+    let dir = m3_scratch();
+    let api_uri = file_uri(&dir.join("server/api/notes.vyrn"));
+    let mut client = rfc33_client();
+    // Only the api module is open. It reaches no generator, so the facts can
+    // come only from the ranked probe over the roots that mount a surface.
+    did_open(&mut client, &api_uri, "vyrn", M3_API);
+
+    let (l, c) = pos_after(M3_API, "export fn byId");
+    let hover = hover_value(&mut client, &api_uri, l, c - 1).expect("hover on the declaration");
+    assert!(hover.contains("fn byId(req: NoteReq) -> Note"), "{hover}");
+    assert!(hover.contains("Fetch one note by id"), "{hover}");
+    assert!(hover.contains("`POST /_/notes/byId` · convention"), "the derived route: {hover}");
+
+    // The lens the extension renders reads the same facts.
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": "m3lens", "method": "vyrn/routeLenses",
+        "params": { "textDocument": { "uri": api_uri } }
+    }));
+    let resp = client.read_response(&serde_json::json!("m3lens"));
+    let lenses = resp["result"].as_array().cloned().unwrap_or_default();
+    assert_eq!(lenses.len(), 1, "one lens per DECLARATION, not per generated symbol: {lenses:?}");
+    assert_eq!(lenses[0]["line"].as_i64(), Some(3), "{lenses:?}");
+    assert_eq!(lenses[0]["title"].as_str(), Some("POST /_/notes/byId · convention"));
+
+    // A module nothing mounts gets no lenses and no note — and is not an error.
+    let wire_uri = file_uri(&dir.join("shared/wire.vyrn"));
+    did_open(&mut client, &wire_uri, "vyrn", M3_WIRE);
+    let (wl, wc) = pos_after(M3_WIRE, "export type Note ");
+    let h = hover_value(&mut client, &wire_uri, wl, wc - 6).unwrap_or_default();
+    assert!(!h.contains("POST"), "a wire type is mounted at nothing: {h}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = client.child.kill();
+}
+
