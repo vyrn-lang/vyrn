@@ -941,7 +941,7 @@ fn rpcRouteDirectives(routes: Array<RpcRoute>) -> String {
 /// only thing that keeps a module's exports OUT of the flat namespace — and two
 /// api modules both exporting `get` is not a mistake, it is the normal shape of
 /// a directory-derived API. Named imports (however aliased) would make
-/// `pastes/get` and `orders/get` a "defined in both" error before this generator
+/// `pastes/get` and `orders/get` a "declared by both" error before this generator
 /// could say anything about either.
 fn rpcNs(i: Int64) -> String {
     return "rpcM" + i.toString()

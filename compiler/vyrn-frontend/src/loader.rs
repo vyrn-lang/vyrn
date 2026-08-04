@@ -25,7 +25,7 @@
 //!   * `impl` blocks travel with their module and apply program-wide
 //!     (coherence: duplicate `(protocol, type)` impls are a link error).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
@@ -1854,7 +1854,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // out of that, and they are the reason the injection is safe at all:
     //
     //   * `link`'s program-wide uniqueness check cannot fire. A user's own
-    //     `fn emit` would otherwise be "defined in both `main.vyrn` and
+    //     `fn emit` would otherwise be "declared by both `main.vyrn` and
     //     `std/json.vyrn`" — an error naming a module they never imported and
     //     cannot remove.
     //   * the desugar's call cannot be captured. RFC-0022 resolves co-naming by
@@ -1914,24 +1914,36 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // Pass 1: alias collision checks + decide co-naming renames.
     for m in modules.iter() {
         let mine = module_decls.get(&m.key).cloned().unwrap_or_default();
-        let mut locals_seen: HashSet<String> = HashSet::new();
-        for imp in &m.program.imports {
+        // local name -> (target module, original name) of the import that bound it.
+        let mut locals_seen: HashMap<String, (String, String)> = HashMap::new();
+        for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             for n in &imp.names {
                 let local = n.local().to_string();
                 // The alias (or bare name) must not clash with another import's
                 // local name, nor — when it differs from the original — with a
                 // top-level decl of this module.
-                if !locals_seen.insert(local.clone()) {
-                    errors.push(with_file(
-                        Diagnostic::error(
-                            imp.line,
-                            0,
-                            "load",
-                            format!("`{local}` is imported twice into this module"),
-                        ),
-                        m,
-                        root_key,
-                    ));
+                let here = (target.clone(), n.original.clone());
+                if let Some(prev) = locals_seen.insert(local.clone(), here.clone()) {
+                    // The SAME name from two different modules is not really a
+                    // double binding — it is those two modules sharing a
+                    // top-level name, which `link` reports once for the pair,
+                    // with the namespace fix attached. Saying "imported twice"
+                    // here as well would bill one mistake twice. A repeat from
+                    // the one module, or two different names aliased to one
+                    // local, has no such owner and still errors here.
+                    let one_name_two_modules = prev.0 != here.0 && prev.1 == here.1;
+                    if !one_name_two_modules {
+                        errors.push(with_file(
+                            Diagnostic::error(
+                                imp.line,
+                                0,
+                                "load",
+                                format!("`{local}` is imported twice into this module"),
+                            ),
+                            m,
+                            root_key,
+                        ));
+                    }
                 }
                 if n.alias.is_some() && mine.contains(&local) {
                     errors.push(with_file(
@@ -2718,8 +2730,15 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // protocol method name -> protocol name
     let mut method_protocol: HashMap<String, String> = HashMap::new();
 
+    // Flat-namespace collisions, as `(name, first owner, second owner)`. They are
+    // COLLECTED rather than reported: one pair of modules sharing five names is
+    // one problem with five symptoms, and the decl line they carry belongs to a
+    // module the user may never have opened. `clash_diagnostics` turns the whole
+    // batch into one diagnostic per module pair, at an import site in a real file.
+    let mut clashes: Vec<(String, String, String)> = Vec::new();
+
     let mut register =
-        |name: &str, module: &str, exported: bool, line: usize, errors: &mut Vec<Diagnostic>| {
+        |name: &str, module: &str, exported: bool, clashes: &mut Vec<(String, String, String)>| {
             // A reserved name never enters the flat namespace, and the reason is
             // not tidiness. `owner` is what decides whether a use is a foreign
             // reference, so registering one made every use of the BUILTIN inside
@@ -2736,15 +2755,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             }
             if let Some((prev, _)) = owner.get(name) {
                 if prev != module {
-                    errors.push(Diagnostic::error(
-                        line,
-                        0,
-                        "load",
-                        format!(
-                            "`{name}` is defined in both `{prev}` and `{module}` — top-level \
-                             names must be unique across the program"
-                        ),
-                    ));
+                    clashes.push((name.to_string(), prev.clone(), module.to_string()));
                 }
                 return;
             }
@@ -2756,7 +2767,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             if is_injected(t) {
                 continue;
             }
-            register(&t.name, &m.key, t.exported, t.line, &mut errors);
+            register(&t.name, &m.key, t.exported, &mut clashes);
             if let Type::Enum(vs) = &t.base {
                 for v in vs {
                     variant_enum.insert(v.name.clone(), t.name.clone());
@@ -2767,10 +2778,10 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             // Impl-flattened methods carry mangled names (`P__Key__m`) that
             // cannot collide with user identifiers; register them anyway so
             // duplicate impls across modules collide loudly here.
-            register(&f.name, &m.key, f.exported, f.line, &mut errors);
+            register(&f.name, &m.key, f.exported, &mut clashes);
         }
         for p in &m.program.protocols {
-            register(&p.name, &m.key, p.exported, p.line, &mut errors);
+            register(&p.name, &m.key, p.exported, &mut clashes);
             for sig in &p.methods {
                 method_protocol.insert(sig.name.clone(), p.name.clone());
             }
@@ -2779,14 +2790,21 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
         // a contract name is what `contractOf(Name)` resolves, so it must be
         // program-wide unique and obey the ordinary export/import visibility.
         for c in &m.program.contracts {
-            register(&c.name, &m.key, c.exported, c.line, &mut errors);
+            register(&c.name, &m.key, c.exported, &mut clashes);
         }
         // Module-state bindings (RFC-0013) join the top-level namespace: a
         // global may not share a name with any other top-level declaration.
         for g in &m.program.globals {
-            register(&g.name, &m.key, false, g.line, &mut errors);
+            register(&g.name, &m.key, false, &mut clashes);
         }
     }
+    errors.extend(clash_diagnostics(&clashes, &modules, root_key));
+    // `owner` kept only the FIRST module of every collision, so from here on it
+    // answers "where does this live?" with half the truth. The checks below must
+    // not repeat that half-truth as its own error: `map` IS defined in
+    // `std/stream`, it just lost the flat namespace to `std/arrays`, and telling
+    // the user to look in `std/arrays` sends them somewhere the fix is not.
+    let clashed: HashSet<&str> = clashes.iter().map(|(n, _, _)| n.as_str()).collect();
 
     // ---- per-module import + visibility checks ---------------------------
     for m in &modules {
@@ -2829,7 +2847,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         // resolves those through this name.
                         visible.insert(name.clone());
                     }
-                    Some((def_module, _)) => {
+                    Some((def_module, _)) if !clashed.contains(name.as_str()) => {
                         errors.push(with_file(
                             Diagnostic::error(
                                 imp.line,
@@ -2843,6 +2861,13 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                             m,
                             root_key,
                         ));
+                    }
+                    // A clashed name: `clash_diagnostics` already reported the
+                    // pair. Grant visibility anyway so the reference check below
+                    // does not follow up with "defined in X but not imported
+                    // here" about the module that merely won the name.
+                    Some(_) => {
+                        visible.insert(name.clone());
                     }
                     None => {
                         errors.push(with_file(
@@ -3010,6 +3035,139 @@ fn with_file(mut d: Diagnostic, m: &Module, root_key: &str) -> Diagnostic {
         d.file = Some(m.key.clone());
     }
     d
+}
+
+/// The import of `target` a diagnostic should point at, with the module that
+/// wrote it — preferring one that names a name in `names`, since that is the line
+/// the user has to edit.
+fn import_site<'a>(
+    modules: &'a [Module],
+    target: &str,
+    names: &[&str],
+) -> Option<(&'a Module, &'a ImportDecl)> {
+    let mut fallback = None;
+    for m in modules {
+        for (imp, t) in m.program.imports.iter().zip(&m.import_targets) {
+            if t != target {
+                continue;
+            }
+            if imp.names.iter().any(|n| names.contains(&n.original.as_str())) {
+                return Some((m, imp));
+            }
+            fallback.get_or_insert((m, imp));
+        }
+    }
+    fallback
+}
+
+/// A plausible namespace binding for `spec`: its last path segment, minus the
+/// extension and anything that is not an identifier character.
+fn ns_suggestion(spec: &str) -> String {
+    let tail = spec.rsplit(['/', '\\', ':']).next().unwrap_or(spec);
+    let stem = tail.strip_suffix(".vyrn").unwrap_or(tail);
+    let n: String = stem.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
+    if n.is_empty() || n.starts_with(|c: char| c.is_ascii_digit()) {
+        "ns".to_string()
+    } else {
+        n
+    }
+}
+
+/// Turn the raw flat-namespace collisions into ONE diagnostic per pair of
+/// modules, reported at an import of one of them.
+///
+/// Every collision `link` finds has the same single cause — two linked modules
+/// declaring the same top-level name — but it used to surface once per NAME, at
+/// the foreign declaration's line, with no file attached. Importing `map` from
+/// both `std/arrays` and `std/stream` therefore produced an error about `filter`,
+/// which the user never wrote, pointing at line 69 of a six-line program. Both
+/// facts belong to one problem: the pair collides, these are the names, and the
+/// fix is a namespace import — which is why they are grouped and re-located here.
+fn clash_diagnostics(
+    clashes: &[(String, String, String)],
+    modules: &[Module],
+    root_key: &str,
+) -> Vec<Diagnostic> {
+    let mut pairs: BTreeMap<(&str, &str), BTreeSet<&str>> = BTreeMap::new();
+    for (name, first, second) in clashes {
+        pairs
+            .entry((first.as_str(), second.as_str()))
+            .or_default()
+            .insert(name.as_str());
+    }
+    let mut out = Vec::new();
+    for ((first, second), names) in pairs {
+        let mut names: Vec<&str> = names.into_iter().collect();
+        // Prefer an import of the SECOND module: it is the one whose names lost,
+        // and dropping it is the smaller edit. The root is imported by nobody, so
+        // fall back to the first when the root is the second owner.
+        let (m, imp) = match import_site(modules, second, &names)
+            .or_else(|| import_site(modules, first, &names))
+        {
+            Some(site) => site,
+            // Unreachable in a real link (a module is here because it was
+            // imported), but the diagnostic must not be lost if it ever is.
+            None => {
+                out.push(Diagnostic::error(
+                    0,
+                    0,
+                    "load",
+                    format!("`{}` is declared by both `{first}` and `{second}`", names[0]),
+                ));
+                continue;
+            }
+        };
+        // Lead with a name the user actually wrote at this line, if any — the
+        // rest are collateral and belong in the note. Alphabetical order is fine
+        // for those; it is not fine for the headline, which is how `filter` came
+        // to front an error about an `import { map }`.
+        if let Some(i) = names
+            .iter()
+            .position(|n| imp.names.iter().any(|x| x.original == *n))
+        {
+            names.swap(0, i);
+            names[1..].sort();
+        }
+        let spec = match &imp.source {
+            ImportSource::Path(p) => Some(p.as_str()),
+            ImportSource::Generator { .. } => None,
+        };
+        let line = imp.line;
+        let mut d = Diagnostic::error(
+            line,
+            0,
+            "load",
+            format!(
+                "`{}` is declared by both `{first}` and `{second}` — a top-level name is \
+                 program-wide, so two linked modules cannot share one",
+                names[0]
+            ),
+        );
+        let fix = match spec {
+            Some(s) => format!(
+                "import one of them as a namespace instead — `import * as {ns} from \"{s}\"` \
+                 reaches its exports as `{ns}.{}` and keeps them out of the flat namespace",
+                names[0],
+                ns = ns_suggestion(s)
+            ),
+            None => "import one of them as a namespace (`import * as ns from ..`) instead — a \
+                     namespace keeps its exports out of the flat namespace"
+                .to_string(),
+        };
+        let rest = &names[1..];
+        d.note = Some(if rest.is_empty() {
+            fix
+        } else {
+            let list: Vec<String> = rest.iter().map(|n| format!("`{n}`")).collect();
+            format!(
+                "{fix}; {} collide{} the same way",
+                list.join(", "),
+                if rest.len() == 1 { "s" } else { "" }
+            )
+        });
+        out.push(with_file(d, m, root_key));
+    }
+    out
 }
 
 /// Every (callee/constructor name, line) referenced in a block — calls, spawns,
@@ -4146,7 +4304,92 @@ mod tests {
                     import { f } from \"./b\" \
                     fn main() -> Int64 { return f() }";
         let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("defined in both"), "{e}");
+        assert!(e.contains("`f` is declared by both `a.vyrn` and `b.vyrn`"), "{e}");
+    }
+
+    #[test]
+    fn a_module_pair_collision_is_one_error_that_names_the_fix() {
+        // Two modules sharing top-level names is ONE mistake. It used to be
+        // reported once per shared name — including names the user never wrote —
+        // at the foreign declaration's line, against the root file, and then a
+        // fourth time as "`f` is not defined in `b.vyrn`", which is false.
+        let a = "export fn f() -> Int64 { return 1 } \
+                 export fn g() -> Int64 { return 1 }";
+        let b = "export fn f() -> Int64 { return 2 } \
+                 export fn g() -> Int64 { return 2 }";
+        let root = "import { f } from \"./a\" \n\
+                    import { f } from \"./b\" \n\
+                    fn main() -> Int64 { return f() }";
+        let ds = match load(root, "main.vyrn", &opts(), &map(&[("a.vyrn", a), ("b.vyrn", b)])) {
+            Ok(_) => panic!("expected a load error"),
+            Err(ds) => ds,
+        };
+        let all = ds
+            .iter()
+            .map(|d| format!("{:?} {} {}", d.file, d.line, d.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(ds.len(), 1, "{all}");
+        let d = &ds[0];
+        // The user's own file, at the import they wrote — never a line borrowed
+        // from the module the name collided with.
+        assert_eq!(d.file, None, "{all}");
+        assert_eq!(d.line, 2, "{all}");
+        assert!(d.message.contains("`f` is declared by both"), "{all}");
+        let note = d.note.as_deref().unwrap_or("");
+        assert!(note.contains("import * as b from \"./b\""), "{note}");
+        // `g` collides too, but the user never wrote it: a note, not an error.
+        assert!(note.contains("`g` collides the same way"), "{note}");
+        assert!(!all.contains("is not defined in"), "{all}");
+        assert!(!all.contains("imported twice"), "{all}");
+    }
+
+    #[test]
+    fn the_same_module_imported_twice_still_says_so() {
+        // The suppression above is only for the same name from DIFFERENT modules
+        // (which the pair collision covers). A genuine double binding still errors.
+        let a = "export fn f() -> Int64 { return 1 } export fn g() -> Int64 { return 2 }";
+        let root = "import { f } from \"./a\" \
+                    import { f } from \"./a\" \
+                    fn main() -> Int64 { return f() }";
+        let e = load_err(root, &[("a.vyrn", a)]);
+        assert!(e.contains("`f` is imported twice"), "{e}");
+        let root = "import { f as x } from \"./a\" \
+                    import { g as x } from \"./a\" \
+                    fn main() -> Int64 { return x() }";
+        let e = load_err(root, &[("a.vyrn", a)]);
+        assert!(e.contains("`x` is imported twice"), "{e}");
+    }
+
+    #[test]
+    fn a_collision_the_user_did_not_import_is_still_one_error() {
+        // Neither name is imported from both modules, so nothing is "imported
+        // twice" — but the flat namespace still cannot hold two `g`s, and the
+        // user has to hear about it exactly once, with the fix.
+        let a = "export fn f() -> Int64 { return 1 } \
+                 export fn g() -> Int64 { return 1 }";
+        let b = "export fn h() -> Int64 { return 2 } \
+                 export fn g() -> Int64 { return 2 }";
+        let root = "import { f } from \"./a\" \n\
+                    import { h } from \"./b\" \n\
+                    fn main() -> Int64 { return f() + h() }";
+        let ds = match load(root, "main.vyrn", &opts(), &map(&[("a.vyrn", a), ("b.vyrn", b)])) {
+            Ok(_) => panic!("expected a load error"),
+            Err(ds) => ds,
+        };
+        assert_eq!(ds.len(), 1, "{ds:?}");
+        assert!(ds[0].message.contains("`g` is declared by both"), "{ds:?}");
+    }
+
+    #[test]
+    fn a_namespace_import_resolves_the_collision() {
+        // The fix the diagnostic names has to actually work.
+        let a = "export fn f() -> Int64 { return 1 }";
+        let b = "export fn f() -> Int64 { return 2 }";
+        let root = "import { f } from \"./a\" \
+                    import * as b from \"./b\" \
+                    fn main() -> Int64 { return f() + b.f() }";
+        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 3);
     }
 
     #[test]
@@ -4334,7 +4577,7 @@ mod tests {
                     let tally = 0 \
                     fn main() -> Int64 { return tally }";
         let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("must be unique"), "{e}");
+        assert!(e.contains("`tally` is declared by both"), "{e}");
     }
 
     // ---- flat-namespace local shadowing (dogfood BUG 2) ------------------
@@ -4910,7 +5153,7 @@ mod gen_tests {
                     import { b } from \"./b\" \
                     fn main() -> Int64 { return a() + b() }";
         let e = gen_err(root, &[("gen.vyrn", gen), ("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("defined in both") || e.contains("unique"), "{e}");
+        assert!(e.contains("`bump` is declared by both"), "{e}");
     }
 
     #[test]
@@ -4935,7 +5178,7 @@ mod gen_tests {
                     fn dup() -> Int64 { return 2 } \
                     fn main() -> Int64 { return dup() }";
         let e = gen_err(root, &[("gen.vyrn", gen)]);
-        assert!(e.contains("defined in both") || e.contains("unique"), "{e}");
+        assert!(e.contains("`dup` is declared by both"), "{e}");
     }
 
     #[test]
