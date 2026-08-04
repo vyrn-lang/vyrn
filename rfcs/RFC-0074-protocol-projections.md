@@ -320,6 +320,47 @@ So: **M4a is mutation-ness at the procedure** (which deletes a naming
 convention and is the part with a user visible today), and the resolver override
 waits on an executor.
 
+### M4a — `mut fn`
+
+**The spelling.** `mut fn create(input: NewPaste) -> Paste` — contextual, the
+same trick `gen fn`, `extern fn`, `export fn`, `test "…"` and `bench "…"` already
+use, so nothing is reserved and no existing program breaks. It reuses `mut`,
+which already means "this changes" in `let mut`, and it is **transport-free**:
+GraphQL reads it as Mutation, an HTTP projection reads it as not-a-`GET`, gRPC
+ignores it. Naming it `mutation` would put one protocol's vocabulary in the
+language, which is the inversion this RFC exists to prevent.
+
+**It is a declaration, not an inference.** Vyrn does not track effects and this
+does not start: nothing checks that a `mut fn` writes anything or that a plain
+one does not. The value is that it is *stated in a real symbol* — it renames, it
+hovers, and it cannot be misspelled into silence the way `getPaste` → `gtePaste`
+silently becomes a mutation today.
+
+**One bit, three consumers**, which is the test of whether it belongs in the
+language rather than in one generator: `std/graphql` picks Query vs Mutation,
+`std/openapi` picks GET vs POST, and RFC-0072's derived surface gets the
+idempotency fact it needs for caching. `FnInfo` carries it the way RFC-0071 M3
+taught it to carry `retUncodable`.
+
+**What it deletes**, and this is the milestone's actual deliverable:
+
+```vyrn
+fn gqlIsQuery(name: String) -> Bool {
+    return name.startsWith("get") || name.startsWith("list")
+}
+```
+
+That is the only such guess in `std/` — `std/openapi`, `std/connect` and
+`std/rpc` make none — so there is exactly one convention to remove and one test
+asserting it (`gqlIsQuery splits accessors from mutations`) to delete with it.
+
+**The open question is the default.** A procedure with no marker is a Query
+today by omission, and after this it is a Query by declaration — which is wrong
+for `create` and right for `list`, and silently so either way. Whether an
+unmarked export in an `api` role should eventually be a *diagnostic* rather than
+a default belongs with RFC-0071's contract machinery, not here; state which was
+chosen and why.
+
 ## As landed — M1
 
 `std/http.vyrn`: `Route`, five method constructors, `surface`, `mount`, and a
