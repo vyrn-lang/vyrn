@@ -301,8 +301,8 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // without an import, and filtered out of the LSP by their line-0 origin. The
     // records reference each other and `Schema` by name (resolution is
     // order-independent). A generator consumes these to emit stubs/docs/mocks.
-    //   ParamInfo { name, spelling, schema }
-    //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema }
+    //   ParamInfo { name, spelling, schema, uncodable }
+    //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema, retUncodable }
     //   TypeInfo   { name, source, module, schema }
     //   ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
     program.type_decls.push(TypeDecl {
@@ -323,6 +323,15 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             Field {
                 name: "schema".to_string(),
                 ty: Type::Named("Schema".to_string()),
+            },
+            // The first type inside this parameter's type that cannot cross the
+            // wire, or `""` when the whole of it can (RFC-0071 M3). A parameter
+            // is a DECODE target, so this is `codec::decodable`'s answer — which
+            // is the compiler's own rule rather than a second one that could
+            // drift from it.
+            Field {
+                name: "uncodable".to_string(),
+                ty: Type::Str,
             },
         ]),
         predicate: None,
@@ -350,6 +359,14 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             Field {
                 name: "retSchema".to_string(),
                 ty: Type::Named("Schema".to_string()),
+            },
+            // The same answer for the return type, `codec::encodable`'s way
+            // round — a return is ENCODED. `Unit` reports itself here (nothing
+            // is codable that is not a value); a caller that means "nothing is
+            // sent" tests `ret == ""` first, which is what `std/rpc` does.
+            Field {
+                name: "retUncodable".to_string(),
+                ty: Type::Str,
             },
         ]),
         predicate: None,

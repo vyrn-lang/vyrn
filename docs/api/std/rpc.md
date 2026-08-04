@@ -35,7 +35,8 @@ Two checks, in the order a reader would apply them. First the `Api` contract
 (RFC-0071): every export is a procedure, which is what the OPEN rule states.
 Then serializability, which the contract grammar cannot express because it is
 a property of the types rather than of the signature shape: at most one
-parameter, and both ends nameable by the module's own reflection.
+parameter, and both ends codable by the compiler's own `toJson`/`fromJson`
+rule and nameable by the module's own reflection.
 
 A `gen fn`, because `contractOf` is compile-time reflection and has no
 runtime lowering by design (RFC-0071 M1) — the same reason `std/ui`'s

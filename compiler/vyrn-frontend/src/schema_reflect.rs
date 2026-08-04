@@ -9,14 +9,16 @@
 //! The shape (all injected in the parser, LSP-filtered by their line-0 origin):
 //! ```text
 //! ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
-//! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema }
-//! ParamInfo{ name: String, spelling: String, schema: Schema }
+//! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema, retUncodable: String }
+//! ParamInfo{ name: String, spelling: String, schema: Schema, uncodable: String }
 //! TypeInfo { name: String, source: String, schema: Schema }
 //! ```
 //! `ret`/`spelling` are the raw type *spellings* (for stub emission); a
 //! `TypeInfo.source` is the canonical `type` declaration text (for verbatim
 //! re-emission of contract types); the `Schema` values carry the RFC-0009
-//! reflection (bounds/pattern/length).
+//! reflection (bounds/pattern/length); `uncodable`/`retUncodable` carry
+//! [`crate::codec`]'s verdict on whether that end can cross a JSON wire, so a
+//! generator asks the compiler instead of guessing from a name (RFC-0071 M3).
 //!
 //! RFC-0071 adds the mirror image: `contractOf(Name)` reflects a `contract`
 //! declaration — what a module is *expected* to export — into the same kind of
@@ -255,6 +257,7 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
                     ("name", Expr::Str(p.name.clone())),
                     ("spelling", Expr::Str(p.ty.to_string())),
                     ("schema", schema_lit_for_type(&p.ty, types)),
+                    ("uncodable", Expr::Str(uncodable_of(&p.ty, types, true))),
                 ],
             )
         })
@@ -273,8 +276,31 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
             ("params", array_lit(params)),
             ("ret", Expr::Str(ret_spelling)),
             ("retSchema", schema_lit_for_type(&f.ret, types)),
+            ("retUncodable", Expr::Str(uncodable_of(&f.ret, types, false))),
         ],
     )
+}
+
+/// The first type inside `ty` that cannot cross the wire, or `""` when the whole
+/// of it can — [`crate::codec`]'s own answer, reflected (RFC-0071 M3).
+///
+/// A generator that puts a value on a JSON wire needs to know this, and the only
+/// alternatives were a name-membership test (which admits a record with a
+/// function-typed field, since the record itself is perfectly nameable) or
+/// scanning `TypeInfo.source` for `fn(` — a scanner, which is the practice
+/// RFC-0071 exists to end. So the compiler answers instead, with the same
+/// predicate that governs `toJson`/`fromJson`; there is no second rule to drift.
+///
+/// `decode` picks the direction: a procedure's PARAMETER is a decode target and
+/// its RETURN is encoded, and the two domains genuinely differ (a fixed
+/// `Array<T, N>` encodes but cannot be decoded into).
+fn uncodable_of(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> String {
+    let r = if decode {
+        crate::codec::decodable(ty, types)
+    } else {
+        crate::codec::encodable(ty, types)
+    };
+    r.err().unwrap_or_default()
 }
 
 fn type_info_lit(t: &TypeDecl, module_spec: &str, types: &HashMap<String, TypeDecl>) -> Expr {

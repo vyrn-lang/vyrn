@@ -53,7 +53,7 @@ import { checkContract } from "std/contract"
 /// member type parameter, so what remains — at most one parameter, and both ends
 /// serializable — is a property of the TYPES rather than of the signature shape
 /// and cannot be spelled in the contract grammar. It is checked by
-/// `rpcIsSerializable` below, against a rule stated once and named in every
+/// `rpcWhyNotSerializable` below, against a rule stated once and named in every
 /// message it produces.
 export contract Api {
     /// A procedure: at most one serializable parameter in, a serializable value
@@ -113,20 +113,56 @@ fn contractError(detail: String) -> String {
     return "RPC_CONTRACT_ERROR__" + detail + "\n"
 }
 
-/// THE serializability rule, stated once (RFC-0072 M2).
+/// THE serializability rule, stated once (RFC-0072 M2, completed in RFC-0071 M3).
 ///
-/// A value crosses the wire as JSON, and `fromJson` needs a declared type to
-/// validate the incoming bytes against — so both ends of a procedure must be a
-/// type the module's own reflection can name. `Unit` is serializable in the only
-/// sense that matters: nothing is sent, which is the 204 the server emits.
+/// Returns "" when a value of `spelling` can cross the wire, and otherwise the
+/// identifier fragment saying why — a fragment rather than a sentence because a
+/// generator has no message-carrying trap and an objection rides a bare
+/// identifier (`contractError`).
 ///
-/// Named once so every message below can cite it, and so the rule the generator
-/// enforces is the rule this file documents rather than two things that drifted.
-fn rpcIsSerializable(spelling: String, iface: ModuleInterface) -> Bool {
+/// `uncodable` is the reflected verdict for the END being asked about
+/// (`ParamInfo.uncodable` for an argument, `FnInfo.retUncodable` for a result),
+/// so the direction is already baked in and this function does not need to know
+/// which side it is on.
+///
+/// Nothing is always serializable: a `Unit` return sends nothing, which is the
+/// 204 the server emits, and reflection spells it "". Past that there are three
+/// refusals, in the order a reader would apply them.
+///
+/// **A stream, by name.** A procedure answers all at once — every generator here
+/// buffers the whole value into a `Response.body` — while a `Stream` is a linear
+/// producer that is still running (RFC-0075). It is refused with its own message
+/// because it is the one unserializable thing that has somewhere else to go:
+/// RFC-0074's `sse`/`ws` publish a feed, from a dotted projection module beside
+/// the procedures. Falling through to "not codable" would be true and useless.
+///
+/// **Not codable.** `codec::encodable`/`decodable` is the compiler's own rule for
+/// what `toJson`/`fromJson` accept, and reflection now carries its verdict — so
+/// this is the same predicate that governs the generated code, not a second one
+/// that could drift from it. It is what makes the check TOTAL: a record whose
+/// field is a `fn`, a `Ref` or a `Map<String, Ref<..>>` is a perfectly nameable
+/// type that cannot be encoded, and before this it passed the rule and failed
+/// inside the generated module instead.
+///
+/// **Not nameable.** `fromJson(<Type>, body)` and `jsonSchema(<Type>)` are
+/// emitted as SOURCE TEXT, so both ends must additionally be a type the module's
+/// own reflection can name. This is why a bare `Int64` or `Array<Paste>` is
+/// refused although both are codable: wrap them in a record, which is what keeps
+/// the wire an object and the payload versionable.
+fn rpcWhyNotSerializable(spelling: String, uncodable: String, iface: ModuleInterface) -> String {
     if spelling == "" {
-        return true
+        return ""
     }
-    return isNamedType(spelling, iface)
+    if spelling.startsWith("Stream<") {
+        return "is_a_stream__a_procedure_answers_all_at_once__publish_a_feed_with_sse_or_ws_from_a_dotted_projection_module"
+    }
+    if uncodable != "" {
+        return "is_not_serializable__" + rpcIdentOf(uncodable) + "_cannot_cross_a_json_wire"
+    }
+    if isNamedType(spelling, iface) == false {
+        return "is_not_serializable__it_must_be_an_exported_named_type"
+    }
+    return ""
 }
 
 /// Reject any module the RPC layer cannot model. Returns "" when it is clean.
@@ -135,7 +171,8 @@ fn rpcIsSerializable(spelling: String, iface: ModuleInterface) -> Bool {
 /// (RFC-0071): every export is a procedure, which is what the OPEN rule states.
 /// Then serializability, which the contract grammar cannot express because it is
 /// a property of the types rather than of the signature shape: at most one
-/// parameter, and both ends nameable by the module's own reflection.
+/// parameter, and both ends codable by the compiler's own `toJson`/`fromJson`
+/// rule and nameable by the module's own reflection.
 ///
 /// A `gen fn`, because `contractOf` is compile-time reflection and has no
 /// runtime lowering by design (RFC-0071 M1) — the same reason `std/ui`'s
@@ -156,18 +193,16 @@ export gen fn validateContract(iface: ModuleInterface) -> String {
             )
         }
         if f.params.length == 1 {
-            if rpcIsSerializable(f.params[0].spelling, iface) == false {
+            let why = rpcWhyNotSerializable(f.params[0].spelling, f.params[0].uncodable, iface)
+            if why != "" {
                 return contractError(
-                    f.name + "__parameter_" + rpcIdentOf(f.params[0].spelling) + "_is_not_serializable"
-                    + "__a_procedure_parameter_must_be_an_exported_named_type"
+                    f.name + "__parameter_" + rpcIdentOf(f.params[0].spelling) + "_" + why
                 )
             }
         }
-        if rpcIsSerializable(f.ret, iface) == false {
-            return contractError(
-                f.name + "__return_" + rpcIdentOf(f.ret) + "_is_not_serializable"
-                + "__a_procedure_must_return_an_exported_named_type_or_nothing"
-            )
+        let whyRet = rpcWhyNotSerializable(f.ret, f.retUncodable, iface)
+        if whyRet != "" {
+            return contractError(f.name + "__return_" + rpcIdentOf(f.ret) + "_" + whyRet)
         }
     }
     return ""
