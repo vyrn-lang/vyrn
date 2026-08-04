@@ -573,8 +573,46 @@ I32x4.store(xs, i, v)
 a.lane(0)  a.replaceLane(2, 99)    // the same constant-index rule
 ```
 
-`F64x2` and `I64x2` are **not shipped**, on the licence this milestone gave
-itself ("free to ship one"), and each for its own reason. `I64x2` has no
+### M4 — `F64x2`, and why the integer measurement raises its priority
+
+**The 2026-08-05 measurement above is an argument *for* this milestone.** A
+scalar `Int32` reduction beats hand-written `I32x4` by 2x because LLVM may
+vectorise it — integer addition associates. **A `Float64` reduction is the case
+where it may not**, for exactly the reason this RFC's opening states: float
+reassociation changes bits, so no optimiser is allowed to do it. So explicit
+SIMD is worth most precisely where the optimiser cannot go, and `F64x2` sits
+there while `I32x4` does not.
+
+That is also the honest reading of M3's outcome. `I32x4` shipped and then
+measured as the width you should *not* reach for to speed up a loop; `F64x2`
+would be the width you must.
+
+**The type decision, and it is smaller than it sounds.** A mask is *N booleans
+about N lanes, and nothing in it remembers what compared them* — this document's
+own words, and the reason `Mask32x4` is shared by `F32x4` and `I32x4` rather
+than duplicated. What a mask is characterised by is **lane count and lane
+width**, which is the one thing `F64x2` changes. So `Mask64x2` is a second type
+and not a generalisation: Vyrn has no const generics, so there is no `Mask<N>`
+to write, and inventing one for two inhabitants would be machinery serving a
+count.
+
+`Mask64x2` inherits `anyTrue`/`allTrue` (wasm spells them `i64x2.all_true`, a
+different opcode at the same shape) and the closed-inhabitants argument the
+lowering rests on. `bitmask` stays refused for the reason M2 gave.
+
+**What must be measured before it is called done**, mirroring what M3 learned:
+a `Float64` reduction written with `F64x2` against the same reduction written
+scalar. If LLVM turns out to vectorise it anyway — it may not, but the whole
+point of M3's finding is that assuming is how you ship a 2x regression — then
+this milestone is a table entry with no user, and the honest outcome is to say
+so rather than ship it.
+
+`I64x2` stays refused: it has no `min`/`max` at all, no `MulHigh`, and no
+`AllTrue` before the relaxed proposal, and after M3's finding there is nothing
+left in it but the representation.
+
+`F64x2` and `I64x2` were **not shipped in M3**, on the licence that milestone
+gave itself ("free to ship one"), and each for its own reason. `I64x2` has no
 `min`/`max` at all, no `MulHigh`, and no `AllTrue` before the relaxed proposal —
 the RFC already called it the thinnest, and after M3's finding below there is
 nothing left in it but the representation. `F64x2` would be the substantial one
