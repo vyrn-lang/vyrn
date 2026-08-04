@@ -2421,6 +2421,19 @@ fn vyxNoSchema() -> Schema {
     return Schema { name: "", base: "", doc: None, min: None, max: None, multipleOf: None, minLength: None, maxLength: None, pattern: None }
 }
 
+/// An unplaced `Origin` (RFC-0073 M1) — the same "carry what the check reads,
+/// invent nothing" rule as `vyxNoSchema`.
+///
+/// These two interfaces describe declarations that do not exist yet: one is the
+/// surface `vyxBuildModule` is ABOUT to emit, the other is a `.vyx` `<script>`
+/// read line-by-line rather than parsed. Neither has a declaration site the
+/// compiler placed, and a symbol map wants where the AUTHOR wrote something.
+/// Mapping a component back into its `.vyx` is RFC-0048's origin machinery, not
+/// a number this scanner should guess.
+fn vyxNoOrigin() -> Origin {
+    return Origin { file: "", line: 0, col: 0, name: "" }
+}
+
 /// The export surface `vyxBuildModule` is about to emit, as the reflection a
 /// contract check reads: one view function per component, taking its declared
 /// props (plus `children` when the template has a `<slot/>`) and returning
@@ -2441,7 +2454,7 @@ gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
         if c.takesChildren {
             ps.push(ParamInfo { name: "children", spelling: "Array<Html>", schema: vyxNoSchema(), uncodable: "" })
         }
-        fns.push(FnInfo { name: c.fnName, params: ps, ret: "Html", retSchema: vyxNoSchema(), retUncodable: "", mutates: false })
+        fns.push(FnInfo { name: c.fnName, params: ps, ret: "Html", retSchema: vyxNoSchema(), retUncodable: "", mutates: false, origin: vyxNoOrigin() })
     }
     return ModuleInterface { functions: fns, types: [] }
 }
@@ -2903,7 +2916,7 @@ export gen fn vyxPageInterface(source: String) -> ModuleInterface {
                 for spelling in vyxDeclParamTypes(bare) {
                     ps.push(ParamInfo { name: "", spelling: spelling, schema: vyxNoSchema(), uncodable: "" })
                 }
-                fns.push(FnInfo { name: name, params: ps, ret: vyxRetOfDecl(bare), retSchema: vyxNoSchema(), retUncodable: "", mutates: false })
+                fns.push(FnInfo { name: name, params: ps, ret: vyxRetOfDecl(bare), retSchema: vyxNoSchema(), retUncodable: "", mutates: false, origin: vyxNoOrigin() })
             }
         }
     }

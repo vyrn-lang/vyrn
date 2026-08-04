@@ -1382,9 +1382,16 @@ pub fn gen_module_interface_lit(
             .unwrap_or_else(|| "load failed".to_string());
         format!("moduleInterface `{path}`{where_}: {msg}")
     })?;
+    // Every module the link read, kept as text for the origin index below — the
+    // AST has a declaration's line but not its name column, so the columns come
+    // back out of the lexer (RFC-0073 M1). These are the same reads, so a module
+    // reflected is a module indexed, by construction.
+    let mut origin_src: Vec<(Option<String>, String, String)> =
+        vec![(None, resolved.clone(), source.clone())];
     for (p, s) in rec.into_reads() {
         // The root module was already recorded above; skip the duplicate.
         if p != resolved {
+            origin_src.push((Some(p.clone()), p.clone(), s.clone()));
             reads.push((p, s.into_bytes()));
         }
     }
@@ -1403,9 +1410,15 @@ pub fn gen_module_interface_lit(
             });
         }
     }
+    let origins = crate::schema_reflect::Origins::new(
+        origin_src
+            .iter()
+            .map(|(k, f, s)| (k.clone(), f.as_str(), s.as_str())),
+    );
     Ok(crate::schema_reflect::module_interface_lit(
         &program,
         &specifiers,
+        &origins,
     ))
 }
 

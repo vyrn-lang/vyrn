@@ -9,9 +9,10 @@
 //! The shape (all injected in the parser, LSP-filtered by their line-0 origin):
 //! ```text
 //! ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
-//! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema, retUncodable: String }
+//! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema, retUncodable: String, mutates: Bool, origin: Origin }
 //! ParamInfo{ name: String, spelling: String, schema: Schema, uncodable: String }
-//! TypeInfo { name: String, source: String, schema: Schema }
+//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin }
+//! Origin   { file: String, line: Int64, col: Int64, name: String }
 //! ```
 //! `ret`/`spelling` are the raw type *spellings* (for stub emission); a
 //! `TypeInfo.source` is the canonical `type` declaration text (for verbatim
@@ -20,7 +21,9 @@
 //! [`crate::codec`]'s verdict on whether that end can cross a JSON wire, so a
 //! generator asks the compiler instead of guessing from a name (RFC-0071 M3);
 //! `mutates` is the `mut fn` marker, the same move for "does this change state"
-//! (RFC-0074 M4a) — declared by the author, never inferred.
+//! (RFC-0074 M4a) — declared by the author, never inferred; `origin` is where
+//! the declaration was WRITTEN (RFC-0073 M1), so a generated symbol can name the
+//! declaration it stands for instead of only the line it was emitted from.
 //!
 //! RFC-0071 adds the mirror image: `contractOf(Name)` reflects a `contract`
 //! declaration — what a module is *expected* to export — into the same kind of
@@ -34,6 +37,76 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
+
+/// Name columns per module, for the `Origin` on every reflected declaration
+/// (RFC-0073 M1).
+///
+/// The AST carries a `line` per declaration and nothing else — [`crate::symbols`]
+/// notes why (threading spans through every node construction site is high churn
+/// for something two consumers want), and recovers the column from the lexer's
+/// per-token `(line, col)` instead. This does the same, once per module rather
+/// than once per lookup: the *first* identifier token spelled like the
+/// declaration, on the declaration's line, is its name. Lexing again is a second
+/// pass over source the loader already read, which is a comptime cost on a cached
+/// artifact; re-lexing is what keeps a comment or a string that happens to
+/// contain the name from being mistaken for it.
+///
+/// Keys are the loader's module attribution (`Function::module` /
+/// `TypeDecl::module`) — `None` for the reflected module itself. A module with no
+/// entry, or a name the lexer cannot place, yields column 0, the same "not
+/// located" answer [`crate::symbols::Symbol`] gives.
+#[derive(Default)]
+pub struct Origins {
+    files: HashMap<Option<String>, String>,
+    cols: HashMap<Option<String>, HashMap<(usize, String), usize>>,
+}
+
+impl Origins {
+    /// Index `sources` — module key (`None` = the reflected root) to that
+    /// module's file name and source text.
+    pub fn new<'a>(sources: impl IntoIterator<Item = (Option<String>, &'a str, &'a str)>) -> Self {
+        let mut out = Origins::default();
+        for (key, file, src) in sources {
+            out.files.insert(key.clone(), file.to_string());
+            let mut cols: HashMap<(usize, String), usize> = HashMap::new();
+            if let Ok(tokens) = crate::lexer::lex(src) {
+                for t in tokens {
+                    if let crate::lexer::Tok::Ident(s) = &t.tok {
+                        cols.entry((t.line, s.clone())).or_insert(t.col);
+                    }
+                }
+            }
+            out.cols.insert(key, cols);
+        }
+        out
+    }
+
+    /// The `Origin` literal for a declaration named `name`, declared on `line` of
+    /// module `module`.
+    fn lit(&self, module: &Option<String>, name: &str, line: usize) -> Expr {
+        let file = self
+            .files
+            .get(module)
+            .cloned()
+            .or_else(|| module.clone())
+            .unwrap_or_default();
+        let col = self
+            .cols
+            .get(module)
+            .and_then(|m| m.get(&(line, name.to_string())))
+            .copied()
+            .unwrap_or(0);
+        struct_lit(
+            "Origin",
+            vec![
+                ("file", Expr::Str(file)),
+                ("line", Expr::Int(line as i64)),
+                ("col", Expr::Int(col as i64)),
+                ("name", Expr::Str(name.to_string())),
+            ],
+        )
+    }
+}
 
 /// Build the `ModuleInterface` record literal for the reflected module's exported
 /// surface — its **reachable type closure** (RFC-0031).
@@ -62,6 +135,7 @@ use crate::ast::*;
 pub fn module_interface_lit(
     program: &Program,
     specifiers: &HashMap<Option<String>, String>,
+    origins: &Origins,
 ) -> Expr {
     // Global type table across every linked module (name -> declaration).
     let types: HashMap<String, TypeDecl> = program
@@ -79,7 +153,7 @@ pub fn module_interface_lit(
     let mut fn_infos = Vec::new();
     for f in &program.functions {
         if is_root_fn(f) {
-            fn_infos.push(fn_info_lit(f, &types));
+            fn_infos.push(fn_info_lit(f, &types, origins));
         }
     }
 
@@ -117,7 +191,7 @@ pub fn module_interface_lit(
         // only when the closure reaches them.
         if t.module.is_none() || reachable.contains(&t.name) {
             let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
-            type_infos.push(type_info_lit(t, spec, &types));
+            type_infos.push(type_info_lit(t, spec, &types, origins));
         }
     }
 
@@ -248,7 +322,7 @@ fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
     }
 }
 
-fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
+fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origins) -> Expr {
     let params: Vec<Expr> = f
         .params
         .iter()
@@ -280,6 +354,7 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
             ("retSchema", schema_lit_for_type(&f.ret, types)),
             ("retUncodable", Expr::Str(uncodable_of(&f.ret, types, false))),
             ("mutates", Expr::Bool(f.is_mut)),
+            ("origin", origins.lit(&f.module, &f.name, f.line)),
         ],
     )
 }
@@ -306,7 +381,12 @@ fn uncodable_of(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> S
     r.err().unwrap_or_default()
 }
 
-fn type_info_lit(t: &TypeDecl, module_spec: &str, types: &HashMap<String, TypeDecl>) -> Expr {
+fn type_info_lit(
+    t: &TypeDecl,
+    module_spec: &str,
+    types: &HashMap<String, TypeDecl>,
+    origins: &Origins,
+) -> Expr {
     struct_lit(
         "TypeInfo",
         vec![
@@ -314,6 +394,7 @@ fn type_info_lit(t: &TypeDecl, module_spec: &str, types: &HashMap<String, TypeDe
             ("source", Expr::Str(render_type_decl(t, types))),
             ("module", Expr::Str(module_spec.to_string())),
             ("schema", crate::types::schema_struct_lit(t)),
+            ("origin", origins.lit(&t.module, &t.name, t.line)),
         ],
     )
 }
@@ -531,7 +612,8 @@ mod tests {
                    export fn ping(id: Id, times: Int64) -> String { return \"pong\" } \
                    fn hidden() -> Int64 { return 0 }";
         let (program, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
-        let iface = module_interface_lit(&program, &HashMap::new());
+        let origins = Origins::new([(None, "m.vyrn", src)]);
+        let iface = module_interface_lit(&program, &HashMap::new(), &origins);
 
         // functions: only the exported `ping`.
         let fns = elems(field(&iface, "functions"));
@@ -556,6 +638,69 @@ mod tests {
         );
     }
 
+    /// An origin is checked by READING the source at it: `file:line:col` must be
+    /// where the name it carries is written (RFC-0073 M1). Asserting the numbers
+    /// would only restate them.
+    fn assert_points_at(src: &str, origin: &Expr) {
+        let line: usize = match field(origin, "line") {
+            Expr::Int(n) => *n as usize,
+            other => panic!("line is not an int: {other:?}"),
+        };
+        let col: usize = match field(origin, "col") {
+            Expr::Int(n) => *n as usize,
+            other => panic!("col is not an int: {other:?}"),
+        };
+        let name = str_of(field(origin, "name"));
+        let text = src.lines().nth(line - 1).expect("line in range");
+        let at: String = text.chars().skip(col - 1).take(name.chars().count()).collect();
+        assert_eq!(at, name, "origin {line}:{col} does not point at `{name}`");
+    }
+
+    #[test]
+    fn origins_point_at_the_declarations_they_name() {
+        // A leading comment mentioning `ping` (so a substring search would be
+        // wrong), a doc comment (so the decl line is not the doc line), and a
+        // type below the function (so both kinds are covered).
+        let src = "// ping is declared below, not here\n\
+                   \n\
+                   /// Pong.\n\
+                   export fn ping(id: Id) -> String { return \"pong\" }\n\
+                   export type Id = Int64 where value >= 1\n";
+        let (program, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
+        let origins = Origins::new([(None, "m.vyrn", src)]);
+        let iface = module_interface_lit(&program, &HashMap::new(), &origins);
+
+        let f = &elems(field(&iface, "functions"))[0];
+        let o = field(f, "origin");
+        assert_eq!(str_of(field(o, "file")), "m.vyrn");
+        assert_points_at(src, o);
+
+        let t = &elems(field(&iface, "types"))[0];
+        assert_points_at(src, field(t, "origin"));
+    }
+
+    #[test]
+    fn a_renamed_declaration_moves_its_origin() {
+        let one = "export fn ping() -> String { return \"\" }\n";
+        let two = "\n\nexport fn pong() -> String { return \"\" }\n";
+        let origin_of = |src: &str| {
+            let (p, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
+            let iface = module_interface_lit(
+                &p,
+                &HashMap::new(),
+                &Origins::new([(None, "m.vyrn", src)]),
+            );
+            field(&elems(field(&iface, "functions"))[0], "origin").clone()
+        };
+        let a = origin_of(one);
+        let b = origin_of(two);
+        assert_points_at(one, &a);
+        assert_points_at(two, &b);
+        // The rename moved the name, and the two blank lines moved the line.
+        assert_ne!(str_of(field(&a, "name")), str_of(field(&b, "name")));
+        assert_ne!(field(&a, "line"), field(&b, "line"));
+    }
+
     // ---- reachable type closure across modules (RFC-0031) ------------------
 
     /// Link `files` (keyed by module path, `main` is the root) and reflect the
@@ -577,7 +722,13 @@ mod tests {
                     .or_insert_with(|| format!("./{}", k.strip_suffix(".vyrn").unwrap_or(k)));
             }
         }
-        module_interface_lit(&program, &specs)
+        let mut srcs: Vec<(Option<String>, &str, &str)> = Vec::new();
+        for (k, v) in files {
+            let key = if *k == root { None } else { Some(k.to_string()) };
+            srcs.push((key, k, v));
+        }
+        let origins = Origins::new(srcs);
+        module_interface_lit(&program, &specs, &origins)
     }
 
     fn type_names_of(iface: &Expr) -> Vec<String> {
