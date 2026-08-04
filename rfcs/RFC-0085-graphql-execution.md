@@ -1,6 +1,6 @@
 # RFC-0085 — Answering a GraphQL Query
 
-- **Status:** M1 shipped. M2–M4 designed.
+- **Status:** M1, M2 shipped. M3–M4 designed.
 - **Depends on:** RFC-0038 (`std/graphql` — the SDL this executes against),
   RFC-0074 (protocol projections — M4b is the consumer), RFC-0021 (`gen fn`),
   RFC-0031 (`moduleInterface` reachable type closure), RFC-0059 (`std/json`)
@@ -74,9 +74,22 @@ can observe, and the RFC-0074 example that motivates it stops making sense.
   arguments, no aliases, no nesting past the first level. Errors as GraphQL's
   `{"errors": [...]}` shape rather than an HTTP status, because that is what a
   client reads.
-- **M2 — arguments and nesting.** Field arguments decoded into the procedure's
-  input record (the same `fromJson` path the RPC surface uses), aliases, nested
-  selection into record-valued fields.
+- **M2 — arguments, aliases, and the type graph they bring with them.** Nesting
+  landed in M1 (see its "as landed" — once the projector walks an array, walking
+  an object is three lines). What is left is field arguments decoded into the
+  procedure's input record, via the same `fromJson` path the RPC surface uses,
+  and aliases.
+
+  **The reason those belong together with M1's two open holes** is that an
+  argument cannot be decoded without knowing the input record's *type*. M1's
+  projector has only the value, which is why a selected member the value lacks
+  answers `null` rather than an error, and why a selection on a scalar is
+  unrefused: `toJson` omits a `None` `Option`, so absence-in-value and
+  absence-from-schema are indistinguishable when all you hold is JSON.
+  Decoding an argument forces the type graph into the executor — and once it is
+  there, both holes close for free. Closing them in M3 instead would mean
+  carrying the type graph in for arguments and then not using it for a
+  milestone.
 - **M3 — the error model.** Partial data with a populated `errors` array, path
   attribution, and the `null`-bubbling rule for non-null fields. This is the part
   every GraphQL implementation gets wrong first; it deserves its own milestone
@@ -182,3 +195,107 @@ later has to mean the work was never done. `examples/graphql.vyrn` shows both
 sides of it in adjacent lines — `{ browse { books { title } } }` drops four
 fields per book that the store computed and `toJson` encoded, and
 `{ browse { books } }` keeps them.
+
+---
+
+## M2 — as landed
+
+`{ byId(input: { id: 2 }) { Ok { title } } }` answers with that book's title, and
+`{ recent: browse { .. } }` answers under `recent`. Both of M1's recorded holes
+are closed: a selected member the schema does not declare is
+``Cannot query field `nope` on type `Book`.`` and a selection on a scalar is
+``Field `title` must not have a selection since type `Title` has no subfields.``
+`examples/graphql.vyrn` asserts all four as its own tests, and `examples/shelf`
+answers them over the wire.
+
+### The argument, and where the type actually was
+
+Decoding reused the RPC path completely: the arm the generator emits for a
+procedure that takes an argument is `fromJson(<ReqType>, ..)`, which is the same
+call `std/rpc`'s handler makes on a POSTed body, over the same record. So
+`BookId = Int64 where value >= 0` refuses `{ id: -1 }` here without this file
+knowing that the rule exists, and the accumulated `Issue`s reaching the GraphQL
+error are the ones a 422 would have carried.
+
+**This document's stated reason for pairing the holes with the arguments was
+wrong about the mechanism.** It said an argument cannot be decoded without
+knowing the input record's type, so decoding one "forces the type graph into the
+executor". The premise is true and the conclusion does not follow: the type is
+known where the arm is EMITTED — `ParamInfo.spelling`, which the SDL already
+reads to write `(input: BookIdInput)` — so it is spelled into the generated
+source and nothing carries a type at run time. Arguments cost no type graph at
+all.
+
+The two holes still cost one, and it is a separate table. The pairing was right
+for a reason this document did not give: the table has to list exactly the object
+types the SDL declares and exactly their fields, or a query the document accepts
+gets `Cannot query field` from the executor — which is the divergence the shared
+walk exists to prevent, arriving through a second walk instead of a second
+declaration. So the SDL emitter was refactored first: `gqlMembers(decl, iface)`
+is now the ONE reading of a declaration's right-hand side, answering "does this
+map to a GraphQL object, and with which members" for a record, a payload enum's
+tagged form, and a `Result<A, B>` alias alike. `gqlRecord`, the tagged type and
+the `Result` type are all emitted from it, and so is the baked table. The SDL is
+byte-identical across that refactor and the file is shorter than it was.
+
+### One lookup, two questions
+
+The table is one generated function:
+
+- `gqlSchema(t, field)` is the NAMED GraphQL type of `t`'s `field`, `""` when `t`
+  declares no such field.
+- `gqlSchema(t, "")` is `t` itself when `t` is an object type, `""` when it is a
+  leaf.
+
+Two questions rather than two tables, because a selection asks both of them at
+once and a leaf is the ABSENCE of an arm — which is exactly the answer "has no
+subfields". `Query` and `Mutation` are arms like any other, split by the same
+`gqlRootOf` verdict that puts a field under one root in the document, so the
+projector gets a root field's type from the same place the SDL got its spelling.
+Only the NAMED type is carried: the projector walks a list transparently, so
+`[Book]` and `Book` ask the table the same question.
+
+That is what separates the two observations M1 could not tell apart. A member
+the schema DECLARES and the value lacks is still `null` — it is a `None`
+`Option`, and that is what `null` is for. A member the schema does not declare is
+an error naming it. `toJson` still omits both; the schema is what says which one
+happened.
+
+### Arguments are a JSON tree, read by std/json where it matters
+
+GraphQL's argument syntax is not JSON — an input-object key is unquoted, an enum
+value is a bare word — but what an argument MEANS is a JSON value, which is the
+form `fromJson` already decodes. So the executor reads the structure (list,
+input object, bare word) and deliberately does not read the two forms that have a
+lexical definition worth getting exactly right: a string literal and a number
+token are handed to `std/json`'s own reader over their source span. A second
+escape decoder and a second number grammar are precisely the kind of near-copy
+that is lenient where the original is strict, and this is the same refusal M1
+made about writing a projection-aware encoder.
+
+### Refused by name, still
+
+The milestone's habit is kept for everything it does not do. A variable (`$id`)
+and a variable definition list are refused naming them, because an argument here
+is a literal and nothing substitutes the envelope's `variables` — silently
+ignoring `($id: Int)` would leave every later `$id` reading as a bare enum value.
+An argument written at depth is `Unknown argument`, since the SDL declares
+arguments on root fields only.
+
+### Recorded, not fixed
+
+**A missing selection on an object type is not refused.** GraphQL requires one:
+`{ browse { books } }` should be "Field `books` of type `[Book]` must have a
+selection of subfields". It is legal here and answers each book whole, which is
+M1's own demonstration that a leaf is taken entire and that the executor OMITS
+rather than avoids computing. Refusing it would delete the clearest evidence for
+the decision this RFC rests on, and the check belongs with the rest of the
+validation pass rather than smuggled in beside these two.
+
+**Introspection is still absent**, and the error model is still one message. M3
+is not closer for the type graph being here: `gqlAnswerOne` would loop over root
+fields in two lines, and the two lines are not the milestone — `path`
+attribution, partial `data` beside a populated `errors`, and the `null`-bubbling
+rule are, and none of them got cheaper.
+
+110 examples, three engines.

@@ -1,4 +1,4 @@
-/// A GraphQL query is answered (RFC-0085 M1), over the SAME procedures
+/// A GraphQL query is answered (RFC-0085 M1/M2), over the SAME procedures
 /// `examples/shelf` publishes over RPC, Connect, REST and an SDL document —
 /// `examples/shelf/server/api/books.vyrn`, reached here directly so the executor
 /// is an ordinary three-way parity citizen (interp == native == wasm).
@@ -14,7 +14,15 @@
 /// is the decision RFC-0085 rests on — field selection OMITS, it does not avoid
 /// computing — and it is what RFC-0074 M4b's `.lazy(..)` will later have to break.
 ///
-/// Inspect the generated resolver table with:  vyrn emit-gen examples/graphql.vyrn
+/// M2 adds the two things a client writes and the type graph they need. An
+/// argument is decoded by `fromJson` into the procedure's input record — the same
+/// call `std/rpc`'s handler makes on a POSTed body, so `BookId >= 0` is refused
+/// identically over both wires. And with the schema's types in the executor, a
+/// member the schema does not declare and a selection on a scalar are errors
+/// naming them, where M1 could only answer `null` and let them through.
+///
+/// Inspect the generated resolver table and type graph with:
+///   vyrn emit-gen examples/graphql.vyrn
 import { graphqlServer } from "std/graphql"
 import { graphqlHandle } from graphqlServer("./shelf/server/api/books")
 
@@ -42,6 +50,40 @@ fn main() -> Int64 {
     // A root field whose type is the JSON scalar (`Map<String, Int64>`).
     ask("{ tags }", "{ tags }")
 
+    // ---- M2: an argument reaches the procedure ----------------------------
+    // The unquoted GraphQL object becomes the JSON `fromJson` decodes into
+    // `IdReq`, and `byId` answers with the book that id names. `BookResult` is
+    // `Result<Book, String>`, which the SDL maps to a tagged object — so `Ok` is
+    // an ordinary selectable field.
+    ask("byId(input: {id: 2})", "{ byId(input: { id: 2 }) { Ok { title } } }")
+
+    // The SAME decode, refusing the same value it refuses over RPC: `BookId` is
+    // `Int64 where value >= 0`, and nothing here re-states that rule.
+    ask("byId(input: {id: -1})", "{ byId(input: { id: -1 }) { Ok { title } } }")
+
+    // A `mut fn` under `mutation`, its record argument spelled across three
+    // fields — strings, a list, and the validated `Url`.
+    ask(
+        "mutation add(input: ..)",
+        "mutation { add(input: { title: \"Vyrn\", url: \"https://vyrn.dev\", tags: [\"lang\"] }) { Ok { title } } }",
+    )
+
+    // ---- M2: an alias renames the answer -----------------------------------
+    // The key is the client's; the field it names is what the resolver table and
+    // the type graph are asked about.
+    ask("alias", "{ recent: browse { books { name: title } } }")
+
+    // ---- M2: the two holes M1 recorded, closed -----------------------------
+    // A selected member the value lacks. At M1 this answered `"nope":null`,
+    // because `toJson` omits a `None` `Option` and the projector held only the
+    // value. The type graph tells absence-in-the-value from absence-from-the-
+    // schema, so this names the field instead.
+    ask("undeclared member", "{ browse { books { nope } } }")
+
+    // A selection on a scalar. `title` is `Title`, a validated `String` the SDL
+    // publishes as a custom scalar, and a scalar has no subfields to select.
+    ask("selection on a scalar", "{ browse { books { title { nope } } } }")
+
     // A field the schema does not declare: a GraphQL error NAMING it, on the
     // channel a client reads — not a trap and not a 500.
     ask("{ shelved { title } }", "{ shelved { title } }")
@@ -51,15 +93,9 @@ fn main() -> Int64 {
     // SDL. Asking for it under `query` names the root it is not on.
     ask("{ add { title } }", "{ add { title } }")
 
-    // In the table, and refusing by NAME: decoding arguments into the input
-    // record is M2, and a declared field silently missing from the executor is
-    // exactly the divergence the shared walk exists to prevent.
-    ask("mutation { add { title } }", "mutation { add { title } }")
-    ask("{ byId { title } }", "{ byId { title } }")
-
-    // M2's syntax is refused where it is written rather than quietly dropped.
-    ask("alias", "{ shelf: browse { books { title } } }")
-    ask("arguments", "{ byId(id: 1) { title } }")
+    // An argument the field does not declare, and one it declares and did not get.
+    ask("unknown argument", "{ byId(id: 1) { Ok { title } } }")
+    ask("missing argument", "{ byId { Ok { title } } }")
 
     // One root field per request: two of them raise partial data beside a
     // populated `errors`, which is the whole of M3.
@@ -78,17 +114,17 @@ fn main() -> Int64 {
     return 0
 }
 
-test "the projection omits every field the query did not select" {
-    let r = graphqlHandle(Request {
-            method: "POST",
-            path: "/graphql",
-            headers: [:],
-            body: "{ browse { books { title } } }",
-        })
-    let body = match r {
+/// The reply body for `body`, or "" when nothing routed it.
+fn reply(body: String) -> String {
+    let r = graphqlHandle(Request { method: "POST", path: "/graphql", headers: [:], body: body })
+    return match r {
         Some(res) => res.body,
         None => "",
     }
+}
+
+test "the projection omits every field the query did not select" {
+    let body = reply("{ browse { books { title } } }")
     assert(body.contains("\"title\":\"SICP\""))
     // The absence is the assertion: every one of these was computed and encoded
     // by the procedure, and the projection dropped it.
@@ -99,15 +135,48 @@ test "the projection omits every field the query did not select" {
 }
 
 test "an undeclared field is a GraphQL error naming it" {
-    let r = graphqlHandle(Request {
-            method: "POST",
-            path: "/graphql",
-            headers: [:],
-            body: "{ shelved }",
-        })
-    let body = match r {
-        Some(res) => res.body,
-        None => "",
-    }
-    assertEq(body, "{\"errors\":[{\"message\":\"Cannot query field `shelved` on type `Query`.\"}]}")
+    assertEq(
+        reply("{ shelved }"),
+        "{\"errors\":[{\"message\":\"Cannot query field `shelved` on type `Query`.\"}]}",
+    )
+}
+
+test "an argument reaches the procedure and the right record comes back" {
+    assertEq(
+        reply("{ byId(input: { id: 2 }) { Ok { title } } }"),
+        "{\"data\":{\"byId\":{\"Ok\":{\"title\":\"SICP\"}}}}",
+    )
+    // The argument is decoded by the SAME `fromJson` a POSTed body goes through,
+    // so `BookId = Int64 where value >= 0` refuses this without a second rule.
+    assert(reply("{ byId(input: { id: -1 }) { Ok { title } } }").contains("invalid argument"))
+    // An argument the field does not declare is named, not ignored.
+    assertEq(
+        reply("{ byId(id: 1) { Ok { title } } }"),
+        "{\"errors\":[{\"message\":\"Unknown argument `id` on field `byId`.\"}]}",
+    )
+}
+
+test "an alias renames the answer and nothing else" {
+    assertEq(
+        reply("{ recent: browse { books { name: title } } }"),
+        "{\"data\":{\"recent\":{\"books\":[{\"name\":\"The Pragmatic Programmer\"},{\"name\":\"Dune\"},{\"name\":\"SICP\"}]}}}",
+    )
+}
+
+test "a selected member the value lacks is an error naming it — M1's first hole" {
+    // M1 answered `{"books":[{"nope":null}, ..]}` here and said so in its own
+    // section: `toJson` omits a `None` `Option`, so absence in the value and
+    // absence from the schema were the same observation. Asserting the message is
+    // the only way to see that closed.
+    assertEq(
+        reply("{ browse { books { nope } } }"),
+        "{\"errors\":[{\"message\":\"Cannot query field `nope` on type `Book`.\"}]}",
+    )
+}
+
+test "a selection on a scalar is refused — M1's second hole" {
+    assertEq(
+        reply("{ browse { books { title { nope } } } }"),
+        "{\"errors\":[{\"message\":\"Field `title` must not have a selection since type `Title` has no subfields.\"}]}",
+    )
 }
