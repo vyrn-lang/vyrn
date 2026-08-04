@@ -396,6 +396,13 @@ other type. Closing the contract cost nothing and bought total typo detection.
 
 ### M3 — what `Serializable` has to admit
 
+**This section predicted the wrong hole. Kept because the prediction is worth
+reading against what was actually there — see "M3 — as landed".** A feed is not
+an exported procedure: `sse`/`ws` take a `Feed` closure that is never exported
+and never reflected, and the projection module it lives in is excluded from the
+procedure scan by its dotted stem anyway. So the door this section proposed
+opening leads nowhere.
+
 `fn *(_: Serializable) -> Serializable` was written before RFC-0074 M3a/M3b, and
 those shipped `sse` and `ws` over procedures that return **`Stream<T>`** — which
 live in exactly the directory the `api` role attaches to. A stream is not
