@@ -280,6 +280,10 @@ pub struct ProtocolDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodSig {
     pub name: String,
+    /// `///` documentation (markdown), attached by the parser; `None` if absent.
+    /// Retained for the same reason [`ContractMember::doc`] is: `vyrn doc` and
+    /// LSP hover are the only readers a signature-only declaration has.
+    pub doc: Option<String>,
     pub params: Vec<Type>,
     pub ret: Type,
     pub line: usize,

@@ -446,13 +446,17 @@ fn analyze_inner(
     let mut impl_members = Vec::new();
     for imp in &member_src.impls {
         for m in &imp.methods {
+            let doc = m
+                .doc
+                .clone()
+                .or_else(|| signature_doc(&member_src.protocols, &imp.protocol, &m.name));
             impl_members.push((
                 imp.ty.clone(),
                 Completion {
                     label: m.name.clone(),
                     kind: SymbolKind::Method,
                     detail: function_detail(m),
-                    doc: m.doc.clone(),
+                    doc,
                 },
             ));
         }
@@ -466,7 +470,7 @@ fn analyze_inner(
                     label: m.name.clone(),
                     kind: SymbolKind::Method,
                     detail: method_sig_detail(m),
-                    doc: None,
+                    doc: m.doc.clone(),
                 },
             ));
         }
@@ -1536,7 +1540,10 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                 col,
                 end_col,
                 detail: function_detail(m),
-                doc: m.doc.clone(),
+                doc: m
+                    .doc
+                    .clone()
+                    .or_else(|| signature_doc(&program.protocols, &imp.protocol, &m.name)),
                 file: None,
             });
         }
@@ -1563,7 +1570,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                 col,
                 end_col,
                 detail: method_sig_detail(m),
-                doc: None,
+                doc: m.doc.clone(),
                 file: None,
             });
         }
@@ -1725,7 +1732,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
                         col: 0,
                         end_col: 0,
                         detail: method_sig_detail(m),
-                        doc: None,
+                        doc: m.doc.clone(),
                         file: Some(file.clone()),
                     });
                 }
@@ -2231,6 +2238,21 @@ fn infer_literal_type(e: &Expr) -> Option<Type> {
     }
 }
 
+/// The `///` on the protocol signature that `method` implements, if any.
+///
+/// A `///` on the signature documents EVERY implementation of that method, so an
+/// impl body repeating it would be a second copy to keep in step — and a bare
+/// `cacheFor` hovers on the LAST declaration of the name, which is the impl.
+/// Both hover and `.`-completion borrow the signature's doc here rather than
+/// leaving the implementation undocumented.
+fn signature_doc(protocols: &[ProtocolDecl], protocol: &str, method: &str) -> Option<String> {
+    protocols
+        .iter()
+        .find(|p| p.name == protocol)
+        .and_then(|p| p.methods.iter().find(|m| m.name == method))
+        .and_then(|m| m.doc.clone())
+}
+
 fn method_sig_detail(m: &MethodSig) -> String {
     // MethodSig.params are types only (names are dropped by the parser); the
     // receiver `self` is implied and prepended.
@@ -2371,6 +2393,12 @@ pub struct DocExport {
     /// The declaration's `///` documentation (markdown), verbatim; `None` when it
     /// carries no doc comment.
     pub doc: Option<String>,
+    /// The DOCUMENTED members of this export — `(signature, doc)` per protocol
+    /// method that carries a `///` block. Empty for everything else, and for a
+    /// protocol whose methods are undocumented: the entry exists to carry the
+    /// prose, and a member with none has nothing the one-line protocol signature
+    /// above it does not already say.
+    pub members: Vec<(String, String)>,
 }
 
 /// A module's documentation model for `vyrn doc` (RFC-0065): the detached
@@ -2447,6 +2475,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
                 line: f.line,
                 signature: function_detail(f),
                 doc: f.doc.clone(),
+                members: Vec::new(),
             });
         }
     }
@@ -2458,6 +2487,13 @@ pub fn module_doc(source: &str) -> ModuleDoc {
                 line: p.line,
                 signature: protocol_detail(p),
                 doc: p.doc.clone(),
+                members: p
+                    .methods
+                    .iter()
+                    .filter_map(|m| {
+                        m.doc.clone().map(|d| (method_sig_detail(m), d))
+                    })
+                    .collect(),
             });
         }
     }
@@ -2473,6 +2509,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
             line: t.line,
             signature: type_decl_detail(t, &program.type_decls),
             doc: t.doc.clone(),
+            members: Vec::new(),
         });
     }
     // Declaration order: sort by source line (stable across runs). Ties (two
@@ -3466,6 +3503,61 @@ mod tests {
         let d = module_doc(src);
         assert_eq!(d.exports[0].doc.as_deref(), Some("attaches to foo"));
         assert_eq!(d.exports[1].doc, None);
+    }
+
+    #[test]
+    fn module_doc_carries_documented_protocol_methods_only() {
+        let src = "/// the protocol\n\
+                   export protocol P {\n\
+                   /// what show does\n\
+                   fn show(self) -> String\n\
+                   fn debug(self) -> String\n\
+                   }\n";
+        let d = module_doc(src);
+        assert_eq!(d.exports[0].doc.as_deref(), Some("the protocol"));
+        assert_eq!(
+            d.exports[0].members,
+            vec![("fn show(self) -> String".to_string(), "what show does".to_string())]
+        );
+    }
+
+    /// The same `///` reaches hover: the symbol a cursor on `show` resolves to
+    /// carries the method's doc, exactly as a free function's does.
+    #[test]
+    fn a_protocol_method_symbol_carries_its_doc() {
+        let src = "export protocol P {\n\
+                   /// what show does\n\
+                   fn show(self) -> String\n\
+                   }\n";
+        let a = analyze(src);
+        let m = a.symbols.iter().find(|s| s.name == "show").unwrap();
+        assert_eq!(m.kind, SymbolKind::Method);
+        assert_eq!(m.doc.as_deref(), Some("what show does"));
+    }
+
+    /// Hovering the CALL site (`r.show()`) is what the defect was actually
+    /// about. It resolves through the impl, whose body carries no `///` of its
+    /// own — the protocol signature's doc is the one that describes it.
+    #[test]
+    fn hovering_a_method_call_shows_the_protocol_signatures_doc() {
+        let src = "type R = { x: Int64 }\n\
+protocol P {\n\
+/// what show does\n\
+fn show(self) -> String\n\
+}\n\
+impl P for R {\n\
+fn show(self) -> String { return \"r\" }\n\
+}\n\
+fn main() -> Int64 {\n\
+let r = R { x: 1 }\n\
+let s = r.show()\n\
+return 0\n\
+}\n";
+        let a = analyze(src);
+        let r = resolve(&a, 11, 11).expect("show at (11,11) should resolve");
+        assert_eq!(r.hover, "fn show(self: R) -> String\n\nwhat show does");
+        // Go-to-definition still lands on the impl, not the signature.
+        assert_eq!(r.target_line, 7);
     }
 
     #[test]
