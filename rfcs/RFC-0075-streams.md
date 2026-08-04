@@ -1,6 +1,7 @@
 # RFC-0075 — `Stream<T>`: Cleanup as an Obligation, Not a Convention
 
-- **Status:** **M1, M2, M2b and M2c shipped** — `Stream<T>` is a linear
+- **Status:** **Implemented.** M1, M2, M2b, M2c and M3 shipped; M4 given up to
+  RFC-0074 M3, which shipped it. `Stream<T>` is a linear
   resource, an abandoned stream does not compile
   (`examples/stream_abandoned.vyrn`), release runs on normal end, `break` and
   early `return`, and since M2b a stream is a PRODUCER rather than a buffer.
@@ -10,13 +11,13 @@
   `unfold`, `map`, `filter`, `take` and `merge`; `merge` is the one that stays
   eager, for a structural reason — a cursor cell has one stream behind it — and
   `channel` and arrival-order `merge` stay **refused**, not for want of a
-  representation. See "As landed — M2" and "As landed — M2c". **M3's conformance table is four-sixths true already**: one row
-  is struck (it asks for behaviour during an unwind Vyrn does not have), one
-  needed nothing (a fallible producer yields `Stream<Result<T, E>>`, so the
-  error is an element), and the last — client disconnect — **is closed by
-  RFC-0074 M3a**, whose `sse` learns the client is gone by writing to it and
-  failing. **M4 is given up to RFC-0074 M3**, which owns `Route` and spells the
-  adapters as projections; what stays here is the contract they must meet.
+  representation. See "As landed — M2" and "As landed — M2c". **M3's conformance
+  table settled without a milestone being spent on it**: one row is struck (it
+  asks for behaviour during an unwind Vyrn does not have), one needed nothing (a
+  fallible producer yields `Stream<Result<T, E>>`, so the error is an element),
+  three are M1's and M2b's own pins, and client disconnect was closed by
+  RFC-0074 M3a and then a second time by M3b's `ws` **against the same file,
+  unchanged**. The normalized signal is *the write failing*.
 - **Depends on:** RFC-0074 (`sse` / `ws` projections — the transports that
   consume streams), RFC-0072 (audience, derived RPC), RFC-0037 (stored closures
   / defunctionalization — the producer state below), RFC-0060 (`break` /
@@ -175,9 +176,9 @@ suite.
 Every host adapter — the native server, the wasm/WASI server, SSE, WebSocket,
 and any third-party adapter — must pass a shared suite:
 
-| test | requirement | state after M2b |
+| test | requirement | state |
 |---|---|---|
-| client disconnects mid-stream | producer release runs within 100 ms | **holds, and stronger** — RFC-0074 M3a |
+| client disconnects mid-stream | producer release runs within 100 ms | **holds, and stronger** — RFC-0074 M3a, and `ws` in M3b |
 | consumer `break`s | release runs before the loop's next statement | **holds** — M1's pin, re-counted in M2b |
 | consumer traps | release runs during unwind | **struck; see below** |
 | producer raises | release runs; the error surfaces to the consumer | **holds, and needed nothing** |
@@ -281,6 +282,16 @@ inherited.
   struck, and the last came with the transport rather than before it — RFC-0074
   M3a. The normalized signal turned out to be the failing write, which is the one
   mechanism every host implements identically because it is the socket.
+
+  **One thing this milestone deliberately did not build.** This document says
+  "the suite is a public part of `std/stream`, so a third-party adapter proves
+  itself with the same file the built-in adapters run." It lives in
+  `compiler/vyrn-cli/tests/serve.rs` instead — written *below* `std/http`,
+  calling `serveStream`/`fromStep` directly, which is exactly what let `ws` pass
+  it unchanged in M3b. That is the property the sentence was after. Packaging it
+  as a shipped artifact is speculative until there is a third-party adapter, and
+  doing it now would fix the suite's shape before a second *kind* of adapter has
+  pulled on it — the two it has are both server-push over a socket.
 - **M4 — transports.** **Given up to RFC-0074 M3**, which spells `sse` and `ws`
   as projections and owns `Route`. They were always the same adapters and the
   same evidence, and two RFCs claiming one deliverable is how it gets built
