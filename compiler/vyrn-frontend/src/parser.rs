@@ -2743,6 +2743,11 @@ impl Parser {
             "F32x4" => Type::F32x4,
             "I32x4" => Type::I32x4,
             "Mask32x4" => Type::Mask32x4,
+            // M4's wider lane, and the SECOND mask: two lanes of 64 bits is a
+            // different count and a different width, which is the whole of what
+            // characterises a mask.
+            "F64x2" => Type::F64x2,
+            "Mask64x2" => Type::Mask64x2,
             // The unsized names are removed — point at the sized spellings.
             "Int" => {
                 return Err(Diagnostic::error(
@@ -3853,11 +3858,16 @@ impl Parser {
                         let name = match args.first() {
                             // M3's `I32x4.*` is the table entry M1 predicted, not
                             // a receiver the three backends have to decode: one
-                            // internal prefix per width, assigned here.
+                            // internal prefix per width, assigned here. M4's
+                            // `F64x2.*` is the third, and it cost this one line.
                             Some(Expr::Var { name: ty, .. })
-                                if ty == "F32x4" || ty == "I32x4" =>
+                                if ty == "F32x4" || ty == "I32x4" || ty == "F64x2" =>
                             {
-                                let pre = if ty == "F32x4" { "@f32x4" } else { "@i32x4" };
+                                let pre = match ty.as_str() {
+                                    "F32x4" => "@f32x4",
+                                    "I32x4" => "@i32x4",
+                                    _ => "@f64x2",
+                                };
                                 let mut it = wrote.chars();
                                 let m = match it.next() {
                                     Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),

@@ -129,11 +129,19 @@ pub enum Val {
     /// wrapping it back after every operation would be re-deriving what the
     /// narrower type already guarantees: `i32::wrapping_add` IS `i32x4.add`.
     I32x4([i32; 4]),
+    /// Two `Float64` lanes as one value (RFC-0083 M4). Lane-by-lane again, and
+    /// exact for the same reason: two independent double-precision operations
+    /// reassociate with nothing.
+    F64x2([f64; 2]),
     /// Four `Bool` lanes — a lane-wise comparison's result (RFC-0083 M2). Four
     /// `bool`s rather than an `[i32; 4]` of all-ones/all-zeros, because the type
     /// has no other inhabitants: the backends' bit patterns are their own
     /// business and there is nothing here to normalize.
     Mask32x4([bool; 4]),
+    /// Two `Bool` lanes — an `F64x2` comparison's result (RFC-0083 M4). A second
+    /// variant rather than a widened first one, for the reason the type is a
+    /// second type: a mask is characterised by its lane count and lane width.
+    Mask64x2([bool; 2]),
     Bool(bool),
     /// Copy-on-write, like [`Val::Array`]. Generators pass multi-KB source
     /// buffers by value all day; cloning one per reference and per call is the
@@ -649,6 +657,40 @@ fn fmaximum(a: f32, b: f32) -> f32 {
     }
 }
 
+/// IEEE-754-2019 `minimum` / `maximum` at the wide lane (RFC-0083 M4).
+///
+/// Written out a second time rather than computed through the `f32` pair: the
+/// rule is the same, but routing `f64` operands through a narrower function
+/// would round them, and the whole claim of a lane-wise operation is that it is
+/// the scalar one exactly.
+fn fminimum64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a == b {
+        return if a.is_sign_negative() { a } else { b };
+    }
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn fmaximum64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a == b {
+        return if a.is_sign_negative() { b } else { a };
+    }
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 /// One `I32x4` lane out of a `Val` (RFC-0083 M3).
 ///
 /// Through [`convert_val`] rather than off the `Val` directly, for the reason a
@@ -663,13 +705,16 @@ fn i32_lane(v: Val) -> Result<i32, Ctrl> {
     }
 }
 
-/// The bounds trap a vector load/store at element `i` reports.
+/// The bounds trap a vector load/store of `span` elements at `i` reports.
 ///
-/// The wording is the scalar one, and the index is the FIRST lane of `i..i+3`
-/// that is actually out of range — reporting `i` itself would name an in-range
-/// element whenever only the tail overruns, which is the common case.
-fn vec_oob(i: i64) -> String {
-    let k = if i < 0 { i } else { i + 3 };
+/// The wording is the scalar one, and the index is the FIRST lane of
+/// `i..i+span-1` that is actually out of range — reporting `i` itself would name
+/// an in-range element whenever only the tail overruns, which is the common
+/// case. `span` is the lane count and not a constant since M4: two `Float64`
+/// lanes read two elements, and a four-element message would name one that was
+/// never touched.
+fn vec_oob(i: i64, span: i64) -> String {
+    let k = if i < 0 { i } else { i + span - 1 };
     format!("array index {k} out of bounds")
 }
 
@@ -3300,6 +3345,7 @@ impl<'a> Interp<'a> {
                     // exists rather than leaving `F32x4.splat(0.0) - v` as the
                     // spelling.
                     (UnOp::Neg, Val::F32x4(v)) => Ok(Val::F32x4(v.map(|x| -x))),
+                    (UnOp::Neg, Val::F64x2(v)) => Ok(Val::F64x2(v.map(|x| -x))),
                     // The integer negation WRAPS, exactly as the scalar one above
                     // does and as `i32x4.sub` from zero does: `-Int32.min` is
                     // `Int32.min`. Bare `-` would panic in a debug build.
@@ -3309,6 +3355,7 @@ impl<'a> Interp<'a> {
                     // `!` because `!` is the Bool operator and a mask is four
                     // answers, the same separation `&`/`&&` keeps in `binop`.
                     (UnOp::BitNot, Val::Mask32x4(m)) => Ok(Val::Mask32x4(m.map(|b| !b))),
+                    (UnOp::BitNot, Val::Mask64x2(m)) => Ok(Val::Mask64x2(m.map(|b| !b))),
                     // An integer vector complements its lanes directly — `v128.not`
                     // has no lane width, so this is `xor` against all-ones either
                     // way, and the mask reaches it through the same instruction.
@@ -3595,7 +3642,7 @@ impl<'a> Interp<'a> {
                 // elements, bounds-checked ONCE. Handled here rather than below
                 // because it mutates the receiver, and the receiver is copy-on-
                 // write: storing into the evaluated VALUE would store into a copy.
-                if name == "@f32x4Store" || name == "@i32x4Store" {
+                if name == "@f32x4Store" || name == "@i32x4Store" || name == "@f64x2Store" {
                     let Some(Expr::Var { name: recv, .. }) = args.first() else {
                         return Err("`.store` needs a mutable array binding".into());
                     };
@@ -3617,11 +3664,16 @@ impl<'a> Interp<'a> {
                             .iter()
                             .map(|l| Val::IntN { v: i64::from(*l), bits: 32, signed: true })
                             .collect(),
+                        Val::F64x2(v) => v.iter().map(|l| Val::Float(*l)).collect(),
                         other => return Err(format!(".store: {other:?}").into()),
                     };
+                    // The span is the lane count, which the value already knows —
+                    // two `Float64`s write two elements where four `Float32`s
+                    // write four.
+                    let span = lanes.len() as i64;
                     let put = |items: &mut std::rc::Rc<Vec<Val>>| -> Result<Val, Ctrl> {
-                        if idx < 0 || idx > items.len() as i64 - 4 {
-                            return Err(vec_oob(idx).into());
+                        if idx < 0 || idx > items.len() as i64 - span {
+                            return Err(vec_oob(idx, span).into());
                         }
                         let items = std::rc::Rc::make_mut(items);
                         for (k, l) in lanes.iter().enumerate() {
@@ -3787,6 +3839,24 @@ impl<'a> Interp<'a> {
                         Ok(Val::I32x4(lanes))
                     }
                     "@i32x4Splat" => Ok(Val::I32x4([i32_lane(vals.remove(0))?; 4])),
+                    // The wide float width (RFC-0083 M4). `Float64` is the
+                    // literal's own type, so `convert_val` has nothing to round
+                    // here — unlike both narrower widths, where a literal arrives
+                    // wider than the lane.
+                    "F64x2" => {
+                        let mut lanes = [0f64; 2];
+                        for (i, v) in vals.into_iter().enumerate() {
+                            lanes[i] = match convert_val(v, &Type::Float) {
+                                Val::Float(f) => f,
+                                other => return Err(format!("F64x2 lane: {other:?}").into()),
+                            };
+                        }
+                        Ok(Val::F64x2(lanes))
+                    }
+                    "@f64x2Splat" => match convert_val(vals.remove(0), &Type::Float) {
+                        Val::Float(f) => Ok(Val::F64x2([f; 2])),
+                        other => Err(format!("F64x2.splat: {other:?}").into()),
+                    },
                     // The index was proven constant and in range by the checker,
                     // so there is nothing to bounds-check and no trap to reach.
                     "@lane" => match (&vals[0], &vals[1]) {
@@ -3797,6 +3867,8 @@ impl<'a> Interp<'a> {
                             signed: true,
                         }),
                         (Val::Mask32x4(m), Val::Int(k)) => Ok(Val::Bool(m[*k as usize])),
+                        (Val::F64x2(v), Val::Int(k)) => Ok(Val::Float(v[*k as usize])),
+                        (Val::Mask64x2(m), Val::Int(k)) => Ok(Val::Bool(m[*k as usize])),
                         (a, b) => Err(format!("lane: {a:?}[{b:?}]").into()),
                     },
                     // `v.replaceLane(k, x)` — `lane`'s inverse, and the same
@@ -3821,6 +3893,13 @@ impl<'a> Interp<'a> {
                                 v[k as usize] = i32_lane(x)?;
                                 Ok(Val::I32x4(v))
                             }
+                            Val::F64x2(mut v) => {
+                                v[k as usize] = match convert_val(x, &Type::Float) {
+                                    Val::Float(f) => f,
+                                    o => return Err(format!("replaceLane value: {o:?}").into()),
+                                };
+                                Ok(Val::F64x2(v))
+                            }
                             other => Err(format!("replaceLane: {other:?}").into()),
                         }
                     }
@@ -3831,8 +3910,12 @@ impl<'a> Interp<'a> {
                     // "partly set" lane here whose meaning the engines could read
                     // differently.
                     "@anyTrue" | "@allTrue" => {
-                        let m = match &vals[0] {
-                            Val::Mask32x4(m) => *m,
+                        // Either mask, over its own lanes — the fold does not care
+                        // how many there are, which is the shape wasm's two
+                        // all-true opcodes have too.
+                        let m: &[bool] = match &vals[0] {
+                            Val::Mask32x4(m) => m,
+                            Val::Mask64x2(m) => m,
                             other => return Err(format!("mask reduce: {other:?}").into()),
                         };
                         Ok(Val::Bool(if name == "@anyTrue" {
@@ -3852,7 +3935,7 @@ impl<'a> Interp<'a> {
                         };
                         let (i, len) = (*i, xs.len() as i64);
                         if i < 0 || i > len - 4 {
-                            return Err(vec_oob(i).into());
+                            return Err(vec_oob(i, 4).into());
                         }
                         let mut lanes = [0f32; 4];
                         for (k, l) in lanes.iter_mut().enumerate() {
@@ -3873,13 +3956,35 @@ impl<'a> Interp<'a> {
                         };
                         let (i, len) = (*i, xs.len() as i64);
                         if i < 0 || i > len - 4 {
-                            return Err(vec_oob(i).into());
+                            return Err(vec_oob(i, 4).into());
                         }
                         let mut lanes = [0i32; 4];
                         for (k, l) in lanes.iter_mut().enumerate() {
                             *l = i32_lane(xs[(i + k as i64) as usize].clone())?;
                         }
                         Ok(Val::I32x4(lanes))
+                    }
+                    // The wide load (RFC-0083 M4): TWO elements behind the one
+                    // check, and the check is `len - 2` rather than `len - 4` for
+                    // that reason. An 8-byte stride on the backends' side, which
+                    // is the one place the wide width is not the narrow one with
+                    // different opcodes.
+                    "@f64x2Load" => {
+                        let (Val::Array(xs), Val::Int(i)) = (&vals[0], &vals[1]) else {
+                            return Err(format!("F64x2.load: {:?}", vals[0]).into());
+                        };
+                        let (i, len) = (*i, xs.len() as i64);
+                        if i < 0 || i > len - 2 {
+                            return Err(vec_oob(i, 2).into());
+                        }
+                        let mut lanes = [0f64; 2];
+                        for (k, l) in lanes.iter_mut().enumerate() {
+                            *l = match &xs[(i + k as i64) as usize] {
+                                Val::Float(f) => *f,
+                                other => return Err(format!("F64x2.load lane: {other:?}").into()),
+                            };
+                        }
+                        Ok(Val::F64x2(lanes))
                     }
                     // (`@i32x4Min`/`Max`/`Abs` were here, lowering to
                     // `i32x4.min_s`/`max_s`/`abs`, and were deleted for `select`'s
@@ -3946,6 +4051,37 @@ impl<'a> Interp<'a> {
                             };
                         }
                         Ok(Val::F32x4(out))
+                    }
+                    // The wide width's three (RFC-0083 M4), and only three: the
+                    // same NaN rule and the same signed zero at 64 bits, plus the
+                    // square root that is not writable in Vyrn at any width. The
+                    // four roundings are NOT here — `f64x2.ceil` and the rest all
+                    // exist, and they were left out because the four `F32x4`
+                    // rounding rows are this RFC's weakest block and four more
+                    // would be symmetry rather than evidence.
+                    "@f64x2Min" | "@f64x2Max" | "@f64x2Sqrt" => {
+                        let a = match &vals[0] {
+                            Val::F64x2(v) => *v,
+                            other => return Err(format!("F64x2 op: {other:?}").into()),
+                        };
+                        let b = match vals.get(1) {
+                            Some(Val::F64x2(v)) => *v,
+                            _ => a,
+                        };
+                        let mut out = [0f64; 2];
+                        for k in 0..2 {
+                            out[k] = match name.as_str() {
+                                "@f64x2Min" => fminimum64(a[k], b[k]),
+                                "@f64x2Max" => fmaximum64(a[k], b[k]),
+                                // Spelled out for the census scan's sake, exactly
+                                // as the narrow width's `sqrt` is.
+                                "@f64x2Sqrt" => a[k].sqrt(),
+                                other => {
+                                    return Err(format!("vector op: {other}").into())
+                                }
+                            };
+                        }
+                        Ok(Val::F64x2(out))
                     }
                     // (`@f32x4Select` was here, lowering to `v128.bitselect` and
                     // `select <4 x i1>`. It is not a builtin: written in Vyrn on
@@ -4992,6 +5128,38 @@ impl<'a> Interp<'a> {
             }
             return Ok(Val::F32x4(out));
         }
+        // The wide float width (RFC-0083 M4): the same ten operators over two
+        // `f64` lanes, with `/` kept — `f64x2.div` exists, which is what makes
+        // this the float table rather than the integer one. The comparison
+        // answers a `Mask64x2`, and that is the only line here that is not the
+        // narrow width with a wider lane.
+        if let (Val::F64x2(a), Val::F64x2(b)) = (&l, &r) {
+            if matches!(op, Lt | LtEq | Gt | GtEq | Eq | NotEq) {
+                let mut m = [false; 2];
+                for i in 0..2 {
+                    m[i] = match op {
+                        Lt => a[i] < b[i],
+                        LtEq => a[i] <= b[i],
+                        Gt => a[i] > b[i],
+                        GtEq => a[i] >= b[i],
+                        Eq => a[i] == b[i],
+                        _ => a[i] != b[i],
+                    };
+                }
+                return Ok(Val::Mask64x2(m));
+            }
+            let mut out = [0f64; 2];
+            for i in 0..2 {
+                out[i] = match op {
+                    Add => a[i] + b[i],
+                    Sub => a[i] - b[i],
+                    Mul => a[i] * b[i],
+                    Div => a[i] / b[i],
+                    _ => return Err("type error in vector binop (should have been caught)".into()),
+                };
+            }
+            return Ok(Val::F64x2(out));
+        }
         // Lane-wise integer arithmetic (RFC-0083 M3). Wrapping, which is the
         // language's overflow rule at every other width and also what `i32x4.add`
         // and `add <4 x i32>` do — a SATURATING add where the scalar wraps would
@@ -5046,6 +5214,19 @@ impl<'a> Interp<'a> {
                 };
             }
             return Ok(Val::Mask32x4(m));
+        }
+        // The two-lane mask, the same three combinators.
+        if let (Val::Mask64x2(a), Val::Mask64x2(b)) = (&l, &r) {
+            let mut m = [false; 2];
+            for i in 0..2 {
+                m[i] = match op {
+                    BitAnd => a[i] && b[i],
+                    BitOr => a[i] || b[i],
+                    BitXor => a[i] != b[i],
+                    _ => return Err("type error in mask binop (should have been caught)".into()),
+                };
+            }
+            return Ok(Val::Mask64x2(m));
         }
         // Float32 (possibly with a plain-Float literal sibling): round both to f32
         // and compute at single precision, matching native `float` instructions.
@@ -5583,7 +5764,9 @@ impl<'a> Interp<'a> {
             | Type::Unit
             | Type::F32x4
             | Type::I32x4
-            | Type::Mask32x4 => true,
+            | Type::F64x2
+            | Type::Mask32x4
+            | Type::Mask64x2 => true,
             Type::Named(n) => match self.types.get(n.as_str()) {
                 // An unknown name coerces to itself in the walk below.
                 None => true,
