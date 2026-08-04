@@ -273,7 +273,52 @@ the same stated reason.
 (echoed in the handshake response) and `maxFrame` (splitting a large payload)
 have no such problem.
 - **M4 — schema overrides.** `graphql(...).mutations(...).lazy(...)`; the same
-  override surface for `std/openapi`.
+  override surface for `std/openapi`. **Not buildable as spelled — split; see
+  below.**
+
+### M4, read against what shipped
+
+Two facts, both checked rather than assumed, and they do not point the same way.
+
+**`.mutations([create])` cannot reach a generator.** `std/graphql`'s `sdl` is a
+`gen fn`, and the checker refuses one that takes a `fn`-typed parameter
+(RFC-0023, `a gen fn may not take a fn-typed parameter in v1`). So a list of
+procedure references cannot be an argument to it. Passing their *names* would
+work and is the one thing this document rules out by name — "declared in real
+symbols rather than strings".
+
+That is worth taking as information rather than as an obstacle, because the
+current stand-in is worse than the missing feature:
+
+```vyrn
+fn gqlIsQuery(name: String) -> Bool {
+    return name.startsWith("get") || name.startsWith("list")
+}
+```
+
+**`std/graphql` ships the magic naming convention this arc exists to remove**,
+and this document condemns it two sections above the code that does it. Fixing
+that is the real M4a, and `.mutations(..)` is not the fix — **mutation-ness is a
+property of the procedure, not of the projection.** "Does this change state" is
+one fact with per-transport spellings: GraphQL calls it Mutation, HTTP calls it
+not-a-`GET`, gRPC does not care. Declared at the procedure it reaches reflection
+in `FnInfo`, one declaration serves every projection, and nothing has to travel
+into a generator. Declared per projection it is restated once per transport and
+still cannot get there.
+
+Where it is declared is the open question — `FnInfo` is
+`{ name, params, ret, retSchema }` today, with no room for it, and RFC-0071's
+module contracts are the obvious candidate for saying it in a real symbol.
+
+**`.lazy(..)` presupposes something that does not exist.** `std/graphql` emits an
+SDL *document* — one `gen fn`, no resolver, no executor, and `std/openapi` is the
+same shape. There are no resolvers to override, so a per-field resolver override
+has nothing to attach to. That is not a milestone in this RFC; it is a GraphQL
+server, and it should be its own.
+
+So: **M4a is mutation-ness at the procedure** (which deletes a naming
+convention and is the part with a user visible today), and the resolver override
+waits on an executor.
 
 ## As landed — M1
 
