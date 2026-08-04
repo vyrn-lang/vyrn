@@ -57,6 +57,15 @@ import { civil, fromMillis, hour, minute, second } from "std/time"
 // copy would be a second thing to drift.
 import { validateContract } from "std/rpc"
 
+// The symbol map (RFC-0073 M1). A projection re-exports each procedure under the
+// DECLARATION's own name, so nothing in the emitted source says that the `create`
+// a projection file imports is the `create` in `pastes.vyrn` — the map is the
+// only record, and M4's rename is what needs it: renaming the declaration has to
+// move the projection's import and its `POST(create("/"))` with it. No derived
+// facts, because a projection's paths are written in the projection file rather
+// than derived here.
+import { Symbol, symbol, symbolMapFn } from "std/symbolmap"
+
 // ---- the values ------------------------------------------------------------
 
 /// What a mounted route runs: the request, plus the placeholder bindings the
@@ -1562,8 +1571,12 @@ export gen fn http(module: String) -> String {
     out = out + "import { Route, httpRoute, httpInput } from \"std/http\"\n"
     out = out + httpImports(iface, module)
     out = out + "type HttpIssues = { issues: Array<Issue> }\n"
+    let mut syms: Array<Symbol> = []
     for f in iface.functions {
         out = out + httpProcedure(f, iface, base)
+        syms.push(symbol(f.name, f.origin, []))
+        syms.push(symbol("Path" + httpCapFirst(f.name), f.origin, []))
     }
+    out = out + symbolMapFn("http(" + module + ")", syms)
     return out
 }

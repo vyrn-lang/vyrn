@@ -3451,3 +3451,242 @@ fn a_procedure_declaration_hovers_with_the_route_it_is_mounted_at() {
     let _ = client.child.kill();
 }
 
+
+// ===========================================================================
+// RFC-0073 M4 — rename across the generated boundary.
+//
+// `byId` in the api module is `api.notesById` in the client, and the two
+// spellings share no substring the editor could match on. The symbol map is the
+// only thing that relates them, so this is the milestone the RFC was written
+// for: one cursor, one new name, and every call site through the generated
+// module follows.
+//
+// The edit spans SOURCES only. The generated module is a build artifact and is
+// never in the result — it is regenerated from the renamed declaration.
+// ===========================================================================
+
+/// `textDocument/rename` at `(line, ch)`, as `(edits by file suffix, error)`.
+fn rename_at(
+    client: &mut LspClient,
+    uri: &str,
+    line: u32,
+    ch: u32,
+    new_name: &str,
+) -> (Vec<(String, Vec<String>)>, Option<String>) {
+    let id = serde_json::json!(format!("rn{line}_{ch}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/rename",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": ch },
+            "newName": new_name
+        }
+    }));
+    let resp = client.read_response(&id);
+    if let Some(msg) = resp.pointer("/error/message").and_then(|m| m.as_str()) {
+        return (Vec::new(), Some(msg.to_string()));
+    }
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(changes) = resp.pointer("/result/changes").and_then(|c| c.as_object()) {
+        for (file, edits) in changes {
+            let spans: Vec<String> = edits
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}:{}={}",
+                        e.pointer("/range/start/line").and_then(|v| v.as_i64()).unwrap_or(-1),
+                        e.pointer("/range/start/character").and_then(|v| v.as_i64()).unwrap_or(-1),
+                        e.get("newText").and_then(|v| v.as_str()).unwrap_or("")
+                    )
+                })
+                .collect();
+            out.push((file.clone(), spans));
+        }
+    }
+    out.sort();
+    (out, None)
+}
+
+/// The edits for the file whose URI ends with `suffix`.
+fn edits_for<'a>(changes: &'a [(String, Vec<String>)], suffix: &str) -> &'a [String] {
+    changes
+        .iter()
+        .find(|(f, _)| f.ends_with(suffix))
+        .map(|(_, e)| e.as_slice())
+        .unwrap_or_else(|| panic!("no edits for {suffix} in {changes:#?}"))
+}
+
+#[test]
+fn renaming_a_procedure_follows_the_symbol_map_into_the_generated_call_site() {
+    let dir = m3_scratch();
+    let api_uri = file_uri(&dir.join("server/api/notes.vyrn"));
+    let mut client = rfc33_client();
+    did_open(&mut client, &api_uri, "vyrn", M3_API);
+
+    let (l, c) = pos_after(M3_API, "export fn byId");
+
+    // The pre-flight seeds the box with the current name and the exact span.
+    let id = serde_json::json!("m4prep");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/prepareRename",
+        "params": { "textDocument": { "uri": api_uri }, "position": { "line": l, "character": c - 1 } }
+    }));
+    let prep = client.read_response(&id);
+    assert_eq!(prep.pointer("/result/placeholder").and_then(|p| p.as_str()), Some("byId"), "{prep}");
+    assert_eq!(prep.pointer("/result/range/start/line").and_then(|v| v.as_i64()), Some(3), "{prep}");
+    assert_eq!(
+        prep.pointer("/result/range/start/character").and_then(|v| v.as_i64()),
+        Some(10),
+        "{prep}"
+    );
+
+    let (changes, err) = rename_at(&mut client, &api_uri, l, c - 1, "fetch");
+    assert!(err.is_none(), "{err:?}");
+
+    // The declaration itself.
+    assert_eq!(edits_for(&changes, "server/api/notes.vyrn"), ["3:10=fetch"]);
+    // And the call site, under the name the GENERATOR derives — which shares no
+    // substring with `byId` that a textual rename could have found.
+    assert_eq!(edits_for(&changes, "boot.vyrn"), ["7:8=notesFetch"]);
+    // The generated module is not a file, and is not edited.
+    assert_eq!(changes.len(), 2, "sources only: {changes:#?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = client.child.kill();
+}
+
+#[test]
+fn renaming_a_wire_type_follows_both_the_direct_import_and_the_re_emitted_copy() {
+    let dir = m3_scratch();
+    let wire_uri = file_uri(&dir.join("shared/wire.vyrn"));
+    let mut client = rfc33_client();
+    did_open(&mut client, &wire_uri, "vyrn", M3_WIRE);
+
+    let (l, c) = pos_after(M3_WIRE, "export type Note");
+    let (changes, err) = rename_at(&mut client, &wire_uri, l, c - 1, "Memo");
+    assert!(err.is_none(), "{err:?}");
+
+    // Its own declaration.
+    assert_eq!(edits_for(&changes, "shared/wire.vyrn"), ["1:12=Memo"]);
+    // The api module imports it DIRECTLY — an ordinary cross-file reference,
+    // found because that module's import resolves to this file. `NoteReq` is a
+    // different token and does not move.
+    assert_eq!(edits_for(&changes, "server/api/notes.vyrn"), ["0:9=Memo", "3:32=Memo", "4:11=Memo"]);
+    // The client never imports it: `client()` re-emits the declaration, and the
+    // map is the only record that the copy came from here.
+    assert_eq!(edits_for(&changes, "boot.vyrn"), ["3:30=Memo"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = client.child.kill();
+}
+
+#[test]
+fn rename_refuses_what_it_cannot_carry_through_rather_than_doing_half_of_it() {
+    let dir = m3_scratch();
+    let api_uri = file_uri(&dir.join("server/api/notes.vyrn"));
+    let boot_uri = file_uri(&dir.join("boot.vyrn"));
+    let mut client = rfc33_client();
+    did_open(&mut client, &api_uri, "vyrn", M3_API);
+    did_open(&mut client, &boot_uri, "vyrn", M3_BOOT);
+
+    // A new name that is not an identifier would not fail to compile, it would
+    // fail to LEX, in every file the rename touched.
+    let (l, c) = pos_after(M3_API, "export fn byId");
+    let (_, err) = rename_at(&mut client, &api_uri, l, c - 1, "by Id");
+    assert!(err.unwrap_or_default().contains("not a valid identifier"));
+
+    // A cursor on a local binding: nothing crosses a file boundary, and there is
+    // nothing here this milestone knows how to rename.
+    let (bl, bc) = pos_after(M3_API, "Note { text: req");
+    let (_, err) = rename_at(&mut client, &api_uri, bl, bc - 1, "x");
+    assert!(err.unwrap_or_default().contains("no declaration here"));
+
+    // A cursor on an IMPORTED name: renameable, but not from here.
+    let (il, ic) = pos_after(M3_API, "    return Note");
+    let (_, err) = rename_at(&mut client, &api_uri, il, ic - 1, "x");
+    assert!(err.unwrap_or_default().contains("not declared in this file"));
+
+    // A GENERATED name at its call site: the thing to rename is the declaration
+    // it stands for, and the message says so instead of silently doing nothing.
+    let (gl, gc) = pos_after(M3_BOOT, "api.notesById");
+    let (_, err) = rename_at(&mut client, &boot_uri, gl, gc - 1, "x");
+    assert!(err.is_some(), "a generated symbol is not renameable in place");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = client.child.kill();
+}
+
+
+/// The RFC's acceptance line, against the corpus rather than a fixture: renaming
+/// a procedure in `examples/bin` updates every call site across `app/`,
+/// `client/` and the REST projection in one edit.
+///
+/// `create` is mapped by three generators living in three different roots —
+/// `client()` exports it as `pastesCreate`, `rpc()` dispatches to
+/// `rpcHandlePastesCreate`, `http()` re-exports it as `create` — and `create`
+/// appears in none of the calling files under a name a textual rename could have
+/// found. Asserted by the new NAMES and the files they land in rather than by
+/// line numbers, so editing the example does not falsify the property.
+#[test]
+fn renaming_a_procedure_in_the_corpus_reaches_every_generated_call_site() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bin");
+    let api = root.join("server/api/pastes.vyrn");
+    let text = std::fs::read_to_string(&api).expect("examples/bin/server/api/pastes.vyrn");
+    let uri = file_uri(&api);
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", &text);
+
+    let (l, c) = pos_after(&text, "export mut fn create");
+    let (changes, err) = rename_at(&mut client, &uri, l, c - 1, "add");
+    assert!(err.is_none(), "{err:?}");
+
+    // The declaration.
+    assert_eq!(edits_for(&changes, "server/api/pastes.vyrn"), ["27:14=add"]);
+    // The browser client, through `client()`'s stub — the one the RFC is about.
+    let boot: Vec<&str> =
+        edits_for(&changes, "client/boot.vyrn").iter().map(|s| s.as_str()).collect();
+    assert_eq!(boot.len(), 1, "{boot:?}");
+    assert!(boot[0].ends_with("=pastesAdd"), "the derived stub name moves too: {boot:?}");
+    // The REST projection, through `http()`'s same-named re-export: the import
+    // list AND the `POST(create("/"))` that names it.
+    let http: Vec<&str> =
+        edits_for(&changes, "pastes.http.vyrn").iter().map(|s| s.as_str()).collect();
+    assert_eq!(http.len(), 2, "{http:?}");
+    assert!(http.iter().all(|e| e.ends_with("=add")), "{http:?}");
+    // Sources only: the generated modules are build artifacts.
+    assert_eq!(changes.len(), 3, "{changes:#?}");
+
+    let _ = client.child.kill();
+}
+
+/// The same rename seen from a `.vyx`: a page imports `recent` DIRECTLY, and its
+/// reference lives in a `<script>` body whose lines are offset from the file's.
+#[test]
+fn renaming_a_procedure_in_the_corpus_reaches_a_pages_script_body() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bin");
+    let api = root.join("server/api/pastes.vyrn");
+    let text = std::fs::read_to_string(&api).expect("examples/bin/server/api/pastes.vyrn");
+    let uri = file_uri(&api);
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", &text);
+
+    let (l, c) = pos_after(&text, "export fn recent");
+    let (changes, err) = rename_at(&mut client, &uri, l, c - 1, "latest");
+    assert!(err.is_none(), "{err:?}");
+
+    let page: Vec<&str> =
+        edits_for(&changes, "app/routes/index.vyx").iter().map(|s| s.as_str()).collect();
+    // The import and the one call. `recentRows` is a different token and the
+    // four prose mentions of "recent" in the comments are not tokens at all.
+    assert_eq!(page.len(), 2, "{page:?}");
+    assert!(page.iter().all(|e| e.ends_with("=latest")), "{page:?}");
+    // The `.vyx` line numbers are the FILE's, not the script body's: the import
+    // is on file line 15 (0-based 14).
+    assert!(page[0].starts_with("14:"), "script-body lines map back to the file: {page:?}");
+
+    let _ = client.child.kill();
+}
+

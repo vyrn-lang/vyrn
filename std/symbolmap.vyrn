@@ -78,8 +78,40 @@ export fn mapJson(module: String, symbols: Array<Symbol>) -> String {
     return emit(JObj(doc))
 }
 
-/// The `symbolMap()` declaration to append to a generated module — the whole of
-/// what a generator emits for its map.
+/// The generator call as an identifier tail: every letter and digit of it,
+/// camel-cased at each boundary. `http(./pastes)` becomes `HttpPastes`.
+///
+/// A top-level name in Vyrn is program-wide, so a fixed `symbolMap` would let
+/// two generated modules in one program collide — which is exactly what a server
+/// root does the moment it links both `rpc("./server/api")` and a REST
+/// projection's `http("./pastes")`. The generator call is the one thing that
+/// distinguishes them and it is already in hand.
+fn mapSlug(module: String) -> String {
+    let mut bytes: Array<UInt8> = []
+    let mut upper = true
+    let mut i = 0
+    while i < module.byteLength {
+        let b = module[i]
+        let lower = b >= 'a' && b <= 'z'
+        if lower || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
+            bytes.push(if upper && lower { b - 32 } else { b })
+            upper = false
+        } else {
+            upper = true
+        }
+        i = i + 1
+    }
+    // Every kept byte is ASCII alphanumeric, so the decode cannot fail; the
+    // empty fallback is unreachable and is written rather than trapped, because
+    // a generator that trapped here would report a lexer fact as a user error.
+    return match stringFromBytes(bytes) {
+        Ok(s) => s,
+        Err(why) => "",
+    }
+}
+
+/// The map declaration to append to a generated module — the whole of what a
+/// generator emits for its map.
 ///
 /// The JSON is baked as a string LITERAL through an RFC-0054 code quote:
 /// `\{json}` sits in expression position, so the compiler's own escaping turns
@@ -87,11 +119,14 @@ export fn mapJson(module: String, symbols: Array<Symbol>) -> String {
 /// disagree with the lexer, over a string that already carries one layer of JSON
 /// escaping. `gen fn` because a code quote is a generation-context construct;
 /// every caller is a generator already.
+///
+/// The declaration's name carries [`mapSlug`], so the reader finds it by the
+/// `symbolMap` PREFIX rather than by an exact name.
 export gen fn symbolMapFn(module: String, symbols: Array<Symbol>) -> String {
     let json = mapJson(module, symbols)
     let mut out = "/// The RFC-0073 symbol map for this generated module: every exported\n"
     out = out + "/// symbol, the declaration it stands for, and its derived facts.\n"
-    out = out + "export fn symbolMap() -> String {\n"
+    out = out + "export fn symbolMap" + mapSlug(module) + "() -> String {\n"
     out = out + "    return " + render(vyrn"\{json}") + "\n}\n"
     return out
 }

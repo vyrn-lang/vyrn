@@ -42,7 +42,8 @@ pub mod types;
 // pipeline lives in one place.
 pub use symbols::{
     analyze, analyze_linked, at_module_scope, class_completions, class_token_hover, classify_at,
-    completions, import_spec_at, member_completions, module_doc, references, resolve, semantic_tokens,
+    completions, import_spec_at, member_completions, module_doc, references, references_to, resolve,
+    semantic_tokens,
     string_literal_completions, Analysis, Completion, DocExport, LocalBinding, LocalKind, ModuleDoc,
     RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
 };

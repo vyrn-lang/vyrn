@@ -69,8 +69,8 @@ compact JSON, symbols in emission order.
 fn symbolMapFn(module: String, symbols: Array<Symbol>) -> String
 ```
 
-The `symbolMap()` declaration to append to a generated module — the whole of
-what a generator emits for its map.
+The map declaration to append to a generated module — the whole of what a
+generator emits for its map.
 
 The JSON is baked as a string LITERAL through an RFC-0054 code quote:
 `\{json}` sits in expression position, so the compiler's own escaping turns
@@ -78,3 +78,6 @@ the document into data. Hand-escaping it would be a second escaper free to
 disagree with the lexer, over a string that already carries one layer of JSON
 escaping. `gen fn` because a code quote is a generation-context construct;
 every caller is a generator already.
+
+The declaration's name carries [`mapSlug`], so the reader finds it by the
+`symbolMap` PREFIX rather than by an exact name.
