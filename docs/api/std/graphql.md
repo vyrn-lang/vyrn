@@ -42,10 +42,13 @@ Mapping rules (documented and DUMB on purpose — RFC-0038):
     are NOT in `moduleInterface` reflection, so operation descriptions are
     absent (gap recorded in RFC-0038).
 
-The EXECUTOR (RFC-0085 M1) lives at the bottom of this file: `graphqlServer`
-emits a `graphqlHandle(req) -> Option<Response>` answering `POST /graphql`
-over the SAME `iface.functions` walk the SDL reads, so a field the schema
-declares and a field the executor dispatches are one list.
+The EXECUTOR (RFC-0085 M1/M2) lives at the bottom of this file:
+`graphqlServer` emits a `graphqlHandle(req) -> Option<Response>` answering
+`POST /graphql` over the SAME `iface.functions` walk the SDL reads, so a field
+the schema declares and a field the executor dispatches are one list. It bakes
+the SDL's TYPE GRAPH beside the resolver table, out of the same `gqlMembers`
+reading of each declaration the `type` definitions above are emitted from —
+so an object type's fields are one set, not two that agree.
 
 Inspect the synthesized module with:  vyrn emit-gen <file>
 
@@ -69,14 +72,15 @@ document for the contract. The document is baked as a deterministic constant.
 ## GqlSel
 
 ```vyrn
-type GqlSel = { name: String, subs: Array<GqlSel> }
+type GqlSel = { key: String, name: String, args: Array<JsonField>, subs: Array<GqlSel> }
 ```
 
-One selected field: its name and whatever it selects in turn.
+One selected field: the RESPONSE KEY the answer arrives under (the alias when
+one was written, else the field name), the field it names, its arguments as
+the value tree `fromJson` reads, and whatever it selects in turn.
 
-No alias and no arguments — both are RFC-0085 M2, and the parser REFUSES them
-by name rather than dropping them, so a query that means something this
-milestone cannot do is never answered as if it meant something else.
+The key is stored rather than the alias, because every consumer wants the key
+and nothing wants to ask whether one was written.
 
 ## GqlQuery
 
@@ -100,10 +104,10 @@ which needs `operationName` to choose between — RFC-0085 M2.
 ## gqlProject
 
 ```vyrn
-fn gqlProject(v: Json, sels: Array<GqlSel>) -> Json
+fn gqlProject(v: Json, sels: Array<GqlSel>, ty: String, schema: fn(String, String) -> String) -> Result<Json, String>
 ```
 
-Project `sels` out of `v`.
+Project `sels` out of `v`, whose named GraphQL type is `ty`.
 
 **Field selection is a projection over a value the procedure ALREADY
 returned, not a fetch plan.** `v` arrives here fully computed — every field of
@@ -117,6 +121,8 @@ work was never done. Stated here because if it is only stated then, `.lazy(..)`
 is an optimisation nobody can observe and there is nothing to point at.
 
 An empty selection set means "this field is a leaf" — take the value whole.
+A list is walked transparently: `[Book]` and `Book` ask `schema` the same
+question, which is why only the NAMED type is carried.
 
 ## gqlQueryText
 
@@ -149,14 +155,63 @@ A GraphQL client reads the `errors` array, not the status line, so the reply
 stays a 200 `application/json`. Path attribution and partial `data` beside a
 populated `errors` are RFC-0085 M3.
 
+## GqlArg
+
+```vyrn
+type GqlArg = { json: String, err: String }
+```
+
+One argument's value as the JSON text `fromJson` reads, or why it is not
+there (`err != ""`).
+
+## gqlArgOf
+
+```vyrn
+fn gqlArgOf(field: String, args: Array<JsonField>, want: String) -> GqlArg
+```
+
+The `want` argument of `field`, emitted as the JSON text a procedure's input
+record is decoded from.
+
+**The same decode path the RPC surface uses.** `std/rpc`'s generated handler
+runs a POSTed body through `fromJson(<ReqType>, body)`; the arm this feeds
+runs `fromJson(<ReqType>, ..)` over the text this returns. An argument and a
+request body reach the same record by one route and are validated by one rule,
+so a `Title` too long is refused identically over both wires — there is no
+second decoder here to be lenient where the first is strict.
+
+The SDL spells a procedure's single argument `input` (`gqlRootField`), so an
+argument by any other name is one the field does not declare.
+
+## gqlNoArgs
+
+```vyrn
+fn gqlNoArgs(field: String, args: Array<JsonField>) -> String
+```
+
+"" when `field` takes no arguments and got none, else the GraphQL error
+naming the first one it does not declare.
+
+## gqlArgError
+
+```vyrn
+fn gqlArgError(field: String, issues: Array<Issue>) -> String
+```
+
+The GraphQL error for an argument the input record refuses: the accumulated
+`Issue`s `fromJson` produced (RFC-0009) — the same ones a 422 carries over
+RPC, since it is the same decode.
+
 ## gqlAnswer
 
 ```vyrn
-fn gqlAnswer(body: String, resolve: fn(String, String) -> Result<Json, String>) -> Response
+fn gqlAnswer(body: String, resolve: fn(String, String, Array<JsonField>) -> Result<Json, String>, schema: fn(String, String) -> String) -> Response
 ```
 
-Answer one GraphQL request body against `resolve`, the generated resolver
-table (`(root, field) -> the encoded value, or why not`).
+Answer one GraphQL request body against the two tables the generator bakes
+from the contract's reflection: `resolve` (`(root, field, args) -> the encoded
+value, or why not`) and `schema`, the type graph the projection is checked
+against.
 
 One root field per request: a second one immediately raises partial `data`
 beside a populated `errors` when only one of them resolves, which is the whole
