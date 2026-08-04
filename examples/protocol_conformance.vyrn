@@ -1,0 +1,49 @@
+// An impl's methods must have the signatures its protocol declared —
+// RFC-0002 §5.
+//
+// The reason this is checked at the impl rather than left to the backend is the
+// bounded generic. Inside `fn total<T: Shape>(x: T)` no impl has been selected
+// yet, so the checker types `x.area()` from the PROTOCOL's declared signature —
+// `Int64`, and the addition below type-checks against it. The call then lands on
+// an impl that returns a `Bool`, and the disagreement is discovered somewhere
+// with no idea what the user wrote: the interpreter says `type error in binop
+// (should have been caught)`, and the native path is clang objecting to a line
+// in a generated `.ll` file. Both are the compiler's internals shown to whoever
+// wrote the impl.
+//
+// The declaration is the one place where both signatures are in hand, so that is
+// where the two are compared and both are quoted.
+//
+// This file is an INTENTIONAL compile error. It is meant to FAIL `vyrn check`,
+// so the parity harness lists it under EXPECTED_CHECK_FAILURE rather than
+// running it. Observe both diagnostics with:
+//
+//   vyrn check examples/protocol_conformance.vyrn
+
+type Sq = { side: Int64 }
+
+protocol Shape {
+    fn area(self) -> Int64
+    fn scale(self, by: Int64) -> Sq
+}
+
+impl Shape for Sq {
+    // Rejected: the return type. `Bool` is not what `Shape` promised anyone
+    // holding a `T: Shape`.
+    fn area(self) -> Bool { return true }
+
+    // Rejected the same way one parameter over: a `String` where the protocol
+    // declared an `Int64`. Arity, parameters and return type are all compared;
+    // `self` is not, because it is the impl's own type by construction.
+    fn scale(self, by: String) -> Sq { return Sq { side: 1 } }
+}
+
+fn total<T: Shape>(x: T) -> Int64 {
+    return x.area() + 41
+}
+
+fn main() -> Int64 {
+    let s = Sq { side: 3 }
+    print(total(s).toString())
+    return 0
+}

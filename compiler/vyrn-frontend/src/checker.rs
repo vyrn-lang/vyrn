@@ -267,6 +267,18 @@ fn render_impl_head(imp: &crate::ast::ImplBlock) -> String {
     format!("impl{binder} {} for {}", imp.protocol, imp.ty)
 }
 
+/// `fn area(self, Int64) -> Bool` — one method signature as the conformance
+/// diagnostic quotes it, on both sides of the comparison.
+///
+/// Types only, no parameter names: a `MethodSig` never had them (the parser
+/// drops them at the declaration), so printing the impl's would make the two
+/// quoted lines differ in a place where they agree.
+fn render_method_sig(name: &str, params: &[Type], ret: &Type) -> String {
+    let mut ps = vec!["self".to_string()];
+    ps.extend(params.iter().map(|t| t.to_string()));
+    format!("fn {name}({}) -> {ret}", ps.join(", "))
+}
+
 fn check_accum_inner(
     program: &Program,
     reuse: Option<&std::collections::HashMap<String, String>>,
@@ -499,10 +511,10 @@ fn check_accum_inner(
     // in them is at the impl: the parser has already substituted each binding
     // into the methods, so what is left to verify is that an impl binds exactly
     // the set its protocol declares.
-    let protocol_assoc: HashMap<&str, &Vec<String>> = program
+    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = program
         .protocols
         .iter()
-        .map(|p| (p.name.as_str(), &p.assoc))
+        .map(|p| (p.name.as_str(), p))
         .collect();
     let mut impls: std::collections::HashSet<(String, String)> = Default::default();
     // The impl already declared for each (protocol, type-constructor) key, so a
@@ -515,7 +527,7 @@ fn check_accum_inner(
         // (RFC-0080 M2) — no more, no fewer. Both halves fire at the IMPL, which
         // is the only place both lists are in hand. An unknown protocol name is
         // left alone: a missing `type` is not the interesting news about it.
-        if let Some(declared) = protocol_assoc.get(imp.protocol.as_str()) {
+        if let Some(declared) = protocol_decls.get(imp.protocol.as_str()).map(|p| &p.assoc) {
             for name in declared.iter() {
                 if !imp.assoc.contains(name) {
                     out.push(Diagnostic::from_rendered(
@@ -541,6 +553,70 @@ fn check_accum_inner(
                 }
             }
         }
+        // Every method the protocol declares, against what the impl provides
+        // (RFC-0002 §5). Nothing compared the two until now, and the reason it
+        // mattered is the bounded generic: inside `fn f<T: Shape>(x: T)` the
+        // checker types `x.area()` from the PROTOCOL's declared signature, then
+        // the call lands on an impl free to have returned something else. The
+        // divergence surfaced as the interpreter confessing `type error in binop
+        // (should have been caught)`, or as clang naming a line in a generated
+        // `.ll` file — both of them the compiler's internals, printed at whoever
+        // wrote the impl.
+        if let Some(p) = protocol_decls.get(imp.protocol.as_str()) {
+            // A signature position naming an associated type (RFC-0080 M2) is
+            // not compared. The impl's methods left the parser with the binding
+            // already substituted in and `ImplBlock::assoc` deliberately keeps
+            // only the NAMES, so `Output` here and `String` there are the same
+            // type and nothing at this point can prove it. Everything else in
+            // the signature is still compared, which is where the mistakes are.
+            let probe: HashMap<String, Type> = p
+                .assoc
+                .iter()
+                .map(|a| (a.clone(), Type::Unit))
+                .collect();
+            let opaque = |t: &Type| crate::types::substitute(t, &probe) != *t;
+            for sig in &p.methods {
+                let Some(f) = imp.methods.iter().find(|m| m.name == sig.name) else {
+                    out.push(Diagnostic::from_rendered(
+                        format!(
+                            "line {}: `impl {} for {}` does not provide `{}`, which protocol `{}` \
+                             declares — a protocol's methods are all required, so anything \
+                             holding a `T: {}` may call it",
+                            imp.line,
+                            imp.protocol,
+                            imp.ty,
+                            render_method_sig(&sig.name, &sig.params, &sig.ret),
+                            imp.protocol,
+                            imp.protocol
+                        ),
+                        "check",
+                    ));
+                    continue;
+                };
+                // `self` is implicit in the declaration and the first parameter
+                // of the method the parser built, whose type is the impl's own
+                // head — so it is dropped rather than compared.
+                let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                let agrees = got.len() == sig.params.len()
+                    && (sig.ret == f.ret || opaque(&sig.ret))
+                    && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                if !agrees {
+                    out.push(Diagnostic::from_rendered(
+                        format!(
+                            "line {}: `{}` does not match protocol `{}` — it declares `{}`, this \
+                             provides `{}`",
+                            f.line,
+                            render_impl_head(imp),
+                            imp.protocol,
+                            render_method_sig(&sig.name, &sig.params, &sig.ret),
+                            render_method_sig(&f.name, &got, &f.ret)
+                        ),
+                        "check",
+                    ));
+                }
+            }
+        }
+
         // A named target must be an enum or a record. `Option`/`Result` and a
         // generic enum application keep a distinct runtime shape, so they
         // dispatch (RFC-0080 M1); a record carries its declared name from the
@@ -11419,5 +11495,63 @@ mod tests {
             unknown.contains("binds `type Elem`, which protocol `Unwrap` does not declare"),
             "{unknown}"
         );
+    }
+
+    /// An impl's methods are compared against the protocol's declarations
+    /// (RFC-0002 §5). Before this the three shapes below all passed `vyrn check`
+    /// and failed somewhere with no idea what the user wrote — the interpreter's
+    /// own "should have been caught", clang on a generated `.ll`, or a call to
+    /// the mangled `Shape__Sq__area` at run time.
+    #[test]
+    fn an_impl_must_match_the_signatures_its_protocol_declared() {
+        let ret = check_src(
+            "protocol Shape { fn area(self) -> Int64 }\n\
+             type Sq = { side: Int64 }\n\
+             impl Shape for Sq { fn area(self) -> Bool { return true } }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            ret.contains(
+                "it declares `fn area(self) -> Int64`, this provides `fn area(self) -> Bool`"
+            ),
+            "{ret}"
+        );
+        let param = check_src(
+            "protocol Shape { fn scale(self, by: Int64) -> Int64 }\n\
+             type Sq = { side: Int64 }\n\
+             impl Shape for Sq { fn scale(self, by: String) -> Int64 { return 1 } }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(param.contains("this provides `fn scale(self, String) -> Int64`"), "{param}");
+        let missing = check_src(
+            "protocol Shape { fn area(self) -> Int64  fn name(self) -> String }\n\
+             type Sq = { side: Int64 }\n\
+             impl Shape for Sq { fn area(self) -> Int64 { return self.side } }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            missing.contains("does not provide `fn name(self) -> String`"),
+            "{missing}"
+        );
+    }
+
+    /// The two variances the rule deliberately admits, in one program that must
+    /// still check: an impl head's type variables, and an associated type. The
+    /// second is not so much admitted as unprovable here — by the time an impl
+    /// leaves the parser its `Output` IS the bound type, and `ImplBlock::assoc`
+    /// keeps only the name — so any signature position naming one is skipped.
+    #[test]
+    fn conformance_admits_generic_impls_and_associated_types() {
+        let ok = check_src(
+            "protocol Unwrap { type Output  fn valueOr(self, f: Output) -> Output }\n\
+             impl<T> Unwrap for Option<T> {\n\
+               type Output = T\n\
+               fn valueOr(self, f: T) -> T { return match self { Some(v) => v, None => f } } }\n\
+             fn main() -> Int64 { let n: Option<Int64> = Some(7)  return n.valueOr(0) }",
+        );
+        assert!(ok.is_ok(), "{ok:?}");
     }
 }

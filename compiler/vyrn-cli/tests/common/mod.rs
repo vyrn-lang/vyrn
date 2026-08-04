@@ -50,6 +50,18 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "does not bind the associated type `Output`",
     ),
     (
+        "protocol_conformance.vyrn",
+        "an impl whose methods do not have the signatures the protocol declared — a \
+         wrong return type and a wrong parameter type (RFC-0002 §5)",
+        "it declares `fn area(self) -> Int64`, this provides `fn area(self) -> Bool`",
+    ),
+    (
+        "protocol_incomplete.vyrn",
+        "an impl missing a method its protocol declares (RFC-0002 §5) — `vyrn check` \
+         used to pass this and the mangled `Shape__Sq__name` surfaced at run time",
+        "does not provide `fn name(self) -> String`",
+    ),
+    (
         "protocol_scalar.vyrn",
         "a protocol implemented for a validated scalar — the half of the old refusal \
          RFC-0084 M1 kept, and now the only one it names",
