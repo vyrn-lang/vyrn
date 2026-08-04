@@ -336,7 +336,9 @@ one does not. The value is that it is *stated in a real symbol* — it renames, 
 hovers, and it cannot be misspelled into silence the way `getPaste` → `gtePaste`
 silently becomes a mutation today.
 
-**One bit, three consumers**, which is the test of whether it belongs in the
+**One bit, three consumers** *(one actual and two designed — `std/openapi`
+declined to be the second, and was right to; see "As landed — M4a")*, which is
+the test of whether it belongs in the
 language rather than in one generator: `std/graphql` picks Query vs Mutation,
 `std/openapi` picks GET vs POST, and RFC-0072's derived surface gets the
 idempotency fact it needs for caching. `FnInfo` carries it the way RFC-0071 M3
