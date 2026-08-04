@@ -19,7 +19,7 @@ export fn byId(req: GetUserReq) -> User {
 
 /// "Create" a user. The request is already validated by the time the body runs
 /// (decode enforced `Username`/`Age`), so this just echoes it back with an id.
-export fn create(req: CreateUserReq) -> User {
+export mut fn create(req: CreateUserReq) -> User {
     return User { id: 1000, name: req.name, age: req.age }
 }
 
@@ -32,7 +32,7 @@ export fn create(req: CreateUserReq) -> User {
 /// projection reads them (RFC-0074 M2): "there is no such user" is a 404, and
 /// "you may not delete this one" is not — it is a refusal of a resource that
 /// exists, and `notFoundWhen` in `users.http.vyrn` distinguishes exactly these.
-export fn del(req: DeleteReq) -> DeleteResult {
+export mut fn del(req: DeleteReq) -> DeleteResult {
     if req.id == 0 {
         return Err("cannot delete the root user")
     }

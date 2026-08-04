@@ -29,8 +29,10 @@
 ///     per variant (nullary => `Boolean`, single payload => that type, multi
 ///     payload => `JSON`): exactly one field is non-null at a time. A nullary-only
 ///     enum maps to a real GraphQL `enum`.
-///   - PROCEDURES become `Query`/`Mutation` fields: a `get*`/`list*` procedure is
-///     a Query, everything else a Mutation (the split is dumb by design). A
+///   - PROCEDURES become `Query`/`Mutation` fields: a `mut fn` is a Mutation,
+///     everything else a Query. The split is the author's DECLARATION, read off
+///     `FnInfo.mutates` (RFC-0074 M4a) — nothing here guesses from a name, so
+///     renaming a procedure cannot silently move it between roots. A
 ///     1-parameter procedure takes `(input: <Req>Input)`; the return maps by the
 ///     table above. An empty `Query` gets a `_placeholder` field (GraphQL needs a
 ///     non-empty query root); an empty `Mutation` is omitted.
@@ -549,13 +551,8 @@ fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
 }
 
 // ===========================================================================
-// Query / Mutation split.
+// Root fields.
 // ===========================================================================
-
-/// Whether a procedure name reads as a query (a `get*` / `list*` accessor).
-fn gqlIsQuery(name: String) -> Bool {
-    return name.startsWith("get") || name.startsWith("list")
-}
 
 /// One root field for a procedure: `name(input: <Req>Input): <Ret>` (or no args
 /// for a zero-parameter procedure). A `Unit` return maps to `Boolean`.
@@ -580,7 +577,7 @@ export gen fn sdl(contract: String) -> String {
     doc = doc + "# Records => type/input pairs; validated scalars => custom scalars\n"
     doc = doc + "# (base + constraint in the description); Map => the JSON scalar;\n"
     doc = doc + "# payload enums (incl. Result) => tagged objects (one nullable\n"
-    doc = doc + "# field per variant); get*/list* => Query, else Mutation.\n"
+    doc = doc + "# field per variant); a `mut fn` => Mutation, else Query.\n"
     // The JSON scalar (documented) — the honest stand-in for `Map<String, V>`.
     doc = doc + "\"\"\"An arbitrary JSON value — the wire form of a Vyrn Map<String, V>.\"\"\"\n"
     doc = doc + "scalar JSON\n"
@@ -594,10 +591,10 @@ export gen fn sdl(contract: String) -> String {
     let mut queries = ""
     let mut mutations = ""
     for f in iface.functions {
-        if gqlIsQuery(f.name) {
-            queries = queries + gqlRootField(f, iface)
-        } else {
+        if f.mutates {
             mutations = mutations + gqlRootField(f, iface)
+        } else {
+            queries = queries + gqlRootField(f, iface)
         }
     }
     doc = doc + "type Query {\n"
@@ -653,12 +650,6 @@ test "gqlSplitTop respects angle and paren nesting" {
     let parts = gqlSplitTop("id: BookId, tags: Array<Tag>, m: Map<String, Int64>", 44)
     assertEq(parts.length, 3)
     assertEq(parts[2], "m: Map<String, Int64>")
-}
-
-test "gqlIsQuery splits accessors from mutations" {
-    assert(gqlIsQuery("getBook"))
-    assert(gqlIsQuery("listBooks"))
-    assertEq(gqlIsQuery("addBook"), false)
 }
 
 test "gqlSplitTop is string-literal aware — a predicate string never splits" {

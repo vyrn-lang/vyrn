@@ -2320,6 +2320,7 @@ fn bench_native(
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         });
         let body_ref = Expr::Var { name: format!("__vyrn_bench_body_{slot}"), line: 0 };
         if json {
@@ -2390,6 +2391,7 @@ fn bench_native(
         is_extern: false,
         is_export_extern: false,
         is_gen: false,
+        is_mut: false,
     });
     // Benches/tests are now either lifted or irrelevant — drop them so nothing
     // downstream mistakes them for live code.

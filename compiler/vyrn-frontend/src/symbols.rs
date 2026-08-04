@@ -2175,10 +2175,15 @@ fn function_detail(f: &Function) -> String {
     // An `extern` import (RFC-0012 M1) shows the `extern fn` prefix, and an
     // `export extern` (M2) the `export extern fn` prefix, so hover makes the
     // JS-boundary crossing (and its direction) obvious.
+    // A `mut fn` (RFC-0074 M4a) shows its marker for the same reason: it is what
+    // a projection reads to call the procedure a Mutation, and a reader who
+    // cannot see it on hover is back to guessing from the name.
     let kw = if f.is_export_extern {
         "export extern fn"
     } else if f.is_extern {
         "extern fn"
+    } else if f.is_mut {
+        "mut fn"
     } else {
         "fn"
     };
@@ -3435,6 +3440,17 @@ mod tests {
         assert_eq!(names, ["b", "A"]);
         assert_eq!(d.exports[0].signature, "fn b() -> Int64");
         assert_eq!(d.exports[1].signature, "type A = { x: Int64 }");
+    }
+
+    #[test]
+    fn a_mut_fn_shows_its_marker_in_the_signature() {
+        // RFC-0074 M4a: the marker decides whether a projection calls the
+        // procedure a mutation, so hover and `vyrn doc` have to show it.
+        let src = "export mut fn create(x: Int64) -> Int64 { return x }\n\
+                   export fn read() -> Int64 { return 0 }\n";
+        let d = module_doc(src);
+        assert_eq!(d.exports[0].signature, "mut fn create(x: Int64) -> Int64");
+        assert_eq!(d.exports[1].signature, "fn read() -> Int64");
     }
 
     #[test]

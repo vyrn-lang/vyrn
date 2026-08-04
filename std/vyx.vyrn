@@ -2413,8 +2413,10 @@ fn vyxCompNames(comps: Array<VyxComp>) -> Array<String> {
 /// `uncodable`/`retUncodable` are left "" below for the same reason: they are the
 /// compiler's verdict on whether an end can cross a JSON wire (RFC-0071 M3), and
 /// a component's props and its `Html` never do — `Component` is checked for
-/// SHAPE. Synthesized reflection carries what the check reads and nothing it
-/// would have to invent.
+/// SHAPE. `mutates` is `false` for the same reason again: a component renders,
+/// and nothing projects one onto a protocol that would ask (RFC-0074 M4a).
+/// Synthesized reflection carries what the check reads and nothing it would have
+/// to invent.
 fn vyxNoSchema() -> Schema {
     return Schema { name: "", base: "", doc: None, min: None, max: None, multipleOf: None, minLength: None, maxLength: None, pattern: None }
 }
@@ -2439,7 +2441,7 @@ gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
         if c.takesChildren {
             ps.push(ParamInfo { name: "children", spelling: "Array<Html>", schema: vyxNoSchema(), uncodable: "" })
         }
-        fns.push(FnInfo { name: c.fnName, params: ps, ret: "Html", retSchema: vyxNoSchema(), retUncodable: "" })
+        fns.push(FnInfo { name: c.fnName, params: ps, ret: "Html", retSchema: vyxNoSchema(), retUncodable: "", mutates: false })
     }
     return ModuleInterface { functions: fns, types: [] }
 }
@@ -2901,7 +2903,7 @@ export gen fn vyxPageInterface(source: String) -> ModuleInterface {
                 for spelling in vyxDeclParamTypes(bare) {
                     ps.push(ParamInfo { name: "", spelling: spelling, schema: vyxNoSchema(), uncodable: "" })
                 }
-                fns.push(FnInfo { name: name, params: ps, ret: vyxRetOfDecl(bare), retSchema: vyxNoSchema(), retUncodable: "" })
+                fns.push(FnInfo { name: name, params: ps, ret: vyxRetOfDecl(bare), retSchema: vyxNoSchema(), retUncodable: "", mutates: false })
             }
         }
     }

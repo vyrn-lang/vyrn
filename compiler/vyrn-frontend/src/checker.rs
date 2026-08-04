@@ -954,6 +954,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         };
         if let Err(s) = checker.function(&synthetic) {
             let mut d = Diagnostic::from_rendered(s, "check");
@@ -1007,6 +1008,7 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
+            is_mut: false,
         };
         if let Err(s) = checker.function(&synthetic) {
             let mut d = Diagnostic::from_rendered(s, "check");

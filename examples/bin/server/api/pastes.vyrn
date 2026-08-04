@@ -25,6 +25,6 @@ export fn byId(req: IdReq) -> PasteResult {
 
 /// Create a paste (title/body/lang already validated by `fromJson`); returns the
 /// stored copy with its server-assigned id and `created` wall-clock timestamp.
-export fn create(req: CreateReq) -> PasteResult {
+export mut fn create(req: CreateReq) -> PasteResult {
     return store.createPaste(req)
 }

@@ -225,7 +225,8 @@ Emits `sdlText() -> String`. Mapping decisions where the draft left latitude
   "tagged" object `type` with one **nullable** field per variant (nullary →
   `Boolean`, single payload → that type, multi-payload → `JSON`); a **nullary-only**
   enum → a real GraphQL `enum`.
-- procedures → `Query` (`get*`/`list*`) else `Mutation`; a 1-param procedure
+- procedures → `Mutation` when declared `mut fn`, else `Query` (this read
+  `get*`/`list*` off the name until RFC-0074 M4a); a 1-param procedure
   takes `(input: <Req>Input)`; a `Unit` return → `Boolean`; an empty `Query`
   gets a `_placeholder` field (GraphQL needs a non-empty query root); an empty
   `Mutation` is omitted.

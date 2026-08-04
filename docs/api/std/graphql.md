@@ -31,8 +31,10 @@ Mapping rules (documented and DUMB on purpose — RFC-0038):
     per variant (nullary => `Boolean`, single payload => that type, multi
     payload => `JSON`): exactly one field is non-null at a time. A nullary-only
     enum maps to a real GraphQL `enum`.
-  - PROCEDURES become `Query`/`Mutation` fields: a `get*`/`list*` procedure is
-    a Query, everything else a Mutation (the split is dumb by design). A
+  - PROCEDURES become `Query`/`Mutation` fields: a `mut fn` is a Mutation,
+    everything else a Query. The split is the author's DECLARATION, read off
+    `FnInfo.mutates` (RFC-0074 M4a) — nothing here guesses from a name, so
+    renaming a procedure cannot silently move it between roots. A
     1-parameter procedure takes `(input: <Req>Input)`; the return maps by the
     table above. An empty `Query` gets a `_placeholder` field (GraphQL needs a
     non-empty query root); an empty `Mutation` is omitted.
