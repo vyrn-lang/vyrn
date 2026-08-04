@@ -47,18 +47,11 @@ export fn unfold<T>(seed: Int64, step: fn(Ref<Int64>) -> Option<T>) -> Stream<T>
 /// `map(unfold(..), f)` is a feed rather than a hang and `take(map(feed, f), n)`
 /// asks the feed n times. Nothing is buffered on the way through — a mapped
 /// buffer stream allocates less than the eager version did, not more.
-///
-/// The one-line `let g = f` below is not decoration. A lambda captures by value
-/// (RFC-0037), and an RFC-0023 `fn` PARAMETER is not a value in scope — it is a
-/// specialization the caller chose — so capturing `f` directly is the one
-/// spelling the compiled backends do not have. Re-materializing it as a stored
-/// function value first is what the step captures.
 export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
-    let g: fn(T) -> U = f
     let step: fn(Ref<Int64>) -> Option<U> = |c| {
         let x: Option<T> = pull(c)
         if let Some(v) = x {
-            return Some(g(v))
+            return Some(f(v))
         }
         return None
     }
@@ -74,12 +67,11 @@ export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
 /// nothing ever passes — which is the honest behaviour of a filter, not a bug
 /// laziness introduced.
 export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
-    let p: fn(T) -> Bool = pred
     let step: fn(Ref<Int64>) -> Option<T> = |c| {
         while true {
             let x: Option<T> = pull(c)
             if let Some(v) = x {
-                if p(v) {
+                if pred(v) {
                     return Some(v)
                 }
             } else {

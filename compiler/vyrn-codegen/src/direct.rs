@@ -5575,10 +5575,27 @@ impl Fn_<'_> {
         let cap_names = crate::lambda_captures(
             body,
             params.iter().cloned().collect(),
-            &|n| self.scope.iter().any(|(s, _, _)| s == n),
+            &|n| {
+                self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n)
+            },
         );
         let mut cap_tys = Vec::new();
         for cn in &cap_names {
+            // A `fn`-typed PARAMETER captured by the lambda has no slot: inside a
+            // specialization it lives in `fn_binds`. It is captured as its own
+            // `fn` TYPE, so the lifted function takes an ordinary function value
+            // and calls it through the dispatcher — the site reads it with
+            // `fnval_binding`, which is the same aggregate storing it anywhere
+            // else builds. Without this the name fell through to a direct call to
+            // a symbol no module defines.
+            if let Some(bnd) = self.fn_binds.get(cn) {
+                let t = &bnd.target;
+                cap_tys.push(crate::normalize_fn_sig(
+                    &Type::Fn(t.sig.params[t.ncaps..].to_vec(), Box::new(t.sig.ret_ty.clone())),
+                    &self.cx.types,
+                ));
+                continue;
+            }
             let (_, t) = self.lookup(cn, line)?;
             cap_tys.push(self.cx.sub(&t));
         }

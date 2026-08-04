@@ -59,12 +59,6 @@ Apply `f` to every element. `s` is consumed; the result is a new obligation.
 asks the feed n times. Nothing is buffered on the way through — a mapped
 buffer stream allocates less than the eager version did, not more.
 
-The one-line `let g = f` below is not decoration. A lambda captures by value
-(RFC-0037), and an RFC-0023 `fn` PARAMETER is not a value in scope — it is a
-specialization the caller chose — so capturing `f` directly is the one
-spelling the compiled backends do not have. Re-materializing it as a stored
-function value first is what the step captures.
-
 ## filter
 
 ```vyrn

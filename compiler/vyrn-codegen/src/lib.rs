@@ -4949,14 +4949,8 @@ impl<'a> Gen<'a> {
                 let cap_names = self.lambda_captures(body, locals);
                 let mut cap_tys = Vec::new();
                 for cn in &cap_names {
-                    let (slot, ty) = self
-                        .lookup(cn)
-                        .ok_or_else(|| format!("captured `{cn}` not in scope"))?;
-                    let cty = vyrn_frontend::types::substitute(&ty, self.subst);
-                    let ll = self.llt(&cty);
-                    let v = self.fresh_tmp();
-                    self.emit(format!("{v} = load {ll}, ptr {slot}"));
-                    capture_ops.push(format!("{ll} {v}"));
+                    let (v, cty) = self.emit_capture(cn)?;
+                    capture_ops.push(format!("{} {v}", self.llt(&cty)));
                     cap_tys.push(cty);
                 }
                 // The expected return: concrete for a monomorphic `fn` type, or a
@@ -5021,7 +5015,38 @@ impl<'a> Gen<'a> {
     ) -> Vec<String> {
         lambda_captures(body, locals, &|name| {
             self.scope.iter().any(|f| f.iter().any(|(n, _, _)| n == name))
+                || self.fn_bindings.contains_key(name)
         })
+    }
+
+    /// Materialize ONE capture of a lambda being lifted, at the literal's site.
+    ///
+    /// An ordinary local is a load from its slot. A `fn`-typed PARAMETER has no
+    /// slot — inside a specialized instance it lives in `fn_bindings` as a target
+    /// plus this instance's own capture SSA values — so it becomes the same
+    /// `{ i64, i64 }` defunctionalized aggregate storing it anywhere else builds.
+    /// The lifted body then receives it as an ordinary `fn`-typed local and calls
+    /// it through the signature's dispatcher, which is exactly what a hand-written
+    /// `let g: fn(T) -> U = f` was doing at three call sites in std.
+    ///
+    /// The expected-type stack is cleared across the aggregate's construction: the
+    /// type in scope here is the OUTER lambda's signature, and letting it be read
+    /// as the capture's own would register the wrong variant.
+    fn emit_capture(&mut self, cn: &str) -> Result<(String, Type), String> {
+        if let Some((slot, ty)) = self.lookup(cn) {
+            let cty = vyrn_frontend::types::substitute(&ty, self.subst);
+            let ll = self.llt(&cty);
+            let v = self.fresh_tmp();
+            self.emit(format!("{v} = load {ll}, ptr {slot}"));
+            return Ok((v, cty));
+        }
+        if let Some(b) = self.fn_bindings.get(cn).cloned() {
+            let saved = std::mem::take(&mut self.expect);
+            let r = self.construct_fnval_binding(&b);
+            self.expect = saved;
+            return r;
+        }
+        Err(format!("captured `{cn}` not in scope"))
     }
 }
 
@@ -5416,13 +5441,7 @@ impl<'a> Gen<'a> {
         let mut cap_tys = Vec::new();
         let mut cap_vals = Vec::new();
         for cn in &cap_names {
-            let (slot, ty) = self
-                .lookup(cn)
-                .ok_or_else(|| format!("captured `{cn}` not in scope"))?;
-            let cty = vyrn_frontend::types::substitute(&ty, self.subst);
-            let ll = self.llt(&cty);
-            let v = self.fresh_tmp();
-            self.emit(format!("{v} = load {ll}, ptr {slot}"));
+            let (v, cty) = self.emit_capture(cn)?;
             cap_vals.push(v);
             cap_tys.push(cty);
         }
