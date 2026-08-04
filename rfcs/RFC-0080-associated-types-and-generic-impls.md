@@ -310,7 +310,12 @@ the plan above got wrong or left out:
   so a signature position naming one has nothing left to compare against and is
   skipped. `Output` versus `T` in `impl<T> Unwrap for Option<T>` is the same type
   and no longer says so anywhere. Arity, every other parameter, the return type
-  and a missing method are all checked; see RFC-0002 §5.
+  and a missing method are all checked; see RFC-0002 §5. The other direction —
+  an impl providing a method the protocol does not declare — is the exact mirror
+  of what M2 already refuses for a `type`, and stayed open a few days longer for
+  no better reason than that; it is refused now too. Its first description said
+  such a method "becomes a callable method", which was never so: it flattens to a
+  symbol no dispatch can reach, so what it became was dead code that compiled.
 
 ### M3 — `Fallible`, and the operators resolve through it
 

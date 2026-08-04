@@ -244,6 +244,22 @@ declares but the impl omits is refused there too rather than surfacing as a call
 to a mangled `Shape__Sq__name` at run time. `examples/protocol_conformance.vyrn`
 and `examples/protocol_incomplete.vyrn` are the refusals.
 
+The third direction closed a few days later, and the first account of it was
+wrong in a way worth recording: an impl method the protocol does *not* declare
+was said to be accepted and to become a callable method on the type. Only the
+first half was true. Protocol-method resolution keys on the names the
+**protocol** declares, so `fn perimeter` in `impl Shape for Sq` flattened to a
+`Shape__Sq__perimeter` that nothing could dispatch to, and `s.perimeter()`
+answered `call to unknown function `perimeter``. It was not extra surface on the
+type; it was dead code that compiled. The harmful shape is the typo beside the
+real method — `fn area` and `fn aera` — where the extra one is accepted,
+unreachable, and looks like it did something, so the diagnostic offers the
+declared name it is within RFC-0071's edit distance of. It also names the
+alternative, which is not another block: Vyrn has no inherent methods, `impl`
+always names a protocol, and `x.m(..)` falls through to a plain top-level
+`fn m(x: Sq, ..)` — so a helper needs no impl at all.
+`examples/protocol_extra.vyrn` is the refusal.
+
 One position is deliberately not compared: a signature naming an associated type
 (RFC-0080 M2). The impl's methods leave the parser with the binding already
 substituted in and the impl retains only the *name* it bound, so `Output` on one

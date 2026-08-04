@@ -615,6 +615,56 @@ fn check_accum_inner(
                     ));
                 }
             }
+            // The mirror of the associated-type refusal above, and until now the
+            // one place the two halves disagreed: an undeclared `type` was an
+            // error, an undeclared `fn` was not. It is the worse of the two.
+            // Protocol-method resolution keys on the names the PROTOCOL declares
+            // (see `Checker::call`), so an extra method flattens to
+            // `Shape__Sq__perimeter` and is then reachable from nowhere at all —
+            // it is not an addition to the type's surface, it is dead code that
+            // compiles. The shape that costs someone an afternoon is a typo
+            // beside the real method, `fn area` and `fn aera`, where the extra
+            // one is silently unreachable and looks like it did something.
+            for m in &imp.methods {
+                if p.methods.iter().any(|sig| sig.name == m.name) {
+                    continue;
+                }
+                // The same question, and the same answer, as RFC-0071 M4's
+                // `laod` → `data`: one distance function for the whole compiler,
+                // ties going to declaration order.
+                let near = p
+                    .methods
+                    .iter()
+                    .map(|sig| (crate::contracts::edit_distance(&m.name, &sig.name), &sig.name))
+                    .filter(|(d, _)| *d <= crate::contracts::NEAR_THRESHOLD)
+                    .min_by_key(|(d, _)| *d)
+                    .map(|(_, n)| n);
+                let fix = match near {
+                    Some(n) => format!("did you mean `{n}`?"),
+                    // True as of RFC-0084: `impl` always names a protocol, so
+                    // there is no inherent-method block to move this into. What
+                    // there is instead is that `x.m(..)` falls through to a
+                    // plain function of the same name, so a helper needs no impl.
+                    None => format!(
+                        "Vyrn has no inherent methods, so a helper is a plain \
+                         `fn {}(x: {}, ..)` at the top level — `x.{}(..)` calls that",
+                        m.name, imp.ty, m.name
+                    ),
+                };
+                let got: Vec<Type> = m.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                out.push(Diagnostic::from_rendered(
+                    format!(
+                        "line {}: `{}` provides `{}`, which protocol `{}` does not declare — \
+                         dispatch knows only a protocol's own method names, so this one is \
+                         reachable from nowhere; {fix}",
+                        m.line,
+                        render_impl_head(imp),
+                        render_method_sig(&m.name, &got, &m.ret),
+                        imp.protocol
+                    ),
+                    "check",
+                ));
+            }
         }
 
         // A named target must be an enum or a record. `Option`/`Result` and a
@@ -11536,6 +11586,50 @@ mod tests {
             missing.contains("does not provide `fn name(self) -> String`"),
             "{missing}"
         );
+    }
+
+    /// The other direction, and the mirror of
+    /// `an_impl_binds_exactly_the_protocols_associated_types`: a method the
+    /// protocol never declared. It was accepted until now and described as
+    /// becoming a callable method, which it never did — resolution knows only
+    /// the protocol's names, so the flattened `Shape__Sq__perimeter` is
+    /// reachable from nowhere and `s.perimeter()` says the function is unknown.
+    #[test]
+    fn an_impl_provides_only_the_methods_its_protocol_declared() {
+        let extra = check_src(
+            "protocol Shape { fn area(self) -> Int64 }\n\
+             type Sq = { side: Int64 }\n\
+             impl Shape for Sq { fn area(self) -> Int64 { return self.side }\n\
+               fn perimeter(self) -> Int64 { return self.side * 4 } }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            extra.contains("provides `fn perimeter(self) -> Int64`, which protocol `Shape` does \
+                            not declare")
+                && extra.contains("no inherent methods"),
+            "{extra}"
+        );
+        // The shape that costs an afternoon: the extra method is a typo beside
+        // the real one, so the declared name it is one transposition from is the
+        // whole diagnostic.
+        let typo = check_src(
+            "protocol Shape { fn area(self) -> Int64 }\n\
+             type Sq = { side: Int64 }\n\
+             impl Shape for Sq { fn area(self) -> Int64 { return self.side }\n\
+               fn aera(self) -> Int64 { return self.side } }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(typo.contains("did you mean `area`?"), "{typo}");
+        // What the diagnostic offers instead has to be true: `impl` always names
+        // a protocol, and a method call falls through to a plain function.
+        let helper = check_src(
+            "type Sq = { side: Int64 }\n\
+             fn perimeter(x: Sq) -> Int64 { return x.side * 4 }\n\
+             fn main() -> Int64 { return Sq { side: 3 }.perimeter() }",
+        );
+        assert!(helper.is_ok(), "{helper:?}");
     }
 
     /// The two variances the rule deliberately admits, in one program that must
