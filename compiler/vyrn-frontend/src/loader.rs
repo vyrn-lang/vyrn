@@ -3172,9 +3172,32 @@ fn clash_diagnostics(
 
 /// Every (callee/constructor name, line) referenced in a block — calls, spawns,
 /// struct literals, fallible constructions, and bare variant constructors.
-fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
-    fn stmt(s: &Stmt, out: &mut Vec<(String, usize)>) {
+///
+/// `ns` is the enclosing module's in-scope namespace bindings (RFC-0027), and a
+/// call whose receiver is one of them is NOT a bare reference: `bt.routes()`
+/// parses as the method sugar `routes(bt)`, so without this the member name of
+/// every namespace call reads as a top-level name the module used directly. The
+/// same guard [`rewrite_expr`] applies before renaming a callee, for the same
+/// reason — a namespace member belongs to its receiver's module, and nothing in
+/// this module's flat namespace answers for it. A local that shadows a namespace
+/// name (legal, and what `NsResolver`'s scope-aware walk honors) is not modelled
+/// here: this walk knows no scopes, so such a call's member name goes unrecorded
+/// rather than misrecorded — the direction that reports less, not wrongly.
+fn fn_body_names(b: &Block, ns: &HashSet<String>) -> Vec<(String, usize)> {
+    /// The walk's accumulator, carrying the namespace set the `Call` arm needs.
+    /// A field rather than a parameter on every nested function: the recursion
+    /// already threads one `&mut` everywhere, so this rides it.
+    struct Sink<'a> {
+        out: Vec<(String, usize)>,
+        ns: &'a HashSet<String>,
+    }
+    impl Sink<'_> {
+        fn push(&mut self, n: (String, usize)) {
+            self.out.push(n);
+        }
+    }
+    let mut out = Sink { out: Vec::new(), ns };
+    fn stmt(s: &Stmt, out: &mut Sink) {
         match s {
             Stmt::Let {
                 value, line, ty, ..
@@ -3240,14 +3263,26 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
             Stmt::Region { body, .. } => block(body, out),
         }
     }
-    fn block(b: &Block, out: &mut Vec<(String, usize)>) {
+    fn block(b: &Block, out: &mut Sink) {
         for s in &b.stmts {
             stmt(s, out);
         }
     }
-    fn expr(e: &Expr, line: usize, out: &mut Vec<(String, usize)>) {
+    fn expr(e: &Expr, line: usize, out: &mut Sink) {
         match e {
-            Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+            Expr::Call { name, args, line } => {
+                // `spawn` takes a bare identifier, so only a `Call` can carry a
+                // namespace receiver — the same split `rewrite_expr` makes.
+                let ns_receiver =
+                    matches!(args.first(), Some(Expr::Var { name: h, .. }) if out.ns.contains(h));
+                if !ns_receiver {
+                    out.push((name.clone(), *line));
+                }
+                for a in args {
+                    expr(a, *line, out);
+                }
+            }
+            Expr::Spawn { name, args, line } => {
                 out.push((name.clone(), *line));
                 for a in args {
                     expr(a, *line, out);
@@ -3321,7 +3356,7 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
         }
     }
     block(b, &mut out);
-    out
+    out.out
 }
 
 /// Scope-aware reference scan for the link-time visibility check: every name a
@@ -3931,8 +3966,12 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &Hash
 /// import's original name is not also used directly.
 fn program_ref_names(p: &Program) -> HashSet<String> {
     let mut out: HashSet<String> = HashSet::new();
+    // The module's own namespace bindings, read off its imports rather than
+    // passed in: both callers hold only a `Program`, and `ns.member` is spelled
+    // against the namespaces this file declares.
+    let ns: HashSet<String> = p.imports.iter().filter_map(|i| i.namespace.clone()).collect();
     let add_block = |b: &Block, out: &mut HashSet<String>| {
-        for (n, _) in fn_body_names(b) {
+        for (n, _) in fn_body_names(b, &ns) {
             out.insert(n);
         }
     };
@@ -4379,6 +4418,39 @@ mod tests {
         };
         assert_eq!(ds.len(), 1, "{ds:?}");
         assert!(ds[0].message.contains("`g` is declared by both"), "{ds:?}");
+    }
+
+    #[test]
+    fn a_namespace_call_is_not_a_bare_use_of_an_aliased_original() {
+        // An aliased import hides the original name, and using it directly is an
+        // error. `bt.routes()` is not that use: it is a namespace call to another
+        // module entirely, which the method sugar parses as `routes(bt)` — and the
+        // check counted that member name as a bare reference. The advice it gave
+        // (`use pageRoutes`) would have produced `bt.pageRoutes()`, which names
+        // nothing.
+        let a = "export fn route() -> Int64 { return 1 } \
+                 export fn routes() -> Int64 { return 2 }";
+        let b = "export fn routes() -> Int64 { return 3 }";
+        let root = "import { route, routes as pageRoutes } from \"./a\" \
+                    import * as bt from \"./b\" \
+                    fn main() -> Int64 { return route() + pageRoutes() + bt.routes() }";
+        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]), Ok(6));
+    }
+
+    #[test]
+    fn a_real_bare_use_of_an_aliased_original_is_still_reported() {
+        // The other direction: the namespace call must not SATISFY the check
+        // either. `routes()` here is the hidden name, written bare, and it is
+        // still an error however many namespace calls share its spelling.
+        let a = "export fn routes() -> Int64 { return 2 }";
+        let b = "export fn routes() -> Int64 { return 3 }";
+        let root = "import { routes as pageRoutes } from \"./a\" \
+                    import * as bt from \"./b\" \
+                    fn main() -> Int64 { return routes() + bt.routes() }";
+        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
+        assert!(e.contains("`routes` is not in scope — it was imported as `pageRoutes`"), "{e}");
+        // One cause, one error: the collision diagnostics next door do not pile on.
+        assert!(!e.contains("is declared by both"), "{e}");
     }
 
     #[test]
