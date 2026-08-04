@@ -775,12 +775,16 @@ its own signature owes. One implementation, and the loop pays nothing for it.
 lazy combinator is exactly the shape that wants to: `map`'s step captures `f`.
 A `fn`-typed parameter is not a value in scope — it is a specialization the
 caller chose — so the LLVM backend emitted a call to an undefined `@vyrn_f` and
-the failure landed at the linker. The one-line fix is in `std/stream` rather
-than in the backend: `let g: fn(T) -> U = f` re-materializes it as an RFC-0037
-stored value, which a lambda captures the ordinary way. It is recorded as a
-compiler hole rather than closed, because closing it means teaching the lambda
-lifter to forward another instance's capture arguments — a change in the
-higher-order machinery, not in this milestone.
+the failure landed at the linker. M2c shipped with the one-line laundering
+`let g: fn(T) -> U = f` in `std/stream` rather than a backend fix, recorded as a
+compiler hole.
+
+*Closed afterwards, and the hole was smaller than this paragraph guessed.* It
+does not need the lifter to forward another instance's capture arguments: a
+`fn` parameter re-materializes into exactly the stored value the workaround
+wrote by hand, so the lifter can do that itself at the capture site. The
+laundering lines in `map` and `filter` are gone and `examples/capturefn.vyrn`
+pins the shape on all three engines.
 
 **`merge` is still eager, and the reason is structural rather than schedule.** A
 wrapper owns ONE source, because a cursor cell has one stream behind it.

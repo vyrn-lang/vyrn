@@ -83,12 +83,13 @@ export type IsMissing = fn(String) -> Bool
 /// `method` is `""` until a method constructor sets it — a route that reaches
 /// `mount` without one is a startup error, not a silent GET.
 ///
-/// Two fn fields rather than one plus an adapting closure, and the reason is a
-/// backend limit worth naming: a lambda that CALLS a captured `fn`-typed
-/// PARAMETER (`|req, ps| run(req)`) lowers to a call on a symbol no module
-/// defines, so it runs under the interpreter and fails to build natively. Each
-/// route uses one field and leaves the other at a named never-answers stub,
-/// which costs a word and no closure at all.
+/// Two fn fields rather than one plus an adapting closure. M1 chose this because
+/// `|req, ps| run(req)` — a lambda CALLING a captured `fn`-typed parameter — did
+/// not lower in either compiled backend; that hole is closed and the shape stays
+/// anyway, now as a choice rather than a workaround. An adapter would allocate a
+/// capture block per mounted subsystem and turn a field read into a dispatch on
+/// every request; two fields cost a word and no closure at all, and each route
+/// leaves the one it does not use at a named never-answers stub.
 ///
 /// The M2 policy fields below are flat on `Route` rather than nested in a
 /// `Policy` record, for one reason: nesting would put a `fn` value one level
@@ -334,9 +335,8 @@ export fn surface(prefix: String, run: Surface) -> Route {
 ///
 /// `.notFoundWhen(|why| why == "no such paste")` turns that one error into a 404
 /// and leaves every other `Err` a 200 carrying the error the procedure returned.
-/// The lambda captures nothing, which is what makes it lowerable: M1's native
-/// codegen bug was a lambda CALLING a captured `fn`-typed parameter, and a
-/// predicate over a `String` has neither.
+/// The lambda captures nothing at all, which is the cheapest thing it can be —
+/// no capture block, no dispatch.
 export protocol Policy {
     fn cacheFor(self, seconds: Int64) -> Route
     fn etag(self) -> Route

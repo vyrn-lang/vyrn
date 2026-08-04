@@ -446,6 +446,13 @@ two `fn` fields, `run` and `whole`, with `prefix` selecting which `mount` calls
 and the other left at a named never-answers stub. It costs a word per route and
 no closure at all.
 
+*The other half is fixed now* — the capture site materializes the parameter as
+an RFC-0037 stored value, which is what the workaround was writing by hand
+(`examples/capturefn.vyrn`). `Route` keeps its two fields regardless: an
+adapting closure would allocate a capture block per mounted subsystem and turn a
+field read into a dispatch on every request, so what M1 reached for under
+duress is what it would pick freely.
+
 The manifest's `projections` key is not implemented: `std/http` knows its own
 suffix. What the suffix does do is keep a projection out of the derived surface —
 `rpc(dir)` skips a dotted stem now, so `pastes.http.vyrn` colocates with
