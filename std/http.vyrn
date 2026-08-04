@@ -35,6 +35,7 @@
 /// signature, and a generic cannot name a type to `fromJson` — the first argument
 /// there must be a declared type name, which is precisely what a type parameter
 /// is not.
+
 import { Json, JsonField, emit } from "std/json"
 import { parseJson } from "std/jsonread"
 import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"

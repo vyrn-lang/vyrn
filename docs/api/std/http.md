@@ -1,5 +1,43 @@
 # std/http
 
+std/http — the REST projection (RFC-0074 M1), a library over the same
+procedures the derived RPC surface reflects on. The compiler knows nothing
+about routes: everything below is either an ordinary record moved around at
+runtime or generated Vyrn source over `moduleInterface` reflection, exactly
+as `std/rpc`, `std/openapi` and `std/graphql` are.
+
+A projection is opt-in and hand-written, because `GET /pastes/{id}` is API
+*design* — no reflection can derive it, and deriving it would need the magic
+naming conventions RFC-0072 exists to remove. You write one when you publish
+a public API, and not before:
+
+```vyrn
+// server/api/pastes.http.vyrn — base path `/pastes`, from the stem.
+import { http, Route, GET, POST } from "std/http"
+import { recent, byId, create } from http("./pastes")
+
+export fn routes() -> Array<Route> {
+    return [GET(recent("/")), GET(byId("/{id}")), POST(create("/"))]
+}
+```
+
+**The chain is value-level, not type-level.** `Route` is `Route` after every
+call — `GET(..)` takes a `Route` and hands back a `Route`, and so does every
+method of `Policy` below. Nothing accumulates in the type, so the
+fortieth route costs the checker one more nominal value rather than a wider
+instantiation. That is the property this design exists to keep.
+
+The shape is `GET(byId("/{id}"))` and not the RFC's `get("/{id}", byId)`, for
+one reason: the pattern has to sit in the *procedure's own* parameter slot for
+its placeholders to be checked at compile time. `byId`'s generated parameter
+type is a `String where value =~ …` admitting exactly the placeholders `IdReq`
+has fields for, so `byId("/{ID}")` is a checker error at the call site and
+needs neither RFC-0073's symbol map nor a compiler rule. A uniform
+`GET(pattern, proc)` cannot do that: it would have to be generic over the
+signature, and a generic cannot name a type to `fromJson` — the first argument
+there must be a declared type name, which is precisely what a type parameter
+is not.
+
 ## Handler
 
 ```vyrn
