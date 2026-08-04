@@ -1,6 +1,9 @@
 # RFC-0074 — Protocol Projections: Full Fidelity, No Erasure
 
-- **Status:** Draft
+- **Status:** **M1, M2, M3a, M3b and M4a shipped.** What remains is **M4b**,
+  the per-field resolver override — which needs a GraphQL *executor*
+  (`std/graphql` emits a document, not a server), so it belongs in its own RFC
+  rather than here. See "M4, read against what shipped".
 - **Depends on:** RFC-0072 (audience, roles, derived RPC surface — projections
   are the opt-in layer above it), RFC-0073 (symbol maps — projections write
   their policy into `derived`), RFC-0038 (`std/connect`, `std/openapi`,
