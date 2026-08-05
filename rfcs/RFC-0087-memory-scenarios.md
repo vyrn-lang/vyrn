@@ -515,6 +515,11 @@ is visible.
 **How it should be handled.** A `copy` that means it. Then §9b's rule gets a
 diagnostic that names the way out.
 
+**Closed by RFC-0089 M1b.** `x.copy()` ships in all three engines — structural,
+recursive, and refused on a type that declares its own `Owned` row. See
+"M1b as landed" in RFC-0089 for the four decisions it needed. The five `arg + ""`
+sites still stand: they migrate with the diagnostic, in M3b.
+
 ---
 
 ## U3. Path B never joined the subject-first surface

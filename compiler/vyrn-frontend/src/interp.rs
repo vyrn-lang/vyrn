@@ -254,6 +254,28 @@ pub enum CodePiece {
 /// pieces are bracketed by `//@origin` directives, each on its own line (the
 /// directive governs the lines that follow — RFC-0033), so a check/parse error
 /// inside the region maps back to its recorded `path:line:col`.
+/// `x.copy()` (RFC-0089 M1b): a value that shares no heap with `v`.
+///
+/// A `Ref` clones its `{slot, gen}` and therefore keeps pointing at the same
+/// cell — RFC-0089 §5 keeps aliasing explicit, and copying a handle is not a
+/// reason to duplicate what it names. A `Stream` and a `Fn` never reach here;
+/// the checker refuses the first and the second owns nothing.
+fn deep_copy(v: &Val) -> Val {
+    match v {
+        Val::Str(s) => Val::Str(std::rc::Rc::new(String::clone(s))),
+        Val::Array(xs) => Val::Array(std::rc::Rc::new(xs.iter().map(deep_copy).collect())),
+        Val::Map(kv) => Val::Map(kv.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect()),
+        Val::Record(fs, name) => Val::Record(
+            fs.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
+            name.clone(),
+        ),
+        Val::Option(o) => Val::Option(o.as_ref().map(|b| Box::new(deep_copy(b)))),
+        Val::Result(ok, b) => Val::Result(*ok, Box::new(deep_copy(b))),
+        Val::Enum(n, ps) => Val::Enum(n.clone(), ps.iter().map(deep_copy).collect()),
+        other => other.clone(),
+    }
+}
+
 pub fn render_code(pieces: &[CodePiece]) -> String {
     let mut out = String::new();
     let ensure_nl = |out: &mut String| {
@@ -4793,6 +4815,13 @@ impl<'a> Interp<'a> {
                         Val::Array(_) => Ok(vals.remove(0)),
                         other => Err(format!("@toArray of non-Array {other:?}").into()),
                     },
+                    // `x.copy()` (RFC-0089 M1b) — a value that shares no heap
+                    // with the receiver. Copy-on-write already gives this engine
+                    // value semantics, so an identity clone would pass every
+                    // test; it is written out anyway, because the two compiled
+                    // backends allocate here and the three engines must describe
+                    // one operation.
+                    "@copy" => Ok(deep_copy(&vals[0])),
                     // `@join` (`t.join()`) awaits a task; eager tasks are in hand.
                     "@join" => Ok(vals.remove(0)),
                     "Some" => Ok(Val::Option(Some(Box::new(vals.remove(0))))),

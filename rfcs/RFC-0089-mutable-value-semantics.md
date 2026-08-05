@@ -200,6 +200,58 @@ Measured on the M0 benchmarks (`examples/membench.vyrn`, medians):
 The cost is code and data size on wasm: `fib.wasm` grew from 1,334 to 1,590
 bytes, and `domdemo.wasm` from 25,966 to 27,630.
 
+## M1b as landed — `copy`
+
+`x.copy()` ships in all three engines. It is a method-only builtin (`@copy`
+internally), so a free `copy(x)` is still an available user name, and its result
+has the receiver's own type — a copy of a validated `type Email = String` is
+still an `Email`.
+
+The copy is structural and recursive: `String`, `Array<T>`, `SmallArray<T, N>`,
+`Map<String, V>`, records, fixed arrays, `Option`, `Result` and user enums,
+through their payloads. Four decisions the RFC did not state.
+
+1. **A scalar copies to itself, and this is not a diagnostic.** The alternative
+   was to refuse `n.copy()` on an `Int64`. It was rejected because Vyrn
+   monomorphizes: `fn twice<T>(x: T)` calling `x.copy()` is a String in one
+   instance and an `Int64` in the next, and a refusal would make `copy` mean
+   something narrower than "a value of this type that shares nothing with the
+   receiver". One word, one meaning. The compiler emits nothing at all for a
+   receiver that owns no heap, so the no-op costs no instruction.
+2. **A `Ref<T>` copies as the handle it is.** §5 already said `Ref` is the one
+   aliasing mechanism, so copying one names the same cell. That is also what
+   keeps the analysis sound: `copy` is a producer in `own.rs`, and calling a
+   `Ref` copy a transfer would release one cell twice. The rule is written as
+   the `owns_heap` predicate — a `Ref` is excluded from it — so one function
+   answers for the checker and for both backends. `Task<T>` and `lazy T` copy
+   the same way, for the same reason.
+3. **A type that declares `impl Owned for T` (RFC-0086 M1) is refused, and the
+   refusal reaches through anything holding one.** A declared container states
+   how it is released and says nothing about how it is duplicated; copying its
+   fields would run the declared `release` over two values that claim the same
+   resources. The diagnostic names the type. RFC-0091 M1 makes `Copy` a protocol
+   such a type implements, and that is where the refusal retires. A `Stream<T>`
+   is refused too, for a nearer reason: it is a cursor over a producer, and two
+   consumers of one cursor is not a copy.
+4. **The copy's capacity is its length.** An `Array` or a `Map` with room to
+   spare copies into a buffer sized to what it holds. Spare room is an
+   allocation history, not part of the value.
+
+Measured on the M0 benchmarks (`examples/membench.vyrn`, medians, two new rows):
+
+| row | median |
+|---|---|
+| copy of a 10 KB String, 1000 times | 68.02 µs |
+| copy of a 1000-element `Array<Int64>`, 1000 times | 66.98 µs |
+
+Roughly 68 ns per copy of about ten kilobytes — one `malloc` and one `memcpy`,
+which is the floor for the operation. The M1a rows are unmoved. `fib.wasm` is
+still 1,590 bytes and `domdemo.wasm` still 27,630: nothing that does not call
+`copy` emits anything for it.
+
+The corpus still writes `arg + ""` in five places. Migrating them is M3b (the
+plan's Phase 6), where the diagnostic that points at `copy` lands with them.
+
 ## Rejected
 
 - **RFC-0088 alone** — keeps the silent-leak fallback as defined behavior;

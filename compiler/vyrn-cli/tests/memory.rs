@@ -39,6 +39,7 @@
 //! | export | census | today | why |
 //! |---|---|---|---|
 //! | `control` | §2 | steady | a local concat, freed at block exit — the whole model working |
+//! | `copyLocal` | U2 | steady | `x.copy()` transfers, so the copy has an owner (RFC-0089 M1b) |
 //! | `ifExpr` | §2a | leaks | `transfers` answers `false` for an if-expression |
 //! | `selfAppend` | §4 / P1 | leaks | a module-state `String` overwrite never releases the old buffer |
 //! | `fieldOverwrite` | §4 | leaks | `r.field = v` never releases the old field |
@@ -326,6 +327,13 @@ const ROWS: &[Row] = &[
         why: "a local concat is freed at block exit — the control for every row below",
     },
     Row {
+        export: "copyLocal",
+        census: "U2",
+        today: Shape::Steady,
+        why: "`x.copy()` (RFC-0089 M1b) transfers, so the copy is reclaimed at block exit — \
+              the row exists to prove the new builtin is not a new leak",
+    },
+    Row {
         export: "ifExpr",
         census: "§2a",
         today: Shape::Leaks,
@@ -400,6 +408,14 @@ fn maybe(x: String) -> Option<String> {{
 export extern fn control() {{
     let s = tag() + "!"
     seen = seen + Int64(s.byteLength)
+}}
+
+/// RFC-0089 M1b. The copy is a fresh buffer with one owner, released at block
+/// exit exactly as `control`'s concatenation is.
+export extern fn copyLocal() {{
+    let s = tag() + "!"
+    let c = s.copy()
+    seen = seen + Int64(c.byteLength)
 }}
 
 export extern fn ifExpr() {{

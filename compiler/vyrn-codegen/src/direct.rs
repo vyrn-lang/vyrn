@@ -3430,6 +3430,8 @@ impl Fn_<'_> {
                         }
                     }
                 }
+                // `x.copy()` (RFC-0089 M1b) has its receiver's type.
+                "@copy" if args.len() == 1 => self.peek(&args[0], line)?,
                 // The generational reference (M2l). `cell` and `get` are inverses
                 // and typed as such; `set` and `release` carry nothing, which a
                 // `match` arm may still be — an arm that only mutates.
@@ -4997,6 +4999,13 @@ impl Fn_<'_> {
             }
             "@keys" if args.len() == 1 => return self.map_method(m, b, name, args, line),
             "at" if args.len() == 2 => return self.at(m, b, args, line),
+            // `x.copy()` (RFC-0089 M1b) — the receiver's value, with heap of its
+            // own. The reported type is the receiver's own.
+            "@copy" if args.len() == 1 => {
+                let ty = self.expr(m, b, &args[0])?;
+                self.copy_stack(b, &ty, line)?;
+                return Ok(ty);
+            }
             // `array()` IS `[]` — an empty growable array taking its element type
             // from the position. One spelling, one lowering.
             "array" if args.is_empty() => return self.array_lit(m, b, &[], line),
@@ -7632,7 +7641,399 @@ fn float_into_word(b: &mut Frame, v: ValType) {
     }
 }
 
+// ---- RFC-0089 M1b: `x.copy()` ---------------------------------------------
+
 impl Fn_<'_> {
+    /// Whether a value of `ty` transitively owns heap — the frontend's own
+    /// predicate, so this backend copies exactly what the textual one does.
+    fn owns_heap(&self, ty: &Type) -> bool {
+        vyrn_frontend::own::owns_heap(&self.cx.sub(ty), &self.cx.types)
+    }
+
+    /// `x.copy()`: the receiver's value is on the stack; replace it with one
+    /// that shares no heap with it.
+    ///
+    /// A `String` is the only owning value this backend keeps in a wasm local;
+    /// everything else is an aggregate in the frame, so the copy is a byte copy
+    /// of the shape followed by [`Fn_::copy_at`] over what the bytes point at.
+    fn copy_stack(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<(), String> {
+        if !self.owns_heap(ty) {
+            return Ok(());
+        }
+        match self.cx.repr(ty, line)? {
+            Repr::Scalar(ValType::I32) if matches!(self.cx.resolve(ty), Type::Str) => {
+                self.str_dup(b);
+                Ok(())
+            }
+            Repr::Agg(l) => {
+                let src = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(src));
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                let a = b.local(ValType::I32);
+                b.slot(off);
+                b.ins(&Instruction::LocalSet(a));
+                self.copy_at(b, a, ty, line)?;
+                b.ins(&Instruction::LocalGet(a));
+                Ok(())
+            }
+            _ => unsupported(&format!("`copy` of `{ty}`"), line),
+        }
+    }
+
+    /// A `String` pointer on the stack, replaced by a fresh buffer holding the
+    /// same bytes. The length is a header load since RFC-0089 M1a, so nothing
+    /// scans.
+    fn str_dup(&mut self, b: &mut Frame) {
+        let (s, n, d) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+        );
+        b.ins(&Instruction::LocalSet(s));
+        b.ins(&Instruction::LocalGet(s));
+        str_len(b);
+        b.ins(&Instruction::LocalSet(n));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::Call(self.cx.rt.str_new));
+        b.ins(&Instruction::LocalSet(d));
+        b.ins(&Instruction::LocalGet(d));
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::LocalGet(d));
+    }
+
+    /// A fresh heap block of `bytes` holding a copy of `live` bytes from `src`,
+    /// its address left in a new local. One byte of slack, so copying an empty
+    /// container never asks the allocator for nothing.
+    fn dup_buf(&mut self, b: &mut Frame, src: u32, live: u32, bytes: u32) -> u32 {
+        let nb = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(bytes));
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalSet(nb));
+        b.ins(&Instruction::LocalGet(nb));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::LocalGet(live));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        nb
+    }
+
+    /// Replace each of the first `count` elements of `buf` with a deep copy of
+    /// itself. No loop is emitted at all when the element owns no heap.
+    fn copy_each(
+        &mut self,
+        b: &mut Frame,
+        buf: u32,
+        count: u32,
+        stride: u32,
+        elem: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        if !self.owns_heap(elem) {
+            return Ok(());
+        }
+        let i = b.local(ValType::I32);
+        let p = b.local(ValType::I32);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::LocalSet(i));
+        let out = self.depth;
+        b.ins(&Instruction::Block(BlockType::Empty));
+        self.depth += 1;
+        let again = self.depth;
+        b.ins(&Instruction::Loop(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(i));
+        b.ins(&Instruction::LocalGet(count));
+        b.ins(&Instruction::I32GeU);
+        let leave = self.br_to(out);
+        b.ins(&Instruction::BrIf(leave));
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::LocalGet(i));
+        if stride != 1 {
+            b.ins(&Instruction::I32Const(stride as i32));
+            b.ins(&Instruction::I32Mul);
+        }
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalSet(p));
+        self.copy_at(b, p, elem, line)?;
+        b.ins(&Instruction::LocalGet(i));
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalSet(i));
+        let back = self.br_to(again);
+        b.ins(&Instruction::Br(back));
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        Ok(())
+    }
+
+    /// The bytes at `a` already hold a copy of a value of `ty`. Give that copy
+    /// its own heap.
+    fn copy_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
+        if !self.owns_heap(ty) {
+            return Ok(());
+        }
+        match self.cx.resolve(ty) {
+            Type::Str => {
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load(word()));
+                self.str_dup(b);
+                b.ins(&Instruction::I32Store(word()));
+                Ok(())
+            }
+            Type::Array(inner) => {
+                let l = self.layout_of(ty, line)?;
+                let stride = self.stride(&inner, line)?;
+                let (n, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalTee(n));
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::I32Mul);
+                b.ins(&Instruction::LocalSet(bytes));
+                let src = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+                b.ins(&Instruction::LocalSet(src));
+                let nb = self.dup_buf(b, src, bytes, bytes);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(nb));
+                b.ins(&Instruction::I32Store(word_at(l.fields[0])));
+                // The copy's capacity is its length: a copy is a fresh buffer,
+                // and the room the original had spare is not part of its value.
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+                b.ins(&Instruction::I64Store(at(l.fields[2])));
+                self.copy_each(b, nb, n, stride, &inner, line)
+            }
+            // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
+            // header copy is the whole copy of its storage.
+            Type::SmallArray(inner, cap_n) => {
+                let l = self.layout_of(ty, line)?;
+                let stride = self.stride(&inner, line)?;
+                let (n, base) = (b.local(ValType::I32), b.local(ValType::I32));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[0])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(n));
+                // Inline while `cap == N`; the data pointer is live otherwise.
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Const(l.fields[3] as i32));
+                b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::LocalSet(base));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+                b.ins(&Instruction::I64Const(cap_n as i64));
+                b.ins(&Instruction::I64Ne);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                let (src, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load(word_at(l.fields[2])));
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::I32Mul);
+                b.ins(&Instruction::LocalSet(bytes));
+                let live = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(n));
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::I32Mul);
+                b.ins(&Instruction::LocalSet(live));
+                let nb = self.dup_buf(b, src, live, bytes);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(nb));
+                b.ins(&Instruction::I32Store(word_at(l.fields[2])));
+                b.ins(&Instruction::LocalGet(nb));
+                b.ins(&Instruction::LocalSet(base));
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                self.copy_each(b, base, n, stride, &inner, line)
+            }
+            Type::Map(_, vt) => {
+                let l = self.layout_of(ty, line)?;
+                let vstride = self.stride(&vt, line)?;
+                let (n, cap) = (b.local(ValType::I32), b.local(ValType::I32));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[2])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(n));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[3])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(cap));
+                for (i, (stride, elem)) in
+                    [(4u32, Type::Str), (vstride, (*vt).clone())].into_iter().enumerate()
+                {
+                    let (src, live, room) = (
+                        b.local(ValType::I32),
+                        b.local(ValType::I32),
+                        b.local(ValType::I32),
+                    );
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I32Load(word_at(l.fields[i])));
+                    b.ins(&Instruction::LocalSet(src));
+                    b.ins(&Instruction::LocalGet(n));
+                    b.ins(&Instruction::I32Const(stride as i32));
+                    b.ins(&Instruction::I32Mul);
+                    b.ins(&Instruction::LocalSet(live));
+                    b.ins(&Instruction::LocalGet(cap));
+                    b.ins(&Instruction::I32Const(stride as i32));
+                    b.ins(&Instruction::I32Mul);
+                    b.ins(&Instruction::LocalSet(room));
+                    let nb = self.dup_buf(b, src, live, room);
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::LocalGet(nb));
+                    b.ins(&Instruction::I32Store(word_at(l.fields[i])));
+                    self.copy_each(b, nb, n, stride, &elem, line)?;
+                }
+                Ok(())
+            }
+            Type::Record(_) => {
+                let l = self.layout_of(ty, line)?;
+                let fields = self
+                    .cx
+                    .fields(ty)
+                    .ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
+                for (i, f) in fields.iter().enumerate() {
+                    if !self.owns_heap(&f.ty) {
+                        continue;
+                    }
+                    let p = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                    b.ins(&Instruction::I32Add);
+                    b.ins(&Instruction::LocalSet(p));
+                    self.copy_at(b, p, &f.ty, line)?;
+                }
+                Ok(())
+            }
+            Type::ArrayN(inner, n) => {
+                let stride = self.stride(&inner, line)?;
+                let count = b.local(ValType::I32);
+                b.ins(&Instruction::I32Const(n as i32));
+                b.ins(&Instruction::LocalSet(count));
+                self.copy_each(b, a, count, stride, &inner, line)
+            }
+            Type::Option(inner) => {
+                let l = self.layout_of(ty, line)?;
+                let w = self.word2(&inner)?;
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load8U(byte()));
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.copy_word(b, a, l.fields[1], &inner, w, line)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                Ok(())
+            }
+            Type::Result(ok, err) => {
+                let l = self.layout_of(ty, line)?;
+                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load8U(byte()));
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.copy_word(b, a, l.fields[1], &ok, wo, line)?;
+                b.ins(&Instruction::Else);
+                self.copy_word(b, a, l.fields[1], &err, we, line)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                Ok(())
+            }
+            // A user enum: the payload slots of the live variant, and only the
+            // ones whose declared type owns something. The tag is the variant's
+            // position, exactly as `match` reads it.
+            Type::Enum(vs) => {
+                let l = self.layout_of(ty, line)?;
+                for (tag, var) in vs.iter().enumerate() {
+                    if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                        continue;
+                    }
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I64Load(word8()));
+                    b.ins(&Instruction::I64Const(tag as i64));
+                    b.ins(&Instruction::I64Eq);
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    for (j, pty) in var.payload.clone().iter().enumerate() {
+                        if !self.owns_heap(pty) {
+                            continue;
+                        }
+                        let w = self.word1(pty);
+                        self.copy_word(b, a, l.fields[j + 1], pty, w, line)?;
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                Ok(())
+            }
+            // A handle names something; copying it names the same thing.
+            Type::Task(_) | Type::Lazy(_) => Ok(()),
+            other => unsupported(&format!("`copy` of `{other}`"), line),
+        }
+    }
+
+    /// Give the sum payload word at `a + off` its own heap.
+    ///
+    /// Only two encodings can own anything: a `String` rides in the word itself,
+    /// and everything wider is a pointer to a block this copies and then walks.
+    fn copy_word(
+        &mut self,
+        b: &mut Frame,
+        a: u32,
+        off: u32,
+        pty: &Type,
+        w: Word,
+        line: usize,
+    ) -> Result<(), String> {
+        match w {
+            Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                self.str_dup(b);
+                b.ins(&Instruction::I64ExtendI32U);
+                b.ins(&Instruction::I64Store(at(off)));
+                Ok(())
+            }
+            Word::Boxed => {
+                let size = self.layout_of(pty, line)?.size;
+                let (src, bytes) = (b.local(ValType::I32), b.local(ValType::I32));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::I32Const(size as i32));
+                b.ins(&Instruction::LocalSet(bytes));
+                let nb = self.dup_buf(b, src, bytes, bytes);
+                self.copy_at(b, nb, pty, line)?;
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(nb));
+                b.ins(&Instruction::I64ExtendI32U);
+                b.ins(&Instruction::I64Store(at(off)));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn sum_of(&self, ty: &Type) -> Option<Sum> {
         match self.cx.resolve(ty) {
             Type::Option(t) => Some(Sum::Opt(*t)),
