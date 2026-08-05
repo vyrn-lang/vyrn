@@ -563,10 +563,45 @@ impl Module {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
         );
+        // The same address, immutable, because [`HEAP`] moves and a `free` has to
+        // ask where the heap STARTS (RFC-0077 M6). See [`HEAP_BASE`].
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: false, shared: false },
+            &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
+        );
 
+        // Runs of zeros are not written. A wasm memory arrives zeroed, so a
+        // segment of them is bytes in the file that change nothing, and what pays
+        // for them is [`Module::reserve`] — every reservation is zero-filled
+        // scratch. RFC-0077 M6's 116 free-list heads are 464 of them, in the
+        // middle of the pool, in every module this backend emits including `fib`.
+        //
+        // A segment costs about nine bytes of its own, so a gap has to be wider
+        // than that to be worth splitting on. `data_end` does not move: the
+        // addresses were handed out long before this, and each segment carries the
+        // one it starts at.
+        const GAP: usize = 16;
         let mut data = DataSection::new();
-        if !self.pool.is_empty() {
-            data.active(0, &ConstExpr::i32_const(DATA_BASE as i32), self.pool.iter().copied());
+        let mut i = 0;
+        while i < self.pool.len() {
+            if self.pool[i] == 0 {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut end = i + 1;
+            let mut j = end;
+            while j < self.pool.len() {
+                if self.pool[j] != 0 {
+                    end = j + 1;
+                } else if j - end >= GAP {
+                    break;
+                }
+                j += 1;
+            }
+            let at = DATA_BASE + start as u32;
+            data.active(0, &ConstExpr::i32_const(at as i32), self.pool[start..end].iter().copied());
+            i = end;
         }
 
         let mut code = CodeSection::new();
@@ -640,6 +675,17 @@ pub const SP: u32 = 0;
 /// standalone module has no shim to ask, so the direct backend emits its own
 /// against this global.
 pub const HEAP: u32 = 1;
+
+/// The first byte of the heap — [`HEAP`]'s initial value, kept immutable so a
+/// `free` can tell a heap pointer from one that never came out of `malloc`
+/// (RFC-0077 M6).
+///
+/// It is not a refinement. `drop s` on a `String` bound to a literal hands `free`
+/// a data-segment address; the textual backend passes that to C's `free`, which
+/// reads a header that is not there. Here the address is BELOW this global and
+/// the release is a no-op — a leak of nothing, instead of a free list threaded
+/// through the string pool.
+pub const HEAP_BASE: u32 = 2;
 
 /// A function body under construction, plus the frame it is accumulating.
 ///

@@ -134,8 +134,13 @@ export extern fn resetCount(arg: String) {
     count = 0
 }
 
+/// `arg + ""` and not `arg`, because a String ARGUMENT is borrowed: RFC-0012
+/// gives it to the caller, and across this boundary the caller is JS, which
+/// releases it as soon as the call returns (RFC-0077 M6). Keeping the pointer
+/// past that is a use-after-free, and it read as `count = 0` in the page —
+/// whatever the next allocation put in the recycled block.
 export extern fn onType(arg: String) {
-    typed = arg
+    typed = arg + ""
 }
 
 export extern fn onTick(arg: String) {

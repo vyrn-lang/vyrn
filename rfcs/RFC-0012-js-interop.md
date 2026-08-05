@@ -129,6 +129,24 @@ with it, or move the parameter to callee ownership so the ABI frees it. The
 second changes what a `String` parameter means everywhere, not just at this
 boundary. Recorded, not decided.
 
+**Decided and applied by RFC-0077 M6: the first.** A module that exports
+`__vyrn_malloc` exports `__vyrn_free` beside it, and the export wrapper in
+`wasi-min.js` releases every buffer it encoded for a call, after decoding the
+result. The 20000-call measurement above is flat.
+
+Two things fell out of it. **The result is decoded before the release**, because
+an export may hand back the pointer it was given and `free` writes its list link
+into the block. And **five handlers in this repo were retaining the argument** —
+`domdemo`'s `onType`, `bin`'s three draft setters, `fullstack`'s `setId`, each
+doing `state = arg`. That was always wrong under the rule above; it worked only
+because the owner could not free. They copy now, and **nothing checks the rule**:
+an exported `extern fn` that stores a String parameter past its own return is a
+use-after-free the compiler accepts. That is open, and it is a frontend rule.
+
+A returned `String` is still not freed. Who owns one is `own::analyze`'s answer
+per function and nothing carries it across the boundary — see RFC-0077 "M6, as
+landed".
+
 **Zero-copy over a foreign buffer is impossible on wasm.** RFC-0082 lists
 "zero-copy over a buffer Vyrn does not own" among the capabilities a raw-memory
 view would serve. On this target that item is unreachable whatever the language

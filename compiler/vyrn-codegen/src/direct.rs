@@ -45,7 +45,9 @@ use vyrn_frontend::types::INT32;
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
-use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP};
+use crate::wasm::{
+    self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP, HEAP_BASE,
+};
 
 /// What the direct backend cannot lower yet: the construct, and where.
 ///
@@ -516,10 +518,17 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // BigInt `wasi-min.js` passes — so it is exported as itself. It used to go
     // out through an `i32.wrap` wrapper, which was the one place a JS caller
     // could ask for 5 GiB and be handed a pointer to 1.
+    //
+    // `__vyrn_free` goes out with it, and it is not a convenience. RFC-0012 M?
+    // settled that the CALLER owns a `String` argument, and across this boundary
+    // the caller is JS — so before M6 the only allocator symbol a module exported
+    // had no counterpart and `wasi-min.js` could not do anything but forget the
+    // pointer. 20000 keystrokes into `domdemo` cost 18 MB that way.
     if user.iter().any(|f| {
         f.is_export_extern && f.params.iter().any(|p| matches!(p.ty, Type::Str))
     }) {
         m.export("__vyrn_malloc", cx.rt.malloc);
+        m.export("__vyrn_free", cx.rt.free);
     }
     // Keep only what those exports reach (M2p). Everything above emits eagerly —
     // 39 runtime helpers, 12 WASI imports, every function of every linked module —
@@ -758,9 +767,11 @@ struct Cx {
     /// it — `vyrn_frontend::own`'s answer, keyed by statement node address: the
     /// same map, read with the same key, as the textual backend's `droppable`.
     ///
-    /// Only `ReleaseRef` is acted on. Everything else it reports is a `free`, and
-    /// a bump allocator has no free — but a cell's SLOT comes out of a fixed slab
-    /// of 65536, so a release that never fires IS observable (M2l).
+    /// Every kind is acted on since M6. The KIND itself is not read — the release
+    /// shape comes off the binding's type through [`Fn_::rel_for`], so an explicit
+    /// `drop x` and an inferred block-exit release cannot reclaim different things
+    /// — but the map's membership is `own`'s answer and stays authoritative about
+    /// WHICH `let`s own their value.
     droppable: HashMap<String, HashMap<usize, DropKind>>,
     /// RFC-0008's threshold, as an ordinal. Compile-time, and that is the point:
     /// with `logging { level: warn }` a `.debug(..)` call emits no write at all,
@@ -1036,14 +1047,26 @@ fn stream_step_sig(elem: &Type) -> Type {
     )
 }
 
-/// What a release frame entry reclaims (RFC-0075 M2b added the second one).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// What a release frame entry reclaims (RFC-0075 M2b added the second one,
+/// RFC-0077 M6 the last two).
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum Rel {
-    /// A `Ref<T>` binding — check the generation, hand the slot back.
+    /// A `Ref<T>` binding — check the generation, free the payload, hand the slot
+    /// back.
     Cell,
-    /// A `Stream<T>` — nothing if it is a buffer (this backend's allocator never
-    /// frees), its cursor cell if it is a producer.
+    /// A `Stream<T>` — its buffer if it is one, its cursor cell if it is a
+    /// producer.
     Stream,
+    /// A `String` — the place holds the buffer pointer itself.
+    Str,
+    /// An aggregate owning heap buffers at these byte offsets: an `Array`'s data,
+    /// a `Map`'s keys and values, a `SmallArray`'s `data` (null while inline,
+    /// which `free` refuses).
+    ///
+    /// Offsets rather than a `Type`, because the layout is a compile-time fact and
+    /// carrying the type would mean asking `layout_of` a second time at the
+    /// release — the place a wrong answer is silent.
+    Buffers(Vec<u32>),
 }
 
 impl Place {
@@ -1546,13 +1569,73 @@ impl Fn_<'_> {
             self.releases[boundary..].iter().rev().cloned().collect();
         for frame in frames {
             for (p, k) in frame.into_iter().rev() {
-                match k {
-                    Rel::Cell => self.emit_release(b, p, 0)?,
-                    Rel::Stream => self.stream_release(b, p, 0)?,
-                }
+                self.emit_rel(b, p, &k, 0)?;
             }
         }
         Ok(())
+    }
+
+    /// Reclaim one binding, whichever of the four shapes it is.
+    fn emit_rel(&mut self, b: &mut Frame, p: Place, k: &Rel, line: usize) -> Result<(), String> {
+        match k {
+            Rel::Cell => self.emit_release(b, p, line),
+            Rel::Stream => self.stream_release(b, p, line),
+            Rel::Str => {
+                // A `String` is a scalar, so a `Place::Local` holds the pointer —
+                // the opposite of what a local holding an aggregate means, which is
+                // why this and `Rel::Buffers` are two arms and not one.
+                match p {
+                    Place::Local(l) => b.ins(&Instruction::LocalGet(l)),
+                    _ => {
+                        p.addr(b, 0).ok_or_else(|| gap("a String with no place", line))?;
+                        b.ins(&Instruction::I32Load(word()))
+                    }
+                };
+                b.ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            Rel::Buffers(offs) => {
+                for &off in offs {
+                    match p {
+                        Place::Local(a) => {
+                            b.ins(&Instruction::LocalGet(a)).ins(&Instruction::I32Load(word_at(off)))
+                        }
+                        _ => {
+                            p.addr(b, off)
+                                .ok_or_else(|| gap("an aggregate with no place", line))?;
+                            b.ins(&Instruction::I32Load(word()))
+                        }
+                    };
+                    b.ins(&Instruction::Call(self.cx.rt.free));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
+    ///
+    /// The single rule both drop paths read — `own`'s automatic block-exit release
+    /// and an explicit `drop x` — so the two cannot free different sets. It is the
+    /// same set the textual backend's [`crate::Gen::emit_drop`] frees, minus the
+    /// `Stream`, which reaches its release through the stream lowering rather than
+    /// through `own`.
+    fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
+        let t = self.cx.resolve(ty);
+        Ok(match &t {
+            Type::Str => Some(Rel::Str),
+            Type::Ref(_) => Some(Rel::Cell),
+            Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
+            Type::Map(..) => {
+                let l = self.layout_of(&t, line)?;
+                Some(Rel::Buffers(vec![l.fields[0], l.fields[1]]))
+            }
+            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it is
+            // null until the array spills, which is exactly the case `free`
+            // refuses. The inline slots need no reclamation.
+            Type::SmallArray(..) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[2]])),
+            _ => None,
+        })
     }
 
     /// Push a region scope: trap if this would be the 65th, else bump the counter.
@@ -1699,17 +1782,20 @@ impl Fn_<'_> {
                         self.str_append_shadow(b, l);
                     }
                 }
-                self.scope.push((name.clone(), place, bound));
-                // A non-escaping `cell(..)` is released when this block exits.
-                // The key is the statement's node address, which is `own`'s own
-                // identity for it — the textual backend reads the same map with
+                // A `let` that owns a heap value is reclaimed when this block
+                // exits. The key is the statement's node address, which is `own`'s
+                // own identity for it — the textual backend reads the same map with
                 // the same key, so the two cannot disagree about which `let` owns
-                // a cell.
-                if self.drops.get(&(s as *const Stmt as usize)) == Some(&DropKind::ReleaseRef) {
-                    self.releases
-                        .last_mut()
-                        .expect("a `let` outside any block")
-                        .push((place, Rel::Cell));
+                // what.
+                let owns = self.drops.contains_key(&(s as *const Stmt as usize));
+                self.scope.push((name.clone(), place, bound.clone()));
+                if owns {
+                    if let Some(r) = self.rel_for(&bound, *line)? {
+                        self.releases
+                            .last_mut()
+                            .expect("a `let` outside any block")
+                            .push((place, r));
+                    }
                 }
             }
             Stmt::Assign { name, value, line } => {
@@ -2003,12 +2089,6 @@ impl Fn_<'_> {
                 let d = self.br_to(cont);
                 b.ins(&Instruction::Br(d));
             }
-            // `drop` is reclamation, and reclamation is not observable for
-            // anything this backend's allocator owns — it never reuses (see
-            // `runtime`). A `Ref` is the exception, and not a small one: releasing
-            // a cell bumps its generation and returns its SLOT to a fixed slab of
-            // 65536. `freelist.vyrn` puts 100,000 allocations through it and only
-            // fits because the release fires.
             // `region { .. }` (RFC-0004 §4). An arena scope, and in this backend
             // that is a counter and its trap — see `region_exit` for why the arena
             // itself is the allocator's ceiling rather than a region-shaped hole.
@@ -2028,8 +2108,8 @@ impl Fn_<'_> {
             }
             Stmt::Drop { name, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
-                if matches!(self.cx.resolve(&ty), Type::Ref(_)) {
-                    self.emit_release(b, place, *line)?;
+                if let Some(r) = self.rel_for(&ty, *line)? {
+                    self.emit_rel(b, place, &r, *line)?;
                 }
             }
             Stmt::Expr(e) => {
@@ -6499,11 +6579,9 @@ impl Fn_<'_> {
         Ok(())
     }
 
-    /// A stream's release. A buffer's is nothing — this backend's allocator is a
-    /// bump pointer that never frees, exactly as for `Stmt::Drop` of an array —
-    /// but a producer owns a cursor cell, and a cell is a slot in a slab of
-    /// 65536 that a leak WOULD exhaust. So the branch is real here even though
-    /// half of it is empty.
+    /// A stream's release: a buffer hands back the array data it was given, a
+    /// producer its cursor cell and the cursor itself. What
+    /// `__vyrn_stream_close` does, in the same order.
     fn stream_release(
         &mut self,
         b: &mut Frame,
@@ -6543,22 +6621,34 @@ impl Fn_<'_> {
         b.ins(&Instruction::Loop(BlockType::Empty));
         self.depth += 1;
 
-        // A buffer holds nothing this allocator can hand back.
+        // A buffer owns the array data it was handed, and that is where the walk
+        // ends.
         b.ins(&Instruction::LocalGet(cur));
         b.ins(&Instruction::I64Load(at(sl.fields[2])));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(cur));
+        b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        let out_of_if = self.br_to(out);
+        b.ins(&Instruction::Br(out_of_if));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
         let leave = self.br_to(out);
-        b.ins(&Instruction::BrIf(leave));
 
         // The generation check, then the cell's two halves: the stream behind it
-        // (null unless this is a wrapper) and the slot itself.
+        // (null unless this is a wrapper) and the slot itself. The payload is the
+        // cursor, freed on both exits — the order `__vyrn_stream_close` frees it
+        // in, so the two backends release the same things in the same sequence.
+        let pay = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(cur));
         b.ins(&Instruction::I64Load(at(sl.fields[4])));
         b.ins(&Instruction::LocalGet(cur));
         b.ins(&Instruction::I64Load(at(sl.fields[5])));
         b.ins(&Instruction::Call(self.cx.rt.cell_addr));
-        b.ins(&Instruction::Drop);
+        b.ins(&Instruction::LocalSet(pay));
         b.ins(&Instruction::LocalGet(cur));
         b.ins(&Instruction::I64Load(at(sl.fields[4])));
         b.ins(&Instruction::Call(self.cx.rt.cell_srcp));
@@ -6567,6 +6657,8 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalGet(cur));
         b.ins(&Instruction::I64Load(at(sl.fields[4])));
         b.ins(&Instruction::Call(self.cx.rt.cell_release));
+        b.ins(&Instruction::LocalGet(pay));
+        b.ins(&Instruction::Call(self.cx.rt.free));
 
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Eqz);
@@ -7088,9 +7180,23 @@ impl Fn_<'_> {
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::LocalSet(cap));
 
-        // Full: 0 → 4, else double. Growing means allocating and copying rather
-        // than `realloc`ing, because this backend's allocator is a bump pointer
-        // that never frees (see `runtime`) — the old buffer is simply abandoned.
+        // Full: 0 → 4, else double. Allocate, copy, and hand the old buffer back —
+        // which is what `realloc` does for the textual backend, so growth costs the
+        // two the same heap (M6).
+        //
+        // The release waits until the element is stored, and that is not tidiness.
+        // The value expression is evaluated BELOW, and it may read the array being
+        // pushed onto — `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in `std/hash` does,
+        // through a header this `push` has not written back yet, so it reads the
+        // OLD buffer. Freeing at the growth made that a read of a block already on
+        // a free list, and SHA-1 came out wrong from the seventeenth word.
+        //
+        // `stale` is cleared first because a `push` in a loop is ONE emitted site:
+        // an iteration that grew would otherwise leave the local set and the next
+        // iteration, growing nothing, would free that block a second time.
+        let stale = b.local(ValType::I32);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::LocalSet(stale));
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::LocalGet(cap));
         b.ins(&Instruction::I64Eq);
@@ -7125,6 +7231,8 @@ impl Fn_<'_> {
         b.ins(&Instruction::I32Const(stride));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalSet(stale));
         b.ins(&Instruction::LocalGet(grown));
         b.ins(&Instruction::LocalSet(data));
         self.depth -= 1;
@@ -7144,6 +7252,9 @@ impl Fn_<'_> {
             }
             Repr::Unit => return unsupported("an array of Unit", line),
         }
+        // Now nothing can read the old buffer through the caller's header.
+        b.ins(&Instruction::LocalGet(stale));
+        b.ins(&Instruction::Call(self.cx.rt.free));
         let off = b.alloc(l.size, l.align);
         b.slot(off + l.fields[0]);
         b.ins(&Instruction::LocalGet(data));
@@ -7329,11 +7440,14 @@ impl Fn_<'_> {
     /// The binding a mutating array method is applied to. Anything else is a gap
     /// rather than a silent no-op: a `pop` whose shrink went nowhere is a wrong
     /// program.
-    /// Release the cell a `Ref` binding names: check the generation, then hand the
-    /// slot back. The payload is not freed, because a bump allocator has no free.
+    /// Release the cell a `Ref` binding names: check the generation, free the
+    /// payload, then hand the slot back.
     ///
     /// `{ i64 slot, i64 generation }` whatever the `T`, so the layout is asked for
-    /// once with a stand-in rather than threaded through every caller.
+    /// once with a stand-in rather than threaded through every caller. The payload
+    /// is one `malloc` at `cell(..)` whatever the `T` as well, so freeing it needs
+    /// no type either — which is why the generation check's own result is the
+    /// address handed to `free` rather than being dropped (M6).
     fn emit_release(&mut self, b: &mut Frame, place: Place, line: usize) -> Result<(), String> {
         let l = self.layout_of(&Type::Ref(Box::new(Type::Int)), line)?;
         let r = self.scratch(b, ValType::I32, 6);
@@ -7345,7 +7459,7 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalGet(r));
         b.ins(&Instruction::I64Load(at(l.fields[1])));
         b.ins(&Instruction::Call(self.cx.rt.cell_addr));
-        b.ins(&Instruction::Drop);
+        b.ins(&Instruction::Call(self.cx.rt.free));
         b.ins(&Instruction::LocalGet(r));
         b.ins(&Instruction::I64Load(at(l.fields[0])));
         b.ins(&Instruction::Call(self.cx.rt.cell_release));
@@ -8332,11 +8446,12 @@ impl Fn_<'_> {
 
     /// Room for one more entry: 0 to 4, else double, growing BOTH buffers.
     ///
-    /// Allocate-and-copy rather than realloc, for the reason `push` gives — this
-    /// backend's allocator is a bump pointer and abandons the old buffer.
+    /// Allocate, copy, free the old — the shape `push` grows in, and what
+    /// `__vyrn_map_reserve`'s `realloc` does for the textual backend.
     fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32) {
         let (nc, nk, nv) = (b.local(ValType::I32), b.local(ValType::I32), b.local(ValType::I32));
         let len = b.local(ValType::I32);
+        let old = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
@@ -8374,10 +8489,13 @@ impl Fn_<'_> {
             b.ins(&Instruction::LocalTee(into));
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::I32Load(word_at(field)));
+            b.ins(&Instruction::LocalTee(old));
             b.ins(&Instruction::LocalGet(len));
             b.ins(&Instruction::I32Const(stride));
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            b.ins(&Instruction::LocalGet(old));
+            b.ins(&Instruction::Call(self.cx.rt.free));
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::LocalGet(into));
             b.ins(&Instruction::I32Store(word_at(field)));
@@ -8716,6 +8834,9 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalSet(hdr));
 
         let (len, cap, base) = self.sa_parts(b, hdr, &l, n);
+        let stale = b.local(ValType::I32);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::LocalSet(stale));
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::LocalGet(cap));
         b.ins(&Instruction::I64Eq);
@@ -8738,6 +8859,13 @@ impl Fn_<'_> {
         b.ins(&Instruction::I32Const(stride));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        // From the inline slots `base` is a frame address, which is below
+        // `HEAP_BASE` and which `free` therefore ignores; from a spilled buffer it
+        // is the block `realloc` would have released for the textual backend. Held
+        // until the element is stored, for `push`'s reason: the value expression
+        // may read the array through the caller's header, which still names it.
+        b.ins(&Instruction::LocalGet(base));
+        b.ins(&Instruction::LocalSet(stale));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(nb));
         b.ins(&Instruction::I32Store(word_at(l.fields[2])));
@@ -8763,6 +8891,8 @@ impl Fn_<'_> {
             }
             Repr::Unit => return unsupported("a SmallArray of Unit", line),
         }
+        b.ins(&Instruction::LocalGet(stale));
+        b.ins(&Instruction::Call(self.cx.rt.free));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::I64Const(1));
@@ -9155,6 +9285,9 @@ fn store_of(ll: &str) -> Instruction<'static> {
 struct Rt {
     write_all: u32,
     malloc: u32,
+    /// Hand a block back to its size class (RFC-0077 M6). Paired with `malloc` in
+    /// the table because the two share the header format and nothing else does.
+    free: u32,
     strlen: u32,
     strcmp: u32,
     trap: u32,
@@ -9251,7 +9384,23 @@ struct Rt {
     /// wasm global for M2f's reason — module state showed that one mechanism in
     /// memory beats two, and `reserve` is that mechanism.
     region_sp: u32,
+    /// The free list head of each size class (RFC-0077 M6), `MAX_CLASS -
+    /// MIN_CLASS + 1` words. Zero-filled by `reserve`, which is what an empty
+    /// list is.
+    heads: u32,
 }
+
+/// The bytes in front of every heap block, holding its size class.
+///
+/// See `malloc` for why there is a header at all — one of the six things `own`
+/// releases cannot recover its own size.
+const HDR: u32 = 8;
+/// The smallest class index: `shift = 0, sub = 3`, which is eight bytes — the
+/// width of the list link `free` writes into a released payload.
+const MIN_CLASS: u32 = 3;
+/// The largest: `shift = 28, sub = 3`, which is 2 GiB. Past it a block plus its
+/// header cannot fit a wasm32 memory at all.
+const MAX_CLASS: u32 = 115;
 
 impl Rt {
     /// Hand out the index of every runtime function, in the order the bodies are
@@ -9287,6 +9436,7 @@ impl Rt {
         let mut rt = Rt {
             write_all: slot("write_all"),
             malloc: slot("malloc"),
+            free: slot("free"),
             strlen: slot("strlen"),
             strcmp: slot("strcmp"),
             trap: slot("trap"),
@@ -9337,6 +9487,7 @@ impl Rt {
             msg_oob_end: 0,
             msg_region: 0,
             region_sp: 0,
+            heads: 0,
         };
         rt.count = table.len() as u32;
         (rt, table)
@@ -9456,83 +9607,248 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // allocated those, and then copied 2 GiB into them — heap corruption out of
     // an allocation that reported success.
     //
-    // ponytail: it never frees. Vyrn's ownership analysis knows exactly where every
-    // value dies (`Stmt::Drop` is already in the AST), so a real allocator belongs
-    // here eventually; nothing observable depends on it, because a free is not a
-    // thing a program can print.
-    let (p, end) = (2, 3);
+    // It frees since M6, and the shape is a segregated free list over size classes
+    // with an eight-byte header holding the class index.
+    //
+    // The header was not the first choice. A compile-time ownership model knows
+    // the size at the release as well as at the allocation, so it can size-class
+    // with no header at all — and for four of `own`'s six kinds it does: an array,
+    // a map and a `SmallArray` all carry their `cap` in the aggregate, and a cell
+    // payload's type is a compile-time fact. The fifth breaks it. A `String` is a
+    // bare NUL-terminated pointer, so a drop site can recover its LENGTH with
+    // `strlen` and cannot recover its CAPACITY — and RFC-0081's `str_append`
+    // exists precisely to allocate capacity beyond length. Sizing a headerless
+    // free from `strlen` would file a 1024-byte block on the 128-byte list and
+    // hand out overlapping memory later. Eight bytes per live block, in one
+    // function each way, is cheaper than threading a capacity to every drop.
+    //
+    // The classes are four steps per power of two — `(4 + sub) << shift` for
+    // `sub` in 0..3 — and that is not decoration either. Plain powers of two were
+    // written first and measured: they doubled `vyrnView`'s never-freed leak from
+    // 24 MB per 500 calls to 48 MB, because rounding a payload UP is a cost every
+    // block pays and only a REUSED block earns back. Four steps cap the round-up
+    // at 25%. The header sits outside the class for the same reason: a block is
+    // `8 + size`, so an 8192-byte array buffer is not pushed into the next class
+    // by its own header.
+    let (p, end, cls, h) = (2, 3, 4, 5);
+    let (want, shift, sub, sz) = (6, 7, 8, 9);
     let trap = rt.trap;
     let oom = rt.intern(m, "error: out of memory\n");
+    // One head per class, indexed by the class directly — the three below
+    // `MIN_CLASS` are unreachable and cost twelve bytes, against a subtraction at
+    // both ends. In reserved memory rather than in globals for M2f's reason:
+    // module state showed that one mechanism in memory beats two.
+    rt.heads = m.reserve(4 * (MAX_CLASS + 1), 4);
+    let heads = rt.heads;
     rt.next_is(m, rt.malloc);
-    m.func(&[ValType::I64], &[ValType::I32], &[ValType::I32, ValType::I64], 0, |b| {
-        // The width check, BEFORE the rounding — the native shim puts it before
-        // the `(size_t)` cast for the same reason, and here `n + 7` is the cast:
-        // a request of 2^64-1 rounds to 0 and would bump the heap by nothing,
-        // handing back a pointer for sixteen exabytes.
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I64Const(0xFFFF_FFFF))
-            .ins(&Instruction::I64GtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(oom as i32))
-            .ins(&Instruction::Call(trap))
-            .ins(&Instruction::End);
-        // The bump itself, in 64 bits so the SUM cannot wrap either: a 3 GiB heap
-        // plus a 2 GiB request is 5 GiB, which as an `i32` was a small pointer
-        // that then passed the `memory.size` test below. A wasm32 memory stops at
-        // 4 GiB, so a top past it is a request that can never be served —
-        // reported with the words `memory.grow` failing reports, since it is the
-        // same failure reached one step earlier.
-        b.ins(&Instruction::GlobalGet(HEAP))
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::I64ExtendI32U)
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I64Const(7))
-            .ins(&Instruction::I64Add)
-            .ins(&Instruction::I64Const(-8))
-            .ins(&Instruction::I64And)
-            .ins(&Instruction::I64Add)
-            .ins(&Instruction::LocalTee(end))
-            .ins(&Instruction::I64Const(0xFFFF_FFFF))
-            .ins(&Instruction::I64GtU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(oom as i32))
-            .ins(&Instruction::Call(trap))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(end))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::GlobalSet(HEAP))
-            .ins(&Instruction::Block(BlockType::Empty))
-            .ins(&Instruction::Loop(BlockType::Empty))
-            .ins(&Instruction::GlobalGet(HEAP))
-            .ins(&Instruction::MemorySize(0))
-            .ins(&Instruction::I32Const(16))
-            .ins(&Instruction::I32Shl)
-            .ins(&Instruction::I32LeU)
-            .ins(&Instruction::BrIf(1))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::MemoryGrow(0))
-            // A grow that fails returns -1 and leaves `memory.size` where it was,
-            // so dropping the result re-tests the same condition and grows again
-            // — forever, with no output. Not academic: a browser
-            // `WebAssembly.Memory` is routinely constructed with a `maximum`, and
-            // the browser is a first-class target, so the capped memory is the
-            // normal case and the hang is what a user would see. Uncapped it was
-            // masked, badly: growth ran to the 4 GiB ceiling and the wrapped bump
-            // pointer trapped out of bounds instead.
+    m.func(
+        &[ValType::I64],
+        &[ValType::I32],
+        &[
+            ValType::I32,
+            ValType::I64,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+        ],
+        0,
+        |b| {
+            // The width check, BEFORE the rounding — the native shim puts it
+            // before the `(size_t)` cast for the same reason, and here `n + 7` is
+            // the cast: a request of 2^64-1 rounds to 0 and would bump the heap by
+            // nothing, handing back a pointer for sixteen exabytes.
             //
-            // The wording is the native shim's `__vyrn_alloc_check`
-            // (`toolchain.rs`), not new words, because parity compares stderr byte
-            // for byte across the three engines.
-            .ins(&Instruction::I32Const(-1))
-            .ins(&Instruction::I32Eq)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(oom as i32))
-            .ins(&Instruction::Call(trap))
-            .ins(&Instruction::End)
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End)
-            .ins(&Instruction::LocalGet(p));
+            // The ceiling is 2 GiB rather than 4, because the class rounds UP and
+            // the largest class is 2 GiB. A request between them could never have
+            // been served anyway: the block would have to be its own class plus
+            // the header, past where a wasm32 memory ends.
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I64Const(0x8000_0000))
+                .ins(&Instruction::I64GtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(oom as i32))
+                .ins(&Instruction::Call(trap))
+                .ins(&Instruction::End);
+            // `t = max(round8(n), 8) - 1`. The floor of 8 is what makes a freed
+            // block wide enough to hold the list link `free` writes into it, and
+            // it also puts `t >= 7`, so the `shift` below cannot go negative.
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I64Const(7))
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::I64Const(-8))
+                .ins(&Instruction::I64And)
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::LocalTee(want))
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::LocalSet(want))
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(want))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::LocalSet(want));
+            // `shift = floor_log2(t) - 2`, i.e. `29 - clz(t)`, and `sub` is the
+            // two bits under the leading one. Then `cls = shift * 4 + sub` and
+            // `size = (sub + 5) << shift` — the class covers
+            // `((sub + 4) << shift, (sub + 5) << shift]`, so every size is a
+            // multiple of 8 and the smallest is 8.
+            b.ins(&Instruction::I32Const(29))
+                .ins(&Instruction::LocalGet(want))
+                .ins(&Instruction::I32Clz)
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::LocalSet(shift));
+            b.ins(&Instruction::LocalGet(want))
+                .ins(&Instruction::LocalGet(shift))
+                .ins(&Instruction::I32ShrU)
+                .ins(&Instruction::I32Const(3))
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::LocalSet(sub));
+            b.ins(&Instruction::LocalGet(shift))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalGet(sub))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(cls));
+            b.ins(&Instruction::LocalGet(sub))
+                .ins(&Instruction::I32Const(5))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(shift))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalSet(sz));
+            // `h = &heads[cls]`, then the class's first block if it has one. A
+            // recycled block already carries the right header, so the reuse path
+            // writes only the list.
+            b.ins(&Instruction::LocalGet(cls))
+                .ins(&Instruction::I32Const(4))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I32Const(heads as i32))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(h))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalTee(p))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(h))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::Else);
+            // The bump itself, in 64 bits so the SUM cannot wrap either: a 3 GiB
+            // heap plus a 2 GiB request is 5 GiB, which as an `i32` was a small
+            // pointer that then passed the `memory.size` test below. A wasm32
+            // memory stops at 4 GiB, so a top past it is a request that can never
+            // be served — reported with the words `memory.grow` failing reports,
+            // since it is the same failure reached one step earlier.
+            b.ins(&Instruction::GlobalGet(HEAP))
+                .ins(&Instruction::LocalTee(p))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::LocalGet(sz))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Const(HDR as i64))
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::LocalTee(end))
+                .ins(&Instruction::I64Const(0xFFFF_FFFF))
+                .ins(&Instruction::I64GtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(oom as i32))
+                .ins(&Instruction::Call(trap))
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(end))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::GlobalSet(HEAP))
+                .ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::GlobalGet(HEAP))
+                .ins(&Instruction::MemorySize(0))
+                .ins(&Instruction::I32Const(16))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::I32LeU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::MemoryGrow(0))
+                // A grow that fails returns -1 and leaves `memory.size` where it
+                // was, so dropping the result re-tests the same condition and grows
+                // again — forever, with no output. Not academic: a browser
+                // `WebAssembly.Memory` is routinely constructed with a `maximum`,
+                // and the browser is a first-class target, so the capped memory is
+                // the normal case and the hang is what a user would see. Uncapped
+                // it was masked, badly: growth ran to the 4 GiB ceiling and the
+                // wrapped bump pointer trapped out of bounds instead.
+                //
+                // The wording is the native shim's `__vyrn_alloc_check`
+                // (`toolchain.rs`), not new words, because parity compares stderr
+                // byte for byte across the three engines.
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(oom as i32))
+                .ins(&Instruction::Call(trap))
+                .ins(&Instruction::End)
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            // Header, then hand back the payload past it.
+            b.ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(cls))
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::I32Const(HDR as i32))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(p))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(p));
+        },
+    );
+
+    // free(p) — push the block back on its class's list.
+    //
+    // Everything it refuses, it refuses SILENTLY, and that is the design: a wrong
+    // free is worse than no free, and this backend has no ASan behind it. A
+    // pointer below `HEAP_BASE` never came out of `malloc` — `drop s` on a
+    // `String` bound to a literal hands over a data-segment address, and null is
+    // the `SmallArray` that never spilled and the `Map` that never grew. A header
+    // outside the class range is memory this allocator did not write. Both leak
+    // rather than corrupt.
+    rt.next_is(m, rt.free);
+    m.func(&[ValType::I32], &[], &[ValType::I32, ValType::I32], 0, |b| {
+        let (cls, h) = (2, 3);
+        b.ins(&Instruction::Block(BlockType::Empty))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::GlobalGet(HEAP_BASE))
+            .ins(&Instruction::I32LtU)
+            .ins(&Instruction::BrIf(0));
+        b.ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Const(HDR as i32))
+            .ins(&Instruction::I32Sub)
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::LocalTee(cls))
+            .ins(&Instruction::I32Const(MIN_CLASS as i32))
+            .ins(&Instruction::I32LtS)
+            .ins(&Instruction::BrIf(0));
+        b.ins(&Instruction::LocalGet(cls))
+            .ins(&Instruction::I32Const(MAX_CLASS as i32))
+            .ins(&Instruction::I32GtS)
+            .ins(&Instruction::BrIf(0));
+        // `*p = heads[cls]; heads[cls] = p` — the link lives in the payload, which
+        // the `MIN_CLASS` floor guarantees is wide enough to hold it.
+        b.ins(&Instruction::LocalGet(cls))
+            .ins(&Instruction::I32Const(4))
+            .ins(&Instruction::I32Mul)
+            .ins(&Instruction::I32Const(heads as i32))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalTee(h))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::LocalGet(h))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Store(word()))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Store(word()))
+            .ins(&Instruction::End);
     });
 
     // strlen(s)
@@ -9756,22 +10072,15 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // caller's frame; the new pointer comes back as the result because a wasm
     // local has no address to write through (RFC-0081).
     //
-    // The grow is `malloc` and copy, not a `realloc`, because this backend's
-    // allocator IS a bump pointer with no free (see `malloc` above) — so there is
-    // nothing to hand a block back to, and nothing to extend it into once the
-    // next element's string has been bumped past it. That is not the quadratic
-    // part: doubling makes N appends copy O(N) bytes in total and bump O(N) of
-    // heap, where `concat` per element copied and bumped O(N²) — which is why 40k
-    // `Int64` did not merely take 1.4 s, it walked the bump pointer past 4 GiB
-    // and trapped out of bounds on 229 KB of JSON.
-    //
-    // ponytail: a bump allocator can extend its own top allocation in place
-    // (`HEAP == p + cap`), which would make an accumulator with nothing allocated
-    // after it grow for free. Not taken — the writers that matter allocate each
-    // element's string BETWEEN appends, so the accumulator is never on top and
-    // the fast path would never fire in the case this exists for.
+    // The grow is `malloc`, copy and `free`, not a `realloc`: this allocator has
+    // no in-place extend, because the block after an accumulator belongs to
+    // whatever the writer allocated between two appends. Doubling is what makes N
+    // appends copy O(N) bytes in total, where `concat` per element copied O(N²) —
+    // which is why 40k `Int64` did not merely take 1.4 s, it walked the heap past
+    // 4 GiB and trapped out of bounds on 229 KB of JSON.
     let (st, p, v) = (0, 1, 2);
     let (vlen, cap, len, need, nc, nb) = (4, 5, 6, 7, 8, 9);
+    let free = rt.free;
     rt.next_is(m, rt.str_append);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
@@ -9849,6 +10158,10 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::LocalGet(p))
                 .ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                // Only this branch frees. `cap != 0` is what says the buffer is
+                // ours; the `cap == 0` branch above copies a pointer that is not.
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::Call(free))
                 .ins(&Instruction::LocalGet(nb))
                 .ins(&Instruction::LocalSet(p))
                 .ins(&Instruction::LocalGet(st))

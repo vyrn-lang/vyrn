@@ -380,7 +380,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // name it `"string"` (NUL-decoded) or `"bool"`, else an i32 result is a
   // number. `i64` results are BigInt, floats are numbers. See web/README.md.
   const returnHints = hooks.exportReturns || {};
-  const RESERVED = new Set(["memory", "_start", "__vyrn_malloc"]);
+  const RESERVED = new Set(["memory", "_start", "__vyrn_malloc", "__vyrn_free"]);
   const wrappedExports = {};
   for (const ex of mod.exports) {
     if (ex.kind !== 0 || !ex.type) continue; // functions only
@@ -392,28 +392,52 @@ export async function runVyrn(wasmBytes, hooks = {}) {
     if (typeof raw !== "function") continue;
     wrappedExports[ex.field] = (...jsArgs) => {
       const call = [];
+      // Every buffer this call allocated inside the module. The CALLER owns a
+      // String argument (RFC-0012), and across this boundary the caller is here —
+      // so this list is what has to be handed back. Before RFC-0077 M6 there was
+      // nothing to hand it to: `__vyrn_malloc` was the only allocator symbol a
+      // module exported, and 20000 keystrokes cost 18 MB.
+      const owned = [];
       for (let k = 0; k < params.length; k++) {
         const t = params[k];
         const a = jsArgs[k];
         if (t === "i64") {
           call.push(typeof a === "bigint" ? a : BigInt(Math.trunc(Number(a))));
         } else if (t === "i32") {
-          if (typeof a === "string") call.push(encodeString(a));
-          else if (typeof a === "boolean") call.push(a ? 1 : 0);
+          if (typeof a === "string") {
+            const p = encodeString(a);
+            owned.push(p);
+            call.push(p);
+          } else if (typeof a === "boolean") call.push(a ? 1 : 0);
           else call.push(Number(a) | 0);
         } else {
           call.push(Number(a)); // f32 / f64
         }
       }
-      const r = raw(...call);
-      if (result === undefined) return undefined; // Unit
-      if (result === "i64") return r; // BigInt
-      if (result === "i32") {
-        if (hint === "string") return decodeCString(r);
-        if (hint === "bool") return r !== 0;
-        return r;
+      let out;
+      try {
+        const r = raw(...call);
+        // Decoded BEFORE the release, because an export may return the pointer it
+        // was given and `free` writes its list link into the block.
+        if (result === undefined) out = undefined; // Unit
+        else if (result === "i64") out = r; // BigInt
+        else if (result === "i32") {
+          if (hint === "string") out = decodeCString(r);
+          else if (hint === "bool") out = r !== 0;
+          else out = r;
+        } else out = r; // f32 / f64 — number
+      } finally {
+        // A trap leaves the module unusable, but a `panic` the page catches does
+        // not, so the release runs on both paths.
+        const free = instance.exports.__vyrn_free;
+        if (typeof free === "function") for (const p of owned) free(p);
       }
-      return r; // f32 / f64 — number
+      return out;
+      // NOT freed: a returned String. Who owns one is `own::analyze`'s answer and
+      // it differs per function — a module-state field or a literal is borrowed,
+      // and releasing it here would be a use-after-free. Nothing crosses this
+      // boundary that says which, so a returned String still leaks. See RFC-0077
+      // "M6 — as landed".
     };
   }
 
@@ -429,5 +453,8 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   }
   // `exports`: the exported-extern functions, callable AFTER `_start` ran `main`
   // once — the instance stays alive (RFC-0012 M2 post-`_start` callability).
-  return { exitCode, stdout, stderr, exports: wrappedExports };
+  // `memory`: the instance's linear memory. `memory.buffer.byteLength` is the
+  // only way to see whether the module reclaims what it allocates, which is why
+  // nothing saw that it did not (RFC-0077 M6).
+  return { exitCode, stdout, stderr, exports: wrappedExports, memory };
 }

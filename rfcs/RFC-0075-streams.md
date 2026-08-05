@@ -467,6 +467,9 @@ means giving both analyses a scope-id key at once. And the `close` on the direct
 wasm backend reclaims nothing, because that backend's `malloc` is a bump pointer
 that never frees — pre-existing, already noted at its `region_exit`, and
 unobservable, since a released stream cannot be named again on any engine.
+(RFC-0077 M6 gave that backend a free list, and `close` there now frees a buffer
+stream's buffer and a producer's cursor, in the order `__vyrn_stream_close`
+does.)
 
 ## As landed — M2
 
@@ -676,7 +679,8 @@ Three smaller things, stated so they are not mistaken for coverage.
 - **The direct wasm backend still reclaims nothing for a buffer stream**, which
   is M1's note unchanged — its `malloc` is a bump pointer. The cursor cell is
   the exception and the reason `close` grew a real body there: the slab is not
-  the bump heap, and it is finite.
+  the bump heap, and it is finite. (Closed by RFC-0077 M6: that `malloc` frees,
+  and the buffer arm of the release is no longer empty.)
 
 `channel` is unchanged by any of this. It is push-shaped, and the representation
 was never what stood in its way — this RFC adds no concurrency and RFC-0013
