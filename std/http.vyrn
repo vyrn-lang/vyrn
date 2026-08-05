@@ -198,7 +198,7 @@ fn httpTidy(pattern: String) -> String {
     if pattern.endsWith("/") && pattern != "/" {
         return substring(pattern, 0, pattern.byteLength - 1)
     }
-    return pattern
+    return pattern.copy()
 }
 
 /// `GET` this route. The four below are the same call with another verb; the
@@ -841,7 +841,7 @@ fn httpInvokeWhole(h: Surface, req: Request) -> Option<Response> {
 // `notFoundWhen`'s capture-free predicate.
 
 /// The route's policy over the answer its handler gave.
-fn httpApply(r: Route, req: Request, resp: Response) -> Response {
+fn httpApply(r: Route, req: Request, resp: consume Response) -> Response {
     // A mounted subsystem writes its own headers and owns its own caching; a
     // prefix route has no policy to apply anyway (no combinator returns one).
     if r.prefix {
@@ -965,7 +965,7 @@ fn httpUnweak(t: String) -> String {
 
 /// `notFoundWhen`'s answer: a procedure that returned `Err(why)` for a reason this
 /// route calls absence is a 404, not a 200 carrying an error object.
-fn httpMapMissing(r: Route, resp: Response) -> Response {
+fn httpMapMissing(r: Route, resp: consume Response) -> Response {
     if resp.status != 200 {
         return resp
     }
@@ -975,7 +975,7 @@ fn httpMapMissing(r: Route, resp: Response) -> Response {
     }
 }
 
-fn httpMaybe404(r: Route, resp: Response, why: String) -> Response {
+fn httpMaybe404(r: Route, resp: consume Response, why: String) -> Response {
     if httpAsk(r.missing, why) == false {
         return resp
     }
@@ -1075,7 +1075,7 @@ fn httpText(v: Json) -> String {
 /// name is left verbatim: a wrong `Location` should be visible in the URL, not
 /// silently shortened to one that resolves to something else.
 fn httpFill(template: String, body: String) -> String {
-    let mut out = template
+    let mut out = template.copy()
     for f in httpPayload(body) {
         out = replace(out, "{" + f.key + "}", httpText(f.value))
     }
@@ -1271,7 +1271,7 @@ fn httpSubsumes(a: Route, b: Route) -> Bool {
 /// integer-only, and no dogfood has one.
 export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> String {
     if ps.length == 0 {
-        return body
+        return body.copy()
     }
     let mut fs: Array<JsonField> = []
     for k in ps.keys() {

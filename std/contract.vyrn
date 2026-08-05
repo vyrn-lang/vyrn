@@ -239,18 +239,18 @@ fn exportSpelling(e: Export) -> String {
     if e.kind == "fn" {
         return sigSpelling(e.params, e.ret)
     }
-    return e.ret
+    return e.ret.copy()
 }
 
 /// How a member's type reads in a diagnostic (same notation as `exportSpelling`).
 fn memberSpelling(m: MemberInfo) -> String {
     if m.kind == "fn" {
         if m.variadic {
-            return m.spelling
+            return m.spelling.copy()
         }
         return sigSpelling(m.params, m.ret)
     }
-    return m.spelling
+    return m.spelling.copy()
 }
 
 // ---- reporting -------------------------------------------------------------

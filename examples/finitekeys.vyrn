@@ -26,7 +26,7 @@ type Section = String where value =~ "home|about|settings"
 /// A translation lookup keyed by a compile-time-checked key. A bad key is a
 /// compile error at every call site; there is no runtime key validation to pay.
 fn t(key: TransKey) -> String {
-    return key
+    return key.copy()
 }
 
 /// Build a nav-label key from a section. The interpolation is PROVEN contained

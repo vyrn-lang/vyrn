@@ -460,12 +460,12 @@ gen fn parseBranches(blob: String) -> Branches {
 gen fn branchText(br: Branches, sel: String) -> String {
     for b in br.branches {
         if b.selector == sel {
-            return b.text
+            return b.text.copy()
         }
     }
     for b in br.branches {
         if b.selector == "other" {
-            return b.text
+            return b.text.copy()
         }
     }
     return ""
@@ -830,7 +830,7 @@ gen fn compileSelect(br: Branches, tag: String, ind: String, argName: String) ->
 /// clauses, the else body is emitted bare (a locale with only `other`).
 gen fn emitChain(clauses: Array<String>, bodies: Array<String>, otherBody: String, ind: String) -> String {
     if clauses.length == 0 {
-        return otherBody
+        return otherBody.copy()
     }
     let mut code = ind + "if " + clauses[0] + " {\n"
     code = code + bodies[0]
@@ -1300,7 +1300,7 @@ gen fn buildT(tags: Array<String>, datas: Array<LocaleData>) -> String {
         out = out + "    }\n"
         k = k + 1
     }
-    out = out + "    return key\n}\n"
+    out = out + "    return key.copy()\n}\n"
     return out
 }
 

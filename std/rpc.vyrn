@@ -626,7 +626,7 @@ export gen fn rpcInProcess(contract: String) -> String {
 // generator. RFC-0072's audience rule forbids the same edge from the other
 // direction, and neither one depends on the other being right.
 
-import { Json, JsonField } from "std/json"
+import { Json, JsonField, copyJson } from "std/json"
 import { parseJson } from "std/jsonread"
 import { replace, split } from "std/strings"
 
@@ -731,7 +731,7 @@ fn rpcFieldsOf(j: Json) -> Array<JsonField> {
 fn rpcMember(j: Json, key: String) -> Json {
     for f in rpcFieldsOf(j) {
         if f.key == key {
-            return f.value
+            return copyJson(f.value)
         }
     }
     return JNull
@@ -830,10 +830,13 @@ gen fn rpcRoutesOf(mods: Array<RpcModule>, cfg: RpcConfig) -> Array<RpcRoute> {
         let iface = moduleInterface(m.modPath)
         for f in iface.functions {
             let path = rpcPathFor(cfg, m.rel, f.name)
+            // `pinned` reads `path` before the record takes it: the literal is
+            // the move, so the comparison has to happen first.
+            let pinned = path != rpcTemplatePath(cfg, m.rel, f.name)
             out.push(RpcRoute {
                     path: path,
                     key: m.rel + "/" + f.name,
-                    pinned: path != rpcTemplatePath(cfg, m.rel, f.name),
+                    pinned: pinned,
                 })
         }
     }

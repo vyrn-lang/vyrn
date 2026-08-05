@@ -39,7 +39,7 @@ fn pasteTitle(p: Paste) -> String {
     if p.title.byteLength == 0 {
         return t.binUntitled()
     }
-    return p.title
+    return p.title.copy()
 }
 </script>
 

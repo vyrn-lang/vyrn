@@ -252,6 +252,69 @@ still 1,590 bytes and `domdemo.wasm` still 27,630: nothing that does not call
 The corpus still writes `arg + ""` in five places. Migrating them is M3b (the
 plan's Phase 6), where the diagnostic that points at `copy` lands with them.
 
+## M2 as landed, part one — rules 1 and 3
+
+Phase 4b enforces **rule 1** (a value moves) and **rule 3** (a return is owned).
+Rule 2's store refusal is measured, written and **not turned on**: see "What rule
+2 costs" below. Four things this RFC did not say.
+
+1. **A `let` of a borrow is not a store.** The RFC says a borrowed value "cannot
+   be stored in a field, captured by an escaping closure, put in a container, or
+   returned". An earlier reading added `let` to that list and refused
+   `let ss = h.stylesheets`. That reading is wrong, and rule 2's own argument
+   says why: a borrow needs no lifetime *because its lifetime is the call*, and
+   a second local name cannot outlive the first. The new name is a borrow too,
+   and every rule that governs the parameter governs it.
+
+2. **A field read is a borrow, not a partial move.** `let t = r.s` does not take
+   `s` out of `r` and leave a hole — rule 4 says the place owns its contents, so
+   the record still does. `t` is a projection, second-class exactly like a
+   parameter. The same holds for a `match` binder over a place scrutinee and for
+   an element read.
+
+3. **Builtins that store need a convention, and three of them do.** The census
+   called `builtin_producers` a hand list that rule 2 would delete. The sink side
+   is the same list read backwards: `push`, `set` and `cell` put their argument
+   somewhere that outlives the call, and rule 1 governs them exactly as it
+   governs `xs = [.., v]`. Everything else a builtin does with a heap argument is
+   a read.
+
+4. **`copy` is not recursive, and the RFC's M1b section says it is.** "Structural
+   and recursive ... through their payloads" is true of a type with a bottom. A
+   type that reaches itself — `Json` through `JArr`, `VyxNode` through its
+   children — has none, and both compiling backends expanded one until the
+   compiler's stack ran out: a crash, at compile time, with no line on it. That
+   was true from the day M1b landed; rule 3 found it, because a `Json` field
+   lookup is one of the sites rule 3 sends through `copy`. `copy` now refuses a
+   self-referring type and names the fix, and `std/json` exports `copyJson` as
+   the worked example. RFC-0091 M1's `Copy` protocol is where a type declares its
+   own.
+
+### What rule 2 costs, measured
+
+Rule 2's store refusal is implemented and gated off, because the corpus says it
+is a phase of its own rather than a paragraph of this one. Over `examples/` and
+`std/`, with rules 1 and 3 already migrated:
+
+| site | count |
+|---|---|
+| a loop variable stored (`for x in xs { out.push(x) }`) | 154 |
+| a `read`/`modify` parameter stored | 105 |
+| a projection stored | 29 |
+
+288 sites, against the 45 the M0 gate predicted. The gate is not wrong and
+neither is the rule: M0 counted two shapes, `return p` and `let y = x`, and rule
+2 governs five. Rules 1 and 3 came to 65 sites, which is the M0 number plus the
+returns it could not see through a loop variable.
+
+The 154 are the number to argue about. `for x in xs { out.push(x) }` has no
+`consume` spelling — iteration binds a `read` borrow (RFC-0090's decision) and
+there is no way to move an element out of a container — so every one of them
+becomes `x.copy()`. That is 154 defensive copies in `std/`, which is a worse
+outcome than the leaks they replace. Either iteration gains a consuming form, or
+rule 2 lands with the copies and a benchmark, and that choice belongs to whoever
+takes rule 2, not to the phase that measured it.
+
 ## Rejected
 
 - **RFC-0088 alone** — keeps the silent-leak fallback as defined behavior;

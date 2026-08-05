@@ -195,6 +195,77 @@ impl Owned {
     }
 }
 
+/// The name of a type `ty` reaches from itself, if it reaches one.
+///
+/// `copy` is structural and recursive (RFC-0089 M1b), and a structural walk of a
+/// type that refers to itself has no bottom. Both compiling backends expanded
+/// one until the process ran out of stack — a crash, at compile time, with no
+/// diagnostic and no line. Phase 4b found it because rule 3 sends a `Json` field
+/// lookup through `copy`, and this predicate is what turns the crash into a
+/// refusal that names the type.
+///
+/// The answer for a self-referring type is a function: recursion in the value
+/// needs recursion in the code, and `std/json`'s `copyJson` is the worked
+/// example. RFC-0091 M1's `Copy` protocol is where a type declares its own.
+pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<String> {
+    fn go(
+        ty: &Type,
+        types: &HashMap<String, TypeDecl>,
+        seen: &mut Vec<String>,
+    ) -> Option<String> {
+        if let Type::Named(n) | Type::App(n, _) = ty {
+            if seen.iter().any(|s| s == n) {
+                return Some(n.clone());
+            }
+            // Not a declared name: nothing to expand, so nothing to recur into.
+            if !types.contains_key(n) {
+                return None;
+            }
+            seen.push(n.clone());
+            let r = go(&crate::types::resolve(ty, types), types, seen);
+            seen.pop();
+            return r;
+        }
+        let mut deeper = |t: &Type| go(t, types, seen);
+        match ty {
+            Type::Option(t)
+            | Type::Array(t)
+            | Type::ArrayN(t, _)
+            | Type::SmallArray(t, _)
+            | Type::Lazy(t)
+            | Type::Task(t)
+            | Type::Stream(t)
+            | Type::Ref(t) => deeper(t),
+            Type::Result(a, b) | Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
+            Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, seen)),
+            Type::Enum(vs) => vs
+                .iter()
+                .find_map(|v| v.payload.iter().find_map(|p| go(p, types, seen))),
+            _ => None,
+        }
+    }
+    go(ty, types, &mut Vec::new())
+}
+
+/// Whether a value of `ty` carries a **must-use** obligation: it has to be
+/// consumed by name, and letting it go out of scope is an error.
+///
+/// This is the row RFC-0090's downsides list promised. Ownership is affine —
+/// under RFC-0089 rule 1 a value you stop using is simply released, and that
+/// alone would have deleted RFC-0075's "a stream must be consumed" diagnostic
+/// the day rule 1 landed. A must-use type is the opt-in linear case: releasing
+/// its memory is not the same thing as discharging it, because its producer has
+/// a teardown no memory drop can run.
+///
+/// One row today, `Stream`, reached through the alias resolver so a
+/// `type Events = Stream<Event>` carries the obligation its base does. A user
+/// type joins the table when it can declare the obligation (RFC-0091 M1's
+/// protocol work), not before: an inferred must-use would be exactly the
+/// guessing this whole arc removes.
+pub fn must_use(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    matches!(crate::types::resolve(ty, types), Type::Stream(_))
+}
+
 /// Whether a value of `ty` transitively owns heap, under RFC-0089 rule 1.
 ///
 /// [`Owned::release_kind`] answers about the value's OWN storage; this asks
@@ -1737,10 +1808,18 @@ pub(crate) mod tests {
             let where_ = path.file_name().unwrap().to_string_lossy().to_string();
 
             for f in &program.functions {
-                // Rule 3: a return of a PARAMETER from a function whose result
-                // owns heap. Returning a local is a legal move and stays legal.
+                // Rule 3: a return of a BORROWED parameter from a function whose
+                // result owns heap. Returning a local is a legal move and stays
+                // legal, and so is returning a `consume` parameter — that is one
+                // of the two fixes, so counting it as a site made the migrated
+                // corpus look unmigrated. Phase 4b corrected the counter.
                 if owns_heap(&f.ret, &types, 0) {
-                    let names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+                    let names: HashSet<&str> = f
+                        .params
+                        .iter()
+                        .filter(|p| p.capability != Capability::Consume)
+                        .map(|p| p.name.as_str())
+                        .collect();
                     for (line, name) in returned_params(&f.body, &names) {
                         param_returns.push(format!("{where_}:{line} {}: return {name}", f.name));
                     }
@@ -1810,8 +1889,13 @@ pub(crate) mod tests {
         params: &[Param],
         types: &HashMap<String, TypeDecl>,
     ) -> Vec<(usize, String, String)> {
-        let mut known: HashMap<String, Type> =
-            params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+        // A `consume` parameter is already owned, so aliasing it is a legal
+        // move, not a site.
+        let mut known: HashMap<String, Type> = params
+            .iter()
+            .filter(|p| p.capability != Capability::Consume)
+            .map(|p| (p.name.clone(), p.ty.clone()))
+            .collect();
         let mut out = Vec::new();
         walk_stmts(body, &mut |s| {
             if let Stmt::Let {

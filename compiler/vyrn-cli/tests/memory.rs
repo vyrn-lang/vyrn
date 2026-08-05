@@ -190,7 +190,7 @@ fn make(a: String, b: String) -> String {
 }
 
 fn borrow(s: String) -> String {
-    return s
+    return s.copy()
 }
 
 fn main() -> Int64 {
@@ -269,11 +269,16 @@ fn why_memory_says_which_functions_transfer_ownership() {
         ),
         "{text}"
     );
-    // A function that returns a parameter hands back something it does not own
-    // — RFC-0089 rule 3's error, today's silent downgrade.
+    // This function returned its parameter until Phase 4b, and the printer
+    // downgraded it to "transfers: no". Rule 3 refuses that program, so the
+    // fixture writes `s.copy()` and the answer is yes. **No compiling program
+    // can print "transfers: no" for a heap-owning return type any more** — that
+    // branch of the printer is unreachable, which is rule 3 stated as a property
+    // of the report rather than as a diagnostic.
     assert!(
         text.contains(
-            "fn borrow(s: String) -> String\n    transfers: no — the return type String owns heap"
+            "fn borrow(s: String) -> String\n    transfers: yes — the caller owns the result, \
+             and releases it by freeing the String buffer"
         ),
         "{text}"
     );

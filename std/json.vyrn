@@ -37,6 +37,40 @@ export type Json =
     | JArr(Array<Json>)
     | JObj(Array<JsonField>)
 
+/// A `Json` that shares nothing with `j` — RFC-0089's `copy`, written out.
+///
+/// `j.copy()` is refused for this type and says why: `Json` reaches itself
+/// through `JArr` and `JObj`, and the builtin is a structural walk with no
+/// bottom to stop at. Recursion in the value needs recursion in the code, and
+/// this is that code. Every reader that looks a field out of an object needs it,
+/// because a field belongs to the object that holds it and a return is owned.
+export fn copyJson(j: Json) -> Json {
+    return match j {
+        JNull => JNull,
+        JBool(b) => JBool(b),
+        JNum(s) => JNum(s.copy()),
+        JStr(s) => JStr(s.copy()),
+        JArr(xs) => JArr(copyJsonArray(xs)),
+        JObj(fs) => JObj(copyJsonFields(fs)),
+    }
+}
+
+fn copyJsonArray(xs: Array<Json>) -> Array<Json> {
+    let mut out: Array<Json> = []
+    for x in xs {
+        out.push(copyJson(x))
+    }
+    return out
+}
+
+fn copyJsonFields(fs: Array<JsonField>) -> Array<JsonField> {
+    let mut out: Array<JsonField> = []
+    for f in fs {
+        out.push(JsonField { key: f.key.copy(), value: copyJson(f.value) })
+    }
+    return out
+}
+
 // ===========================================================================
 // Writer — canonical, correct escaping (control chars as `\u00XX`), field order
 // as stored. `emit` is compact; `emitPretty` indents.

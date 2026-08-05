@@ -31,7 +31,7 @@
 /// `std/jsonread`'s `line N, col M: <reason>` — RFC-0078's strictness ruling
 /// replaced the C reader's 0-based `at position N`.
 
-import { Json, JsonField } from "std/json"
+import { Json, JsonField, copyJson } from "std/json"
 import { parseJson } from "std/jsonread"
 import { parseInt64, parseUInt64, parseFloat64, parseFloat32 } from "std/num"
 
@@ -114,7 +114,7 @@ export fn hasField(fs: Array<JsonField>, key: String) -> Bool {
 export fn fieldAt(fs: Array<JsonField>, key: String) -> Json {
     for f in fs {
         if f.key == key {
-            return f.value
+            return copyJson(f.value)
         }
     }
     return JNull
@@ -194,7 +194,7 @@ export fn pushValidate(iss: modify Array<Issue>, path: String, message: String) 
 /// A dotted path extended by a record field (or an enum tag).
 export fn fieldPath(parent: String, field: String) -> String {
     if parent == "" {
-        return field
+        return field.copy()
     }
     return parent + "." + field
 }

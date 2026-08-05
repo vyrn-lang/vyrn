@@ -133,7 +133,7 @@ export fn keyed(k: String, node: Html) -> Html {
 
 /// `attrs` with a trailing `Key(k)`.
 fn withKey(attrs: Array<Attr>, k: String) -> Array<Attr> {
-    let mut out = attrs
+    let mut out = attrs.copy()
     out.push(Key(k))
     return out
 }
@@ -145,7 +145,7 @@ fn withKey(attrs: Array<Attr>, k: String) -> Array<Attr> {
 // ===========================================================================
 
 /// Append every byte of `src` onto `dst`, returning the grown array.
-fn appendBytes(dst: Array<UInt8>, src: Array<UInt8>) -> Array<UInt8> {
+fn appendBytes(dst: consume Array<UInt8>, src: Array<UInt8>) -> Array<UInt8> {
     let mut out = dst
     for b in src {
         out.push(b)

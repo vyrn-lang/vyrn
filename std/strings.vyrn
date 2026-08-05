@@ -296,7 +296,7 @@ export fn toUpper(s: String) -> String {
 export fn replace(s: String, from: String, to: String) -> String {
     let fl = from.byteLength
     if fl == 0 {
-        return s
+        return s.copy()
     }
     let mut out = ""
     let mut start = 0
@@ -325,7 +325,7 @@ export fn replace(s: String, from: String, to: String) -> String {
 /// A `s` already `len` bytes or longer is returned unchanged.
 export fn padStart(s: String, len: Int64, fill: String) -> String {
     if s.byteLength >= len || fill.byteLength == 0 {
-        return s
+        return s.copy()
     }
     let mut pad = ""
     while pad.byteLength < len - s.byteLength {
@@ -339,7 +339,7 @@ export fn padStart(s: String, len: Int64, fill: String) -> String {
 /// ASCII `fill` note).
 export fn padEnd(s: String, len: Int64, fill: String) -> String {
     if s.byteLength >= len || fill.byteLength == 0 {
-        return s
+        return s.copy()
     }
     let mut pad = ""
     while pad.byteLength < len - s.byteLength {

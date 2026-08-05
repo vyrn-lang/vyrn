@@ -64,7 +64,7 @@ import { fromBytesOr } from "std/strings"
 // The executor's half (RFC-0085 M1). The value tree is what a projection is
 // written over — see `gqlProject` — and the shared cursor is what the query
 // language is parsed with (RFC-0054).
-import { Json, JsonField, emit } from "std/json"
+import { Json, JsonField, emit, copyJson } from "std/json"
 import { parseJson } from "std/jsonread"
 import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } from "std/scan"
 
@@ -111,7 +111,7 @@ fn gqlStripBang(s: String) -> String {
         let ba = bytes(s)
         return gqlSlice(ba, 0, ba.length - 1)
     }
-    return s
+    return s.copy()
 }
 
 /// The inner text between the FIRST `<` and the LAST `>` of `s` (`Array<Tag>` =>
@@ -243,7 +243,7 @@ fn gqlSplitDecl(source: String) -> GqlDecl {
 fn gqlSourceOf(name: String, iface: ModuleInterface) -> String {
     for t in iface.types {
         if t.name == name {
-            return t.source
+            return t.source.copy()
         }
     }
     return ""
@@ -562,7 +562,7 @@ fn gqlStripWhere(s: String) -> String {
             i = i + 1
         }
     }
-    return s
+    return s.copy()
 }
 
 /// The SDL for a NULLARY enum RHS (`| A | B`): a real GraphQL `enum`. A payload
@@ -1006,7 +1006,7 @@ fn gqlSelSet(sc: modify Scanner) -> GqlSet {
         skipWs(sc)
         // `key: field` — the alias renames the answer and nothing else; the field
         // it names is what the resolver table and the type graph are asked about.
-        let mut name = first
+        let mut name = first.copy()
         if gqlAt(sc, ':') {
             advance(sc)
             skipWs(sc)
@@ -1099,7 +1099,7 @@ export fn gqlParseQuery(src: String) -> GqlQuery {
 fn gqlMemberOf(fields: Array<JsonField>, key: String) -> Json {
     for f in fields {
         if f.key == key {
-            return f.value
+            return copyJson(f.value)
         }
     }
     return JNull
@@ -1178,7 +1178,7 @@ fn gqlElemRef(r: String) -> String {
         let ba = bytes(r)
         return gqlSlice(ba, 1, ba.length - 1)
     }
-    return r
+    return r.copy()
 }
 
 /// Complete one field position: project `sels` out of `v` at response `path`,
@@ -1723,7 +1723,7 @@ fn gqlSchemaTable(iface: ModuleInterface) -> String {
 /// One object type's arm of the lookup.
 fn gqlSchemaArm(name: String, ms: Array<GqlMember>) -> String {
     let mut out = "    if t == \"" + name + "\" {\n"
-    out = out + "        if field == \"\" {\n            return t\n        }\n"
+    out = out + "        if field == \"\" {\n            return t.copy()\n        }\n"
     for m in ms {
         out = out + "        if field == \"" + m.name + "\" {\n"
         out = out + "            return \"" + m.ref + "\"\n"
@@ -1850,7 +1850,7 @@ fn gqlTestValue() -> Json {
 fn gqlTestSchema(t: String, field: String) -> String {
     if t == "BookList" {
         if field == "" {
-            return t
+            return t.copy()
         }
         if field == "books" {
             return "[Book!]!"
@@ -1859,7 +1859,7 @@ fn gqlTestSchema(t: String, field: String) -> String {
     }
     if t == "Book" {
         if field == "" {
-            return t
+            return t.copy()
         }
         if field == "id" {
             return "BookId!"

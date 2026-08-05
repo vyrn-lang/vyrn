@@ -3474,9 +3474,11 @@ fn main() -> Int64 {
 /// - `perTurn` — a `let` INSIDE the loop, so the accumulator is a fresh unowned
 ///   pointer every turn while the wasm local and its frame slot are the same two
 ///   words. The second turn is the one that catches a shadow that is not reset.
-/// - `aliased` — `let copy = out` is exactly what the whitelist bans, so this one
-///   must still take the copying path on every engine; it is the negative that
-///   keeps the other three from passing by accident.
+/// - `aliased` — a second name taken inside the loop. It said `let copy = out`
+///   until RFC-0089 rule 1 made that a move, and now says `out.copy()`, which is
+///   the named fix. The bytes it must print are the same either way, and that is
+///   what this row pins: a per-turn snapshot of a growing accumulator reads the
+///   accumulator as it stood, on every engine.
 ///
 /// Byte equality across all three engines is the assertion, because a wrong
 /// `(len, cap)` does not trap — it prints a truncated or doubled string, which is
@@ -3523,7 +3525,7 @@ fn aliased(n: Int64) -> String {
     let mut i = 0
     while i < n {
         out = out + "x"
-        let copy = out
+        let copy = out.copy()
         print(copy)
         i = i + 1
     }
@@ -3752,7 +3754,7 @@ fn a_malloc_whose_bump_pointer_would_wrap_traps_instead_of_lying() {
     // `the_wasm_module_exports_what_the_llvm_path_exports`).
     let src = "\
 export extern fn greet(name: String) -> String {
-    return name
+    return name.copy()
 }
 
 fn main() -> Int64 {
