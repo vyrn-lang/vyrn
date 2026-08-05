@@ -1,0 +1,101 @@
+// Shadowing: an inner binder is a new binding, never the outer one.
+//
+// Ownership analysis (RFC-0004 §4) decides at every `let` whether the value is
+// a fresh heap String the block must free when it exits. To decide it has to
+// know the type of each name in the initializer, and to know that it has to
+// resolve the name to the binding actually in scope. Resolving past an inner
+// binder to an outer String read `let t = s + 1` as concatenation, and the
+// native backend then passed the integer 2 to `free` as if it were an address.
+//
+// Every binder kind shadows: a `let`, a `for` variable, a pattern's payload, a
+// lambda parameter. Each one is a different way into the same question, so each
+// gets a case here. The last case is the mirror — a shadowed String is still a
+// String and is still freed, because answering "an inner binding is never a
+// String" would trade the wrong free for a leak.
+
+fn shadowedByLet() -> Int64 {
+    let s = "x"
+    print(s)
+    if true {
+        let s = 1
+        let t = s + 1
+        print(t) // 2
+    }
+    return 0
+}
+
+fn shadowedByLoopVar() -> Int64 {
+    let n = "n"
+    print(n)
+    let ns: Array<Int64, 2> = [3, 4]
+    let mut total = 0
+    for n in ns {
+        let t = n + 1
+        total = total + t
+    }
+    print(total) // 4 + 5 = 9
+    return 0
+}
+
+fn shadowedByPatternBinder() -> Int64 {
+    let v = "v"
+    print(v)
+    let o: Option<Int64> = Some(41)
+    if let Some(v) = o {
+        let t = v + 1
+        print(t) // 42
+    }
+    return 0
+}
+
+fn shadowedByMatchArm() -> Int64 {
+    let m = "m"
+    print(m)
+    let o: Option<Int64> = Some(7)
+    let t = match o {
+        Some(m) => m + 1,
+        None => 0,
+    }
+    print(t) // 8
+    return 0
+}
+
+fn applyTo(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return f(x)
+}
+
+fn shadowedByLambdaParam() -> Int64 {
+    let k = "k"
+    print(k)
+    let bump: fn(Int64) -> Int64 = |k| {
+        let t = k + 1
+        return t + 1
+    }
+    print(applyTo(bump, 2)) // 4
+    return 0
+}
+
+// The mirror. Both concatenations allocate, both bindings own what they
+// allocated, and both are freed at the end of their own block. Nothing here is
+// visible in the output — a missed free is a leak, not a wrong line — so what
+// this case guards is that the fix did not buy correctness by freeing nothing.
+fn shadowedStringIsStillFreed() -> Int64 {
+    let a = "one "
+    let s = a + "two"
+    print(s)
+    if true {
+        let s = a + "three"
+        print(s)
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    let a = shadowedByLet()
+    let b = shadowedByLoopVar()
+    let c = shadowedByPatternBinder()
+    let d = shadowedByMatchArm()
+    let e = shadowedByLambdaParam()
+    let f = shadowedStringIsStillFreed()
+    return a + b + c + d + e + f
+}

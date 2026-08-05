@@ -213,11 +213,12 @@ fn analyze_body(
     string_fns: &HashSet<String>,
     string_types: &HashSet<String>,
 ) -> FnResult {
-    // Seed the string-var scope with any `String`-typed parameters.
-    let params: HashSet<String> = params_list
+    // Seed the outermost string-var scope with every parameter, each carrying
+    // whether it is a String — a non-String parameter has to be recorded too, or
+    // a `let` shadowing it further in would resolve to nothing and fall through.
+    let params: HashMap<String, bool> = params_list
         .iter()
-        .filter(|p| is_string_like(&p.ty, string_types))
-        .map(|p| p.name.clone())
+        .map(|p| (p.name.clone(), is_string_like(&p.ty, string_types)))
         .collect();
     let mut a = Analysis {
         droppable: HashMap::new(),
@@ -227,7 +228,7 @@ fn analyze_body(
         ret_is_heap: returns_owned_kind(ret).is_some(),
         all_returns_owned: true,
         string_fns,
-        str_vars: vec![params],
+        str_vars: Scopes::new(params),
     };
     a.block(body);
     FnResult {
@@ -239,6 +240,38 @@ fn analyze_body(
 /// The identity key for a statement: its node address.
 fn id(s: &Stmt) -> usize {
     s as *const Stmt as usize
+}
+
+/// A lexical scope stack, innermost binding wins.
+///
+/// The rule that makes it correct is that EVERY binder is recorded, including a
+/// loop variable, a pattern binder or a lambda parameter that carries no
+/// interesting fact of its own. Recording only the interesting ones lets an
+/// inner binding inherit an outer binding's property — which is how a `let s = 1`
+/// under a `let s = "x"` came to be classified as a String and freed.
+struct Scopes<T>(Vec<HashMap<String, T>>);
+
+impl<T> Scopes<T> {
+    fn new(outermost: HashMap<String, T>) -> Self {
+        Scopes(vec![outermost])
+    }
+
+    fn enter(&mut self) {
+        self.0.push(HashMap::new());
+    }
+
+    fn exit(&mut self) {
+        self.0.pop();
+    }
+
+    fn bind(&mut self, name: &str, value: T) {
+        self.0.last_mut().unwrap().insert(name.to_string(), value);
+    }
+
+    /// The innermost binding of `name`, or `None` if nothing binds it.
+    fn get(&self, name: &str) -> Option<&T> {
+        self.0.iter().rev().find_map(|frame| frame.get(name))
+    }
 }
 
 struct Analysis<'a> {
@@ -256,23 +289,37 @@ struct Analysis<'a> {
     /// over `String`). Used to classify `a + b` as string concatenation when an
     /// operand is a call — a fresh heap String the caller then owns.
     string_fns: &'a HashSet<String>,
-    /// Scope stack of `String`-typed variable names (params + string-bound lets).
-    /// Kept in lock-step with `live`; lets `a + b` be recognised as a string
-    /// concat (not integer arithmetic) without a full re-typing pass. It only
-    /// ever under-approximates — an unrecognised string temporary is left to
+    /// Scope stack of every binding in scope, each saying whether it is a
+    /// `String`. Kept in lock-step with `live`; lets `a + b` be recognised as a
+    /// string concat (not integer arithmetic) without a full re-typing pass. It
+    /// only ever under-approximates — an unrecognised string temporary is left to
     /// leak, never freed as if it were an integer.
-    str_vars: Vec<HashSet<String>>,
+    str_vars: Scopes<bool>,
 }
 
 impl Analysis<'_> {
     fn block(&mut self, b: &Block) {
         self.live.push(HashMap::new());
-        self.str_vars.push(HashSet::new());
+        self.str_vars.enter();
         for s in &b.stmts {
             self.stmt(s);
         }
-        self.str_vars.pop();
+        self.str_vars.exit();
         self.live.pop();
+    }
+
+    /// Run `body` with `binders` in scope ahead of it — a `for` variable, an
+    /// `if let` arm's payload, a lambda's parameters. None of them can be proved
+    /// a String, so each is recorded as not one. Recording is the point: an
+    /// unrecorded binder falls through to whatever the enclosing scope calls that
+    /// name, which is how an integer loop variable inherits a String.
+    fn scoped_block(&mut self, binders: &[String], body: &Block) {
+        self.str_vars.enter();
+        for n in binders {
+            self.str_vars.bind(n, false);
+        }
+        self.block(body);
+        self.str_vars.exit();
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -287,12 +334,13 @@ impl Analysis<'_> {
                 // Account for uses in the initializer *before* the new binding
                 // exists (so `let x = x + b` escapes the old `x`).
                 self.visit(value);
-                // Track a `String`-typed binding so later `a + b` on it is seen
-                // as concatenation. Computed against the *pre-binding* env, so a
-                // self-reference resolves to the old value's type.
-                if self.expr_is_string(value) {
-                    self.str_vars.last_mut().unwrap().insert(name.clone());
-                }
+                // Record whether the binding is a `String`, so later `a + b` on
+                // it is seen as concatenation. Computed against the *pre-binding*
+                // env, so a self-reference resolves to the old value's type. A
+                // non-String is recorded as such rather than left out: that is
+                // what shadows an outer String of the same name.
+                let is_str = self.expr_is_string(value);
+                self.str_vars.bind(name, is_str);
                 // A `SmallArray<T, N>` binding (RFC-0056) owns its `data` buffer,
                 // which is null while inline (so `free` is a no-op) and heap once
                 // spilled. Unlike a growable `Array`, its only producers are the
@@ -380,15 +428,17 @@ impl Analysis<'_> {
             }
             // `if let` (RFC-0060): the scrutinee is visited like any expression;
             // the binders are payload borrows (never auto-freed), so the blocks
-            // are walked exactly as an `if`'s are.
+            // are walked exactly as an `if`'s are — except that the binders go
+            // into scope, so one shadowing an outer String is not read as one.
             Stmt::IfLet {
+                pattern,
                 scrutinee,
                 then_block,
                 else_block,
                 ..
             } => {
                 self.visit(scrutinee);
-                self.block(then_block);
+                self.scoped_block(&pattern_binders(pattern), then_block);
                 if let Some(eb) = else_block {
                     self.block(eb);
                 }
@@ -401,9 +451,11 @@ impl Analysis<'_> {
             // pointer into its buffer, so we must not auto-free the array while a
             // bound element could outlive the loop. (Safe leak, never a UAF;
             // explicit `afree` still reclaims it.)
-            Stmt::ForIn { iter, body, .. } => {
+            Stmt::ForIn {
+                var, iter, body, ..
+            } => {
                 self.visit(iter);
-                self.block(body);
+                self.scoped_block(std::slice::from_ref(var), body);
             }
             Stmt::Expr(e) => self.visit(e),
             // `drop name;` reclaims the value explicitly, so it must escape the
@@ -471,9 +523,11 @@ impl Analysis<'_> {
         }
     }
 
-    /// Whether `name` is a known `String`-typed binding in the current scopes.
+    /// Whether the binding `name` resolves to is a known `String`. The innermost
+    /// one answers: an inner `let s = 1` under an outer `let s = "x"` is an
+    /// integer, and reading the outer one there would free that integer.
     fn is_string_var(&self, name: &str) -> bool {
-        self.str_vars.iter().any(|f| f.contains(name))
+        self.str_vars.get(name).copied().unwrap_or(false)
     }
 
     /// A conservative, sound "is this expression a `String`?" test — used only to
@@ -567,7 +621,14 @@ impl Analysis<'_> {
             } => {
                 self.visit(scrutinee);
                 for arm in arms {
+                    // The arm's payload binders shadow the enclosing scope for
+                    // the arm body, exactly as a `let` would.
+                    self.str_vars.enter();
+                    for n in pattern_binders(&arm.pattern) {
+                        self.str_vars.bind(&n, false);
+                    }
                     self.visit(&arm.body);
+                    self.str_vars.exit();
                 }
             }
             Expr::IfExpr {
@@ -614,14 +675,26 @@ impl Analysis<'_> {
             // treats a captured candidate as escaped, so it is not auto-freed at
             // the capture site — sound (never a double-free; at worst a leak, which
             // does not affect observable behavior or parity).
-            Expr::Lambda { body, .. } => match body {
-                LambdaBody::Expr(e2) => self.visit(e2),
-                LambdaBody::Block(b) => {
-                    for s in &b.stmts {
-                        self.stmt(s);
+            //
+            // The parameters are untyped here, so none of them is provably a
+            // String and each is recorded as not one — which costs nothing a
+            // parameter did not already lack, and stops one named like an
+            // enclosing String from being read as that String.
+            Expr::Lambda { params, body, .. } => {
+                self.str_vars.enter();
+                for p in params {
+                    self.str_vars.bind(p, false);
+                }
+                match body {
+                    LambdaBody::Expr(e2) => self.visit(e2),
+                    LambdaBody::Block(b) => {
+                        for s in &b.stmts {
+                            self.stmt(s);
+                        }
                     }
                 }
-            },
+                self.str_vars.exit();
+            }
         }
     }
 
@@ -669,7 +742,7 @@ impl Analysis<'_> {
 fn fresh_refs_in(body: &Block, droppable: &HashMap<usize, DropKind>) -> HashSet<usize> {
     let mut f = Fresh {
         droppable,
-        scopes: Vec::new(),
+        scopes: Scopes::new(HashMap::new()),
         out: HashSet::new(),
     };
     f.block(body);
@@ -683,48 +756,41 @@ struct Fresh<'a> {
     /// a droppable cell, so 0 and "absent" both answer "not fresh" — but the
     /// binder still has to be *recorded*, or a `for c in refs` inside a block
     /// that also has `let c = cell(..)` would resolve to the wrong one.
-    scopes: Vec<HashMap<String, usize>>,
+    scopes: Scopes<usize>,
     out: HashSet<usize>,
 }
 
 impl Fresh<'_> {
     fn block(&mut self, b: &Block) {
-        self.scopes.push(HashMap::new());
+        self.scopes.enter();
         for s in &b.stmts {
             self.stmt(s);
         }
-        self.scopes.pop();
+        self.scopes.exit();
     }
 
     /// Run `body` with `binders` in scope ahead of it (an `if let` arm, a `for`).
-    fn scoped(&mut self, binders: &[&str], body: &Block) {
-        self.scopes.push(HashMap::new());
+    fn scoped(&mut self, binders: &[String], body: &Block) {
+        self.scopes.enter();
         for n in binders {
-            self.bind(n, 0);
+            self.scopes.bind(n, 0);
         }
         self.block(body);
-        self.scopes.pop();
-    }
-
-    fn bind(&mut self, name: &str, key: usize) {
-        self.scopes.last_mut().unwrap().insert(name.to_string(), key);
+        self.scopes.exit();
     }
 
     /// Whether `name` is bound by a `let` that owns a cell nothing else can reach.
     fn is_fresh_cell(&self, name: &str) -> bool {
-        for frame in self.scopes.iter().rev() {
-            if let Some(key) = frame.get(name) {
-                return self.droppable.get(key) == Some(&DropKind::ReleaseRef);
-            }
-        }
-        false
+        self.scopes
+            .get(name)
+            .is_some_and(|key| self.droppable.get(key) == Some(&DropKind::ReleaseRef))
     }
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let { name, value, .. } => {
                 self.expr(value);
-                self.bind(name, id(s));
+                self.scopes.bind(name, id(s));
             }
             Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => self.expr(value),
             Stmt::IndexSet { index, value, .. } => {
@@ -757,8 +823,7 @@ impl Fresh<'_> {
                 ..
             } => {
                 self.expr(scrutinee);
-                let bs = pattern_binders(pattern);
-                self.scoped(&bs.iter().map(|s| s.as_str()).collect::<Vec<_>>(), then_block);
+                self.scoped(&pattern_binders(pattern), then_block);
                 if let Some(eb) = else_block {
                     self.block(eb);
                 }
@@ -771,7 +836,7 @@ impl Fresh<'_> {
                 var, iter, body, ..
             } => {
                 self.expr(iter);
-                self.scoped(&[var.as_str()], body);
+                self.scoped(std::slice::from_ref(var), body);
             }
             Stmt::Expr(e) => self.expr(e),
             Stmt::Region { body, .. } => self.block(body),
@@ -806,12 +871,12 @@ impl Fresh<'_> {
             } => {
                 self.expr(scrutinee);
                 for arm in arms {
-                    self.scopes.push(HashMap::new());
+                    self.scopes.enter();
                     for n in pattern_binders(&arm.pattern) {
-                        self.bind(&n, 0);
+                        self.scopes.bind(&n, 0);
                     }
                     self.expr(&arm.body);
-                    self.scopes.pop();
+                    self.scopes.exit();
                 }
             }
             Expr::IfExpr {
@@ -941,6 +1006,61 @@ mod tests {
     }
 
     // ---- ownership transfer ---------------------------------------------
+
+    // ---- shadowing (an inner binder is not the outer binding) ------------
+
+    #[test]
+    fn an_inner_let_shadowing_a_string_is_not_a_string() {
+        // `s + 1` under `let s = 1` is an integer add. Reading the outer `s`
+        // here made `t` droppable, and the backend freed the integer 2.
+        let src = "fn main() -> Int64 { let s = \"x\"; print(s); \
+                   if true { let s = 1; let t = s + 1; print(t); } return 0; }";
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    #[test]
+    fn a_loop_binder_shadowing_a_string_is_not_a_string() {
+        let src = "fn main() -> Int64 { let s = \"x\"; print(s); \
+                   let ns: Array<Int64> = array(); \
+                   for s in ns { let t = s + 1; print(t); } return 0; }";
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    #[test]
+    fn a_pattern_binder_shadowing_a_string_is_not_a_string() {
+        let src = "fn main() -> Int64 { let s = \"x\"; print(s); \
+                   let o: Option<Int64> = Some(1); \
+                   if let Some(s) = o { let t = s + 1; print(t); } return 0; }";
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    #[test]
+    fn a_lambda_parameter_shadowing_a_string_is_not_a_string() {
+        let src = "fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x); } \
+                   fn main() -> Int64 { let s = \"x\"; print(s); \
+                   return apply(|s| { let t = s + 1; print(t); return t + 1; }, 2); }";
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    #[test]
+    fn a_shadowed_string_is_still_freed() {
+        // The mirror of the four above. Over-correcting into "an inner binding
+        // is never a string" would turn the miscompile into a leak: both
+        // concatenations are fresh Strings and both must be reclaimed.
+        let src = "fn main() -> Int64 { let a = \"x\"; \
+                   let s = a + \"y\"; print(s); \
+                   if true { let s = a + \"z\"; print(s); } return 0; }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr; 2]);
+    }
+
+    #[test]
+    fn an_inner_let_shadowing_a_non_string_is_a_string() {
+        // The other direction of the same lookup: the innermost binding answers,
+        // so an inner String under an outer integer concatenates.
+        let src = "fn main() -> Int64 { let s = 1; print(s); \
+                   if true { let s = \"a\"; let t = s + \"b\"; print(t); } return 0; }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
+    }
 
     #[test]
     fn factory_returning_concat_is_owned() {
