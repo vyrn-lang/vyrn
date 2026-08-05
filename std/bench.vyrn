@@ -100,7 +100,7 @@ export fn formatDuration(ns: Int64) -> String {
 /// Right-pad `s` with spaces to `width` (measured in bytes — bench names are the
 /// only variable-width field, and the column widths are computed the same way).
 export fn padRight(s: String, width: Int64) -> String {
-    let mut out = s
+    let mut out = s.copy()
     let mut i = s.byteLength
     while i < width {
         out = out + " "

@@ -15,10 +15,26 @@
 //! **This pass carries types** (RFC-0089 M2, Phase 4a). It keeps a
 //! [`crate::declared`] type environment beside its scope stack and can answer
 //! `owns_heap` at every binding, argument, return, store, iterable and capture —
-//! see [`owning_sites`]. Nothing in the diagnostics reads that answer yet: 4a
-//! plumbs it in and stops, so this change accepts and refuses exactly the
-//! programs it did before, in the same words. The [`streams`] sub-module below
-//! is the one part still name-based and typeless.
+//! see [`owning_sites`]. The [`streams`] sub-module below is the one part still
+//! name-based and typeless.
+//!
+//! **It enforces RFC-0089 rules 1–3** (Phase 4b). Three families of error, on
+//! top of the `consume` family above:
+//!
+//! - **Rule 1 — a value moves.** A store of a value that transitively owns heap
+//!   (a `let`, an assignment, a field or element store, a literal operand)
+//!   takes the source place. The analysis is *last-use aware*: `let t = s` with
+//!   no later use of `s` is legal, and the error only fires on the later use.
+//!   That is the machinery `consume` already had; rule 1 adds the stores.
+//! - **Rule 2 — a borrow is second-class.** A `read`/`modify`/`share` parameter,
+//!   a `for` variable and a local bound to a field or element read are all
+//!   [`Borrow`]s. They may be observed and passed on, but not stored, not
+//!   captured by an escaping closure, and not returned.
+//! - **Rule 3 — a return is owned.** Returning a borrow is refused, with the
+//!   two fixes named.
+//!
+//! Every one of these diagnostics is a **menu** (RFC-0087 U2): it prints the
+//! move and the later use, then the named ways out (`consume`, `.copy()`).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -62,7 +78,7 @@ impl OwningSite {
 /// Runs the same walk [`check_accum`] runs, with recording on, and discards the
 /// diagnostics. 4a answers the question at every site; 4b enforces on the answer.
 pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
-    run(program, true).1
+    run(program, true, false).1
 }
 
 /// Check every function for use-after-consume, returning **all** problems found
@@ -76,13 +92,28 @@ pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
 /// sub-expression checking *before* mutating `consumed`/`scope`, so after an
 /// error the flow state is consistent for the next statement.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    run(program, false).0
+    run(program, false, false).0
+}
+
+/// Every place RFC-0089 rule 2 would refuse a **store** of a borrow.
+///
+/// Rule 2's other two positions — a return and an escaping capture — are
+/// enforced by [`check_accum`]. The store position is not, and this is how its
+/// cost is measured rather than argued about: it is 288 sites over `examples/`
+/// and `std/`, 154 of them `for x in xs { out.push(x) }`, which has no `consume`
+/// spelling to migrate to. RFC-0089 "What rule 2 costs" carries the table, and
+/// the plan's Phase 4b-2 is where the decision belongs.
+///
+/// This is the same walk with one flag flipped, so the rule cannot rot while it
+/// waits: it is compiled, tested and countable today.
+pub fn borrow_store_sites(program: &Program) -> Vec<Diagnostic> {
+    run(program, false, true).0
 }
 
 /// The one walk, shared by [`check_accum`] and [`owning_sites`]. `record` turns
 /// the site collection on; with it off the pass still builds and carries its type
 /// environment, and asks `owns_heap` nowhere.
-fn run(program: &Program, record: bool) -> (Vec<Diagnostic>, Vec<OwningSite>) {
+fn run(program: &Program, record: bool, stores: bool) -> (Vec<Diagnostic>, Vec<OwningSite>) {
     let caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
@@ -102,7 +133,16 @@ fn run(program: &Program, record: bool) -> (Vec<Diagnostic>, Vec<OwningSite>) {
         decl: &decl,
         // Module state is the outermost frame and is built once, not per body.
         vars: RefCell::new(Scopes::new(decl.globals())),
+        // Module state is nobody's borrow: it owns what it holds for the whole
+        // module, which is why nothing may `consume` it either.
+        borrows: RefCell::new(Scopes::new(
+            program.globals.iter().map(|g| (g.name.clone(), None)).collect(),
+        )),
+        ret: RefCell::new(Type::Unit),
         lambda_base: RefCell::new(Vec::new()),
+        lambda_escapes: RefCell::new(Vec::new()),
+        at_call_site: std::cell::Cell::new(false),
+        refuse_stores: stores,
         sites: record.then(|| RefCell::new(Vec::new())),
     };
     let mut out = Vec::new();
@@ -175,7 +215,7 @@ fn run(program: &Program, record: bool) -> (Vec<Diagnostic>, Vec<OwningSite>) {
     // may-analysis (consumed on either branch ⇒ consumed after), and "disposed
     // exactly once" is a must-analysis. Folding them would have made one of the
     // two wrong at every branch.
-    out.extend(streams::check(program));
+    out.extend(streams::check(program, &decl));
     let sites = mc.sites.map(RefCell::into_inner).unwrap_or_default();
     (out, sites)
 }
@@ -207,16 +247,98 @@ struct MoveCheck<'a> {
     /// deliberately absent from it (which is what makes a loop variable shadowing
     /// module state still refuse a `consume`), and it is typed here.
     vars: RefCell<Scopes<Option<Type>>>,
+    /// Which bindings are BORROWS (RFC-0089 rule 2), in lockstep with `vars` —
+    /// see [`MoveCheck::enter`]. A borrow is second-class: observable, passable,
+    /// but never stored, captured or returned.
+    borrows: RefCell<Scopes<Option<Borrow>>>,
+    /// The return type of the function being checked, for rule 3.
+    ret: RefCell<Type>,
     /// The frame depth at each enclosing lambda's parameter frame. A name that
     /// resolves BELOW the innermost of these is a capture, not a local.
     lambda_base: RefCell<Vec<usize>>,
+    /// Whether each enclosing lambda ESCAPES — RFC-0089 says a non-escaping
+    /// lambda (a `map`/`filter` argument) borrows freely and a stored one may
+    /// not. Parallel to `lambda_base`.
+    lambda_escapes: RefCell<Vec<bool>>,
+    /// Set for the duration of one call argument that IS a lambda. A lambda
+    /// written directly at a call site is consumed by that call and cannot
+    /// outlive it; a lambda anywhere else is stored, and RFC-0037's
+    /// defunctionalization makes it a value that can outlive the frame.
+    at_call_site: std::cell::Cell<bool>,
+    /// Whether rule 2's STORE refusal is on. `false` on every ordinary check —
+    /// see [`borrow_store_sites`] for what it costs and why it waits.
+    refuse_stores: bool,
     /// Where recorded [`OwningSite`]s go, or `None` on the ordinary check path —
     /// which is what keeps a build and a keystroke paying for nothing.
     sites: Option<RefCell<Vec<OwningSite>>>,
 }
 
-/// Consumed variables: name -> (line consumed, description of the consumer).
-type Consumed = HashMap<String, (usize, String)>;
+/// A binding that names a value somebody else owns (RFC-0089 rule 2).
+///
+/// The variants exist for the diagnostic, not for the rule: every borrow is
+/// refused in the same three positions, and each variant names a different fix.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Borrow {
+    /// A `read` or `share` parameter — the caller still owns it.
+    Read,
+    /// A `modify` parameter — exclusive in-place access, still the caller's.
+    Modify,
+    /// A `for` variable. Iteration binds a `read` borrow of the element (PLAN
+    /// decision log), so the container still owns what the loop sees.
+    Element,
+    /// A local bound to a field or element read: `let t = r.s`. A place owns its
+    /// contents (rule 4), so reading one out does not take it.
+    Projection,
+}
+
+impl Borrow {
+    /// What this borrow is, in words, for the message.
+    fn what(self) -> &'static str {
+        match self {
+            Borrow::Read => "a `read` parameter",
+            Borrow::Modify => "a `modify` parameter",
+            Borrow::Element => "a loop variable",
+            Borrow::Projection => "read out of a place that owns it",
+        }
+    }
+
+    /// The named ways out (RFC-0087 U2). The order is the order a reader should
+    /// try them: take ownership if the callee should have it, copy if both sides
+    /// genuinely need a value. `root` is the binding, `path` what was read out
+    /// of it — a `consume` goes on the binding, a `.copy()` on the path.
+    fn fixes(self, root: &str, path: &str) -> Vec<String> {
+        let copy = format!("`{path}.copy()` if both sides need a value");
+        match self {
+            Borrow::Read | Borrow::Modify => vec![
+                format!("declare the parameter `consume {root}` if this function should own it"),
+                copy,
+            ],
+            Borrow::Element | Borrow::Projection => vec![copy],
+        }
+    }
+}
+
+/// A name that has been moved out of, and the menu its later use prints.
+#[derive(Clone)]
+struct Consumption {
+    /// Where the move happened.
+    line: usize,
+    /// What took it, in words: ``​`take(..)`​``, ``​`drop`​``, "the binding `t`".
+    by: String,
+    /// The named fixes. Empty for a `consume` parameter, which keeps its own
+    /// historical wording — the capability IS the fix there.
+    fixes: Vec<String>,
+}
+
+/// Consumed variables: name -> what took it.
+type Consumed = HashMap<String, Consumption>;
+
+impl Consumption {
+    /// A `consume` capability took it — the wording this pass has always used.
+    fn by_capability(line: usize, by: String) -> Self {
+        Consumption { line, by, fixes: Vec::new() }
+    }
+}
 
 impl MoveCheck<'_> {
     fn function(&self, f: &Function) {
@@ -227,19 +349,224 @@ impl MoveCheck<'_> {
         // order every function body sees them in (RFC-0013).
         {
             let mut v = self.vars.borrow_mut();
+            let mut b = self.borrows.borrow_mut();
             v.truncate(1);
+            b.truncate(1);
             v.enter();
+            b.enter();
             for p in &f.params {
                 v.bind(&p.name, Some(p.ty.clone()));
+                // RFC-0089 rule 2: everything but `consume` is a borrow, and only
+                // a type that owns heap has anything to borrow.
+                b.bind(
+                    &p.name,
+                    match p.capability {
+                        Capability::Consume => None,
+                        _ if !self.decl.owns_heap(&p.ty) => None,
+                        Capability::Modify => Some(Borrow::Modify),
+                        _ => Some(Borrow::Read),
+                    },
+                );
             }
         }
+        *self.ret.borrow_mut() = f.ret.clone();
         self.lambda_base.borrow_mut().clear();
+        self.lambda_escapes.borrow_mut().clear();
         self.block(&f.body, &mut consumed, &mut scope);
     }
 
+    /// Push a frame on BOTH stacks. They are read as one environment — a name's
+    /// type and whether it is a borrow — so they are never entered apart.
+    fn enter(&self) {
+        self.vars.borrow_mut().enter();
+        self.borrows.borrow_mut().enter();
+    }
+
+    fn exit(&self) {
+        self.vars.borrow_mut().exit();
+        self.borrows.borrow_mut().exit();
+    }
+
+    /// Bind `name` with its type and its borrow status.
+    fn bind(&self, name: &str, ty: Option<Type>, borrow: Option<Borrow>) {
+        self.vars.borrow_mut().bind(name, ty);
+        self.borrows.borrow_mut().bind(name, borrow);
+    }
+
+    /// Whether `name` names a borrow here.
+    fn borrow_of(&self, name: &str) -> Option<Borrow> {
+        self.borrows.borrow().get(name).copied().flatten()
+    }
+
     /// The declared type of `e` here, or `None` where this reading cannot name it.
+    ///
+    /// [`crate::declared::Declared::type_of`] first, then the readings only this
+    /// pass may have. **The widening lives here and not in `Declared`** because
+    /// `own.rs` shares that reading and decides `free` with it: a type answered
+    /// there that was not answered before changes what a program releases. Here
+    /// it changes only what the program is allowed to say.
     fn type_of(&self, e: &Expr) -> Option<Type> {
-        self.decl.type_of(&self.vars.borrow(), e)
+        if let Some(t) = self.decl.type_of(&self.vars.borrow(), e) {
+            return Some(t);
+        }
+        match e {
+            // A field's type comes out of the record declaration. Without this
+            // every field read is unknown, and so is everything read out of one.
+            Expr::Field { expr, field, .. } => {
+                let base = self.type_of(expr)?;
+                match crate::types::resolve(&base, self.decl.decls()) {
+                    Type::Record(fs) => {
+                        fs.iter().find(|f| &f.name == field).map(|f| f.ty.clone())
+                    }
+                    _ => None,
+                }
+            }
+            // An element read: `xs[i]` lowers to `at`, and `x.copy()` is already
+            // answered by `Declared`. The element type is the container's.
+            Expr::Call { name, args, .. } if name == "at" => {
+                let c = self.type_of(args.first()?)?;
+                self.decl.elem_of(&c)
+            }
+            _ => None,
+        }
+    }
+
+    /// A store of `value` into `into` — RFC-0089 rule 1, and rule 2's refusal.
+    ///
+    /// `into` is the destination in words ("the binding `t`", "the field `r.s`").
+    /// Three outcomes:
+    ///
+    /// - the value owns no heap, or is fresh (a call result, a literal, an
+    ///   operator result): nothing happens, because nothing else holds it;
+    /// - the source is a **borrow**: refused here, with its fixes named;
+    /// - the source is an owned place: it MOVES, and a later use of it is the
+    ///   error [`MoveCheck::expr`] reports.
+    ///
+    /// `outlives` is what separates a store from a rebinding. A borrow's
+    /// lifetime is the call, so putting one in a field, a container, module
+    /// state or a return is refused, and giving it a second local name is not:
+    /// `let t = s` cannot outlive `s`, and rule 2's whole point is that a borrow
+    /// needs no lifetime because it never leaves the frame. The new name is a
+    /// borrow too — see [`MoveCheck::borrow_from`].
+    ///
+    /// A type this reading cannot name does NOT move. That is the same
+    /// under-approximation `own.rs` makes and it costs the same thing — a
+    /// diagnostic that is not printed. It is not the unsound direction: 4b
+    /// decides what a program may SAY, and every value it fails to move is one
+    /// today's engines already leak rather than free twice.
+    fn store(
+        &self,
+        value: &Expr,
+        // A closure and not a string: most stores take a fresh value and print
+        // nothing, and rendering a destination at every `let` in the corpus cost
+        // more than the rest of this pass put together.
+        into: &dyn Fn() -> String,
+        line: usize,
+        outlives: bool,
+        consumed: &mut Consumed,
+    ) -> Result<(), String> {
+        let Some((root, path)) = place_path(value) else { return Ok(()) };
+        // A scalar copies. An unnamed type is left alone — see the doc above.
+        if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
+            return Ok(());
+        }
+        if let Some(b) = self.borrow_of(&root) {
+            if !outlives || !self.refuse_stores {
+                return Ok(());
+            }
+            // Rule 2. A borrow may be observed and passed on; it may not be put
+            // anywhere that outlives the call.
+            return Err(menu(
+                line,
+                format!("`{path}` may not be stored into {} — it is {}", into(), b.what()),
+                b.fixes(&root, &path),
+            ));
+        }
+        // Reading a field out of a record does not take the record: the binding
+        // it makes is itself a borrow (recorded by the caller), so nothing moves.
+        if path != root {
+            return Ok(());
+        }
+        consumed.insert(
+            root,
+            Consumption {
+                line,
+                by: into(),
+                fixes: vec![format!("`{path}.copy()` if both sides need a value")],
+            },
+        );
+        Ok(())
+    }
+
+    /// The borrow status a `let` of `value` gives its binding.
+    ///
+    /// A field or element read binds a [`Borrow::Projection`]: the aggregate
+    /// still owns it, so the new name may be read but not stored on. Everything
+    /// else — a fresh value, or a place that just moved — binds an owner.
+    fn borrow_from(&self, value: &Expr) -> Option<Borrow> {
+        // Shape first, type second. Every other initializer is a fresh value, and
+        // asking the type of one walks a concat chain for an answer nothing reads.
+        if !matches!(
+            value,
+            Expr::Var { .. } | Expr::Field { .. } | Expr::Call { .. }
+        ) {
+            return None;
+        }
+        if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
+            return None;
+        }
+        match place_path(value) {
+            // `let t = r.s` / `let t = xs[i]` — a projection of somebody's place.
+            Some((root, path)) if path != root => Some(Borrow::Projection),
+            // `let t = s` where `s` is itself a borrow: the borrow travels.
+            Some((root, _)) => self.borrow_of(&root),
+            None => match value {
+                Expr::Call { name, args, .. } if name == "at" => args
+                    .first()
+                    .and_then(place_path)
+                    .map(|_| Borrow::Projection),
+                _ => None,
+            },
+        }
+    }
+
+    /// What a pattern's binders name: one type per binder, and whether they are
+    /// borrows.
+    ///
+    /// Destructuring a place looks INTO it — `match o { Some(v) => .. }` does not
+    /// take `o` apart, so `v` is a projection of it and rule 2 applies. A
+    /// scrutinee that is a fresh value has no other owner, so its payload is
+    /// owned.
+    fn payload_binding(&self, scrutinee: &Expr, p: &Pattern) -> (Vec<Option<Type>>, Option<Borrow>) {
+        let n = pattern_bindings(p).len();
+        let ty = self.type_of(scrutinee);
+        let tys: Vec<Option<Type>> = match (ty.as_ref().map(|t| crate::types::resolve(t, self.decl.decls())), p) {
+            (Some(Type::Option(t)), Pattern::Some(_)) => vec![Some(*t)],
+            (Some(Type::Result(t, _)), Pattern::Ok(_) | Pattern::Success(_)) => vec![Some(*t)],
+            (Some(Type::Result(_, e)), Pattern::Err(_) | Pattern::Failure(_)) => vec![Some(*e)],
+            (Some(Type::Enum(vs)), Pattern::Variant(name, _)) => vs
+                .iter()
+                .find(|v| &v.name == name)
+                .map(|v| v.payload.iter().cloned().map(Some).collect())
+                .unwrap_or_else(|| vec![None; n]),
+            _ => vec![None; n],
+        };
+        let borrow = place_path(scrutinee).map(|_| Borrow::Projection);
+        (tys, borrow)
+    }
+
+    /// Rule 3: a function returns an owned value, always.
+    fn check_return(&self, e: &Expr, line: usize) -> Result<(), String> {
+        if !self.decl.owns_heap(&self.ret.borrow()) {
+            return Ok(());
+        }
+        let Some((root, path)) = place_path(e) else { return Ok(()) };
+        let Some(b) = self.borrow_of(&root) else { return Ok(()) };
+        Err(menu(
+            line,
+            format!("`{path}` may not be returned — it is {}, and a return is owned", b.what()),
+            b.fixes(&root, &path),
+        ))
     }
 
     /// Record one site RFC-0089 rule 1 governs. `declared` overrides the
@@ -288,7 +615,7 @@ impl MoveCheck<'_> {
     /// error), and its consumptions never flow to the block's exit.
     fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {
         scope.push(HashSet::new());
-        self.vars.borrow_mut().enter();
+        self.enter();
         let mut diverged = false;
         for s in &b.stmts {
             if diverged {
@@ -305,7 +632,7 @@ impl MoveCheck<'_> {
                 }
             }
         }
-        self.vars.borrow_mut().exit();
+        self.exit();
         scope.pop();
         diverged
     }
@@ -336,7 +663,11 @@ impl MoveCheck<'_> {
                 // so `let x = x + b` resolves the old `x`.
                 let bty = ty.clone().or_else(|| self.type_of(value));
                 self.site("bind", *line, value, bty.as_ref());
-                self.vars.borrow_mut().bind(name, bty);
+                let borrow = self.borrow_from(value);
+                // A projection is a borrow rather than a move, so only a whole
+                // place moves here — `store` decides which.
+                self.store(value, &|| format!("the binding `{name}`"), *line, false, consumed)?;
+                self.bind(name, bty, borrow);
                 consumed.remove(name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
                 Ok(false)
@@ -345,18 +676,27 @@ impl MoveCheck<'_> {
                 self.expr(value, consumed, scope)?;
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
                 // so 4b treats a store into it differently from a local's.
-                let kind = if self.globals.contains(name) && !Self::in_scope(scope, name) {
-                    "assign-global"
+                let global = self.globals.contains(name) && !Self::in_scope(scope, name);
+                self.site(if global { "assign-global" } else { "assign" }, *line, value, None);
+                let into = || if global {
+                    format!("module state `{name}`")
                 } else {
-                    "assign"
+                    format!("`{name}`")
                 };
-                self.site(kind, *line, value, None);
+                self.store(value, &into, *line, global, consumed)?;
                 consumed.remove(name); // reassignment revives it
                 Ok(false)
             }
-            Stmt::SetField { value, line, .. } => {
+            Stmt::SetField {
+                name,
+                field,
+                value,
+                line,
+            } => {
                 self.site("field", *line, value, None);
-                self.expr(value, consumed, scope).map(|_| false)
+                self.expr(value, consumed, scope)?;
+                self.store(value, &|| format!("the field `{name}.{field}`"), *line, true, consumed)?;
+                Ok(false)
             }
             // `a[i] = v` — the stored value is consumed like a `push` argument
             // (neither `push` nor the store marks it consumed, since no user
@@ -364,17 +704,22 @@ impl MoveCheck<'_> {
             // An element store and a map-value store are the same node, so one
             // row covers both places.
             Stmt::IndexSet {
-                index, value, line, ..
+                name,
+                index,
+                value,
+                line,
             } => {
                 self.expr(index, consumed, scope)?;
                 self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
+                self.store(value, &|| format!("`{name}`"), *line, true, consumed)?;
                 Ok(false)
             }
             Stmt::Return { value, line } => {
                 if let Some(e) = value {
                     self.site("return", *line, e, None);
                     self.expr(e, consumed, scope)?;
+                    self.check_return(e, *line)?;
                 }
                 Ok(true)
             }
@@ -425,17 +770,17 @@ impl MoveCheck<'_> {
                 self.expr(scrutinee, consumed, scope)?;
                 let mut then_c = consumed.clone();
                 scope.push(HashSet::new());
-                self.vars.borrow_mut().enter();
-                for b in pattern_bindings(pattern) {
+                self.enter();
+                let (tys, borrow) = self.payload_binding(scrutinee, pattern);
+                for (i, b) in pattern_bindings(pattern).into_iter().enumerate() {
                     scope.last_mut().unwrap().insert(b.to_string());
-                    // A payload's type is not derived here, so it is recorded as
-                    // unknown. Recording it is the point: an unrecorded binder
-                    // falls through to whatever the enclosing scope calls that
-                    // name (`own.rs`'s shadowing lesson).
-                    self.vars.borrow_mut().bind(b, None);
+                    // Recording it is the point: an unrecorded binder falls
+                    // through to whatever the enclosing scope calls that name
+                    // (`own.rs`'s shadowing lesson).
+                    self.bind(b, tys.get(i).cloned().flatten(), borrow);
                 }
                 let then_div = self.block(then_block, &mut then_c, scope);
-                self.vars.borrow_mut().exit();
+                self.exit();
                 scope.pop();
                 let mut else_c = consumed.clone();
                 let else_div = match else_block {
@@ -481,11 +826,15 @@ impl MoveCheck<'_> {
                 // RFC-0089 decided the loop variable is a `read` borrow, so 4b
                 // needs its type. It is the iterable's element type.
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
+                let borrow = elem
+                    .as_ref()
+                    .is_some_and(|t| self.decl.owns_heap(t))
+                    .then_some(Borrow::Element);
                 let mut body_c = consumed.clone();
-                self.vars.borrow_mut().enter();
-                self.vars.borrow_mut().bind(var, elem);
+                self.enter();
+                self.bind(var, elem, borrow);
                 let body_div = self.block(body, &mut body_c, scope);
-                self.vars.borrow_mut().exit();
+                self.exit();
                 self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
                 for (k, v) in body_c {
                     consumed.entry(k).or_insert(v);
@@ -506,13 +855,21 @@ impl MoveCheck<'_> {
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
             Stmt::Drop { name, line } => {
-                if let Some((cline, consumer)) = consumed.get(name) {
-                    return Err(format!(
-                        "line {line}: `{name}` is dropped here but was already consumed by \
-                         {consumer} on line {cline}"
+                if let Some(c) = consumed.get(name) {
+                    let (cline, consumer) = (c.line, &c.by);
+                    return Err(menu(
+                        *line,
+                        format!(
+                            "`{name}` is dropped here but was already consumed by \
+                             {consumer} on line {cline}"
+                        ),
+                        c.fixes.clone(),
                     ));
                 }
-                consumed.insert(name.clone(), (*line, "`drop`".to_string()));
+                consumed.insert(
+                    name.clone(),
+                    Consumption::by_capability(*line, "`drop`".to_string()),
+                );
                 Ok(false)
             }
         }
@@ -548,6 +905,62 @@ impl MoveCheck<'_> {
         }
     }
 
+    /// Exclusivity: `f(modify a, .. a ..)` is refused.
+    ///
+    /// `modify` is exclusive in-place access. Handing the same place to a
+    /// `modify` parameter and to any other parameter of the same call gives the
+    /// callee two names for one value, and the callee was told it had one.
+    fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), String> {
+        let Some(caps) = self.caps.get(callee) else { return Ok(()) };
+        for (i, a) in args.iter().enumerate() {
+            if caps.get(i) != Some(&Capability::Modify) {
+                continue;
+            }
+            let Some((root, path)) = place_path(a) else { continue };
+            for (j, b) in args.iter().enumerate() {
+                if i != j && streams::mentions(b, &root) {
+                    return Err(menu(
+                        line,
+                        format!(
+                            "`{path}` is passed to `{callee}` as `modify` and read again in the \
+                             same call — a `modify` borrow is exclusive"
+                        ),
+                        vec![
+                            format!("`{root}.copy()` for the second argument"),
+                            "or split the call so the two accesses do not overlap".to_string(),
+                        ],
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// RFC-0089 rule 2 at a capture: an ESCAPING closure may not hold a borrow.
+    ///
+    /// A lambda written directly as a call argument (`map(xs, |x| ..)`) does not
+    /// outlive the call, so it borrows freely — that is the common case and the
+    /// rule leaves it alone. A lambda that is stored is a value under RFC-0037's
+    /// defunctionalization, and a borrow inside one has no lifetime to stand on.
+    fn check_capture(&self, name: &str, line: usize) -> Result<(), String> {
+        let Some(&inside) = self.lambda_base.borrow().last() else { return Ok(()) };
+        if !self.lambda_escapes.borrow().last().copied().unwrap_or(false) {
+            return Ok(());
+        }
+        if !self.vars.borrow().frame_of(name).is_some_and(|f| f < inside) {
+            return Ok(());
+        }
+        let Some(b) = self.borrow_of(name) else { return Ok(()) };
+        Err(menu(
+            line,
+            format!(
+                "`{name}` may not be captured by a closure that outlives this call — it is {}",
+                b.what()
+            ),
+            b.fixes(name, name),
+        ))
+    }
+
     /// The loop-body reuse check: a variable consumed in the body (`body_c`) that
     /// was live before the loop would be consumed *again* on the next iteration.
     /// Skipped when the body **diverges unconditionally** (`body_div`) — it then
@@ -563,11 +976,16 @@ impl MoveCheck<'_> {
         if body_div {
             return Ok(());
         }
-        for (k, (line, consumer)) in body_c {
+        for (k, c) in body_c {
             if !consumed.contains_key(k) && Self::in_scope(scope, k) {
-                return Err(format!(
-                    "line {line}: `{k}` is consumed by {consumer} inside a loop, \
-                     so it would be used again on the next iteration"
+                let (line, consumer) = (c.line, &c.by);
+                return Err(menu(
+                    line,
+                    format!(
+                        "`{k}` is consumed by {consumer} inside a loop, \
+                         so it would be used again on the next iteration"
+                    ),
+                    c.fixes.clone(),
                 ));
             }
         }
@@ -584,11 +1002,27 @@ impl MoveCheck<'_> {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
             Expr::Var { name, line } => {
                 self.capture_site(name, *line);
-                if let Some((cline, consumer)) = consumed.get(name) {
-                    return Err(format!(
-                        "line {line}: `{name}` is used here but was already consumed by {consumer} \
-                         on line {cline}\n  (a `consume` parameter takes ownership; the value can't \
-                         be used afterward)"
+                self.check_capture(name, *line)?;
+                if let Some(c) = consumed.get(name) {
+                    // A `consume` capability keeps the wording it has always had:
+                    // the capability IS the fix, so there is no menu to print.
+                    if c.fixes.is_empty() {
+                        let (cline, consumer) = (c.line, &c.by);
+                        return Err(format!(
+                            "line {line}: `{name}` is used here but was already consumed by \
+                             {consumer} on line {cline}\n  (a `consume` parameter takes \
+                             ownership; the value can't be used afterward)"
+                        ));
+                    }
+                    // RFC-0089 rule 1. Both lines, then the ways out.
+                    return Err(menu(
+                        c.line,
+                        format!(
+                            "`{name}` was moved here into {}\nline {line}: ... and `{name}` is \
+                             used again here",
+                            c.by
+                        ),
+                        c.fixes.clone(),
                     ));
                 }
                 Ok(())
@@ -602,17 +1036,19 @@ impl MoveCheck<'_> {
             Expr::Try { expr, .. } => self.expr(expr, consumed, scope),
             // A literal's operands are places too: `Ring { slots: xs }` puts `xs`
             // where the record owns it, exactly as an argument does.
-            Expr::StructLit { fields, line, .. } => {
-                for (_, v) in fields {
+            Expr::StructLit { name, fields, line } => {
+                for (f, v) in fields {
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
+                    self.store(v, &|| format!("the field `{name}.{f}`"), *line, true, consumed)?;
                 }
                 Ok(())
             }
-            Expr::TryConstruct { args, line, .. } => {
+            Expr::TryConstruct { name, args, line } => {
                 for a in args {
                     self.site("literal", *line, a, None);
                     self.expr(a, consumed, scope)?;
+                    self.store(a, &|| format!("`{name}`"), *line, true, consumed)?;
                 }
                 Ok(())
             }
@@ -625,13 +1061,14 @@ impl MoveCheck<'_> {
                 for arm in arms {
                     let mut c = base.clone();
                     scope.push(HashSet::new());
-                    self.vars.borrow_mut().enter();
-                    for b in pattern_bindings(&arm.pattern) {
+                    self.enter();
+                    let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
+                    for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         scope.last_mut().unwrap().insert(b.to_string());
-                        self.vars.borrow_mut().bind(b, None);
+                        self.bind(b, tys.get(i).cloned().flatten(), borrow);
                     }
                     let r = self.expr(&arm.body, &mut c, scope);
-                    self.vars.borrow_mut().exit();
+                    self.exit();
                     r?;
                     scope.pop();
                     match &mut merged {
@@ -671,21 +1108,32 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Expr::Call { name, args, line } => {
+                self.check_exclusive(name, args, *line)?;
                 let caps = self.caps.get(name);
                 // Left-to-right: check each argument, then apply its consumption,
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
                     self.site("arg", *line, arg, None);
-                    self.expr(arg, consumed, scope)?;
+                    self.at_call_site.set(true);
+                    let r = self.expr(arg, consumed, scope);
+                    self.at_call_site.set(false);
+                    r?;
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         if let Expr::Var { name: v, line: vl } = arg {
                             if !Self::in_scope(scope, v) {
                                 self.reject_consume_global(v, name, false, *vl)?;
                             }
-                            consumed
-                                .entry(v.clone())
-                                .or_insert((*line, format!("`{name}(..)`")));
+                            consumed.entry(v.clone()).or_insert(Consumption::by_capability(
+                                *line,
+                                format!("`{name}(..)`"),
+                            ));
                         }
+                    } else if sinks(name, i) {
+                        // A builtin that STORES its argument in a container is a
+                        // `consume` parameter that has no signature to say so
+                        // (RFC-0087 §2b). Rule 1 governs it exactly as it governs
+                        // `xs = [.., v]`, which is what it means.
+                        self.store(arg, &|| format!("`{name}(..)`"), *line, true, consumed)?;
                     }
                 }
                 Ok(())
@@ -694,6 +1142,7 @@ impl MoveCheck<'_> {
                 for e in elems {
                     self.site("literal", *line, e, None);
                     self.expr(e, consumed, scope)?;
+                    self.store(e, &|| "the array literal".to_string(), *line, true, consumed)?;
                 }
                 Ok(())
             }
@@ -702,6 +1151,8 @@ impl MoveCheck<'_> {
                     self.expr(k, consumed, scope)?;
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
+                    self.store(k, &|| "the map literal".to_string(), *line, true, consumed)?;
+                    self.store(v, &|| "the map literal".to_string(), *line, true, consumed)?;
                 }
                 Ok(())
             }
@@ -711,11 +1162,13 @@ impl MoveCheck<'_> {
             // so a reference to one that was already consumed surfaces the standard
             // use-after-consume error here too.
             Expr::Lambda { params, body, .. } => {
+                let escapes = !self.at_call_site.replace(false);
+                self.lambda_escapes.borrow_mut().push(escapes);
                 scope.push(HashSet::new());
-                self.vars.borrow_mut().enter();
+                self.enter();
                 for p in params {
                     scope.last_mut().unwrap().insert(p.clone());
-                    self.vars.borrow_mut().bind(p, None);
+                    self.bind(p, None, None);
                 }
                 // Everything read below this frame is a capture (RFC-0089's
                 // no-retain rule is about exactly these).
@@ -730,13 +1183,15 @@ impl MoveCheck<'_> {
                     }
                 };
                 self.lambda_base.borrow_mut().pop();
-                self.vars.borrow_mut().exit();
+                self.lambda_escapes.borrow_mut().pop();
+                self.exit();
                 scope.pop();
                 r
             }
             // `spawn f(args)` moves arguments exactly like a direct call: a
             // `consume` parameter takes ownership across the task boundary.
             Expr::Spawn { name, args, line } => {
+                self.check_exclusive(name, args, *line)?;
                 let caps = self.caps.get(name);
                 for (i, arg) in args.iter().enumerate() {
                     self.site("arg", *line, arg, None);
@@ -746,9 +1201,10 @@ impl MoveCheck<'_> {
                             if !Self::in_scope(scope, v) {
                                 self.reject_consume_global(v, name, true, *vl)?;
                             }
-                            consumed
-                                .entry(v.clone())
-                                .or_insert((*line, format!("`spawn {name}(..)`")));
+                            consumed.entry(v.clone()).or_insert(Consumption::by_capability(
+                                *line,
+                                format!("`spawn {name}(..)`"),
+                            ));
                         }
                     }
                 }
@@ -813,6 +1269,7 @@ mod streams {
     use std::collections::HashMap;
 
     use crate::ast::*;
+    use crate::declared::Declared;
     use crate::diagnostics::Diagnostic;
 
     /// What a straight-line statement list does to one live stream binding.
@@ -832,7 +1289,7 @@ mod streams {
         doubled: bool,
     }
 
-    pub fn check(program: &Program) -> Vec<Diagnostic> {
+    pub fn check(program: &Program, decl: &Declared) -> Vec<Diagnostic> {
         // Functions whose return type is a stream, with the rendering the
         // diagnostic quotes. `fromArray`/`fromStep` are the builtin producers and
         // carry no element type here — this pass has no types — so a stream from
@@ -840,7 +1297,7 @@ mod streams {
         let producers: HashMap<&str, String> = program
             .functions
             .iter()
-            .filter(|f| matches!(f.ret, Type::Stream(_)))
+            .filter(|f| decl.must_use(&f.ret))
             .map(|f| (f.name.as_str(), rendered_ret(f)))
             .collect();
         let mut out = Vec::new();
@@ -856,13 +1313,13 @@ mod streams {
                     live.push((p.name.clone(), p.ty.to_string()));
                 }
             }
-            block(&f.body, &mut live, &producers, &f.module, &mut out);
+            block(&f.body, &mut live, &producers, &f.module, decl, &mut out);
         }
         for t in &program.tests {
-            block(&t.body, &mut Vec::new(), &producers, &t.module, &mut out);
+            block(&t.body, &mut Vec::new(), &producers, &t.module, decl, &mut out);
         }
         for b in &program.benches {
-            block(&b.body, &mut Vec::new(), &producers, &b.module, &mut out);
+            block(&b.body, &mut Vec::new(), &producers, &b.module, decl, &mut out);
         }
         out
     }
@@ -920,6 +1377,7 @@ mod streams {
         live: &mut Vec<(String, String)>,
         producers: &HashMap<&str, String>,
         module: &Option<String>,
+        decl: &Declared,
         out: &mut Vec<Diagnostic>,
     ) {
         let base = live.len();
@@ -928,7 +1386,7 @@ mod streams {
                 name, ty, value, line, ..
             } = st
             {
-                if let Some(rendered) = stream_let(ty.as_ref(), value, live, producers) {
+                if let Some(rendered) = stream_let(ty.as_ref(), value, live, producers, decl) {
                     // `false`: a `break` in the rest of THIS block leaves the block
                     // that declared the stream, so it abandons it. Inside a loop
                     // nested below, a `break` only leaves that loop and control
@@ -940,7 +1398,7 @@ mod streams {
                 }
             }
             for sub in sub_blocks(st) {
-                block(sub, live, producers, module, out);
+                block(sub, live, producers, module, decl, out);
             }
         }
         live.truncate(base);
@@ -952,9 +1410,14 @@ mod streams {
         value: &Expr,
         live: &[(String, String)],
         producers: &HashMap<&str, String>,
+        decl: &Declared,
     ) -> Option<String> {
-        if let Some(t @ Type::Stream(_)) = ty {
-            return Some(t.to_string());
+        // The must-use row, not a `Stream` match: an alias of a must-use type
+        // carries the obligation its base does.
+        if let Some(t) = ty {
+            if decl.must_use(t) {
+                return Some(t.to_string());
+            }
         }
         match value {
             Expr::Call { name, .. }
@@ -1179,7 +1642,7 @@ mod streams {
     /// Whether `e` names the binding anywhere. Every mention of a stream is a
     /// move — a `Stream` has no field, no length, and no indexing — so this needs
     /// no notion of position, which is what keeps it a dozen lines.
-    fn mentions(e: &Expr, name: &str) -> bool {
+    pub(super) fn mentions(e: &Expr, name: &str) -> bool {
         match e {
             Expr::Var { name: n, .. } => n == name,
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
@@ -1214,6 +1677,47 @@ mod streams {
             },
         }
     }
+}
+
+/// Whether parameter `i` of the builtin `name` **stores** its argument.
+///
+/// A builtin has no signature to carry a capability, so the three that put a
+/// value somewhere it outlives the call are listed here (RFC-0087 §2b — the
+/// hand list this replaces was the producer half of the same gap). Everything
+/// else a builtin does with a heap argument is a read: `print` formats it,
+/// `@concat` copies out of it, `at` looks inside it.
+fn sinks(name: &str, i: usize) -> bool {
+    matches!((name, i), ("push", 1) | ("set", 1) | ("cell", 0))
+}
+
+/// The place `e` reads, as `(root name, whole path)`.
+///
+/// `s` is `("s", "s")` and `r.a.b` is `("r", "r.a.b")` — the root is what a move
+/// takes, the path is what the diagnostic quotes. Anything else (a call, a
+/// literal, an operator) is not a place and answers `None`: it has no earlier
+/// owner, so nothing about it can be a move.
+fn place_path(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Var { name, .. } => Some((name.clone(), name.clone())),
+        Expr::Field { expr, field, .. } => {
+            let (root, path) = place_path(expr)?;
+            Some((root, format!("{path}.{field}")))
+        }
+        _ => None,
+    }
+}
+
+/// One diagnostic with its menu of fixes (RFC-0087 U2).
+///
+/// Every rule-1/2/3 error names the ways out rather than only the problem. The
+/// shape is fixed — the offending line, then one `fix:` per way out — so the
+/// editor, `vyrn check` and a future `vyrn fix` all read the same thing.
+fn menu(line: usize, message: String, fixes: Vec<String>) -> String {
+    let mut s = format!("line {line}: {message}");
+    for f in fixes {
+        s.push_str(&format!("\n  fix: {f}"));
+    }
+    s
 }
 
 /// The payload names a `match` pattern binds.
@@ -1378,6 +1882,139 @@ mod tests {
                        while true { break let a = take(x); let b = take(x); } \
                        return 0; }";
         assert!(run(src).is_ok(), "{:?}", run(src));
+    }
+
+    // ---- RFC-0089 Phase 4b: rules 1 and 3 --------------------------------
+
+    #[test]
+    fn a_store_of_an_owned_place_moves_it() {
+        // Rule 1. The binding takes the String; reading `s` afterward is the
+        // error, and the message prints both lines and the way out.
+        let src = "fn main() -> Int64 { let s = \"a\" + \"b\" let t = s \
+                   return s.byteLength + t.byteLength }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`s` was moved here into the binding `t`"), "{e}");
+        assert!(e.contains("... and `s` is used again here"), "{e}");
+        assert!(e.contains("fix: `s.copy()`"), "{e}");
+    }
+
+    #[test]
+    fn a_last_use_may_move() {
+        // The half that keeps rule 1 usable: `let t = s` with no later `s` is
+        // not an error, so the common rename costs nothing.
+        assert!(run("fn main() -> Int64 { let s = \"a\" + \"b\" let t = s \
+                     return t.byteLength }")
+            .is_ok());
+        // And a scalar never moves at all.
+        assert!(run("fn main() -> Int64 { let a = 1 let b = a return a + b }").is_ok());
+    }
+
+    #[test]
+    fn a_move_into_a_container_is_a_move() {
+        // `push` stores its argument, so it is the `consume` parameter a builtin
+        // has no signature to declare.
+        let src = "fn main() -> Int64 { let s = \"a\" + \"b\" let mut xs: Array<String> = [] \
+                   xs.push(s) return s.byteLength }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("was moved here into `push(..)`"), "{e}");
+        // A record literal takes its operands the same way.
+        let src = "type R = { s: String } \
+                   fn main() -> Int64 { let s = \"a\" + \"b\" let r = R { s: s } \
+                   return s.byteLength + r.s.byteLength }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("was moved here into the field `R.s`"), "{e}");
+    }
+
+    #[test]
+    fn a_borrowed_parameter_may_not_be_returned() {
+        // Rule 3, and the 36 corpus sites Phase 1's gate counted.
+        let src = "fn id(s: String) -> String { return s } fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`s` may not be returned"), "{e}");
+        assert!(e.contains("fix: declare the parameter `consume s`"), "{e}");
+        assert!(e.contains("fix: `s.copy()`"), "{e}");
+        // Both named fixes work.
+        assert!(run("fn id(s: consume String) -> String { return s } \
+                     fn main() -> Int64 { return 0 }")
+            .is_ok());
+        assert!(run("fn id(s: String) -> String { return s.copy() } \
+                     fn main() -> Int64 { return 0 }")
+            .is_ok());
+    }
+
+    #[test]
+    fn a_returned_scalar_parameter_is_not_a_borrow() {
+        // The surface only exists where heap is owned (RFC-0089 "What it costs").
+        assert!(run("fn id(n: Int64) -> Int64 { return n } fn main() -> Int64 { return id(1) }")
+            .is_ok());
+    }
+
+    #[test]
+    fn a_loop_variable_is_a_read_borrow() {
+        // The PLAN's decision log: iteration binds a `read` borrow, so the
+        // element belongs to the container and returning one is rule 3.
+        let src = "fn first(xs: Array<String>) -> String { for x in xs { return x } return \"\" } \
+                   fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`x` may not be returned") && e.contains("a loop variable"), "{e}");
+        assert!(run("fn first(xs: Array<String>) -> String { for x in xs { return x.copy() } \
+                     return \"\" } fn main() -> Int64 { return 0 }")
+            .is_ok());
+    }
+
+    #[test]
+    fn a_field_read_does_not_take_the_record() {
+        // A place owns its contents (rule 4), so `r.s` is a projection: naming it
+        // locally is free, and returning that name is still rule 3.
+        let src = "type R = { s: String } \
+                   fn get(r: R) -> String { let t = r.s return t } \
+                   fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`t` may not be returned"), "{e}");
+        // Reading two fields out of one record is not two moves of the record.
+        assert!(run("type R = { a: String, b: String } \
+                     fn use2(r: R) -> Int64 { let x = r.a let y = r.b \
+                     return x.byteLength + y.byteLength } fn main() -> Int64 { return 0 }")
+            .is_ok());
+    }
+
+    #[test]
+    fn rule_2_refuses_a_stored_borrow_when_it_is_turned_on() {
+        // The half of rule 2 that is written and waiting (RFC-0089 "What rule 2
+        // costs"). It is off on every ordinary check, so this asks for it by
+        // name — a rule nothing exercises is a rule that rots.
+        let src = "type R = { s: String } \
+                   fn keep(x: String) -> R { return R { s: x } } \
+                   fn main() -> Int64 { return 0 }";
+        let p = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        assert!(super::check_accum(&p).is_empty(), "off by default");
+        let d = borrow_store_sites(&p);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].message.contains("may not be stored into the field `R.s`"), "{d:?}");
+        assert!(d[0].message.contains("fix: declare the parameter `consume x`"), "{d:?}");
+    }
+
+    #[test]
+    fn a_modify_borrow_is_exclusive() {
+        let src = "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 { return a.length } \
+                   fn main() -> Int64 { let mut xs: Array<Int64> = [] return f(xs, xs) }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("as `modify` and read again in the same call"), "{e}");
+        assert!(e.contains("fix: `xs.copy()`"), "{e}");
+    }
+
+    #[test]
+    fn an_escaping_closure_may_not_capture_a_borrow() {
+        // A lambda written at a call site does not outlive the call, so it
+        // borrows freely; one that is stored is a value and may not.
+        assert!(run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
+                     fn go(s: String) -> Int64 { return apply(|n| n + s.byteLength) } \
+                     fn main() -> Int64 { return 0 }")
+            .is_ok());
+        let src = "fn go(s: String) -> Int64 { let f = |n| n + s.byteLength return f(1) } \
+                   fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("may not be captured by a closure that outlives this call"), "{e}");
     }
 
     // ---- RFC-0075: the disposal obligation -------------------------------
@@ -1607,14 +2244,17 @@ mod tests {
     }
 
     #[test]
-    fn a_site_this_reading_cannot_name_is_recorded_as_unknown() {
-        // The half of the census that matters most: 4b may not treat an unknown
-        // as "no move", because a missed move is a use-after-free.
+    fn a_pattern_payload_takes_the_scrutinee_s_type() {
+        // 4a recorded this binder as UNKNOWN and left 4b to decide what an
+        // unknown means. 4b names it instead: an `Option<String>` matched by
+        // `Some(v)` binds a `String`, so the site is typed rather than guessed
+        // at. The widening is movecheck-only — `own.rs` decides `free` with the
+        // reading it had.
         let src = "fn main() -> Int64 { let o: Option<String> = None \
                    match o { Some(v) => print(v), None => print(\"\") } return 0 }";
-        let unknown: Vec<_> = sites_of(src).into_iter().filter(|s| s.unknown()).collect();
-        assert_eq!(unknown.len(), 1, "{unknown:?}");
-        assert_eq!(unknown[0].kind, "arg");
+        let sites = sites_of(src);
+        assert!(sites.iter().all(|s| !s.unknown()), "{sites:?}");
+        assert_eq!(kinds(src, "arg"), vec!["String"]);
     }
 
     /// RFC-0089 Phase 4a's deliverable: how many places Phase 4b's analysis has

@@ -151,6 +151,12 @@ impl Declared {
         crate::own::owns_heap(ty, &self.decls)
     }
 
+    /// Whether `ty` carries a must-use obligation — RFC-0090's opt-in linear
+    /// row, through the one implementation in [`crate::own::must_use`].
+    pub fn must_use(&self, ty: &Type) -> bool {
+        crate::own::must_use(ty, &self.decls)
+    }
+
     /// The element type of an iterable, where this reading can name it.
     ///
     /// `for x in xs` binds an element, so without this every loop variable is

@@ -124,7 +124,19 @@ Split into three PRs, in order:
   cannot key statements; use node addresses) into `movecheck`. Derive
   `owns_heap(ty)` transitively from the `Owned` table (RFC-0086 M1). No
   diagnostics change yet; internal only.
-- **4b. Enforce rules 1–3.** Moves on assignment/arg/return of owning types
+- **4b. Enforce rules 1 and 3 — LANDED. Rule 2's stores split out as 4b-2.**
+  Rule 1 (a store of an owning place moves it, flow-sensitive and last-use
+  aware), rule 3 (a return is owned), exclusivity, iteration as a `read` borrow,
+  the `must-use` row, and menu diagnostics. 65 corpus sites migrated: 58
+  `.copy()`, 4 `consume`, 3 restructured. Rule 2's **store** refusal is written
+  and gated off: it is 288 more sites, 154 of them `for x in xs { out.push(x) }`
+  with no `consume` spelling available. See RFC-0089 "What rule 2 costs".
+  4b also found that `copy` crashes the compiler on a self-referring type — an
+  M1b bug, now a diagnostic, with `std/json`'s `copyJson` as the worked fix.
+- **4b-2. Rule 2's second-class stores.** Turn on `MoveCheck::refuse_stores`
+  and migrate the 288. Decide first whether iteration gains a consuming form;
+  landing 154 `.copy()` calls in `std/` without one is the worse outcome.
+- ~~**4b. Enforce rules 1–3.**~~ Moves on assignment/arg/return of owning types
   (flow-sensitive, last-use aware — `let t = s` then never using `s` is
   legal). `read`/`modify` no-retain: a borrowed param may not be stored,
   captured by an escaping closure, or returned. Returns are owned. Exclusivity:

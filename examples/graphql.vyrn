@@ -161,7 +161,7 @@ fn main() -> Int64 {
 fn topSchema(t: String, field: String) -> String {
     if t == "Query" {
         if field == "" {
-            return t
+            return t.copy()
         }
         if field == "book" {
             return "Book!"
@@ -170,7 +170,7 @@ fn topSchema(t: String, field: String) -> String {
     }
     if t == "Book" {
         if field == "" {
-            return t
+            return t.copy()
         }
         if field == "title" {
             return "Title!"

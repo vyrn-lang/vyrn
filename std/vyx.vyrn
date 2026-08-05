@@ -151,7 +151,7 @@ fn vyxIdentOf(key: String) -> String {
 /// `arr` with `s` appended (value semantics — the input is unchanged). Unused by
 /// the compiler today; kept for the page/component builders' historical API.
 fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
-    let mut out = arr
+    let mut out = arr.copy()
     out.push(s)
     return out
 }
@@ -982,22 +982,22 @@ fn vyxRebaseImport(line: String, dir: String) -> String {
     let ba = bytes(line)
     let fromAt = vyxFind(ba, bytes(" from "), 0)
     if fromAt < 0 {
-        return line
+        return line.copy()
     }
     let q1 = vyxFind(ba, bytes("\""), fromAt)
     if q1 < 0 {
-        return line
+        return line.copy()
     }
     let q2 = vyxFind(ba, bytes("\""), q1 + 1)
     if q2 < 0 {
-        return line
+        return line.copy()
     }
     let spec = vyxSlice(ba, q1 + 1, q2)
     if spec.startsWith("./") || spec.startsWith("../") {
         let rebased = dir + "/" + spec
         return vyxSlice(ba, 0, q1 + 1) + rebased + vyxSlice(ba, q2, ba.length)
     }
-    return line
+    return line.copy()
 }
 
 /// A located `props` block. `found` is set when a STATEMENT-LEADING `props`
@@ -2377,7 +2377,7 @@ import * as vyxTheme from tw(\{theme})
 /// the emitted code is always byte-identical to the pre-RFC-0048 helper text.
 gen fn vyxHelperBlock(c: VyxComp) -> String {
     if c.helperTexts.length == 0 {
-        return c.helpers
+        return c.helpers.copy()
     }
     let mut out = ""
     let mut i = 0
@@ -2469,7 +2469,7 @@ gen fn vyxFinish(comps: Array<VyxComp>, err: String, themed: Bool, theme: String
         return "VYX_ERROR__no_vyx_files_found_under_the_components_directory\n"
     }
     if err != "" {
-        return err
+        return err.copy()
     }
     // RFC-0071: the surface this is about to emit, checked against the contract
     // that describes it. An issue is a load diagnostic like any other.
@@ -2735,7 +2735,7 @@ fn vyxLoaderDataType(loadRet: String) -> String {
     // RFC-0069 §0: a plain query (`Query<Array<Paste>>`) carries its data type
     // directly — only the `Validation<…>`/`Result<…>` wrappers are unwrapped.
     if loadRet.startsWith("Validation<") == false && loadRet.startsWith("Result<") == false {
-        return loadRet
+        return loadRet.copy()
     }
     let ba = bytes(loadRet)
     let open = vyxFind(ba, bytes("<"), 0)
@@ -2887,7 +2887,7 @@ fn vyxAfterColon(part: String) -> String {
         }
         i = i + 1
     }
-    return part
+    return part.copy()
 }
 
 /// The PUBLIC surface a `.vyx` page's `<script>` declares — its statement-leading
@@ -3315,7 +3315,7 @@ gen fn vyxStripLoadFn(script: String) -> String {
         }
         i = i + 1
     }
-    return script
+    return script.copy()
 }
 
 /// Whether `name` is CALLED (`name(`) anywhere in `corpus`, as a whole token — the
@@ -3409,12 +3409,12 @@ gen fn vyxStripDeadHelpers(script: String, keep: String) -> String {
     while rounds < 16 {
         let next = vyxStripDeadHelpersOnce(cur, keep)
         if next == cur {
-            return cur
+            return cur.copy()
         }
         cur = next
         rounds = rounds + 1
     }
-    return cur
+    return cur.copy()
 }
 
 /// One pass of [`vyxStripDeadHelpers`]: remove the first private helper nothing
@@ -3442,7 +3442,7 @@ gen fn vyxStripDeadHelpersOnce(script: String, keep: String) -> String {
         }
         i = i + 1
     }
-    return script
+    return script.copy()
 }
 
 /// The declared name of a `fn <name>(` line ("" when the line is not one).
@@ -3554,12 +3554,12 @@ gen fn vyxPruneOneImport(line: String, corpus: String, loadBody: String) -> Stri
     }
     let fromIdx = vyxFind(lb, bytes(" from "), 0)
     if fromIdx < 0 {
-        return line
+        return line.copy()
     }
     if vyxImportNameDead(vyxLastIdent(vyxSlice(lb, 0, fromIdx)), corpus, loadBody) {
         return ""
     }
-    return line
+    return line.copy()
 }
 
 /// `line` with any `//` line-comment removed, so a doc comment mentioning a type
@@ -3570,7 +3570,7 @@ fn vyxStripLineComment(line: String) -> String {
     let lb = bytes(line)
     let idx = vyxFind(lb, bytes("//"), 0)
     if idx < 0 {
-        return line
+        return line.copy()
     }
     return vyxSlice(lb, 0, idx)
 }
@@ -3817,7 +3817,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
         // The synthetic component's `props` block trails the page's own imports so
         // it satisfies the imports-first rule (RFC-0040 §3); the emitted module is
         // order-independent (imports and helpers are collected separately).
-        synthScript = restExported + "props { " + propsInner + " }\n"
+        synthScript = synthScript + "props { " + propsInner + " }\n"
     }
     let synthPrefix = "<script>\n" + synthScript + "\n</script>\n<template>\n"
     let synthSource = synthPrefix + templateBody + "\n</template>\n"
@@ -3830,7 +3830,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     let mut comp = comp0
     if srcPath != "" {
         let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
-        comp = vyxRelocateComp(comp0, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_page")
+        comp = vyxRelocateComp(comp, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_page")
     }
     let moduleStr = vyxBuildModule([comp], themed, theme)
     if moduleStr.contains("export fn uiPageBody") == false {
@@ -4076,7 +4076,7 @@ export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: Strin
     let mut comp = comp0
     if srcPath != "" {
         let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
-        comp = vyxRelocateComp(comp0, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_layout")
+        comp = vyxRelocateComp(comp, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_layout")
     }
     // A layout MUST render the page body through a `<slot/>`.
     if comp.takesChildren == false {
@@ -4156,7 +4156,7 @@ export gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String
     let mut comp = comp0
     if srcPath != "" {
         let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
-        comp = vyxRelocateComp(comp0, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_error")
+        comp = vyxRelocateComp(comp, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_error")
     }
     let moduleStr = vyxBuildModule([comp], themed, theme)
     if moduleStr.contains("export fn uiErrorBody") == false {
@@ -4237,7 +4237,10 @@ test "a themed build routes class through vyxTheme.cls with its own origin direc
     assert(out.contains("vyxTheme.cls(\"row\")"))
     assert(out.contains(": Attr = vyxTheme.cls(\"row\")"))
     assert(out.contains("//@origin ./c/Item.vyx:1:"))
-    let bare = vyxBuildModule([comp], false, "")
+    // The array literal took `comp`, and a `VyxNode` tree refers to itself, so
+    // it cannot be copied: the second build compiles its own component.
+    let comp2 = vyxCompileComponent("Item", src, "./c")
+    let bare = vyxBuildModule([comp2], false, "")
     assert(bare.contains("Cls(\"row\")"))
     assertEq(bare.contains("vyxTheme"), false)
 }

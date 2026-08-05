@@ -21,7 +21,7 @@ impl Show for Bool {
 }
 
 impl Show for String {
-    fn show(self) -> String { return self }
+    fn show(self) -> String { return self.copy() }
 }
 
 // An impl head can bind type variables (RFC-0080 M1), so a protocol reaches a

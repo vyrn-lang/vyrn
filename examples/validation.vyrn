@@ -38,7 +38,7 @@ fn translateDe(key: String) -> String {
     if key == "name.required" { return "Name ist erforderlich" }
     if key == "age.min" { return "Alter muss mindestens 0 sein" }
     if key == "age.max" { return "Alter ist unplausibel" }
-    return key
+    return key.copy()
 }
 
 fn main() -> Int64 {

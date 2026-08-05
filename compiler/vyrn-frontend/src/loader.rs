@@ -4774,9 +4774,9 @@ mod tests {
     fn generated_module_param_shadows_a_foreign_export() {
         // The `.vyx` `cls` shape: a generator-synthesized module has a fn whose
         // PARAM `cls` shadows `std/html`'s exported `cls`, both linked together.
-        let html = "export fn cls(s: String) -> String { return s }";
+        let html = "export fn cls(s: String) -> String { return s.copy() }";
         let gen = "export gen fn widgets(dir: String) -> String { \
-                       return \"export fn item(cls: String) -> String { return cls }\" }";
+                       return \"export fn item(cls: String) -> String { return cls.copy() }\" }";
         let root = "import { cls } from \"./html\" \
                     import { widgets } from \"./gen\" \
                     import { item } from widgets(\"./w\") \

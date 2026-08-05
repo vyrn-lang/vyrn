@@ -10733,13 +10733,13 @@ mod tests {
 
     #[test]
     fn string_accumulator_not_appended_when_aliased_or_in_region() {
-        // An alias taken before the append must keep reading the old contents,
-        // so a `let` that copies the variable disqualifies it...
-        let aliased = "fn main() -> Int64 { let mut out = \"a\"; let copy = out; \
-                       out = out + \"b\"; print(copy); return out.byteLength; }";
-        let ir = emit(&check(aliased).unwrap()).unwrap();
-        assert!(!ir.contains("app.own"), "aliased accumulator stays copying: {ir}");
-        // ...and so does any user call, which may store what it is handed.
+        // The ALIAS half of this test is gone with RFC-0089 rule 1. `let copy =
+        // out` moves, so a program that reads `out` afterward does not compile,
+        // and the named fix `out.copy()` gives `copy` a buffer of its own —
+        // which is the condition the in-place append needed all along. The
+        // whitelist row survives for `Ref`, the one aliasing the language keeps.
+        //
+        // A user call may store what it is handed, so it still disqualifies.
         let escaped = "fn keep(s: String) -> Int64 { return s.byteLength; } \
                        fn main() -> Int64 { let mut out = \"a\"; out = out + \"b\"; \
                        return keep(out); }";
@@ -10814,16 +10814,18 @@ mod tests {
     fn the_append_path_frees_exactly_what_the_copying_path_frees() {
         let body = |extra: &str| {
             format!(
-                "fn build(n: Int64) -> String {{ let mut out = \"[\"; let mut i = 0; \
+                "fn keep(s: String) -> Int64 {{ return s.byteLength; }} \
+                 fn build(n: Int64) -> String {{ let mut out = \"[\"; let mut i = 0; \
                  {extra} while i < n {{ out = out + \",\"; i = i + 1; }} return out + \"]\"; }} \
                  fn main() -> Int64 {{ let a = \"x\"; let b = \"y\"; let s = a + b; \
                  return build(s.byteLength).byteLength; }}"
             )
         };
         let appending = emit(&check(&body("")).unwrap()).unwrap();
-        // `let alias = out` is the whitelist's own ban, so this is the same
-        // function lowered the old way.
-        let copying = emit(&check(&body("let alias = out; print(alias);")).unwrap()).unwrap();
+        // Handing `out` to a user call is the whitelist's own ban, so this is the
+        // same function lowered the old way. It used to say `let alias = out`,
+        // which RFC-0089 rule 1 now refuses.
+        let copying = emit(&check(&body("let n0 = keep(out);")).unwrap()).unwrap();
         assert!(appending.contains("app.own") && !copying.contains("app.own"), "setup");
         assert_eq!(
             free_calls(&appending),
@@ -11793,7 +11795,7 @@ mod tests {
         // parameter is a SINGLE `ptr` (not the import's (ptr,len) pair) — the JS
         // caller allocates the buffer, so decode-side length is a NUL scan.
         let src = "export extern fn vyrnAdd(a: Int64, b: Int64) -> Int64 { return a + b } \
-                   export extern fn greet(name: String) -> String { return name } \
+                   export extern fn greet(name: String) -> String { return name.copy() } \
                    fn main() -> Int64 { return vyrnAdd(1, 2) }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(

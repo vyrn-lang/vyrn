@@ -25,7 +25,7 @@ fn issueText(iss: RpcIssue) -> String {
             return tIssueBodyEmpty()
         }
     }
-    return iss.message
+    return iss.message.copy()
 }
 
 /// The localized text of the FIRST issue at `path` ("" when clean), for the span

@@ -6100,6 +6100,19 @@ impl<'a> Checker<'a> {
                      producer, not a container. Collect it first (`collect`), then copy the array"
                 ));
             }
+            // A type that reaches itself has no structural bottom, and `copy` is
+            // a structural walk. Both compiling backends expanded one until the
+            // compiler's stack ran out — a crash with no line on it. Recursion in
+            // the value needs recursion in the code, so the answer is a function
+            // (`std/json`'s `copyJson` is the worked example), and RFC-0091 M1's
+            // `Copy` protocol is where a type will declare its own.
+            if let Some(name) = crate::own::self_referring(&t, &self.types) {
+                return Err(format!(
+                    "line {line}: `copy` cannot copy `{name}`: it refers to itself, so a \
+                     structural copy has no bottom to stop at. Write a recursive function that \
+                     copies it one variant at a time"
+                ));
+            }
             return Ok(t);
         }
         // Map methods (RFC-0028), all method-only (unspellable `@` names). `has`

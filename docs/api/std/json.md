@@ -39,6 +39,20 @@ A JSON value. `JNum` carries the RAW, validated number text (never a float):
 generators compare and re-emit numbers, nobody needs float semantics at
 comptime, and raw text makes emit → parse → emit byte-stable.
 
+## copyJson
+
+```vyrn
+fn copyJson(j: Json) -> Json
+```
+
+A `Json` that shares nothing with `j` — RFC-0089's `copy`, written out.
+
+`j.copy()` is refused for this type and says why: `Json` reaches itself
+through `JArr` and `JObj`, and the builtin is a structural walk with no
+bottom to stop at. Recursion in the value needs recursion in the code, and
+this is that code. Every reader that looks a field out of an object needs it,
+because a field belongs to the object that holds it and a return is owned.
+
 ## emit
 
 ```vyrn
