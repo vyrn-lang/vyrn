@@ -147,7 +147,7 @@ codec, schema, enum-payload Map, validated-V trap).
 - **Ownership.** `Map` is a heap value (`DropKind::FreeMap`): auto-dropped like
   an array (a `mut` map keeps its identity and its buffers). `drop m` frees both
   backing buffers; elements are a **safe leak**, mirroring `Array`'s
-  `AfreeArr` exactly (the RFC's "recursively" reads as "follow Array's rules",
+  `FreeArr` exactly (the RFC's "recursively" reads as "follow Array's rules",
   which is what parity actually pins). `keys()` copies the key pointers into a
   fresh `Array<String>` snapshot.
 - **Boundary validation.** A validated `V` re-validates on every `m[k] = v`

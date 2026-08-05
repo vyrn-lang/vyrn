@@ -133,7 +133,6 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("push", Memory, "Array: append, reallocating"),
     ("at", Memory, "Array: indexed read; also traps out of bounds"),
     ("alen", Memory, "Array: the length word"),
-    ("afree", Memory, "Array: reclamation (native frees; the interpreter's Vec drops)"),
     ("@list", Memory, "a fixed and a growable array share one representation"),
     ("@toArray", Memory, "SmallArray (RFC-0056): copy the inline/spilled buffer out"),
     ("@pop", Memory, "Array: shrink by one, writing back through the binding"),
@@ -162,7 +161,8 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // make or unmake a stream, which is what makes "disposed exactly once"
     // checkable. M2b is where the note M1 left here came due — the producer
     // stopped being an eager buffer, so `close` grew a real teardown and stopped
-    // being `afree` under another name.
+    // being the array free under another name. (The array free had a surface
+    // name of its own then, `afree`; it has none now.)
     ("fromArray", Memory, "Stream: the array's buffer, moved into a buffer-tagged header"),
     ("fromStep", Memory, "Stream: a cursor cell plus a step, pulled once per element"),
     // RFC-0075 M2c: the wrapper is the same cursor cell with a source moved into
@@ -508,7 +508,13 @@ fn the_census_is_the_code() {
     // whole of the rest — every operator is a `BinOp` or a `UnOp`, and both lane
     // accessors serve the new width from the arm they already had, since a lane
     // accessor is about the lane index and only the RANGE changed.
-    assert_eq!(found.len(), 93, "the primitive core changed size");
+    // 93 -> 92 when `afree` was deleted, and it is the only row that ever left
+    // for having no callers rather than for being routed into Vyrn. It had zero
+    // uses in `examples/` and `std/`, and the direct wasm backend never lowered
+    // it, so a program that called it could not build for wasm at all. `drop a`
+    // is the reclamation, on all three engines. This test named the stale row
+    // before anything else did.
+    assert_eq!(found.len(), 92, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

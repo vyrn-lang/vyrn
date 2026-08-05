@@ -1104,7 +1104,7 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     }
     let (analysis, _uri) = lookup(server, uri)?;
     // A `.foo` member access → context-aware completions for the receiver's type
-    // (e.g. `arr.` → push/at/alen/afree/length). Otherwise → all top-level
+    // (e.g. `arr.` → push/at/alen/pop/length). Otherwise → all top-level
     // symbols; the client filters by the prefix the user typed.
     let raw = server.docs.get(uri);
     // RFC-0020 M1 / RFC-0042: inside a string literal whose expected type is a

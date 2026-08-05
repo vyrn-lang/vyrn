@@ -517,7 +517,7 @@ fn main() -> Int64 { return 0; }
 
 /// `textDocument/completion` at a `.foo` member-access position returns the
 /// built-in methods for the receiver's type (here `Array<Int>` → push/at/alen/
-/// afree/length), NOT the top-level symbol list. Guards the `is_member_context`
+/// pop/length), NOT the top-level symbol list. Guards the `is_member_context`
 /// routing → `member_completions` → receiver-type resolution path over the wire.
 #[test]
 fn member_completion_after_dot_lists_array_methods() {
@@ -564,9 +564,10 @@ fn main() -> Int64 {
         .expect("member-completion result is a list");
     let labels: Vec<&str> =
         items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
-    for expected in ["push", "at", "alen", "afree", "length"] {
+    for expected in ["push", "at", "alen", "pop", "length"] {
         assert!(labels.contains(&expected), "array member {expected} missing: {labels:?}");
     }
+    assert!(!labels.contains(&"afree"), "`afree` was removed: {labels:?}");
     // In a `.foo` context the top-level symbols must NOT be offered.
     assert!(!labels.contains(&"main"), "top-level `main` leaked into member completion: {labels:?}");
 }

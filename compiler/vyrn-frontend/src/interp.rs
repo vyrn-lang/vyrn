@@ -4672,12 +4672,6 @@ impl<'a> Interp<'a> {
                         Val::Array(elems) => Ok(Val::Int(elems.len() as i64)),
                         other => Err(format!("alen of non-Array {other:?}").into()),
                     },
-                    // Reclamation is observable only in native code (the host
-                    // frees the Vec); the two agree on output and exit code.
-                    "afree" => match &vals[0] {
-                        Val::Array(_) => Ok(Val::Unit),
-                        other => Err(format!("afree of non-Array {other:?}").into()),
-                    },
                     // RFC-0075. The two producers and the release. `close` is
                     // variant-aware (M2b): a buffer stream has nothing the host
                     // does not reclaim anyway, but a stepped one owns a cursor
