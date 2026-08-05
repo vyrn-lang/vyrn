@@ -1,14 +1,18 @@
 //! Ownership / drop analysis for heap temporaries (RFC-0004 §4).
 //!
 //! This is the *ownership* half of the memory model's Path A — the counterpart
-//! to `region` arenas. It decides, per function, two things:
+//! to `region` arenas. It decides, per function, three things:
 //!
 //!   * **droppable** `let` bindings — ones that own a fresh heap allocation and
 //!     provably do not escape their block, so the backend frees them at block
 //!     exit; and
 //!   * whether the function **returns an owned value** — every heap-typed return
 //!     hands the caller a fresh, unaliased allocation, transferring ownership out
-//!     so the *caller's* receiving binding becomes droppable in turn.
+//!     so the *caller's* receiving binding becomes droppable in turn; and
+//!   * which `get`/`set` sites read a **provably fresh** reference, so their
+//!     generation check cannot fail and no engine emits it (RFC-0004 §5.3). That
+//!     one is a second pass over the finished `droppable` set — see
+//!     [`fresh_refs_in`].
 //!
 //! A fresh heap value is produced by `a + b` on Strings (the `@concat`/`@str`
 //! internal spellings), or by a call to a function that itself returns owned
@@ -65,6 +69,11 @@ pub struct Ownership {
     pub owned_fns: HashMap<String, DropKind>,
     /// Per function: identity of each droppable `let` and how to reclaim it.
     pub droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// The `Ref` argument of every `get`/`set` whose generation check cannot
+    /// fail, keyed by that argument expression's node address — RFC-0004 §5.3.
+    /// See [`fresh_refs_in`] for the condition. Flat across the program, because
+    /// node addresses are already unique.
+    pub fresh_refs: HashSet<usize>,
 }
 
 /// Analyse ownership across a whole program.
@@ -111,49 +120,48 @@ pub fn analyze(program: &Program) -> Ownership {
 
     // Final droppable sets, computed under the fixed owned set.
     let mut droppable = HashMap::new();
+    let mut fresh_refs = HashSet::new();
     for f in &program.functions {
-        droppable.insert(
-            f.name.clone(),
-            analyze_fn(f, &owned, &string_fns, &string_types).droppable,
-        );
+        let d = analyze_fn(f, &owned, &string_fns, &string_types).droppable;
+        fresh_refs.extend(fresh_refs_in(&f.body, &d));
+        droppable.insert(f.name.clone(), d);
     }
     // Test bodies (RFC-0015) get the same block-exit drop analysis so a `let` in
     // a test reclaims its heap value exactly as it would in a function. The body
     // is the REAL node the interpreter walks, so the by-address droppable keys
     // match at run time. Tests never return an owned value (they are `Unit`).
     for (i, t) in program.tests.iter().enumerate() {
-        droppable.insert(
-            format!("test@{i}"),
-            analyze_body(
-                &[],
-                &t.body,
-                &Type::Unit,
-                &owned,
-                &string_fns,
-                &string_types,
-            )
-            .droppable,
-        );
+        let d = analyze_body(
+            &[],
+            &t.body,
+            &Type::Unit,
+            &owned,
+            &string_fns,
+            &string_types,
+        )
+        .droppable;
+        fresh_refs.extend(fresh_refs_in(&t.body, &d));
+        droppable.insert(format!("test@{i}"), d);
     }
     // Bench bodies (RFC-0055) get the same block-exit drop analysis, keyed by the
     // synthetic `bench@<index>` name the interpreter (`--check`) walks.
     for (i, b) in program.benches.iter().enumerate() {
-        droppable.insert(
-            format!("bench@{i}"),
-            analyze_body(
-                &[],
-                &b.body,
-                &Type::Unit,
-                &owned,
-                &string_fns,
-                &string_types,
-            )
-            .droppable,
-        );
+        let d = analyze_body(
+            &[],
+            &b.body,
+            &Type::Unit,
+            &owned,
+            &string_fns,
+            &string_types,
+        )
+        .droppable;
+        fresh_refs.extend(fresh_refs_in(&b.body, &d));
+        droppable.insert(format!("bench@{i}"), d);
     }
     Ownership {
         owned_fns: owned,
         droppable,
+        fresh_refs,
     }
 }
 
@@ -641,6 +649,224 @@ impl Analysis<'_> {
     }
 }
 
+/// The `get`/`set` sites in `body` whose generation check can never fail
+/// (RFC-0004 §5), given that function's *final* `droppable` set.
+///
+/// A `let c = cell(..)` survives into `droppable` with [`DropKind::ReleaseRef`]
+/// only if nothing aliased it, nothing was handed it, and no `release(c)`
+/// reached it — `release` is deliberately outside the safe-read list in
+/// [`Analysis::visit`], so an explicit release removes the binding. The one
+/// release left is the compiler's own at block exit, which runs after every
+/// access in the block. So the reference a `get(c)`/`set(c, ..)` reads is the
+/// one `cell(..)` just handed out and its generation is the slot's: the check
+/// has one possible answer.
+///
+/// This has to be a second pass. `droppable` is order-independent only once it
+/// is final — a `get(c)` can precede the `release(c)` that escapes `c`.
+///
+/// The key is the *argument* expression's node address, which is what all three
+/// engines hold at their check site.
+fn fresh_refs_in(body: &Block, droppable: &HashMap<usize, DropKind>) -> HashSet<usize> {
+    let mut f = Fresh {
+        droppable,
+        scopes: Vec::new(),
+        out: HashSet::new(),
+    };
+    f.block(body);
+    f.out
+}
+
+struct Fresh<'a> {
+    droppable: &'a HashMap<usize, DropKind>,
+    /// Scope stack of every name in scope: a `let` maps to its node identity, a
+    /// pattern or loop binder to 0. Parameters are absent. Only a `let` can name
+    /// a droppable cell, so 0 and "absent" both answer "not fresh" — but the
+    /// binder still has to be *recorded*, or a `for c in refs` inside a block
+    /// that also has `let c = cell(..)` would resolve to the wrong one.
+    scopes: Vec<HashMap<String, usize>>,
+    out: HashSet<usize>,
+}
+
+impl Fresh<'_> {
+    fn block(&mut self, b: &Block) {
+        self.scopes.push(HashMap::new());
+        for s in &b.stmts {
+            self.stmt(s);
+        }
+        self.scopes.pop();
+    }
+
+    /// Run `body` with `binders` in scope ahead of it (an `if let` arm, a `for`).
+    fn scoped(&mut self, binders: &[&str], body: &Block) {
+        self.scopes.push(HashMap::new());
+        for n in binders {
+            self.bind(n, 0);
+        }
+        self.block(body);
+        self.scopes.pop();
+    }
+
+    fn bind(&mut self, name: &str, key: usize) {
+        self.scopes.last_mut().unwrap().insert(name.to_string(), key);
+    }
+
+    /// Whether `name` is bound by a `let` that owns a cell nothing else can reach.
+    fn is_fresh_cell(&self, name: &str) -> bool {
+        for frame in self.scopes.iter().rev() {
+            if let Some(key) = frame.get(name) {
+                return self.droppable.get(key) == Some(&DropKind::ReleaseRef);
+            }
+        }
+        false
+    }
+
+    fn stmt(&mut self, s: &Stmt) {
+        match s {
+            Stmt::Let { name, value, .. } => {
+                self.expr(value);
+                self.bind(name, id(s));
+            }
+            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => self.expr(value),
+            Stmt::IndexSet { index, value, .. } => {
+                self.expr(index);
+                self.expr(value);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(e) = value {
+                    self.expr(e);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(cond);
+                self.block(then_block);
+                if let Some(eb) = else_block {
+                    self.block(eb);
+                }
+            }
+            Stmt::IfLet {
+                pattern,
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(scrutinee);
+                let bs = pattern_binders(pattern);
+                self.scoped(&bs.iter().map(|s| s.as_str()).collect::<Vec<_>>(), then_block);
+                if let Some(eb) = else_block {
+                    self.block(eb);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                self.expr(cond);
+                self.block(body);
+            }
+            Stmt::ForIn {
+                var, iter, body, ..
+            } => {
+                self.expr(iter);
+                self.scoped(&[var.as_str()], body);
+            }
+            Stmt::Expr(e) => self.expr(e),
+            Stmt::Region { body, .. } => self.block(body),
+        }
+    }
+
+    fn expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+            Expr::Var { .. } => {}
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                self.expr(expr)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            Expr::Call { name, args, .. } => {
+                if (name == "get" || name == "set") && !args.is_empty() {
+                    if let Expr::Var { name: c, .. } = &args[0] {
+                        if self.is_fresh_cell(c) {
+                            self.out.insert(&args[0] as *const Expr as usize);
+                        }
+                    }
+                }
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    self.scopes.push(HashMap::new());
+                    for n in pattern_binders(&arm.pattern) {
+                        self.bind(&n, 0);
+                    }
+                    self.expr(&arm.body);
+                    self.scopes.pop();
+                }
+            }
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expr(cond);
+                self.expr(then_branch);
+                if let Some(eb) = else_branch {
+                    self.expr(eb);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    self.expr(v);
+                }
+            }
+            Expr::TryConstruct { args, .. }
+            | Expr::ArrayLit { elems: args, .. }
+            | Expr::Spawn { args, .. } => {
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
+            // A lambda body is NOT walked. Its `get(c)` on a captured cell runs
+            // whenever the closure runs, and a stored closure (RFC-0037) can run
+            // after the block that released `c` has exited. `visit` counts that
+            // `get` as a safe read, so `c` stays droppable — the block-exit
+            // release is what the check would then catch. Elide nothing there.
+            Expr::Lambda { .. } => {}
+        }
+    }
+}
+
+/// The names a refutable pattern binds.
+fn pattern_binders(p: &Pattern) -> Vec<String> {
+    match p {
+        Pattern::Some(n)
+        | Pattern::Ok(n)
+        | Pattern::Err(n)
+        | Pattern::Success(n)
+        | Pattern::Failure(n) => vec![n.clone()],
+        Pattern::Variant(_, ns) => ns.clone(),
+        Pattern::None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,6 +1060,57 @@ mod tests {
                    a = push(a, 1); return a; } fn main() -> Int64 { return 0; }";
         // `a` is moved out by the return, so it is not freed inside `build`.
         assert_eq!(drop_count(src, "build"), 0);
+    }
+
+    // ---- elided generation checks (RFC-0004 §5) --------------------------
+
+    fn fresh_count(src: &str) -> usize {
+        let p = parse(lex(src).unwrap()).unwrap();
+        analyze(&p).fresh_refs.len()
+    }
+
+    #[test]
+    fn accesses_to_a_non_escaping_cell_are_fresh() {
+        // `set`, the `get` inside it, and the trailing `get` — three sites.
+        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
+        assert_eq!(fresh_count(src), 3);
+    }
+
+    #[test]
+    fn an_explicit_release_makes_every_access_checked() {
+        // The `release` is textually last, so only the final `droppable` says so.
+        let src = "fn main() -> Int64 { let c = cell(1); let v = get(c); release(c); return v; }";
+        assert_eq!(fresh_count(src), 0);
+    }
+
+    #[test]
+    fn an_aliased_cell_stays_checked() {
+        let src = "fn main() -> Int64 { let c = cell(1); let d = c; return get(d) + get(c); }";
+        assert_eq!(fresh_count(src), 0);
+    }
+
+    #[test]
+    fn a_parameter_reference_stays_checked() {
+        let src = "fn bump(r: Ref<Int64>) -> Int64 { set(r, get(r) + 1); return get(r); } \
+                   fn main() -> Int64 { return 0; }";
+        assert_eq!(fresh_count(src), 0);
+    }
+
+    #[test]
+    fn a_loop_binder_does_not_borrow_an_outer_cells_freshness() {
+        // `c` inside the loop is the element, not the cell — resolving it to the
+        // outer `let` would elide a check on a reference this analysis never saw.
+        let src = "fn main() -> Int64 { let c = cell(1); let rs: Array<Ref<Int64>> = array(); \
+                   for c in rs { print(get(c)); } return get(c); }";
+        assert_eq!(fresh_count(src), 1);
+    }
+
+    #[test]
+    fn a_captured_cell_is_never_fresh_inside_the_lambda() {
+        // The closure can outlive the block that releases `c`.
+        let src = "fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x); } \
+                   fn main() -> Int64 { let c = cell(1); return apply(|x| x + get(c), 2); }";
+        assert_eq!(fresh_count(src), 0);
     }
 
     #[test]

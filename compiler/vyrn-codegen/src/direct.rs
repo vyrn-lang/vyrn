@@ -334,6 +334,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
         .collect();
 
+    let ownership = vyrn_frontend::own::analyze(program);
     let mut cx = Cx {
         types,
         sigs: HashMap::new(),
@@ -349,7 +350,8 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         dispatch: RefCell::new(Dispatch::default()),
         globals: HashMap::new(),
         externs,
-        droppable: vyrn_frontend::own::analyze(program).droppable,
+        droppable: ownership.droppable,
+        fresh_refs: ownership.fresh_refs,
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
         // Reserved only for a file sink, so every console-sink module — which is
@@ -773,6 +775,11 @@ struct Cx {
     /// — but the map's membership is `own`'s answer and stays authoritative about
     /// WHICH `let`s own their value.
     droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// `get`/`set` reference arguments (by `Expr` node address) whose generation
+    /// check `own` proved cannot fail (RFC-0004 §5) — the same set, read with the
+    /// same key, as the textual backend's and the interpreter's. Flat rather than
+    /// keyed by function, because node addresses already are.
+    fresh_refs: std::collections::HashSet<usize>,
     /// RFC-0008's threshold, as an ordinal. Compile-time, and that is the point:
     /// with `logging { level: warn }` a `.debug(..)` call emits no write at all,
     /// which is what makes a disabled log site cost nothing on every engine. A
@@ -7469,9 +7476,14 @@ impl Fn_<'_> {
     /// Evaluate a `Ref<T>` expression and leave its generation-checked payload
     /// address on the stack, giving `T`.
     ///
-    /// One helper for all four operations because the check is not optional on any
-    /// of them: `get`, `set`, `release` and a `drop` of a reference all trap on a
-    /// stale handle, which is the whole of what Path B buys over dangling.
+    /// One helper for all four operations because the check is not optional on
+    /// most of them: `get`, `set`, `release` and a `drop` of a reference all trap
+    /// on a stale handle, which is the whole of what Path B buys over dangling.
+    ///
+    /// The exception is a `get`/`set` whose reference `own` proved fresh
+    /// (RFC-0004 §5). That one loads the payload address and reads no generation
+    /// at all — so a check left standing in the output marks a reference the
+    /// analysis could not follow, rather than merely one it was asked about.
     fn ref_addr(
         &mut self,
         m: &mut Module,
@@ -7484,6 +7496,11 @@ impl Fn_<'_> {
             return unsupported(&format!("a reference operation on `{rty}`"), line);
         };
         let l = self.layout_of(&rty, line)?;
+        if self.cx.fresh_refs.contains(&(e as *const Expr as usize)) {
+            b.ins(&Instruction::I64Load(at(l.fields[0])));
+            b.ins(&Instruction::Call(self.cx.rt.cell_ptr));
+            return Ok(*elem);
+        }
         let r = self.scratch(b, ValType::I32, 6);
         b.ins(&Instruction::LocalTee(r));
         b.ins(&Instruction::I64Load(at(l.fields[0])));
@@ -9339,6 +9356,11 @@ struct Rt {
     cell_new: u32,
     cell_addr: u32,
     cell_release: u32,
+    /// The same payload address `cell_addr` returns, with no generation check —
+    /// for a `get`/`set` on a reference `own` proved fresh (RFC-0004 §5). It is
+    /// the second half of `cell_addr` and nothing else, so the two cannot drift
+    /// apart in what they compute, only in what they verify first.
+    cell_ptr: u32,
     /// RFC-0075 M2c's fourth array: the ADDRESS of `src[slot]`, the stream a
     /// `fromWrap` put behind a cursor. An address rather than a getter and a
     /// setter, because the slab's base is a lazily-allocated pointer this
@@ -9469,6 +9491,7 @@ impl Rt {
             cell_new: slot("cell_new"),
             cell_addr: slot("cell_addr"),
             cell_release: slot("cell_release"),
+            cell_ptr: slot("cell_ptr"),
             cell_srcp: slot("cell_srcp"),
             map_find: slot("map_find"),
             regex_run: slot("regex_run"),
@@ -10947,6 +10970,24 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32Add)
             .ins(&Instruction::I32Store(word()));
+    });
+
+    // cell_ptr(slot) -> the payload's address, unchecked (RFC-0004 §5). The
+    // second half of `cell_addr` with the first half removed, for a reference the
+    // ownership analysis proved fresh: the binding owns its cell, nothing else can
+    // name it, and the only release is the one this block exits into.
+    rt.next_is(m, rt.cell_ptr);
+    m.func(&[ValType::I64], &[ValType::I32], &[], 0, |b| {
+        b.ins(&Instruction::I32Const(slab as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(CELL_PTRS as i32))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32WrapI64)
+            .ins(&Instruction::I32Const(4))
+            .ins(&Instruction::I32Mul)
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Load(word()));
     });
 
     // cell_srcp(slot) -> the address of src[slot] (RFC-0075 M2c). The address
@@ -12467,6 +12508,7 @@ mod tests {
             globals: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),
+            fresh_refs: std::collections::HashSet::new(),
             // RFC-0008's defaults, which are `Program`'s: nothing here logs.
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,
