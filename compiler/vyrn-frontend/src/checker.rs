@@ -3002,7 +3002,11 @@ impl<'a> Checker<'a> {
             Expr::Var { name, line } => {
                 // `None` is the empty-Option constructor, not a variable.
                 if name == "None" {
-                    return match expected {
+                    // Resolved: `type MaybeInt = Option<Int64>` names an Option,
+                    // and the annotation is what `None` takes its payload from.
+                    // The type RETURNED is the one written, so the binding keeps
+                    // its name.
+                    return match expected.map(|t| self.base(t)) {
                         Some(Type::Option(_)) => Ok(expected.unwrap().clone()),
                         _ => Err(format!(
                             "line {line}: cannot infer the type of `None`; \
@@ -3369,6 +3373,13 @@ impl<'a> Checker<'a> {
                 Ok(Type::Task(Box::new(ret.clone())))
             }
             Expr::ArrayLit { elems, line } => {
+                // `type Nums = Array<Int64>` is a supported spelling, so the
+                // annotation that supplies the element type may be a name. Match
+                // what it resolves to, never how it was written — the same rule
+                // `Ok`/`Err` already follow for a `Result` alias.
+                let written = expected;
+                let expected = expected.map(|t| self.base(t));
+                let expected = expected.as_ref();
                 // An empty `[]` has no elements to infer from — it is a growable
                 // empty array (like `array()`), with its element type taken from
                 // the expected type.
@@ -3380,7 +3391,15 @@ impl<'a> Checker<'a> {
                         Some(Type::SmallArray(t, n)) => {
                             Ok(Type::SmallArray(t.clone(), *n))
                         }
-                        _ => Err(format!(
+                        // An annotation IS present and it is not an array. Saying
+                        // "annotate it" to somebody who annotated sends them to
+                        // fix the one thing that is right.
+                        Some(_) => Err(format!(
+                            "line {line}: `[]` is an array literal, but {} is not an \
+                             array type",
+                            written.unwrap()
+                        )),
+                        None => Err(format!(
                             "line {line}: cannot infer the element type of `[]`; annotate it, \
                              e.g. `let a: Array<Int64> = [];`"
                         )),
@@ -3448,7 +3467,11 @@ impl<'a> Checker<'a> {
             // `["k": v, ...]`. Keys coerce to `String`, values to the expected
             // map's value type (auto-validated when predicated).
             Expr::MapLit { entries, line } => {
-                let (key_ty, val_expected) = match expected {
+                // Resolved, for the same reason `ArrayLit` resolves: the
+                // annotation may be `type IntMap = Map<String, Int64>`.
+                let written = expected;
+                let expected = expected.map(|t| self.base(t));
+                let (key_ty, val_expected) = match &expected {
                     Some(Type::Map(k, v)) => (Some((**k).clone()), Some((**v).clone())),
                     _ => (None, None),
                 };
@@ -3457,6 +3480,10 @@ impl<'a> Checker<'a> {
                         (Some(k), Some(v)) => {
                             Ok(Type::Map(Box::new(k.clone()), Box::new(v.clone())))
                         }
+                        _ if written.is_some() => Err(format!(
+                            "line {line}: `[:]` is a map literal, but {} is not a map type",
+                            written.unwrap()
+                        )),
                         _ => Err(format!(
                             "line {line}: cannot infer the type of `[:]`; annotate it, \
                              e.g. `let m: Map<String, Int64> = [:];`"
@@ -5607,9 +5634,17 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
-            match expected {
-                Some(Type::Array(t)) => return Ok(Type::Array(t.clone())),
-                _ => {
+            // Resolved: `array()` takes its element type from the annotation, and
+            // the annotation may be `type Nums = Array<Int64>` (as for `[]`).
+            match expected.map(|t| self.base(t)) {
+                Some(Type::Array(t)) => return Ok(Type::Array(t)),
+                Some(_) => {
+                    return Err(format!(
+                        "line {line}: `array()` builds an array, but {} is not an array type",
+                        expected.unwrap()
+                    ))
+                }
+                None => {
                     return Err(format!(
                         "line {line}: cannot infer the element type of `array()`; annotate it, \
                          e.g. `let a: Array<Int64> = array();`"
@@ -6274,8 +6309,10 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
-            let inner_expected = match expected {
-                Some(Type::Option(t)) => Some((**t).clone()),
+            // Resolved, as `Ok`/`Err` below do: `type MaybeAge = Option<Age>` is
+            // a named Option, and the payload's refinement rides on `Age`.
+            let inner_expected = match expected.map(|t| self.base(t)) {
+                Some(Type::Option(t)) => Some((*t).clone()),
                 _ => None,
             };
             let aty = self.expr(&args[0], scope, inner_expected.as_ref(), fn_ret)?;
@@ -8709,6 +8746,57 @@ mod tests {
     #[test]
     fn accepts_valid_program() {
         assert!(check_src("fn main() -> Int64 { let x = 2 + 3; print(x); return x; }").is_ok());
+    }
+
+    /// An annotation may be an alias, and five expressions read the annotation
+    /// for their own type. Each used to match it as written, so the alias missed
+    /// and the compiler asked for the annotation that was already there.
+    #[test]
+    fn an_alias_supplies_a_contextual_literals_type() {
+        let decls = "type IntMap = Map<String, Int64> \
+                     type Nums = Array<Int64> \
+                     type Age = Int64 where value >= 18 \
+                     type MaybeAge = Option<Age> ";
+        let ok = |body: &str| {
+            let src = format!("{decls} fn main() -> Int64 {{ {body} return 0 }}");
+            check_src(&src).map_err(|e| format!("{body}: {e}")).unwrap();
+        };
+        ok("let m: IntMap = [:]");
+        ok("let a: Nums = []");
+        // The filled array literal used to check as a FIXED `Array<Int64, 3>`,
+        // which the `let` then rejected.
+        ok("let a: Nums = [1, 2, 3]");
+        ok("let m: IntMap = [\"a\": 1]");
+        ok("let a: Nums = array()");
+        ok("let m: MaybeAge = None");
+        ok("let m: MaybeAge = Some(21)");
+        // The payload's refinement travels with the alias: this is a predicate
+        // failure naming `Age`, not "expected MaybeAge, found Option<Int64>".
+        let e = check_src(&format!(
+            "{decls} fn main() -> Int64 {{ let m: MaybeAge = Some(3) return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("`Age`"), "{e}");
+    }
+
+    /// Two situations, two messages: no annotation, versus an annotation this
+    /// literal cannot build. Telling somebody who annotated to annotate sends
+    /// them to fix the one thing that is right.
+    #[test]
+    fn a_wrong_annotation_is_not_a_missing_one() {
+        let ring = "type Ring = { items: Array<Int64>, head: Int64 } ";
+        let err = |body: &str| {
+            check_src(&format!("{ring} fn main() -> Int64 {{ {body} return 0 }}")).unwrap_err()
+        };
+        let a = err("let r: Ring = []");
+        assert!(a.contains("Ring is not an array type"), "{a}");
+        let m = err("let r: Ring = [:]");
+        assert!(m.contains("Ring is not a map type"), "{m}");
+        let f = err("let r: Ring = array()");
+        assert!(f.contains("Ring is not an array type"), "{f}");
+        // With no annotation at all the advice to add one still stands.
+        let none = check_src("fn main() -> Int64 { let a = [] return 0 }").unwrap_err();
+        assert!(none.contains("annotate it"), "{none}");
     }
 
     #[test]
