@@ -1214,6 +1214,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // which `let` bindings each function must free at block exit (RFC-0004 §4).
     let ownership = vyrn_frontend::own::analyze(program);
     let droppable_map = &ownership.droppable;
+    let fresh_refs = &ownership.fresh_refs;
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1232,7 +1233,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     if !program.globals.is_empty() {
         let mut gi = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, &regex_globals,
+            &funcs, droppable_map, fresh_refs, &regex_globals,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -1318,7 +1319,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let sym = if f.name == "main" { "vyrn_main".to_string() } else { format!("vyrn_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, &regex_globals,
+            &funcs, droppable_map, fresh_refs, &regex_globals,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -1349,7 +1350,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 f.type_params.iter().cloned().zip(type_args.iter().cloned()).collect();
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &subst,
-                &funcs, droppable_map, &regex_globals,
+                &funcs, droppable_map, fresh_refs, &regex_globals,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1372,7 +1373,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             }
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &inst.subst,
-                &funcs, droppable_map, &regex_globals,
+                &funcs, droppable_map, fresh_refs, &regex_globals,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1403,7 +1404,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ));
         let mut dgen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, &regex_globals,
+            &funcs, droppable_map, fresh_refs, &regex_globals,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -1515,6 +1516,11 @@ struct Gen<'a> {
     droppable: HashMap<usize, DropKind>,
     /// Per-function droppable maps for the whole program (looked up per emit).
     droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
+    /// `get`/`set` reference arguments (by `Expr` node address) whose generation
+    /// check the ownership analysis proved cannot fail (RFC-0004 §5). Flat across
+    /// the program, so a monomorphized instance reads it without a key — it
+    /// re-emits the callee's own body nodes.
+    fresh_refs: &'a std::collections::HashSet<usize>,
     /// Per-block stack of (slot register, kind) to reclaim when the block exits.
     drop_stack: Vec<Vec<(String, DropKind)>>,
     /// Active loop targets for `break`/`continue` (RFC-0060), innermost last.
@@ -1645,6 +1651,7 @@ impl<'a> Gen<'a> {
         subst: &'a HashMap<String, Type>,
         funcs: &'a HashMap<String, &'a Function>,
         droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
+        fresh_refs: &'a std::collections::HashSet<usize>,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
     ) -> Self {
         Gen {
@@ -1669,6 +1676,7 @@ impl<'a> Gen<'a> {
             region_depth: 0,
             droppable: HashMap::new(),
             droppable_map,
+            fresh_refs,
             drop_stack: Vec::new(),
             loop_ctx: Vec::new(),
             log_level: DEFAULT_LOG_LEVEL,
@@ -7065,8 +7073,14 @@ impl<'a> Gen<'a> {
             let g = self.fresh_tmp();
             self.emit(format!("{slot} = extractvalue {{ i64, i64 }} {r}, 0"));
             self.emit(format!("{g} = extractvalue {{ i64, i64 }} {r}, 1"));
-            // Every access first validates the generation (traps on a stale ref).
-            self.emit(format!("call void @__vyrn_cell_check(i64 {slot}, i64 {g})"));
+            // Every access validates the generation first (traps on a stale ref)
+            // — unless ownership proved this reference fresh (RFC-0004 §5), in
+            // which case the check has one possible answer and is not emitted.
+            // A check that survives marks a reference the analysis could not
+            // follow, which is what makes the remaining ones worth reading.
+            if !self.fresh_refs.contains(&(&args[0] as *const Expr as usize)) {
+                self.emit(format!("call void @__vyrn_cell_check(i64 {slot}, i64 {g})"));
+            }
             let payload = self.fresh_tmp();
             self.emit(format!("{payload} = call ptr @__vyrn_cell_ptr(i64 {slot})"));
             let ll = self.llt(&elem);
@@ -9470,8 +9484,8 @@ mod tests {
     /// escape the layout check that stands between it and a silent miscompile.
     #[test]
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
-        let (rt, pt, pc, ty, va, sg, sb, fs, dm, rg) = Default::default();
-        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &rg);
+        let (rt, pt, pc, ty, va, sg, sb, fs, dm, fr, rg) = Default::default();
+        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &fr, &rg);
         let rec = |fs: &[Type]| {
             Type::Record(
                 fs.iter()
@@ -10777,6 +10791,31 @@ mod tests {
         let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call void @__vyrn_cell_release"), "expected auto-release: {ir}");
+    }
+
+    #[test]
+    fn a_provably_fresh_reference_is_read_without_a_generation_check() {
+        // Same body as `non_escaping_cell_is_auto_released`, read for what it does
+        // NOT emit: `c` is never aliased, never handed to a function and never
+        // released by hand, so the only release is the block-exit one below every
+        // access. Every check here has one possible answer (RFC-0004 §5).
+        //
+        // The auto-release keeps its own check — this elides accesses, not drops.
+        // `checks` counts the fixed prelude's own call inside `@__vyrn_stream_close`
+        // as well, so read the two numbers against each other, not alone.
+        let checks = |src: &str| {
+            emit(&check(src).unwrap())
+                .unwrap()
+                .matches("call void @__vyrn_cell_check")
+                .count()
+        };
+        let body = "let c = cell(1); set(c, get(c) + 1);";
+        let fresh = checks(&format!("fn main() -> Int64 {{ {body} return get(c); }}"));
+        // One `release(c)` is all it takes to put the three accesses back.
+        let kept = checks(&format!(
+            "fn main() -> Int64 {{ {body} let v = get(c); release(c); return v; }}"
+        ));
+        assert_eq!(kept - fresh, 3, "three accesses, all of them provable");
     }
 
     #[test]

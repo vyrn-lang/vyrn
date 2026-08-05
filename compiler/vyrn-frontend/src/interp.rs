@@ -1833,6 +1833,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     // Identities are `Stmt` node addresses — unique program-wide, so the
     // per-function maps flatten into one.
     let ownership = crate::own::analyze(program);
+    let fresh_refs = ownership.fresh_refs;
     let droppable: HashMap<usize, crate::own::DropKind> =
         ownership.droppable.into_values().flatten().collect();
     let funcs: HashMap<&str, &Function> = program
@@ -1883,6 +1884,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         type_map,
         variants,
         droppable,
+        fresh_refs,
         cells: RefCell::new(Vec::new()),
         free: RefCell::new(Vec::new()),
         sources: RefCell::new(HashMap::new()),
@@ -1925,6 +1927,11 @@ struct Interp<'a> {
     /// Droppable `let` bindings (by `Stmt` node address) and their reclamation
     /// kind — the ownership analysis shared with the native backend.
     droppable: HashMap<usize, crate::own::DropKind>,
+    /// `get`/`set` reference arguments (by `Expr` node address) whose generation
+    /// check the ownership analysis proved cannot fail (RFC-0004 §5). The same
+    /// set both backends read; here the check it removes is a Rust comparison
+    /// rather than emitted code, but it is the same check on the same sites.
+    fresh_refs: std::collections::HashSet<usize>,
     /// The generational-reference cell slab (RFC-0004 §4, Path B).
     cells: RefCell<Vec<CellSlot>>,
     /// Free slots available for reuse (their generation was already bumped).
@@ -4514,11 +4521,11 @@ impl<'a> Interp<'a> {
                     "cell" => self.cell_alloc(vals.remove(0)),
                     "get" => {
                         let (slot, gen) = self.as_ref(&vals[0])?;
-                        self.cell_get(slot, gen)
+                        self.cell_get(slot, gen, self.fresh(&args[0]))
                     }
                     "set" => {
                         let (slot, gen) = self.as_ref(&vals[0])?;
-                        self.cell_set(slot, gen, vals[1].clone())?;
+                        self.cell_set(slot, gen, vals[1].clone(), self.fresh(&args[0]))?;
                         Ok(Val::Unit)
                     }
                     "release" => {
@@ -4708,7 +4715,7 @@ impl<'a> Interp<'a> {
                     // outlived its stream traps here exactly as `get` would.
                     "pull" => {
                         let (slot, gen) = self.as_ref(&vals[0])?;
-                        self.cell_get(slot, gen)?;
+                        self.cell_get(slot, gen, false)?;
                         // Taken out for the duration of the step, which may run
                         // arbitrary Vyrn code — including, for a chain, another
                         // `pull` on a different slot.
@@ -6076,18 +6083,25 @@ impl<'a> Interp<'a> {
         Ok(Val::Ref { slot, gen: 0 })
     }
 
-    fn cell_get(&self, slot: usize, gen: u64) -> Result<Val, Ctrl> {
+    /// Whether the generation check on this reference argument was proved
+    /// unnecessary (RFC-0004 §5) — the binding owns its cell, nothing else can
+    /// reach it, and the only release is the compiler's, after this access.
+    fn fresh(&self, e: &Expr) -> bool {
+        self.fresh_refs.contains(&(e as *const Expr as usize))
+    }
+
+    fn cell_get(&self, slot: usize, gen: u64, fresh: bool) -> Result<Val, Ctrl> {
         let cells = self.cells.borrow();
         match cells.get(slot) {
-            Some(c) if c.gen == gen => Ok(c.val.clone()),
+            Some(c) if fresh || c.gen == gen => Ok(c.val.clone()),
             _ => Err(Self::stale()),
         }
     }
 
-    fn cell_set(&self, slot: usize, gen: u64, v: Val) -> Result<(), Ctrl> {
+    fn cell_set(&self, slot: usize, gen: u64, v: Val, fresh: bool) -> Result<(), Ctrl> {
         let mut cells = self.cells.borrow_mut();
         match cells.get_mut(slot) {
-            Some(c) if c.gen == gen => {
+            Some(c) if fresh || c.gen == gen => {
                 c.val = v;
                 Ok(())
             }

@@ -351,6 +351,54 @@ work (inferred/invisible regions per Q3, `share`-by-reference, and *parallel
 execution* of the already-shipped concurrency model per Q4) is refinement of the
 surface and the runtime, not a change of mechanism.
 
+### 5.3 How many of those checks are necessary
+
+§5.1 asked whether the check is fast enough and answered yes. It never asked how
+many checks a program needs. That is a different question and its answer is not
+about speed. A site with no check cannot fail at run time, and a check that
+survives marks a reference the compiler could not follow — where today every
+`get` looks the same whether the compiler understood it or not.
+
+The ownership analysis already holds the fact. `own::analyze` keeps a
+`let c = cell(..)` in `droppable` with `ReleaseRef` only when nothing aliased it,
+nothing was handed it, and no `release(c)` reached it — `release` sits outside the
+safe-read list on purpose, so an explicit release drops the binding from the set.
+The one release left is the one the compiler emits at block exit, which runs after
+every access in the block. So every `get(c)` and `set(c, ..)` in that block reads
+the reference `cell(..)` just handed out, and the generation it captured is the
+slot's. The comparison has one possible answer.
+
+All three engines now skip it. `own` computes the sites in a second pass — it has
+to be a second pass, because a `get(c)` can precede the `release(c)` that escapes
+`c` — and keys them by the argument expression's node address, which is what the
+interpreter, the textual backend and the direct wasm backend each hold at their
+own check site. The direct backend gained one runtime function, `cell_ptr`: the
+second half of `cell_addr` with the check removed and nothing else, so the two
+cannot drift apart in what they compute, only in what they verify first.
+
+**3 of 48 lowered `get`/`set` sites over the 121-example corpus — 6%.** The three
+are `autorelease.vyrn`'s loop, which is every access it makes. The other 45 are in
+`genref`, `freelist`, `linkedlist`, `tree` and the three stream examples, and each
+one is a reference that genuinely escapes: a `Ref` in a record field, a `Ref`
+parameter, a cell an explicit `drop` hands off. The interpreter counts source
+sites rather than lowered ones and sees 3 of 42 — the backends re-lower six of
+those sites again for monomorphized instances.
+
+Read 6% against §5.2 rather than as a shortfall. A `Ref<T>` is the tool for
+aliasing, and corpus code reaches for one exactly where single ownership cannot
+follow the value. The 94% are the case Path B exists for. What the number says is
+that a generation check in Vyrn source today is almost always doing real work —
+and the few that are not are now gone, so the remaining ones can be read as the
+signal they are.
+
+The block-exit release keeps its own check. The same argument proves it cannot
+fail, but it is a drop rather than an access, and it is also the last thing
+standing between a wrong `droppable` and a double release. That is a separate
+change with a different risk.
+
+Parity is the proof. Removing a check that can never fire is unobservable, so
+`111 checked, 10 skipped, 0 failed` had to come out byte-identical, and did.
+
 ---
 
 ## Design constraints the winner must satisfy
