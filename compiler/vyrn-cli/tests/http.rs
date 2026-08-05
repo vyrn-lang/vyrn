@@ -160,7 +160,7 @@ fn under(req: Request) -> Option<Response> {
 
 fn hit(method: String, path: String) -> String {
     let groups: Array<Array<Route>> = [[surface(\"/_\", under)], api.routes()]
-    return match mount(Request { method: method, path: path, headers: [:], body: \"\" }, groups, [], []) {
+    return match mount(Request { method: method.copy(), path: path.copy(), headers: [:], body: \"\" }, groups, [], []) {
         Some(r) => \"\\{r.status} \\{r.body}\",
         None => \"none\",
     }
@@ -325,7 +325,7 @@ import { mount, Route } from \"std/http\"
 import * as api from \"./notes.http\"
 
 fn hit(method: String, path: String, body: String, headers: Map<String, String>) -> Response {
-    return match mount(Request { method: method, path: path, headers: headers, body: body }, [api.routes()], [], []) {
+    return match mount(Request { method: method.copy(), path: path.copy(), headers: headers.copy(), body: body.copy() }, [api.routes()], [], []) {
         Some(r) => r,
         None => Response { status: 0, contentType: \"\", body: \"\", vary: \"\", headers: [:] },
     }
@@ -533,7 +533,7 @@ fn sockets() -> Array<Socket> {
 }
 
 fn hit(path: String, lastId: String) -> String {
-    let req = Request { method: \"GET\", path: path, headers: [\"last-event-id\": lastId], body: \"\" }
+    let req = Request { method: \"GET\", path: path.copy(), headers: [\"last-event-id\": lastId.copy()], body: \"\" }
     return match mount(req, [[surface(\"/_\", under)], api.routes()], feeds(), sockets()) {
         Some(r) => \"\\{r.status} \\{r.contentType} [\\{r.body}]\",
         None => \"none\",

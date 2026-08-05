@@ -9,7 +9,7 @@
 import type { User, Port } from "./user.schema.json"
 
 fn mk(name: String, n: Int64) -> User {
-    return User { name: name, age: n, nick: None }
+    return User { name: name.copy(), age: n, nick: None }
 }
 
 fn main() -> Int64 {

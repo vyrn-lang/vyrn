@@ -2785,6 +2785,7 @@ impl<'a> Checker<'a> {
                 iter,
                 body,
                 line,
+                ..
             } => {
                 let ity = self.expr(iter, scope, None, Some(ret))?;
                 let elem = match self.base(&ity) {

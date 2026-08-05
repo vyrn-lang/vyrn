@@ -246,7 +246,7 @@ fn string_segment_and_respond_route_end_to_end() {
         &dir.join("app.vyrn"),
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/p/deadbeef\")\n\
          print(\"P:\\{a.status}:\\{a.body.byteLength}\")\n\
@@ -299,7 +299,7 @@ fn vyx_page_with_loader_routes_through_pages_themed() {
         &dir.join("app.vyrn"),
         "import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"home:\\{a.status}\")\n\
@@ -463,7 +463,7 @@ fn layout_head_and_error_pages_route_end_to_end() {
         &dir.join("app.vyrn"),
         "import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"home:\\{a.status}:\\{a.body.contains(\"class=\\\"shell\\\"\")}:\\{a.body.contains(\"/style.css\")}\")\n\
@@ -531,7 +531,7 @@ fn the_page_contract_members_route_end_to_end() {
         &dir.join("app.vyrn"),
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"new:\\{a.status}:\\{a.body.contains(\"<title>Home</title>\")}:\\{a.body.contains(\"/style.css\")}:\\{a.body.contains(\"<h1>2</h1>\")}\")\n\

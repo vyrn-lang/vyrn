@@ -731,7 +731,7 @@ fn upgrade(req: Request, params: String) -> Response {
     return Response {
         status: 101,
         contentType: "",
-        body: params,
+        body: params.copy(),
         vary: "",
         headers: ["Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Accept": accept(req)],
     }

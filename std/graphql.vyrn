@@ -438,7 +438,7 @@ fn gqlMembers(decl: GqlDecl, iface: ModuleInterface) -> Array<GqlMember> {
 /// exactly one is non-null at a time.
 fn gqlNullableMember(name: String, spelling: String, iface: ModuleInterface) -> GqlMember {
     return GqlMember {
-        name: name,
+        name: name.copy(),
         ref: gqlStripBang(gqlRef(spelling, false, iface)),
         inputRef: gqlStripBang(gqlRef(spelling, true, iface)),
     }
@@ -798,7 +798,7 @@ fn gqlAt(sc: Scanner, b: UInt8) -> Bool {
 
 /// A failed parse carrying `why`.
 fn gqlSetErr(why: String) -> GqlSet {
-    return GqlSet { sels: [], err: why }
+    return GqlSet { sels: [], err: why.copy() }
 }
 
 // ---- argument values -------------------------------------------------------
@@ -811,7 +811,7 @@ type GqlArgs = { args: Array<JsonField>, err: String }
 
 /// A failed value parse carrying `why`.
 fn gqlValErr(why: String) -> GqlVal {
-    return GqlVal { value: JNull, err: why }
+    return GqlVal { value: JNull, err: why.copy() }
 }
 
 /// Whether `b` can appear inside a GraphQL number token.
@@ -1147,7 +1147,7 @@ export type GqlErr = { message: String, path: Array<Json> }
 export type GqlOut = { value: Json, errs: Array<GqlErr>, failed: Bool }
 
 /// A position that completed with nothing wrong.
-fn gqlOk(v: Json) -> GqlOut {
+fn gqlOk(v: consume Json) -> GqlOut {
     return GqlOut { value: v, errs: [], failed: false }
 }
 
@@ -1155,20 +1155,35 @@ fn gqlOk(v: Json) -> GqlOut {
 /// this position may not hold one. Where a climb STOPS is `gqlProject`'s single
 /// decision; this is only where one begins.
 fn gqlFaultAt(message: String, at: Array<Json>, tref: String) -> GqlOut {
+    let mut path: Array<Json> = []
+    for p in at {
+        path.push(copyJson(p))
+    }
     return GqlOut {
         value: JNull,
-        errs: [GqlErr { message: message, path: at }],
+        errs: [GqlErr { message: message.copy(), path: path }],
         failed: tref.endsWith("!"),
     }
+}
+
+/// A `GqlErr` that shares nothing with its source. `Json` refers to itself, so
+/// `copy` refuses it (RFC-0089 M1b) and `std/json`'s `copyJson` is the worked
+/// answer; this is the same answer one level up.
+fn gqlCopyErr(e: GqlErr) -> GqlErr {
+    let mut path: Array<Json> = []
+    for p in e.path {
+        path.push(copyJson(p))
+    }
+    return GqlErr { message: e.message.copy(), path: path }
 }
 
 /// `path` with one more step — a response key or a list index.
 fn gqlStep(path: Array<Json>, step: Json) -> Array<Json> {
     let mut out: Array<Json> = []
     for p in path {
-        out.push(p)
+        out.push(copyJson(p))
     }
-    out.push(step)
+    out.push(copyJson(step))
     return out
 }
 
@@ -1268,7 +1283,7 @@ fn gqlProjectEach(
     for it in items {
         let r = gqlProject(it, sels, elem, gqlStep(path, JNum(i.toString())), schema)
         for e in r.errs {
-            errs.push(e)
+            errs.push(gqlCopyErr(e))
         }
         if r.failed {
             failed = true
@@ -1316,7 +1331,7 @@ fn gqlPick(
         if r.failed {
             failed = true
         } else {
-            out.push(JsonField { key: s.key, value: r.value })
+            out.push(JsonField { key: s.key.copy(), value: r.value })
         }
     }
     let v = if failed { JNull } else { JObj(out) }
@@ -1397,7 +1412,7 @@ export fn gqlErrorBody(message: String) -> String {
 /// before reading a `data` that may be partial, and it is the order the reference
 /// implementation writes. `data` is always present here, `null` only when a fault
 /// climbed past every root field.
-fn gqlExecBody(data: Json, errs: Array<GqlErr>) -> String {
+fn gqlExecBody(data: consume Json, errs: Array<GqlErr>) -> String {
     let mut top: Array<JsonField> = []
     if errs.length > 0 {
         top.push(JsonField { key: "errors", value: gqlErrJson(errs) })
@@ -1421,7 +1436,7 @@ fn gqlErrJson(errs: Array<GqlErr>) -> Json {
 
 /// A GraphQL reply carrying `body`.
 fn gqlReply(body: String) -> Response {
-    return Response { status: 200, contentType: "application/json", body: body, vary: "", headers: [:] }
+    return Response { status: 200, contentType: "application/json", body: body.copy(), vary: "", headers: [:] }
 }
 
 // ---- arguments, at the resolver ---------------------------------------------
@@ -1463,7 +1478,7 @@ fn gqlArgsBesides(args: Array<JsonField>, want: String) -> Array<JsonField> {
     let mut out: Array<JsonField> = []
     for a in args {
         if a.key != want {
-            out.push(a)
+            out.push(JsonField { key: a.key.copy(), value: copyJson(a.value) })
         }
     }
     return out
@@ -1519,12 +1534,12 @@ export fn gqlAnswer(
         let key = sel.key
         let r = gqlAnswerOne(rootType, sel, resolve(q.root, sel.name, sel.args), schema)
         for e in r.errs {
-            errs.push(e)
+            errs.push(gqlCopyErr(e))
         }
         if r.failed {
             dataNull = true
         } else {
-            out.push(JsonField { key: key, value: r.value })
+            out.push(JsonField { key: key.copy(), value: r.value })
         }
     }
     let data = if dataNull { JNull } else { JObj(out) }
@@ -1577,10 +1592,10 @@ fn gqlAnswerValue(
 /// procedures from the contract itself, each type from the module that DECLARES
 /// it, so a type reached across an import keeps one identity.
 fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
-    let mut specs: Array<String> = [contract]
+    let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
         if gqlHas(specs, t.module) == false {
-            specs.push(t.module)
+            specs.push(t.module.copy())
         }
     }
     let mut out = ""
@@ -1588,12 +1603,12 @@ fn gqlImportBlock(iface: ModuleInterface, contract: String) -> String {
         let mut names: Array<String> = []
         if spec == contract {
             for f in iface.functions {
-                names.push(f.name)
+                names.push(f.name.copy())
             }
         }
         for t in iface.types {
             if t.module == spec {
-                names.push(t.name)
+                names.push(t.name.copy())
             }
         }
         if names.length > 0 {

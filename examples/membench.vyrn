@@ -171,6 +171,40 @@ fn copyArray(n: Int64, xs: Array<Int64>) -> Int64 {
     return t
 }
 
+/// Splice 1000 owned Strings into a second array. The loop CONSUMES the source,
+/// so each element moves: one pointer store per element, no allocation.
+fn spliceConsuming(src: consume Array<String>) -> Int64 {
+    let mut out: Array<String> = []
+    for x in consume src {
+        out.push(x)
+    }
+    return out.length
+}
+
+/// The same splice with the source still borrowed. RFC-0089 rule 2 says the
+/// element belongs to the container, so every push copies: one `malloc` and one
+/// `memcpy` per element. This row is the price of NOT having the consuming form.
+fn spliceCopying(src: Array<String>) -> Int64 {
+    let mut out: Array<String> = []
+    for x in src {
+        out.push(x.copy())
+    }
+    return out.length
+}
+
+/// 1000 distinct 16-byte Strings — small enough that the copy is allocator cost
+/// rather than `memcpy` cost, which is what a corpus of names and keys looks
+/// like.
+fn words(n: Int64) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < n {
+        out.push("wordwordword" + i.toString())
+        i = i + 1
+    }
+    return out
+}
+
 bench "copy of a 10 KB string, 1000 times" {
     let s = spine(blackBox(1000))
     blackBox(copyString(blackBox(1000), blackBox(s)))
@@ -207,6 +241,14 @@ bench "byteLength of a 10 KB string, 500 reads" {
         i = i + 1
     }
     blackBox(t)
+}
+
+bench "splice 1000 Strings, consuming loop" {
+    blackBox(spliceConsuming(blackBox(words(blackBox(1000)))))
+}
+
+bench "splice 1000 Strings, copying loop" {
+    blackBox(spliceCopying(blackBox(words(blackBox(1000)))))
 }
 
 bench "array push churn, 1000 pushes" {

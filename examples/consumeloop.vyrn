@@ -1,0 +1,100 @@
+// `for x in consume xs` — RFC-0089 rule 2's companion.
+//
+// Rule 2 makes a borrow second-class: a `read` parameter, a projection, or a
+// loop variable may be observed and passed on, but never stored somewhere that
+// outlives the call. `for x in xs { out.push(x) }` stores one buffer pointer in
+// two containers, so under rule 2 it needs `x.copy()` — and that copy is
+// correct, because `xs` still owns what the loop saw.
+//
+// The gap was that Vyrn had no way to move an element OUT of a container.
+// `consume` fills it. The loop takes the container, each element is owned, and
+// storing one is a move. After the loop the container is dead: naming it again
+// is the rule 1 error.
+//
+// A container that is not a place needs no word at all. `for o in make()`
+// iterates a temporary nobody else holds, so its elements are already the
+// loop's — that is 91 of the 207 corpus sites and it costs no syntax.
+
+/// Splice two owned lists into one. Nothing copies: both loops take what they
+/// are given, and both parameters say so.
+fn spliced(a: consume Array<String>, b: consume Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for x in consume a {
+        out.push(x)
+    }
+    for x in consume b {
+        out.push(x)
+    }
+    return out
+}
+
+/// A fresh list, so the caller has something to give away.
+fn make(prefix: String, n: Int64) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < n {
+        out.push(prefix + i.toString())
+        i = i + 1
+    }
+    return out
+}
+
+/// The container the caller KEEPS. `names` stays the caller's, so the element
+/// stored here is copied — that is rule 2 being right, not rule 2 being in the
+/// way.
+fn lengthsOf(names: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for n in names {
+        out.push(n.copy())
+    }
+    return out
+}
+
+/// A loop over a temporary. `make(..)` is nobody else's, so `s` is owned and
+/// the push is a move — no `consume` written, and no copy either.
+fn joinTemporary(prefix: String, n: Int64) -> String {
+    let mut out = ""
+    for s in make(prefix, n) {
+        out = out + s + ";"
+    }
+    return out
+}
+
+fn show(label: String, xs: Array<String>) {
+    let mut line = label + ":"
+    for x in xs {
+        line = line + " " + x
+    }
+    print(line)
+}
+
+fn main() -> Int64 {
+    // Two owned lists go in; one comes out; nothing is duplicated.
+    let joined = spliced(make("a", 3), make("b", 2))
+    show("joined", joined)
+    print("count " + joined.length.toString())
+
+    // A named local the loop takes. `parts` is dead after it.
+    let parts = make("p", 4)
+    let mut taken: Array<String> = []
+    for p in consume parts {
+        taken.push(p)
+    }
+    show("taken", taken)
+
+    // The borrowed side: `taken` is still ours after `lengthsOf` reads it.
+    let echoed = lengthsOf(taken)
+    show("echoed", echoed)
+    show("taken again", taken)
+
+    print(joinTemporary("t", 3))
+
+    // A consuming loop over an empty container is an empty loop.
+    let empty: Array<String> = []
+    let mut none: Array<String> = []
+    for e in consume empty {
+        none.push(e)
+    }
+    print("none " + none.length.toString())
+    return 0
+}

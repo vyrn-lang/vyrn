@@ -3457,6 +3457,7 @@ fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usi
             iter,
             body,
             line,
+            ..
         } => {
             scope_expr(iter, *line, locals, out);
             let mut inner = locals.clone();

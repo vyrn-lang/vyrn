@@ -3317,6 +3317,15 @@ impl Parser {
                 self.eat(&Tok::In)?;
                 // Parse the iterable in the no-struct context (like a `while`
                 // condition) so a bare `{` opens the loop body, not a struct lit.
+                // `for x in consume xs` (RFC-0089 rule 2). Contextual exactly
+                // like a parameter's capability: `consume` is a capability only
+                // when another identifier follows it, so `for x in consume(y)`
+                // stays a call to a user function named `consume`.
+                let consuming = matches!(self.peek(), Tok::Ident(id) if id == "consume")
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_));
+                if consuming {
+                    self.advance();
+                }
                 let iter = self.cond_expr()?;
                 let body = self.block()?;
                 Ok(Stmt::ForIn {
@@ -3324,6 +3333,7 @@ impl Parser {
                     iter,
                     body,
                     line,
+                    consuming,
                 })
             }
             Tok::Region => {

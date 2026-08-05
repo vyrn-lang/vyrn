@@ -20,7 +20,7 @@ export fn byId(req: GetUserReq) -> User {
 /// "Create" a user. The request is already validated by the time the body runs
 /// (decode enforced `Username`/`Age`), so this just echoes it back with an id.
 export mut fn create(req: CreateUserReq) -> User {
-    return User { id: 1000, name: req.name, age: req.age }
+    return User { id: 1000, name: req.name.copy(), age: req.age }
 }
 
 /// "Delete" a user, returning a `Result` (RFC-0024) — an application-level

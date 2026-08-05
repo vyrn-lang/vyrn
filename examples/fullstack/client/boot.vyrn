@@ -43,10 +43,10 @@ fn parseId(s: String) -> Int64 {
 }
 
 fn setUser(s: String) {
-    userLine = s
+    userLine = s.copy()
 }
 fn setIssues(s: String) {
-    issueLine = s
+    issueLine = s.copy()
 }
 
 /// Render an accumulated issue list as `path: message; ...` for the view.

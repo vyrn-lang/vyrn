@@ -34,13 +34,13 @@ import { Json, JsonField, emit } from "std/json"
 export type Symbol = { name: String, origin: Origin, derived: Array<JsonField> }
 
 /// A mapped symbol. `derived` is `[]` for a symbol with nothing derived about it.
-export fn symbol(name: String, origin: Origin, derived: Array<JsonField>) -> Symbol {
-    return Symbol { name: name, origin: origin, derived: derived }
+export fn symbol(name: String, origin: Origin, derived: consume Array<JsonField>) -> Symbol {
+    return Symbol { name: name.copy(), origin: origin.copy(), derived: derived }
 }
 
 /// `"key": "value"` — the shape almost every derived fact has.
 export fn strField(key: String, value: String) -> JsonField {
-    return JsonField { key: key, value: JStr(value) }
+    return JsonField { key: key.copy(), value: JStr(value) }
 }
 
 /// An origin as JSON. A `line`/`col` of 0 means the declaration could not be

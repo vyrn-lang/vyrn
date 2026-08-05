@@ -18,8 +18,8 @@
 //! see [`owning_sites`]. The [`streams`] sub-module below is the one part still
 //! name-based and typeless.
 //!
-//! **It enforces RFC-0089 rules 1–3** (Phase 4b). Three families of error, on
-//! top of the `consume` family above:
+//! **It enforces RFC-0089 rules 1–3** (Phase 4b, completed by 4b-2). Three
+//! families of error, on top of the `consume` family above:
 //!
 //! - **Rule 1 — a value moves.** A store of a value that transitively owns heap
 //!   (a `let`, an assignment, a field or element store, a literal operand)
@@ -27,9 +27,12 @@
 //!   no later use of `s` is legal, and the error only fires on the later use.
 //!   That is the machinery `consume` already had; rule 1 adds the stores.
 //! - **Rule 2 — a borrow is second-class.** A `read`/`modify`/`share` parameter,
-//!   a `for` variable and a local bound to a field or element read are all
-//!   [`Borrow`]s. They may be observed and passed on, but not stored, not
-//!   captured by an escaping closure, and not returned.
+//!   a `for` variable over a container the loop does not own, and a local bound
+//!   to a field or element read are all [`Borrow`]s. They may be observed and
+//!   passed on, but not stored, not captured by an escaping closure, and not
+//!   returned. A loop owns its elements in two cases: `for x in consume xs`
+//!   takes the container, and `for x in f()` iterates a temporary nobody else
+//!   holds.
 //! - **Rule 3 — a return is owned.** Returning a borrow is refused, with the
 //!   two fixes named.
 //!
@@ -78,7 +81,7 @@ impl OwningSite {
 /// Runs the same walk [`check_accum`] runs, with recording on, and discards the
 /// diagnostics. 4a answers the question at every site; 4b enforces on the answer.
 pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
-    run(program, true, false).1
+    run(program, true).1
 }
 
 /// Check every function for use-after-consume, returning **all** problems found
@@ -92,28 +95,26 @@ pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
 /// sub-expression checking *before* mutating `consumed`/`scope`, so after an
 /// error the flow state is consistent for the next statement.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    run(program, false, false).0
+    run(program, false).0
 }
 
-/// Every place RFC-0089 rule 2 would refuse a **store** of a borrow.
+/// Every place rule 2 refuses a **store** of a borrow, out of `program`.
 ///
-/// Rule 2's other two positions — a return and an escaping capture — are
-/// enforced by [`check_accum`]. The store position is not, and this is how its
-/// cost is measured rather than argued about: it is 288 sites over `examples/`
-/// and `std/`, 154 of them `for x in xs { out.push(x) }`, which has no `consume`
-/// spelling to migrate to. RFC-0089 "What rule 2 costs" carries the table, and
-/// the plan's Phase 4b-2 is where the decision belongs.
-///
-/// This is the same walk with one flag flipped, so the rule cannot rot while it
-/// waits: it is compiled, tested and countable today.
+/// A filter over [`check_accum`] rather than a mode of its own: rule 2 is
+/// enforced on every check since Phase 4b-2, so this is a reading of the
+/// diagnostics rather than a second walk. The corpus test below asks for it by
+/// name and expects zero.
 pub fn borrow_store_sites(program: &Program) -> Vec<Diagnostic> {
-    run(program, false, true).0
+    check_accum(program)
+        .into_iter()
+        .filter(|d| d.message.contains("may not be stored into"))
+        .collect()
 }
 
 /// The one walk, shared by [`check_accum`] and [`owning_sites`]. `record` turns
 /// the site collection on; with it off the pass still builds and carries its type
 /// environment, and asks `owns_heap` nowhere.
-fn run(program: &Program, record: bool, stores: bool) -> (Vec<Diagnostic>, Vec<OwningSite>) {
+fn run(program: &Program, record: bool) -> (Vec<Diagnostic>, Vec<OwningSite>) {
     let caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
@@ -142,7 +143,6 @@ fn run(program: &Program, record: bool, stores: bool) -> (Vec<Diagnostic>, Vec<O
         lambda_base: RefCell::new(Vec::new()),
         lambda_escapes: RefCell::new(Vec::new()),
         at_call_site: std::cell::Cell::new(false),
-        refuse_stores: stores,
         sites: record.then(|| RefCell::new(Vec::new())),
     };
     let mut out = Vec::new();
@@ -265,9 +265,6 @@ struct MoveCheck<'a> {
     /// outlive it; a lambda anywhere else is stored, and RFC-0037's
     /// defunctionalization makes it a value that can outlive the frame.
     at_call_site: std::cell::Cell<bool>,
-    /// Whether rule 2's STORE refusal is on. `false` on every ordinary check —
-    /// see [`borrow_store_sites`] for what it costs and why it waits.
-    refuse_stores: bool,
     /// Where recorded [`OwningSite`]s go, or `None` on the ordinary check path —
     /// which is what keeps a build and a keystroke paying for nothing.
     sites: Option<RefCell<Vec<OwningSite>>>,
@@ -277,15 +274,16 @@ struct MoveCheck<'a> {
 ///
 /// The variants exist for the diagnostic, not for the rule: every borrow is
 /// refused in the same three positions, and each variant names a different fix.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum Borrow {
     /// A `read` or `share` parameter — the caller still owns it.
     Read,
     /// A `modify` parameter — exclusive in-place access, still the caller's.
     Modify,
-    /// A `for` variable. Iteration binds a `read` borrow of the element (PLAN
-    /// decision log), so the container still owns what the loop sees.
-    Element,
+    /// A `for` variable over a container the loop does NOT own, carrying that
+    /// container's name so the diagnostic can spell the consuming form. A loop
+    /// over a `consume`d container or over a temporary binds an owner instead.
+    Element(String),
     /// A local bound to a field or element read: `let t = r.s`. A place owns its
     /// contents (rule 4), so reading one out does not take it.
     Projection,
@@ -293,11 +291,11 @@ enum Borrow {
 
 impl Borrow {
     /// What this borrow is, in words, for the message.
-    fn what(self) -> &'static str {
+    fn what(&self) -> &'static str {
         match self {
             Borrow::Read => "a `read` parameter",
             Borrow::Modify => "a `modify` parameter",
-            Borrow::Element => "a loop variable",
+            Borrow::Element(_) => "a loop variable",
             Borrow::Projection => "read out of a place that owns it",
         }
     }
@@ -306,14 +304,22 @@ impl Borrow {
     /// try them: take ownership if the callee should have it, copy if both sides
     /// genuinely need a value. `root` is the binding, `path` what was read out
     /// of it — a `consume` goes on the binding, a `.copy()` on the path.
-    fn fixes(self, root: &str, path: &str) -> Vec<String> {
+    fn fixes(&self, root: &str, path: &str) -> Vec<String> {
         let copy = format!("`{path}.copy()` if both sides need a value");
         match self {
             Borrow::Read | Borrow::Modify => vec![
                 format!("declare the parameter `consume {root}` if this function should own it"),
                 copy,
             ],
-            Borrow::Element | Borrow::Projection => vec![copy],
+            // A loop variable has a second way out: let the loop take the
+            // container. It only works when the whole element is stored — a
+            // stored field of it is a partial move — so `copy` stays first when
+            // the two differ.
+            Borrow::Element(c) if root == path => vec![
+                format!("`for {root} in consume {c}` if the loop should take the elements"),
+                copy,
+            ],
+            Borrow::Element(_) | Borrow::Projection => vec![copy],
         }
     }
 }
@@ -395,7 +401,7 @@ impl MoveCheck<'_> {
 
     /// Whether `name` names a borrow here.
     fn borrow_of(&self, name: &str) -> Option<Borrow> {
-        self.borrows.borrow().get(name).copied().flatten()
+        self.borrows.borrow().get(name).cloned().flatten()
     }
 
     /// The declared type of `e` here, or `None` where this reading cannot name it.
@@ -471,7 +477,7 @@ impl MoveCheck<'_> {
             return Ok(());
         }
         if let Some(b) = self.borrow_of(&root) {
-            if !outlives || !self.refuse_stores {
+            if !outlives {
                 return Ok(());
             }
             // Rule 2. A borrow may be observed and passed on; it may not be put
@@ -553,6 +559,68 @@ impl MoveCheck<'_> {
         };
         let borrow = place_path(scrutinee).map(|_| Borrow::Projection);
         (tys, borrow)
+    }
+
+    /// Whether iterating `e` reads a container somebody else still owns.
+    ///
+    /// A variable and a field are places. A call is a fresh value — except
+    /// `at(..)`, which is what `xs[i]` lowers to and is a projection of its
+    /// receiver. The same judgment [`MoveCheck::borrow_from`] makes for a `let`.
+    fn iterable_is_a_place(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Var { .. } | Expr::Field { .. } => true,
+            Expr::Call { name, args, .. } if name == "at" => {
+                args.first().is_some_and(|a| self.iterable_is_a_place(a))
+            }
+            _ => false,
+        }
+    }
+
+    /// `for x in consume xs` — the loop takes the container, so it must be one
+    /// the enclosing function can give away.
+    fn check_consuming_iter(
+        &self,
+        e: &Expr,
+        line: usize,
+        scope: &[HashSet<String>],
+    ) -> Result<(), String> {
+        let Some((root, path)) = place_path(e) else {
+            return Err(menu(
+                line,
+                "`consume` here has nothing to take — the loop already owns a container \
+                 that is not a binding"
+                    .to_string(),
+                vec!["drop the `consume`: the elements are already owned".to_string()],
+            ));
+        };
+        if root != path {
+            return Err(menu(
+                line,
+                format!(
+                    "`{path}` may not be consumed — a place owns its contents, so taking \
+                     `{path}` out of `{root}` would leave a hole"
+                ),
+                vec![
+                    format!("`for .. in consume {root}` if the loop should take the whole value"),
+                    format!("`{path}.copy()` if `{root}` is still needed"),
+                ],
+            ));
+        }
+        if self.globals.contains(&root) && !Self::in_scope(scope, &root) {
+            return Err(format!(
+                "line {line}: module state `{root}` may not be consumed by a `for` loop — \
+                 nothing may take ownership of module state (it lives for the whole module \
+                 and is never dropped)"
+            ));
+        }
+        if let Some(b) = self.borrow_of(&root) {
+            return Err(menu(
+                line,
+                format!("`{root}` may not be consumed — it is {}", b.what()),
+                b.fixes(&root, &path),
+            ));
+        }
+        Ok(())
     }
 
     /// Rule 3: a function returns an owned value, always.
@@ -663,7 +731,16 @@ impl MoveCheck<'_> {
                 // so `let x = x + b` resolves the old `x`.
                 let bty = ty.clone().or_else(|| self.type_of(value));
                 self.site("bind", *line, value, bty.as_ref());
-                let borrow = self.borrow_from(value);
+                // An UNSPELLABLE name (it contains `[`) is the `a[i].f = v`
+                // desugar's element temp: the place is read out, mutated, and
+                // written straight back to where it came from. That round trip
+                // is not a store of a borrow, so rule 2 must not see it — the
+                // parser built both halves and there is no second owner.
+                let borrow = if name.contains('[') {
+                    None
+                } else {
+                    self.borrow_from(value)
+                };
                 // A projection is a borrow rather than a move, so only a whole
                 // place moves here — `store` decides which.
                 self.store(value, &|| format!("the binding `{name}`"), *line, false, consumed)?;
@@ -777,7 +854,7 @@ impl MoveCheck<'_> {
                     // Recording it is the point: an unrecorded binder falls
                     // through to whatever the enclosing scope calls that name
                     // (`own.rs`'s shadowing lesson).
-                    self.bind(b, tys.get(i).cloned().flatten(), borrow);
+                    self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                 }
                 let then_div = self.block(then_block, &mut then_c, scope);
                 self.exit();
@@ -820,24 +897,46 @@ impl MoveCheck<'_> {
                 iter,
                 body,
                 line,
+                consuming,
             } => {
                 self.expr(iter, consumed, scope)?;
                 self.site("iterate", *line, iter, None);
-                // RFC-0089 decided the loop variable is a `read` borrow, so 4b
-                // needs its type. It is the iterable's element type.
+                if *consuming {
+                    self.check_consuming_iter(iter, *line, scope)?;
+                }
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
-                let borrow = elem
-                    .as_ref()
-                    .is_some_and(|t| self.decl.owns_heap(t))
-                    .then_some(Borrow::Element);
+                // RFC-0089 rule 2: the loop variable is a borrow only while the
+                // container outlives the loop. A `consume`d container is the
+                // loop's, and a container that is not a place — `for o in
+                // diff(..)` — has no other owner at all, so both bind an OWNED
+                // element and storing one is a move.
+                let borrow = (!*consuming
+                    && self.iterable_is_a_place(iter)
+                    && elem.as_ref().is_some_and(|t| self.decl.owns_heap(t)))
+                .then(|| Borrow::Element(place_path(iter).map(|(r, _)| r).unwrap_or_default()));
                 let mut body_c = consumed.clone();
                 self.enter();
                 self.bind(var, elem, borrow);
                 let body_div = self.block(body, &mut body_c, scope);
                 self.exit();
+                // The loop variable is fresh on every iteration, so a move of it
+                // is not a move of anything the enclosing scope can still name.
+                body_c.remove(var);
                 self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
                 for (k, v) in body_c {
                     consumed.entry(k).or_insert(v);
+                }
+                // The container is dead after a consuming loop: using it again is
+                // the rule 1 error `expr` already reports.
+                if *consuming {
+                    if let Some((root, _)) = place_path(iter) {
+                        let fixes =
+                            vec![format!("`{root}.copy()` if both sides need a value")];
+                        consumed.insert(
+                            root,
+                            Consumption { line: *line, by: "the `for .. in consume` loop".into(), fixes },
+                        );
+                    }
                 }
                 Ok(false)
             }
@@ -1065,7 +1164,7 @@ impl MoveCheck<'_> {
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                     for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         scope.last_mut().unwrap().insert(b.to_string());
-                        self.bind(b, tys.get(i).cloned().flatten(), borrow);
+                        self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                     }
                     let r = self.expr(&arm.body, &mut c, scope);
                     self.exit();
@@ -1595,7 +1694,7 @@ mod streams {
     }
 
     /// The nested blocks of a statement, for the declaration walk.
-    fn sub_blocks(s: &Stmt) -> Vec<&Block> {
+    pub(super) fn sub_blocks(s: &Stmt) -> Vec<&Block> {
         match s {
             Stmt::If {
                 then_block,
@@ -1979,19 +2078,80 @@ mod tests {
     }
 
     #[test]
-    fn rule_2_refuses_a_stored_borrow_when_it_is_turned_on() {
-        // The half of rule 2 that is written and waiting (RFC-0089 "What rule 2
-        // costs"). It is off on every ordinary check, so this asks for it by
-        // name — a rule nothing exercises is a rule that rots.
-        let src = "type R = { s: String } \
-                   fn keep(x: String) -> R { return R { s: x } } \
-                   fn main() -> Int64 { return 0 }";
-        let p = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(super::check_accum(&p).is_empty(), "off by default");
-        let d = borrow_store_sites(&p);
-        assert_eq!(d.len(), 1, "{d:?}");
-        assert!(d[0].message.contains("may not be stored into the field `R.s`"), "{d:?}");
-        assert!(d[0].message.contains("fix: declare the parameter `consume x`"), "{d:?}");
+    fn rule_2_refuses_a_stored_borrow() {
+        let src = "type R = { s: String }                    fn keep(x: String) -> R { return R { s: x } }                    fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("may not be stored into the field `R.s`"), "{e}");
+        assert!(e.contains("fix: declare the parameter `consume x`"), "{e}");
+        // Both named fixes work.
+        assert!(run("type R = { s: String } fn keep(x: consume String) -> R { return R { s: x } }                      fn main() -> Int64 { return 0 }")
+            .is_ok());
+        assert!(run("type R = { s: String } fn keep(x: String) -> R { return R { s: x.copy() } }                      fn main() -> Int64 { return 0 }")
+            .is_ok());
+    }
+
+    #[test]
+    fn a_stored_loop_variable_names_the_consuming_form() {
+        // The half of rule 2 the corpus is made of, and the fix that is not a
+        // copy: the loop takes the container.
+        let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("fix: `for x in consume xs` if the loop should take"), "{e}");
+        // Taking the container needs the function to own it, and the diagnostic
+        // says so before it says `copy`.
+        assert!(e.contains("fix: `x.copy()`"), "{e}");
+    }
+
+    #[test]
+    fn a_consuming_loop_owns_its_elements() {
+        // `for x in consume xs`: the container is the loop's, so storing an
+        // element is a move and needs no copy.
+        assert!(run("fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]                      let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
+            .is_ok());
+        // And the container is dead afterwards — rule 1's own error.
+        let src = "fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]                    let mut out: Array<String> = []                    for x in consume xs { out.push(x) } return xs.length }                    fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`xs` was moved here into the `for .. in consume` loop"), "{e}");
+    }
+
+    #[test]
+    fn a_consuming_loop_needs_a_container_it_may_take() {
+        // A borrow is not the loop's to give away, and the two-step fix says so.
+        let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in consume xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`xs` may not be consumed — it is a `read` parameter"), "{e}");
+        assert!(run("fn go(xs: consume Array<String>) -> Int64 { let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
+            .is_ok());
+        // A field is a hole in the record it comes out of (rule 4).
+        let src = "type R = { xs: Array<String> }                    fn go(r: R) -> Int64 { let mut out: Array<String> = []                    for x in consume r.xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("would leave a hole"), "{e}");
+        // Module state lives for the whole module and is nobody's to take.
+        let src = "let g: Array<String> = []                    fn go() -> Int64 { let mut out: Array<String> = []                    for x in consume g { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("module state `g` may not be consumed"), "{e}");
+    }
+
+    #[test]
+    fn a_loop_over_a_temporary_owns_its_elements() {
+        // 91 of the corpus sites. `for o in diff(..)` iterates a container
+        // nobody else holds, so the elements are the loop's with no word for it.
+        assert!(run("fn make() -> Array<String> { return [\"a\" + \"b\"] }                      fn go() -> Int64 { let mut out: Array<String> = []                      for x in make() { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
+            .is_ok());
+        // An element read is NOT a temporary: `xs[i]` is a place the container
+        // still owns, so a loop over one still borrows.
+        let src = "fn go(xs: Array<Array<String>>) -> Int64 { let mut out: Array<String> = []                    for x in xs[0] { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("may not be stored"), "{e}");
+    }
+
+    #[test]
+    fn consume_before_an_iterable_is_contextual() {
+        // `consume` is a capability only when an identifier follows it, so a
+        // user function called `consume` is untouched — the same rule a
+        // parameter's capability follows.
+        assert!(run("fn consume(n: Int64) -> Array<Int64> { return [n] }                      fn main() -> Int64 { let mut t = 0 for x in consume(1) { t = t + x }                      return t }")
+            .is_ok());
     }
 
     #[test]
@@ -2342,6 +2502,47 @@ mod tests {
             println!("  {t:>5} {p:>5} {u:>5}  {f}");
         }
     }
+
+    /// RFC-0089 rule 2 over the whole corpus: **zero**.
+    ///
+    /// The number Phase 4b measured and gated off. It parses each file ALONE,
+    /// like the other corpus measurements here, which under-counts a linked
+    /// program — `vyrn check` over every root is the reading that migrated the
+    /// corpus, and it is also zero.
+    ///
+    /// Ignored by default: it reads the repository. Run it with
+    /// `cargo test -p vyrn-frontend --lib borrow_store_sites -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn borrow_store_sites_over_the_corpus() {
+        let mut files = Vec::new();
+        crate::own::tests::sources("examples", &mut files);
+        crate::own::tests::sources("std", &mut files);
+        files.sort();
+
+        let mut rows: Vec<String> = Vec::new();
+        let mut parsed = 0;
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            let Ok(tokens) = crate::lexer::lex(&src) else { continue };
+            let (program, errs) = crate::parser::parse_accum(tokens);
+            if !errs.is_empty() {
+                continue;
+            }
+            parsed += 1;
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for d in borrow_store_sites(&program) {
+                rows.push(format!("{name}:{} {}", d.line, d.message.lines().next().unwrap_or("")));
+            }
+        }
+        println!("corpus: {} files ({parsed} parsed)", files.len());
+        println!("rule 2 store refusals: {}", rows.len());
+        for r in &rows {
+            println!("    {r}");
+        }
+        assert!(rows.is_empty(), "{rows:#?}");
+    }
+
 
     #[test]
     fn rejects_consume_in_loop() {

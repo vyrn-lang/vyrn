@@ -109,13 +109,13 @@ fn oaSorted(names: Array<String>) -> Array<String> {
         let mut res: Array<String> = []
         for m in out {
             if placed == false && n < m {
-                res.push(n)
+                res.push(n.copy())
                 placed = true
             }
-            res.push(m)
+            res.push(m.copy())
         }
         if placed == false {
-            res.push(n)
+            res.push(n.copy())
         }
         out = res
     }
@@ -139,7 +139,7 @@ fn oaImportBlock(iface: ModuleInterface) -> String {
     let mut specs: Array<String> = []
     for t in iface.types {
         if includes(specs, t.module) == false {
-            specs.push(t.module)
+            specs.push(t.module.copy())
         }
     }
     let mut out = ""
@@ -147,7 +147,7 @@ fn oaImportBlock(iface: ModuleInterface) -> String {
         let mut names: Array<String> = []
         for t in iface.types {
             if t.module == spec {
-                names.push(t.name)
+                names.push(t.name.copy())
             }
         }
         if names.length > 0 {
@@ -206,7 +206,7 @@ fn oaPathValue(f: FnInfo, iface: ModuleInterface) -> String {
 fn oaTypeNames(iface: ModuleInterface) -> Array<String> {
     let mut out: Array<String> = []
     for t in iface.types {
-        out.push(t.name)
+        out.push(t.name.copy())
     }
     return out
 }
@@ -233,10 +233,10 @@ export gen fn openapi(contract: String) -> String {
     out = out + "        Err(e) => JObj([]),\n"
     out = out + "    }\n"
     out = out + "}\n"
-    out = out + "fn oaObjWithId(id: String, fs: Array<JsonField>) -> Json {\n"
+    out = out + "fn oaObjWithId(id: String, fs: consume Array<JsonField>) -> Json {\n"
     out = out + "    let mut ordered: Array<JsonField> = []\n"
     out = out + "    ordered.push(JsonField { key: \"$id\", value: JStr(id) })\n"
-    out = out + "    for f in fs {\n"
+    out = out + "    for f in consume fs {\n"
     out = out + "        ordered.push(f)\n"
     out = out + "    }\n"
     out = out + "    return JObj(ordered)\n"

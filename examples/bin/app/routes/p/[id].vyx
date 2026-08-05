@@ -29,7 +29,7 @@ export fn data() -> ParamQuery<Params, Result<Paste, PageError>> {
 }
 
 fn fetchPaste(p: Params) -> Result<Paste, PageError> {
-    return match byId(IdReq { id: p.id }) {
+    return match byId(IdReq { id: p.id.copy() }) {
         Ok(paste) => Ok(paste),
         Err(why) => Err(notFound(why)),
     }

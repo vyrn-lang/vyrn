@@ -973,6 +973,13 @@ pub enum Stmt {
         iter: Expr,
         body: Block,
         line: usize,
+        /// `for x in consume xs` (RFC-0089 rule 2): the loop takes ownership of
+        /// the container, so each `x` is an **owned** element and storing one is
+        /// a move rather than a copy. After the loop the container is dead.
+        ///
+        /// A loop over a value that is not a place (`for o in diff(..)`) is
+        /// consuming without the word: nobody else can hold a temporary.
+        consuming: bool,
     },
     /// `drop name;` — explicitly reclaim a heap value (string / array / reference)
     /// and consume the binding. Most reclamation is inferred; this is the escape

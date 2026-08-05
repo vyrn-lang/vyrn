@@ -170,7 +170,7 @@ export fn valOf(v: Json) -> Json {
 export fn pushType(iss: modify Array<Issue>, path: String, expected: String, found: String) -> Unit {
     iss.push(Issue {
             key: "json.type",
-            path: path,
+            path: path.copy(),
             message: "expected " + expected + ", found " + found,
         })
 }
@@ -179,7 +179,7 @@ export fn pushType(iss: modify Array<Issue>, path: String, expected: String, fou
 export fn pushMissing(iss: modify Array<Issue>, path: String, field: String) -> Unit {
     iss.push(Issue {
             key: "json.missing",
-            path: path,
+            path: path.copy(),
             message: "missing required field `" + field + "`",
         })
 }
@@ -188,7 +188,7 @@ export fn pushMissing(iss: modify Array<Issue>, path: String, field: String) -> 
 /// compiler's own canonical validation wording, passed in rather than built here
 /// so the trap path and this path cannot word it differently.
 export fn pushValidate(iss: modify Array<Issue>, path: String, message: String) -> Unit {
-    iss.push(Issue { key: "validate", path: path, message: message })
+    iss.push(Issue { key: "validate", path: path.copy(), message: message.copy() })
 }
 
 /// A dotted path extended by a record field (or an enum tag).
@@ -224,7 +224,7 @@ export fn readDoc(src: String, iss: modify Array<Issue>) -> Array<Json> {
 }
 
 fn pushParse(iss: modify Array<Issue>, e: String) -> Array<Json> {
-    iss.push(Issue { key: "json.parse", path: "", message: e })
+    iss.push(Issue { key: "json.parse", path: "", message: e.copy() })
     return []
 }
 

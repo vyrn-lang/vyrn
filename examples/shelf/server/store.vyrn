@@ -15,9 +15,9 @@ let mut nextId: Int64 = 3
 fn copyBook(b: Book) -> Book {
     let mut tags: Array<Tag> = []
     for t in b.tags {
-        tags.push(t)
+        tags.push(t.copy())
     }
-    return Book { id: b.id, title: b.title, url: b.url, tags: tags, rating: b.rating }
+    return Book { id: b.id, title: b.title.copy(), url: b.url.copy(), tags: tags, rating: b.rating }
 }
 
 // ---- procedures (REAL, stateful implementations over the store) --------------
@@ -47,9 +47,9 @@ export fn addBook(req: AddBookReq) -> BookResult {
     let id = nextId
     let mut tags: Array<Tag> = []
     for t in req.tags {
-        tags.push(t)
+        tags.push(t.copy())
     }
-    books.push(Book { id: id, title: req.title, url: req.url, tags: tags, rating: 0 })
+    books.push(Book { id: id, title: req.title.copy(), url: req.url.copy(), tags: tags, rating: 0 })
     nextId = nextId + 1
     return getBook(IdReq { id: id })
 }

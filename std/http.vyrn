@@ -156,7 +156,7 @@ export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
         prefix: false,
         run: run,
         whole: httpNoWhole,
-        derived: derived,
+        derived: derived.copy(),
         maxAge: -1,
         validator: false,
         modified: "",
@@ -172,18 +172,18 @@ export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
 /// of thirteen times in each of the seven combinators.
 fn httpCopy(r: Route) -> Route {
     return Route {
-        method: r.method,
-        pattern: r.pattern,
+        method: r.method.copy(),
+        pattern: r.pattern.copy(),
         prefix: r.prefix,
         run: r.run,
         whole: r.whole,
-        derived: r.derived,
+        derived: r.derived.copy(),
         maxAge: r.maxAge,
         validator: r.validator,
-        modified: r.modified,
-        varyOn: r.varyOn,
+        modified: r.modified.copy(),
+        varyOn: r.varyOn.copy(),
         ok: r.ok,
-        location: r.location,
+        location: r.location.copy(),
         missing: r.missing,
     }
 }
@@ -234,7 +234,7 @@ export fn DELETE(r: Route) -> Route {
 fn httpWithMethod(r: Route, method: String) -> Route {
     let line = method + " " + r.pattern + " " + r.derived
     let mut out = httpCopy(r)
-    out.method = method
+    out.method = method.copy()
     out.derived = line
     return out
 }
@@ -369,14 +369,14 @@ impl Policy for Route {
 
     fn lastModified(self, field: String) -> Route {
         let mut out = httpCopy(self)
-        out.modified = field
+        out.modified = field.copy()
         out.derived = out.derived + " last-modified=" + field
         return out
     }
 
     fn vary(self, headers: String) -> Route {
         let mut out = httpCopy(self)
-        out.varyOn = headers
+        out.varyOn = headers.copy()
         out.derived = out.derived + " vary=" + headers
         return out
     }
@@ -390,7 +390,7 @@ impl Policy for Route {
 
     fn createdAt(self, template: String) -> Route {
         let mut out = httpCopy(self)
-        out.location = template
+        out.location = template.copy()
         out.derived = out.derived + " created-at=" + template
         return out
     }
@@ -490,7 +490,7 @@ export protocol Wire {
 impl Wire for Live {
     fn retryAfter(self, ms: Int64) -> Live {
         return Live {
-            pattern: self.pattern,
+            pattern: self.pattern.copy(),
             feed: self.feed,
             retry: ms,
             resume: self.resume,
@@ -500,7 +500,7 @@ impl Wire for Live {
 
     fn resumable(self) -> Live {
         return Live {
-            pattern: self.pattern,
+            pattern: self.pattern.copy(),
             feed: self.feed,
             retry: self.retry,
             resume: true,
@@ -593,10 +593,10 @@ export protocol Frames {
 impl Frames for Socket {
     fn closeCode(self, code: Int64) -> Socket {
         return Socket {
-            pattern: self.pattern,
+            pattern: self.pattern.copy(),
             feed: self.feed,
             closing: code,
-            subproto: self.subproto,
+            subproto: self.subproto.copy(),
             fragment: self.fragment,
             derived: self.derived + " close=\{code}",
         }
@@ -604,10 +604,10 @@ impl Frames for Socket {
 
     fn subprotocol(self, name: String) -> Socket {
         return Socket {
-            pattern: self.pattern,
+            pattern: self.pattern.copy(),
             feed: self.feed,
             closing: self.closing,
-            subproto: name,
+            subproto: name.copy(),
             fragment: self.fragment,
             derived: self.derived + " subprotocol=" + name,
         }
@@ -615,10 +615,10 @@ impl Frames for Socket {
 
     fn maxFrame(self, size: Int64) -> Socket {
         return Socket {
-            pattern: self.pattern,
+            pattern: self.pattern.copy(),
             feed: self.feed,
             closing: self.closing,
-            subproto: self.subproto,
+            subproto: self.subproto.copy(),
             fragment: size,
             derived: self.derived + " max-frame=\{size}",
         }
@@ -672,7 +672,7 @@ fn httpOpenSocket(w: Socket, req: Request, ps: Map<String, String>) -> Response 
     ]
     // §4.2.2: the server may only select a subprotocol the client offered.
     if w.subproto != "" && httpHasToken(httpHeader(req, "sec-websocket-protocol"), w.subproto) {
-        headers["Sec-WebSocket-Protocol"] = w.subproto
+        headers["Sec-WebSocket-Protocol"] = w.subproto.copy()
     }
     serveStream(httpFeed(w.feed, req, ps, 0))
     return Response {
@@ -897,13 +897,13 @@ fn httpHeaders(base: Map<String, String>, r: Route, tag: String, stamp: String, 
         hs["Cache-Control"] = "max-age=\{r.maxAge}"
     }
     if tag != "" {
-        hs["ETag"] = tag
+        hs["ETag"] = tag.copy()
     }
     if stamp != "" {
-        hs["Last-Modified"] = stamp
+        hs["Last-Modified"] = stamp.copy()
     }
     if loc != "" {
-        hs["Location"] = loc
+        hs["Location"] = loc.copy()
     }
     return hs
 }
@@ -1275,7 +1275,8 @@ export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String
     }
     let mut fs: Array<JsonField> = []
     for k in ps.keys() {
-        fs.push(JsonField { key: k, value: httpValue(httpAt(ps, k), httpListHas(numeric, k)) })
+        let v = httpValue(httpAt(ps, k), httpListHas(numeric, k))
+        fs.push(JsonField { key: k, value: v })
     }
     if body != "" {
         for f in httpBodyFields(body) {
@@ -1427,7 +1428,7 @@ fn httpIsNumericBase(spelling: String) -> Bool {
 fn httpNamesOf(fields: Array<HttpField>) -> Array<String> {
     let mut out: Array<String> = []
     for f in fields {
-        out.push(f.name)
+        out.push(f.name.copy())
     }
     return out
 }
@@ -1520,10 +1521,10 @@ fn httpBraced(fields: Array<String>) -> Array<String> {
 /// constructors take their names), and every reachable type from the module that
 /// DECLARES it, so a type crossing an import keeps one identity (RFC-0031).
 fn httpImports(iface: ModuleInterface, module: String) -> String {
-    let mut specs: Array<String> = [module]
+    let mut specs: Array<String> = [module.copy()]
     for t in iface.types {
         if httpContains(specs, t.module) == false {
-            specs.push(t.module)
+            specs.push(t.module.copy())
         }
     }
     let mut out = ""
@@ -1536,7 +1537,7 @@ fn httpImports(iface: ModuleInterface, module: String) -> String {
         }
         for t in iface.types {
             if t.module == spec {
-                names.push(t.name)
+                names.push(t.name.copy())
             }
         }
         if names.length > 0 {
