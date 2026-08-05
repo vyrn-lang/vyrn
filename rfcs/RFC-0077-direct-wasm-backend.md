@@ -1,12 +1,12 @@
 # RFC-0077 — A Direct Wasm Backend: Stop Going Through LLVM
 
-- **Status:** IMPLEMENTED (M0–M2p, M5; M3 and M4 struck — see their lines below).
-  **M6 open, and it is not a refinement: this backend's allocator never frees, so
-  a wasm program's heap grows until the page dies.** Measured — 20000 exported
-  calls with a 900-byte String grew linear memory by 18 MB, all of it. Three
-  separate notes each described one face of this; none named it, and the sentence
-  that promised a fix pointed at the struck M4. See "M6 — an allocator that
-  frees".
+- **Status:** IMPLEMENTED (M0–M2p, M5, M6; M3 and M4 struck — see their lines
+  below). M6 gave this backend an allocator that frees: the same 20000 exported
+  calls that grew linear memory by 18 MB now leave it flat at 4 pages. What still
+  leaks is named in "M6 — as landed", and none of it is the allocator: a returned
+  `String` needs an ownership bit this ABI does not carry, an `Array` bound from a
+  literal is a gap in `own::analyze` that predates this backend, and a `region` is
+  still a counter.
 - **Depends on:** RFC-0076 (generators as wasm; the shared runtime shim and the
   memory map it established), RFC-0012 (the `extern` ABI), RFC-0037
   (defunctionalized closures — the reason *closures* need no function table),
@@ -1983,6 +1983,10 @@ ladder is the tier that gates the acceptance criterion.
 - **M6 — an allocator that frees.** New. See below.
 
 ### M6 — an allocator that frees
+
+*(The plan. What landed is "M6, as landed" at the end of this document, and it
+differs on two things: there is only one tier, and a header was cheaper than
+taking the size.)*
 
 **The wasm target reclaims no heap memory. None.** The source says so plainly:
 `malloc` is a bump pointer that never frees "for `push`, for a cell payload and
@@ -4039,3 +4043,179 @@ section. Recorded rather than quietly corrected, because the failure is worth na
 an acceptance criterion about `--target wasm` was read as a claim about every consumer
 of the wasm target, and the one consumer it missed was the one the opening paragraph
 was about.
+
+---
+
+## M6, as landed — an allocator that frees
+
+`malloc` files a block on a free list now, `Stmt::Drop` releases every heap type
+the textual backend releases, and `wasi-min.js` hands back the `String` it
+allocated. **20000 exported calls with a 900-byte argument leave `domdemo.wasm`
+at 4 pages, from 279.**
+
+| measured, Node, `web/domdemo.wasm` | before | after |
+|---|---|---|
+| `increment(arg: String)` x 5000 | 3 -> 72 pages | 4 -> 4 |
+| `increment(arg: String)` x 20000 | 3 -> 279 pages | 4 -> 4 |
+
+### There is one tier, and the RFC said two
+
+M6 was written as "the **shim tier** can import an allocator ... the **standalone
+tier** must emit one". There is no shim tier. M5 deleted it with
+`VYRN_WASM_BACKEND`, for M2i's and M2j's own reasons, and `direct.rs` says so
+twenty lines above `compile`. So the question "can the two tiers share an
+allocator" has no second term: one allocator, emitted, in every module this
+backend produces including the generator artifacts RFC-0076 M7 runs.
+
+The paragraph was written from M4's map of the backend, and M4 was struck.
+
+### The header, and why the size was not taken
+
+The instruction was to take the size rather than a header, because a compile-time
+ownership model knows the size at the release as well as at the allocation. It is
+true for four of `own`'s six kinds: an `Array`, a `Map` and a `SmallArray` all
+carry `cap` in the aggregate the drop site already has, and a cell payload's type
+is a compile-time fact.
+
+**A `String` breaks it, and it is the kind that matters.** A Vyrn `String` is a
+bare NUL-terminated pointer with no header of its own. A drop site can recover its
+LENGTH with `strlen`; it cannot recover its CAPACITY -- and RFC-0081's
+`str_append` exists precisely to allocate capacity beyond length, so the two
+differ on every accumulator in `std/json`. A headerless free sized from `strlen`
+would file a 1024-byte block on the 128-byte list and hand out overlapping memory
+later.
+
+Threading a capacity to every drop site is the alternative, and it is not eight
+bytes of work -- it is a second field on every String-typed binding, through
+`own`, both backends and the interpreter, so that three engines agree about a
+number none of them can print. Eight bytes per live block, written and read in one
+function each, is cheaper. **Header taken, and the reason is the one type whose
+size the compiler discarded on purpose.**
+
+### Four steps per power of two, because two was measured and was wrong
+
+The first version used plain power-of-two classes. It is the obvious shape and it
+cost 2x on `vyrnView`, which returns a `String` and still leaks: 500 calls went
+from 39 MB to 48 MB. Rounding a payload UP is a cost every block pays and only a
+REUSED block earns back, so a program that leaks pays it twice over.
+
+Classes are `(4 + sub) << shift` for `sub` in 0..3, which caps the round-up at
+25%: `cls = shift * 4 + sub`, where `shift = 29 - clz(size - 1)` and
+`sub = ((size - 1) >> shift) & 3`. One formula, no branch, ten more instructions
+than the power-of-two version. `vyrnView` x 500 is 42.6 MB against the 39.2 MB
+baseline -- 8.5% on a path that still leaks, against 90%.
+
+The header sits OUTSIDE the class for the same reason. A block is `8 + size`, so
+an 8192-byte array buffer is not pushed into the next class by its own header.
+
+### `free` refuses more than it accepts
+
+Everything it declines, it declines silently, and that is the design: a wrong free
+is worse than no free and this backend has no ASan behind it.
+
+- **Below `HEAP_BASE`.** A new immutable global holding `HEAP`'s initial value.
+  `drop s` on a `String` bound to a literal hands over a data-segment address --
+  the textual backend passes that to C's `free`, which reads a header that is not
+  there. Null is the same case: the `SmallArray` that never spilled, the `Map`
+  that never grew.
+- **A class outside `MIN_CLASS..=MAX_CLASS`.** Memory this allocator did not
+  write.
+
+### The free that was wrong, and parity caught it
+
+`push` grows by allocating, copying and releasing the old buffer -- what `realloc`
+does for the textual backend. Released at the growth, `sha1.vyrn` came out wrong
+from the seventeenth word of its message schedule, and three-way parity failed on
+it.
+
+The value expression is evaluated AFTER the growth and it may read the array being
+pushed onto: `w.push(sha1Rotl1(w[t - 3] ^ w[t - 8] ...))` reads `w` through a
+header this `push` has not written back yet, which still names the old buffer. So
+the release waits until the element is stored -- in `push`, in `sa_push`, and not
+needed in `map_set`, which evaluates key and value before it reserves.
+
+This is worth reading twice. **Parity DID catch a wrong free**, in the milestone
+whose premise is that parity cannot see reclamation. It cannot see a free that
+happens; it sees a free that happens too early, because that one changes output.
+
+### Five programs were retaining a borrowed argument
+
+RFC-0012 settled that a `String` argument to an exported function belongs to the
+caller. Across this boundary the caller is JS, so `wasi-min.js` releases it when
+the call returns.
+
+Five handlers in this repo then broke, and they were already wrong: `domdemo`'s
+`onType`, `bin`'s three draft setters and `fullstack`'s `setId` all did
+`state = arg` -- storing a borrowed pointer past the call that lent it. Nothing
+checks this. Before M6 the caller could not free, so it worked by accident; with
+the free it read as `you typed: count = 0` in the page, which is whatever the next
+allocation put in the recycled block. All five copy now (`arg + ""`).
+
+**The rule is unchecked and that is open.** A checker that refuses an exported
+`extern fn` retaining a String parameter is the fix, and it is a frontend rule
+rather than a backend one.
+
+### What still leaks, named rather than implied
+
+- **A returned `String` crossing to JS.** Who owns one is `own::analyze`'s answer
+  and it differs per function: a fresh concat transfers, a module-state field or a
+  literal does not. Nothing crosses the boundary that says which, so
+  `wasi-min.js` cannot free it without a use-after-free on the second case. It
+  needs a fact from the compiler -- an ownership bit per export -- which is ABI,
+  not allocator.
+- **An `Array` bound from a literal.** `own::owner_producing` has an arm for
+  `Expr::MapLit` and none for `Expr::ArrayLit`, so `let mut xs: Array<UInt8> = []`
+  is not tracked and never released -- on every engine, `realloc` and all. Found
+  while writing the memory test, which measured 16 bytes per call leaking out of a
+  three-element array. A frontend gap, not this backend's.
+- **A `region`.** Unchanged. It is still a counter and its trap; the arena the
+  note under `region_exit` describes is still the sound version and still waits.
+- **Module state.** Never released, by design (RFC-0029). The five copies above
+  each leak the value they replace.
+
+### The test asserts a relation
+
+`vyrn-cli/tests/memory.rs`: memory after N exported calls equals memory after 4N,
+read from `memory.buffer.byteLength` under Node, through the real
+`web/wasi-min.js` copied to a `.mjs`. N is 5000, so 4N is the RFC's own 20000.
+
+A relation and not a byte count, because a byte count breaks on every allocator
+change and the property that matters is that the steady state is bounded. It is a
+real gate: with the JS release removed it reports 5,242,880 against 20,709,376.
+
+It runs the SHIPPING loader rather than a private one, because half the fix is
+there. It skips loudly with no `node`, which is the parity harness's posture with
+wasmtime. `web/` is in CI's `paths-ignore` and this test is not -- it lives under
+`compiler/`, where CI runs.
+
+### A data segment of zeros is not written
+
+`Module::finish` splits the pool on runs of zeros wider than sixteen bytes. The
+116 free-list heads are 464 zero bytes in the middle of every module this backend
+emits, and `Module::reserve` is zero-filled scratch by definition -- `region_sp`,
+the cell slab's three words, the log descriptor. A wasm memory arrives zeroed, so
+a segment of zeros is bytes in the file that change nothing.
+
+`fib.wasm` is **1,334 bytes**, down 109 from M5's 1,443 -- an allocator that frees
+made the smallest module smaller. `domdemo` is up 539, for the `free` body and the
+wider `malloc`.
+
+### The cursor slab is untouched
+
+`cell_new`/`cell_release` still hand slots out of a fixed 65536 with their own
+LIFO free list, and `examples/freelist.vyrn` still puts 100,000 allocations
+through it and prints 15 on all three engines. The new allocator does not subsume
+it and should not: a slot is a generation counter's identity, not bytes, which is
+the whole of what Path B buys over dangling. What changed is that a release now
+frees the slot's PAYLOAD as well, which the textual backend always did.
+
+The slab itself is one 1,310,720-byte `malloc`. Four-step classes give it 1,310,720
+exactly, because it is `5 << 18`. Power-of-two classes would have given it 2 MiB.
+
+### Verification
+
+- three-way parity: **111 checked, 10 skipped, 0 failed** -- the numbers M5 left.
+- `cargo test --workspace`: 51 suites, 0 failed. `vyrn-lsp`: 71 passed.
+- `cargo test -p vyrn-cli --features wasm-gen --test genwasm`: 11 passed.
+- `web/domdemo.html` driven in a browser: type, `+1`, `rotate`, the 1-second
+  subscription. No console errors, and `you typed:` echoes what was typed.
