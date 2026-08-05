@@ -9,7 +9,8 @@
 
 use vyrn_frontend::contracts::{
     contract_completions, contract_fixes, contract_member_hover, contract_status, discovered_roles,
-    edit_distance, load_contract, role_for, roles_from_manifest, MemberStatus, RoleScope,
+    edit_distance, load_contract, role_for, roles_from_manifest, synthesized_members,
+    MemberStatus, RoleScope,
 };
 use vyrn_frontend::loader::{LoadOptions, ModuleResolver};
 
@@ -189,6 +190,11 @@ fn a_role_scope_may_span_the_audience_segment() {
     assert_eq!(
         role_for("/app/server/api/pastes.vyrn", &roles).map(|r| r.contract.as_str()),
         Some("Api")
+    );
+    assert!(
+        role_for("/app/server/api/pastes.http.vyrn", &roles).is_none(),
+        "a dotted stem is a projection over the modules beside it, not one of them — \
+         the same question `std/rpc`'s own scan asks (RFC-0074)"
     );
     assert_eq!(
         role_for("/app/client/api/other.vyrn", &roles).map(|r| r.contract.as_str()),
@@ -458,9 +464,11 @@ fn edit_distance_matches_the_vyrn_one() {
 #[test]
 fn status_reports_the_matched_shape() {
     let v = page();
-    let vyx = std::fs::read_to_string(repo("examples/bin/app/routes/index.vyx")).unwrap();
+    let path = repo("examples/bin/app/routes/index.vyx");
+    let vyx = std::fs::read_to_string(&path).unwrap();
     let script = script_of(&vyx);
-    let st = contract_status(&v, &script);
+    let synth = synthesized_members(&v, &path, &vyx);
+    let st = contract_status(&v, &script, &synth);
     let head = st.iter().find(|e| e.name == "head").unwrap();
     assert_eq!(
         head.status,
@@ -475,6 +483,63 @@ fn status_reports_the_matched_shape() {
     );
     // Private helpers never appear: the closed rule is about the public surface.
     assert!(st.iter().all(|e| e.name != "isLoading"));
+    // The `<template>` is the page. No `<script>` mentions it, and reporting it
+    // absent was a claim about something the `.vyx` form guarantees exists.
+    let page = st.iter().find(|e| e.name == "page").unwrap();
+    assert_eq!(page.status, MemberStatus::Synthesized);
+    assert_eq!(
+        synth,
+        vec!["page".to_string()],
+        "the template returns Html, and `page` is the member declared at that return type"
+    );
+    // `respond` returns a `Response`, so the template does not write it: a page
+    // exports one or the other and this one has a view.
+    let respond = st.iter().find(|e| e.name == "respond").unwrap();
+    assert_eq!(respond.status, MemberStatus::Defaulted);
+    // A `.vyrn` page has no form beyond its text — nothing is synthesized for it.
+    let vyrn_page = repo("examples/bin/server/routes/raw/[id].vyrn");
+    let src = std::fs::read_to_string(&vyrn_page).unwrap();
+    assert!(synthesized_members(&v, &vyrn_page, &src).is_empty());
+}
+
+/// A `.vyx` under an OPEN contract synthesizes nothing to report: `Component`
+/// names no members, so there is no absence to correct. The rule is over the
+/// contract's own declarations, never a table of generator names.
+#[test]
+fn a_component_vyx_has_no_members_to_synthesize() {
+    let v = load_contract(
+        "std/vyx",
+        "Component",
+        &repo("examples/bin/server.vyrn"),
+        &opts(),
+        &Disk,
+    )
+    .unwrap();
+    let path = repo("examples/bin/app/widgets/CreateForm.vyx");
+    let src = std::fs::read_to_string(&path).unwrap();
+    assert!(synthesized_members(&v, &path, &src).is_empty());
+}
+
+/// A `.vyx` still being written — no `<template>` yet — has no view, and the
+/// report must not invent one.
+#[test]
+fn a_templateless_vyx_synthesizes_nothing() {
+    let v = page();
+    assert!(synthesized_members(&v, "/app/routes/half.vyx", "<script>\n</script>\n").is_empty());
+    assert_eq!(
+        synthesized_members(&v, "/app/routes/half.vyx", "<template>\n<p></p>\n</template>\n"),
+        vec!["page".to_string()],
+        "a template with no script at all is still a view"
+    );
+    assert!(
+        synthesized_members(
+            &v,
+            "/app/routes/half.vyx",
+            "<script>\nlet s = \"<template>\"\n</script>\n"
+        )
+        .is_empty(),
+        "a template tag inside the script is a string, not a section"
+    );
 }
 
 /// Absent-and-optional, absent-and-required, wrong shape, and unknown — the
@@ -482,11 +547,11 @@ fn status_reports_the_matched_shape() {
 #[test]
 fn status_covers_every_class() {
     let v = page();
-    let st = contract_status(&v, "");
+    let st = contract_status(&v, "", &[]);
     assert_eq!(st[0].status, MemberStatus::Defaulted, "head defaults to noHead()");
     assert_eq!(st[1].status, MemberStatus::Defaulted, "data defaults to noQuery()");
 
-    let st = contract_status(&v, "export fn head() -> Int64 {\n    return 1\n}\n");
+    let st = contract_status(&v, "export fn head() -> Int64 {\n    return 1\n}\n", &[]);
     assert_eq!(
         st[0].status,
         MemberStatus::Mismatched {
@@ -494,7 +559,7 @@ fn status_covers_every_class() {
         }
     );
 
-    let st = contract_status(&v, "export fn dta() -> Int64 {\n    return 1\n}\n");
+    let st = contract_status(&v, "export fn dta() -> Int64 {\n    return 1\n}\n", &[]);
     let unknown = st.iter().find(|e| e.name == "dta").unwrap();
     assert_eq!(
         unknown.status,
@@ -520,6 +585,7 @@ fn status_checks_the_open_rule() {
         "import { Html } from \"std/html\"\n\
          export fn anythingAtAll() -> Html {\n    return h()\n}\n\
          export fn wrong() -> Int64 {\n    return 1\n}\n",
+        &[],
     );
     assert_eq!(st[0].name, "anythingAtAll");
     assert_eq!(st[0].status, MemberStatus::OpenMatched);

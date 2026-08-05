@@ -598,6 +598,46 @@ fn why_contract_reports_the_matched_shape_of_a_real_page() {
     assert!(text.contains("ok        data: shape 2 of 4"), "data's shape:\n{text}");
     // Private helpers are outside the contract entirely.
     assert!(!text.contains("isLoading"), "a helper is not part of the surface:\n{text}");
+    // A `.vyx`'s `<template>` IS its page. The report read the `<script>` and
+    // called the page absent — of every `.vyx` in the corpus, none of which can
+    // be written any other way.
+    assert!(
+        text.contains("ok        page: the `<template>` compiles to it"),
+        "the page the template writes:\n{text}"
+    );
+    assert!(
+        !text.contains("page: absent"),
+        "and it is never absent in a file whose form guarantees it:\n{text}"
+    );
+    // `respond` is the alternative to `page`, and this page has a view: the
+    // correction is about the member the template writes, not about absence.
+    assert!(text.contains("default   respond: absent, optional"), "{text}");
+}
+
+/// A `.http` projection sits in the api DIRECTORY and is not a procedure module:
+/// `std/rpc`'s own scan skips a dotted stem, so grading it against `Api` claimed
+/// `Array<Route>` crosses a wire. It is in no role, and `why` says why.
+#[test]
+fn why_contract_refuses_to_grade_a_projection() {
+    let proj = repo_dir("examples/bin/server/api/pastes.http.vyrn");
+    let out = vyrn().arg("why").arg("--contract").arg(&proj).output().expect("why");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("no contract: this file is in no role"), "{text}");
+    assert!(text.contains("its stem is dotted"), "naming the reason:\n{text}");
+    assert!(
+        !text.contains("matches the open rule"),
+        "and never grades `routes()`/`feeds()` against `Api`:\n{text}"
+    );
+    assert!(!out.status.success(), "no contract governs it, which is not the question asked");
+
+    // The procedure module BESIDE it is unaffected — the rule is the dot, not
+    // the directory.
+    let procs = repo_dir("examples/bin/server/api/pastes.vyrn");
+    let out = vyrn().arg("why").arg("--contract").arg(&procs).output().expect("why");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("contract: Api (std/rpc)"), "{text}");
+    assert!(text.contains("ok        recent: matches the open rule"), "{text}");
 }
 
 /// A layout is chrome, not a page: it is in no role, and `why` says so rather
@@ -647,6 +687,10 @@ fn why_contract_reports_every_status_class() {
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(text.contains("ok        data: shape 1 of 4"), "satisfied:\n{text}");
     assert!(text.contains("default   head: absent, optional"), "defaulted:\n{text}");
+    assert!(
+        text.contains("ok        page: the `<template>` compiles to it"),
+        "synthesized by the form, which is a fifth status class:\n{text}"
+    );
     assert!(
         text.contains("UNKNOWN   dta: not named by the contract — did you mean `data`?"),
         "the did-you-mean:\n{text}"

@@ -53,8 +53,9 @@ pub use symbols::{
 // CLI, so the contract knowledge stays in ONE place and both are adapters.
 pub use contracts::{
     contract_completions, contract_fixes, contract_member_hover, contract_status, discovered_roles,
-    load_contract, load_role_contract, role_for, roles_from_manifest, ContractCompletion, ContractFix,
-    ContractMemberView, ContractShape, ContractView, MemberStatus, Role, RoleScope, StatusEntry,
+    is_projection, load_contract, load_role_contract, role_for, roles_from_manifest,
+    synthesized_members, ContractCompletion, ContractFix, ContractMemberView, ContractShape,
+    ContractView, MemberStatus, Role, RoleScope, StatusEntry,
 };
 
 // The canonical formatter (RFC-0017). `fmt` the module and `fmt` the function

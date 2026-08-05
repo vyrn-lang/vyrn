@@ -2787,6 +2787,17 @@ fn m4_completion_offers_contract_members_in_a_vyx_page() {
         !snippets.iter().any(|s| s.starts_with("export fn head")),
         "`head` is already written, so it is not offered again: {snippets:?}"
     );
+    // Nor is `page`: the `<template>` below is the page, so accepting the
+    // snippet would insert a declaration that collides with the generated
+    // export. What a file's FORM writes counts as already written.
+    assert!(
+        !snippets.iter().any(|s| s.starts_with("export fn page")),
+        "the template already wrote the page: {snippets:?}"
+    );
+    assert!(
+        snippets.iter().any(|s| s.starts_with("export fn respond")),
+        "`respond` is the alternative to a view and no template writes one: {snippets:?}"
+    );
 
     let data = items
         .iter()

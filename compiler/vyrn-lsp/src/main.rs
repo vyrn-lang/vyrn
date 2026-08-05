@@ -1961,6 +1961,10 @@ struct ContractCtx {
     source: String,
     /// Lines to add to a `source` position to reach the buffer (0 for `.vyrn`).
     line_offset: usize,
+    /// The members the document's FORM writes rather than its `source` — a
+    /// `.vyx`'s `<template>`. Completion must not offer one: the declaration it
+    /// would insert collides with the generated export.
+    synthesized: Vec<String>,
 }
 
 impl ContractCtx {
@@ -1986,12 +1990,16 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
         .get(uri)
         .cloned()
         .or_else(|| std::fs::read_to_string(&path).ok())?;
-    let (source, line_offset) = if is_vyrn_uri(uri) {
-        (text, 0)
+    // `raw` is the whole `.vyx` buffer, kept because its `<template>` is not in
+    // the `<script>` body and is where a page's view comes from. Empty for a
+    // `.vyrn`, which has no form beyond its text.
+    let (source, line_offset, raw) = if is_vyrn_uri(uri) {
+        (text, 0, String::new())
     } else {
         // A generator input: only `.vyx` carries a Vyrn `<script>`, and a cursor
         // outside it is not at module scope in any module.
-        contracts::vyx_script(&text)?
+        let (body, offset) = contracts::vyx_script(&text)?;
+        (body, offset, text)
     };
 
     let dir = std::path::Path::new(&path).parent()?.to_path_buf();
@@ -2021,10 +2029,12 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     // A cached view is trusted only while its own declaring file is unchanged.
     if let Some((was, view)) = entry.views.get(&key) {
         if *was == contracts::file_sig(std::path::Path::new(&view.file)) {
+            let synthesized = vyrn_frontend::contracts::synthesized_members(view, &path, &raw);
             return Some(ContractCtx {
                 view: view.clone(),
                 source,
                 line_offset,
+                synthesized,
             });
         }
     }
@@ -2035,10 +2045,12 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let view = vyrn_frontend::contracts::load_role_contract(&role, &manifest, &opts, &resolver)?;
     let file_sig = contracts::file_sig(std::path::Path::new(&view.file));
     entry.views.insert(key, (file_sig, view.clone()));
+    let synthesized = vyrn_frontend::contracts::synthesized_members(&view, &path, &raw);
     Some(ContractCtx {
         view,
         source,
         line_offset,
+        synthesized,
     })
 }
 
@@ -2060,7 +2072,11 @@ fn contract_completion_items(server: &Server, uri: &Url, line: usize, col: usize
     if !vyrn_frontend::at_module_scope(&ctx.source, src_line, col) {
         return Vec::new();
     }
-    let already = contracts::exported_names(&ctx.source);
+    // What the document already has: what its `<script>` exports, plus what its
+    // FORM exports for it — a `.vyx`'s `<template>` is its view, so offering the
+    // view member would insert a declaration that collides with the generated one.
+    let mut already = contracts::exported_names(&ctx.source);
+    already.extend(ctx.synthesized.iter().cloned());
     vyrn_frontend::contracts::contract_completions(&ctx.view, &already)
         .into_iter()
         .map(|c| CompletionItem {

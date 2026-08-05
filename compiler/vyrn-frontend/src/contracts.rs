@@ -275,6 +275,29 @@ fn read_module(
     Some((program, (resolved, source)))
 }
 
+/// Whether `path`'s file stem is DOTTED — `pastes.http.vyrn`, not `pastes.vyrn`.
+///
+/// RFC-0074's convention: a dotted stem is a protocol PROJECTION written OVER
+/// the modules beside it, and the dot is what marks it (the same suffix that
+/// derives the projection's base path). Every generator that scans a role's
+/// directory already skips one — `std/rpc`'s `rpcScan` tests `st.contains(".")
+/// == false`, because mounting a projection's `routes()` as a procedure would
+/// put `Array<Route>` on the wire.
+///
+/// Role attachment is by DIRECTORY, so without this a projection sits in the
+/// role of the modules it projects and is graded against their contract.
+/// RFC-0071 M3 recorded exactly that and judged it inert: true of the editor,
+/// where `Api` names no members and there is nothing to complete or hover, and
+/// false of `vyrn why --contract`, whose entire output is the claim. The rule
+/// here is the generator's own question rather than a second one — a pattern,
+/// as M3 said closing it would need, not another blessed stem in
+/// [`DEFAULT_ROLE_EXCEPT`].
+pub fn is_projection(path: &str) -> bool {
+    let file = path.replace('\\', "/");
+    let file = file.rsplit('/').next().unwrap_or_default();
+    file.rsplit_once('.').is_some_and(|(stem, _)| stem.contains('.'))
+}
+
 /// The role governing `path`, if any. `path` is a slash-separated module path
 /// (`.vyrn` or a generator input like `.vyx`).
 ///
@@ -288,7 +311,12 @@ fn read_module(
 /// to discover which one happened to win. A role scope is matched at its
 /// NEAREST occurrence too, so a scope that appears twice on a path resolves the
 /// way a reader would expect (the one closest to the file).
+/// A file whose stem is DOTTED (`pastes.http.vyrn`) is in no role, whatever
+/// directory it sits in — see [`is_projection`].
 pub fn role_for<'r>(path: &str, roles: &'r [Role]) -> Option<&'r Role> {
+    if is_projection(path) {
+        return None;
+    }
     let path = path.replace('\\', "/");
     let stem = path
         .rsplit('/')
@@ -628,6 +656,48 @@ pub struct ContractCompletion {
     pub required: bool,
 }
 
+/// The contract members a file's FORM already provides, which its text does not
+/// declare — the names [`contract_status`] must not report absent and
+/// [`contract_completions`] must not offer.
+///
+/// A `.vyx`'s `<template>` IS its view. `std/vyx` compiles it into an
+/// `Html`-returning export of the module the contract actually governs — `page`
+/// for a `std/ui` page, the component's own name for a widget — and the
+/// `<script>` every query in this module reads never mentions it. So a page with
+/// a template was reported `page: absent, optional`, which is a claim about
+/// something the form guarantees exists, and completion offered a declaration
+/// that would have collided with the generated one.
+///
+/// The test is the member's RETURN TYPE rather than its name, because the name
+/// is the consuming generator's to choose and a table of generator names is the
+/// drift this module refuses everywhere else. What the form guarantees is that
+/// the template becomes `Html`; which member that satisfies is the contract's
+/// own business.
+pub fn synthesized_members(view: &ContractView, path: &str, file_text: &str) -> Vec<String> {
+    if !path.ends_with(".vyx") || !has_template(file_text) {
+        return Vec::new();
+    }
+    view.members
+        .iter()
+        .filter(|m| {
+            !m.shapes.is_empty() && m.shapes.iter().all(|s| s.kind == "fn" && s.ret == "Html")
+        })
+        .map(|m| m.name.clone())
+        .collect()
+}
+
+/// Whether a `.vyx` source has a `<template>` section, searched OUTSIDE the
+/// `<script>` — a template tag inside a script string is not one. The section
+/// may sit on either side of the script, as `std/vyx`'s own `vyxSectionAvoid`
+/// allows.
+fn has_template(text: &str) -> bool {
+    let (before, after) = match (text.find("<script"), text.find("</script>")) {
+        (Some(s), Some(e)) if e > s => (&text[..s], &text[e + "</script>".len()..]),
+        _ => ("", text),
+    };
+    before.contains("<template") || after.contains("<template")
+}
+
 /// The contract members to offer at module scope, required first.
 ///
 /// `already` are the names the module already exports — a page that has written
@@ -822,6 +892,9 @@ pub enum MemberStatus {
     /// An optional member the module does not export; the contract's default
     /// applies.
     Defaulted,
+    /// A member the file's FORM provides rather than its text — a `.vyx`'s
+    /// `<template>`. Neither absent nor defaulted: see [`synthesized_members`].
+    Synthesized,
     /// The module exports it at a shape the contract does not declare.
     Mismatched { found: String },
     /// An export the contract does not name (closed contract), with the member
@@ -845,7 +918,17 @@ pub struct StatusEntry {
 /// Every member's status plus every unrecognized export's, in the order
 /// `std/contract:checkContract` reports them: members in declaration order
 /// first, then the module's other exports in source order.
-pub fn contract_status(view: &ContractView, module_source: &str) -> Vec<StatusEntry> {
+///
+/// `synthesized` are the members the file's form writes for it — a `.vyx`'s
+/// `<template>`, from [`synthesized_members`]. They are not in `module_source`
+/// and reporting them absent is a falsehood, so they are checked before absence
+/// is concluded and never after: a member the text DOES declare is graded on
+/// what it declares.
+pub fn contract_status(
+    view: &ContractView,
+    module_source: &str,
+    synthesized: &[String],
+) -> Vec<StatusEntry> {
     let Ok(tokens) = crate::lexer::lex(module_source) else {
         return Vec::new();
     };
@@ -869,6 +952,7 @@ pub fn contract_status(view: &ContractView, module_source: &str) -> Vec<StatusEn
             .collect::<Vec<_>>()
             .join(" or ");
         let status = match exports.iter().find(|e| e.name == m.name) {
+            None if synthesized.iter().any(|n| *n == m.name) => MemberStatus::Synthesized,
             None if m.optional => MemberStatus::Defaulted,
             None => MemberStatus::Missing,
             Some(e) => match m.shapes.iter().position(|s| shape_matches(s, e)) {
