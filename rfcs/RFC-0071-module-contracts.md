@@ -761,18 +761,25 @@ would have to invent. The precedent is `vyxNoSchema()` sitting beside it.
 
 **A projection is in the `api` role and is not a procedure module.** Role
 attachment is by DIRECTORY, and `pastes.http.vyrn` lives in the api directory, so
-`vyrn why --contract` reports it under `Api` and answers "ok" for a `feeds()`
-returning `Array<Live>` — which no wire could carry. Nothing misfires today:
-`Api` names no members, so there is no completion or hover to be wrong, the open
-rule constrains only shape, and the generator that WOULD object skips the file by
-its dotted stem. But the role and the generator disagree about which files are
-procedure modules, and closing that needs `Role::except` to match a pattern
-rather than a stem, or a `Projection` contract of its own — the same shape as the
-`Layout` contract M2b, M2c and M4 each deferred.
+`vyrn why --contract` reported it under `Api` and answered "ok" for a `feeds()`
+returning `Array<Live>` — which no wire could carry. This entry judged that inert
+— `Api` names no members, so there is no completion or hover to be wrong, the
+open rule constrains only shape, and the generator that WOULD object skips the
+file by its dotted stem — and the judgement was about the EDITOR. It was never
+true of `vyrn why --contract`, whose entire output is the claim: the report told
+the author their REST projection was a conforming RPC surface, in the one place
+built to be asked. **Since fixed**, by the first of the two doors this paragraph
+named: `role_for` excludes a dotted stem, which is a pattern rather than another
+blessed name in `Role::except`. The rule is not a second one — it is the question
+`std/rpc`'s own `rpcScan` asks (`st.contains(".") == false`), and RFC-0074's
+convention is that the dot marks a projection written OVER the modules beside it.
+A `Projection` contract of its own — the shape `Layout` still has — would say
+more (that `routes()` returns `Array<Route>` is a SHAPE worth declaring), but it
+is a feature, and nothing needed one to stop the command asserting a falsehood.
 
 ## M4 — as landed
 
-Seven places where the implementation is not what this document said, and why.
+Eight places where the implementation is not what this document said, and why.
 
 **Role attachment falls back to the generator call site, because no project
 writes a `roles` key.** This document specifies `vyrn.json`'s `roles` map and
@@ -834,6 +841,21 @@ The client's diagnostics are attached by RANGE overlap, so the lightbulb still
 appears on the squiggle without the server understanding a word of it. It renames
 the declaration only; a page that calls its own misspelled accessor internally
 needs the second edit by hand.
+
+**A `.vyx`'s `<template>` is its page, and the report read only its
+`<script>`.** Every query in this milestone runs over the script body, which is
+ordinary Vyrn — and the one export a `.vyx` cannot write there is the one its
+form guarantees: `vyxBuildPageModule` compiles the template into `export fn
+page(…) -> Html`. So `why --contract` answered `page: absent, optional` for
+every `.vyx` in the corpus, and completion offered all four `page` snippets
+inside a file whose template had already written it — accepting one inserts a
+declaration that collides with the generated export. **Since fixed**, in
+`synthesized_members`, which both the CLI and the LSP ask. The test is the
+member's RETURN TYPE, not its name: what the `.vyx` form guarantees is that the
+template becomes `Html`, and which member that satisfies is the contract's own
+business — `page` for `std/ui`, nothing for `std/vyx:Component`, which names no
+members to be absent. A table of generator names would have been the second rule
+this module refuses everywhere else.
 
 **`vyrn why --contract` reports; it does not gate.** A `.vyrn` page's own surface
 carries the router's entry point (`page`/`respond`), which `Page` does not name,

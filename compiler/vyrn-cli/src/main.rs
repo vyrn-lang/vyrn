@@ -732,6 +732,12 @@ fn why_cmd(args: &[String]) -> ExitCode {
     let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
         println!("{path}");
         println!("  no contract: this file is in no role");
+        if vyrn_frontend::contracts::is_projection(&path) {
+            println!(
+                "  (its stem is dotted: a projection written OVER the modules beside it \
+                 (RFC-0074), which the generator scanning that directory skips)"
+            );
+        }
         if roles.is_empty() {
             println!("  (the project declares no `roles` in vyrn.json, and no generator call site names a directory containing it)");
         } else {
@@ -750,8 +756,10 @@ fn why_cmd(args: &[String]) -> ExitCode {
     };
 
     // A `.vyx` is not a module; its `<script>` is. Everything downstream is the
-    // same question over the same ordinary Vyrn.
+    // same question over the same ordinary Vyrn — except its `<template>`, which
+    // becomes an export of the compiled module and is in no `<script>`.
     let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let synthesized = vyrn_frontend::contracts::synthesized_members(&view, &path, &raw);
     let source = if path.ends_with(".vyx") {
         vyx_script_body(&raw).unwrap_or_default()
     } else {
@@ -763,9 +771,15 @@ fn why_cmd(args: &[String]) -> ExitCode {
     println!("  contract: {} ({})", view.name, view.module);
     println!("  declared in: {}", view.file);
     let mut objections = 0;
-    for e in vyrn_frontend::contracts::contract_status(&view, &source) {
+    for e in vyrn_frontend::contracts::contract_status(&view, &source, &synthesized) {
         use vyrn_frontend::contracts::MemberStatus::*;
         let line = match &e.status {
+            // Not absent and not defaulted: the file's FORM writes it. A `.vyx`
+            // has no other way to declare a view, so "absent, optional" was a
+            // claim about every `.vyx` in the corpus.
+            Synthesized => {
+                format!("ok        {}: the `<template>` compiles to it — {}", e.name, e.want)
+            }
             Satisfied { shape } => {
                 let of = view.member(&e.name).map(|m| m.shapes.len()).unwrap_or(1);
                 format!("ok        {}: shape {} of {} — {}", e.name, shape + 1, of, e.want)
