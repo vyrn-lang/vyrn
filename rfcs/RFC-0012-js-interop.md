@@ -99,6 +99,62 @@ parameter and an `Int32`/`Bool` are both a single `i32`; `wasi-min.js` resolves
 the ambiguity by the runtime JS value (a JS string argument is encoded), and by
 an optional `exportReturns` hint for a `String`/`Bool` *result*.
 
+**Who frees an exported `String` parameter: nobody (measured).** The paragraph
+above says who allocates and never said who frees. The answer follows from a
+rule the language already has. Ownership analysis (`vyrn-frontend/src/own.rs`)
+keys `droppable` on `Stmt::Let` nodes only, so a parameter is *borrowed* — a
+callee never frees one, on any backend. The caller owns it. Across this boundary
+the caller is JS, and `wasi-min.js` allocates through `__vyrn_malloc` and then
+forgets the pointer. The owner is real and does not free.
+
+It also cannot free. `__vyrn_malloc` is the only allocator symbol a module
+exports, and the direct wasm backend has nothing to pair with it: its allocator
+is a bump pointer, `Stmt::Drop` of a `String` emits no code there, and
+`DropKind::FreeStr` has no wasm counterpart at all.
+
+Measured on `web/domdemo.wasm`, whose `increment` never reads `arg`. 20000 calls
+with a 900-byte argument grew linear memory from 2 pages to 277 — 18,022,400
+bytes against 20000 × 901 = 18,020,000, so the growth is the argument buffers
+and nothing else. Successive `__vyrn_malloc` results never repeat.
+
+The leak is not particular to this ABI: on the wasm target the whole heap is
+monotonic. What is particular is the rate. Elsewhere the program decides how
+often it allocates. Here the host decides — `onType` fires once per keystroke
+and burns `len + 1` bytes the instance never gets back. Input-driven growth is a
+different problem from program-driven growth.
+
+Not fixed here, and not fixable in `wasi-min.js`. It needs an allocator that can
+free, plus a decision: export `__vyrn_free` and make the host pair every encode
+with it, or move the parameter to callee ownership so the ABI frees it. The
+second changes what a `String` parameter means everywhere, not just at this
+boundary. Recorded, not decided.
+
+**Zero-copy over a foreign buffer is impossible on wasm.** RFC-0082 lists
+"zero-copy over a buffer Vyrn does not own" among the capabilities a raw-memory
+view would serve. On this target that item is unreachable whatever the language
+offers, so it should not sit on a list of things Vyrn might add. wasm loads and
+stores address one linear memory and nothing else. A JS string, an
+`ArrayBuffer`, a `File` — none live there, so each is copied in before wasm code
+can read a byte of it. `externref` does not change that: a reference is an
+opaque handle, not addressable bytes, and the JS string builtins that consume
+one still finish by writing into linear memory. Multi-memory imports a
+`WebAssembly.Memory`, and an existing `ArrayBuffer` cannot become one.
+
+The achievable version is one copy instead of two. `encodeString` calls
+`TextEncoder.encode`, which allocates a JS array, then copies that array into
+linear memory with `view.set`. `TextEncoder.encodeInto` writes straight into
+linear memory. Per call on Node v24, with the destination over-allocated 3x:
+24 B 269 ns → 88 ns, 900 B 1090 ns → 592 ns, 90 KB 81.2 µs → 50.3 µs. Sizing the
+destination exactly beats 3x on ASCII (66 ns at 24 B) and loses on non-ASCII
+(1865 ns against 1148 ns today at 900 B), because the exact path re-encodes from
+scratch when `encodeInto` stops short. 3x wins at every size and loses nowhere.
+It is not applied, because over-allocating on a path that never frees triples
+the leak above. The two land together or not at all.
+
+The NUL scan in `decodeCString` was measured and is not worth changing: a byte
+loop costs 25.60 µs against 24.37 µs for `indexOf` on a 90 KB string. The decode
+dominates both.
+
 ## The parity question (decided)
 
 `extern` is host-provided by definition, so byte-identical three-way parity
