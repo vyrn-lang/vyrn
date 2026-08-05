@@ -43,6 +43,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
+use crate::declared::{builtin_producers, Declared, Scopes};
 
 /// How a droppable binding is reclaimed at block exit.
 ///
@@ -338,28 +339,6 @@ fn expr_form(e: &Expr) -> String {
     }
 }
 
-/// The built-in calls that hand the caller a fresh heap value, with the type of
-/// that value. **This is a fact about a function, not about a type** — `at(a, 0)`
-/// and `m.keys()` both return an element of a container and only one of them
-/// allocates — so it cannot be derived from a signature and the compiler knows it
-/// intrinsically, exactly as it knows the seeded [`Owned`] rows.
-///
-/// It under-approximates on purpose. A builtin missing from here leaks, which is
-/// always safe; one wrongly present frees memory somebody still holds.
-fn builtin_producers() -> impl Iterator<Item = (&'static str, Type)> {
-    [
-        // `a + b` on Strings, and `"..\{x}"` interpolation.
-        ("@concat", Type::Str),
-        ("@str", Type::Str),
-        ("cell", Type::Ref(Box::new(Type::Unit))),
-        ("array", Type::Array(Box::new(Type::Unit))),
-        ("push", Type::Array(Box::new(Type::Unit))),
-        // `m.keys()` copies the key pointers into a new buffer (RFC-0028).
-        ("@keys", Type::Array(Box::new(Type::Str))),
-    ]
-    .into_iter()
-}
-
 /// Whole-program ownership facts.
 pub struct Ownership {
     /// Functions whose return value transfers heap ownership to the caller,
@@ -387,16 +366,10 @@ pub struct Ownership {
 pub fn analyze(program: &Program) -> Ownership {
     let proto = Owned::new(program);
 
-    // The declared return type of every callable the analysis can name: the
-    // program's functions, plus the built-in producers. A user declaration wins,
-    // though `checker::RESERVED` already forbids taking one of these names.
-    let mut ret_types: HashMap<String, Type> = HashMap::new();
-    for (n, t) in builtin_producers() {
-        ret_types.insert(n.to_string(), t);
-    }
-    for f in &program.functions {
-        ret_types.insert(f.name.clone(), f.ret.clone());
-    }
+    // The declared-types reading, shared with `movecheck` (RFC-0089 M2). It
+    // carries the return type of every callable this analysis can name: the
+    // program's functions, plus the built-in producers.
+    let decl = Declared::new(program);
 
     // Callables whose result the caller owns. The built-ins are seeded and stay;
     // every heap-returning function is assumed owned and may be removed below.
@@ -418,7 +391,7 @@ pub fn analyze(program: &Program) -> Ownership {
         for f in &program.functions {
             if snapshot.contains(&f.name)
                 && !seeded.contains(&f.name)
-                && !analyze_fn(f, &snapshot, &ret_types, &proto).is_owned
+                && !analyze_fn(f, &snapshot, &decl, &proto).is_owned
             {
                 owned.remove(&f.name);
                 changed = true;
@@ -434,7 +407,7 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut notes = HashMap::new();
     let mut fresh_refs = HashSet::new();
     for f in &program.functions {
-        let r = analyze_fn(f, &owned, &ret_types, &proto);
+        let r = analyze_fn(f, &owned, &decl, &proto);
         fresh_refs.extend(fresh_refs_in(&f.body, &r.droppable));
         droppable.insert(f.name.clone(), r.droppable);
         notes.insert(f.name.clone(), r.notes);
@@ -444,7 +417,7 @@ pub fn analyze(program: &Program) -> Ownership {
     // is the REAL node the interpreter walks, so the by-address droppable keys
     // match at run time. Tests never return an owned value (they are `Unit`).
     for (i, t) in program.tests.iter().enumerate() {
-        let r = analyze_body(&[], &t.body, &Type::Unit, &owned, &ret_types, &proto);
+        let r = analyze_body(&[], &t.body, &Type::Unit, &owned, &decl, &proto);
         fresh_refs.extend(fresh_refs_in(&t.body, &r.droppable));
         droppable.insert(format!("test@{i}"), r.droppable);
         notes.insert(format!("test@{i}"), r.notes);
@@ -452,7 +425,7 @@ pub fn analyze(program: &Program) -> Ownership {
     // Bench bodies (RFC-0055) get the same block-exit drop analysis, keyed by the
     // synthetic `bench@<index>` name the interpreter (`--check`) walks.
     for (i, b) in program.benches.iter().enumerate() {
-        let r = analyze_body(&[], &b.body, &Type::Unit, &owned, &ret_types, &proto);
+        let r = analyze_body(&[], &b.body, &Type::Unit, &owned, &decl, &proto);
         fresh_refs.extend(fresh_refs_in(&b.body, &r.droppable));
         droppable.insert(format!("bench@{i}"), r.droppable);
         notes.insert(format!("bench@{i}"), r.notes);
@@ -483,10 +456,10 @@ struct FnResult {
 fn analyze_fn(
     f: &Function,
     owned: &HashSet<String>,
-    ret_types: &HashMap<String, Type>,
+    decl: &Declared,
     proto: &Owned,
 ) -> FnResult {
-    analyze_body(&f.params, &f.body, &f.ret, owned, ret_types, proto)
+    analyze_body(&f.params, &f.body, &f.ret, owned, decl, proto)
 }
 
 /// The core of [`analyze_fn`], parameterized over a body directly so a test body
@@ -497,7 +470,7 @@ fn analyze_body(
     body: &Block,
     ret: &Type,
     owned: &HashSet<String>,
-    ret_types: &HashMap<String, Type>,
+    decl: &Declared,
     proto: &Owned,
 ) -> FnResult {
     // Seed the outermost scope with every parameter and its declared type.
@@ -516,7 +489,7 @@ fn analyze_body(
         owned,
         ret_is_heap: proto.release_kind(ret).is_some(),
         all_returns_owned: true,
-        ret_types,
+        decl,
         proto,
         var_types: Scopes::new(params),
     };
@@ -531,38 +504,6 @@ fn analyze_body(
 /// The identity key for a statement: its node address.
 fn id(s: &Stmt) -> usize {
     s as *const Stmt as usize
-}
-
-/// A lexical scope stack, innermost binding wins.
-///
-/// The rule that makes it correct is that EVERY binder is recorded, including a
-/// loop variable, a pattern binder or a lambda parameter that carries no
-/// interesting fact of its own. Recording only the interesting ones lets an
-/// inner binding inherit an outer binding's property — which is how a `let s = 1`
-/// under a `let s = "x"` came to be classified as a String and freed.
-struct Scopes<T>(Vec<HashMap<String, T>>);
-
-impl<T> Scopes<T> {
-    fn new(outermost: HashMap<String, T>) -> Self {
-        Scopes(vec![outermost])
-    }
-
-    fn enter(&mut self) {
-        self.0.push(HashMap::new());
-    }
-
-    fn exit(&mut self) {
-        self.0.pop();
-    }
-
-    fn bind(&mut self, name: &str, value: T) {
-        self.0.last_mut().unwrap().insert(name.to_string(), value);
-    }
-
-    /// The innermost binding of `name`, or `None` if nothing binds it.
-    fn get(&self, name: &str) -> Option<&T> {
-        self.0.iter().rev().find_map(|frame| frame.get(name))
-    }
 }
 
 struct Analysis<'a> {
@@ -588,8 +529,9 @@ struct Analysis<'a> {
     ret_is_heap: bool,
     /// Whether every heap return seen so far transfers a fresh owned value.
     all_returns_owned: bool,
-    /// Declared return type of every callable, for typing a call's result.
-    ret_types: &'a HashMap<String, Type>,
+    /// The declared-types reading, shared with `movecheck` — the one place a
+    /// call's result type, a nominal type's base and `owns_heap` are answered.
+    decl: &'a Declared,
     /// The `Owned` table — the only thing that decides how a type is released.
     proto: &'a Owned,
     /// Scope stack of every binding in scope with its type where one is known.
@@ -862,7 +804,7 @@ impl Analysis<'_> {
             Expr::Call { name, args, .. } if name == "@copy" => args
                 .first()
                 .and_then(|a| self.expr_type(a))
-                .is_some_and(|t| owns_heap(&t, &self.proto.types)),
+                .is_some_and(|t| self.decl.owns_heap(&t)),
             Expr::ArrayLit { .. }
             | Expr::MapLit { .. }
             | Expr::StructLit { .. }
@@ -892,45 +834,12 @@ impl Analysis<'_> {
 
     /// The type of `e`, where this pass can name it.
     ///
-    /// It is a *declared-types* pass, not a re-run of the checker: parameters,
-    /// `let` annotations, function return types and literal shapes, propagated
-    /// through the scope stack. When unsure it answers `None`, which leaves the
-    /// binding to leak — always safe, never freed as something it is not.
+    /// The reading itself lives in [`crate::declared`], because `movecheck` asks
+    /// the same question and a second implementation could answer differently.
+    /// When unsure it answers `None`, which leaves the binding to leak — always
+    /// safe, never freed as something it is not.
     fn expr_type(&self, e: &Expr) -> Option<Type> {
-        match e {
-            Expr::Str(_) => Some(Type::Str),
-            Expr::Int(_) | Expr::Byte(_) => Some(Type::Int),
-            Expr::Float(_) => Some(Type::Float),
-            Expr::Bool(_) => Some(Type::Bool),
-            Expr::Var { name, .. } => self.var_types.get(name).cloned().flatten(),
-            // `x.copy()` returns its receiver's type — the one builtin whose
-            // result type is not a fixed row.
-            Expr::Call { name, args, .. } if name == "@copy" => {
-                args.first().and_then(|a| self.expr_type(a))
-            }
-            Expr::Call { name, .. } => self.ret_types.get(name).cloned(),
-            // The one allocating operator is `+` on Strings, and its result has
-            // its left operand's type. Every other operator is a scalar, whose
-            // type answers `None` from the seed anyway.
-            Expr::Binary {
-                op: BinOp::Add,
-                lhs,
-                ..
-            } => self.expr_type(lhs),
-            // An array literal does NOT name its own type, and that is the whole
-            // reason it is absent here: `[1, 2, 3]` is an `ArrayN` held inline,
-            // `[]` annotated `Array<T>` is three words around a buffer, and
-            // annotated `SmallArray<T, N>` is a header whose buffer is null until
-            // it spills. Three layouts, one syntax. Answering `Array` for all of
-            // them freed a fixed array's stack storage and corrupted the heap, so
-            // the annotation is the only thing that may answer.
-            //
-            // A map literal has no such second shape: `[:]` is a `Map` and there
-            // is nothing else it could be.
-            Expr::MapLit { .. } => Some(Type::Map(Box::new(Type::Str), Box::new(Type::Unit))),
-            Expr::StructLit { name, .. } => Some(Type::Named(name.clone())),
-            _ => None,
-        }
+        self.decl.type_of(&self.var_types, e)
     }
 
     /// Walk an expression, escaping any candidate used outside a safe read.
@@ -1364,7 +1273,7 @@ fn pattern_binders(p: &Pattern) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{lexer::lex, parser::parse};
 
@@ -1772,7 +1681,10 @@ mod tests {
     }
 
     /// Every `.vyrn` under a repo-relative directory.
-    fn sources(rel: &str, out: &mut Vec<std::path::PathBuf>) {
+    ///
+    /// `pub(crate)` so the RFC-0089 gates measure ONE corpus: `movecheck`'s
+    /// Phase-4a site census walks exactly the files this one does.
+    pub(crate) fn sources(rel: &str, out: &mut Vec<std::path::PathBuf>) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel);
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
