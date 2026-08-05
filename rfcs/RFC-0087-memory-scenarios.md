@@ -728,6 +728,12 @@ A Vyrn String is a bare NUL-terminated pointer. So:
 `str_append` keeps a shadow length and capacity beside the eligible local, which is
 the header, kept somewhere else, for one case. P1 is what the other cases cost.
 
+**Closed by RFC-0089 M1a.** A String now carries `{len, cap}` in the two words in
+front of its pointer. `byteLength` of a 10 KB string fell from 289 ns to 10 ns per
+read, `a + b` from 29.1 to 19.0 µs per thousand, and the shadow became the header.
+The pointer is still one word and still NUL-terminated, so nothing at the extern
+boundary changed.
+
 ---
 
 ## P3. Every leak in Part I is also a performance defect

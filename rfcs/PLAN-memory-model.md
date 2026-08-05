@@ -74,20 +74,28 @@ No semantic change. Three deliverables, one PR:
 go into the PR body. Expected from the census: ~21 param-returns + ~5 aliases.
 If the real count is 10× that, STOP and report — the design premise is wrong.
 
-## Phase 2 — String becomes a value triple *(RFC-0089 M1a)*
+## Phase 2 — String carries its length *(RFC-0089 M1a)* — LANDED
 
-`String` = `{ptr, len, cap}` in all three engines, like `Array` already is.
-`byteLength` reads the field. `strlen` sites die. `str_append`'s shadow
-len/cap dies (the shadow IS the field now). Extern boundary: the wasm export
-ABI keeps NUL-terminated `ptr` at the edge and converts at the boundary —
-`wasi-min.js` changes stay inside its encode/decode helpers. NUL rule
-(RFC-0014) is unchanged: still rejected, `len` is not a license.
-In-place append stays restricted to today's proven-unique sites until Phase 4.
+`String` gained `{len, cap}` in the two compiling engines (the interpreter's
+Rust `String` already had both). **Not** as a `{ptr, len, cap}` value triple:
+the two words sit BEHIND the pointer, so a `String` is still one word and still
+addresses NUL-terminated UTF-8. See RFC-0089 "M1a as landed" for the three
+measurements that decided it — the deciding one is that an `Option`/`Result`
+/enum payload is one word, so a three-word String would box and move the
+`optionString` census row this phase was required not to move.
 
-Risks the agent must check: JSON codec, `bytes(s)`, `slice`, hashing in
-`std/hash`, the `.stdin` fixtures, data-segment literals (static strings get
-`cap = 0` meaning "never realloc, never free"). Membench rows for concat and
-byteLength must improve; parity must not move.
+`byteLength` reads the field. `str_append`'s shadow len/cap died (the header IS
+that pair); one word of ownership flag survives per accumulator and retires with
+Phase 4. Extern boundary: the wasm export ABI keeps NUL-terminated `ptr` at the
+edge, and `wasi-min.js` writes the header when it allocates and subtracts it
+when it frees. NUL rule (RFC-0014) unchanged: still rejected, `len` is not a
+license. In-place append stays restricted to today's proven-unique sites until
+Phase 4. Data-segment literals carry `cap = 0`, meaning never realloc, never
+free.
+
+Five boundaries materialize a header for a pointer they did not allocate:
+`args()`, `readLine`, `readFile`, the generator host's directory listing, and
+`wasi-min.js`. Everything else allocates through one function per backend.
 
 ## Phase 3 — `copy` *(RFC-0089 M1b)* — small, parallel-safe with Phase 2
 

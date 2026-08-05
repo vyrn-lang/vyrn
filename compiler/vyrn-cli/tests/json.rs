@@ -144,7 +144,7 @@ fn the_json_writer_does_not_copy_once_per_element() {
             "`{writer}` must grow its accumulator in place:\n{body}"
         );
         assert_eq!(
-            body.matches("call ptr @strcat(").count(),
+            body.matches("call ptr @__vyrn_str_concat(").count(),
             1,
             "`{writer}` may copy only in its tail — a second copy is one per \
              element, which is the O(N²) `toJson` had:\n{body}"

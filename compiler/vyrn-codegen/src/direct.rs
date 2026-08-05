@@ -1185,7 +1185,7 @@ struct Fn_<'a> {
     /// "may this buffer move", and one of them a use-after-free.
     append_ok: std::collections::HashSet<String>,
     /// wasm local holding the accumulator's pointer → the frame slot holding its
-    /// `(len, cap)` shadow. Keyed by local index rather than by name because the
+    /// ownership flag. Keyed by local index rather than by name because the
     /// local IS the binding: two `let out`s in one body are two accumulators, and
     /// a global (a `Place::Static`) never gets an entry at all.
     str_append: HashMap<u32, u32>,
@@ -1611,6 +1611,10 @@ impl Fn_<'_> {
                 // A `String` is a scalar, so a `Place::Local` holds the pointer —
                 // the opposite of what a local holding an aggregate means, which is
                 // why this and `Rel::Buffers` are two arms and not one.
+                //
+                // The block base is the pointer less its header (RFC-0089 M1a).
+                // `free` still refuses anything below `HEAP_BASE`, which is what
+                // makes `drop s` on a literal a no-op.
                 match p {
                     Place::Local(l) => b.ins(&Instruction::LocalGet(l)),
                     _ => {
@@ -1618,6 +1622,7 @@ impl Fn_<'_> {
                         b.ins(&Instruction::I32Load(word()))
                     }
                 };
+                str_hdr(b);
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
@@ -2187,28 +2192,31 @@ impl Fn_<'_> {
         })
     }
 
-    /// Give the accumulator in wasm local `l` its `(len, cap)` shadow, and start
-    /// it unowned.
+    /// Give the accumulator in wasm local `l` its ownership flag, and start it
+    /// unowned.
     ///
-    /// A Vyrn `String` is a bare NUL-terminated pointer with no header, so growing
-    /// one in place needs its length and capacity kept beside it. They go in the
-    /// frame rather than in two more wasm locals because the runtime helper writes
-    /// them back and wasm has no way to pass a local by reference — eight bytes of
-    /// shadow stack against a three-result function type, and the frame is already
-    /// per-invocation, so a recursive writer (`emitArr` calling `emit`) gets its
-    /// own without anything being said about recursion.
+    /// This was a `(len, cap)` shadow until RFC-0089 M1a, because a String
+    /// carried neither. Both are in the String header now, and the one word left
+    /// is the question the header cannot answer: did THIS path allocate the
+    /// buffer? `0` means no — a literal in a data segment, a `concat` result, a
+    /// call result — so it may not be grown in place, because `s = t` may alias
+    /// it and nothing yet forbids that (the conventions do, RFC-0089 M2).
     ///
-    /// `cap == 0` means "this pointer was not allocated by the append path" — a
-    /// literal in a data segment, a `concat` result, a call result — so it may not
-    /// be grown and `len` says nothing. Emitted at the `let`, so the second trip
-    /// through an enclosing loop starts unowned again.
+    /// It goes in the frame rather than in another wasm local because the runtime
+    /// helper writes it back and wasm has no way to pass a local by reference —
+    /// four bytes of shadow stack against a two-result function type, and the
+    /// frame is already per-invocation, so a recursive writer (`emitArr` calling
+    /// `emit`) gets its own without anything being said about recursion.
+    ///
+    /// Emitted at the `let`, so the second trip through an enclosing loop starts
+    /// unowned again.
     fn str_append_shadow(&mut self, b: &mut Frame, l: u32) {
-        let at = *self.str_append.entry(l).or_insert_with(|| b.alloc(8, 4));
-        b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(cap_at()));
+        let at = *self.str_append.entry(l).or_insert_with(|| b.alloc(4, 4));
+        b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
     }
 
     /// Append the `String` on top of the stack to the accumulator in local `l`,
-    /// in place. The helper takes the shadow's address, the current pointer and
+    /// in place. The helper takes the flag's address, the current pointer and
     /// the operand, and gives back the pointer to store — which is the whole
     /// convention, and why the call site is five instructions.
     fn emit_str_append(&mut self, b: &mut Frame, l: u32) {
@@ -2216,11 +2224,11 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalSet(l));
     }
 
-    /// Invalidate the shadow after any other write to the accumulator: the local
-    /// now holds a pointer this path did not allocate.
+    /// Clear the flag after any other write to the accumulator: the local now
+    /// holds a pointer this path did not allocate.
     fn str_append_reset(&mut self, b: &mut Frame, l: u32) {
         if let Some(&at) = self.str_append.get(&l) {
-            b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(cap_at()));
+            b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
         }
     }
 
@@ -4168,24 +4176,19 @@ impl Fn_<'_> {
     /// host stashes and answers with a length precisely so it never writes into
     /// guest memory the guest did not hand it.
     fn fetch_str(&mut self, b: &mut Frame, g: Gen) {
-        // The length stays 64-bit all the way into `malloc`, which is the only
-        // thing here that can judge it — the host names the size, so this is the
-        // one length in the module that is not bounded by the memory it has to
-        // fit in.
-        let len = b.local(ValType::I64);
+        // `str_new` allocates the header, the room and the terminator, so the
+        // result is a `String` the moment the host has filled it (RFC-0089 M1a).
+        // The length is 64-bit on the way in because the host names the size —
+        // this is the one length in the module that is not bounded by the memory
+        // it has to fit in — and `str_new` is where it is judged.
+        let len = b.local(ValType::I32);
         let buf = b.local(ValType::I32);
-        b.ins(&Instruction::LocalTee(len))
-            .ins(&Instruction::I64Const(1))
-            .ins(&Instruction::I64Add)
-            .ins(&Instruction::Call(self.cx.rt.malloc))
+        b.ins(&Instruction::I32WrapI64)
+            .ins(&Instruction::LocalTee(len))
+            .ins(&Instruction::LocalGet(len))
+            .ins(&Instruction::Call(self.cx.rt.str_new))
             .ins(&Instruction::LocalTee(buf))
             .ins(&Instruction::Call(g.fetch))
-            .ins(&Instruction::LocalGet(buf))
-            .ins(&Instruction::LocalGet(len))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32Store8(byte()))
             .ins(&Instruction::LocalGet(buf));
     }
 
@@ -4258,7 +4261,7 @@ impl Fn_<'_> {
                 if args.len() != 1 {
                     return unsupported("`panic` with other than one argument", line);
                 }
-                let (write_all, strlen) = (self.cx.rt.write_all, self.cx.rt.strlen);
+                let write_all = self.cx.rt.write_all;
                 let (pre, nl) = (self.cx.rt.intern(m, "error: "), self.cx.rt.intern(m, "\n"));
                 // Parked in a local because `write_all` consumes three operands,
                 // so the message cannot wait on the stack under the prefix's
@@ -4271,11 +4274,10 @@ impl Fn_<'_> {
                     .ins(&Instruction::I32Const(pre as i32))
                     .ins(&Instruction::I32Const(7))
                     .ins(&Instruction::Call(write_all));
-                b.ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::LocalGet(msg))
-                    .ins(&Instruction::LocalGet(msg))
-                    .ins(&Instruction::Call(strlen))
-                    .ins(&Instruction::Call(write_all));
+                b.ins(&Instruction::I32Const(2)).ins(&Instruction::LocalGet(msg));
+                b.ins(&Instruction::LocalGet(msg));
+                str_len(b);
+                b.ins(&Instruction::Call(write_all));
                 b.ins(&Instruction::I32Const(nl as i32))
                     .ins(&Instruction::Call(self.cx.rt.trap));
                 // The stack goes polymorphic here, which is what lets a `panic`
@@ -4498,9 +4500,9 @@ impl Fn_<'_> {
                 let s = self.scratch(b, ValType::I32, 0);
                 let n = self.scratch(b, ValType::I32, 1);
                 let buf = self.scratch(b, ValType::I32, 2);
-                let (strlen, malloc) = (self.cx.rt.strlen, self.cx.rt.malloc);
+                let malloc = self.cx.rt.malloc;
                 b.ins(&Instruction::LocalTee(s));
-                b.ins(&Instruction::Call(strlen));
+                str_len(b);
                 b.ins(&Instruction::LocalTee(n));
                 // A zero-length string still gets a buffer, so the triple's pointer
                 // is never null — `push` reallocs from it either way.
@@ -5214,10 +5216,9 @@ impl Fn_<'_> {
                     // values is the M2g bug, and here it would send the host a
                     // length taken from the wrong string.
                     let s = self.scratch(b, ValType::I32, 20 + i as u8);
-                    b.ins(&Instruction::LocalTee(s))
-                        .ins(&Instruction::LocalGet(s))
-                        .ins(&Instruction::Call(self.cx.rt.strlen))
-                        .ins(&Instruction::I64ExtendI32U);
+                    b.ins(&Instruction::LocalTee(s)).ins(&Instruction::LocalGet(s));
+                    str_len(b);
+                    b.ins(&Instruction::I64ExtendI32U);
                 }
             }
             b.ins(&Instruction::Call(index));
@@ -5271,7 +5272,7 @@ impl Fn_<'_> {
         let (name, msg) = (self.scratch(b, ValType::I32, 7), self.scratch(b, ValType::I32, 8));
         b.ins(&Instruction::LocalSet(msg));
         b.ins(&Instruction::LocalSet(name));
-        let (write_all, strlen) = (self.cx.rt.write_all, self.cx.rt.strlen);
+        let write_all = self.cx.rt.write_all;
         // The descriptor, decided at compile time: 2 and 1 are WASI's own stderr
         // and stdout, and a file sink reads the one `_start` opened. There is no
         // fourth case, and a sink this backend could not serve would be a gap
@@ -5303,10 +5304,9 @@ impl Fn_<'_> {
         konst(b, at, plen);
         let string = |b: &mut Frame, l: u32| {
             fd(b);
-            b.ins(&Instruction::LocalGet(l))
-                .ins(&Instruction::LocalGet(l))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::Call(write_all));
+            b.ins(&Instruction::LocalGet(l)).ins(&Instruction::LocalGet(l));
+            str_len(b);
+            b.ins(&Instruction::Call(write_all));
         };
         string(b, name);
         konst(b, colon, 2);
@@ -6184,8 +6184,9 @@ impl Fn_<'_> {
         line: usize,
     ) -> Result<Option<Type>, String> {
         match (field, self.cx.resolve(base)) {
+            // One load off the String header, not a scan (RFC-0089 M1a).
             ("byteLength", Type::Str) => {
-                b.ins(&Instruction::Call(self.cx.rt.strlen));
+                str_len(b);
                 b.ins(&Instruction::I64ExtendI32U);
             }
             ("length", Type::Array(_)) => {
@@ -6961,7 +6962,7 @@ impl Fn_<'_> {
             }
             Type::Str => {
                 b.ins(&Instruction::LocalGet(addr));
-                b.ins(&Instruction::Call(self.cx.rt.strlen));
+                str_len(b);
                 b.ins(&Instruction::I64ExtendI32U);
                 b.ins(&Instruction::LocalSet(len));
                 Walk { data: addr, len, stride: 1, elem: Type::Int, byte: true }
@@ -9347,6 +9348,10 @@ struct Rt {
     /// Hand a block back to its size class (RFC-0077 M6). Paired with `malloc` in
     /// the table because the two share the header format and nothing else does.
     free: u32,
+    /// Allocate a `String` buffer: its `{ len, cap }` header, `cap` bytes of
+    /// room, and the NUL (RFC-0089 M1a). Returns the address of the BYTES, so
+    /// everything downstream still holds an ordinary NUL-terminated pointer.
+    str_new: u32,
     strlen: u32,
     strcmp: u32,
     trap: u32,
@@ -9501,6 +9506,7 @@ impl Rt {
             write_all: slot("write_all"),
             malloc: slot("malloc"),
             free: slot("free"),
+            str_new: slot("str_new"),
             strlen: slot("strlen"),
             strcmp: slot("strcmp"),
             trap: slot("trap"),
@@ -9570,13 +9576,46 @@ impl Rt {
         assert_eq!(m.next_func(), want, "a runtime helper was emitted out of declared order");
     }
 
-    /// A string literal's address in the data segment, NUL-terminated because a
-    /// Vyrn `String` is a `ptr` and everything downstream scans for the zero.
+    /// A string literal's address in the data segment: its `{ len, cap }` header
+    /// (RFC-0089 M1a), then the bytes, then the NUL. The address handed back is
+    /// the BYTES, so a literal is an ordinary `String` pointer and every C-shaped
+    /// consumer still scans for the zero.
+    ///
+    /// `cap` is 0 — the runtime's word for static. `free` already refuses
+    /// anything below `HEAP_BASE`; this makes the refusal a fact in the value
+    /// rather than a fact about the address.
+    ///
+    /// Four-byte aligned so the two header words load aligned.
     fn intern(&self, m: &mut Module, s: &str) -> u32 {
-        let mut bytes = s.as_bytes().to_vec();
+        let mut bytes = (s.len() as u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(s.as_bytes());
         bytes.push(0);
-        m.data(&bytes, 1)
+        m.data(&bytes, 4) + SHDR
     }
+}
+
+/// The `{ i32 len, i32 cap }` header in front of every Vyrn `String`
+/// (RFC-0089 M1a). Two pointer-sized words, which is eight bytes here and
+/// sixteen on the textual backend — one rule, two widths.
+///
+/// `s.byteLength` is a load off it. `a + b` reads two. RFC-0081's `str_append`
+/// used to keep the same pair beside the variable; the header IS that pair now.
+/// And `cap == 0` marks a data-segment literal, so a drop site knows what it may
+/// hand back without knowing where the pointer came from.
+const SHDR: u32 = 8;
+
+/// Replace a `String` pointer on the stack with the address of its header.
+/// [`word`] then reads `len` and [`cap_at`] reads `cap`.
+fn str_hdr(b: &mut Frame) {
+    b.ins(&Instruction::I32Const(SHDR as i32));
+    b.ins(&Instruction::I32Sub);
+}
+
+/// Replace a `String` pointer on the stack with its byte length.
+fn str_len(b: &mut Frame) {
+    str_hdr(b);
+    b.ins(&Instruction::I32Load(word()));
 }
 
 fn byte() -> MemArg {
@@ -9587,9 +9626,9 @@ fn word() -> MemArg {
     MemArg { offset: 0, align: 2, memory_index: 0 }
 }
 
-/// The second word of a String accumulator's `(len, cap)` shadow. Named because
-/// the two halves are addressed from the same base in four places and an offset
-/// of 0 where 4 was meant is a silent wrong length.
+/// The second word of a String's `{ len, cap }` header. Named because the two
+/// halves are addressed from the same base in a dozen places and an offset of 0
+/// where 4 was meant is a silent wrong length.
 fn cap_at() -> MemArg {
     MemArg { offset: 4, align: 2, memory_index: 0 }
 }
@@ -9916,6 +9955,39 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             .ins(&Instruction::End);
     });
 
+    // str_new(len, cap) — one heap block holding the `{ len, cap }` header, `cap`
+    // bytes of room and the NUL, and the address of the bytes (RFC-0089 M1a).
+    // Every String this module allocates comes from here, which is what makes
+    // "the eight bytes in front of a String are its header" true rather than
+    // hoped: a pointer that reached a Vyrn `String` binding without passing this
+    // function is a boundary that has to materialize one, and there are five.
+    rt.next_is(m, rt.str_new);
+    let malloc0 = rt.malloc;
+    m.func(&[ValType::I32, ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
+        let (base, malloc) = (2, malloc0);
+        b.ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Const((SHDR + 1) as i32))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I64ExtendI32U)
+            .ins(&Instruction::Call(malloc))
+            .ins(&Instruction::LocalTee(base));
+        // header: len, then cap
+        b.ins(&Instruction::LocalGet(0)).ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::LocalGet(base))
+            .ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Store(cap_at()));
+        // the terminator at `len`
+        b.ins(&Instruction::LocalGet(base))
+            .ins(&Instruction::I32Const(SHDR as i32))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalTee(base))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32Store8(byte()));
+        b.ins(&Instruction::LocalGet(base));
+    });
+
     // strlen(s)
     rt.next_is(m, rt.strlen);
     m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
@@ -10006,9 +10078,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     m.func(&[ValType::I32], &[], &[], 0, |b| {
         b.ins(&Instruction::I32Const(1))
             .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::Call(strlen))
-            .ins(&Instruction::Call(write_all))
+            .ins(&Instruction::LocalGet(0));
+        str_len(b);
+        b.ins(&Instruction::Call(write_all))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32Const(nl as i32))
             .ins(&Instruction::I32Const(1))
@@ -10019,20 +10091,23 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     print_i64(m, write_all);
 
     // int_str(v, signed) — the same digit loop as `print_i64`, into a fresh
-    // 24-byte block. The digits are written backwards from the end, so the result
-    // pointer is wherever they stopped.
-    let (pp, neg) = (3, 4);
-    let malloc = rt.malloc;
+    // 24-byte String. The digits are written backwards from the end, then moved
+    // to the front: a String pointer is the start of its own buffer, because its
+    // header is the eight bytes before it (RFC-0089 M1a).
+    let (pp, neg, buf0) = (3, 4, 5);
+    let str_new = rt.str_new;
     rt.next_is(m, rt.int_str);
     m.func(
         &[ValType::I64, ValType::I32],
         &[ValType::I32],
-        &[ValType::I32, ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32],
         0,
         |b| {
-            b.ins(&Instruction::I64Const(24))
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::I32Const(23))
+            b.ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Const(24))
+                .ins(&Instruction::Call(str_new))
+                .ins(&Instruction::LocalTee(buf0))
+                .ins(&Instruction::I32Const(24))
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::LocalTee(pp))
                 .ins(&Instruction::I32Const(0))
@@ -10078,7 +10153,26 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::I32Const(b'-' as i32))
                 .ins(&Instruction::I32Store8(byte()))
                 .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(pp));
+            // The digits ended somewhere inside the room, and a String pointer
+            // has to be the start of its own buffer or its header is not in
+            // front of it. Move them down and publish the length.
+            b.ins(&Instruction::LocalGet(buf0))
+                .ins(&Instruction::LocalGet(pp))
+                .ins(&Instruction::LocalGet(buf0))
+                .ins(&Instruction::I32Const(25))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(pp))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            b.ins(&Instruction::LocalGet(buf0));
+            str_hdr(b);
+            b.ins(&Instruction::LocalGet(buf0))
+                .ins(&Instruction::I32Const(24))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(pp))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::LocalGet(buf0));
         },
     );
 
@@ -10102,19 +10196,20 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         &[ValType::I32, ValType::I32, ValType::I32],
         0,
         |bb| {
-            bb.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(la))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(lb))
+            // Both lengths are header loads since RFC-0089 M1a — `a + b` used to
+            // scan both operands before it could size the result.
+            bb.ins(&Instruction::LocalGet(0));
+            str_len(bb);
+            bb.ins(&Instruction::LocalSet(la)).ins(&Instruction::LocalGet(1));
+            str_len(bb);
+            bb.ins(&Instruction::LocalSet(lb))
                 .ins(&Instruction::LocalGet(la))
                 .ins(&Instruction::LocalGet(lb))
                 .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalGet(la))
+                .ins(&Instruction::LocalGet(lb))
                 .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::Call(str_new))
                 .ins(&Instruction::LocalSet(r))
                 .ins(&Instruction::LocalGet(r))
                 .ins(&Instruction::LocalGet(0))
@@ -10132,20 +10227,27 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         },
     );
 
-    // str_append(st, p, v) -> p' — append `v` to the accumulator `p`, in place,
-    // growing geometrically. `st` addresses its `(len, cap)` shadow in the
-    // caller's frame; the new pointer comes back as the result because a wasm
-    // local has no address to write through (RFC-0081).
+    // str_append(own, p, v) -> p' — append `v` to the accumulator `p`, in place,
+    // growing geometrically. The new pointer comes back as the result because a
+    // wasm local has no address to write through (RFC-0081).
     //
-    // The grow is `malloc`, copy and `free`, not a `realloc`: this allocator has
+    // `own` addresses ONE word in the caller's frame: did this path allocate the
+    // buffer `p` holds? Until RFC-0089 M1a that word was a `(len, cap)` pair,
+    // because a String carried neither. Both now live in the String's header, and
+    // what is left is the ownership question — which the conventions answer
+    // (RFC-0089 M2), and this word retires with them. A `concat` result has a real
+    // capacity and is still not ours to grow, because `s = t` may alias it.
+    //
+    // The grow is `str_new`, copy and `free`, not a `realloc`: this allocator has
     // no in-place extend, because the block after an accumulator belongs to
     // whatever the writer allocated between two appends. Doubling is what makes N
     // appends copy O(N) bytes in total, where `concat` per element copied O(N²) —
     // which is why 40k `Int64` did not merely take 1.4 s, it walked the heap past
     // 4 GiB and trapped out of bounds on 229 KB of JSON.
-    let (st, p, v) = (0, 1, 2);
+    let (own, p, v) = (0, 1, 2);
     let (vlen, cap, len, need, nc, nb) = (4, 5, 6, 7, 8, 9);
     let free = rt.free;
+    let str_new = rt.str_new;
     rt.next_is(m, rt.str_append);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
@@ -10153,24 +10255,20 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         &[ValType::I32; 6],
         0,
         |b| {
-            b.ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(vlen));
-            // `cap == 0`: the pointer is not ours (a literal, a `concat` result,
-            // a call result), so copy it into a buffer that is. 32 bytes minimum,
-            // matching the textual backend's floor so the two grow in step.
-            b.ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Load(cap_at()))
-                .ins(&Instruction::LocalTee(cap))
+            b.ins(&Instruction::LocalGet(v));
+            str_len(b);
+            b.ins(&Instruction::LocalSet(vlen));
+            b.ins(&Instruction::LocalGet(p));
+            str_len(b);
+            b.ins(&Instruction::LocalSet(len));
+            // Not ours: copy into a buffer that is. 32 bytes minimum, matching
+            // the textual backend's floor so the two grow in step.
+            b.ins(&Instruction::LocalGet(own))
+                .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::I32Eqz)
                 .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(len))
                 .ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::LocalTee(cap))
                 .ins(&Instruction::I32Const(32))
@@ -10179,28 +10277,27 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::I32Const(32))
                 .ins(&Instruction::LocalSet(cap))
                 .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::Call(str_new))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(p))
                 .ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
                 .ins(&Instruction::LocalGet(nb))
                 .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Store(cap_at()))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::LocalGet(own))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::Else);
+            b.ins(&Instruction::LocalGet(p));
+            str_hdr(b);
+            b.ins(&Instruction::I32Load(cap_at()))
+                .ins(&Instruction::LocalSet(cap))
                 .ins(&Instruction::End);
-            // Reserve `len + vlen + 1`, doubling so N appends are O(N).
+            // Reserve `len + vlen` content bytes, doubling so N appends are O(N).
             b.ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::LocalTee(need))
                 .ins(&Instruction::LocalGet(cap))
@@ -10216,24 +10313,23 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::LocalGet(need))
                 .ins(&Instruction::LocalSet(nc))
                 .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::LocalGet(nc))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::Call(str_new))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(p))
                 .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
-                // Only this branch frees. `cap != 0` is what says the buffer is
-                // ours; the `cap == 0` branch above copies a pointer that is not.
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::Call(free))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            // Only this branch frees. The flag is what says the buffer is ours;
+            // the branch above copies a pointer that is not.
+            b.ins(&Instruction::LocalGet(p));
+            str_hdr(b);
+            b.ins(&Instruction::Call(free))
                 .ins(&Instruction::LocalGet(nb))
                 .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::LocalGet(nc))
-                .ins(&Instruction::I32Store(cap_at()))
                 .ins(&Instruction::End);
-            // Copy the operand's bytes AND its NUL over the old terminator.
+            // Copy the operand's bytes AND its NUL over the old terminator, then
+            // publish the new length in the header.
             b.ins(&Instruction::LocalGet(p))
                 .ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::I32Add)
@@ -10241,11 +10337,10 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::LocalGet(vlen))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
-                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Add)
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            b.ins(&Instruction::LocalGet(p));
+            str_hdr(b);
+            b.ins(&Instruction::LocalGet(need))
                 .ins(&Instruction::I32Store(word()))
                 .ins(&Instruction::LocalGet(p));
         },
@@ -10349,7 +10444,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // params 0..2, the frame base 3, then ours — `i` is NOT `utf8valid`'s `i`
     // above, whose 3 is this function's base.
     let (buf, err, c, at_i) = (4, 5, 6, 7);
-    let (utf8valid, malloc) = (rt.utf8valid, rt.malloc);
+    let (utf8valid, str_new) = (rt.utf8valid, rt.str_new);
     rt.next_is(m, rt.str_from_bytes);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
@@ -10358,10 +10453,8 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         0,
         |b| {
             b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(str_new))
                 .ins(&Instruction::LocalSet(buf));
             b.ins(&Instruction::Block(BlockType::Empty)) // fin
                 .ins(&Instruction::Block(BlockType::Empty)) // copied
@@ -11399,9 +11492,12 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // exactly the buffer an `Array<String>` wants — the element stride IS
     // `of_ll("ptr")` — so dropping the program name is `+ 4` rather than a copy.
     let (args_sizes_get, args_get) = (wasi.args_sizes_get, wasi.args_get);
+    let str_new = rt.str_new;
+    let strlen = rt.strlen;
     rt.next_is(m, rt.args);
-    m.func(&[ValType::I32], &[], &[ValType::I32, ValType::I32], 8, |b| {
+    m.func(&[ValType::I32], &[], &[ValType::I32; 7], 8, |b| {
         let (cnt, ptrs) = (2, 3);
+        let (i, at_p, e, n, c) = (4, 5, 6, 7, 8);
         b.slot(0).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
         b.slot(4).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
         b.slot(0);
@@ -11428,6 +11524,42 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             .ins(&Instruction::Call(malloc))
             .ins(&Instruction::Call(args_get))
             .ins(&Instruction::Drop);
+        // The host wrote one blob and pointers into it, so no element has a
+        // String header in front of it. Copy each one into a String that does
+        // (RFC-0089 M1a). The blob and the copies both outlive the program, which
+        // is what `args()` always did — RFC-0011's array-element rule.
+        b.ins(&Instruction::LocalGet(cnt)).ins(&Instruction::LocalSet(i));
+        b.ins(&Instruction::Block(BlockType::Empty))
+            .ins(&Instruction::Loop(BlockType::Empty))
+            .ins(&Instruction::LocalGet(i))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::BrIf(1))
+            .ins(&Instruction::LocalGet(i))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Sub)
+            .ins(&Instruction::LocalSet(i))
+            .ins(&Instruction::LocalGet(ptrs))
+            .ins(&Instruction::LocalGet(i))
+            .ins(&Instruction::I32Const(2))
+            .ins(&Instruction::I32Shl)
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalTee(at_p))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::LocalTee(e))
+            .ins(&Instruction::Call(strlen))
+            .ins(&Instruction::LocalTee(n))
+            .ins(&Instruction::LocalGet(n))
+            .ins(&Instruction::Call(str_new))
+            .ins(&Instruction::LocalTee(c))
+            .ins(&Instruction::LocalGet(e))
+            .ins(&Instruction::LocalGet(n))
+            .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+            .ins(&Instruction::LocalGet(at_p))
+            .ins(&Instruction::LocalGet(c))
+            .ins(&Instruction::I32Store(word()))
+            .ins(&Instruction::Br(0))
+            .ins(&Instruction::End)
+            .ins(&Instruction::End);
         b.ins(&Instruction::LocalGet(cnt))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32GtU)
@@ -11491,6 +11623,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // the last of those is where the interpreter's `String::from_utf8` fails, so
     // the DFA decides it here rather than the caller.
     let getbyte = rt.getbyte;
+    let str_new = rt.str_new;
     rt.next_is(m, rt.read_line);
     m.func(
         &[ValType::I32],
@@ -11506,10 +11639,10 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Const(0))
                 .ins(&Instruction::I32LtS)
                 .ins(&Instruction::BrIf(0))
+                .ins(&Instruction::I32Const(0))
                 .ins(&Instruction::I32Const(64))
                 .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::Call(str_new))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::Block(BlockType::Empty)) // 0: eol
                 .ins(&Instruction::Loop(BlockType::Empty)) // 0: rd
@@ -11535,12 +11668,12 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::LocalGet(cap))
                 .ins(&Instruction::I32GeU)
                 .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(0))
                 .ins(&Instruction::LocalGet(cap))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::Call(str_new))
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(buf))
                 .ins(&Instruction::LocalGet(len))
@@ -11585,8 +11718,12 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::LocalGet(len))
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(nul))
+                .ins(&Instruction::I32Store8(byte()));
+            // Publish the length in the header, now the CR trim is done.
+            b.ins(&Instruction::LocalGet(buf));
+            str_hdr(b);
+            b.ins(&Instruction::LocalGet(len)).ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::LocalGet(nul))
                 .ins(&Instruction::BrIf(0))
                 .ins(&Instruction::LocalGet(buf))
                 .ins(&Instruction::LocalGet(len))
@@ -11664,25 +11801,35 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         },
     );
 
-    // read_all(fd, outlen) — the whole descriptor into one NUL-terminated buffer,
-    // with its byte length through `outlen`; 0 on a read error.
+    // read_all(fd, outlen, hdr) — the whole descriptor into one NUL-terminated
+    // buffer, with its byte length through `outlen`; 0 on a read error.
     //
     // A read loop rather than a stat-and-slurp, for the reason the C shim gives:
     // it is the same code for a regular file and for a pipe. The terminator is
     // there so a `String` result needs no second copy, and it is past `outlen`
     // bytes so a bytes result simply ignores it.
+    //
+    // `hdr` is how many bytes to leave in FRONT of the returned pointer. It is
+    // `SHDR` for `readFile`, whose answer is a `String` and therefore needs its
+    // header there, and 0 for `readFileBytes`, whose answer is an
+    // `Array<UInt8>` whose buffer is freed at its own base (RFC-0089 M1a). One
+    // reader, two shapes, and no second copy of the read loop.
     rt.next_is(m, rt.read_all);
     m.func(
-        &[ValType::I32, ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32],
         &[ValType::I32],
         &[ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
         16,
         |b| {
-            let (buf, cap, len, nb, got) = (3, 4, 5, 6, 7);
+            let (buf, cap, len, nb, got) = (4, 5, 6, 7, 8);
             b.ins(&Instruction::I32Const(1024))
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Add)
                 .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Add)
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::Block(BlockType::Empty))
                 .ins(&Instruction::Loop(BlockType::Empty))
@@ -11696,8 +11843,12 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Shl)
                 .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Add)
                 .ins(&Instruction::I64ExtendI32U)
                 .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Add)
                 .ins(&Instruction::LocalTee(nb))
                 .ins(&Instruction::LocalGet(buf))
                 .ins(&Instruction::LocalGet(len))
@@ -11802,11 +11953,15 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                       err_msg: u32,
                       err_depth: u32,
                       mode: i32| {
+        // `readFile` answers a `String`, so its buffer needs the header room in
+        // front of it; `readFileBytes` answers an `Array<UInt8>`, whose buffer is
+        // freed at its own base and must not have one (RFC-0089 M1a).
+        let hdr = if mode == crate::GEN_MODE_READ { SHDR } else { 0 };
         if let Some(g) = gen {
             gen_slurp(
                 b,
                 &g,
-                (malloc, err3),
+                (malloc, str_new, err3),
                 [readpre, readpost, nulpre, nulpost],
                 (buf, len, err_msg, err_depth),
                 mode,
@@ -11830,7 +11985,8 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             .ins(&Instruction::End)
             .ins(&Instruction::LocalGet(fd));
         b.slot(base_off);
-        b.ins(&Instruction::Call(read_all))
+        b.ins(&Instruction::I32Const(hdr as i32))
+            .ins(&Instruction::Call(read_all))
             .ins(&Instruction::LocalSet(buf))
             .ins(&Instruction::LocalGet(fd))
             .ins(&Instruction::Call(fd_close))
@@ -11847,6 +12003,17 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             .ins(&Instruction::End);
         b.slot(base_off);
         b.ins(&Instruction::I32Load(word())).ins(&Instruction::LocalSet(len));
+        // The `String` answer needs its header filled in: `read_all` left the
+        // room but only this side knows the length. `cap == len` — the buffer is
+        // never grown again, only read and freed (RFC-0089 M1a).
+        if hdr != 0 {
+            b.ins(&Instruction::LocalGet(buf));
+            str_hdr(b);
+            b.ins(&Instruction::LocalGet(len)).ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::LocalGet(buf));
+            str_hdr(b);
+            b.ins(&Instruction::LocalGet(len)).ins(&Instruction::I32Store(cap_at()));
+        }
     };
 
     // read_file(path, dest) — RFC-0014's `readFile` as a `Result<String, String>`.
@@ -12127,15 +12294,16 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         // stride comes off the layout engine rather than off a 4 written here.
         let stride = layout::of_ll("ptr").expect("a pointer has a layout").size as i32;
         rt.next_is(m, list_dir);
-        m.func(&[ValType::I32, ValType::I32], &[], &[ValType::I32; 9], 0, |b| {
+        m.func(&[ValType::I32, ValType::I32], &[], &[ValType::I32; 12], 0, |b| {
             // params 0..1, the frame base 2, then ours.
             let (buf, len, n, i, names, start, k, emsg, boxed) = (3, 4, 5, 6, 7, 8, 9, 10, 11);
+            let (endp, seg, own) = (12, 13, 14);
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)); // 0: err
             gen_slurp(
                 b,
                 &g,
-                (malloc, err3),
+                (malloc, str_new, err3),
                 [listpre, listpost, listpre, listpost],
                 (buf, len, emsg, 0),
                 crate::GEN_MODE_LIST,
@@ -12194,13 +12362,27 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::LocalSet(start))
                 .ins(&Instruction::I32Const(0))
                 .ins(&Instruction::LocalSet(i));
+            // Each name is COPIED out of the blob. The split used to be in
+            // place, which a `String` header ends: a name's header has to sit in
+            // front of the name, and inside one shared buffer there is no room
+            // (RFC-0089 M1a). `endp` is where this name stops.
             let elem = |b: &mut Frame| {
                 b.ins(&Instruction::LocalGet(names))
                     .ins(&Instruction::LocalGet(k))
                     .ins(&Instruction::I32Const(stride))
                     .ins(&Instruction::I32Mul)
                     .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalGet(endp))
                     .ins(&Instruction::LocalGet(start))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::LocalTee(seg))
+                    .ins(&Instruction::LocalGet(seg))
+                    .ins(&Instruction::Call(str_new))
+                    .ins(&Instruction::LocalTee(own))
+                    .ins(&Instruction::LocalGet(start))
+                    .ins(&Instruction::LocalGet(seg))
+                    .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                    .ins(&Instruction::LocalGet(own))
                     .ins(&Instruction::I32Store(word()));
             };
             b.ins(&Instruction::Block(BlockType::Empty))
@@ -12216,13 +12398,10 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::I32Const(b'\n' as i32))
                 .ins(&Instruction::I32Eq)
                 .ins(&Instruction::If(BlockType::Empty))
-                // The separator becomes this name's terminator, which is what makes
-                // the split in place rather than a copy per entry.
                 .ins(&Instruction::LocalGet(buf))
                 .ins(&Instruction::LocalGet(i))
                 .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()));
+                .ins(&Instruction::LocalSet(endp));
             elem(b);
             b.ins(&Instruction::LocalGet(k))
                 .ins(&Instruction::I32Const(1))
@@ -12243,7 +12422,11 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::End)
                 .ins(&Instruction::End)
                 .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::If(BlockType::Empty));
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(endp));
             elem(b);
             b.ins(&Instruction::End)
                 .ins(&Instruction::I64Const(triple.size as i64))
@@ -12288,7 +12471,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
 fn gen_slurp(
     b: &mut Frame,
     g: &Gen,
-    (malloc, err3): (u32, u32),
+    (malloc, str_new, err3): (u32, u32, u32),
     [readpre, readpost, nulpre, nulpost]: [u32; 4],
     (buf, len, err_msg, err_depth): (u32, u32, u32, u32),
     mode: i32,
@@ -12324,15 +12507,26 @@ fn gen_slurp(
         // memory rather than a one-byte buffer.
         .ins(&Instruction::LocalGet(packed))
         .ins(&Instruction::I32WrapI64)
-        .ins(&Instruction::LocalTee(len))
+        .ins(&Instruction::LocalSet(len));
+    // `readFile` answers a `String`, so its buffer gets a header and its
+    // terminator from `str_new` (RFC-0089 M1a). The byte read and the directory
+    // listing answer buffers that are not Strings, so they get neither.
+    if mode == crate::GEN_MODE_READ {
+        b.ins(&Instruction::LocalGet(len))
+            .ins(&Instruction::LocalGet(len))
+            .ins(&Instruction::Call(str_new))
+            .ins(&Instruction::LocalTee(buf))
+            .ins(&Instruction::Call(g.fetch));
+        return;
+    }
+    b.ins(&Instruction::LocalGet(len))
         .ins(&Instruction::I64ExtendI32U)
         .ins(&Instruction::I64Const(1))
         .ins(&Instruction::I64Add)
         .ins(&Instruction::Call(malloc))
         .ins(&Instruction::LocalTee(buf))
         .ins(&Instruction::Call(g.fetch))
-        // NUL-terminated, because a Vyrn `String` is a `ptr` and everything
-        // downstream scans for the zero.
+        // NUL-terminated, because the listing is scanned for the zero.
         .ins(&Instruction::LocalGet(buf))
         .ins(&Instruction::LocalGet(len))
         .ins(&Instruction::I32Add)
