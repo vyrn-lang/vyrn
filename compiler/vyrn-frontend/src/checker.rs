@@ -141,7 +141,6 @@ pub const RESERVED: &[&str] = &[
     "push",
     "at",
     "alen",
-    "afree",
     "str",
     "parse",
     "join",
@@ -5764,23 +5763,6 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Int);
         }
-        if name == "afree" {
-            if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `afree` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            if !matches!(at, Type::Array(_)) {
-                return Err(format!("line {line}: `afree` needs an Array, found {at}"));
-            }
-            return Ok(Type::Unit);
-        }
         // RFC-0075. `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
         // `fromStep(seed, f)` (M2b) hands over a producer instead; `close(s)` is
         // the explicit release for either. All three are builtins because none
@@ -7692,17 +7674,19 @@ fn render_int_literal(n: i64) -> String {
 }
 
 /// Builtins a concurrent task may not use: `print` (observable ordering),
-/// `cell`/`set`/`release` (mutate the shared reference slab), `afree` (frees a
-/// buffer the caller may still hold across the task boundary), and the log
+/// `cell`/`set`/`release` (mutate the shared reference slab), and the log
 /// methods. `get` is a read-only slab access and is allowed.
+///
+/// Every name here is also in [`RESERVED`], and has to be: a name the compiler
+/// does not own is a user function, which this list would then forbid by
+/// coincidence of spelling. `spawn_forbidden_names_are_reserved` checks it.
 const SPAWN_FORBIDDEN: &[&str] = &[
     "print",
     "cell",
     "set",
     "release",
-    "afree",
-    // `close` frees a stream's buffer, for the same reason `afree` is here: the
-    // caller may still hold it across the task boundary.
+    // `close` frees a stream's buffer: the caller may still hold it across the
+    // task boundary.
     "close",
     "trace",
     "debug",
@@ -10022,15 +10006,24 @@ mod tests {
         assert!(e.contains("isolated (pure)"), "{e}");
     }
 
+    /// The two hand-written name lists in this file, checked against each other.
+    ///
+    /// They are not the same set and are not meant to be: `RESERVED` is every
+    /// name the compiler owns, `SPAWN_FORBIDDEN` the few of those a task may not
+    /// reach. But the second is meaningless outside the first — `SPAWN_FORBIDDEN`
+    /// is consulted by name, so an entry the compiler does not own would forbid
+    /// whatever user function happened to share the spelling, and an entry that
+    /// LEAVES `RESERVED` would keep forbidding it silently. Removing `afree` is
+    /// how that became checkable rather than remembered.
     #[test]
-    fn rejects_spawn_of_function_that_afrees() {
-        let src = "fn task(a: Array<Int64>) -> Int64 { afree(a) return 0 } \
-                   fn main() -> Int64 { \
-                       let a: Array<Int64> = [1, 2] \
-                       let t = spawn task(a) \
-                       return t.join() }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
+    fn spawn_forbidden_names_are_reserved() {
+        for n in SPAWN_FORBIDDEN {
+            assert!(
+                RESERVED.contains(n),
+                "`{n}` is forbidden inside a task but is not a name the compiler \
+                 owns — it now forbids any user function spelled that way"
+            );
+        }
     }
 
     #[test]

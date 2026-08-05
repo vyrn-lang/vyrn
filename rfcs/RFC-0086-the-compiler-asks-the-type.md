@@ -197,7 +197,16 @@ backend's `rel_for` had already been arranged to do for its own two paths. So
 
 - **`afree`** has **zero** uses in `examples/` and `std/`, and the direct wasm
   backend has no lowering for it — a surface form one engine cannot compile.
-  `drop x` covers it and works everywhere. It should go.
+  `drop x` covers it and works everywhere. It should go. **Removed.** The name
+  is gone from both `RESERVED` and `SPAWN_FORBIDDEN`, from the checker, the
+  interpreter, the textual backend, the LSP's completion table and the primitive
+  census, so `afree(xs)` is now an ordinary call to an unknown function. The
+  internal `DropKind` that reclaims an array's buffer is **not** the same thing
+  and stays; it was called `AfreeArr` after the builtin and is now `FreeArr`,
+  beside `FreeStr` and `FreeMap`. Two checks were added on the way out: the
+  primitive census named the stale row before anything else did, and
+  `SPAWN_FORBIDDEN` — which had never been checked against `RESERVED` at all —
+  now is.
 - **`array()`** has one use left, `examples/aliascontext.vyrn`, which exists to
   pin the alias-resolution defect PR #64 fixed. The spelling is dead; the pin is
   not.

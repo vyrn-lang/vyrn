@@ -608,13 +608,16 @@ fn main() -> Int64 {
         .into_iter()
         .map(|c| c.label)
         .collect();
-    for expected in ["push", "at", "alen", "afree", "length"] {
+    for expected in ["push", "at", "alen", "pop", "length"] {
         assert!(
             labels.contains(expected),
             "array member {expected} missing: {:?}",
             labels
         );
     }
+    // `afree` was removed. Completion must not offer a name that no longer
+    // resolves — the reclamation an array still has is `drop a`.
+    assert!(!labels.contains("afree"), "afree is gone: {labels:?}");
     // A Logger method must NOT appear for an array receiver.
     assert!(
         !labels.contains("info"),

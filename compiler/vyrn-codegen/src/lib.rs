@@ -2657,8 +2657,8 @@ impl<'a> Gen<'a> {
                 // RFC-0075 M2b: one call, and the variant is settled inside it.
                 self.emit(format!("call void @__vyrn_stream_close(ptr {slot})"));
             }
-            DropKind::AfreeArr => {
-                // Auto-afree: free the array's final backing buffer (field 0).
+            DropKind::FreeArr => {
+                // Free the array's final backing buffer (field 0).
                 let a = self.fresh_tmp();
                 let d = self.fresh_tmp();
                 self.emit(format!("{a} = load {{ ptr, i64, i64 }}, ptr {slot}"));
@@ -3174,8 +3174,8 @@ impl<'a> Gen<'a> {
                 Ok(())
             }
             Stmt::Drop { name, .. } => {
-                // Explicit reclamation: free a string, afree an array, or release
-                // a reference — reusing the primitives the automatic-drop analysis
+                // Explicit reclamation: free a string, free an array's buffer, or
+                // release a reference — the primitives the automatic-drop analysis
                 // emits. Ownership analysis escaped `name`, so there is no double
                 // free, and move checking forbids using it after this point.
                 let (slot, ty) =
@@ -7372,17 +7372,9 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        if name == "afree" {
-            let (av, _) = self.gen_expr(&args[0])?;
-            let data = self.fresh_tmp();
-            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
-            self.emit(format!("call void @free(ptr {data})"));
-            return Ok((String::new(), Type::Unit));
-        }
         // RFC-0075 M2b: `close(s)` is the explicit half of the disposal
-        // obligation, and it is no longer `afree` under another name — which of
-        // the two producers a stream holds is a runtime tag, so the teardown is
-        // the runtime's branch on it.
+        // obligation. Which of the two producers a stream holds is a runtime tag,
+        // so the teardown is the runtime's branch on it.
         if name == "close" {
             let (av, _) = self.gen_expr(&args[0])?;
             let s = self.fresh_alloca(STREAM_LL);
@@ -10448,13 +10440,16 @@ mod tests {
     }
 
     #[test]
-    fn drop_of_array_emits_afree() {
+    fn drop_of_array_frees_its_buffer() {
         // `drop a` on a growable array frees its backing buffer (an extra free
-        // beyond the region-runtime baseline).
+        // beyond the region-runtime baseline). It is the only way to reclaim one
+        // early — the `afree` builtin that used to be the other way is gone.
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(1); \
                    drop a; return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(free_calls(&ir) >= 1, "expected an afree from `drop`: {ir}");
+        // The buffer pointer is aggregate field 0.
+        assert!(ir.contains("extractvalue { ptr, i64, i64 }"), "{ir}");
+        assert!(free_calls(&ir) >= 1, "expected a free from `drop`: {ir}");
     }
 
     #[test]
@@ -11313,22 +11308,12 @@ mod tests {
 
     #[test]
     fn mut_array_is_auto_freed() {
-        // No explicit `afree`, yet the non-escaping mutable array is freed at
+        // No explicit `drop`, yet the non-escaping mutable array is freed at
         // scope end (inferred by the ownership analysis).
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    a = push(a, 1); return at(a, 0); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call void @free(ptr"), "expected auto-afree: {ir}");
-    }
-
-    #[test]
-    fn afree_frees_the_array_buffer() {
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   a = push(a, 1); afree(a); return 0; }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        // The buffer pointer (aggregate field 0) is freed.
-        assert!(ir.contains("extractvalue { ptr, i64, i64 }"), "{ir}");
-        assert!(ir.contains("call void @free(ptr"), "afree should free the buffer: {ir}");
+        assert!(ir.contains("call void @free(ptr"), "expected an automatic free: {ir}");
     }
 
     #[test]

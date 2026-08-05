@@ -54,8 +54,8 @@ pub enum DropKind {
     FreeStr,
     /// A generational reference — `release` the cell (Path B).
     ReleaseRef,
-    /// A growable array — `afree` the backing buffer.
-    AfreeArr,
+    /// A growable array — free the backing buffer.
+    FreeArr,
     /// A `SmallArray<T, N>` (RFC-0056) — free its `data` buffer, which is null
     /// while inline (so `free(null)` is a harmless no-op) and heap once spilled.
     /// Frees iff spilled; the drop site is identical either way.
@@ -140,7 +140,7 @@ impl Owned {
             // ---- the seeded built-in rows ----------------------------------
             Type::Str => Some(DropKind::FreeStr),
             Type::Ref(_) => Some(DropKind::ReleaseRef),
-            Type::Array(_) => Some(DropKind::AfreeArr),
+            Type::Array(_) => Some(DropKind::FreeArr),
             Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
             Type::Map(..) => Some(DropKind::FreeMap),
             // A `Stream<T>` is reclaimed too, but through the stream lowering
@@ -491,7 +491,7 @@ impl Analysis<'_> {
                     // A `mut` Map is mutated in place (`m[k] = v`) and keeps its
                     // identity, so — like an array — it can still own its buffers.
                     let assignable_ok = !*mutable
-                        || kind == DropKind::AfreeArr
+                        || kind == DropKind::FreeArr
                         || kind == DropKind::FreeSmallArr
                         || kind == DropKind::FreeMap;
                     if assignable_ok && !region_owns {
@@ -576,7 +576,7 @@ impl Analysis<'_> {
             // Iterating escapes the array conservatively: an element may be a
             // pointer into its buffer, so we must not auto-free the array while a
             // bound element could outlive the loop. (Safe leak, never a UAF;
-            // explicit `afree` still reclaims it.)
+            // an explicit `drop` still reclaims it.)
             Stmt::ForIn {
                 var, iter, body, ..
             } => {
@@ -1319,13 +1319,13 @@ mod tests {
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    let mut i = 0; while i < 3 { a = push(a, i); i = i + 1; } \
                    return at(a, 0); }";
-        assert_eq!(drop_kinds(src, "main"), vec![DropKind::AfreeArr]);
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
     }
 
     #[test]
-    fn explicitly_afreed_array_is_not_auto_freed() {
+    fn explicitly_dropped_array_is_not_auto_freed() {
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   a = push(a, 1); let v = at(a, 0); afree(a); return v; }";
+                   a = push(a, 1); let v = at(a, 0); drop a; return v; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
@@ -1398,7 +1398,7 @@ mod tests {
         // list was what decided.
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
                    a = push(a, 1); return at(a, 0); }";
-        assert_eq!(drop_kinds(src, "main"), vec![DropKind::AfreeArr]);
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
     }
 
     #[test]
@@ -1420,7 +1420,7 @@ mod tests {
         // The map and the snapshot, in whichever order the map iterates.
         let mut kinds = drop_kinds(src, "main");
         kinds.sort_by_key(|k| format!("{k:?}"));
-        assert_eq!(kinds, vec![DropKind::AfreeArr, DropKind::FreeMap]);
+        assert_eq!(kinds, vec![DropKind::FreeArr, DropKind::FreeMap]);
     }
 
     #[test]
