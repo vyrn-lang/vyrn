@@ -1215,6 +1215,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let ownership = vyrn_frontend::own::analyze(program);
     let droppable_map = &ownership.droppable;
     let fresh_refs = &ownership.fresh_refs;
+    let owned_proto = &ownership.proto;
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1233,7 +1234,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     if !program.globals.is_empty() {
         let mut gi = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, &regex_globals,
+            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -1319,7 +1320,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let sym = if f.name == "main" { "vyrn_main".to_string() } else { format!("vyrn_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, &regex_globals,
+            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -1350,7 +1351,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 f.type_params.iter().cloned().zip(type_args.iter().cloned()).collect();
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &subst,
-                &funcs, droppable_map, fresh_refs, &regex_globals,
+                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1373,7 +1374,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             }
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &inst.subst,
-                &funcs, droppable_map, fresh_refs, &regex_globals,
+                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1404,7 +1405,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ));
         let mut dgen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, &regex_globals,
+            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -1516,6 +1517,10 @@ struct Gen<'a> {
     droppable: HashMap<usize, DropKind>,
     /// Per-function droppable maps for the whole program (looked up per emit).
     droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
+    /// The `Owned` table (RFC-0086 M1) — the one answer to "how is a value of
+    /// this type reclaimed", shared with the automatic block-exit path so an
+    /// explicit `drop x` cannot free a different set.
+    owned: &'a vyrn_frontend::own::Owned,
     /// `get`/`set` reference arguments (by `Expr` node address) whose generation
     /// check the ownership analysis proved cannot fail (RFC-0004 §5). Flat across
     /// the program, so a monomorphized instance reads it without a key — it
@@ -1652,6 +1657,7 @@ impl<'a> Gen<'a> {
         funcs: &'a HashMap<String, &'a Function>,
         droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
         fresh_refs: &'a std::collections::HashSet<usize>,
+        owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
     ) -> Self {
         Gen {
@@ -1677,6 +1683,7 @@ impl<'a> Gen<'a> {
             droppable: HashMap::new(),
             droppable_map,
             fresh_refs,
+            owned,
             drop_stack: Vec::new(),
             loop_ctx: Vec::new(),
             log_level: DEFAULT_LOG_LEVEL,
@@ -2558,7 +2565,7 @@ impl<'a> Gen<'a> {
         let drops = self.drop_stack.pop().unwrap();
         if !self.terminated {
             for (slot, kind) in drops.iter().rev() {
-                self.emit_drop(slot, *kind);
+                self.emit_drop(slot, kind);
             }
         }
         self.scope.pop();
@@ -2578,7 +2585,7 @@ impl<'a> Gen<'a> {
         let frames: Vec<Vec<(String, DropKind)>> = self.drop_stack.iter().rev().cloned().collect();
         for frame in frames {
             for (slot, kind) in frame.iter().rev() {
-                self.emit_drop(slot, *kind);
+                self.emit_drop(slot, kind);
             }
         }
         for _ in 0..self.region_depth {
@@ -2596,7 +2603,7 @@ impl<'a> Gen<'a> {
             self.drop_stack[boundary..].iter().rev().cloned().collect();
         for frame in frames {
             for (slot, kind) in frame.iter().rev() {
-                self.emit_drop(slot, *kind);
+                self.emit_drop(slot, kind);
             }
         }
     }
@@ -2625,7 +2632,7 @@ impl<'a> Gen<'a> {
 
     /// Reclaim one owned binding: `free` a string buffer, or `release` a cell
     /// (extracting its slot/generation from the reference aggregate).
-    fn emit_drop(&mut self, slot: &str, kind: DropKind) {
+    fn emit_drop(&mut self, slot: &str, kind: &DropKind) {
         match kind {
             DropKind::FreeStr => {
                 let p = self.fresh_tmp();
@@ -2684,6 +2691,21 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {k})"));
                 self.emit(format!("call void @free(ptr {v})"));
             }
+            // RFC-0086 M1: the type declared `impl Owned`, so its own `release`
+            // is what reclaims it. An ordinary call to an ordinary function —
+            // the protocol decided WHICH, and this is only the lowering.
+            DropKind::Release(f) => {
+                let pty = self
+                    .param_types
+                    .get(f)
+                    .and_then(|p| p.first())
+                    .cloned()
+                    .unwrap_or(Type::Unit);
+                let ll = self.llt(&pty);
+                let v = self.fresh_tmp();
+                self.emit(format!("{v} = load {ll}, ptr {slot}"));
+                self.emit(format!("call void @vyrn_{f}({ll} {v})"));
+            }
         }
     }
 
@@ -2722,7 +2744,7 @@ impl<'a> Gen<'a> {
                 }
                 // If ownership analysis proved this heap binding non-escaping,
                 // schedule it to be reclaimed when its block exits.
-                if let Some(&kind) = self.droppable.get(&key) {
+                if let Some(kind) = self.droppable.get(&key).cloned() {
                     self.drop_stack.last_mut().unwrap().push((slot, kind));
                 }
                 Ok(())
@@ -3158,15 +3180,19 @@ impl<'a> Gen<'a> {
                 // free, and move checking forbids using it after this point.
                 let (slot, ty) =
                     self.lookup(name).ok_or_else(|| format!("drop of unbound `{name}`"))?;
-                let kind = match self.resolve(&ty) {
-                    Type::Str => DropKind::FreeStr,
-                    Type::Array(_) => DropKind::AfreeArr,
-                    Type::SmallArray(..) => DropKind::FreeSmallArr,
-                    Type::Map(..) => DropKind::FreeMap,
-                    Type::Ref(_) => DropKind::ReleaseRef,
-                    other => return Err(format!("cannot drop non-heap value of type {other:?}")),
-                };
-                self.emit_drop(&slot, kind);
+                // The same question the automatic block-exit path asks, asked of
+                // the same table (RFC-0086 M1). A second copy here is what let
+                // the two free different sets.
+                // Ask the declared type first (an `impl Owned for Ring` is keyed
+                // by the NAME, which resolving away would lose), then its
+                // structural form (which is where a generic substitution lands).
+                let rty = self.resolve(&ty);
+                let kind = self
+                    .owned
+                    .release_kind(&ty)
+                    .or_else(|| self.owned.release_kind(&rty))
+                    .ok_or_else(|| format!("cannot drop non-heap value of type {rty:?}"))?;
+                self.emit_drop(&slot, &kind);
                 Ok(())
             }
             Stmt::Expr(e) => {
@@ -4072,7 +4098,7 @@ impl<'a> Gen<'a> {
 
         // Normal end and `break` both land here, still owning the stream.
         self.emit_label(&end_l);
-        self.emit_drop(&sslot, DropKind::CloseStream);
+        self.emit_drop(&sslot, &DropKind::CloseStream);
         Ok(())
     }
 
@@ -9485,7 +9511,8 @@ mod tests {
     #[test]
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
         let (rt, pt, pc, ty, va, sg, sb, fs, dm, fr, rg) = Default::default();
-        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &fr, &rg);
+        let ow = vyrn_frontend::own::Owned::default();
+        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &fr, &ow, &rg);
         let rec = |fs: &[Type]| {
             Type::Record(
                 fs.iter()

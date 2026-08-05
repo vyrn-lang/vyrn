@@ -2417,7 +2417,9 @@ impl<'a> Interp<'a> {
         // aliases must trap); string/array buffers are host-reclaimed. The
         // value is captured at the `let` (droppable bindings are immutable),
         // which also keeps shadowed bindings reclaimable.
-        let mut drops: Vec<Val> = Vec::new();
+        // Each entry is the captured value and, when the type declared
+        // `impl Owned` (RFC-0086 M1), the `release` to call on it.
+        let mut drops: Vec<(Val, Option<String>)> = Vec::new();
         for stmt in &block.stmts {
             let flow = self.stmt(stmt, scope);
             match flow {
@@ -2432,11 +2434,18 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Flow::Normal) => {
                     if let Stmt::Let { name, .. } = stmt {
-                        if let Some(kind) = self.droppable.get(&(stmt as *const Stmt as usize)) {
-                            if *kind == crate::own::DropKind::ReleaseRef {
-                                if let Some(slot) = scope.last().unwrap().get(name) {
-                                    drops.push(slot.v.clone());
-                                }
+                        let release = match self.droppable.get(&(stmt as *const Stmt as usize)) {
+                            Some(crate::own::DropKind::ReleaseRef) => Some(None),
+                            // A user type's `release` is ordinary Vyrn and may
+                            // print, so this engine has to run it too — it is the
+                            // only auto-reclamation besides a cell that is
+                            // observable from inside the language.
+                            Some(crate::own::DropKind::Release(f)) => Some(Some(f.clone())),
+                            _ => None,
+                        };
+                        if let Some(f) = release {
+                            if let Some(slot) = scope.last().unwrap().get(name) {
+                                drops.push((slot.v.clone(), f));
                             }
                         }
                     }
@@ -2455,11 +2464,23 @@ impl<'a> Interp<'a> {
 
     /// Execute a frame's pending block-exit drops: release each captured
     /// reference (bumping its slot's generation, exactly like the emitted
-    /// `release` in the native backend).
-    fn run_drops(&self, drops: &[Val]) -> Result<(), Ctrl> {
-        for v in drops {
-            if let Val::Ref { slot, gen } = v {
-                self.cell_release(*slot, *gen)?;
+    /// `release` in the native backend), and call each declared `release`.
+    ///
+    /// Newest binding first, which is the order both compiling backends emit
+    /// (`emit_all_drops` and `emit_releases_above` both walk their frame in
+    /// reverse). It never mattered for a cell; a declared `release` can print, so
+    /// now it does.
+    fn run_drops(&self, drops: &[(Val, Option<String>)]) -> Result<(), Ctrl> {
+        for (v, release) in drops.iter().rev() {
+            match release {
+                Some(f) => {
+                    self.call(f, std::slice::from_ref(v))?;
+                }
+                None => {
+                    if let Val::Ref { slot, gen } = v {
+                        self.cell_release(*slot, *gen)?;
+                    }
+                }
             }
         }
         Ok(())

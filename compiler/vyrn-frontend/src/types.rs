@@ -139,6 +139,17 @@ pub fn impl_method_name(protocol: &str, type_key: &str, method: &str) -> String 
 /// open for everything else. What M3 actually delivers is the second half.
 pub const FALLIBLE: &str = "Fallible";
 
+/// The protocol a type implements to say **it owns heap and here is how to
+/// release it** (RFC-0086 M1). The compiler knows the name and the one method
+/// name; everything else about it is an ordinary declaration, so a program that
+/// declares `protocol Owned { fn release(self) }` itself works identically to one
+/// that imports it — the same bootstrap answer [`FALLIBLE`] gives above, for the
+/// same reason (`vyrn run` on a bare file has no resolver).
+pub const OWNED: &str = "Owned";
+
+/// The one method [`OWNED`] declares.
+pub const OWNED_RELEASE: &str = "release";
+
 /// Extract the `(min, max)` inclusive numeric bounds a validated type's `where`
 /// predicate implies (RFC-0003 reflection). Recognizes `value >=/> N`,
 /// `value <=/< N` in either operand order, and `&&` conjunctions. Anything else

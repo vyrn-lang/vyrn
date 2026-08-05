@@ -351,6 +351,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         globals: HashMap::new(),
         externs,
         droppable: ownership.droppable,
+        owned: ownership.proto,
         fresh_refs: ownership.fresh_refs,
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
@@ -775,6 +776,9 @@ struct Cx {
     /// — but the map's membership is `own`'s answer and stays authoritative about
     /// WHICH `let`s own their value.
     droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
+    /// user type's declared `release` reaches this backend without a second list.
+    owned: vyrn_frontend::own::Owned,
     /// `get`/`set` reference arguments (by `Expr` node address) whose generation
     /// check `own` proved cannot fail (RFC-0004 §5) — the same set, read with the
     /// same key, as the textual backend's and the interpreter's. Flat rather than
@@ -1074,6 +1078,10 @@ enum Rel {
     /// carrying the type would mean asking `layout_of` a second time at the
     /// release — the place a wrong answer is silent.
     Buffers(Vec<u32>),
+    /// A type that declared `impl Owned` (RFC-0086 M1) — call the `release` it
+    /// declared, whose flattened name this carries. The receiver's own type, so
+    /// the call goes through the ordinary path rather than a second ABI.
+    Call(String, Type),
 }
 
 impl Place {
@@ -1559,7 +1567,7 @@ impl Fn_<'_> {
         // same frames before its branch, so this runs after a branch only in code
         // wasm has already marked unreachable.
         let boundary = self.releases.len() - 1;
-        self.emit_releases_above(b, boundary)?;
+        self.emit_releases_above(m, b, boundary)?;
         self.releases.pop();
         self.scope.truncate(mark);
         Ok(())
@@ -1571,19 +1579,31 @@ impl Fn_<'_> {
     /// Not popping is what makes an early exit safe: the frames stay so the
     /// enclosing [`Fn_::block`] still emits its own copy, which lands after the
     /// branch and is therefore unreachable rather than a second release.
-    fn emit_releases_above(&mut self, b: &mut Frame, boundary: usize) -> Result<(), String> {
+    fn emit_releases_above(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        boundary: usize,
+    ) -> Result<(), String> {
         let frames: Vec<Vec<(Place, Rel)>> =
             self.releases[boundary..].iter().rev().cloned().collect();
         for frame in frames {
             for (p, k) in frame.into_iter().rev() {
-                self.emit_rel(b, p, &k, 0)?;
+                self.emit_rel(m, b, p, &k, 0)?;
             }
         }
         Ok(())
     }
 
     /// Reclaim one binding, whichever of the four shapes it is.
-    fn emit_rel(&mut self, b: &mut Frame, p: Place, k: &Rel, line: usize) -> Result<(), String> {
+    fn emit_rel(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        p: Place,
+        k: &Rel,
+        line: usize,
+    ) -> Result<(), String> {
         match k {
             Rel::Cell => self.emit_release(b, p, line),
             Rel::Stream => self.stream_release(b, p, line),
@@ -1617,6 +1637,20 @@ impl Fn_<'_> {
                 }
                 Ok(())
             }
+            // The receiver is parked under a reserved name so the ordinary call
+            // path finds it as it finds any argument — the same trick `?` uses
+            // for `@try` — and the release is then just a call.
+            Rel::Call(f, ty) => {
+                let mark = self.scope.len();
+                self.scope.push(("@rel".to_string(), p, ty.clone()));
+                let recv = [Expr::Var {
+                    name: "@rel".to_string(),
+                    line,
+                }];
+                let r = self.call(m, b, f, &recv, line);
+                self.scope.truncate(mark);
+                r.map(|_| ())
+            }
         }
     }
 
@@ -1628,6 +1662,11 @@ impl Fn_<'_> {
     /// `Stream`, which reaches its release through the stream lowering rather than
     /// through `own`.
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
+        // A declared row (RFC-0086 M1) answers before any built-in shape does,
+        // and it is keyed by the type's NAME — which resolving away would lose.
+        if let Some(DropKind::Release(f)) = self.cx.owned.release_kind(ty) {
+            return Ok(Some(Rel::Call(f, ty.clone())));
+        }
         let t = self.cx.resolve(ty);
         Ok(match &t {
             Type::Str => Some(Rel::Str),
@@ -1887,7 +1926,7 @@ impl Fn_<'_> {
                 // disturb it — M2d's note that a value may sit under a block.
                 // Ownership analysis has un-tracked anything the return escapes, so
                 // this cannot release what is being handed back.
-                self.emit_releases_above(b, 0)?;
+                self.emit_releases_above(m, b, 0)?;
                 // And every region scope, for the same reason the interpreter
                 // decrements its counter on this path: a `return` out of a region
                 // leaves it. The textual backend does NOT — see the M2m note; there
@@ -2083,7 +2122,7 @@ impl Fn_<'_> {
             Stmt::Break { line } => {
                 let &(brk, _, boundary, regions) =
                     self.loops.last().ok_or_else(|| gap("`break` outside a loop", *line))?;
-                self.emit_releases_above(b, boundary)?;
+                self.emit_releases_above(m, b, boundary)?;
                 self.exit_regions_above(b, regions);
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
@@ -2091,7 +2130,7 @@ impl Fn_<'_> {
             Stmt::Continue { line } => {
                 let &(_, cont, boundary, regions) =
                     self.loops.last().ok_or_else(|| gap("`continue` outside a loop", *line))?;
-                self.emit_releases_above(b, boundary)?;
+                self.emit_releases_above(m, b, boundary)?;
                 self.exit_regions_above(b, regions);
                 let d = self.br_to(cont);
                 b.ins(&Instruction::Br(d));
@@ -2116,7 +2155,7 @@ impl Fn_<'_> {
             Stmt::Drop { name, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
                 if let Some(r) = self.rel_for(&ty, *line)? {
-                    self.emit_rel(b, place, &r, *line)?;
+                    self.emit_rel(m, b, place, &r, *line)?;
                 }
             }
             Stmt::Expr(e) => {
@@ -8023,7 +8062,7 @@ impl Fn_<'_> {
         // raised, and the 65th such call aborted where the interpreter kept
         // going. The value is already copied through `dest`, so neither of these
         // can disturb it — the same reason the `return` arm does them here.
-        self.emit_releases_above(b, 0)?;
+        self.emit_releases_above(m, b, 0)?;
         self.exit_regions_above(b, 0);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
@@ -8100,7 +8139,7 @@ impl Fn_<'_> {
         b.ins(&Instruction::I32Const(sl.size as i32));
         b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
         // The same two unwinds `?` owes as `return`-minus-the-keyword.
-        self.emit_releases_above(b, 0)?;
+        self.emit_releases_above(m, b, 0)?;
         self.exit_regions_above(b, 0);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
@@ -12504,6 +12543,7 @@ mod tests {
             generics: HashMap::new(),
             higher_order: HashMap::new(),
             protocol_methods: HashMap::new(),
+            owned: Default::default(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             fnvals: RefCell::new(Vec::new()),

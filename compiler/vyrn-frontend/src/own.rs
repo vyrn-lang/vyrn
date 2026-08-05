@@ -14,9 +14,16 @@
 //!     one is a second pass over the finished `droppable` set — see
 //!     [`fresh_refs_in`].
 //!
-//! A fresh heap value is produced by `a + b` on Strings (the `@concat`/`@str`
-//! internal spellings), or by a call to a function that itself returns owned
-//! (computed by fixpoint over the call graph). A binding is droppable unless it
+//! **Two questions, and only one of them is about the expression** (RFC-0086 M1).
+//! A binding needs cleanup when its initializer *transfers* a value nobody else
+//! holds AND its **type** says how that value is released. Transfer is a property
+//! of the expression form — `at(a, 0)` and `m.keys()` have the same `Array` type
+//! and opposite answers — and [`Analysis::transfers`] answers it exhaustively, so
+//! a new expression form has to. Release is a property of the type, and [`Owned`]
+//! is the only place it is answered: seeded built-in rows plus every
+//! `impl Owned for T` in the program. There is no second list.
+//!
+//! A binding is droppable unless it
 //! is `mut`, lexically inside a `region` (the arena owns it), or *escapes*: it
 //! appears anywhere except as a whole argument of `print`/`@concat` (which only
 //! read a string), an operand of a binary operator (`==`/`+`/…, all reads), or
@@ -38,7 +45,10 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 
 /// How a droppable binding is reclaimed at block exit.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// Not `Copy`: [`DropKind::Release`] carries the name of the method the type
+/// declared, which is the point of RFC-0086 M1.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DropKind {
     /// A dynamic `String` — `free` the buffer (Path A).
     FreeStr,
@@ -60,6 +70,150 @@ pub enum DropKind {
     /// also keeps every drop SITE straight-line, which the early-return path
     /// (`emit_all_drops`, mid-block) depends on.
     CloseStream,
+    /// A type that declared `impl Owned for T` (RFC-0086 M1) — call its own
+    /// `release`, whose flattened name this carries. The compiler emits an
+    /// ordinary call, so a third party's container is reclaimed by the same
+    /// mechanism a built-in is, in the same words, with no compiler patch.
+    Release(String),
+}
+
+/// The `Owned` protocol: **how a type is released**, and the only place that
+/// question is answered (RFC-0086 M1).
+///
+/// The lookup is uniform. The built-in *entries* are **seeded** by the compiler
+/// rather than read from `std/`, because `vyrn run` on a bare file has no
+/// resolver and therefore no `std/` — RFC-0080 M3 refused to route `?` through a
+/// std protocol for exactly that reason, and the same reason applies to the
+/// decision that frees memory. A user adds rows with `impl Owned for T`; a bare
+/// file keeps working and a third party still joins.
+///
+/// *Representation* stays intrinsic: `Array`'s three words are primitive, so a
+/// built-in row lowers to an inline `free` rather than a protocol call. That is
+/// lowering, not deciding. What is declared is the property.
+/// `Default` is the seed with no declared rows and no nominal declarations —
+/// what a program of built-ins alone would ask.
+#[derive(Default)]
+pub struct Owned {
+    /// One row per `impl Owned for T`: the type key -> its flattened `release`.
+    impls: HashMap<String, String>,
+    /// Nominal declarations, so `type Email = String` answers as a String does.
+    types: HashMap<String, TypeDecl>,
+}
+
+impl Owned {
+    /// Read the program's `impl Owned` rows and seed the built-in ones.
+    pub fn new(program: &Program) -> Self {
+        let impls = program
+            .impls
+            .iter()
+            .filter(|i| i.protocol == crate::types::OWNED)
+            .filter_map(|i| crate::types::type_key(&i.ty))
+            .map(|k| {
+                let m = crate::types::impl_method_name(
+                    crate::types::OWNED,
+                    &k,
+                    crate::types::OWNED_RELEASE,
+                );
+                (k, m)
+            })
+            .collect();
+        Owned {
+            impls,
+            types: crate::types::decl_map(program),
+        }
+    }
+
+    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
+    ///
+    /// A **declared** row wins over the seed, so `impl Owned for T` is what `T`
+    /// means rather than what `T` happens to be made of. Otherwise the type is
+    /// resolved through its declaration — a nominal type over `String` IS a
+    /// String — and answered by the seed.
+    ///
+    /// The match has no `_` arm on purpose. A new [`Type`] variant does not get
+    /// to be silently unreclaimed; it has to say so.
+    pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
+        if let Some(f) = crate::types::type_key(ty).and_then(|k| self.impls.get(&k)) {
+            return Some(DropKind::Release(f.clone()));
+        }
+        match crate::types::resolve(ty, &self.types) {
+            // ---- the seeded built-in rows ----------------------------------
+            Type::Str => Some(DropKind::FreeStr),
+            Type::Ref(_) => Some(DropKind::ReleaseRef),
+            Type::Array(_) => Some(DropKind::AfreeArr),
+            Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
+            Type::Map(..) => Some(DropKind::FreeMap),
+            // A `Stream<T>` is reclaimed too, but through the stream lowering
+            // (RFC-0075 M2b), which pushes its own release frame at the binding
+            // that produces it. Answering here as well would release it twice.
+            Type::Stream(_) => None,
+            // ---- everything the language stores by value --------------------
+            Type::Int
+            | Type::IntN { .. }
+            | Type::Float
+            | Type::Float32
+            | Type::F32x4
+            | Type::I32x4
+            | Type::F64x2
+            | Type::Mask32x4
+            | Type::Mask64x2
+            | Type::Bool
+            | Type::Unit
+            | Type::ConstInt(_)
+            | Type::Logger
+            | Type::Never
+            | Type::Err => None,
+            // ---- aggregates whose ELEMENTS are a safe leak (RFC-0011) -------
+            // Each of these is a value the engines copy; anything heap inside is
+            // owned by whoever produced it. A row here would free a payload the
+            // producer still holds, so the honest answer is that they own nothing
+            // of their own.
+            Type::Option(_)
+            | Type::Result(..)
+            | Type::Record(_)
+            | Type::Enum(_)
+            | Type::ArrayN(..)
+            | Type::Task(_)
+            | Type::Fn(..)
+            // `lazy T` IS `fn() -> T` (RFC-0085 M4a); `resolve` normally answers
+            // that, and this is the depth-limited fallback.
+            | Type::Lazy(_) => None,
+            // ---- shapes that are not a runtime value ------------------------
+            // A type operator survives only until `resolve` reaches its base, a
+            // `Param` is erased by monomorphization, and an unresolved `Named`
+            // or `App` is a name with no declaration. None of them reaches a
+            // binding whose cleanup this decides.
+            Type::Omit(..)
+            | Type::Pick(..)
+            | Type::Merge(..)
+            | Type::Partial(_)
+            | Type::Param(_)
+            | Type::Named(_)
+            | Type::App(..) => None,
+        }
+    }
+}
+
+/// The built-in calls that hand the caller a fresh heap value, with the type of
+/// that value. **This is a fact about a function, not about a type** — `at(a, 0)`
+/// and `m.keys()` both return an element of a container and only one of them
+/// allocates — so it cannot be derived from a signature and the compiler knows it
+/// intrinsically, exactly as it knows the seeded [`Owned`] rows.
+///
+/// It under-approximates on purpose. A builtin missing from here leaks, which is
+/// always safe; one wrongly present frees memory somebody still holds.
+fn builtin_producers() -> impl Iterator<Item = (&'static str, Type)> {
+    [
+        // `a + b` on Strings, and `"..\{x}"` interpolation.
+        ("@concat", Type::Str),
+        ("@str", Type::Str),
+        ("cell", Type::Ref(Box::new(Type::Unit))),
+        ("array", Type::Array(Box::new(Type::Unit))),
+        ("push", Type::Array(Box::new(Type::Unit))),
+        // `m.keys()` copies the key pointers into a new buffer (RFC-0028).
+        ("@keys", Type::Array(Box::new(Type::Str))),
+    ]
+    .into_iter()
 }
 
 /// Whole-program ownership facts.
@@ -74,31 +228,38 @@ pub struct Ownership {
     /// See [`fresh_refs_in`] for the condition. Flat across the program, because
     /// node addresses are already unique.
     pub fresh_refs: HashSet<usize>,
+    /// The `Owned` table this analysis decided with. Handed out so a backend
+    /// lowering an explicit `drop x` asks the SAME question the automatic path
+    /// asked, instead of keeping a second copy of the answer.
+    pub proto: Owned,
 }
 
 /// Analyse ownership across a whole program.
 pub fn analyze(program: &Program) -> Ownership {
-    // Named types over `String`, and functions returning a String-like type —
-    // the light context the `a + b` string classifier needs (see `str_vars`).
-    let string_types: HashSet<String> = program
-        .type_decls
-        .iter()
-        .filter(|d| matches!(d.base, Type::Str))
-        .map(|d| d.name.clone())
-        .collect();
-    let string_fns: HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| is_string_like(&f.ret, &string_types))
-        .map(|f| f.name.clone())
-        .collect();
+    let proto = Owned::new(program);
 
-    // Seed optimistically: every heap-returning function might return owned.
-    let mut owned: HashMap<String, DropKind> = program
-        .functions
-        .iter()
-        .filter_map(|f| returns_owned_kind(&f.ret).map(|k| (f.name.clone(), k)))
-        .collect();
+    // The declared return type of every callable the analysis can name: the
+    // program's functions, plus the built-in producers. A user declaration wins,
+    // though `checker::RESERVED` already forbids taking one of these names.
+    let mut ret_types: HashMap<String, Type> = HashMap::new();
+    for (n, t) in builtin_producers() {
+        ret_types.insert(n.to_string(), t);
+    }
+    for f in &program.functions {
+        ret_types.insert(f.name.clone(), f.ret.clone());
+    }
+
+    // Callables whose result the caller owns. The built-ins are seeded and stay;
+    // every heap-returning function is assumed owned and may be removed below.
+    let seeded: HashSet<String> = builtin_producers().map(|(n, _)| n.to_string()).collect();
+    let mut owned: HashSet<String> = seeded.clone();
+    owned.extend(
+        program
+            .functions
+            .iter()
+            .filter(|f| proto.release_kind(&f.ret).is_some())
+            .map(|f| f.name.clone()),
+    );
 
     // Fixpoint: remove any function that has a non-owned heap return under the
     // current assumptions. Monotone (only shrinks), so it terminates.
@@ -106,8 +267,9 @@ pub fn analyze(program: &Program) -> Ownership {
         let mut changed = false;
         let snapshot = owned.clone();
         for f in &program.functions {
-            if snapshot.contains_key(&f.name)
-                && !analyze_fn(f, &snapshot, &string_fns, &string_types).is_owned
+            if snapshot.contains(&f.name)
+                && !seeded.contains(&f.name)
+                && !analyze_fn(f, &snapshot, &ret_types, &proto).is_owned
             {
                 owned.remove(&f.name);
                 changed = true;
@@ -122,7 +284,7 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut droppable = HashMap::new();
     let mut fresh_refs = HashSet::new();
     for f in &program.functions {
-        let d = analyze_fn(f, &owned, &string_fns, &string_types).droppable;
+        let d = analyze_fn(f, &owned, &ret_types, &proto).droppable;
         fresh_refs.extend(fresh_refs_in(&f.body, &d));
         droppable.insert(f.name.clone(), d);
     }
@@ -131,60 +293,30 @@ pub fn analyze(program: &Program) -> Ownership {
     // is the REAL node the interpreter walks, so the by-address droppable keys
     // match at run time. Tests never return an owned value (they are `Unit`).
     for (i, t) in program.tests.iter().enumerate() {
-        let d = analyze_body(
-            &[],
-            &t.body,
-            &Type::Unit,
-            &owned,
-            &string_fns,
-            &string_types,
-        )
-        .droppable;
+        let d = analyze_body(&[], &t.body, &Type::Unit, &owned, &ret_types, &proto).droppable;
         fresh_refs.extend(fresh_refs_in(&t.body, &d));
         droppable.insert(format!("test@{i}"), d);
     }
     // Bench bodies (RFC-0055) get the same block-exit drop analysis, keyed by the
     // synthetic `bench@<index>` name the interpreter (`--check`) walks.
     for (i, b) in program.benches.iter().enumerate() {
-        let d = analyze_body(
-            &[],
-            &b.body,
-            &Type::Unit,
-            &owned,
-            &string_fns,
-            &string_types,
-        )
-        .droppable;
+        let d = analyze_body(&[], &b.body, &Type::Unit, &owned, &ret_types, &proto).droppable;
         fresh_refs.extend(fresh_refs_in(&b.body, &d));
         droppable.insert(format!("bench@{i}"), d);
     }
+    // The public view is about the PROGRAM's functions: a built-in producer is
+    // seeded knowledge, not a fact discovered about a declaration.
+    let owned_fns = program
+        .functions
+        .iter()
+        .filter(|f| owned.contains(&f.name))
+        .filter_map(|f| proto.release_kind(&f.ret).map(|k| (f.name.clone(), k)))
+        .collect();
     Ownership {
-        owned_fns: owned,
+        owned_fns,
         droppable,
         fresh_refs,
-    }
-}
-
-/// Whether `ty` is a `String` or a nominal type whose base is `String`.
-fn is_string_like(ty: &Type, string_types: &HashSet<String>) -> bool {
-    match ty {
-        Type::Str => true,
-        Type::Named(n) => string_types.contains(n),
-        _ => false,
-    }
-}
-
-/// The reclamation kind a function transfers to its caller, if its return type is
-/// a heap value the caller then owns. `String` → free; `Ref` → release. Nominal
-/// string types and records-with-strings are left out for now (they leak — safe).
-fn returns_owned_kind(ty: &Type) -> Option<DropKind> {
-    match ty {
-        Type::Str => Some(DropKind::FreeStr),
-        Type::Ref(_) => Some(DropKind::ReleaseRef),
-        Type::Array(_) => Some(DropKind::AfreeArr),
-        Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
-        Type::Map(..) => Some(DropKind::FreeMap),
-        _ => None,
+        proto,
     }
 }
 
@@ -195,11 +327,11 @@ struct FnResult {
 
 fn analyze_fn(
     f: &Function,
-    owned: &HashMap<String, DropKind>,
-    string_fns: &HashSet<String>,
-    string_types: &HashSet<String>,
+    owned: &HashSet<String>,
+    ret_types: &HashMap<String, Type>,
+    proto: &Owned,
 ) -> FnResult {
-    analyze_body(&f.params, &f.body, &f.ret, owned, string_fns, string_types)
+    analyze_body(&f.params, &f.body, &f.ret, owned, ret_types, proto)
 }
 
 /// The core of [`analyze_fn`], parameterized over a body directly so a test body
@@ -209,26 +341,25 @@ fn analyze_body(
     params_list: &[Param],
     body: &Block,
     ret: &Type,
-    owned: &HashMap<String, DropKind>,
-    string_fns: &HashSet<String>,
-    string_types: &HashSet<String>,
+    owned: &HashSet<String>,
+    ret_types: &HashMap<String, Type>,
+    proto: &Owned,
 ) -> FnResult {
-    // Seed the outermost string-var scope with every parameter, each carrying
-    // whether it is a String — a non-String parameter has to be recorded too, or
-    // a `let` shadowing it further in would resolve to nothing and fall through.
-    let params: HashMap<String, bool> = params_list
+    // Seed the outermost scope with every parameter and its declared type.
+    let params: HashMap<String, Option<Type>> = params_list
         .iter()
-        .map(|p| (p.name.clone(), is_string_like(&p.ty, string_types)))
+        .map(|p| (p.name.clone(), Some(p.ty.clone())))
         .collect();
     let mut a = Analysis {
         droppable: HashMap::new(),
         live: vec![HashMap::new()],
         region_depth: 0,
         owned,
-        ret_is_heap: returns_owned_kind(ret).is_some(),
+        ret_is_heap: proto.release_kind(ret).is_some(),
         all_returns_owned: true,
-        string_fns,
-        str_vars: Scopes::new(params),
+        ret_types,
+        proto,
+        var_types: Scopes::new(params),
     };
     a.block(body);
     FnResult {
@@ -279,47 +410,47 @@ struct Analysis<'a> {
     /// Scope stack of live candidate owners: name -> declaring `let` identity.
     live: Vec<HashMap<String, usize>>,
     region_depth: usize,
-    /// Functions currently believed to return owned values, with their kind.
-    owned: &'a HashMap<String, DropKind>,
+    /// Callables currently believed to hand the caller a value it owns — the
+    /// program's functions under the running fixpoint, plus the seeded built-in
+    /// producers.
+    owned: &'a HashSet<String>,
     /// Whether the function under analysis returns a heap value.
     ret_is_heap: bool,
     /// Whether every heap return seen so far transfers a fresh owned value.
     all_returns_owned: bool,
-    /// Names of functions whose return type is a `String` (or a nominal type
-    /// over `String`). Used to classify `a + b` as string concatenation when an
-    /// operand is a call — a fresh heap String the caller then owns.
-    string_fns: &'a HashSet<String>,
-    /// Scope stack of every binding in scope, each saying whether it is a
-    /// `String`. Kept in lock-step with `live`; lets `a + b` be recognised as a
-    /// string concat (not integer arithmetic) without a full re-typing pass. It
-    /// only ever under-approximates — an unrecognised string temporary is left to
-    /// leak, never freed as if it were an integer.
-    str_vars: Scopes<bool>,
+    /// Declared return type of every callable, for typing a call's result.
+    ret_types: &'a HashMap<String, Type>,
+    /// The `Owned` table — the only thing that decides how a type is released.
+    proto: &'a Owned,
+    /// Scope stack of every binding in scope with its type where one is known.
+    /// Kept in lock-step with `live`. It under-approximates: a binding whose type
+    /// this cannot name is left to leak, never freed as something it is not.
+    var_types: Scopes<Option<Type>>,
 }
 
 impl Analysis<'_> {
     fn block(&mut self, b: &Block) {
         self.live.push(HashMap::new());
-        self.str_vars.enter();
+        self.var_types.enter();
         for s in &b.stmts {
             self.stmt(s);
         }
-        self.str_vars.exit();
+        self.var_types.exit();
         self.live.pop();
     }
 
     /// Run `body` with `binders` in scope ahead of it — a `for` variable, an
-    /// `if let` arm's payload, a lambda's parameters. None of them can be proved
-    /// a String, so each is recorded as not one. Recording is the point: an
-    /// unrecorded binder falls through to whatever the enclosing scope calls that
-    /// name, which is how an integer loop variable inherits a String.
+    /// `if let` arm's payload, a lambda's parameters. None of them carries a type
+    /// this pass can name, so each is recorded as unknown. Recording is the point:
+    /// an unrecorded binder falls through to whatever the enclosing scope calls
+    /// that name, which is how an integer loop variable inherited a String.
     fn scoped_block(&mut self, binders: &[String], body: &Block) {
-        self.str_vars.enter();
+        self.var_types.enter();
         for n in binders {
-            self.str_vars.bind(n, false);
+            self.var_types.bind(n, None);
         }
         self.block(body);
-        self.str_vars.exit();
+        self.var_types.exit();
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -334,25 +465,20 @@ impl Analysis<'_> {
                 // Account for uses in the initializer *before* the new binding
                 // exists (so `let x = x + b` escapes the old `x`).
                 self.visit(value);
-                // Record whether the binding is a `String`, so later `a + b` on
-                // it is seen as concatenation. Computed against the *pre-binding*
-                // env, so a self-reference resolves to the old value's type. A
-                // non-String is recorded as such rather than left out: that is
-                // what shadows an outer String of the same name.
-                let is_str = self.expr_is_string(value);
-                self.str_vars.bind(name, is_str);
-                // A `SmallArray<T, N>` binding (RFC-0056) owns its `data` buffer,
-                // which is null while inline (so `free` is a no-op) and heap once
-                // spilled. Unlike a growable `Array`, its only producers are the
-                // `[]`/`[..]` literals (there is no `array()`-style call), so
-                // track it whenever the slot is a `SmallArray` — reclaim at scope
-                // end via `FreeSmallArr` (escape analysis un-tracks a returned or
-                // aliased one, exactly as for `Array`, so it is freed once).
-                let produced = self.owner_producing(value);
-                let owner_kind = if matches!(ty, Some(Type::SmallArray(..))) {
-                    Some(DropKind::FreeSmallArr)
+                // The binding's type: what it was declared, else what the
+                // initializer yields. Computed against the *pre-binding* env, so
+                // a self-reference resolves to the old value's type. An unknown
+                // type is recorded as unknown rather than left out: that is what
+                // shadows an outer binding of the same name.
+                let bty = ty.clone().or_else(|| self.expr_type(value));
+                self.var_types.bind(name, bty.clone());
+                // The two questions (RFC-0086 M1). Does the initializer hand over
+                // a value nobody else holds? Then the TYPE says how it is
+                // released. Neither half is a list of expression forms.
+                let owner_kind = if self.transfers(value) {
+                    bty.as_ref().and_then(|t| self.proto.release_kind(t))
                 } else {
-                    produced
+                    None
                 };
                 if let Some(kind) = owner_kind {
                     // A dynamic string inside a region is owned by the arena, so
@@ -479,10 +605,11 @@ impl Analysis<'_> {
             self.visit(e);
             return;
         }
-        if self.owner_producing(e).is_some() {
+        if self.transfers(e) {
             // `concat(..)`/`cell(..)` read their args (safe); an owned call
             // escapes its args conservatively. Either way the *result* is a
-            // fresh owned move.
+            // fresh owned move. The function's return TYPE already said this is
+            // a heap value, so transfer is the whole remaining question.
             self.visit(e);
         } else if let Expr::Var { name, .. } = e {
             if self.is_candidate(name) {
@@ -500,53 +627,81 @@ impl Analysis<'_> {
         }
     }
 
-    /// The reclamation kind if `e` yields a fresh heap value the binding owns:
-    /// `@concat`/`@str` or `a + b` on Strings → a string, `cell` → a reference,
-    /// or a call to an owned function (its declared kind). Otherwise `None`.
-    fn owner_producing(&self, e: &Expr) -> Option<DropKind> {
+    /// Whether `e` hands over a value **nobody else holds** — a transfer rather
+    /// than an alias.
+    ///
+    /// This is the half of the decision that is genuinely about the expression,
+    /// and it cannot be asked of the type: `at(a, 0)` and `m.keys()` both have an
+    /// `Array`'s element or an `Array` for a type, and only one of them allocates.
+    /// A literal or an operator result is a value that did not exist a moment ago;
+    /// a call answers by its callee (the fixpoint for a declared function, the
+    /// seed for a built-in); everything else reads a place somebody else owns.
+    ///
+    /// Exhaustive on purpose — a new expression form has to answer.
+    fn transfers(&self, e: &Expr) -> bool {
         match e {
-            Expr::Call { name, .. } if name == "@concat" || name == "@str" => {
-                Some(DropKind::FreeStr)
-            }
-            // `a + b` on Strings allocates a fresh String, exactly like `@concat`.
-            Expr::Binary { op: BinOp::Add, .. } if self.expr_is_string(e) => {
-                Some(DropKind::FreeStr)
-            }
-            Expr::Call { name, .. } if name == "cell" => Some(DropKind::ReleaseRef),
-            Expr::Call { name, .. } if name == "array" || name == "push" => {
-                Some(DropKind::AfreeArr)
-            }
-            // A map literal (`[:]` / `["k": v]`) allocates a fresh Map (RFC-0028).
-            Expr::MapLit { .. } => Some(DropKind::FreeMap),
-            Expr::Call { name, .. } => self.owned.get(name).copied(),
-            _ => None,
+            Expr::ArrayLit { .. }
+            | Expr::MapLit { .. }
+            | Expr::StructLit { .. }
+            | Expr::Binary { .. }
+            | Expr::Unary { .. } => true,
+            Expr::Call { name, .. } => self.owned.contains(name.as_str()),
+            // A string literal is static storage, not an allocation.
+            Expr::Str(_)
+            | Expr::Int(_)
+            | Expr::Byte(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            // A place read is an alias of what it reads.
+            | Expr::Var { .. }
+            | Expr::Field { .. }
+            // The rest may each yield a fresh value, and none of them is
+            // *provably* doing so from the form alone, so each is left to leak —
+            // always safe, never a double free.
+            | Expr::Try { .. }
+            | Expr::Match { .. }
+            | Expr::IfExpr { .. }
+            | Expr::TryConstruct { .. }
+            | Expr::Spawn { .. }
+            | Expr::Lambda { .. } => false,
         }
     }
 
-    /// Whether the binding `name` resolves to is a known `String`. The innermost
-    /// one answers: an inner `let s = 1` under an outer `let s = "x"` is an
-    /// integer, and reading the outer one there would free that integer.
-    fn is_string_var(&self, name: &str) -> bool {
-        self.str_vars.get(name).copied().unwrap_or(false)
-    }
-
-    /// A conservative, sound "is this expression a `String`?" test — used only to
-    /// decide whether `a + b` is concatenation (heap) or arithmetic (no heap).
-    /// It never reports a non-string as a string (so an integer add is never
-    /// freed); when unsure it answers `false`, leaving a genuine string temporary
-    /// to leak, which is always safe.
-    fn expr_is_string(&self, e: &Expr) -> bool {
+    /// The type of `e`, where this pass can name it.
+    ///
+    /// It is a *declared-types* pass, not a re-run of the checker: parameters,
+    /// `let` annotations, function return types and literal shapes, propagated
+    /// through the scope stack. When unsure it answers `None`, which leaves the
+    /// binding to leak — always safe, never freed as something it is not.
+    fn expr_type(&self, e: &Expr) -> Option<Type> {
         match e {
-            Expr::Str(_) => true,
-            Expr::Call { name, .. } if name == "@concat" || name == "@str" => true,
-            Expr::Call { name, .. } => self.string_fns.contains(name),
+            Expr::Str(_) => Some(Type::Str),
+            Expr::Int(_) | Expr::Byte(_) => Some(Type::Int),
+            Expr::Float(_) => Some(Type::Float),
+            Expr::Bool(_) => Some(Type::Bool),
+            Expr::Var { name, .. } => self.var_types.get(name).cloned().flatten(),
+            Expr::Call { name, .. } => self.ret_types.get(name).cloned(),
+            // The one allocating operator is `+` on Strings, and its result has
+            // its left operand's type. Every other operator is a scalar, whose
+            // type answers `None` from the seed anyway.
             Expr::Binary {
                 op: BinOp::Add,
                 lhs,
                 ..
-            } => self.expr_is_string(lhs),
-            Expr::Var { name, .. } => self.is_string_var(name),
-            _ => false,
+            } => self.expr_type(lhs),
+            // An array literal does NOT name its own type, and that is the whole
+            // reason it is absent here: `[1, 2, 3]` is an `ArrayN` held inline,
+            // `[]` annotated `Array<T>` is three words around a buffer, and
+            // annotated `SmallArray<T, N>` is a header whose buffer is null until
+            // it spills. Three layouts, one syntax. Answering `Array` for all of
+            // them freed a fixed array's stack storage and corrupted the heap, so
+            // the annotation is the only thing that may answer.
+            //
+            // A map literal has no such second shape: `[:]` is a `Map` and there
+            // is nothing else it could be.
+            Expr::MapLit { .. } => Some(Type::Map(Box::new(Type::Str), Box::new(Type::Unit))),
+            Expr::StructLit { name, .. } => Some(Type::Named(name.clone())),
+            _ => None,
         }
     }
 
@@ -623,12 +778,12 @@ impl Analysis<'_> {
                 for arm in arms {
                     // The arm's payload binders shadow the enclosing scope for
                     // the arm body, exactly as a `let` would.
-                    self.str_vars.enter();
+                    self.var_types.enter();
                     for n in pattern_binders(&arm.pattern) {
-                        self.str_vars.bind(&n, false);
+                        self.var_types.bind(&n, None);
                     }
                     self.visit(&arm.body);
-                    self.str_vars.exit();
+                    self.var_types.exit();
                 }
             }
             Expr::IfExpr {
@@ -681,9 +836,9 @@ impl Analysis<'_> {
             // parameter did not already lack, and stops one named like an
             // enclosing String from being read as that String.
             Expr::Lambda { params, body, .. } => {
-                self.str_vars.enter();
+                self.var_types.enter();
                 for p in params {
-                    self.str_vars.bind(p, false);
+                    self.var_types.bind(p, None);
                 }
                 match body {
                     LambdaBody::Expr(e2) => self.visit(e2),
@@ -693,7 +848,7 @@ impl Analysis<'_> {
                         }
                     }
                 }
-                self.str_vars.exit();
+                self.var_types.exit();
             }
         }
     }
@@ -1123,7 +1278,7 @@ mod tests {
         let (o, _) = analyze_src(src);
         o.droppable
             .get(which)
-            .map(|m| m.values().copied().collect())
+            .map(|m| m.values().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -1231,6 +1386,87 @@ mod tests {
         let src = "fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x); } \
                    fn main() -> Int64 { let c = cell(1); return apply(|x| x + get(c), 2); }";
         assert_eq!(fresh_count(src), 0);
+    }
+
+    // ---- the type answers, not the expression (RFC-0086 M1) --------------
+
+    #[test]
+    fn an_annotated_array_literal_is_released() {
+        // The defect the RFC was written from: `Expr::ArrayLit` was absent from
+        // the expression list, so this leaked on every engine while the identical
+        // `array()` call did not. Nothing forced the two to agree, because the
+        // list was what decided.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   a = push(a, 1); return at(a, 0); }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::AfreeArr]);
+    }
+
+    #[test]
+    fn an_unannotated_array_literal_is_not_released() {
+        // The other half, and the one that costs a heap if it is got wrong.
+        // `[1, 2, 3]` with no annotation is a FIXED array held inline, so the
+        // literal cannot say what it is — only the annotation can. Answering
+        // `Array` for every literal freed a stack address and corrupted the heap.
+        let src = "fn main() -> Int64 { let a = [1, 2, 3]; return a[0]; }";
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    #[test]
+    fn a_fresh_key_snapshot_is_released() {
+        // `m.keys()` copies the key pointers into a new buffer (RFC-0028) and was
+        // absent from the same list.
+        let src = "fn main() -> Int64 { let m: Map<String, Int64> = [\"a\": 1]; \
+                   let ks = m.keys(); return ks.length; }";
+        // The map and the snapshot, in whichever order the map iterates.
+        let mut kinds = drop_kinds(src, "main");
+        kinds.sort_by_key(|k| format!("{k:?}"));
+        assert_eq!(kinds, vec![DropKind::AfreeArr, DropKind::FreeMap]);
+    }
+
+    #[test]
+    fn a_bare_file_with_no_imports_still_frees_its_string() {
+        // The bootstrap answer. `vyrn run` on a bare file has no resolver and
+        // therefore no `std/`, so the built-in rows are seeded by the compiler and
+        // this program — which imports nothing and declares no protocol — still
+        // gets a `free`. RFC-0080 M3 refused `?` through a std protocol for this
+        // exact reason; the decision that frees memory may not be weaker.
+        let src = "fn main() -> Int64 { let a = \"x\"; let s = a + \"y\"; \
+                   return s.byteLength; }";
+        assert!(!src.contains("import"));
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
+    }
+
+    #[test]
+    fn a_user_type_declares_how_it_is_released() {
+        // The design's own test, in miniature: nothing in the compiler knows the
+        // name `Ring`. The row comes out of the program.
+        let src = "protocol Owned { fn release(self) } \
+                   type Ring = { slots: Array<Int64> } \
+                   impl Owned for Ring { fn release(self) { print(1) } } \
+                   fn make() -> Ring { return Ring { slots: [] } } \
+                   fn main() -> Int64 { let r = make(); return 0; }";
+        let (o, _) = analyze_src(src);
+        assert_eq!(
+            o.owned_fns.get("make"),
+            Some(&DropKind::Release("Owned__Ring__release".to_string()))
+        );
+        assert_eq!(
+            drop_kinds(src, "main"),
+            vec![DropKind::Release("Owned__Ring__release".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_record_that_declares_nothing_is_reclaimed_by_nothing() {
+        // The mirror. A record is a value the engines copy; without a declared row
+        // there is nothing to call, and inventing one would free a field somebody
+        // else still holds.
+        let src = "type Ring = { slots: Array<Int64> } \
+                   fn make() -> Ring { return Ring { slots: [] } } \
+                   fn main() -> Int64 { let r = make(); return 0; }";
+        let (o, _) = analyze_src(src);
+        assert!(!o.owned_fns.contains_key("make"));
+        assert_eq!(drop_count(src, "main"), 0);
     }
 
     #[test]
