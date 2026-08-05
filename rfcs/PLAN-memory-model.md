@@ -97,12 +97,23 @@ Five boundaries materialize a header for a pointer they did not allocate:
 `args()`, `readLine`, `readFile`, the generator host's directory listing, and
 `wasi-min.js`. Everything else allocates through one function per backend.
 
-## Phase 3 — `copy` *(RFC-0089 M1b)* — small, parallel-safe with Phase 2
+## Phase 3 — `copy` *(RFC-0089 M1b)* — LANDED
 
-`x.copy()` on String, Array, SmallArray, Map, and records/options/results of
-them (structural, recursive). Builtin first; protocolization is Phase 7.
-Deep-copies owned heap. Tests: copy-then-mutate independence, copy of nested
-record, parity.
+`x.copy()` ships on String, Array, SmallArray, Map, records, fixed arrays,
+`Option`, `Result` and user enums, structural and recursive, in all three
+engines. Builtin; protocolization is Phase 7, and RFC-0091's `Copy` section now
+records what M1 has to do (add the row and the dispatch — the predicate, the
+override point and the receiver convention are already in place).
+
+Four decisions, in RFC-0089 "M1b as landed": a scalar copies to itself rather
+than erroring (a monomorphized generic calls the same `x.copy()` at every
+element type); a `Ref<T>`, a `Task<T>` and a `lazy T` copy as the handles they
+are; a type that declares `impl Owned for T` is refused, and so is anything
+holding one; a copy's capacity is its length.
+
+Numbers: about 68 ns to copy ten kilobytes, either as a String or as an
+`Array<Int64>` — one `malloc` and one `memcpy`. No wasm size change for a
+program that does not call it. The five `arg + ""` sites migrate in Phase 6.
 
 ## Phase 4 — the semantics *(RFC-0089 M2 — the core, the largest arc)*
 

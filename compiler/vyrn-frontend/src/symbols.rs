@@ -3212,6 +3212,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "set", detail: "set(ref, value) -> Unit — write through a generational reference" },
     BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
     BuiltinMethod { name: "toArray", detail: "smallArray.toArray() -> Array<T> — copy a SmallArray's elements out to a growable Array (RFC-0056)" },
+    BuiltinMethod { name: "copy", detail: "x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural (RFC-0089). A `Ref<T>` copy still names the same cell" },
     BuiltinMethod { name: "toString", detail: "x.toString() -> String — render a number, Bool, or String" },
     BuiltinMethod { name: "charCount", detail: "s.charCount() -> Int64 — number of Unicode scalar values (O(n); counts non-continuation bytes)" },
     BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result" },
@@ -3233,6 +3234,29 @@ fn builtin_method(name: &str) -> Option<&'static BuiltinMethod> {
 /// dispatch in the checker's `call()` — the builtins are grouped by what base
 /// type they operate on.
 fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
+    let by_name = |n: &str| ALL_BUILTIN_METHODS.iter().find(|b| b.name == n).copied();
+    let mut out = builtin_methods_of_shape(ty);
+    // `x.copy()` (RFC-0089 M1b) is legal on every receiver, and offered on the
+    // ones where it does something: a value that owns heap by its shape alone.
+    // On a scalar it is the identity, and a completion list is a place to say
+    // what is worth writing.
+    if matches!(
+        ty,
+        Type::Str
+            | Type::Array(_)
+            | Type::ArrayN(..)
+            | Type::SmallArray(..)
+            | Type::Map(..)
+            | Type::Record(_)
+            | Type::Option(_)
+            | Type::Result(..)
+    ) {
+        out.extend(by_name("copy"));
+    }
+    out
+}
+
+fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
     let by_name = |n: &str| ALL_BUILTIN_METHODS.iter().find(|b| b.name == n).copied();
     match ty {
         // A growable `Array<T>` offers the full mutation surface, including the
@@ -3587,6 +3611,35 @@ mod tests {
             !labels.contains(&"pop"),
             "map must not offer `pop`: {labels:?}"
         );
+    }
+
+    /// RFC-0089 M1b: `copy` completes on a receiver that owns heap, and hovers
+    /// with the rule rather than with a signature alone.
+    #[test]
+    fn copy_completes_and_hovers_on_an_owning_receiver() {
+        let src = "fn main() -> Int64 {\n\
+                   let s = \"a\" + \"b\"\n\
+                   let t = s.copy()\n\
+                   return t.byteLength }";
+        let a = analyze(src);
+        let line = src.lines().nth(2).unwrap();
+        let col = line.find("s.").unwrap() + 3;
+        let labels: Vec<String> =
+            member_completions(&a, 3, col).into_iter().map(|c| c.label).collect();
+        assert!(labels.iter().any(|l| l == "copy"), "{labels:?}");
+        let hover = builtin_method("copy").expect("`copy` hovers").detail;
+        assert!(hover.contains("shares no heap"), "{hover}");
+        // A scalar receiver does not offer it: there it is the identity.
+        let scalar = "fn main() -> Int64 {\n\
+                      let n = 5\n\
+                      let m = n.toString()\n\
+                      return 0 }";
+        let a2 = analyze(scalar);
+        let l2 = scalar.lines().nth(2).unwrap();
+        let c2 = l2.find("n.").unwrap() + 3;
+        let labels2: Vec<String> =
+            member_completions(&a2, 3, c2).into_iter().map(|c| c.label).collect();
+        assert!(!labels2.iter().any(|l| l == "copy"), "{labels2:?}");
     }
 
     // ---- RFC-0020 M1: string-literal completion -----------------------------

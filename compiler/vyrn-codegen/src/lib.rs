@@ -2441,6 +2441,314 @@ impl<'a> Gen<'a> {
         (base, len, cap, data)
     }
 
+    // ---- RFC-0089 M1b: `x.copy()` -----------------------------------------
+
+    /// Whether a value of `ty` transitively owns heap — the one predicate
+    /// [`deep_copy`](Self::deep_copy) copies by, asked of the frontend so the
+    /// checker, this backend and the direct one cannot disagree about it.
+    fn owns_heap(&self, ty: &Type) -> bool {
+        vyrn_frontend::own::owns_heap(
+            &vyrn_frontend::types::substitute(ty, self.subst),
+            self.types,
+        )
+    }
+
+    /// The size in bytes of one `ll` value, as LLVM's null-GEP idiom.
+    fn size_of_ll(&mut self, ll: &str) -> String {
+        let sz = self.fresh_tmp();
+        self.emit(format!("{sz} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"));
+        sz
+    }
+
+    /// Copy `count` elements of `ll` out of `src` into a fresh buffer of `room`
+    /// elements, and return the buffer. One byte of slack, so a copy of an empty
+    /// container never asks the allocator for nothing.
+    fn copy_buf(&mut self, src: &str, count: &str, room: &str, ll: &str) -> String {
+        let esz = self.size_of_ll(ll);
+        let want = self.fresh_tmp();
+        let tot = self.fresh_tmp();
+        self.emit(format!("{want} = mul i64 {room}, {esz}"));
+        self.emit(format!("{tot} = add i64 {want}, 1"));
+        let buf = self.heap_alloc(&tot);
+        let live = self.fresh_tmp();
+        self.emit(format!("{live} = mul i64 {count}, {esz}"));
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {src}, i64 {live}, i1 false)"
+        ));
+        buf
+    }
+
+    /// Replace each of the first `count` elements of `buf` with a deep copy of
+    /// itself. A no-op — and no emitted loop — when the element owns no heap.
+    fn copy_elems(&mut self, buf: &str, count: &str, elem: &Type) -> Result<(), String> {
+        if !self.owns_heap(elem) {
+            return Ok(());
+        }
+        let ell = self.llt(elem);
+        let idx = self.fresh_alloca("i64");
+        self.emit(format!("store i64 0, ptr {idx}"));
+        let cond_l = self.fresh_label("cp.cond");
+        let body_l = self.fresh_label("cp.body");
+        let end_l = self.fresh_label("cp.end");
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&cond_l);
+        let i = self.fresh_tmp();
+        let done = self.fresh_tmp();
+        self.emit(format!("{i} = load i64, ptr {idx}"));
+        self.emit(format!("{done} = icmp uge i64 {i}, {count}"));
+        self.emit_term(format!("br i1 {done}, label %{end_l}, label %{body_l}"));
+        self.emit_label(&body_l);
+        let bi = self.fresh_tmp();
+        let ep = self.fresh_tmp();
+        let ev = self.fresh_tmp();
+        self.emit(format!("{bi} = load i64, ptr {idx}"));
+        self.emit(format!("{ep} = getelementptr {ell}, ptr {buf}, i64 {bi}"));
+        self.emit(format!("{ev} = load {ell}, ptr {ep}"));
+        let cv = self.deep_copy(&ev, elem)?;
+        self.emit(format!("store {ell} {cv}, ptr {ep}"));
+        let i2 = self.fresh_tmp();
+        let inext = self.fresh_tmp();
+        self.emit(format!("{i2} = load i64, ptr {idx}"));
+        self.emit(format!("{inext} = add i64 {i2}, 1"));
+        self.emit(format!("store i64 {inext}, ptr {idx}"));
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&end_l);
+        Ok(())
+    }
+
+    /// `x.copy()` (RFC-0089 M1b): a value of `ty` that shares no heap with `v`.
+    ///
+    /// Structural and recursive. A type that owns nothing IS its own copy, which
+    /// is what makes `copy` one word with one meaning in a monomorphized
+    /// generic: the same call site is a fresh buffer for `String` and the value
+    /// itself for `Int64`. A `Ref<T>` and a `Task<T>` fall in the second group on
+    /// purpose — both are handles, and copying a handle names the same thing.
+    fn deep_copy(&mut self, v: &str, ty: &Type) -> Result<String, String> {
+        if !self.owns_heap(ty) {
+            return Ok(v.to_string());
+        }
+        match self.resolve(ty) {
+            Type::Str => {
+                let len = self.str_len(v);
+                let buf = self.str_alloc(&len, &len);
+                self.emit(format!(
+                    "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {v}, i64 {len}, i1 false)"
+                ));
+                Ok(buf)
+            }
+            Type::Array(inner) => {
+                let ell = self.llt(&inner);
+                let data = self.fresh_tmp();
+                let len = self.fresh_tmp();
+                self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
+                self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {v}, 1"));
+                let buf = self.copy_buf(&data, &len, &len, &ell);
+                self.copy_elems(&buf, &len, &inner)?;
+                let a = self.fresh_tmp();
+                let b = self.fresh_tmp();
+                let c = self.fresh_tmp();
+                self.emit(format!("{a} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
+                self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {len}, 1"));
+                self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {len}, 2"));
+                Ok(c)
+            }
+            // A `SmallArray<T, N>` copies its header by value; the buffer behind
+            // it is only there once it has spilled, and a copy that stays inline
+            // allocates nothing at all.
+            Type::SmallArray(inner, n) => {
+                let sa_ll = self.sa_ll(&inner, n);
+                let ell = self.llt(&inner);
+                let slot = self.fresh_alloca(&sa_ll);
+                self.emit(format!("store {sa_ll} {v}, ptr {slot}"));
+                let (_, len, cap, data) = self.sa_slot_base(&slot, &inner, n);
+                let spilled = self.fresh_tmp();
+                let spill_l = self.fresh_label("cp.sa.spill");
+                let join_l = self.fresh_label("cp.sa.join");
+                self.emit(format!("{spilled} = icmp ne i64 {cap}, {n}"));
+                self.emit_term(format!("br i1 {spilled}, label %{spill_l}, label %{join_l}"));
+                self.emit_label(&spill_l);
+                let buf = self.copy_buf(&data, &len, &cap, &ell);
+                let dp = self.fresh_tmp();
+                self.emit(format!("{dp} = getelementptr {sa_ll}, ptr {slot}, i64 0, i32 2"));
+                self.emit(format!("store ptr {buf}, ptr {dp}"));
+                self.emit_term(format!("br label %{join_l}"));
+                self.emit_label(&join_l);
+                let (base, len2, _, _) = self.sa_slot_base(&slot, &inner, n);
+                self.copy_elems(&base, &len2, &inner)?;
+                let out = self.fresh_tmp();
+                self.emit(format!("{out} = load {sa_ll}, ptr {slot}"));
+                Ok(out)
+            }
+            // Two parallel buffers, and the keys are Strings, so a map copy
+            // always duplicates its keys and duplicates its values only when the
+            // value type owns something.
+            Type::Map(_, vt) => {
+                let vll = self.llt(&vt);
+                let keys = self.fresh_tmp();
+                let vals = self.fresh_tmp();
+                let len = self.fresh_tmp();
+                let cap = self.fresh_tmp();
+                let m = "{ ptr, ptr, i64, i64 }";
+                self.emit(format!("{keys} = extractvalue {m} {v}, 0"));
+                self.emit(format!("{vals} = extractvalue {m} {v}, 1"));
+                self.emit(format!("{len} = extractvalue {m} {v}, 2"));
+                self.emit(format!("{cap} = extractvalue {m} {v}, 3"));
+                let kb = self.copy_buf(&keys, &len, &cap, "ptr");
+                self.copy_elems(&kb, &len, &Type::Str)?;
+                let vb = self.copy_buf(&vals, &len, &cap, &vll);
+                self.copy_elems(&vb, &len, &vt)?;
+                let a = self.fresh_tmp();
+                let b = self.fresh_tmp();
+                let c = self.fresh_tmp();
+                let d = self.fresh_tmp();
+                self.emit(format!("{a} = insertvalue {m} undef, ptr {kb}, 0"));
+                self.emit(format!("{b} = insertvalue {m} {a}, ptr {vb}, 1"));
+                self.emit(format!("{c} = insertvalue {m} {b}, i64 {len}, 2"));
+                self.emit(format!("{d} = insertvalue {m} {c}, i64 {cap}, 3"));
+                Ok(d)
+            }
+            Type::Record(_) => {
+                let fields = self
+                    .record_fields(ty)
+                    .ok_or_else(|| format!("`copy` of a record with no fields: {ty:?}"))?;
+                let rll = self.llt(ty);
+                let mut cur = v.to_string();
+                for (i, f) in fields.iter().enumerate() {
+                    if !self.owns_heap(&f.ty) {
+                        continue;
+                    }
+                    let fll = self.llt(&f.ty);
+                    let fv = self.fresh_tmp();
+                    self.emit(format!("{fv} = extractvalue {rll} {cur}, {i}"));
+                    let cv = self.deep_copy(&fv, &f.ty)?;
+                    let next = self.fresh_tmp();
+                    self.emit(format!("{next} = insertvalue {rll} {cur}, {fll} {cv}, {i}"));
+                    cur = next;
+                }
+                Ok(cur)
+            }
+            // A fixed `[N x T]` is a value, so the copy is unrolled — `N` is a
+            // constant and there is no buffer to allocate.
+            Type::ArrayN(inner, n) => {
+                let all = self.llt(ty);
+                let ell = self.llt(&inner);
+                let mut cur = v.to_string();
+                for i in 0..n {
+                    let ev = self.fresh_tmp();
+                    self.emit(format!("{ev} = extractvalue {all} {cur}, {i}"));
+                    let cv = self.deep_copy(&ev, &inner)?;
+                    let next = self.fresh_tmp();
+                    self.emit(format!("{next} = insertvalue {all} {cur}, {ell} {cv}, {i}"));
+                    cur = next;
+                }
+                Ok(cur)
+            }
+            Type::Option(inner) => self.copy_sum(v, &[(Some("1"), vec![*inner])]),
+            Type::Result(ok, err) => {
+                self.copy_sum(v, &[(Some("1"), vec![*ok]), (Some("0"), vec![*err])])
+            }
+            Type::Enum(vs) => self.copy_enum(v, &vs),
+            // A handle names something; copying it names the same thing. A
+            // `Ref<T>` never reaches here (it owns no heap by rule), and a
+            // `Task<T>`/`lazy T` is the same shape of promise.
+            Type::Task(_) | Type::Lazy(_) => Ok(v.to_string()),
+            other => Err(format!(
+                "`copy` of {other:?} is not lowered — the checker should have refused it"
+            )),
+        }
+    }
+
+    /// The copy of an `Option`/`Result`: one payload, selected by the `i1` tag.
+    /// `arms` pairs the tag value to test against with the payload types it
+    /// carries (one, for both built-in sums).
+    fn copy_sum(&mut self, v: &str, arms: &[(Option<&str>, Vec<Type>)]) -> Result<String, String> {
+        let sll = "{ i1, i64, i64 }";
+        let slot = self.fresh_alloca(sll);
+        self.emit(format!("store {sll} {v}, ptr {slot}"));
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
+        let end_l = self.fresh_label("cp.sum.end");
+        for (want, payload) in arms {
+            let pty = &payload[0];
+            if !self.owns_heap(pty) {
+                continue;
+            }
+            let hit_l = self.fresh_label("cp.sum.hit");
+            let miss_l = self.fresh_label("cp.sum.miss");
+            let is = self.fresh_tmp();
+            self.emit(format!("{is} = icmp eq i1 {tag}, {}", want.unwrap_or("1")));
+            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
+            self.emit_label(&hit_l);
+            let w0 = self.fresh_tmp();
+            let w1 = self.fresh_tmp();
+            self.emit(format!("{w0} = extractvalue {sll} {v}, 1"));
+            self.emit(format!("{w1} = extractvalue {sll} {v}, 2"));
+            let pv = self.decode_payload(&w0, &w1, pty);
+            let cv = self.deep_copy(&pv, pty)?;
+            let (n0, n1) = self.encode_payload(&cv, pty);
+            let a = self.fresh_tmp();
+            let b = self.fresh_tmp();
+            self.emit(format!("{a} = insertvalue {sll} {v}, i64 {n0}, 1"));
+            self.emit(format!("{b} = insertvalue {sll} {a}, i64 {n1}, 2"));
+            self.emit(format!("store {sll} {b}, ptr {slot}"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&miss_l);
+        }
+        self.emit_term(format!("br label %{end_l}"));
+        self.emit_label(&end_l);
+        let out = self.fresh_tmp();
+        self.emit(format!("{out} = load {sll}, ptr {slot}"));
+        Ok(out)
+    }
+
+    /// The copy of a user enum: the payload slots of the live variant, and only
+    /// the ones whose declared type owns something.
+    fn copy_enum(&mut self, v: &str, vs: &[EnumVariant]) -> Result<String, String> {
+        let arity = vs.iter().map(|x| x.payload.len()).max().unwrap_or(0);
+        let ell = enum_ll(arity);
+        let slot = self.fresh_alloca(&ell);
+        self.emit(format!("store {ell} {v}, ptr {slot}"));
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {ell} {v}, 0"));
+        let end_l = self.fresh_label("cp.enum.end");
+        for var in vs {
+            if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                continue;
+            }
+            let Some((n, _)) = self.variants.get(&var.name).cloned() else {
+                continue;
+            };
+            let hit_l = self.fresh_label("cp.enum.hit");
+            let miss_l = self.fresh_label("cp.enum.miss");
+            let is = self.fresh_tmp();
+            self.emit(format!("{is} = icmp eq i64 {tag}, {n}"));
+            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
+            self.emit_label(&hit_l);
+            let mut cur = v.to_string();
+            for (j, pty) in var.payload.iter().enumerate() {
+                if !self.owns_heap(pty) {
+                    continue;
+                }
+                let w = self.fresh_tmp();
+                self.emit(format!("{w} = extractvalue {ell} {cur}, {}", j + 1));
+                let pv = self.unbox_payload(&w, pty);
+                let cv = self.deep_copy(&pv, pty)?;
+                let nw = self.box_payload(&cv, pty);
+                let next = self.fresh_tmp();
+                self.emit(format!("{next} = insertvalue {ell} {cur}, i64 {nw}, {}", j + 1));
+                cur = next;
+            }
+            self.emit(format!("store {ell} {cur}, ptr {slot}"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&miss_l);
+        }
+        self.emit_term(format!("br label %{end_l}"));
+        self.emit_label(&end_l);
+        let out = self.fresh_tmp();
+        self.emit(format!("{out} = load {ell}, ptr {slot}"));
+        Ok(out)
+    }
+
     /// Lower `SmallArray<T, N>.push(v)` (RFC-0056). Value-threaded: takes the
     /// current SmallArray value `av`, returns the new one. Grows on a push at
     /// `len == cap` — from the inline state it allocates `2N` on the heap and
@@ -7923,6 +8231,14 @@ impl<'a> Gen<'a> {
             self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {len}, 1"));
             self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {len}, 2"));
             return Ok((c, Type::Array(Box::new(inner))));
+        }
+        // `x.copy()` (RFC-0089 M1b) — a value of the receiver's type that shares
+        // no heap with it. The reported type is the receiver's own, so a copy of
+        // a validated `type Email = String` is still an `Email`.
+        if name == "@copy" {
+            let (v, ty) = self.gen_expr(&args[0])?;
+            let c = self.deep_copy(&v, &ty)?;
+            return Ok((c, ty));
         }
         // `m.has(k)` (RFC-0028) — membership test → i1. Read-only; the receiver
         // is any Map-typed expression (an SSA aggregate).

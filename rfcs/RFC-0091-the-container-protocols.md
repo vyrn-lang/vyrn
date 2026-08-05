@@ -48,6 +48,16 @@ not be deep-copied — overrides it. `-> Self` requires RFC-0084's dispatch-by-
 expected-type work or the associated-type spelling; this is the same blocker
 RFC-0086 M2 recorded, and this RFC inherits it rather than re-solving it.
 
+**The builtin shipped first** (RFC-0089 M1b), shaped so M1 lifts it rather than
+replaces it. Three things are already in the right place. The structural
+derivation is one predicate, `own::owns_heap`, which the checker and both
+backends call — that becomes "is this type `Copy` by derivation". The override
+point already exists and already errors: a type that declares `impl Owned for T`
+is refused today with a diagnostic pointing here, so M1 turns a refusal into a
+dispatch and nothing else changes. And the receiver convention is `read self`
+already, since `copy` never consumes what it copies. What M1 adds is the row and
+the dispatch; the semantics are landed and under test.
+
 ### `Iterate`
 
 ```vyrn

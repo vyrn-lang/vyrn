@@ -194,6 +194,37 @@ impl Owned {
     }
 }
 
+/// Whether a value of `ty` transitively owns heap, under RFC-0089 rule 1.
+///
+/// [`Owned::release_kind`] answers about the value's OWN storage; this asks
+/// about everything it reaches, because a record of Strings moves under rule 1
+/// even though releasing the record releases nothing today. `Ref<T>` is excluded
+/// on purpose: RFC-0089 §5 keeps it a freely copied handle, so `r.copy()` shares
+/// the cell rather than duplicating it.
+///
+/// The depth limit is the same guard the rest of this file uses against a
+/// declaration that refers to itself; a type that deep is answered `false`, which
+/// costs a copy that copies nothing and never a wrong free.
+pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let deeper = |t: &Type| go(t, types, depth + 1);
+        match crate::types::resolve(ty, types) {
+            Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Stream(_) => {
+                true
+            }
+            Type::Option(t) | Type::ArrayN(t, _) | Type::Lazy(t) | Type::Task(t) => deeper(&t),
+            Type::Result(a, b) => deeper(&a) || deeper(&b),
+            Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
+            Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(&deeper)),
+            _ => false,
+        }
+    }
+    go(ty, types, 0)
+}
+
 /// Why a binding is **not** reclaimed at block exit (RFC-0087 U1).
 ///
 /// Every row is recorded at the point the decision is made, by the walker that
@@ -291,7 +322,11 @@ fn expr_form(e: &Expr) -> String {
         Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) => "a literal".into(),
         Expr::Var { name, .. } => format!("reading `{name}`"),
         Expr::Field { field, .. } => format!("reading the field `{field}`"),
-        Expr::Call { name, .. } => format!("the call to `{name}`"),
+        // A method-only builtin arrives under its internal `@` spelling, which
+        // no user can type. Report what they wrote.
+        Expr::Call { name, .. } => {
+            format!("the call to `{}`", name.strip_prefix('@').unwrap_or(name))
+        }
         Expr::Try { .. } => "a `?` propagation".into(),
         Expr::Match { .. } => "a match expression".into(),
         Expr::IfExpr { .. } => "an if-expression".into(),
@@ -818,6 +853,16 @@ impl Analysis<'_> {
     /// Exhaustive on purpose — a new expression form has to answer.
     fn transfers(&self, e: &Expr) -> bool {
         match e {
+            // `x.copy()` (RFC-0089 M1b) is a producer whose type is its
+            // receiver's, so it cannot be one row of [`builtin_producers`]. It
+            // transfers whenever it allocates, and it allocates for exactly the
+            // types [`owns_heap`] counts. A `Ref<T>` is the case that matters:
+            // copying one shares the cell, so calling it a transfer would
+            // release that cell twice.
+            Expr::Call { name, args, .. } if name == "@copy" => args
+                .first()
+                .and_then(|a| self.expr_type(a))
+                .is_some_and(|t| owns_heap(&t, &self.proto.types)),
             Expr::ArrayLit { .. }
             | Expr::MapLit { .. }
             | Expr::StructLit { .. }
@@ -858,6 +903,11 @@ impl Analysis<'_> {
             Expr::Float(_) => Some(Type::Float),
             Expr::Bool(_) => Some(Type::Bool),
             Expr::Var { name, .. } => self.var_types.get(name).cloned().flatten(),
+            // `x.copy()` returns its receiver's type — the one builtin whose
+            // result type is not a fixed row.
+            Expr::Call { name, args, .. } if name == "@copy" => {
+                args.first().and_then(|a| self.expr_type(a))
+            }
             Expr::Call { name, .. } => self.ret_types.get(name).cloned(),
             // The one allocating operator is `+` on Strings, and its result has
             // its left operand's type. Every other operator is a scalar, whose
@@ -1033,6 +1083,9 @@ impl Analysis<'_> {
                 // map's buffers, so the receiver stays a live owner (a safe
                 // read); `@keys` returns a fresh snapshot.
                 | "@has" | "@remove" | "@keys"
+                // `x.copy()` (RFC-0089 M1b) reads the receiver and allocates a
+                // duplicate — the receiver stays a live owner.
+                | "@copy"
                 | "trace" | "debug" | "info" | "warn" | "error"
         ) {
             for a in args {
@@ -1458,6 +1511,24 @@ mod tests {
         assert_eq!(o.droppable.get("make").map(|s| s.len()).unwrap_or(0), 0);
     }
 
+    /// RFC-0089 M1b. `copy` is a producer, so the copy is the caller's to
+    /// release — and the receiver stays a live owner, so both are freed once.
+    #[test]
+    fn copy_transfers_and_leaves_the_receiver_owned() {
+        let src = "fn main() -> Int64 { let a = \"x\" + \"y\"; let b = a.copy(); \
+                   print(a); print(b); return 0; }";
+        assert_eq!(drop_count(src, "main"), 2);
+    }
+
+    /// A `Ref<T>` copy shares the cell (RFC-0089 §5), so calling it a transfer
+    /// would release one cell twice.
+    #[test]
+    fn copying_a_ref_is_not_a_transfer() {
+        let src = "fn main() -> Int64 { let c = cell(5); let d = c.copy(); \
+                   set(d, 7); return get(c); }";
+        assert_eq!(drop_count(src, "main"), 1);
+    }
+
     #[test]
     fn identity_returning_param_is_not_owned() {
         let src = "fn id(s: String) -> String { return s; } fn main() -> Int64 { return 0; }";
@@ -1694,27 +1765,10 @@ mod tests {
 
     // ---- the RFC-0089 gate (M0) ------------------------------------------
 
-    /// Whether a value of `ty` transitively owns heap, under RFC-0089 rule 1.
-    ///
-    /// `release_kind` answers about the value's OWN storage; this asks about
-    /// everything it reaches, because a record of Strings moves under rule 1
-    /// even though releasing the record releases nothing today. `Ref<T>` is
-    /// excluded on purpose: RFC-0089 §5 keeps it a freely copied handle.
-    fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> bool {
-        if depth > 8 {
-            return false;
-        }
-        let deeper = |t: &Type| owns_heap(t, types, depth + 1);
-        match crate::types::resolve(ty, types) {
-            Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Stream(_) => {
-                true
-            }
-            Type::Option(t) | Type::ArrayN(t, _) | Type::Lazy(t) | Type::Task(t) => deeper(&t),
-            Type::Result(a, b) => deeper(&a) || deeper(&b),
-            Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
-            Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(&deeper)),
-            _ => false,
-        }
+    /// The RFC-0089 rule-1 predicate, now a public function so the checker and
+    /// both backends ask it too (`copy` copies exactly what this counts).
+    fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>, _depth: usize) -> bool {
+        super::owns_heap(ty, types)
     }
 
     /// Every `.vyrn` under a repo-relative directory.

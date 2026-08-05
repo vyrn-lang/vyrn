@@ -1,0 +1,183 @@
+// `x.copy()` — RFC-0089 M1b. A value of the receiver's type that shares no heap
+// with it.
+//
+// Before this, a program that needed a second, independent String wrote
+// `s + ""`. That works because concatenation always allocates, so the corpus was
+// resting on an implementation fact to express an intent the language had no
+// word for (RFC-0087 U2). `copy` is the word.
+//
+// The copy is structural and recursive: a record copies its fields, an array
+// copies its elements, a map copies its keys and its values, a sum copies the
+// payload of the variant it holds. It stops at two places, and both are
+// deliberate. A type that owns no heap IS its own copy — an `Int64`, a record of
+// numbers — so `copy` costs nothing there and means the same thing. And a
+// `Ref<T>` copies as the two words it is, so the copy names the same cell: `Ref`
+// is how a Vyrn program says "share this", and copying a handle does not
+// un-share it.
+//
+// Every pair below mutates one side and prints both.
+
+type Inner = { tag: String }
+
+type Outer = { label: String, inner: Inner, n: Int64 }
+
+type Note = | Blank | Text(String) | Counted(String, Int64)
+
+/// A String the compiler cannot fold: a literal lives in the data segment, and
+/// copying one has nothing interesting to say.
+fn built(s: String) -> String {
+    return s + "!"
+}
+
+fn render(v: Note) -> String {
+    return match v {
+        Blank => "blank",
+        Text(s) => s,
+        Counted(s, k) => s + "/" + k.toString(),
+    }
+}
+
+fn strings() {
+    let mut a = built("first")
+    let b = a.copy()
+    a = a + " changed"
+    print(a)
+    print(b)
+    // The header carries the length since RFC-0089 M1a, so a copy carries it
+    // too rather than re-deriving it. Multi-byte UTF-8 is where a recomputed
+    // length and a stored one part company.
+    let wide = built("héllo wörld")
+    let copy = wide.copy()
+    print(copy)
+    print(copy.byteLength)
+    print(copy.charCount())
+    // The empty cases: nothing to copy, and still a value of the right type.
+    let empty = ("" + "").copy()
+    print(empty.byteLength)
+    // A literal lives in the data segment and carries `cap == 0` — never
+    // realloc'd, never freed. Its copy is an ordinary owned buffer.
+    let fromStatic = "static".copy()
+    print(fromStatic)
+    print(fromStatic.byteLength)
+}
+
+fn arrays() {
+    let mut xs: Array<String> = []
+    xs.push(built("one"))
+    xs.push(built("two"))
+    let ys = xs.copy()
+    xs[0] = built("ONE")
+    print(xs[0])
+    print(ys[0])
+    // Nested: the inner arrays are copied too, so writing through one row of
+    // the copy leaves the original's row alone.
+    let mut grid: Array<Array<String>> = []
+    grid.push(ys.copy())
+    let other = grid.copy()
+    grid[0][1] = built("TWO")
+    print(grid[0][1])
+    print(other[0][1])
+    let none: Array<String> = []
+    print(none.copy().length)
+}
+
+fn smallArrays() {
+    // Inline: the elements live in the header, and the copy allocates only for
+    // the Strings.
+    let mut inline: SmallArray<String, 4> = []
+    inline.push(built("a"))
+    let inlineCopy = inline.copy()
+    inline[0] = built("A")
+    print(inline[0])
+    print(inlineCopy[0])
+    // Spilled: two elements past a capacity of one, so there is a buffer.
+    let mut spilled: SmallArray<String, 1> = []
+    spilled.push(built("x"))
+    spilled.push(built("y"))
+    let spilledCopy = spilled.copy()
+    spilled[1] = built("Y")
+    print(spilled[1])
+    print(spilledCopy[1])
+}
+
+fn maps() {
+    let mut m: Map<String, String> = [:]
+    m[built("k")] = built("v")
+    let n = m.copy()
+    m["k!"] = built("w")
+    if let Some(x) = m["k!"] {
+        print(x)
+    }
+    if let Some(x) = n["k!"] {
+        print(x)
+    }
+    let empty: Map<String, String> = [:]
+    print(empty.copy().length)
+}
+
+fn records() {
+    let mut o = Outer { label: built("L"), inner: Inner { tag: built("T") }, n: 3 }
+    let p = o.copy()
+    o.label = built("L2")
+    o.inner = Inner { tag: built("T2") }
+    print(o.label)
+    print(p.label)
+    print(o.inner.tag)
+    print(p.inner.tag)
+}
+
+fn sums() {
+    let one = Text(built("held"))
+    print(render(one.copy()))
+    let two = Counted(built("pair"), 7)
+    print(render(two.copy()))
+    print(render(Blank.copy()))
+    let some: Option<String> = Some(built("inside"))
+    let alsoSome = some.copy()
+    if let Some(s) = alsoSome {
+        print(s)
+    }
+    let none: Option<String> = None
+    let alsoNone = none.copy()
+    if let Some(s) = alsoNone {
+        print(s)
+    }
+    let ok: Result<String, String> = Ok(built("fine"))
+    print(match ok.copy() {
+            Ok(s) => s,
+            Err(s) => s,
+        })
+}
+
+/// A handle copies as a handle. `set` through the copy is visible through the
+/// original, because both name one cell.
+fn handles() {
+    let c = cell(41)
+    let d = c.copy()
+    set(d, 42)
+    print(get(c))
+}
+
+/// A scalar copies to itself, and that is what makes `copy` usable in generic
+/// code: this same body is monomorphized per element type.
+fn twice<T>(x: T) -> Array<T> {
+    let mut out: Array<T> = []
+    out.push(x.copy())
+    out.push(x.copy())
+    return out
+}
+
+fn main() -> Int64 {
+    strings()
+    arrays()
+    smallArrays()
+    maps()
+    records()
+    sums()
+    handles()
+    let numbers = twice(9)
+    print(numbers[0] + numbers[1])
+    let words = twice(built("word"))
+    print(words[0] + "|" + words[1])
+    return 0
+}

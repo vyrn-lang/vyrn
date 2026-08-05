@@ -3853,6 +3853,11 @@ impl Parser {
                             // `toArray(xs)` never reaches here and the checker
                             // reports it as an unknown call.
                             "toArray" => "@toArray".to_string(),
+                            // `x.copy()` (RFC-0089 M1b) — a deep copy of an
+                            // owned heap value. Method-only, so a free
+                            // `copy(x)` never reaches here and stays available
+                            // as a user function name.
+                            "copy" => "@copy".to_string(),
                             // Map methods (RFC-0028): method-only, unspellable
                             // internal names so a free `has(m, k)` never reaches
                             // here and the checker reports it as an unknown call.

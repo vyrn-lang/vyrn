@@ -1286,6 +1286,38 @@ impl<'a> Checker<'a> {
         crate::types::resolve(ty, self.types)
     }
 
+    /// The first type in `ty` — itself, or a part it reaches — that declares
+    /// `impl Owned for T` (RFC-0086 M1).
+    ///
+    /// Structural, because a record whose field is a declared container cannot
+    /// be copied field by field either: the compiler would duplicate the field
+    /// and the declared `release` would then run over both copies.
+    fn declared_owned_in(&self, ty: &Type, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+        if let Some(k) = crate::types::type_key(ty) {
+            if self.impls.contains(&(crate::types::OWNED.to_string(), k.clone())) {
+                return Some(k);
+            }
+        }
+        let deeper = |t: &Type| self.declared_owned_in(t, depth + 1);
+        match self.base(ty) {
+            Type::Option(t)
+            | Type::ArrayN(t, _)
+            | Type::Array(t)
+            | Type::SmallArray(t, _)
+            | Type::Lazy(t)
+            | Type::Task(t)
+            | Type::Stream(t) => deeper(&t),
+            Type::Result(a, b) => deeper(&a).or_else(|| deeper(&b)),
+            Type::Map(k, v) => deeper(&k).or_else(|| deeper(&v)),
+            Type::Record(fs) => fs.iter().find_map(|f| deeper(&f.ty)),
+            Type::Enum(vs) => vs.iter().find_map(|v| v.payload.iter().find_map(&deeper)),
+            _ => None,
+        }
+    }
+
     /// The generic parameters of the enum a variant belongs to (empty if the
     /// enum is not generic).
     fn enum_type_params(&self, enum_name: &str) -> Vec<String> {
@@ -6025,6 +6057,51 @@ impl<'a> Checker<'a> {
             };
             return Ok(Type::Array(Box::new(elem)));
         }
+        // `x.copy()` (RFC-0089 M1b) — a deep copy of an owned heap value. The
+        // result has the receiver's type and the caller owns it.
+        //
+        // Two receivers are refused, for two different reasons.
+        //
+        // A type that declares `impl Owned for T` (RFC-0086 M1) states how it is
+        // released and says nothing about how it is duplicated. Copying its
+        // fields would produce a second value with the same invariants claimed
+        // over the same resources, and the release the type declared would then
+        // run twice. RFC-0091 makes `Copy` a protocol the type implements; until
+        // then the honest answer is a refusal that names the type.
+        //
+        // A `Stream<T>` is a producer with a cursor, not a container: RFC-0075
+        // gave it a variant-aware release for that reason, and duplicating the
+        // header would hand two consumers one cursor.
+        //
+        // Every other receiver is accepted, including a scalar. `copy` means
+        // "a value of this type that shares nothing with the receiver", and for
+        // a type that owns no heap — an `Int64`, a record of scalars, a `Ref<T>`
+        // — the receiver already is one, so the copy is the value. That keeps
+        // one meaning for one word across a monomorphized generic, where the
+        // same `x.copy()` is a String in one instance and an `Int64` in the next.
+        if name == "@copy" {
+            if args.len() != 1 {
+                return Err(format!("line {line}: `copy` takes no arguments"));
+            }
+            let t = self.expr(&args[0], scope, None, fn_ret)?;
+            if matches!(self.base(&t), Type::Err) {
+                return Ok(Type::Err);
+            }
+            if let Some(declared) = self.declared_owned_in(&t, 0) {
+                return Err(format!(
+                    "line {line}: `copy` cannot copy `{declared}`: it declares `impl Owned for \
+                     {declared}`, so only `{declared}` knows what duplicating it means. Give it a \
+                     copying method of its own, or copy the parts you need"
+                ));
+            }
+            if matches!(self.base(&t), Type::Stream(_)) {
+                return Err(format!(
+                    "line {line}: `copy` cannot copy a Stream: a stream is a cursor over a \
+                     producer, not a container. Collect it first (`collect`), then copy the array"
+                ));
+            }
+            return Ok(t);
+        }
         // Map methods (RFC-0028), all method-only (unspellable `@` names). `has`
         // and `keys` are read-only; `remove` mutates and requires a `mut` binding.
         if name == "@has" || name == "@remove" || name == "@keys" {
@@ -8725,6 +8802,76 @@ mod tests {
 
     fn check_src(s: &str) -> Result<(), String> {
         check(&parse(lex(s).unwrap()).unwrap())
+    }
+
+    // ---- RFC-0089 M1b: `x.copy()` ------------------------------------------
+
+    /// A copy has its receiver's type, on every receiver that owns heap.
+    #[test]
+    fn copy_types_as_its_receiver() {
+        assert!(check_src(
+            "fn main() -> Int64 { let s = \"a\" + \"b\"\n let t: String = s.copy()\n \
+             return t.byteLength }"
+        )
+        .is_ok());
+        assert!(check_src(
+            "type R = { name: String }\n\
+             fn main() -> Int64 { let r = R { name: \"a\" }\n let q: R = r.copy()\n \
+             return q.name.byteLength }"
+        )
+        .is_ok());
+        assert!(check_src(
+            "fn main() -> Int64 { let m: Map<String, String> = [:]\n let n: Map<String, String> = \
+             m.copy()\n return n.length }"
+        )
+        .is_ok());
+    }
+
+    /// A scalar copies to itself. The alternative — a diagnostic — would fire in
+    /// a monomorphized generic where the same `x.copy()` is a String in one
+    /// instance and an `Int64` in the next, so `copy` keeps one meaning.
+    #[test]
+    fn copy_of_a_scalar_is_the_value() {
+        assert!(check_src("fn main() -> Int64 { let n = 5\n return n.copy() }").is_ok());
+        assert!(check_src("fn main() -> Int64 { let c = cell(5)\n return get(c.copy()) }").is_ok());
+    }
+
+    /// A type that declares `impl Owned for T` (RFC-0086 M1) says how it is
+    /// released and nothing about how it is duplicated. Copying its fields would
+    /// run that release over two values, so the refusal names the type — and it
+    /// reaches through a record that merely holds one.
+    #[test]
+    fn copy_refuses_a_declared_container() {
+        let src = "protocol Owned { fn release(self) }\n\
+                   type Ring = { buf: Array<Int64> }\n\
+                   impl Owned for Ring { fn release(self) { print(1) } }\n\
+                   fn main() -> Int64 { let r = Ring { buf: [] }\n let q = r.copy()\n return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("`copy` cannot copy `Ring`"), "{e}");
+        let nested = "protocol Owned { fn release(self) }\n\
+                      type Ring = { buf: Array<Int64> }\n\
+                      impl Owned for Ring { fn release(self) { print(1) } }\n\
+                      type Holder = { r: Ring }\n\
+                      fn main() -> Int64 { let h = Holder { r: Ring { buf: [] } }\n \
+                      let q = h.copy()\n return 0 }";
+        let e = check_src(nested).unwrap_err();
+        assert!(e.contains("`copy` cannot copy `Ring`"), "{e}");
+    }
+
+    /// A `Stream<T>` is a cursor over a producer, not a container.
+    #[test]
+    fn copy_refuses_a_stream() {
+        let src = "fn main() -> Int64 { let xs: Array<Int64> = []\n let s = fromArray(xs)\n \
+                   let t = s.copy()\n close(t)\n return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("`copy` cannot copy a Stream"), "{e}");
+    }
+
+    #[test]
+    fn copy_takes_no_arguments() {
+        let e = check_src("fn main() -> Int64 { let s = \"a\"\n let t = s.copy(1)\n return 0 }")
+            .unwrap_err();
+        assert!(e.contains("`copy` takes no arguments"), "{e}");
     }
 
     #[test]

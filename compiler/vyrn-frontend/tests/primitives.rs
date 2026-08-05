@@ -140,6 +140,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@has", Memory, "Map (RFC-0028): key probe"),
     ("@keys", Memory, "Map: a fresh snapshot of the key column"),
     ("@remove", Memory, "Map: order-preserving removal in place"),
+    ("@copy", Memory, "RFC-0089 M1b: a value that shares no heap with its receiver"),
     // RFC-0083 M2. Array access with a bounds trap, exactly as `at` is — the only
     // difference is that ONE check covers four elements, which is the whole reason
     // the vector form exists.
@@ -514,7 +515,11 @@ fn the_census_is_the_code() {
     // it, so a program that called it could not build for wasm at all. `drop a`
     // is the reclamation, on all three engines. This test named the stale row
     // before anything else did.
-    assert_eq!(found.len(), 92, "the primitive core changed size");
+    // 92 -> 93 when RFC-0089 M1b added `@copy`. A primitive rather than a Vyrn
+    // routine for the reason `@toArray` is one: the operation is the memory
+    // model, so its answer is the shape of the value, and a library written in
+    // Vyrn has no way to ask what a value is made of.
+    assert_eq!(found.len(), 93, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

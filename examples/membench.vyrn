@@ -142,6 +142,50 @@ fn slabChurn(n: Int64) -> Int64 {
     return t
 }
 
+/// `copy` of a long String (RFC-0089 M1b): a header read, one allocation and one
+/// `memcpy` per turn. The row it replaces is `s + ""`, which the corpus wrote for
+/// the same purpose — so the pair of numbers says what the named operation costs
+/// against the trick it retires.
+fn copyString(n: Int64, s: String) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let c = s.copy()
+        t = t + Int64(c[0])
+        i = i + 1
+    }
+    return t
+}
+
+/// `copy` of a 1000-element `Array<Int64>`: one allocation and one `memcpy`, and
+/// no per-element work at all, because an `Int64` owns no heap. An array of
+/// Strings would add a loop of `copy`s — that is the same row, per element.
+fn copyArray(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let c = xs.copy()
+        t = t + c[0]
+        i = i + 1
+    }
+    return t
+}
+
+bench "copy of a 10 KB string, 1000 times" {
+    let s = spine(blackBox(1000))
+    blackBox(copyString(blackBox(1000), blackBox(s)))
+}
+
+bench "copy of a 1000-element Array<Int64>, 1000 times" {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < 1000 {
+        xs.push(i)
+        i = i + 1
+    }
+    blackBox(copyArray(blackBox(1000), blackBox(xs)))
+}
+
 bench "string concat, 1000 fresh buffers" {
     blackBox(concatFresh(blackBox(1000), blackBox(pad()), blackBox(pad())))
 }
@@ -185,5 +229,7 @@ fn main() -> Int64 {
     print(pushChurn(4))
     print(cellChurn(4))
     print(slabChurn(4))
+    print(copyString(4, pad()))
+    print(copyArray(4, [1, 2, 3]))
     return 0
 }
