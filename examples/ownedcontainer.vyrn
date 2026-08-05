@@ -1,0 +1,83 @@
+// A third party's container, reclaimed by the same mechanism a built-in is —
+// RFC-0086 M1.
+//
+// Nothing here is known to the compiler. `Owned` is declared in this file, not
+// imported: `vyrn run` on a bare file has no resolver and therefore no `std/`,
+// so the answer that frees memory may not depend on one. The compiler seeds the
+// rows it knows intrinsically (`String`, `Array`, `Map`, `Ref`, `SmallArray`) and
+// reads the rest out of the program. Both are one lookup.
+//
+// So the compiler asks `Ring` how it is released, `Ring` answers, and every
+// engine calls that answer at block exit. There is no list of container types in
+// the compiler for `Ring` to be missing from.
+
+/// A type that owns heap and can say how to give it back.
+protocol Owned {
+    fn release(self)
+}
+
+type Ring = {
+    label: String,
+    slots: Array<Int64>
+}
+
+impl Owned for Ring {
+    fn release(self) {
+        // Printing here is what makes the reclamation observable. All three
+        // engines run this, at the same point, in the same order.
+        print("release " + self.label + " (" + self.slots.length.toString() + ")")
+        let slots = self.slots
+        drop slots // the buffer goes back, once, here and nowhere else
+    }
+}
+
+/// A second container, added with no compiler change and no `std/` change —
+/// which is the whole test of the design.
+type Tally = {
+    total: Int64
+}
+
+impl Owned for Tally {
+    fn release(self) {
+        print("tally " + self.total.toString())
+    }
+}
+
+/// Hands the caller a ring it owns. The compiler reads the return TYPE, finds a
+/// row for it, and makes every receiving `let` an owner in turn.
+fn ringOf(label: String, n: Int64) -> Ring {
+    let mut slots: Array<Int64> = [] // the literal the old list never released
+    let mut i = 0
+    while i < n {
+        slots.push(i * i)
+        i = i + 1
+    }
+    return Ring { label: label, slots: slots }
+}
+
+fn tallyOf(n: Int64) -> Tally {
+    return Tally { total: n * 10 }
+}
+
+fn inner() {
+    let t = tallyOf(4)
+    print("inside")
+}
+
+fn main() -> Int64 {
+    // Each turn's ring is released at the end of the turn, so the heap is flat
+    // across the loop rather than growing by one buffer per iteration.
+    let mut i = 1
+    while i <= 3 {
+        let r = ringOf("ring" + i.toString(), i)
+        i = i + 1
+    }
+
+    // A callee's owner is released when the callee returns, not when its caller
+    // does — the release is per block, exactly as it is for a `String`.
+    inner()
+    print("after")
+
+    let last = ringOf("last", 2)
+    return 0 // released on the way out of `main`
+}
