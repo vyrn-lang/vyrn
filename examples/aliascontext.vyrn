@@ -1,0 +1,72 @@
+/// A type alias is a NAME for a type, so every place that reads an annotation
+/// must read what the name resolves to. Five expressions take their type *from*
+/// the annotation instead of from their own contents — an empty `[]`, an empty
+/// `[:]`, `array()`, `None` and `Some(x)` — and each one used to match the
+/// annotation as written. Under an alias the match missed and the compiler said
+/// it could not infer a type that was written down.
+///
+/// Everything here is annotated. Nothing here should need inference.
+
+/// The alias `mapdemo.vyrn` already declares for `fromJson`. The gap was that it
+/// could never be used as an annotation.
+type IntMap = Map<String, Int64>
+
+type Nums = Array<Int64>
+
+type Age = Int64 where value >= 18
+
+/// A named `Option` (RFC-0024). Its payload is refined, so the payload's
+/// validation is part of what resolving the alias recovers.
+type MaybeAge = Option<Age>
+
+fn sum(ns: Nums) -> Int64 {
+    let mut t = 0
+    for n in ns {
+        t = t + n
+    }
+    return t
+}
+
+fn describe(m: MaybeAge) -> String {
+    return match m {
+        Some(a) => "age \{a}",
+        None => "nobody",
+    }
+}
+
+fn main() -> Int64 {
+    // --- An empty literal under an alias -------------------------------
+    let mut inv: IntMap = [:]
+    inv["apple"] = 3
+    inv["pear"] = 5
+    print("empty map alias: length=\{inv.length} json=\{toJson(inv)}")
+
+    let mut ns: Nums = []
+    ns.push(4)
+    ns.push(5)
+    print("empty array alias: length=\{ns.length} sum=\{sum(ns)}")
+
+    // --- A non-empty literal under an alias ----------------------------
+    // This one type-checked before, but as a FIXED `Array<Int64, 3>` that the
+    // `let` then rejected. Resolving the annotation makes it the growable array
+    // the alias names.
+    let three: Nums = [1, 2, 3]
+    print("filled array alias: sum=\{sum(three)} length=\{three.length}")
+
+    let prices: IntMap = ["usd": 1, "eur": 2]
+    print("filled map alias: json=\{toJson(prices)}")
+
+    // --- `array()` under an alias --------------------------------------
+    let mut grown: Nums = array()
+    grown.push(7)
+    print("array() alias: sum=\{sum(grown)}")
+
+    // --- `None` and `Some` under an alias ------------------------------
+    let nobody: MaybeAge = None
+    let someone: MaybeAge = Some(21)
+    print("\{describe(nobody)} / \{describe(someone)}")
+
+    // The alias resolves far enough for `Age` to run: 21 passes the predicate.
+    // `Some(3)` here would be a compile error naming `Age`, not a type mismatch.
+    return 0
+}

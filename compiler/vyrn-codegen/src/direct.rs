@@ -4956,6 +4956,9 @@ impl Fn_<'_> {
             }
             "@keys" if args.len() == 1 => return self.map_method(m, b, name, args, line),
             "at" if args.len() == 2 => return self.at(m, b, args, line),
+            // `array()` IS `[]` — an empty growable array taking its element type
+            // from the position. One spelling, one lowering.
+            "array" if args.is_empty() => return self.array_lit(m, b, &[], line),
             "push" if args.len() == 2 => return self.push(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
