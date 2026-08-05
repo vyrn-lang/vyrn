@@ -52,7 +52,7 @@ fn ringOf(label: String, n: Int64) -> Ring {
         slots.push(i * i)
         i = i + 1
     }
-    return Ring { label: label, slots: slots }
+    return Ring { label: label.copy(), slots: slots }
 }
 
 fn tallyOf(n: Int64) -> Tally {

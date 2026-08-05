@@ -241,10 +241,10 @@ fn rpcIdentOf(s: String) -> String {
 fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) -> String {
     // Every distinct declaring-module specifier, in first-appearance order: the
     // contract first (its procedures always live there), then each type's module.
-    let mut specs: Array<String> = [contract]
+    let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
         if rpcListContains(specs, t.module) == false {
-            specs.push(t.module)
+            specs.push(t.module.copy())
         }
     }
     let mut out = ""
@@ -256,13 +256,13 @@ fn typeImportBlock(iface: ModuleInterface, contract: String, procAlias: Bool) ->
                 if procAlias {
                     names.push(f.name + " as " + f.name + "__real")
                 } else {
-                    names.push(f.name)
+                    names.push(f.name.copy())
                 }
             }
         }
         for t in iface.types {
             if t.module == spec {
-                names.push(t.name)
+                names.push(t.name.copy())
             }
         }
         if names.length > 0 {
@@ -305,7 +305,7 @@ fn rpcReplyTypes() -> String {
     out = out + "export fn rpcIssuesFrom(from: Array<Issue>) -> Array<RpcIssue> {\n"
     out = out + "    let mut out: Array<RpcIssue> = []\n"
     out = out + "    for i in from {\n"
-    out = out + "        out.push(RpcIssue { key: i.key, path: i.path, message: i.message })\n"
+    out = out + "        out.push(RpcIssue { key: i.key.copy(), path: i.path.copy(), message: i.message.copy() })\n"
     out = out + "    }\n"
     out = out + "    return out\n}\n"
     return out
@@ -769,8 +769,8 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
     return RpcConfig {
         prefix: if p == "" { cfg.prefix } else { p },
         path: if t == "" { cfg.path } else { t },
-        pinKeys: keys,
-        pinPaths: paths,
+        pinKeys: keys.copy(),
+        pinPaths: paths.copy(),
     }
 }
 
@@ -975,7 +975,7 @@ gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
     let mut specs: Array<String> = []
     for s in typeMods {
         if rpcListContains(specs, s) == false {
-            specs.push(s)
+            specs.push(s.copy())
         }
     }
     for spec in specs {

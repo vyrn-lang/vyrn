@@ -302,7 +302,7 @@ fn toFloat(sc: Scanned, mantBits: Int64, minExp: Int64) -> Float64 {
     }
     // Scale into [1/2, 1). `dp > 0` means the value is at least 1; `dp < 0`, or
     // `dp == 0` with a leading digit below 5, means it is below a half.
-    let mut x = Dec { d: sc.d, dp: sc.dp, trunc: sc.trunc }
+    let mut x = Dec { d: sc.d.copy(), dp: sc.dp, trunc: sc.trunc }
     let mut e2 = 0
     // Coarse first, 32 bits at a time — each pass moves the decimal exponent by
     // between nine and ten, so this lands within ten of the target and cannot

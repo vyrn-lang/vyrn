@@ -182,7 +182,7 @@ export fn benchMeasure(name: String, body: fn() -> Unit) -> BenchResult {
 
     // 4. stats.
     return BenchResult {
-        name: name,
+        name: name.copy(),
         minNs: minOf(samples),
         medianNs: median(samples),
         meanNs: mean(samples),

@@ -152,7 +152,7 @@ fn vyxIdentOf(key: String) -> String {
 /// the compiler today; kept for the page/component builders' historical API.
 fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
     let mut out = arr.copy()
-    out.push(s)
+    out.push(s.copy())
     return out
 }
 
@@ -664,7 +664,7 @@ type VyxDir = { found: Bool, value: String, line: Int64, col: Int64 }
 fn vyxDir(attrs: Array<VyxAttr>, name: String) -> VyxDir {
     for a in attrs {
         if a.evt == false && a.name == name {
-            return VyxDir { found: true, value: a.value, line: a.line, col: a.col }
+            return VyxDir { found: true, value: a.value.copy(), line: a.line, col: a.col }
         }
     }
     return VyxDir { found: false, value: "", line: 0, col: 0 }
@@ -679,7 +679,7 @@ fn vyxStripDirectives(attrs: Array<VyxAttr>, dropKey: Bool) -> Array<VyxAttr> {
         let structural = a.name == "v-if" || a.name == "v-else-if" || a.name == "v-else" || a.name == "v-for" || a.name == "v-html"
         let isKey = dropKey && a.evt == false && a.name == "key"
         if structural == false && isKey == false {
-            out.push(a)
+            out.push(a.copy())
         }
     }
     return out
@@ -752,7 +752,7 @@ fn vyxElemHasDir(n: VyxNode, name: String) -> Bool {
 
 /// Process ONE raw element into its final node — recurse into children, apply
 /// `v-html`, and wrap a `v-for` element into `VNFor` (its required `:key`).
-fn vyxProcessElem(n: VyxNode, fileId: String) -> VyxOne {
+fn vyxProcessElem(n: consume VyxNode, fileId: String) -> VyxOne {
     return match n {
         VNElem(tag, isComp, attrs, kids, line) => vyxProcessElemInner(tag, isComp, attrs, kids, line, fileId),
         VNText(s) => VyxOne { node: n, err: "" },
@@ -1284,7 +1284,7 @@ fn vyxScriptErr(err: String) -> VyxScript {
         helperTexts: [],
         helperLines: [],
         helperCols: [],
-        err: err,
+        err: err.copy(),
     }
 }
 
@@ -1444,9 +1444,15 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
     if roots.length > 1 {
         return vyxCompErr(compName, fnName, fileId, srcPath, vyxErr("VYX_MULTIPLE_ROOTS", fileId, vyxRootLine(roots)))
     }
-    let root = roots[0]
+    // The root MOVES into the component (a `VyxNode` refers to itself, so it
+    // has no `copy`), which means the flag that reads it is computed first.
+    let mut root = VNChildren
+    for r in consume roots {
+        root = r
+    }
+    let takesChildren = vyxUsesChildren([root])
     return VyxComp {
-        name: compName,
+        name: compName.copy(),
         fnName: fnName,
         fileId: fileId,
         srcPath: srcPath,
@@ -1460,16 +1466,16 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
         helperLines: helperLines,
         helperCols: helperCols,
         root: root,
-        takesChildren: vyxUsesChildren([root]),
+        takesChildren: takesChildren,
         err: "",
     }
 }
 
 /// The element/component roots among the top-level nodes (a bare interpolation or
 /// control block at the root is not a valid single root).
-fn vyxElementRoots(nodes: Array<VyxNode>) -> Array<VyxNode> {
+fn vyxElementRoots(nodes: consume Array<VyxNode>) -> Array<VyxNode> {
     let mut out: Array<VyxNode> = []
-    for n in nodes {
+    for n in consume nodes {
         let keep = match n {
             VNElem(t, c, a, k, l) => true,
             VNText(s) => false,
@@ -1502,10 +1508,10 @@ fn vyxRootLine(roots: Array<VyxNode>) -> Int64 {
 /// A `VyxComp` carrying only an error.
 fn vyxCompErr(name: String, fnName: String, fileId: String, srcPath: String, err: String) -> VyxComp {
     return VyxComp {
-        name: name,
-        fnName: fnName,
-        fileId: fileId,
-        srcPath: srcPath,
+        name: name.copy(),
+        fnName: fnName.copy(),
+        fileId: fileId.copy(),
+        srcPath: srcPath.copy(),
         propNames: [],
         propTypes: [],
         imports: [],
@@ -1517,7 +1523,7 @@ fn vyxCompErr(name: String, fnName: String, fileId: String, srcPath: String, err
         helperCols: [],
         root: VNText(""),
         takesChildren: false,
-        err: err,
+        err: err.copy(),
     }
 }
 
@@ -1563,7 +1569,7 @@ gen fn vyxRegion(text: String, src: String, line: Int64, col: Int64) -> String {
 fn vyxShiftAttrs(attrs: Array<VyxAttr>, d: Int64) -> Array<VyxAttr> {
     let mut out: Array<VyxAttr> = []
     for a in attrs {
-        out.push(VyxAttr { name: a.name, value: a.value, dyn: a.dyn, evt: a.evt, line: a.line + d, col: a.col })
+        out.push(VyxAttr { name: a.name.copy(), value: a.value.copy(), dyn: a.dyn, evt: a.evt, line: a.line + d, col: a.col })
     }
     return out
 }
@@ -1694,22 +1700,22 @@ gen fn vyxRelocateComp(comp: VyxComp, realBa: Array<UInt8>, sStart: Int64, sEnd:
         }
     }
     return VyxComp {
-        name: comp.name,
-        fnName: comp.fnName,
-        fileId: comp.fileId,
-        srcPath: realSrc,
-        propNames: comp.propNames,
-        propTypes: comp.propTypes,
-        imports: comp.imports,
+        name: comp.name.copy(),
+        fnName: comp.fnName.copy(),
+        fileId: comp.fileId.copy(),
+        srcPath: realSrc.copy(),
+        propNames: comp.propNames.copy(),
+        propTypes: comp.propTypes.copy(),
+        imports: comp.imports.copy(),
         importLines: importLines,
         importCols: importCols,
-        helpers: comp.helpers,
-        helperTexts: comp.helperTexts,
+        helpers: comp.helpers.copy(),
+        helperTexts: comp.helperTexts.copy(),
         helperLines: helperLines,
         helperCols: helperCols,
         root: vyxShiftNode(comp.root, dLine),
         takesChildren: comp.takesChildren,
-        err: comp.err,
+        err: comp.err.copy(),
     }
 }
 
@@ -1763,7 +1769,7 @@ gen fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, file
         VNText(s) => VyxEmit { code: acc + ".push(text(" + vyxStrLit(s) + "))\n", err: "" },
         VNInterp(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(text((" + x + ").toString()))\n", src, l, c), err: "" },
         VNRaw(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(Raw(" + x + "))\n", src, l, c), err: "" },
-        VNChildren => VyxEmit { code: "for vyxCh in children {\n" + acc + ".push(vyxCh)\n}\n", err: "" },
+        VNChildren => VyxEmit { code: "for vyxCh in consume children {\n" + acc + ".push(vyxCh)\n}\n", err: "" },
         VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, fileId, src),
         VNIf(conds, cl, cc, bodies, els, has) => vyxEmitIf(conds, cl, cc, bodies, els, has, acc, path, reg, fileId, src),
         VNFor(v, it, k, body, l, c) => vyxEmitFor(v, it, k, body, l, c, acc, path, reg, fileId, src),
@@ -1871,7 +1877,7 @@ type VyxAttrFound = { found: Bool, value: String, dyn: Bool }
 fn vyxFindAttr(attrs: Array<VyxAttr>, name: String) -> VyxAttrFound {
     for a in attrs {
         if a.evt == false && a.name == name {
-            return VyxAttrFound { found: true, value: a.value, dyn: a.dyn }
+            return VyxAttrFound { found: true, value: a.value.copy(), dyn: a.dyn }
         }
     }
     return VyxAttrFound { found: false, value: "", dyn: false }
@@ -1892,7 +1898,7 @@ gen fn vyxEmitIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<
         err = err + inner.err
         code = code + vyxRegion(head + conds[bi] + " {\n", src, condLines[bi], condCols[bi])
         code = code + "let mut " + bacc + ": Array<Html> = []\n" + inner.code
-        code = code + "for vyxN in " + bacc + " {\n" + acc + ".push(vyxN)\n}\n"
+        code = code + "for vyxN in consume " + bacc + " {\n" + acc + ".push(vyxN)\n}\n"
         bi = bi + 1
     }
     if has {
@@ -1901,7 +1907,7 @@ gen fn vyxEmitIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<
         err = err + inner.err
         code = code + "} else {\n"
         code = code + "let mut " + eacc + ": Array<Html> = []\n" + inner.code
-        code = code + "for vyxN in " + eacc + " {\n" + acc + ".push(vyxN)\n}\n"
+        code = code + "for vyxN in consume " + eacc + " {\n" + acc + ".push(vyxN)\n}\n"
     }
     code = code + "}\n"
     return VyxEmit { code: code, err: err }
@@ -1916,7 +1922,7 @@ gen fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line
     // directive points at the header column.
     let mut code = vyxRegion("for " + v + " in " + it + " {\n", src, line, col)
     code = code + "let mut " + facc + ": Array<Html> = []\n" + inner.code
-    code = code + "for vyxN in " + facc + " {\n" + acc + ".push(keyed((" + key + ").toString(), vyxN))\n}\n"
+    code = code + "for vyxN in consume " + facc + " {\n" + acc + ".push(keyed((" + key + ").toString(), vyxN))\n}\n"
     code = code + "}\n"
     return VyxEmit { code: code, err: inner.err }
 }
@@ -2142,8 +2148,8 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
             let imp = vyxParseImport(line)
             if imp.ok == false {
                 if includes(rawLines, line) == false {
-                    rawLines.push(line)
-                    rawSrc.push(c.srcPath)
+                    rawLines.push(line.copy())
+                    rawSrc.push(c.srcPath.copy())
                     rawLine.push(oL)
                     rawCol.push(oC)
                 }
@@ -2164,7 +2170,7 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                 if found == false {
                     nsAlias.push(imp.alias)
                     nsSpec.push(imp.spec)
-                    nsSrc.push(c.srcPath)
+                    nsSrc.push(c.srcPath.copy())
                     nsLine.push(oL)
                     nsCol.push(oC)
                 }
@@ -2184,9 +2190,9 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                         ci = ci + 1
                     }
                     if seen == false {
-                        cName.push(nm)
+                        cName.push(nm.copy())
                         cSpec.push(imp.spec)
-                        cFile.push(c.fileId)
+                        cFile.push(c.fileId.copy())
                     }
                 }
                 // Union into the spec bucket.
@@ -2201,7 +2207,7 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                 if si < 0 {
                     selSpecs.push(imp.spec)
                     selNames.push(imp.names)
-                    selSrc.push(c.srcPath)
+                    selSrc.push(c.srcPath.copy())
                     selLine.push(oL)
                     selCol.push(oC)
                     selCount.push(1)
@@ -2209,10 +2215,10 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                     let mut cur = selNames[si]
                     for nm in imp.names {
                         if includes(cur, nm) == false {
-                            cur.push(nm)
+                            cur.push(nm.copy())
                         }
                     }
-                    selNames[si] = cur
+                    selNames[si] = cur.copy()
                     selCount[si] = selCount[si] + 1
                 }
             }
@@ -2270,7 +2276,9 @@ fn vyxEmitSignature(comp: VyxComp) -> String {
         i = i + 1
     }
     if comp.takesChildren {
-        params.push("children: Array<Html>")
+        // The slot splice MOVES the children into the component's own
+        // accumulator (RFC-0089 rule 2), so the view owns what it is given.
+        params.push("children: consume Array<Html>")
     }
     return "export fn " + comp.fnName + "(" + joinWith(params, ", ") + ") -> Html {\n"
 }
@@ -2323,7 +2331,10 @@ gen fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, fileId: String, src: Str
 /// attribute is routed through `vyxTheme.cls(…)`; `theme` is the path passed to
 /// `componentsThemed`, resolved (like `dir`) relative to the importing module.
 /// EXPORTED so `std/ui`'s `pages` can build a page module from `.vyx` components.
-export gen fn vyxBuildModule(comps: Array<VyxComp>, themed: Bool, theme: String) -> String {
+export gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String) -> String {
+    // The registry TAKES the components — a `VyxComp` holds a `VyxNode`, which
+    // refers to itself and so has no `copy`. Everything below reads them back
+    // out of `reg`.
     let reg = VyxRegistry { names: vyxCompNames(comps), comps: comps, themed: themed }
     // The module banner + `std/html` import: a hole-less code quote, so the fixed
     // preamble is validated as Vyrn when `std/vyx` is compiled (RFC-0054 M4b),
@@ -2342,7 +2353,7 @@ import * as vyxTheme from tw(\{theme})
     }
 
     // Merged pass-through imports from every component (RFC-0039 §3).
-    let merged = vyxMergeImports(comps)
+    let merged = vyxMergeImports(reg.comps)
     if merged.err != "" {
         return merged.err
     }
@@ -2352,14 +2363,14 @@ import * as vyxTheme from tw(\{theme})
     // RFC-0048 §1: each verbatim-copied helper line is bracketed by its own
     // `//@origin` directive so a helper `fn`/`type`/`let` identifier maps back to
     // the `.vyx` — the helper CODE is unchanged, only origin comments are added.
-    for c in comps {
+    for c in reg.comps {
         if trim(c.helpers).byteLength > 0 {
             out = out + vyxHelperBlock(c)
         }
     }
     // One view function per component.
     let mut err = ""
-    for c in comps {
+    for c in reg.comps {
         let e = vyxEmitComponent(c, reg)
         out = out + e.code
         err = err + e.err
@@ -2398,7 +2409,7 @@ gen fn vyxHelperBlock(c: VyxComp) -> String {
 fn vyxCompNames(comps: Array<VyxComp>) -> Array<String> {
     let mut out: Array<String> = []
     for c in comps {
-        out.push(c.name)
+        out.push(c.name.copy())
     }
     return out
 }
@@ -2452,9 +2463,9 @@ gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
             i = i + 1
         }
         if c.takesChildren {
-            ps.push(ParamInfo { name: "children", spelling: "Array<Html>", schema: vyxNoSchema(), uncodable: "" })
+            ps.push(ParamInfo { name: "children", spelling: "consume Array<Html>", schema: vyxNoSchema(), uncodable: "" })
         }
-        fns.push(FnInfo { name: c.fnName, params: ps, ret: "Html", retSchema: vyxNoSchema(), retUncodable: "", mutates: false, origin: vyxNoOrigin() })
+        fns.push(FnInfo { name: c.fnName.copy(), params: ps, ret: "Html", retSchema: vyxNoSchema(), retUncodable: "", mutates: false, origin: vyxNoOrigin() })
     }
     return ModuleInterface { functions: fns, types: [] }
 }
@@ -3122,7 +3133,7 @@ gen fn vyxStripHead(script: String, fileId: String) -> VyxHeadSplit {
     let sb = bytes(script)
     let hb = vyxFindKwBlock(sb, "head")
     if hb.found == false || hb.malformed {
-        return VyxHeadSplit { rest: script, head: vyxNoHead() }
+        return VyxHeadSplit { rest: script.copy(), head: vyxNoHead() }
     }
     let end = vyxMatchCurly(sb, hb.braceAt)
     let body = vyxSlice(sb, hb.braceAt + 1, end - 1)
@@ -4087,7 +4098,7 @@ export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: Strin
         return moduleStr
     }
     let mut out = moduleStr
-    out = out + "export fn layout(children: Array<Html>) -> Html {\n    return uiLayoutBody(children)\n}\n"
+    out = out + "export fn layout(children: consume Array<Html>) -> Html {\n    return uiLayoutBody(children)\n}\n"
     out = out + vyxEmitHeadFns(hs.head, "", "")
     return out
 }
@@ -4377,7 +4388,7 @@ test "a component uses children when the template has a slot" {
     assertEq(comp.err, "")
     assert(comp.takesChildren)
     let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("export fn shell(children: Array<Html>) -> Html"))
+    assert(out.contains("export fn shell(children: consume Array<Html>) -> Html"))
 }
 
 test "v-html lowers to a Raw content node" {

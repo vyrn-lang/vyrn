@@ -226,9 +226,9 @@ fn moduleExports(iface: ModuleInterface) -> Array<Export> {
     for f in iface.functions {
         let mut ps: Array<String> = []
         for p in f.params {
-            ps.push(p.spelling)
+            ps.push(p.spelling.copy())
         }
-        out.push(Export { name: f.name, kind: "fn", params: ps, ret: f.ret })
+        out.push(Export { name: f.name.copy(), kind: "fn", params: ps, ret: f.ret.copy() })
     }
     return out
 }
@@ -266,7 +266,7 @@ fn contractSite(c: ContractInfo) -> String {
 }
 
 fn issue(key: String, path: String, message: String) -> Issue {
-    return Issue { key: key, path: path, message: message }
+    return Issue { key: key.copy(), path: path.copy(), message: message.copy() }
 }
 
 /// The member name closest to `name` within `nearThreshold()`, or `None`. Ties
@@ -307,7 +307,7 @@ fn alternatives(c: ContractInfo, name: String) -> Array<MemberInfo> {
     let mut out: Array<MemberInfo> = []
     for m in c.members {
         if m.name == name {
-            out.push(m)
+            out.push(m.copy())
         }
     }
     return out
@@ -321,7 +321,7 @@ fn memberNames(c: ContractInfo) -> Array<String> {
     let mut out: Array<String> = []
     for m in c.members {
         if m.name != "*" && includes(out, m.name) == false {
-            out.push(m.name)
+            out.push(m.name.copy())
         }
     }
     return out

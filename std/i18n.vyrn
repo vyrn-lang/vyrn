@@ -201,7 +201,7 @@ type LocaleEntry = { key: String, value: String }
 type LocaleData = { ok: Bool, error: String, entries: Array<LocaleEntry> }
 
 fn dataError(msg: String) -> LocaleData {
-    return LocaleData { ok: false, error: msg, entries: [] }
+    return LocaleData { ok: false, error: msg.copy(), entries: [] }
 }
 
 /// The leaf-kind error for a value that is neither a string nor a nested object.
@@ -212,7 +212,7 @@ fn i18nUnsupported() -> String {
 /// Append one `key` → `value` entry (helper so a `match` arm stays a single
 /// expression — the language has no multi-statement arm).
 fn addEntry(entries: modify Array<LocaleEntry>, key: String, value: String) -> String {
-    entries.push(LocaleEntry { key: key, value: value })
+    entries.push(LocaleEntry { key: key.copy(), value: value.copy() })
     return ""
 }
 
@@ -277,7 +277,7 @@ fn parseLocaleJson(src: String) -> LocaleData {
 gen fn localeKeys(d: LocaleData) -> Array<String> {
     let mut out: Array<String> = []
     for e in d.entries {
-        out.push(e.key)
+        out.push(e.key.copy())
     }
     return out
 }
@@ -497,14 +497,14 @@ type ArgScan = {
 }
 
 gen fn argError(msg: String) -> ArgScan {
-    return ArgScan { ok: false, error: msg, names: [], kinds: [], branches: [] }
+    return ArgScan { ok: false, error: msg.copy(), names: [], kinds: [], branches: [] }
 }
 
 /// Sorted, comma-joined selector names (so the signature is order-independent).
 gen fn joinSortedSelectors(br: Branches) -> String {
     let mut names: Array<String> = []
     for b in br.branches {
-        names.push(b.selector)
+        names.push(b.selector.copy())
     }
     // insertion sort (selector lists are tiny)
     let mut i = 1
@@ -513,7 +513,7 @@ gen fn joinSortedSelectors(br: Branches) -> String {
         while j > 0 && names[j - 1] > names[j] {
             let tmp = names[j - 1]
             names[j - 1] = names[j]
-            names[j] = tmp
+            names[j] = tmp.copy()
             j = j - 1
         }
         i = i + 1
@@ -662,7 +662,7 @@ gen fn argSignature(sc: ArgScan) -> String {
         while b > 0 && items[b - 1] > items[b] {
             let tmp = items[b - 1]
             items[b - 1] = items[b]
-            items[b] = tmp
+            items[b] = tmp.copy()
             b = b - 1
         }
         a = a + 1

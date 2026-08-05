@@ -71,7 +71,7 @@ fn emit_gen_shows_the_synthesized_component_module() {
     assert!(src.contains("export fn row(item: Item) -> Html"), "row signature:\n{src}");
     assert!(src.contains("export fn listing(items: Array<Item>) -> Html"), "listing signature:\n{src}");
     // The `{children}`-using component carries the trailing children parameter.
-    assert!(src.contains("export fn panel(title: String, children: Array<Html>) -> Html"), "panel signature:\n{src}");
+    assert!(src.contains("export fn panel(title: String, children: consume Array<Html>) -> Html"), "panel signature:\n{src}");
 
     // A relative script import is rebased so it resolves from the synthesized module.
     assert!(src.contains("from \"./vyxcomp/./models\""), "rebased import:\n{src}");
@@ -86,7 +86,7 @@ fn emit_gen_shows_the_synthesized_component_module() {
     assert!(src.contains("On(\"click\", \"removeRow\", (item.id).toString())"), "event lowering:\n{src}");
     assert!(src.contains("On(\"input\", \"setQty\""), "input event:\n{src}");
     assert!(src.contains("Cls(\"row\")"), "class -> Cls:\n{src}");
-    assert!(src.contains("for vyxCh in children {"), "children splice:\n{src}");
+    assert!(src.contains("for vyxCh in consume children {"), "children splice:\n{src}");
     assert!(src.contains("Raw("), "{{@raw}} -> Raw:\n{src}");
 }
 

@@ -19,7 +19,7 @@ let mut store: StoreFile = persist.loadStore()
 /// A deep copy of a paste, so a value can leave the store without moving the
 /// global (nothing may take ownership of module state).
 fn copyPaste(p: Paste) -> Paste {
-    return Paste { id: p.id, title: p.title, body: p.body, lang: p.lang, created: p.created }
+    return Paste { id: p.id.copy(), title: p.title.copy(), body: p.body.copy(), lang: p.lang.copy(), created: p.created }
 }
 
 /// A fresh, owned copy of the whole store for saveStore (which consumes it).
@@ -100,7 +100,7 @@ export fn createPaste(req: CreateReq) -> PasteResult {
     // host effect — fine in a procedure, forbidden in gen/comptime.
     let created: Created = toMillis(now())
     let id = deriveId(req.body, req.title)
-    store.pastes.push(Paste { id: id, title: req.title, body: req.body, lang: req.lang, created: created })
+    store.pastes.push(Paste { id: id, title: req.title.copy(), body: req.body.copy(), lang: req.lang.copy(), created: created })
     // The counter is now just a total-created tally (no longer the stamp source).
     // Module-state's validated `Created` field takes an already-typed value.
     let bumped: Created = store.counter + 1

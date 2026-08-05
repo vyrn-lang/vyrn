@@ -28,7 +28,7 @@ export fn cli() -> Args {
 /// An `Args` over an explicit token list — the constructor tests and callers that
 /// already hold a token slice use.
 export fn cliOf(list: Array<String>) -> Args {
-    return Args { argv: list }
+    return Args { argv: list.copy() }
 }
 
 /// The index of the first `--` terminator in `a.argv`, or the argv length when
@@ -116,7 +116,7 @@ export fn positionals(a: Args) -> Array<String> {
                 i = i + 1
             }
         } else {
-            out.push(tok)
+            out.push(tok.copy())
             i = i + 1
         }
     }

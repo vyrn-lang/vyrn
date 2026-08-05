@@ -20,7 +20,7 @@ fn countIn(loc: String, n: Int64) -> String {
 }
 
 fn pluralRow(loc: String, n: Int64) -> PluralRow {
-    return PluralRow { loc: loc, n: n, msg: countIn(loc, n) }
+    return PluralRow { loc: loc.copy(), n: n, msg: countIn(loc, n) }
 }
 
 fn pluralRows() -> Array<PluralRow> {

@@ -133,9 +133,22 @@ Split into three PRs, in order:
   with no `consume` spelling available. See RFC-0089 "What rule 2 costs".
   4b also found that `copy` crashes the compiler on a self-referring type — an
   M1b bug, now a diagnostic, with `std/json`'s `copyJson` as the worked fix.
-- **4b-2. Rule 2's second-class stores.** Turn on `MoveCheck::refuse_stores`
-  and migrate the 288. Decide first whether iteration gains a consuming form;
-  landing 154 `.copy()` calls in `std/` without one is the worse outcome.
+- **4b-2. Rule 2's second-class stores — LANDED.** Rule 2 is enforced on every
+  check; `MoveCheck::refuse_stores` is gone and `borrow_store_sites` is now a
+  filter over `check_accum` with a corpus test that expects zero. Iteration
+  gained the consuming form `for x in consume xs`, and a loop over a value that
+  is not a place binds an owned element with no word at all.
+  4b's 288 was measured per-file, which cannot see an imported type; linked it
+  is 207 loop-variable stores, and they are four shapes rather than one. 137 of
+  207 (66%) need no copy: 91 iterate a temporary and were rule 2 being wrong, 25
+  take a local container, 21 take a `consume`d parameter. The other 70 store a
+  FIELD of a borrowed element into a fresh array — a copy any rule requires, and
+  not a defensive one. The parameter stores went 21 `consume` to 241 `.copy()`,
+  because a `read` parameter is a promise that the caller keeps the value and a
+  lookup helper cannot break it. See RFC-0089 "M2 as landed, part two".
+  4b-2 also found that a self-referring type (`Json`, `VyxNode`) had, between
+  M1b's `copy` refusal and rule 2's store refusal, no legal way out of a
+  container at all; the consuming form is what unblocked `std/vyx`.
 - ~~**4b. Enforce rules 1–3.**~~ Moves on assignment/arg/return of owning types
   (flow-sensitive, last-use aware — `let t = s` then never using `s` is
   legal). `read`/`modify` no-retain: a borrowed param may not be stored,
@@ -217,7 +230,7 @@ match the "as landed" truth — they have lied before).
 | copy visible or implicit | visible: `.copy()` only | RFC-0089 |
 | borrowed returns | never; place projections instead | RFC-0089/0091 |
 | linear vs affine | affine + opt-in `must-use` row | RFC-0090 downsides |
-| iteration binding | `read` borrow | RFC-0090 downsides |
+| iteration binding | `read` borrow of a PLACE; `for x in consume xs` takes the container, and a temporary is owned already | RFC-0090 downsides, corrected in Phase 4b-2 |
 | handle confusion | container identity word in handle | RFC-0090 downsides |
 | allocator protocol | NOT opened (gated multiplicity) | RFC-0091 |
 | String NULs | still rejected | Phase 2 |

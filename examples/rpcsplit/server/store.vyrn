@@ -13,7 +13,7 @@ let mut items: Array<Item> = [
 export fn getItem(req: GetReq) -> ItemResult {
     for it in items {
         if it.id == req.id {
-            return Ok(Item { id: it.id, label: it.label })
+            return Ok(Item { id: it.id, label: it.label.copy() })
         }
     }
     return Err("no item \{req.id}")

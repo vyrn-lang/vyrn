@@ -163,7 +163,7 @@ export fn split(s: String, sep: String) -> Array<String> {
     let sl = sep.byteLength
     let mut out: Array<String> = []
     if sl == 0 {
-        out.push(s)
+        out.push(s.copy())
         return out
     }
     let mut start = 0

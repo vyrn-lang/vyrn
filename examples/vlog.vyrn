@@ -360,7 +360,7 @@ fn cmdStats(recs: Array<Rec>) -> Int64 {
         if r.line.ts > maxTs {
             maxTs = r.line.ts
         }
-        raws.push(r.raw)
+        raws.push(r.raw.copy())
     }
     print("first: \{format(fromMillis(minTs))}")
     print("last:  \{format(fromMillis(maxTs))}")

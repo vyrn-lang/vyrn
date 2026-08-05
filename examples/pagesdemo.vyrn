@@ -19,7 +19,7 @@ import { route, hrefUsers, hrefItems, rootPath, itemsPath } from pages("./pages"
 
 /// Drive one request through the router and print its status.
 fn show(method: String, path: String) {
-    let r = route(Request { method: method, path: path, headers: [:], body: "" })
+    let r = route(Request { method: method.copy(), path: path.copy(), headers: [:], body: "" })
     print("\{method} \{path} -> \{r.status}")
 }
 

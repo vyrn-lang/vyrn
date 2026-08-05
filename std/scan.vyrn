@@ -37,7 +37,7 @@ export type Scanner = {
 /// has no block comments, so `blockOpen`/`blockClose` are disabled.
 export fn newScanner(src: String) -> Scanner {
     return Scanner {
-        src: src,
+        src: src.copy(),
         pos: 0,
         line: 1,
         col: 1,
@@ -54,7 +54,7 @@ export fn newScanner(src: String) -> Scanner {
 /// strings, `\` escape. The shared cursor for the `std/tw` CSS handling.
 export fn cssScanner(src: String) -> Scanner {
     return Scanner {
-        src: src,
+        src: src.copy(),
         pos: 0,
         line: 1,
         col: 1,
@@ -79,13 +79,13 @@ export fn scanner(
     escape: Int64,
 ) -> Scanner {
     return Scanner {
-        src: src,
+        src: src.copy(),
         pos: 0,
         line: 1,
         col: 1,
-        lineComment: lineComment,
-        blockOpen: blockOpen,
-        blockClose: blockClose,
+        lineComment: lineComment.copy(),
+        blockOpen: blockOpen.copy(),
+        blockClose: blockClose.copy(),
         quote1: quote1,
         quote2: quote2,
         escape: escape,

@@ -131,7 +131,7 @@ fn show(r: Option<Response>) {
 }
 
 fn hit(method: String, path: String, body: String) {
-    show(rpcHandle(Request { method: method, path: path, headers: [:], body: body }))
+    show(rpcHandle(Request { method: method.copy(), path: path.copy(), headers: [:], body: body.copy() }))
 }
 
 fn main() -> Int64 {

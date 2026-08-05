@@ -2018,7 +2018,7 @@ impl Fn_<'_> {
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
-            Stmt::ForIn { var, iter, body, line } => {
+            Stmt::ForIn { var, iter, body, line, .. } => {
                 // `block { loop { br_if 1 (i >= len); bind; block { body }; i++;
                 // br 0 } }`. The INNER block is what makes `continue` correct:
                 // branching to it leaves the body and lands on the increment, so

@@ -1,6 +1,8 @@
 # RFC-0089 — Mutable Value Semantics
 
-- **Status:** Proposed. Supersedes RFC-0088 if accepted; RFC-0088's M1
+- **Status:** Accepted, landing. M0, M1a, M1b and M2 are implemented — see the
+  "as landed" sections, which are the truth where they and the design differ.
+  M3 (places and the boundary) is not built. Supersedes RFC-0088; RFC-0088's M1
   (make it visible) survives unchanged as this RFC's M0.
 - **Depends on:** RFC-0004 §1 (the capability surface — this RFC finishes it),
   RFC-0086 (the compiler asks the type), RFC-0087 (the census)
@@ -55,6 +57,20 @@ one restriction is what makes the whole thing work without lifetime annotations
 call. This is the published result Vyrn's design has been circling: mutable
 value semantics gives whole-program memory safety with zero annotation beyond
 the conventions themselves.
+
+**Rule 2 ships with a companion: `for x in consume xs`.** Iteration binds a
+`read` borrow of the element, so `for x in xs { out.push(x) }` is a store of a
+borrow and rule 2 refuses it. Without a way to move an element *out* of a
+container, the only fix is `x.copy()`, and the corpus measured 207 such loops.
+The consuming form is that way out: the loop takes the container, each element
+is **owned**, storing one is a move, and naming the container afterwards is the
+rule 1 error. `consume` is the capability word it already is, at a new position;
+the form is new, the vocabulary is not.
+
+A loop over a value that is **not a place** — `for o in diffChildren(..)` —
+is consuming without the word. A temporary has no other owner, so its elements
+are already the loop's. That case is 91 of the 207 and it needed no syntax at
+all: it was rule 2 being wrong about a container nobody else holds.
 
 ### 3. A function returns an owned value. Always.
 
@@ -292,28 +308,81 @@ Rule 2's store refusal is measured, written and **not turned on**: see "What rul
 
 ### What rule 2 costs, measured
 
-Rule 2's store refusal is implemented and gated off, because the corpus says it
-is a phase of its own rather than a paragraph of this one. Over `examples/` and
-`std/`, with rules 1 and 3 already migrated:
+Phase 4b implemented rule 2's store refusal and gated it off, because the corpus
+said it was a phase of its own. Its table read 154 loop-variable stores, 105
+parameter stores and 29 projections. Phase 4b-2 re-measured over **linked**
+programs — 4b parsed each file alone, and a file parsed alone cannot name an
+imported type, so `owns_heap` answered "unknown" and the site was invisible. The
+real shape is different in a way that changed the answer.
 
-| site | count |
-|---|---|
-| a loop variable stored (`for x in xs { out.push(x) }`) | 154 |
-| a `read`/`modify` parameter stored | 105 |
-| a projection stored | 29 |
+## M2 as landed, part two — rule 2 and consuming iteration
 
-288 sites, against the 45 the M0 gate predicted. The gate is not wrong and
-neither is the rule: M0 counted two shapes, `return p` and `let y = x`, and rule
-2 governs five. Rules 1 and 3 came to 65 sites, which is the M0 number plus the
-returns it could not see through a loop variable.
+Rule 2 is on. `for x in consume xs` ships in all three engines. Four things
+worth recording.
 
-The 154 are the number to argue about. `for x in xs { out.push(x) }` has no
-`consume` spelling — iteration binds a `read` borrow (RFC-0090's decision) and
-there is no way to move an element out of a container — so every one of them
-becomes `x.copy()`. That is 154 defensive copies in `std/`, which is a worse
-outcome than the leaks they replace. Either iteration gains a consuming form, or
-rule 2 lands with the copies and a benchmark, and that choice belongs to whoever
-takes rule 2, not to the phase that measured it.
+**1. The 154 were not one shape, they were four.** Split by what is stored and
+what is iterated, the 207 linked loop-variable stores are:
+
+| shape | count | fix |
+|---|---|---|
+| the iterable is a temporary (`for o in diff(..)`) | 91 | none needed — the elements are already owned |
+| a projection of the element is stored (`out.push(e.key)`) | 56 | `.copy()` |
+| the iterable is a field (`for m in c.members`) | 19 | `.copy()` — taking it would leave a hole |
+| `consume` the parameter, then `consume` the loop | 21 | both, and every caller must agree |
+| a local container, dead after the loop | 25 | `for x in consume xs` |
+| the container is used after the loop | 3 | `.copy()` |
+
+The shape the design argued about — one pointer in two containers, fixed by
+moving the element — is 137 of 207 (66%). The other 70 are a **field of a
+borrowed record copied into a fresh array**, which is a semantically required
+copy under any rule: the record still owns what was read out of it, and no
+consuming form reaches it. Phase 4b's "154 defensive copies" was the wrong count
+and, for a third of the sites, the wrong word. They are not defensive.
+
+**2. The largest single fix was a correction, not a feature.** 91 of the 207 are
+`for x in f() { out.push(x) }`. A temporary container has exactly one owner —
+the loop — so binding its elements as borrows was over-conservative. A loop
+iterates a **place** when the iterable is a variable, a field, or `xs[i]` (which
+lowers to `at(..)`, a projection of its receiver); everything else is a fresh
+value. That is the judgment a `let` already made, reused.
+
+**3. The parameter stores split 21 `consume` to 241 `.copy()`.** Phase 4b's
+rules 1+3 migration came out 58 `.copy()` to 4 `consume` and named the reason:
+a mixed-return function leaks on the fresh path. 4b-2 has a second reason, and
+it is stronger. **A `read` parameter is a promise that the caller keeps the
+value.** A lookup helper — `vyxDir(attrs, name)`, `alternatives(c, name)`,
+`localeKeys(d)` — is called many times over one container, so `consume` is
+simply false there and `.copy()` is the honest answer. `consume` went where the
+function is a constructor or a sink: `symbol(..)`, `gqlOk(v)`,
+`vyxBuildModule(comps, ..)`, `uiHeadJoin2(a, b)`, and the `children` parameter
+of every generated `.vyx` view.
+
+**4. A self-referring type has no `copy`, so rule 2 makes the consuming form
+mandatory, not optional.** `copy` refuses `Json` and `VyxNode` (M1b's rule, found
+in 4b). Rule 2 refuses moving one out of a container. Between them there was, for
+a moment, no legal way to take a `VyxNode` out of an `Array<VyxNode>` at all —
+`std/vyx`'s `vyxCompileComponent` could not name its own root. `for x in consume
+xs` is what unblocked it. Where the copy is still needed one level down,
+`std/json`'s `copyJson` is the pattern, and `std/graphql` now carries
+`gqlCopyErr` beside it.
+
+**Exclusivity** (`f(modify a, ..a..)`) was already enforced by 4b and is
+unchanged.
+
+**Measured.** `examples/membench.vyrn` gains two rows, 1000 sixteen-byte Strings
+spliced from one array into another, source array built inside the sample on
+both:
+
+| row | min | median |
+|---|---|---|
+| splice 1000 Strings, consuming loop | 79.02 µs | 134.95 µs |
+| splice 1000 Strings, copying loop | 104.22 µs | 143.01 µs |
+
+25 µs for 1000 copies — 25 ns each, one `malloc` and one `memcpy`, which is what
+M1b measured per copy. Compile time did not move: `movecheck` over
+`std/vyx.vyrn` goes 1,071 → 1,100 µs (min of 30) and `vyrn check
+examples/vyxdemo.vyrn` stays at 60 ms. Rule 2's analysis already ran in 4b; only
+the refusal was gated, so turning it on costs nothing.
 
 ## Rejected
 

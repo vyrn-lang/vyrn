@@ -74,17 +74,17 @@ export type PageError = { status: Int64, message: String }
 
 /// A `PageError` with an explicit status.
 export fn pageError(status: Int64, message: String) -> PageError {
-    return PageError { status: status, message: message }
+    return PageError { status: status, message: message.copy() }
 }
 
 /// A 404 `PageError`.
 export fn notFound(message: String) -> PageError {
-    return PageError { status: 404, message: message }
+    return PageError { status: 404, message: message.copy() }
 }
 
 /// A 400 `PageError`.
 export fn badRequest(message: String) -> PageError {
-    return PageError { status: 400, message: message }
+    return PageError { status: 400, message: message.copy() }
 }
 
 // ===========================================================================
@@ -147,35 +147,35 @@ export fn noHead() -> Head {
 
 /// `h` with the document title set. The page's title wins over its layouts'.
 export fn withTitle(h: Head, title: String) -> Head {
-    return Head { title: Some(title), stylesheets: h.stylesheets, modules: h.modules, scripts: h.scripts, meta: h.meta }
+    return Head { title: Some(title), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
 }
 
 /// `h` with a `<link rel="stylesheet" href=…>` appended.
 export fn withStylesheet(h: Head, href: String) -> Head {
     let mut ss = h.stylesheets
-    ss.push(href)
-    return Head { title: h.title, stylesheets: ss, modules: h.modules, scripts: h.scripts, meta: h.meta }
+    ss.push(href.copy())
+    return Head { title: h.title.copy(), stylesheets: ss.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
 }
 
 /// `h` with a `<script type="module" src=…>` appended.
 export fn withModule(h: Head, src: String) -> Head {
     let mut ms = h.modules
-    ms.push(src)
-    return Head { title: h.title, stylesheets: h.stylesheets, modules: ms, scripts: h.scripts, meta: h.meta }
+    ms.push(src.copy())
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: ms.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
 }
 
 /// `h` with a classic `<script src=…>` appended.
 export fn withScript(h: Head, src: String) -> Head {
     let mut sc = h.scripts
-    sc.push(src)
-    return Head { title: h.title, stylesheets: h.stylesheets, modules: h.modules, scripts: sc, meta: h.meta }
+    sc.push(src.copy())
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: sc.copy(), meta: h.meta.copy() }
 }
 
 /// `h` with a `<meta name=… content=…>` appended.
 export fn withMeta(h: Head, name: String, content: String) -> Head {
     let mut mt = h.meta
-    mt.push(Meta { name: name, content: content })
-    return Head { title: h.title, stylesheets: h.stylesheets, modules: h.modules, scripts: h.scripts, meta: mt }
+    mt.push(Meta { name: name.copy(), content: content.copy() })
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: mt.copy() }
 }
 
 /// A head's elements, in the document order `document(title, head, body)` emits.
@@ -465,7 +465,7 @@ export fn uiErrorPayload(status: Int64, props: String) -> String {
 /// without it a shared cache would store whichever came first and hand a page's
 /// JSON to a browser asking for its HTML.
 export fn uiDataResponse(body: String) -> Response {
-    return Response { status: 200, contentType: "application/json", body: body, vary: "Accept", headers: [:] }
+    return Response { status: 200, contentType: "application/json", body: body.copy(), vary: "Accept", headers: [:] }
 }
 
 /// The data response for a true miss (no route matched): the themed error page's
@@ -523,7 +523,7 @@ gen fn uiUpperFirst(s: String) -> String {
 /// `arr.push(s)` would wrongly mutate the shared prefix.
 gen fn uiAppendStr(arr: Array<String>, s: String) -> Array<String> {
     let mut out = arr.copy()
-    out.push(s)
+    out.push(s.copy())
     return out
 }
 
@@ -633,7 +633,7 @@ gen fn uiCollisionKey(segs: Array<String>) -> String {
         if uiIsDynSeg(s) {
             parts.push(":")
         } else {
-            parts.push(s)
+            parts.push(s.copy())
         }
     }
     return "/" + joinWith(parts, "/")
@@ -649,7 +649,7 @@ gen fn uiUrlPatternOf(segs: Array<String>) -> String {
         if uiIsDynSeg(s) {
             parts.push(":" + uiDynName(s))
         } else {
-            parts.push(s)
+            parts.push(s.copy())
         }
     }
     return "/" + joinWith(parts, "/")
@@ -672,7 +672,7 @@ gen fn uiWirePatternOf(segs: Array<String>) -> String {
         if uiIsDynSeg(s) {
             parts.push("{" + uiDynName(s) + "}")
         } else {
-            parts.push(s)
+            parts.push(s.copy())
         }
     }
     return "/" + joinWith(parts, "/")
@@ -747,7 +747,7 @@ gen fn uiDynHelperBody(segs: Array<String>) -> String {
         if uiIsDynSeg(s) {
             parts.push(uiHole(uiDynName(s)))
         } else {
-            parts.push(s)
+            parts.push(s.copy())
         }
     }
     return "\"/" + joinWith(parts, "/") + "\""
@@ -1166,9 +1166,9 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     }
 
     return UiPageInfo {
-        modPath: modPath,
+        modPath: modPath.copy(),
         fileId: fid,
-        segs: segs,
+        segs: segs.copy(),
         urlPattern: uiUrlPatternOf(segs),
         dynNames: dyns,
         dynTypes: dynTypes,
@@ -1181,7 +1181,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         isVyx: false,
         pageArity: arity,
         paramsModule: paramsModule,
-        dirPrefix: dirPrefix,
+        dirPrefix: dirPrefix.copy(),
         loadKind: loadKind,
         layoutNone: false,
         err: err,
@@ -1270,9 +1270,9 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         if dyns.length > 0 { 1 } else { 0 }
     }
     return UiPageInfo {
-        modPath: modPath,
+        modPath: modPath.copy(),
         fileId: fid,
-        segs: segs,
+        segs: segs.copy(),
         urlPattern: uiUrlPatternOf(segs),
         dynNames: dyns,
         dynTypes: dynTypes,
@@ -1285,7 +1285,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         isVyx: true,
         pageArity: arity,
         paramsModule: "",
-        dirPrefix: dirPrefix,
+        dirPrefix: dirPrefix.copy(),
         loadKind: loadKind,
         layoutNone: shape.layoutNone,
         err: err,
@@ -1299,11 +1299,11 @@ gen fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dirPrefix: A
         dynTypes.push("Int64")
     }
     return UiPageInfo {
-        modPath: modPath,
-        fileId: fid,
-        segs: segs,
+        modPath: modPath.copy(),
+        fileId: fid.copy(),
+        segs: segs.copy(),
         urlPattern: uiUrlPatternOf(segs),
-        dynNames: dyns,
+        dynNames: dyns.copy(),
         dynTypes: dynTypes,
         hasLoad: false,
         hasData: false,
@@ -1314,10 +1314,10 @@ gen fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dirPrefix: A
         isVyx: false,
         pageArity: 0,
         paramsModule: "",
-        dirPrefix: dirPrefix,
+        dirPrefix: dirPrefix.copy(),
         loadKind: "",
         layoutNone: false,
-        err: err,
+        err: err.copy(),
     }
 }
 
@@ -1361,9 +1361,9 @@ gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
             let st = uiSliceStr(nb, 0, nb.length - 4)
             let modPath = dir + "/" + st
             if st == "layout" {
-                layouts.push(UiChrome { modPath: modPath, dirPrefix: prefix })
+                layouts.push(UiChrome { modPath: modPath, dirPrefix: prefix.copy() })
             } else if st == "error" {
-                errors.push(UiChrome { modPath: modPath, dirPrefix: prefix })
+                errors.push(UiChrome { modPath: modPath, dirPrefix: prefix.copy() })
             } else {
                 pages.push(uiInspectVyxPage(modPath, uiRouteSegsFor(prefix, st), prefix))
             }
@@ -1372,13 +1372,13 @@ gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
             if uiIsDir(sub) {
                 let kid = uiScanAll(sub, uiAppendStr(prefix, name))
                 for p in kid.pages {
-                    pages.push(p)
+                    pages.push(p.copy())
                 }
                 for l in kid.layouts {
-                    layouts.push(l)
+                    layouts.push(l.copy())
                 }
                 for e in kid.errors {
-                    errors.push(e)
+                    errors.push(e.copy())
                 }
             }
         }
@@ -1555,12 +1555,12 @@ gen fn uiHeadRuntime() -> String {
     }
     return b.copy()
 }
-fn uiHeadJoin2(a: Array<Html>, b: Array<Html>) -> Array<Html> {
+fn uiHeadJoin2(a: consume Array<Html>, b: consume Array<Html>) -> Array<Html> {
     let mut out: Array<Html> = []
-    for x in a {
+    for x in consume a {
         out.push(x)
     }
-    for x in b {
+    for x in consume b {
         out.push(x)
     }
     return out
@@ -1983,7 +1983,10 @@ gen fn uiParamFieldInits(segs: Array<String>) -> String {
     let mut k = 0
     for s in segs {
         if uiIsDynSeg(s) {
-            parts.push(uiDynName(s) + ": v" + k.toString())
+            // The route segment is the render function's to observe, not to keep:
+            // a scalar copies to itself (RFC-0089 M1b), so this is free for an
+            // `Int64` segment and one `strdup` for a `String` one.
+            parts.push(uiDynName(s) + ": v" + k.toString() + ".copy()")
             k = k + 1
         }
     }
@@ -2450,7 +2453,7 @@ fn uiClientSegments(path: String) -> Array<String> {
 }
 type UiResolved = { found: Bool, hasData: Bool, lazy: Bool, page: String, title: String }
 fn uiResolveHit(hasData: Bool, lazy: Bool, page: String, title: String) -> String {
-    return toJson(UiResolved { found: true, hasData: hasData, lazy: lazy, page: page, title: title })
+    return toJson(UiResolved { found: true, hasData: hasData, lazy: lazy, page: page.copy(), title: title.copy() })
 }
 fn uiResolveMiss() -> String {
     return toJson(UiResolved { found: false, hasData: false, lazy: false, page: "", title: "" })

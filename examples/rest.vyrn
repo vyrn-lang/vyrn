@@ -26,14 +26,14 @@ fn handle(req: Request) -> Response {
 }
 
 fn hit(method: String, path: String, body: String) -> Response {
-    return handle(Request { method: method, path: path, headers: [:], body: body })
+    return handle(Request { method: method.copy(), path: path.copy(), headers: [:], body: body.copy() })
 }
 
 /// A conditional GET. Header names are lowercase because that is how the host
 /// hands them over (RFC-0072 M4 folds case at the edge, so a `Map` lookup is
 /// exact), and a hand-written `Request` follows the same rule.
 fn hitIfNoneMatch(path: String, tag: String) -> Response {
-    return handle(Request { method: "GET", path: path, headers: ["if-none-match": tag], body: "" })
+    return handle(Request { method: "GET", path: path.copy(), headers: ["if-none-match": tag.copy()], body: "" })
 }
 
 fn show(label: String, r: Response) {

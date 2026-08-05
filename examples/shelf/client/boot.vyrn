@@ -121,8 +121,8 @@ fn bookViews() -> Array<BookView> {
         if show {
             out.push(BookView {
                     id: b.id,
-                    title: b.title,
-                    url: b.url,
+                    title: b.title.copy(),
+                    url: b.url.copy(),
                     rating: b.rating,
                     tagsText: tagsText(b.tags),
                     confirming: b.id == confirmId,
@@ -216,7 +216,7 @@ fn onListBooks(res: api.RpcReply<api.BookList>) {
     }
 }
 fn setBooks(l: api.BookList) {
-    books = l.books
+    books = l.books.copy()
 }
 
 /// The reactive tag panel derives its histogram from `books` (see
@@ -237,14 +237,14 @@ fn showDetail(r: api.BookResult) {
     }
 }
 fn fillDetail(b: api.Book) {
-    detailTitle = b.title
-    detailUrl = b.url
+    detailTitle = b.title.copy()
+    detailUrl = b.url.copy()
     detailRating = b.rating
     detailTags = tagsText(b.tags)
     detailStatus = ""
 }
 fn setDetailStatus(s: String) {
-    detailStatus = s
+    detailStatus = s.copy()
 }
 
 fn onAddBook(res: api.RpcReply<api.BookResult>) {
@@ -302,7 +302,7 @@ fn afterRate(r: api.BookResult) {
 }
 
 fn setIssues(s: String) {
-    issues = s
+    issues = s.copy()
 }
 
 /// Re-read the shelf. The tag histogram is derived client-side from the returned
@@ -328,13 +328,13 @@ export extern fn bootDetail(arg: String) {
 }
 
 export extern fn setDraftTitle(arg: String) {
-    draftTitle = arg
+    draftTitle = arg.copy()
 }
 export extern fn setDraftUrl(arg: String) {
-    draftUrl = arg
+    draftUrl = arg.copy()
 }
 export extern fn setDraftTags(arg: String) {
-    draftTags = arg
+    draftTags = arg.copy()
 }
 
 /// Validate the draft with `fromJson` (which returns `Invalid` instead of
@@ -389,7 +389,7 @@ export extern fn showServerIssues(arg: String) {
 }
 
 export extern fn setFilter(arg: String) {
-    filter = arg
+    filter = arg.copy()
 }
 export extern fn clearFilter(arg: String) {
     filter = ""

@@ -6,14 +6,14 @@ import { IdReq, Paste } from "../../../shared/wire/paste"
 export type Params = { id: String }
 
 export fn respond(p: Params) -> Response {
-    return match byId(IdReq { id: p.id }) {
+    return match byId(IdReq { id: p.id.copy() }) {
         Ok(paste) => rawOk(paste),
         Err(why) => rawMissing(),
     }
 }
 
 fn rawOk(p: Paste) -> Response {
-    return Response { status: 200, contentType: "text/plain; charset=utf-8", body: p.body, vary: "", headers: [:] }
+    return Response { status: 200, contentType: "text/plain; charset=utf-8", body: p.body.copy(), vary: "", headers: [:] }
 }
 
 fn rawMissing() -> Response {

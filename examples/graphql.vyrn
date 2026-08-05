@@ -41,7 +41,7 @@ import { Json, JsonField } from "std/json"
 
 /// `POST /graphql` with `body`, printed with its status.
 fn ask(label: String, body: String) {
-    let req = Request { method: "POST", path: "/graphql", headers: [:], body: body }
+    let req = Request { method: "POST", path: "/graphql", headers: [:], body: body.copy() }
     match graphqlHandle(req) {
         Some(r) => print("\{label} -> \{r.status} \{r.body}"),
         None => print("\{label} -> unrouted"),
@@ -190,7 +190,7 @@ fn topResolve(root: String, field: String, args: Array<JsonField>) -> Result<Jso
 
 /// The reply body for `body`, or "" when nothing routed it.
 fn reply(body: String) -> String {
-    let r = graphqlHandle(Request { method: "POST", path: "/graphql", headers: [:], body: body })
+    let r = graphqlHandle(Request { method: "POST", path: "/graphql", headers: [:], body: body.copy() })
     return match r {
         Some(res) => res.body,
         None => "",

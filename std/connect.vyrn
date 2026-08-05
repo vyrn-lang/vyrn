@@ -155,10 +155,10 @@ fn connectValidateContract(iface: ModuleInterface) -> String {
 /// DECLARES it (its `module` specifier), so a type reached across an import keeps
 /// ONE identity shared with the real procedures.
 fn connectImportBlock(iface: ModuleInterface, contract: String) -> String {
-    let mut specs: Array<String> = [contract]
+    let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
         if connectListContains(specs, t.module) == false {
-            specs.push(t.module)
+            specs.push(t.module.copy())
         }
     }
     let mut out = ""
@@ -166,12 +166,12 @@ fn connectImportBlock(iface: ModuleInterface, contract: String) -> String {
         let mut names: Array<String> = []
         if spec == contract {
             for f in iface.functions {
-                names.push(f.name)
+                names.push(f.name.copy())
             }
         }
         for t in iface.types {
             if t.module == spec {
-                names.push(t.name)
+                names.push(t.name.copy())
             }
         }
         if names.length > 0 {
@@ -260,7 +260,7 @@ export gen fn connectServer(contract: String) -> String {
     // The two shared error builders: a lossless 400 from Issues, and a bare
     // code-only Connect error (`unimplemented`).
     out = out + "fn connectFail400(issues: Array<Issue>) -> Response {\n"
-    out = out + "    return Response { status: 400, contentType: \"application/json\", body: toJson(ConnectError { code: \"invalid_argument\", message: \"request validation failed\", details: issues }), vary: \"\", headers: [:] }\n}\n"
+    out = out + "    return Response { status: 400, contentType: \"application/json\", body: toJson(ConnectError { code: \"invalid_argument\", message: \"request validation failed\", details: issues.copy() }), vary: \"\", headers: [:] }\n}\n"
     out = out + "fn connectCodeErr(status: Int64, code: String) -> Response {\n"
     out = out + "    return Response { status: status, contentType: \"application/json\", body: \"{\\\"code\\\":\\\"\" + code + \"\\\"}\", vary: \"\", headers: [:] }\n}\n"
     for f in iface.functions {

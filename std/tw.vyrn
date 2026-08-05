@@ -230,7 +230,7 @@ type TwEntry = { key: String, value: String }
 type TwTheme = { ok: Bool, error: String, entries: Array<TwEntry> }
 
 fn twThemeError(msg: String) -> TwTheme {
-    return TwTheme { ok: false, error: msg, entries: [] }
+    return TwTheme { ok: false, error: msg.copy(), entries: [] }
 }
 
 /// The leaf-kind error for a value that is neither a string, an array of strings,
@@ -242,7 +242,7 @@ fn twUnsupported() -> String {
 /// Append one `key` → `value` entry (helper so a `match` arm stays a single
 /// expression — the language has no multi-statement arm).
 fn twAddEntry(entries: modify Array<TwEntry>, key: String, value: String) -> String {
-    entries.push(TwEntry { key: key, value: value })
+    entries.push(TwEntry { key: key.copy(), value: value.copy() })
     return ""
 }
 
@@ -373,7 +373,7 @@ fn twAxisOf(theme: TwTheme, family: String) -> Array<TwPair> {
     for e in theme.entries {
         if e.key.startsWith(prefix) {
             let rest = twDropHead(e.key)
-            out.push(TwPair { token: twDashDots(rest), value: e.value })
+            out.push(TwPair { token: twDashDots(rest), value: e.value.copy() })
         }
     }
     return out
@@ -748,10 +748,10 @@ fn twTokenRegex(vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: 
     out = out + "(hover:|focus:)?"
     let mut bases: Array<String> = []
     for c in vocab {
-        bases.push(c.name)
+        bases.push(c.name.copy())
     }
     for s in safelist {
-        bases.push(s)
+        bases.push(s.copy())
     }
     out = out + "(" + joinWith(bases, "|") + ")"
     return out

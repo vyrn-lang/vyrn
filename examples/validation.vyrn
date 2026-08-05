@@ -23,7 +23,7 @@ fn validatePerson(name: String, age: Int64) -> Validation<Person> {
     if issues.length > 0 {
         return Invalid(issues)
     }
-    return Valid(Person { name: name, age: age })
+    return Valid(Person { name: name.copy(), age: age })
 }
 
 fn issuesOf(v: Validation<Person>) -> Array<Issue> {
