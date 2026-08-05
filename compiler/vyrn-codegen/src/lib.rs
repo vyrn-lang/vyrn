@@ -323,16 +323,96 @@ fin:
 
 ";
 
+/// The String value header (RFC-0089 M1a). A `String` is still one `ptr`, and
+/// that pointer still addresses NUL-terminated UTF-8 — every C sink (`printf`,
+/// `strcmp`, `fopen`) and the extern ABI keep working unchanged. What changed is
+/// what sits IN FRONT of it: sixteen bytes holding `{ i64 len, i64 cap }`.
+///
+/// `len` is the byte length. `s.byteLength` is a load, `a + b` reads two loads
+/// instead of scanning both operands, and RFC-0081's `str_append` no longer keeps
+/// a length beside the slot — the header IS that length.
+///
+/// `cap` is the allocated byte capacity, and `cap == 0` means **static**: a
+/// literal in the data segment, never `realloc`'d and never freed. RFC-0077 M6
+/// put an eight-byte class header on every heap block precisely because a
+/// headerless String could not answer this question at a drop site.
+///
+/// The header is BEHIND the pointer rather than beside it (a `{ptr, len, cap}`
+/// value triple, as `Array<T>` is) for two reasons measured here:
+///   * an `Option<String>` payload is one word, so a three-word String would box
+///     — a `malloc` per `Some(s)`, which moves a census row (`memory.rs` §14);
+///   * two aliases of one String share one header, so an append through one is
+///     never a stale length in the other. Until the conventions land (RFC-0089
+///     M2) aliasing is still legal, and a triple would go stale.
+const STR_HDR: i64 = 16;
+
 /// `bytes(s)`: an `Array<UInt8>` ({ptr,len,cap}, i8 stride — RFC-0014 M2) of a
 /// string's raw UTF-8 bytes. The VIEW every Vyrn string routine is written on, and
 /// irreducible for that reason (RFC-0078 M4a's category).
 ///
 /// `chars(s)` shared this block until RFC-0078 M4c: its two-pass decoder was 82
 /// lines of IR and is now `std/text`'s `decodeUtf8`.
+///
+/// `@__vyrn_str_len` / `@__vyrn_str_new` / `@__vyrn_str_free` are the header
+/// accessors. They are `define`s rather than open-coded GEPs so the decision
+/// lives in one place; `-O2` inlines all three.
 const STRING_RUNTIME: &str = "\
+define i64 @__vyrn_str_len(ptr %s) {
+entry:
+  %h = getelementptr i8, ptr %s, i64 -16
+  %n = load i64, ptr %h
+  ret i64 %n
+}
+
+define ptr @__vyrn_str_new(i64 %len, i64 %cap) {
+entry:
+  %tot = add i64 %cap, 17
+  %base = call ptr @__vyrn_malloc(i64 %tot)
+  store i64 %len, ptr %base
+  %cp = getelementptr i8, ptr %base, i64 8
+  store i64 %cap, ptr %cp
+  %s = getelementptr i8, ptr %base, i64 16
+  %e = getelementptr i8, ptr %s, i64 %len
+  store i8 0, ptr %e
+  ret ptr %s
+}
+
+define void @__vyrn_str_setlen(ptr %s, i64 %n) {
+entry:
+  %h = getelementptr i8, ptr %s, i64 -16
+  store i64 %n, ptr %h
+  ret void
+}
+
+define void @__vyrn_str_free(ptr %s) {
+entry:
+  %cp = getelementptr i8, ptr %s, i64 -8
+  %cap = load i64, ptr %cp
+  %static = icmp eq i64 %cap, 0
+  br i1 %static, label %done, label %heap
+heap:
+  %base = getelementptr i8, ptr %s, i64 -16
+  call void @free(ptr %base)
+  br label %done
+done:
+  ret void
+}
+
+define ptr @__vyrn_str_concat(ptr %a, ptr %b) {
+entry:
+  %la = call i64 @__vyrn_str_len(ptr %a)
+  %lb = call i64 @__vyrn_str_len(ptr %b)
+  %n = add i64 %la, %lb
+  %r = call ptr @__vyrn_str_new(i64 %n, i64 %n)
+  call void @llvm.memcpy.p0.p0.i64(ptr %r, ptr %a, i64 %la, i1 false)
+  %at = getelementptr i8, ptr %r, i64 %la
+  call void @llvm.memcpy.p0.p0.i64(ptr %at, ptr %b, i64 %lb, i1 false)
+  ret ptr %r
+}
+
 define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
 entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
+  %len = call i64 @__vyrn_str_len(ptr %s)
   %data = call ptr @__vyrn_malloc(i64 %len)
   br label %loop
 loop:
@@ -411,8 +491,11 @@ loop:
   br i1 %done, label %ret, label %body
 body:
   %s = call ptr @__vyrn_args_get(i64 %i)
+  %sl = call i64 @__vyrn_strlen(ptr %s)
+  %own = call ptr @__vyrn_str_new(i64 %sl, i64 %sl)
+  call void @llvm.memcpy.p0.p0.i64(ptr %own, ptr %s, i64 %sl, i1 false)
   %dp = getelementptr ptr, ptr %data, i64 %i
-  store ptr %s, ptr %dp
+  store ptr %own, ptr %dp
   %i2 = add i64 %i, 1
   br label %loop
 ret:
@@ -428,19 +511,23 @@ entry:
   %is3 = icmp eq i32 %status, 3
   %f1 = select i1 %is2, ptr @.io.utf8err, ptr @.io.readerr
   %fmt = select i1 %is3, ptr @.io.nulerr, ptr %f1
-  %plen = call i64 @__vyrn_strlen(ptr %path)
+  %plen = call i64 @__vyrn_str_len(ptr %path)
   %bsz = add i64 %plen, 40
-  %buf = call ptr @__vyrn_malloc(i64 %bsz)
-  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %path)
+  %buf = call ptr @__vyrn_str_new(i64 0, i64 %bsz)
+  %n = call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %path)
+  %n64 = sext i32 %n to i64
+  call void @__vyrn_str_setlen(ptr %buf, i64 %n64)
   ret ptr %buf
 }
 
 define ptr @__vyrn_write_err(ptr %path) {
 entry:
-  %plen = call i64 @__vyrn_strlen(ptr %path)
+  %plen = call i64 @__vyrn_str_len(ptr %path)
   %bsz = add i64 %plen, 40
-  %buf = call ptr @__vyrn_malloc(i64 %bsz)
-  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr @.io.writeerr, ptr %path)
+  %buf = call ptr @__vyrn_str_new(i64 0, i64 %bsz)
+  %n = call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr @.io.writeerr, ptr %path)
+  %n64 = sext i32 %n to i64
+  call void @__vyrn_str_setlen(ptr %buf, i64 %n64)
   ret ptr %buf
 }
 
@@ -448,17 +535,18 @@ define ptr @__vyrn_rename_err(ptr %to, i32 %status) {
 entry:
   %isx = icmp eq i32 %status, 2
   %fmt = select i1 %isx, ptr @.io.xdeverr, ptr @.io.writeerr
-  %plen = call i64 @__vyrn_strlen(ptr %to)
+  %plen = call i64 @__vyrn_str_len(ptr %to)
   %bsz = add i64 %plen, 40
-  %buf = call ptr @__vyrn_malloc(i64 %bsz)
-  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %to)
+  %buf = call ptr @__vyrn_str_new(i64 0, i64 %bsz)
+  %n = call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %to)
+  %n64 = sext i32 %n to i64
+  call void @__vyrn_str_setlen(ptr %buf, i64 %n64)
   ret ptr %buf
 }
 
 define ptr @__vyrn_bytes_dup(ptr %data, i64 %len) {
 entry:
-  %bsz = add i64 %len, 1
-  %buf = call ptr @__vyrn_malloc(i64 %bsz)
+  %buf = call ptr @__vyrn_str_new(i64 %len, i64 %len)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %cont ]
@@ -475,11 +563,9 @@ cont:
   %i2 = add i64 %i, 1
   br label %loop
 bad:
-  call void @free(ptr %buf)
+  call void @__vyrn_str_free(ptr %buf)
   ret ptr null
 ok:
-  %tp = getelementptr i8, ptr %buf, i64 %len
-  store i8 0, ptr %tp
   ret ptr %buf
 }
 
@@ -1099,11 +1185,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
     }
     for (i, s) in literals.iter().enumerate() {
         let name = format!("@.str.{i}");
-        let (escaped, len) = llvm_str(s);
-        out.push_str(&format!(
-            "{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
-        ));
-        str_globals.insert(s.clone(), name);
+        out.push_str(&static_str_global(&name, s));
+        str_globals.insert(s.clone(), static_str_ptr(&name, s));
     }
     // The per-enum variant-name table went with RFC-0078 M2b. It existed so
     // `toJson` on a nullary enum could read the name in O(1) from IR; the encoder
@@ -1583,10 +1666,11 @@ struct Gen<'a> {
     /// Local `String` accumulators of the function being emitted that may be
     /// appended to in place (from `append_candidates`, recomputed per body).
     append_ok: std::collections::HashSet<String>,
-    /// Variable slot -> its `(len, cap)` shadow slots, for the in-place append
-    /// path. An entry exists only for a `let`-declared local `String` in
-    /// `append_ok`; its presence is what licenses the fast path.
-    str_append: HashMap<String, (String, String)>,
+    /// Variable slot -> its "this path allocated the buffer" flag slot, for the
+    /// in-place append path. An entry exists only for a `let`-declared local
+    /// `String` in `append_ok`; its presence is what licenses the fast path.
+    /// Length and capacity live in the String's own header (RFC-0089 M1a).
+    str_append: HashMap<String, String>,
 }
 
 /// One variant of a synthesized stored-function enum (RFC-0037): a source
@@ -1994,6 +2078,37 @@ impl<'a> Gen<'a> {
         buf
     }
 
+    /// A fresh `String` buffer with room for `cap` bytes plus the NUL, its
+    /// `{ len, cap }` header written and the terminator placed at `len`
+    /// (RFC-0089 M1a). The caller fills the `len` bytes.
+    ///
+    /// Routed through [`Gen::heap_alloc`], so inside a `region` the header and
+    /// the bytes come from the arena together — one block, freed once at region
+    /// exit, exactly as before.
+    fn str_alloc(&mut self, len: &str, cap: &str) -> String {
+        let tot = self.fresh_tmp();
+        self.emit(format!("{tot} = add i64 {cap}, {}", STR_HDR + 1));
+        let base = self.heap_alloc(&tot);
+        let cp = self.fresh_tmp();
+        let s = self.fresh_tmp();
+        let e = self.fresh_tmp();
+        self.emit(format!("store i64 {len}, ptr {base}"));
+        self.emit(format!("{cp} = getelementptr i8, ptr {base}, i64 8"));
+        self.emit(format!("store i64 {cap}, ptr {cp}"));
+        self.emit(format!("{s} = getelementptr i8, ptr {base}, i64 {STR_HDR}"));
+        self.emit(format!("{e} = getelementptr i8, ptr {s}, i64 {len}"));
+        self.emit(format!("store i8 0, ptr {e}"));
+        s
+    }
+
+    /// The byte length of a `String` value: one load from its header, where it
+    /// used to be a `strlen` scan (RFC-0087 P2).
+    fn str_len(&mut self, v: &str) -> String {
+        let n = self.fresh_tmp();
+        self.emit(format!("{n} = call i64 @__vyrn_str_len(ptr {v})"));
+        n
+    }
+
     /// Concatenate two `String` pointers into a fresh, NUL-terminated buffer.
     /// Shared by the `@concat` builtin (interpolation) and the `a + b` operator
     /// lowering. Routing is lexical: inside a `region` the buffer is drawn from
@@ -2001,17 +2116,34 @@ impl<'a> Gen<'a> {
     /// ownership analysis if it does not escape, else leaked). The two paths are
     /// mutually exclusive, so no buffer is ever freed twice.
     fn emit_str_concat(&mut self, a: &str, b: &str) -> String {
-        let la = self.fresh_tmp();
-        let lb = self.fresh_tmp();
-        self.emit(format!("{la} = call i64 @__vyrn_strlen(ptr {a})"));
-        self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
+        // Both lengths are header loads since RFC-0089 M1a, so the two `strlen`
+        // scans this used to open with are gone and the copies are `memcpy` of a
+        // known count rather than `strcpy`/`strcat` re-scanning what they write.
+        //
+        // Outside a region that whole sequence is one call to the runtime helper
+        // — smaller IR at every `+` on Strings, and the site a reader can count.
+        // Inside a region the buffer must come from the arena, so the sequence is
+        // emitted here with `str_alloc` doing the routing.
+        if self.region_depth == 0 {
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = call ptr @__vyrn_str_concat(ptr {a}, ptr {b})"
+            ));
+            return r;
+        }
+        let la = self.str_len(a);
+        let lb = self.str_len(b);
         let sum = self.fresh_tmp();
-        let tot = self.fresh_tmp();
         self.emit(format!("{sum} = add i64 {la}, {lb}"));
-        self.emit(format!("{tot} = add i64 {sum}, 1"));
-        let buf = self.heap_alloc(&tot);
-        self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {a})"));
-        self.emit(format!("call ptr @strcat(ptr {buf}, ptr {b})"));
+        let buf = self.str_alloc(&sum, &sum);
+        let at = self.fresh_tmp();
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {a}, i64 {la}, i1 false)"
+        ));
+        self.emit(format!("{at} = getelementptr i8, ptr {buf}, i64 {la}"));
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {at}, ptr {b}, i64 {lb}, i1 false)"
+        ));
         buf
     }
 
@@ -2053,125 +2185,138 @@ impl<'a> Gen<'a> {
         Ok(t)
     }
 
-    /// The `(len, cap)` shadow slots of a local String accumulator, created on
-    /// demand. A Vyrn String is a bare NUL-terminated pointer with no header, so
-    /// growing one in place needs its length and capacity kept beside the slot.
+    /// The ownership flag of a local String accumulator, created on demand.
     ///
-    /// `cap == 0` means "this pointer was not allocated by the append path" — a
-    /// literal in .rodata, a concat result, a call result — so it may not be
-    /// `realloc`'d and `len` says nothing; the next append copies it into a
-    /// fresh owned buffer first. Every other write to the variable stores 0 back
-    /// into `cap`, and the entry block zeroes it, so the invariant holds on
-    /// every path (including the second trip through a loop that re-runs the
-    /// `let`).
-    fn str_append_shadow(&mut self, slot: &str) -> (String, String) {
-        if let Some(pair) = self.str_append.get(slot) {
-            return pair.clone();
+    /// This used to be a `(len, cap)` shadow pair, because a Vyrn String had no
+    /// header and growing one in place needed both kept beside the slot.
+    /// RFC-0089 M1a moved length and capacity into the String itself, so what
+    /// remains here is one bit: **did THIS path allocate the buffer the slot
+    /// holds?**
+    ///
+    /// The bit is not the same question as `cap != 0`. A concat result has a
+    /// real capacity and is still not ours to grow in place, because `s = t`
+    /// aliases and nothing yet forbids that — the conventions do (RFC-0089 M2),
+    /// and this flag retires with them. `0` means the next append copies into a
+    /// fresh owned buffer first. Every other write to the variable stores 0
+    /// back, and the entry block zeroes it, so the invariant holds on every
+    /// path (including the second trip through a loop that re-runs the `let`).
+    fn str_append_shadow(&mut self, slot: &str) -> String {
+        if let Some(flag) = self.str_append.get(slot) {
+            return flag.clone();
         }
-        let len = self.fresh_alloca("i64");
-        let cap = self.fresh_alloca("i64");
-        self.allocas.push(format!("  store i64 0, ptr {cap}"));
-        self.str_append
-            .insert(slot.to_string(), (len.clone(), cap.clone()));
-        (len, cap)
+        let owned = self.fresh_alloca("i64");
+        self.allocas.push(format!("  store i64 0, ptr {owned}"));
+        self.str_append.insert(slot.to_string(), owned.clone());
+        owned
     }
 
     /// Append `val` to the String in `slot`, in place, growing geometrically.
     /// `emit_str_concat` allocates and copies both halves every time, which
     /// makes `out = out + piece` in a loop quadratic in the result — the shape
-    /// every generator is written in. Three steps, each re-reading the shadow
-    /// slots so no phi is needed (mem2reg folds them away):
-    /// take ownership of the buffer if it is not ours, reserve room, copy.
+    /// every generator is written in. Three steps, each re-reading the String's
+    /// header so no phi is needed (mem2reg folds the loads away): take ownership
+    /// of the buffer if it is not ours, reserve room, copy.
+    ///
+    /// Since RFC-0089 M1a the length and the capacity are read from and written
+    /// to the String header, not to shadow slots beside the variable. So
+    /// `s.byteLength` mid-spine is now correct and O(1), and a drop of the
+    /// accumulator recovers the capacity it was grown to.
     fn emit_str_append(&mut self, slot: &str, val: &str) {
-        let (lens, caps) = self.str_append_shadow(slot);
-        let vlen = self.fresh_tmp();
-        self.emit(format!("{vlen} = call i64 @__vyrn_strlen(ptr {val})"));
+        let flag = self.str_append_shadow(slot);
+        let vlen = self.str_len(val);
 
-        // Step 1: `cap == 0` — copy the borrowed buffer into one we own.
+        // Step 1: the flag is 0 — copy the borrowed buffer into one we own.
         let own_l = self.fresh_label("app.own");
         let have_l = self.fresh_label("app.have");
-        let cap0 = self.fresh_tmp();
+        let f0 = self.fresh_tmp();
         let owned = self.fresh_tmp();
-        self.emit(format!("{cap0} = load i64, ptr {caps}"));
-        self.emit(format!("{owned} = icmp ne i64 {cap0}, 0"));
+        self.emit(format!("{f0} = load i64, ptr {flag}"));
+        self.emit(format!("{owned} = icmp ne i64 {f0}, 0"));
         self.emit_term(format!("br i1 {owned}, label %{have_l}, label %{own_l}"));
         self.emit_label(&own_l);
         let ob = self.fresh_tmp();
-        let ol = self.fresh_tmp();
         self.emit(format!("{ob} = load ptr, ptr {slot}"));
-        self.emit(format!("{ol} = call i64 @__vyrn_strlen(ptr {ob})"));
+        let ol = self.str_len(&ob);
         let need0 = self.fresh_tmp();
-        let need0n = self.fresh_tmp();
         let big0 = self.fresh_tmp();
         let c0 = self.fresh_tmp();
         self.emit(format!("{need0} = add i64 {ol}, {vlen}"));
-        self.emit(format!("{need0n} = add i64 {need0}, 1"));
-        self.emit(format!("{big0} = icmp ugt i64 {need0n}, 32"));
-        self.emit(format!("{c0} = select i1 {big0}, i64 {need0n}, i64 32"));
-        let nb0 = self.fresh_tmp();
-        self.emit(format!("{nb0} = call ptr @__vyrn_malloc(i64 {c0})"));
+        self.emit(format!("{big0} = icmp ugt i64 {need0}, 32"));
+        self.emit(format!("{c0} = select i1 {big0}, i64 {need0}, i64 32"));
+        let nb0 = self.str_alloc(&ol, &c0);
         self.emit(format!(
             "call void @llvm.memcpy.p0.p0.i64(ptr {nb0}, ptr {ob}, i64 {ol}, i1 false)"
         ));
         self.emit(format!("store ptr {nb0}, ptr {slot}"));
-        self.emit(format!("store i64 {ol}, ptr {lens}"));
-        self.emit(format!("store i64 {c0}, ptr {caps}"));
+        self.emit(format!("store i64 1, ptr {flag}"));
         self.emit_term(format!("br label %{have_l}"));
 
-        // Step 2: reserve `len + vlen + 1` bytes, doubling so N appends are O(N).
+        // Step 2: reserve `len + vlen` content bytes, doubling so N appends are
+        // O(N). `cap` counts content, so the NUL always has its own byte.
         self.emit_label(&have_l);
         let grow_l = self.fresh_label("app.grow");
         let copy_l = self.fresh_label("app.copy");
-        let len1 = self.fresh_tmp();
+        let cur = self.fresh_tmp();
+        self.emit(format!("{cur} = load ptr, ptr {slot}"));
+        let len1 = self.str_len(&cur);
+        let capp = self.fresh_tmp();
         let cap1 = self.fresh_tmp();
         let need = self.fresh_tmp();
-        let needn = self.fresh_tmp();
         let short = self.fresh_tmp();
-        self.emit(format!("{len1} = load i64, ptr {lens}"));
-        self.emit(format!("{cap1} = load i64, ptr {caps}"));
+        self.emit(format!("{capp} = getelementptr i8, ptr {cur}, i64 -8"));
+        self.emit(format!("{cap1} = load i64, ptr {capp}"));
         self.emit(format!("{need} = add i64 {len1}, {vlen}"));
-        self.emit(format!("{needn} = add i64 {need}, 1"));
-        self.emit(format!("{short} = icmp ugt i64 {needn}, {cap1}"));
+        self.emit(format!("{short} = icmp ugt i64 {need}, {cap1}"));
         self.emit_term(format!("br i1 {short}, label %{grow_l}, label %{copy_l}"));
         self.emit_label(&grow_l);
         let dbl = self.fresh_tmp();
         let usedbl = self.fresh_tmp();
         let nc = self.fresh_tmp();
         self.emit(format!("{dbl} = shl i64 {cap1}, 1"));
-        self.emit(format!("{usedbl} = icmp ugt i64 {dbl}, {needn}"));
-        self.emit(format!("{nc} = select i1 {usedbl}, i64 {dbl}, i64 {needn}"));
-        let gb = self.fresh_tmp();
-        let nb1 = self.fresh_tmp();
-        self.emit(format!("{gb} = load ptr, ptr {slot}"));
-        self.emit(format!("{nb1} = call ptr @__vyrn_realloc(ptr {gb}, i64 {nc})"));
-        self.emit(format!("store ptr {nb1}, ptr {slot}"));
-        self.emit(format!("store i64 {nc}, ptr {caps}"));
+        self.emit(format!("{usedbl} = icmp ugt i64 {dbl}, {need}"));
+        self.emit(format!("{nc} = select i1 {usedbl}, i64 {dbl}, i64 {need}"));
+        let obase = self.fresh_tmp();
+        let ntot = self.fresh_tmp();
+        let nbase = self.fresh_tmp();
+        let ncapp = self.fresh_tmp();
+        let nbuf = self.fresh_tmp();
+        self.emit(format!("{obase} = getelementptr i8, ptr {cur}, i64 -{STR_HDR}"));
+        self.emit(format!("{ntot} = add i64 {nc}, {}", STR_HDR + 1));
+        self.emit(format!(
+            "{nbase} = call ptr @__vyrn_realloc(ptr {obase}, i64 {ntot})"
+        ));
+        self.emit(format!("{ncapp} = getelementptr i8, ptr {nbase}, i64 8"));
+        self.emit(format!("store i64 {nc}, ptr {ncapp}"));
+        self.emit(format!(
+            "{nbuf} = getelementptr i8, ptr {nbase}, i64 {STR_HDR}"
+        ));
+        self.emit(format!("store ptr {nbuf}, ptr {slot}"));
         self.emit_term(format!("br label %{copy_l}"));
 
-        // Step 3: copy the operand's bytes AND its NUL over the old terminator.
+        // Step 3: copy the operand's bytes AND its NUL over the old terminator,
+        // then publish the new length in the header.
         self.emit_label(&copy_l);
         let buf = self.fresh_tmp();
-        let len2 = self.fresh_tmp();
+        self.emit(format!("{buf} = load ptr, ptr {slot}"));
+        let len2 = self.str_len(&buf);
         let dst = self.fresh_tmp();
         let n1 = self.fresh_tmp();
         let nlen = self.fresh_tmp();
-        self.emit(format!("{buf} = load ptr, ptr {slot}"));
-        self.emit(format!("{len2} = load i64, ptr {lens}"));
         self.emit(format!("{dst} = getelementptr i8, ptr {buf}, i64 {len2}"));
         self.emit(format!("{n1} = add i64 {vlen}, 1"));
         self.emit(format!(
             "call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {val}, i64 {n1}, i1 false)"
         ));
         self.emit(format!("{nlen} = add i64 {len2}, {vlen}"));
-        self.emit(format!("store i64 {nlen}, ptr {lens}"));
+        self.emit(format!("call void @__vyrn_str_setlen(ptr {buf}, i64 {nlen})"));
     }
 
     /// Invalidate the append shadow after any other write to `slot`: the
     /// variable now holds a pointer this path did not allocate.
     fn str_append_reset(&mut self, slot: &str) {
-        if let Some((_, cap)) = self.str_append.get(slot) {
-            let cap = cap.clone();
-            self.emit(format!("store i64 0, ptr {cap}"));
+        if let Some(flag) = self.str_append.get(slot) {
+            let flag = flag.clone();
+            self.emit(format!("store i64 0, ptr {flag}"));
         }
     }
 
@@ -2635,9 +2780,13 @@ impl<'a> Gen<'a> {
     fn emit_drop(&mut self, slot: &str, kind: &DropKind) {
         match kind {
             DropKind::FreeStr => {
+                // The header says whether there is anything to hand back:
+                // `cap == 0` is a data-segment literal (RFC-0089 M1a), and
+                // `@__vyrn_str_free` returns on it. The block base is the
+                // pointer less the header.
                 let p = self.fresh_tmp();
                 self.emit(format!("{p} = load ptr, ptr {slot}"));
-                self.emit(format!("call void @free(ptr {p})"));
+                self.emit(format!("call void @__vyrn_str_free(ptr {p})"));
             }
             DropKind::ReleaseRef => {
                 // Auto-release: validate, free the boxed payload, invalidate slot.
@@ -3074,8 +3223,7 @@ impl<'a> Gen<'a> {
                 let ell = self.llt(&elem);
                 let (data, len) = match &resolved {
                     Type::Str => {
-                        let len = self.fresh_tmp();
-                        self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {av})"));
+                        let len = self.str_len(&av);
                         (av.clone(), len)
                     }
                     // A SmallArray (RFC-0056): pick the live base + its length.
@@ -3353,12 +3501,12 @@ impl<'a> Gen<'a> {
             Expr::StructLit { name, fields, .. } => self.gen_struct_lit(name, fields),
             Expr::Field { expr, field, .. } => {
                 let (v, ety) = self.gen_expr(expr)?;
-                // `str.byteLength` is the O(1) byte length via `strlen` (RFC-0058;
-                // `.length` on a String is rejected by the checker).
+                // `str.byteLength` is one load from the String header
+                // (RFC-0089 M1a; RFC-0058 named it, this made it O(1)).
+                // `.length` on a String is rejected by the checker.
                 if field == "byteLength" {
                     if let Type::Str = self.resolve(&ety) {
-                        let len = self.fresh_tmp();
-                        self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
+                        let len = self.str_len(&v);
                         return Ok((len, Type::Int));
                     }
                 }
@@ -6499,7 +6647,7 @@ impl<'a> Gen<'a> {
             self.emit(format!("{valid} = call i1 @__vyrn_utf8valid(ptr {p}, i64 {len})"));
             self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{bad_l}"));
             self.emit_label(&bad_l);
-            self.emit(format!("call void @free(ptr {p})"));
+            self.emit(format!("call void @__vyrn_str_free(ptr {p})"));
             self.emit_term(format!("br label %{none_l}"));
             self.emit_label(&none_l);
             self.emit_term(format!("br label %{end_l}"));
@@ -6611,7 +6759,7 @@ impl<'a> Gen<'a> {
             self.emit(format!("{valid} = call i1 @__vyrn_utf8valid(ptr {buf}, i64 {len})"));
             self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{badutf_l}"));
             self.emit_label(&badutf_l);
-            self.emit(format!("call void @free(ptr {buf})"));
+            self.emit(format!("call void @__vyrn_str_free(ptr {buf})"));
             self.emit_term(format!("br label %{err_l}"));
             self.emit_label(&err_l);
             let stphi = self.fresh_tmp();
@@ -6844,20 +6992,22 @@ impl<'a> Gen<'a> {
             self.emit(format!("{valid} = call i1 @__vyrn_utf8valid(ptr {buf}, i64 {len})"));
             self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{badutf_l}"));
             self.emit_label(&badutf_l);
-            self.emit(format!("call void @free(ptr {buf})"));
+            self.emit(format!("call void @__vyrn_str_free(ptr {buf})"));
             self.emit_term(format!("br label %{err_l}"));
             self.emit_label(&err_l);
             let src = self.fresh_tmp();
             self.emit(format!(
                 "{src} = phi ptr [ @.io.bnul, %{nul_l} ], [ @.io.butf8, %{badutf_l} ]"
             ));
+            // `@.io.bnul` / `@.io.butf8` are raw C strings in the data segment
+            // (a `snprintf` format elsewhere), not `String` values, so the length
+            // is still a scan. What it fills is a headered String.
             let mlen = self.fresh_tmp();
-            let msz = self.fresh_tmp();
             self.emit(format!("{mlen} = call i64 @__vyrn_strlen(ptr {src})"));
-            self.emit(format!("{msz} = add i64 {mlen}, 1"));
-            let msg = self.fresh_tmp();
-            self.emit(format!("{msg} = call ptr @__vyrn_malloc(i64 {msz})"));
-            self.emit(format!("call ptr @strcpy(ptr {msg}, ptr {src})"));
+            let msg = self.str_alloc(&mlen, &mlen);
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {msg}, ptr {src}, i64 {mlen}, i1 false)"
+            ));
             let ew = self.fresh_tmp();
             let e0 = self.fresh_tmp();
             let e1 = self.fresh_tmp();
@@ -6914,10 +7064,14 @@ impl<'a> Gen<'a> {
             let (v, ty) = self.gen_expr(&args[0])?;
             match self.resolve(&ty) {
                 Type::Int => {
-                    let buf = self.heap_alloc("24");
+                    let buf = self.str_alloc("0", "24");
+                    let n = self.fresh_tmp();
+                    let n64 = self.fresh_tmp();
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 24, ptr @.fmt.ld, i64 {v})"
+                        "{n} = call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 25, ptr @.fmt.ld, i64 {v})"
                     ));
+                    self.emit(format!("{n64} = sext i32 {n} to i64"));
+                    self.emit(format!("call void @__vyrn_str_setlen(ptr {buf}, i64 {n64})"));
                     return Ok((buf, Type::Str));
                 }
                 // A sized int widens to i64 (sext signed, zext unsigned; a 64-bit
@@ -6933,10 +7087,14 @@ impl<'a> Gen<'a> {
                         self.emit(format!("{t} = {ext} i{bits} {v} to i64"));
                         t
                     };
-                    let buf = self.heap_alloc("24");
+                    let buf = self.str_alloc("0", "24");
+                    let n = self.fresh_tmp();
+                    let n64 = self.fresh_tmp();
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 24, ptr {fmt}, i64 {w})"
+                        "{n} = call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 25, ptr {fmt}, i64 {w})"
                     ));
+                    self.emit(format!("{n64} = sext i32 {n} to i64"));
+                    self.emit(format!("call void @__vyrn_str_setlen(ptr {buf}, i64 {n64})"));
                     return Ok((buf, Type::Str));
                 }
                 // (`%f` was selected here — a `select` on `fcmp uno` between the
@@ -6954,21 +7112,24 @@ impl<'a> Gen<'a> {
                     // Copy "true"/"false" into a fresh buffer so the result owns
                     // its storage (a global pointer must never be freed).
                     let src = self.fresh_tmp();
+                    let n = self.fresh_tmp();
                     self.emit(format!(
                         "{src} = select i1 {v}, ptr @.str.true, ptr @.str.false"
                     ));
-                    let buf = self.heap_alloc("6");
-                    self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {src})"));
+                    self.emit(format!("{n} = select i1 {v}, i64 4, i64 5"));
+                    let buf = self.str_alloc(&n, &n);
+                    self.emit(format!(
+                        "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {src}, i64 {n}, i1 false)"
+                    ));
                     return Ok((buf, Type::Str));
                 }
                 Type::Str => {
                     // strdup: copy so the rendered value is independently owned.
-                    let len = self.fresh_tmp();
-                    let sz = self.fresh_tmp();
-                    self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
-                    self.emit(format!("{sz} = add i64 {len}, 1"));
-                    let buf = self.heap_alloc(&sz);
-                    self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {v})"));
+                    let len = self.str_len(&v);
+                    let buf = self.str_alloc(&len, &len);
+                    self.emit(format!(
+                        "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {v}, i64 {len}, i1 false)"
+                    ));
                     return Ok((buf, Type::Str));
                 }
                 other => return Err(format!("`str` cannot render {other:?}")),
@@ -7288,12 +7449,12 @@ impl<'a> Gen<'a> {
                     self.emit(format!("{v} = load {ell}, ptr {ep}"));
                     return Ok((v, elem));
                 }
-                // `s[i]` on a String: bounds-check against strlen, then load the
-                // byte as a `UInt8` (RFC-0022) — an `i8` SSA value, the same
-                // representation as an element of `bytes(s)`, no zero-extension.
+                // `s[i]` on a String: bounds-check against the header length,
+                // then load the byte as a `UInt8` (RFC-0022) — an `i8` SSA value,
+                // the same representation as an element of `bytes(s)`, no
+                // zero-extension.
                 Type::Str => {
-                    let len = self.fresh_tmp();
-                    self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {av})"));
+                    let len = self.str_len(&av);
                     let oob = self.fresh_tmp();
                     self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
                     self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
@@ -8332,8 +8493,7 @@ impl<'a> Gen<'a> {
             if matches!(self.resolve(&cty), Type::Str) {
                 // String → (ptr, len): the callee decodes UTF-8 from linear
                 // memory (strings are immutable, so decode-on-cross is safe).
-                let len = self.fresh_tmp();
-                self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
+                let len = self.str_len(&v);
                 arg_ops.push(format!("ptr {v}"));
                 arg_ops.push(format!("i64 {len}"));
             } else {
@@ -8491,6 +8651,26 @@ fn pattern_binding(p: &Pattern) -> Option<&str> {
 /// message in this project follows.
 pub(crate) const SERVE_STREAM_TRAP: &str =
     "error: serveStream: a compiled build has no accept loop — a live route needs `vyrn serve`\n";
+
+/// A static `String` value in the data segment: the `{ i64 len, i64 cap }` header
+/// (RFC-0089 M1a) followed by the NUL-terminated bytes. `cap` is 0, which is the
+/// runtime's word for "never `realloc`, never free" — `@__vyrn_str_free` reads it
+/// and returns, so a drop site needs no static/heap analysis of its own.
+fn static_str_global(name: &str, s: &str) -> String {
+    let (escaped, len) = llvm_str(s);
+    format!(
+        "{name} = private unnamed_addr constant {{ i64, i64, [{len} x i8] }} \
+         {{ i64 {}, i64 0, [{len} x i8] c\"{escaped}\" }}, align 8\n",
+        s.len()
+    )
+}
+
+/// The `String` value of a global emitted by [`static_str_global`] — a constant
+/// `getelementptr` past the header, usable anywhere a `ptr` operand is.
+fn static_str_ptr(name: &str, s: &str) -> String {
+    let len = s.len() + 1;
+    format!("getelementptr inbounds ({{ i64, i64, [{len} x i8] }}, ptr {name}, i64 0, i32 2)")
+}
 
 fn llvm_str(s: &str) -> (String, usize) {
     let mut out = String::new();
@@ -10269,7 +10449,7 @@ mod tests {
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("app.own"), "the loop must take the append path: {ir}");
         assert_eq!(
-            ir.matches("call ptr @strcat(").count(),
+            ir.matches("call ptr @__vyrn_str_concat(").count(),
             1,
             "only the tail `out + \"]\"` may copy; a second means the loop is \
              copying again and the complexity class regressed: {ir}"
@@ -10477,16 +10657,22 @@ mod tests {
         assert!(ir.contains("load i64"), "expected an element load: {ir}");
     }
 
-    // The always-present runtime contributes exactly RUNTIME_FREES `call void
-    // @free` occurrences (one in `__vyrn_region_exit`, one in the
-    // `__vyrn_bytes_dup` NUL path, and three in `__vyrn_stream_close`: a
-    // buffer's data, and a cursor cell's payload on each of the two ways out of
-    // the walk M2c made that function — the chain continues, or it stops. Three
-    // sites, still one per stream released), so an *auto*-free is a free beyond
-    // that baseline.
-    const RUNTIME_FREES: usize = 5;
+    // The always-present runtime contributes exactly RUNTIME_FREES release
+    // occurrences: one `@free` in `__vyrn_region_exit`, one inside
+    // `@__vyrn_str_free` itself, one `@__vyrn_str_free` in the
+    // `__vyrn_bytes_dup` NUL path, and three `@free` in `__vyrn_stream_close`
+    // (a buffer's data, and a cursor cell's payload on each of the two ways out
+    // of the walk M2c made that function — the chain continues, or it stops.
+    // Three sites, still one per stream released). An *auto*-free is a release
+    // beyond that baseline.
+    //
+    // Both spellings count. A `String` drop is `@__vyrn_str_free` since
+    // RFC-0089 M1a — it reads the header cap and returns on a static — and the
+    // tests below ask how many bindings are reclaimed, not which call does it.
+    const RUNTIME_FREES: usize = 6;
     fn free_calls(ir: &str) -> usize {
         ir.matches("call void @free(ptr").count()
+            + ir.matches("call void @__vyrn_str_free(ptr").count()
     }
 
     #[test]
@@ -10904,10 +11090,17 @@ mod tests {
     }
 
     #[test]
-    fn string_byte_length_lowers_to_strlen() {
+    fn string_byte_length_reads_the_header() {
         let src = "fn main() -> Int64 { let s = \"hi\"; return s.byteLength; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @__vyrn_strlen"), "str .byteLength → strlen: {ir}");
+        // One load from the String header, not a scan (RFC-0089 M1a). Asserted
+        // inside `@main` because the module's own runtime still scans raw C
+        // strings, so a module-wide `strlen` search proves nothing.
+        let body = &ir[ir.find("define i64 @vyrn_main").expect("main is emitted")..];
+        let body = &body[..body.find("
+}").expect("main ends")];
+        assert!(body.contains("call i64 @__vyrn_str_len"), "byteLength reads the header: {body}");
+        assert!(!body.contains("@__vyrn_strlen"), "and does not scan: {body}");
     }
 
     // (`string_char_count_lowers_to_charcount_shim` pinned
@@ -10915,7 +11108,7 @@ mod tests {
     // found `charCount` the one builtin with no justification for being one, and it
     // is `std/text`'s `charCountV`. Its witness moved to
     // `a_routed_builtin_without_its_module_refuses_by_name` with the other ten.
-    // `string_byte_length_lowers_to_strlen` above is the contrast that matters:
+    // `string_byte_length_reads_the_header` above is the contrast that matters:
     // `byteLength` is a VIEW and stays.)
 
     #[test]
@@ -11025,14 +11218,15 @@ mod tests {
     }
 
     #[test]
-    fn validated_string_runtime_check_uses_strlen() {
-        // A non-constant String construction checks `value.byteLength` via strlen
-        // and traps through the same validation-error path.
+    fn validated_string_runtime_check_reads_the_header() {
+        // A non-constant String construction checks `value.byteLength` — a
+        // header load since RFC-0089 M1a — and traps through the same
+        // validation-error path.
         let src = "type Name = String where value.byteLength >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @__vyrn_strlen"), "refinement uses strlen: {ir}");
+        assert!(ir.contains("call i64 @__vyrn_str_len"), "refinement reads the header: {ir}");
         assert!(ir.contains("@.trap.verr.Name"), "refinement traps: {ir}");
     }
 
@@ -11224,7 +11418,7 @@ mod tests {
         let prop = ir.find("try.prop").expect("propagate block present");
         let ret = prop + ir[prop..].find("ret { i1, i64, i64 }").expect("propagate returns");
         assert!(
-            ir[prop..ret].contains("call void @free(ptr"),
+            ir[prop..ret].contains("call void @__vyrn_str_free(ptr"),
             "owned string must be freed on the propagate path:\n{}",
             &ir[prop..ret]
         );

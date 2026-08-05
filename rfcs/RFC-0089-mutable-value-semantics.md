@@ -101,7 +101,7 @@ is RFC-0086's thesis taken to its end: the compiler asks the signature.
 | U7 `consume` and linearity are two things | one thing — rule 2 |
 | U8 a declared container cannot be read | gone — `read self` is the receiver convention, and the safe-read list dies with `own.rs` |
 | §6/U5 use-after-release traps at runtime | confined to explicit `Ref`, the declared aliasing tool |
-| P2 String scans | String becomes a value triple `{ptr, len, cap}` like `Array` already is — legal now because rule 1 forbids the aliasing that a fat String pointer would break |
+| P2 String scans | String carries `{len, cap}` — see "M1a as landed" below |
 
 Three undesigned items in RFC-0087 (inferred regions, region borrowing, the
 compile-time story for aliasing) shrink to one: `Ref<T>` remains the runtime
@@ -151,6 +151,54 @@ worth building (M0), but the thing it prints becomes a rule, not a report.
   deep drop, export ABI ownership by rule 3.
 
 ---
+
+## M1a as landed — the String header
+
+This RFC sketched `String` as a value triple `{ptr, len, cap}`, "like `Array`
+already is". Implementation measured that and chose differently: the two words
+sit **behind** the pointer, not beside it. A `String` is still one word, and it
+still addresses NUL-terminated UTF-8, so the extern ABI and every C sink are
+unchanged. The sixteen bytes in front of it (eight on wasm32 — two
+pointer-sized words on each target) hold `len` and `cap`.
+
+Three measurements decided it.
+
+1. **An `Option<String>` payload is one word.** A three-word String does not
+   fit, so `Some(s)` would box — one `malloc` per construction. That moves the
+   `optionString` row of the census baseline (`compiler/vyrn-cli/tests/memory.rs`
+   §14), which Phase 2 was required not to move. `Result`, user enum payloads,
+   `Map<String, V>` keys and `Array<String>` elements all carry the same
+   assumption, and a triple widens every one of them.
+2. **A triple goes stale under aliasing; a header cannot.** The RFC's argument
+   for the triple was that rule 1 forbids the aliasing that would break it. Rule
+   1 is M2. Until it lands, `let t = s` is legal, and two triples would hold two
+   lengths for one buffer. Two pointers to one header hold one length.
+3. **The extern boundary needs no conversion at all.** A `String` crosses to JS
+   as a `ptr` (RFC-0012 M2) and still does. `wasi-min.js` writes the header when
+   it allocates and subtracts it when it frees; nothing else in the language
+   sees the boundary.
+
+`cap == 0` means static: a literal in the data segment, never `realloc`'d, never
+freed. That is the fact RFC-0077 M6 said a drop site could not recover, and it
+is now a field rather than an inference.
+
+What P2 asked for is delivered: `byteLength` is a load, `a + b` reads two
+lengths instead of scanning two operands, and `str_append`'s shadow `(len, cap)`
+is gone — the header IS that pair. One word of shadow survives per accumulator,
+holding a question the header cannot answer: did this path allocate the buffer?
+That word is ownership, which is M2's subject, and it retires with M2.
+
+Measured on the M0 benchmarks (`examples/membench.vyrn`, medians):
+
+| row | before | after |
+|---|---|---|
+| `byteLength` of 10 KB × 500 | 149.08 µs | 5.14 µs |
+| string concat, 1000 fresh buffers | 29.14 µs | 18.99 µs |
+| string append spine, 1000 appends | 6.13 µs | 4.54 µs |
+| array push churn, 1000 pushes | 540 ns | 541 ns |
+
+The cost is code and data size on wasm: `fib.wasm` grew from 1,334 to 1,590
+bytes, and `domdemo.wasm` from 25,966 to 27,630.
 
 ## Rejected
 

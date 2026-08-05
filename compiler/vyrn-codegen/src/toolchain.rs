@@ -107,6 +107,30 @@ void* __vyrn_realloc(void* p, unsigned long long n) {
     }
     return __vyrn_alloc_check(realloc(p, (size_t)n), n);
 }
+/* ---- String header (RFC-0089 M1a) --------------------------------------- */
+/* A Vyrn String is still a NUL-terminated `char*`, so every C sink here keeps
+   working. What is new is the sixteen bytes in FRONT of it: { long long len,
+   long long cap }. `cap == 0` means static: never realloc'd, never freed. The
+   IR carries the public accessors (`@__vyrn_str_new` and friends); these three
+   are private to the shim so the two definitions cannot collide at link. */
+#define VSTR_HDR 16
+static char* vstr_new(unsigned long long len, unsigned long long cap) {
+    char* base = (char*)__vyrn_malloc(cap + VSTR_HDR + 1);
+    ((long long*)base)[0] = (long long)len;
+    ((long long*)base)[1] = (long long)cap;
+    base[VSTR_HDR + len] = 0;
+    return base + VSTR_HDR;
+}
+static char* vstr_grow(char* s, unsigned long long cap) {
+    char* base = (char*)__vyrn_realloc(s - VSTR_HDR, cap + VSTR_HDR + 1);
+    ((long long*)base)[1] = (long long)cap;
+    return base + VSTR_HDR;
+}
+static void vstr_setlen(char* s, unsigned long long n) {
+    ((long long*)(s - VSTR_HDR))[0] = (long long)n;
+    s[n] = 0;
+}
+
 /* (`__vyrn_strncmp` lived here for `startsWith`/`endsWith`, which are `std/strpred`
    since RFC-0078 M4c. Nothing else called it, so it is the first shim function a
    milestone of this RFC has retired since M2b.) */
@@ -179,17 +203,17 @@ char* __vyrn_read_line(unsigned long long* outlen) {
     int c = getchar();
     if (c == EOF) return 0;
     unsigned long long cap = 64, len = 0;
-    char* buf = (char*)__vyrn_malloc(cap);
+    char* buf = vstr_new(0, cap);
     int had_nul = 0;
     while (c != EOF && c != '\n') {
         if (c == 0) had_nul = 1;
-        if (len + 2 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
+        if (len + 2 >= cap) { cap *= 2; buf = vstr_grow(buf, cap); }
         buf[len++] = (char)c;
         c = getchar();
     }
     if (len > 0 && buf[len - 1] == '\r') len--;
-    buf[len] = '\0';
-    if (had_nul) { free(buf); return 0; }
+    vstr_setlen(buf, len);
+    if (had_nul) { free(buf - VSTR_HDR); return 0; }
     *outlen = len;
     return buf;
 }
@@ -203,19 +227,19 @@ int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
     FILE* f = fopen(path, "rb");
     if (f == 0) return 1;
     unsigned long long cap = 1024, len = 0;
-    char* buf = (char*)__vyrn_malloc(cap);
+    char* buf = vstr_new(0, cap);
     for (;;) {
-        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
+        if (len + 1 >= cap) { cap *= 2; buf = vstr_grow(buf, cap); }
         size_t got = fread(buf + len, 1, (size_t)(cap - len - 1), f);
         len += (unsigned long long)got;
         if (got == 0) break;
     }
     int bad = ferror(f);
     fclose(f);
-    if (bad) { free(buf); return 1; }
-    buf[len] = '\0';
+    if (bad) { free(buf - VSTR_HDR); return 1; }
+    vstr_setlen(buf, len);
     for (unsigned long long k = 0; k < len; k++) {
-        if (buf[k] == 0) { free(buf); return 3; }
+        if (buf[k] == 0) { free(buf - VSTR_HDR); return 3; }
     }
     *out = buf;
     *outlen = len;

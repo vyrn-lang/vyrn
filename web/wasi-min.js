@@ -340,11 +340,18 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   memory = instance.exports.memory;
 
   // --- string helpers over linear memory (RFC-0012 M2 export ABI) ------------
-  // A String crosses into an exported Vyrn function as a single pointer: the JS
-  // side allocates `len + 1` bytes via the module's own `__vyrn_malloc`, copies
-  // UTF-8, and writes a NUL terminator (a Vyrn String is a NUL-terminated ptr).
+  // A String crosses into an exported Vyrn function as a single pointer to
+  // NUL-terminated UTF-8. That is unchanged. What the JS side now also writes is
+  // the eight-byte `{ len, cap }` header that sits in FRONT of every Vyrn String
+  // (RFC-0089 M1a) — the module reads `s.byteLength` out of it, so a String
+  // built here without one would read a length out of whatever preceded it.
+  //
+  // The conversion belongs here, at the boundary, and nowhere else: the ABI at
+  // the edge is still a bare pointer.
+  //
   // This is the asymmetry vs. an IMPORT (M1), where a String is a (ptr, len)
   // pair — an import can't allocate inside the module, but an exported call can.
+  const STR_HDR = 8;
   const enc = new TextEncoder();
   const encodeString = (s) => {
     const bytes = enc.encode(s);
@@ -355,10 +362,15 @@ export async function runVyrn(wasmBytes, hooks = {}) {
           "takes a String parameter."
       );
     }
-    const ptr = Number(instance.exports.__vyrn_malloc(BigInt(bytes.length + 1)));
-    const view = new Uint8Array(memory.buffer);
-    view.set(bytes, ptr);
-    view[ptr + bytes.length] = 0; // NUL
+    const base = Number(
+      instance.exports.__vyrn_malloc(BigInt(STR_HDR + bytes.length + 1))
+    );
+    const view = new DataView(memory.buffer);
+    view.setUint32(base, bytes.length, true); // len
+    view.setUint32(base + 4, bytes.length, true); // cap — non-zero: heap, freeable
+    const ptr = base + STR_HDR;
+    new Uint8Array(memory.buffer).set(bytes, ptr);
+    new Uint8Array(memory.buffer)[ptr + bytes.length] = 0; // NUL
     return ptr;
   };
   // Decode a returned String pointer: scan linear memory for the NUL byte.
@@ -429,8 +441,10 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       } finally {
         // A trap leaves the module unusable, but a `panic` the page catches does
         // not, so the release runs on both paths.
+        // The block base is the pointer less its String header (RFC-0089 M1a),
+        // which is what `__vyrn_malloc` handed out.
         const free = instance.exports.__vyrn_free;
-        if (typeof free === "function") for (const p of owned) free(p);
+        if (typeof free === "function") for (const p of owned) free(p - STR_HDR);
       }
       return out;
       // NOT freed: a returned String. Who owns one is `own::analyze`'s answer and
