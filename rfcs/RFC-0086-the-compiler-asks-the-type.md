@@ -1,6 +1,7 @@
 # RFC-0086 — The Compiler Asks the Type
 
-- **Status:** M1 implemented. M2–M4 designed.
+- **Status:** M1 implemented. M2 blocked — the protocol needs a receiver-less
+  method and the language has none; see "M2 — what it needs". M3–M4 designed.
 - **Depends on:** RFC-0084 (records are legal protocol targets, and conformance
   is checked), RFC-0002 §5 (protocols, static monomorphized dispatch),
   RFC-0080 (generic impls, associated types)
@@ -101,7 +102,8 @@ intrinsic. Properties get declared.**
   container in the corpus is reclaimed with no compiler change. See "M1 — as
   landed" below.
 - **M2 — `FromElements` / `FromEntries`.** `[]` and `[:]` build anything that
-  implements them. The `Type::Array` / `Type::Map` matches in the checker go.
+  implements them. *Blocked.* A constructor has no receiver, and every protocol
+  method in Vyrn has one. See "M2 — what it needs".
 - **M3 — linearity is a declaration.** The three `Type::Stream` matches in
   `movecheck` become a protocol lookup, so a user's file handle, lock or
   connection gets RFC-0075's obligation. That mechanism was built for one type
@@ -213,6 +215,121 @@ backend's `rel_for` had already been arranged to do for its own two paths. So
 - **`push(a, v)`** as a free function is the desugar target for `xs.push(v)`, so
   `own` must keep the name. `examples/region.vyrn` still writes the raw form by
   hand and could be migrated.
+
+## M2 — what it needs
+
+M2 was attempted and not landed. The protocol it needs cannot be declared in
+Vyrn today, and the milestone's second half — "the `Type::Array` / `Type::Map`
+matches in the checker go" — is wrong about `Array` for a reason M1 already
+recorded. Both are below. No compiler code changed.
+
+### The shape, and the part of it that works
+
+Two of the three worries in the sketch turn out not to bite.
+
+**Variadics are not needed.** The elements arrive as one argument. A map
+literal's keys and values are two ordinary parameters, not a varying number of
+them.
+
+**`Self` is not needed either.** RFC-0080 M2's associated types already say
+"the type the impl picks", and the return position is one more of those. This
+declares and conforms today:
+
+```vyrn
+protocol FromElements {
+    type Elem
+    type Out
+    fn fromElements(self, xs: Array<Elem>) -> Out
+}
+```
+
+`Self` itself is absent, and it is absent in a way that matters: it is not a
+type, so `-> Self` parses as a *name*, and `impl FromElements for Ring` is then
+refused for providing `-> Ring` where the protocol declared `-> Self`. The
+declaration compiles and no impl can ever satisfy it. An associated type is the
+spelling that works, at the cost of the impl naming itself twice.
+
+### The part that does not
+
+`fromElements` is a **constructor**. It has no `self`, and there is nowhere for
+one to come from: at `let r: Ring = []` no `Ring` exists yet.
+
+Every protocol method in Vyrn has a receiver, and it is not a convention —
+`parser::protocol_decl` eats `Tok::Vself` as the first token inside the
+parameter list, so a signature without it is a parse error. Dispatch matches:
+the checker resolves `.m(..)` by `type_key` of the **receiver's** type. Nothing
+in the compiler dispatches on the *expected* type, and `?` through `Fallible` is
+no precedent — it reads its operand.
+
+So the missing feature is one thing, stated exactly:
+
+> **A protocol method with no `self`, dispatched by the type the call site
+> expects rather than by a value it is called on.**
+
+That is new surface. Adding it inside a milestone about which types a literal
+builds would be the milestone smuggling a language feature, so it is reported
+instead of built. `Self` would come with it, because a receiver-less method has
+no other way to name its own type, and `type Out` is a workaround readers have
+to be taught.
+
+Until it exists, a user's container is built by an ordinary function —
+`ringOf([1, 2, 3])` — which works on all three engines and costs one name at
+the call site. That name is the whole of the ergonomic gap.
+
+### The match that cannot go, and why M1 already knew
+
+`release_kind` matches on `Type` with one arm per variant, and that match did
+not go in M1 either. What went was `owner_producing`, the **second** list. The
+milestone text asks for the wrong deletion.
+
+`Expr::ArrayLit`'s match on `expected` is not a hand-written property list. It
+is **layout selection**, which this RFC exempts by name: representation stays
+intrinsic. One syntax has three layouts —
+
+- no annotation: `[1, 2, 3]` is an `ArrayN` held inline;
+- `Array<T>`: three words around a heap buffer;
+- `SmallArray<T, N>`: a header inline until it spills, and a literal longer
+  than `N` is refused there.
+
+Answering one of those for all three is what exited `ifexpr.vyrn` with
+`0xC0000374` during M1. The arms are the answer to *which layout*, and there is
+no protocol that could replace them.
+
+What is genuinely a property test is the fallthrough — `` `[]` is an array
+literal, but Ring is not an array type ``. That one arm is what a `FromElements`
+row would open, and it is one arm. `[:]` has no second layout, so `Type::Map` in
+the `MapLit` arm **is** a pure property test — but a table with one seeded row
+and no way to add a second is not a protocol. It is the special case with a
+protocol's name on it, which is what this RFC exists to remove.
+
+The two literal arms also disagree about *where* they refuse. `let r: Ring = []`
+fails in the literal arm; `let r: Ring = [1, 2, 3]` builds an `ArrayN` and fails
+later at the assignment, saying "declared Ring but initializer is
+`Array<Int64, 3>`". Same question, two failure sites. A `FromElements` lookup
+would have to answer for both, which is a further reason the empty case alone is
+not the milestone.
+
+### The asymmetry rule, stated before building
+
+M1's is that `transfers` may be generous because a wrong yes leaks, and
+`release_kind` may not because a wrong answer frees the wrong bytes.
+
+**M2 has no generous direction.** The answer decides a *representation*, not a
+cleanup, so there is no safe leak to fall back on. Too generous — admitting that
+a type can be built from `[]` when it cannot — lowers a heap array into a slot
+that is not one, which is M1's `0xC0000374` reached from the other side. Too
+strict costs a compile error on a legal program: recoverable, and the only
+direction that is safe to be wrong in.
+
+That difference is the reason M2 is not the same kind of table as M1. M1 had a
+half it could be wrong in for free. M2 has none, so every row has to be right,
+and the rows that decide layout are the compiler's own.
+
+### Bootstrap
+
+Unchanged, and not the obstacle here. The seeded rows for a literal are the
+layout arms, which are already intrinsic and need no resolver. A bare file has
+no user containers to build in the first place.
 
 ## What this does not decide
 
