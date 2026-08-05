@@ -31,6 +31,7 @@
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
 //!   vyrn why     --contract <file>      Print the contract governing a module (RFC-0071)
+//!   vyrn why     --memory <file>        Print what is reclaimed, and why not (RFC-0087 U1)
 //!                                        and every export's status against it.
 //!
 //! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
@@ -55,7 +56,7 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -674,14 +675,20 @@ fn scaffold(name: &str) -> ExitCode {
 /// asks; the CLI only prints. Exits 1 when the file is in no role — "no contract
 /// governs this" is a real answer, but not the one you asked for.
 fn why_cmd(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: vyrn why <file> | vyrn why --contract <file>";
+    const USAGE: &str =
+        "usage: vyrn why <file> | vyrn why --contract <file> | vyrn why --memory <file>";
     let mut file: Option<String> = None;
     let mut contract = false;
+    let mut memory = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--contract" => {
                 contract = true;
+                i += 1;
+            }
+            "--memory" => {
+                memory = true;
                 i += 1;
             }
             other if !other.starts_with('-') => {
@@ -699,6 +706,9 @@ fn why_cmd(args: &[String]) -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if memory {
+        return why_memory(&file);
+    }
     if !contract {
         return why_audience(&file);
     }
@@ -1043,6 +1053,144 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// `vyrn why --memory <file>` (RFC-0087 U1, RFC-0089 M0) — what the ownership
+/// analysis decided about every binding in a module, and why.
+///
+/// Three bindings of one shape have opposite outcomes today, and nothing in the
+/// source says which is which. The compiler holds the exact answer and shows it
+/// to nobody. This is that answer at the shell.
+///
+/// It is a **printer**. Every word comes out of `own::Ownership`, recorded by
+/// the walker that decided — never re-derived here. A second walk over the tree
+/// could disagree with the first, and the census records that defect three times.
+///
+/// It reports; it does not gate. Exit 0 whenever it could answer.
+fn why_memory(file: &str) -> ExitCode {
+    use vyrn_frontend::own::Fate;
+
+    let path = match Path::new(file).canonicalize() {
+        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Err(e) => {
+            eprintln!("error: cannot read {file}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {file}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // A `.vyx` is not a module; its `<script>` is — the same split `--contract`
+    // makes.
+    let source = if path.ends_with(".vyx") {
+        vyx_script_body(&raw).unwrap_or_default()
+    } else {
+        raw
+    };
+    let program = match load_program(&path, &source) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let own = vyrn_frontend::own::analyze(&program);
+
+    println!("{path}");
+    println!("  memory: every binding, whether it is reclaimed, and the reason when it is not");
+
+    let mut bindings = 0usize;
+    let mut reclaimed = 0usize;
+    let mut moved = 0usize;
+    let mut dropped = 0usize;
+    let mut statics = 0usize;
+    // Reason -> count, kept in first-seen order so the report is stable.
+    let mut leaked: Vec<(&'static str, usize)> = Vec::new();
+
+    // Only the file asked about. A linked program carries every import's
+    // functions, and they are another file's answer.
+    for f in program.functions.iter().filter(|f| f.module.is_none() && !f.is_extern) {
+        let params: Vec<String> =
+            f.params.iter().map(|p| format!("{}: {}", p.name, p.ty)).collect();
+        println!();
+        println!("  fn {}({}) -> {}", f.name, params.join(", "), f.ret);
+        match own.owned_fns.get(&f.name) {
+            Some(kind) => println!(
+                "    transfers: yes — the caller owns the result, and releases it by {}",
+                release_words(kind)
+            ),
+            None if own.proto.release_kind(&f.ret).is_some() => println!(
+                "    transfers: no — the return type {} owns heap, but a return path hands back \
+                 a value this function does not own",
+                f.ret
+            ),
+            None => println!("    transfers: no — the return type {} owns no heap", f.ret),
+        }
+        let notes = match own.notes.get(&f.name) {
+            Some(n) if !n.is_empty() => n,
+            _ => {
+                println!("    (no bindings)");
+                continue;
+            }
+        };
+        for n in notes {
+            bindings += 1;
+            let text = match &n.fate {
+                Fate::Reclaimed(kind) => {
+                    reclaimed += 1;
+                    format!("reclaimed at block exit — {}", release_words(kind))
+                }
+                Fate::Moved { line } => {
+                    moved += 1;
+                    format!("moved out by the return at line {line}")
+                }
+                Fate::Dropped { line } => {
+                    dropped += 1;
+                    format!("reclaimed by `drop` at line {line}")
+                }
+                Fate::Static => {
+                    statics += 1;
+                    "static data — nothing reclaims it, and nothing needs to".into()
+                }
+                Fate::Leaked(reason) => {
+                    let key = reason.kind();
+                    match leaked.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, c)) => *c += 1,
+                        None => leaked.push((key, 1)),
+                    }
+                    format!("NOT reclaimed — {reason}")
+                }
+            };
+            println!("    line {:<5} {:<16} {}", n.line, n.name, text);
+        }
+    }
+
+    let leaks: usize = leaked.iter().map(|(_, c)| c).sum();
+    println!();
+    println!(
+        "  summary: {bindings} bindings — {reclaimed} reclaimed, {moved} moved out, \
+         {dropped} dropped, {statics} static, {leaks} not reclaimed"
+    );
+    leaked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    for (reason, count) in &leaked {
+        println!("    {count:>5}  {reason}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// How a release kind reclaims, in words.
+fn release_words(kind: &vyrn_frontend::own::DropKind) -> String {
+    use vyrn_frontend::own::DropKind::*;
+    match kind {
+        FreeStr => "freeing the String buffer".into(),
+        FreeArr => "freeing the array buffer".into(),
+        FreeSmallArr => "freeing the spilled buffer, if it spilled".into(),
+        FreeMap => "freeing both map buffers".into(),
+        ReleaseRef => "releasing the cell".into(),
+        CloseStream => "closing the stream".into(),
+        Release(f) => format!("calling `{f}`"),
+    }
 }
 
 /// `vyrn why <file>` (RFC-0072 M1) — the audience of a module, the path segment

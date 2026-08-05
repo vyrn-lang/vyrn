@@ -194,6 +194,115 @@ impl Owned {
     }
 }
 
+/// Why a binding is **not** reclaimed at block exit (RFC-0087 U1).
+///
+/// Every row is recorded at the point the decision is made, by the walker that
+/// makes it. There is no second pass. A separate walker over `Expr` could
+/// disagree with this one, and the census records that defect three times.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Leak {
+    /// The initializer reads a place somebody else owns. Carries the form of
+    /// the expression, in words — see [`expr_form`].
+    NoTransfer(String),
+    /// The type releases nothing. Carries the type, or `unknown`.
+    NoRelease(String),
+    /// `mut`, and not a container that keeps its identity across a self-update.
+    Mutable,
+    /// Lexically inside a `region` — the arena owns it.
+    Region,
+    /// A second binding took the value.
+    Aliased { line: usize },
+    /// It reached a call that may retain it.
+    Escaped { callee: String, line: usize },
+    /// A lambda captured it, and a stored closure can outlive this block.
+    Captured { line: usize },
+    /// The binding was reassigned, so who owns the old value is no longer clear.
+    Reassigned { line: usize },
+    /// It was used somewhere this pass cannot prove is only a read.
+    Used { line: usize },
+}
+
+impl Leak {
+    /// The reason with its lines and names removed, so a corpus of them groups.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Leak::NoTransfer(_) => "the initializer does not transfer",
+            Leak::NoRelease(_) => "the type owns no heap",
+            Leak::Mutable => "`mut`, and not a self-updating container",
+            Leak::Region => "inside a `region`",
+            Leak::Aliased { .. } => "aliased by another binding",
+            Leak::Escaped { .. } => "escaped into a call",
+            Leak::Captured { .. } => "captured by a lambda",
+            Leak::Reassigned { .. } => "reassigned",
+            Leak::Used { .. } => "used where retention is possible",
+        }
+    }
+}
+
+impl std::fmt::Display for Leak {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Leak::NoTransfer(form) => write!(f, "{form} does not transfer ownership"),
+            Leak::NoRelease(ty) => write!(f, "the type {ty} owns no heap"),
+            Leak::Mutable => write!(f, "it is `mut`, and not a container that updates itself"),
+            Leak::Region => write!(f, "it is inside a `region` — the arena owns it"),
+            Leak::Aliased { line } => write!(f, "another binding aliases it at line {line}"),
+            Leak::Escaped { callee, line } => {
+                write!(f, "it escapes into the call to `{callee}` at line {line}")
+            }
+            Leak::Captured { line } => write!(f, "a lambda captures it at line {line}"),
+            Leak::Reassigned { line } => write!(f, "it is reassigned at line {line}"),
+            Leak::Used { line } => write!(f, "it is used at line {line}, which may retain it"),
+        }
+    }
+}
+
+/// What happens to a `let` binding's value at the end of its block.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Fate {
+    /// The engines release it here, this way.
+    Reclaimed(DropKind),
+    /// A `return` moves it out; the caller owns it.
+    Moved { line: usize },
+    /// `drop name` reclaims it, so the automatic path must not.
+    Dropped { line: usize },
+    /// It is static data in the module's data segment. Nothing reclaims it,
+    /// and nothing needs to (census §1).
+    Static,
+    /// Nothing reclaims it.
+    Leaked(Leak),
+}
+
+/// One `let` binding and what happens to its value — the report behind
+/// `vyrn why --memory`.
+#[derive(Clone, Debug)]
+pub struct BindingNote {
+    pub name: String,
+    pub line: usize,
+    pub fate: Fate,
+}
+
+/// The form of an expression, in the words a diagnostic uses.
+///
+/// A formatter, not a decision: [`Analysis::transfers`] already answered.
+fn expr_form(e: &Expr) -> String {
+    match e {
+        Expr::Str(_) => "a string literal".into(),
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) => "a literal".into(),
+        Expr::Var { name, .. } => format!("reading `{name}`"),
+        Expr::Field { field, .. } => format!("reading the field `{field}`"),
+        Expr::Call { name, .. } => format!("the call to `{name}`"),
+        Expr::Try { .. } => "a `?` propagation".into(),
+        Expr::Match { .. } => "a match expression".into(),
+        Expr::IfExpr { .. } => "an if-expression".into(),
+        Expr::TryConstruct { .. } => "a fallible construction".into(),
+        Expr::Spawn { .. } => "a spawn".into(),
+        Expr::Lambda { .. } => "a lambda".into(),
+        Expr::ArrayLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. } => "a literal".into(),
+        Expr::Binary { .. } | Expr::Unary { .. } => "an operator result".into(),
+    }
+}
+
 /// The built-in calls that hand the caller a fresh heap value, with the type of
 /// that value. **This is a fact about a function, not about a type** — `at(a, 0)`
 /// and `m.keys()` both return an element of a container and only one of them
@@ -223,6 +332,11 @@ pub struct Ownership {
     pub owned_fns: HashMap<String, DropKind>,
     /// Per function: identity of each droppable `let` and how to reclaim it.
     pub droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// Per function: every `let` in source order, and what happens to its value
+    /// — the same decisions `droppable` carries, plus the reason for each one
+    /// this analysis did NOT take. Recorded by the walker that decides, so the
+    /// report and the emission cannot disagree (RFC-0087 U1).
+    pub notes: HashMap<String, Vec<BindingNote>>,
     /// The `Ref` argument of every `get`/`set` whose generation check cannot
     /// fail, keyed by that argument expression's node address — RFC-0004 §5.3.
     /// See [`fresh_refs_in`] for the condition. Flat across the program, because
@@ -282,27 +396,31 @@ pub fn analyze(program: &Program) -> Ownership {
 
     // Final droppable sets, computed under the fixed owned set.
     let mut droppable = HashMap::new();
+    let mut notes = HashMap::new();
     let mut fresh_refs = HashSet::new();
     for f in &program.functions {
-        let d = analyze_fn(f, &owned, &ret_types, &proto).droppable;
-        fresh_refs.extend(fresh_refs_in(&f.body, &d));
-        droppable.insert(f.name.clone(), d);
+        let r = analyze_fn(f, &owned, &ret_types, &proto);
+        fresh_refs.extend(fresh_refs_in(&f.body, &r.droppable));
+        droppable.insert(f.name.clone(), r.droppable);
+        notes.insert(f.name.clone(), r.notes);
     }
     // Test bodies (RFC-0015) get the same block-exit drop analysis so a `let` in
     // a test reclaims its heap value exactly as it would in a function. The body
     // is the REAL node the interpreter walks, so the by-address droppable keys
     // match at run time. Tests never return an owned value (they are `Unit`).
     for (i, t) in program.tests.iter().enumerate() {
-        let d = analyze_body(&[], &t.body, &Type::Unit, &owned, &ret_types, &proto).droppable;
-        fresh_refs.extend(fresh_refs_in(&t.body, &d));
-        droppable.insert(format!("test@{i}"), d);
+        let r = analyze_body(&[], &t.body, &Type::Unit, &owned, &ret_types, &proto);
+        fresh_refs.extend(fresh_refs_in(&t.body, &r.droppable));
+        droppable.insert(format!("test@{i}"), r.droppable);
+        notes.insert(format!("test@{i}"), r.notes);
     }
     // Bench bodies (RFC-0055) get the same block-exit drop analysis, keyed by the
     // synthetic `bench@<index>` name the interpreter (`--check`) walks.
     for (i, b) in program.benches.iter().enumerate() {
-        let d = analyze_body(&[], &b.body, &Type::Unit, &owned, &ret_types, &proto).droppable;
-        fresh_refs.extend(fresh_refs_in(&b.body, &d));
-        droppable.insert(format!("bench@{i}"), d);
+        let r = analyze_body(&[], &b.body, &Type::Unit, &owned, &ret_types, &proto);
+        fresh_refs.extend(fresh_refs_in(&b.body, &r.droppable));
+        droppable.insert(format!("bench@{i}"), r.droppable);
+        notes.insert(format!("bench@{i}"), r.notes);
     }
     // The public view is about the PROGRAM's functions: a built-in producer is
     // seeded knowledge, not a fact discovered about a declaration.
@@ -315,6 +433,7 @@ pub fn analyze(program: &Program) -> Ownership {
     Ownership {
         owned_fns,
         droppable,
+        notes,
         fresh_refs,
         proto,
     }
@@ -322,6 +441,7 @@ pub fn analyze(program: &Program) -> Ownership {
 
 struct FnResult {
     droppable: HashMap<usize, DropKind>,
+    notes: Vec<BindingNote>,
     is_owned: bool,
 }
 
@@ -352,6 +472,10 @@ fn analyze_body(
         .collect();
     let mut a = Analysis {
         droppable: HashMap::new(),
+        notes: Vec::new(),
+        note_at: HashMap::new(),
+        why: None,
+        line: 0,
         live: vec![HashMap::new()],
         region_depth: 0,
         owned,
@@ -364,6 +488,7 @@ fn analyze_body(
     a.block(body);
     FnResult {
         droppable: a.droppable,
+        notes: a.notes,
         is_owned: a.ret_is_heap && a.all_returns_owned,
     }
 }
@@ -407,6 +532,16 @@ impl<T> Scopes<T> {
 
 struct Analysis<'a> {
     droppable: HashMap<usize, DropKind>,
+    /// One row per `let`, in source order, with what happens to its value.
+    notes: Vec<BindingNote>,
+    /// `let` node identity -> its row in `notes`, so a later escape rewrites the
+    /// row the same walker wrote.
+    note_at: HashMap<usize, usize>,
+    /// Why the binding an `escape` is about to remove leaves. `None` means the
+    /// generic "used at the current line".
+    why: Option<Leak>,
+    /// The line of the statement being walked, for the generic reason.
+    line: usize,
     /// Scope stack of live candidate owners: name -> declaring `let` identity.
     live: Vec<HashMap<String, usize>>,
     region_depth: usize,
@@ -454,17 +589,26 @@ impl Analysis<'_> {
     }
 
     fn stmt(&mut self, s: &Stmt) {
+        self.line = stmt_line(s).unwrap_or(self.line);
         match s {
             Stmt::Let {
                 name,
                 mutable,
                 value,
                 ty,
-                ..
+                line,
             } => {
                 // Account for uses in the initializer *before* the new binding
-                // exists (so `let x = x + b` escapes the old `x`).
+                // exists (so `let x = x + b` escapes the old `x`). A bare
+                // variable initializer is the alias case, and it is worth saying
+                // so by name — RFC-0089 rule 1 is about exactly these.
+                let outer = self.why.take();
+                self.why = match value {
+                    Expr::Var { .. } => Some(Leak::Aliased { line: *line }),
+                    _ => outer.clone(),
+                };
                 self.visit(value);
+                self.why = outer;
                 // The binding's type: what it was declared, else what the
                 // initializer yields. Computed against the *pre-binding* env, so
                 // a self-reference resolves to the old value's type. An unknown
@@ -475,33 +619,65 @@ impl Analysis<'_> {
                 // The two questions (RFC-0086 M1). Does the initializer hand over
                 // a value nobody else holds? Then the TYPE says how it is
                 // released. Neither half is a list of expression forms.
-                let owner_kind = if self.transfers(value) {
-                    bty.as_ref().and_then(|t| self.proto.release_kind(t))
-                } else {
-                    None
-                };
-                if let Some(kind) = owner_kind {
-                    // A dynamic string inside a region is owned by the arena, so
-                    // skip it. A cell (`ReleaseRef`) lives in the separate slab,
-                    // which the region does not touch, so release it regardless.
-                    let region_owns = kind == DropKind::FreeStr && self.region_depth > 0;
-                    // Arrays are reassigned in place (`a = push(a, x)`), so a
-                    // `mut` array can still own a buffer; strings/refs must be
-                    // single-assignment to be tracked.
-                    // A `mut` Map is mutated in place (`m[k] = v`) and keeps its
-                    // identity, so — like an array — it can still own its buffers.
-                    let assignable_ok = !*mutable
-                        || kind == DropKind::FreeArr
-                        || kind == DropKind::FreeSmallArr
-                        || kind == DropKind::FreeMap;
-                    if assignable_ok && !region_owns {
-                        let key = id(s);
-                        self.live.last_mut().unwrap().insert(name.clone(), key);
-                        self.droppable.insert(key, kind);
+                //
+                // Each branch below records WHY, in the same place it decides.
+                //
+                // The REPORT asks the type first, though the decision needs
+                // both: "the type owns no heap" is the whole answer for a
+                // scalar, and saying "a literal does not transfer" about
+                // `let i = 0` would be true and useless. Where the type does own
+                // heap, transfer is the remaining question, which is exactly the
+                // §2a cases.
+                let fate = match bty.as_ref().and_then(|t| self.proto.release_kind(t)) {
+                    // A named type that releases nothing is the whole answer.
+                    // An UNNAMED one is not: "unknown" says nothing, and the
+                    // form of the initializer is what a reader can act on.
+                    None if bty.is_some() => {
+                        Fate::Leaked(Leak::NoRelease(bty.as_ref().unwrap().to_string()))
                     }
-                }
+                    None if self.transfers(value) => Fate::Leaked(Leak::NoRelease("unknown".into())),
+                    None => Fate::Leaked(Leak::NoTransfer(expr_form(value))),
+                    // A string literal lives in the data segment. Nothing
+                    // reclaims it and nothing needs to (census §1).
+                    Some(_) if matches!(value, Expr::Str(_)) => Fate::Static,
+                    Some(_) if !self.transfers(value) => {
+                        Fate::Leaked(Leak::NoTransfer(expr_form(value)))
+                    }
+                    Some(kind) => {
+                        // A dynamic string inside a region is owned by the arena,
+                        // so skip it. A cell (`ReleaseRef`) lives in the separate
+                        // slab, which the region does not touch, so release it
+                        // regardless.
+                        let region_owns = kind == DropKind::FreeStr && self.region_depth > 0;
+                        // Arrays are reassigned in place (`a = push(a, x)`), so a
+                        // `mut` array can still own a buffer; strings/refs must be
+                        // single-assignment to be tracked. A `mut` Map is mutated
+                        // in place (`m[k] = v`) and keeps its identity, so — like
+                        // an array — it can still own its buffers.
+                        let assignable_ok = !*mutable
+                            || kind == DropKind::FreeArr
+                            || kind == DropKind::FreeSmallArr
+                            || kind == DropKind::FreeMap;
+                        if region_owns {
+                            Fate::Leaked(Leak::Region)
+                        } else if !assignable_ok {
+                            Fate::Leaked(Leak::Mutable)
+                        } else {
+                            let key = id(s);
+                            self.live.last_mut().unwrap().insert(name.clone(), key);
+                            self.droppable.insert(key, kind.clone());
+                            Fate::Reclaimed(kind)
+                        }
+                    }
+                };
+                self.note_at.insert(id(s), self.notes.len());
+                self.notes.push(BindingNote {
+                    name: name.clone(),
+                    line: *line,
+                    fate,
+                });
             }
-            Stmt::Assign { name, value, .. } => {
+            Stmt::Assign { name, value, line } => {
                 // `a = push(a, ..)` is an in-place self-update: the array keeps
                 // its owner. Any *other* reassignment of a tracked binding makes
                 // its ownership unclear, so it is dropped from tracking (a safe
@@ -520,7 +696,7 @@ impl Analysis<'_> {
                             return;
                         }
                     }
-                    self.escape(name);
+                    self.escape_with(name, Fate::Leaked(Leak::Reassigned { line: *line }));
                 }
                 self.visit(value);
             }
@@ -536,7 +712,7 @@ impl Analysis<'_> {
                 self.visit(index);
                 self.visit(value);
             }
-            Stmt::Return { value, .. } => self.ret(value.as_ref()),
+            Stmt::Return { value, line } => self.ret(value.as_ref(), *line),
             // `break`/`continue` (RFC-0060) touch no bindings — nothing escapes.
             // Drop emission for the exited scopes is handled by codegen/interp.
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
@@ -586,7 +762,9 @@ impl Analysis<'_> {
             Stmt::Expr(e) => self.visit(e),
             // `drop name;` reclaims the value explicitly, so it must escape the
             // automatic-drop analysis — otherwise it would be freed twice.
-            Stmt::Drop { name, .. } => self.escape(name),
+            Stmt::Drop { name, line } => {
+                self.escape_with(name, Fate::Dropped { line: *line })
+            }
             Stmt::Region { body, .. } => {
                 self.region_depth += 1;
                 self.block(body);
@@ -599,7 +777,7 @@ impl Analysis<'_> {
     /// returned value is a fresh owned allocation being moved out (keeping the
     /// function's owned status) or something borrowed/aliased (which downgrades
     /// it). For a non-heap return, just account for uses.
-    fn ret(&mut self, value: Option<&Expr>) {
+    fn ret(&mut self, value: Option<&Expr>, line: usize) {
         let Some(e) = value else { return };
         if !self.ret_is_heap {
             self.visit(e);
@@ -615,7 +793,7 @@ impl Analysis<'_> {
             if self.is_candidate(name) {
                 // Moving a local owner out: it leaves the function, so it must
                 // NOT also be dropped here.
-                self.escape(name);
+                self.escape_with(name, Fate::Moved { line });
             } else {
                 // Returning a parameter or an already-escaped value — borrowed.
                 self.visit(e);
@@ -727,49 +905,15 @@ impl Analysis<'_> {
                 self.operand(lhs);
                 self.operand(rhs);
             }
-            Expr::Call { name, args, .. } => {
-                // These builtins only *read* their heap argument and never retain
-                // it — a whole candidate passed to one is a safe use: `print` /
-                // `@concat` for strings, `get` for references,
-                // and the log methods (which format-and-write their message).
-                // `release` is intentionally excluded: it hands the cell off, so
-                // it escapes the binding (no auto-release on top of it). `logger`
-                // is excluded too: it *returns* its name argument (an alias). Any
-                // other call may alias its argument into its result (e.g.
-                // `fn id(s) { return s; }`), so it counts as an escape too.
-                //
-                // `set(c, v)` reads its *Ref* argument but STORES `v` in the cell
-                // — the cell outlives the block, so `v` must escape (a droppable
-                // `v` would be freed at block exit while the cell still points at
-                // it: a use-after-free on the next `get`).
-                if name == "set" {
-                    if let Some((c, rest)) = args.split_first() {
-                        self.operand(c);
-                        for a in rest {
-                            self.visit(a);
-                        }
-                    }
-                } else if matches!(
-                    name.as_str(),
-                    "print" | "@concat" | "get" | "at" | "alen"
-                        // `@pop`/`@swapRemove` mutate the array in place but do
-                        // not free its buffer, so the receiver stays a live owner
-                        // (a safe read); the removed element is a safe leak.
-                        | "@pop" | "@swapRemove"
-                        // Map methods (RFC-0028) mutate/read in place but never
-                        // free the map's buffers, so the receiver stays a live
-                        // owner (a safe read); `@keys` returns a fresh snapshot.
-                        | "@has" | "@remove" | "@keys"
-                        | "trace" | "debug" | "info" | "warn" | "error"
-                ) {
-                    for a in args {
-                        self.operand(a);
-                    }
-                } else {
-                    for a in args {
-                        self.visit(a);
-                    }
-                }
+            Expr::Call { name, args, line } => {
+                // An argument that is not a safe read escapes INTO this call, and
+                // naming the callee is most of the value of saying so.
+                let outer = self.why.replace(Leak::Escaped {
+                    callee: name.clone(),
+                    line: *line,
+                });
+                self.call(name, args);
+                self.why = outer;
             }
             Expr::Match {
                 scrutinee, arms, ..
@@ -835,7 +979,8 @@ impl Analysis<'_> {
             // String and each is recorded as not one — which costs nothing a
             // parameter did not already lack, and stops one named like an
             // enclosing String from being read as that String.
-            Expr::Lambda { params, body, .. } => {
+            Expr::Lambda { params, body, line } => {
+                let outer = self.why.replace(Leak::Captured { line: *line });
                 self.var_types.enter();
                 for p in params {
                     self.var_types.bind(p, None);
@@ -849,6 +994,53 @@ impl Analysis<'_> {
                     }
                 }
                 self.var_types.exit();
+                self.why = outer;
+            }
+        }
+    }
+
+    /// The arguments of a call.
+    ///
+    /// These builtins only *read* their heap argument and never retain it — a
+    /// whole candidate passed to one is a safe use: `print` / `@concat` for
+    /// strings, `get` for references, and the log methods (which
+    /// format-and-write their message). `release` is intentionally excluded: it
+    /// hands the cell off, so it escapes the binding (no auto-release on top of
+    /// it). `logger` is excluded too: it *returns* its name argument (an alias).
+    /// Any other call may alias its argument into its result (e.g.
+    /// `fn id(s) { return s; }`), so it counts as an escape too.
+    ///
+    /// `set(c, v)` reads its *Ref* argument but STORES `v` in the cell — the cell
+    /// outlives the block, so `v` must escape (a droppable `v` would be freed at
+    /// block exit while the cell still points at it: a use-after-free on the next
+    /// `get`).
+    fn call(&mut self, name: &str, args: &[Expr]) {
+        if name == "set" {
+            if let Some((c, rest)) = args.split_first() {
+                self.operand(c);
+                for a in rest {
+                    self.visit(a);
+                }
+            }
+        } else if matches!(
+            name,
+            "print" | "@concat" | "get" | "at" | "alen"
+                // `@pop`/`@swapRemove` mutate the array in place but do not free
+                // its buffer, so the receiver stays a live owner (a safe read);
+                // the removed element is a safe leak.
+                | "@pop" | "@swapRemove"
+                // Map methods (RFC-0028) mutate/read in place but never free the
+                // map's buffers, so the receiver stays a live owner (a safe
+                // read); `@keys` returns a fresh snapshot.
+                | "@has" | "@remove" | "@keys"
+                | "trace" | "debug" | "info" | "warn" | "error"
+        ) {
+            for a in args {
+                self.operand(a);
+            }
+        } else {
+            for a in args {
+                self.visit(a);
             }
         }
     }
@@ -866,14 +1058,45 @@ impl Analysis<'_> {
     }
 
     /// Mark the innermost candidate named `name`, if any, as escaped: no longer
-    /// droppable and no longer tracked.
+    /// droppable and no longer tracked. The reason is whatever context the
+    /// walker is in — see [`Analysis::why`].
     fn escape(&mut self, name: &str) {
+        let reason = self.why.clone().unwrap_or(Leak::Used { line: self.line });
+        self.escape_with(name, Fate::Leaked(reason));
+    }
+
+    /// The same removal, with the fate stated by the caller: a `return` moves,
+    /// a `drop` reclaims, an assignment loses track.
+    fn escape_with(&mut self, name: &str, fate: Fate) {
         for frame in self.live.iter_mut().rev() {
             if let Some(key) = frame.remove(name) {
                 self.droppable.remove(&key);
+                if let Some(&i) = self.note_at.get(&key) {
+                    self.notes[i].fate = fate;
+                }
                 return;
             }
         }
+    }
+}
+
+/// The source line of a statement, where it carries one.
+fn stmt_line(s: &Stmt) -> Option<usize> {
+    match s {
+        Stmt::Let { line, .. }
+        | Stmt::Assign { line, .. }
+        | Stmt::SetField { line, .. }
+        | Stmt::IndexSet { line, .. }
+        | Stmt::Return { line, .. }
+        | Stmt::Break { line }
+        | Stmt::Continue { line }
+        | Stmt::If { line, .. }
+        | Stmt::IfLet { line, .. }
+        | Stmt::While { line, .. }
+        | Stmt::ForIn { line, .. }
+        | Stmt::Drop { line, .. }
+        | Stmt::Region { line, .. } => Some(*line),
+        Stmt::Expr(_) => None,
     }
 }
 
@@ -1467,6 +1690,211 @@ mod tests {
         let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("make"));
         assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    // ---- the RFC-0089 gate (M0) ------------------------------------------
+
+    /// Whether a value of `ty` transitively owns heap, under RFC-0089 rule 1.
+    ///
+    /// `release_kind` answers about the value's OWN storage; this asks about
+    /// everything it reaches, because a record of Strings moves under rule 1
+    /// even though releasing the record releases nothing today. `Ref<T>` is
+    /// excluded on purpose: RFC-0089 §5 keeps it a freely copied handle.
+    fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let deeper = |t: &Type| owns_heap(t, types, depth + 1);
+        match crate::types::resolve(ty, types) {
+            Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Stream(_) => {
+                true
+            }
+            Type::Option(t) | Type::ArrayN(t, _) | Type::Lazy(t) | Type::Task(t) => deeper(&t),
+            Type::Result(a, b) => deeper(&a) || deeper(&b),
+            Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
+            Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(&deeper)),
+            _ => false,
+        }
+    }
+
+    /// Every `.vyrn` under a repo-relative directory.
+    fn sources(rel: &str, out: &mut Vec<std::path::PathBuf>) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel);
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "vyrn") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    /// RFC-0089 M0's go/no-go evidence: how large the move-error surface is over
+    /// the whole corpus, and how much the current analysis leaks.
+    ///
+    /// It parses each file ALONE — no loader, no linking. That under-counts a
+    /// cross-module call's transfer, and it is the only reading that gives one
+    /// number per source line rather than one per import graph.
+    ///
+    /// Ignored by default: it reads the repository, so it is a measurement, not
+    /// a unit test. Run it with
+    /// `cargo test -p vyrn-frontend rfc0089 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn rfc0089_move_surface_over_the_corpus() {
+        let mut files = Vec::new();
+        sources("examples", &mut files);
+        sources("std", &mut files);
+        files.sort();
+
+        let (mut lines, mut parsed) = (0, 0);
+        let (mut param_returns, mut aliases): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+        let mut reasons: HashMap<&'static str, usize> = HashMap::new();
+        let (mut total, mut kept) = (0usize, 0usize);
+
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            lines += src.lines().count();
+            let Ok(tokens) = crate::lexer::lex(&src) else { continue };
+            let (program, errs) = crate::parser::parse_accum(tokens);
+            if !errs.is_empty() {
+                continue;
+            }
+            parsed += 1;
+            let types = crate::types::decl_map(&program);
+            let own = analyze(&program);
+            let where_ = path.file_name().unwrap().to_string_lossy().to_string();
+
+            for f in &program.functions {
+                // Rule 3: a return of a PARAMETER from a function whose result
+                // owns heap. Returning a local is a legal move and stays legal.
+                if owns_heap(&f.ret, &types, 0) {
+                    let names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+                    for (line, name) in returned_params(&f.body, &names) {
+                        param_returns.push(format!("{where_}:{line} {}: return {name}", f.name));
+                    }
+                }
+                // Rule 1: a bare alias of a value that owns heap. Only a
+                // `let y = x` whose type this pass can name counts; an unnamed
+                // one is invisible to any reading short of the checker.
+                for (line, y, x) in bare_aliases(&f.body, &f.params, &types) {
+                    aliases.push(format!("{where_}:{line} {}: let {y} = {x}", f.name));
+                }
+            }
+
+            for notes in own.notes.values() {
+                for n in notes {
+                    total += 1;
+                    match &n.fate {
+                        Fate::Leaked(r) => *reasons.entry(r.kind()).or_default() += 1,
+                        _ => kept += 1,
+                    }
+                }
+            }
+        }
+
+        let mut rows: Vec<_> = reasons.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        let leaks: usize = rows.iter().map(|(_, c)| c).sum();
+        println!("corpus: {} files ({parsed} parsed), {lines} lines", files.len());
+        println!("RFC-0089 rule 3 — returns of a parameter: {}", param_returns.len());
+        for s in &param_returns {
+            println!("    {s}");
+        }
+        println!("RFC-0089 rule 1 — bare aliases of an owning type: {}", aliases.len());
+        for s in &aliases {
+            println!("    {s}");
+        }
+        println!("move surface: {}", param_returns.len() + aliases.len());
+        println!("bindings: {total} — {kept} reclaimed/moved/dropped/static, {leaks} not reclaimed");
+        for (reason, count) in rows {
+            println!("  {count:>5}  {reason}");
+        }
+    }
+
+    /// Every `return p` in `body` that names one of `params`, with its line.
+    fn returned_params(body: &Block, params: &HashSet<&str>) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        walk_stmts(body, &mut |s| {
+            if let Stmt::Return {
+                value: Some(Expr::Var { name, .. }),
+                line,
+            } = s
+            {
+                if params.contains(name.as_str()) {
+                    out.push((*line, name.clone()));
+                }
+            }
+        });
+        out
+    }
+
+    /// How many `let y = x` in `body` alias a value whose type owns heap.
+    ///
+    /// The type comes from the parameter list or from a `let`'s annotation —
+    /// the same declared-types reading `expr_type` does, and it under-counts
+    /// for the same reason.
+    fn bare_aliases(
+        body: &Block,
+        params: &[Param],
+        types: &HashMap<String, TypeDecl>,
+    ) -> Vec<(usize, String, String)> {
+        let mut known: HashMap<String, Type> =
+            params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+        let mut out = Vec::new();
+        walk_stmts(body, &mut |s| {
+            if let Stmt::Let {
+                name,
+                ty,
+                value,
+                line,
+                ..
+            } = s
+            {
+                if let Expr::Var { name: src, .. } = value {
+                    if known.get(src).is_some_and(|t| owns_heap(t, types, 0)) {
+                        out.push((*line, name.clone(), src.clone()));
+                    }
+                }
+                if let Some(t) = ty {
+                    known.insert(name.clone(), t.clone());
+                }
+            }
+        });
+        out
+    }
+
+    /// Every statement in a block, nested blocks included.
+    fn walk_stmts(b: &Block, f: &mut impl FnMut(&Stmt)) {
+        for s in &b.stmts {
+            f(s);
+            match s {
+                Stmt::If {
+                    then_block,
+                    else_block,
+                    ..
+                }
+                | Stmt::IfLet {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    walk_stmts(then_block, f);
+                    if let Some(eb) = else_block {
+                        walk_stmts(eb, f);
+                    }
+                }
+                Stmt::While { body, .. }
+                | Stmt::ForIn { body, .. }
+                | Stmt::Region { body, .. } => walk_stmts(body, f),
+                _ => {}
+            }
+        }
     }
 
     #[test]

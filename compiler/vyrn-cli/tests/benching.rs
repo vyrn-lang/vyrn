@@ -235,11 +235,13 @@ fn examples_dir() -> PathBuf {
 #[test]
 fn bench_corpus_is_exactly_the_bench_bearing_examples() {
     // CI's blocking `--check` step scans `examples/*.vyrn` for `bench "`; this pins
-    // that the discovered set is exactly {benching, simdbench, smallarray} today,
-    // so a new bench-bearing example (or a lost one) surfaces as a test change.
+    // the discovered set today, so a new bench-bearing example (or a lost one)
+    // surfaces as a test change.
     // `simdbench` arrived with RFC-0083 M2, where the census asked whether
     // `F32x4.min`/`max`/`abs` were worth being Rust primitives and the answer had
-    // to be a number.
+    // to be a number. `membench` arrived with RFC-0089 M0, for the same reason
+    // over the memory model: RFC-0087 P8 found that the three things the model
+    // costs are the three nothing timed.
     let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(examples_dir()).unwrap() {
         let path = entry.unwrap().path();
@@ -254,7 +256,12 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
     found.sort();
     assert_eq!(
         found,
-        vec!["benching".to_string(), "simdbench".to_string(), "smallarray".to_string()],
+        vec![
+            "benching".to_string(),
+            "membench".to_string(),
+            "simdbench".to_string(),
+            "smallarray".to_string()
+        ],
         "bench corpus drifted"
     );
 }
