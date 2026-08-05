@@ -1,6 +1,12 @@
 # RFC-0077 — A Direct Wasm Backend: Stop Going Through LLVM
 
-- **Status:** IMPLEMENTED (M0–M2p, M5; M3 and M4 struck — see their lines below)
+- **Status:** IMPLEMENTED (M0–M2p, M5; M3 and M4 struck — see their lines below).
+  **M6 open, and it is not a refinement: this backend's allocator never frees, so
+  a wasm program's heap grows until the page dies.** Measured — 20000 exported
+  calls with a 900-byte String grew linear memory by 18 MB, all of it. Three
+  separate notes each described one face of this; none named it, and the sentence
+  that promised a fix pointed at the struck M4. See "M6 — an allocator that
+  frees".
 - **Depends on:** RFC-0076 (generators as wasm; the shared runtime shim and the
   memory map it established), RFC-0012 (the `extern` ABI), RFC-0037
   (defunctionalized closures — the reason *closures* need no function table),
@@ -905,8 +911,12 @@ names, which is a gap when nothing expects one.
 
 `push` grows by allocating and copying rather than `realloc`ing, because this
 backend's allocator is still M2b's bump pointer that never frees. The abandoned
-buffer is that decision's cost, not a new one, and M4 is where the shim's real
-allocator arrives and this line deletes itself.
+buffer is that decision's cost, not a new one.
+
+**This paragraph used to end "and M4 is where the shim's real allocator arrives
+and this line deletes itself." M4 was rescoped to three named subsystems and the
+allocator is not among them.** So the deferral had no owner. It has one now:
+M6, below.
 
 ### The one message with a number in it
 
@@ -1970,6 +1980,47 @@ ladder is the tier that gates the acceptance criterion.
   emitted runtime should grow instead.
 - **M5 — unchanged, with one constraint made explicit.** Deleting the LLVM wasm
   path requires the standalone shape to be complete, not the linked one.
+- **M6 — an allocator that frees.** New. See below.
+
+### M6 — an allocator that frees
+
+**The wasm target reclaims no heap memory. None.** The source says so plainly:
+`malloc` is a bump pointer that never frees "for `push`, for a cell payload and
+for `Stmt::Drop` alike". A `Stmt::Drop` on this backend emits code for
+`Type::Ref` and nothing else.
+
+So every String, every array growth and every dropped value grows linear memory
+until the page dies. The browser is this backend's deployment target.
+
+**Measured, not argued.** `web/domdemo.wasm`, Node, 20000 calls to an exported
+`increment(arg: String)` with a 900-byte argument: linear memory went from 2
+pages to 277. That is 18,022,400 bytes against 20000 x 901 = 18,020,000. All of
+it. Successive `__vyrn_malloc` results never repeat. 500 calls to `vyrnView()`,
+which returns a String, cost 24 MB the same way.
+
+**Why it stayed invisible.** Three notes describe it, each scoped to its own
+subject: the region note calls it "this backend's allocator showing through", the
+`push` note calls it "that decision's cost", and RFC-0075's stream note calls it
+a buffer-stream limit. Each is true. None says the whole thing, and no status
+line names it. The one sentence that promised a fix pointed at M4, which was
+rescoped.
+
+**What it is not.** Not an ABI bug. RFC-0012 M-whatever's exported `String`
+parameter leaks at a rate the *host* sets — a keystroke handler burns
+`len + 1` bytes per key — but that is this allocator seen from the worst angle,
+not a separate defect.
+
+**What the work is.** A free list in the emitted runtime, and `Stmt::Drop`
+lowering to a real release for the heap types the textual backend already
+releases. Two tiers, and they differ: the **shim tier** can import an allocator,
+because RFC-0077 M4 already reaches the shim for the JSON DOM and the WASI
+helpers; the **standalone tier** must emit one, and the standalone shape is what
+RFC-0077 M5 made the condition for deleting the LLVM path.
+
+**What must be true when it lands.** The same 20000-call measurement holds
+memory flat. Three-way parity does not move, because reclaiming memory is not
+observable in output — which is exactly why nothing caught this. A test that
+watches `memory.buffer.byteLength` is the only kind that can.
   `VYRN_WASM_BACKEND` still does not survive it, and now neither does
   `direct-shim`.
 
