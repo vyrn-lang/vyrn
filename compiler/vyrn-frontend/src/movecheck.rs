@@ -11,12 +11,59 @@
 //! "may-consume" (a value consumed on either path is consumed afterward), a
 //! reassignment revives a variable, and consuming a pre-loop variable inside a
 //! loop body is rejected (it would be reused next iteration).
+//!
+//! **This pass carries types** (RFC-0089 M2, Phase 4a). It keeps a
+//! [`crate::declared`] type environment beside its scope stack and can answer
+//! `owns_heap` at every binding, argument, return, store, iterable and capture —
+//! see [`owning_sites`]. Nothing in the diagnostics reads that answer yet: 4a
+//! plumbs it in and stops, so this change accepts and refuses exactly the
+//! programs it did before, in the same words. The [`streams`] sub-module below
+//! is the one part still name-based and typeless.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
+use crate::declared::{Declared, Scopes};
 use crate::diagnostics::Diagnostic;
+
+/// One place a value crosses a boundary RFC-0089 rule 1 governs: a binding, an
+/// argument, a return, a store, a `for` iterable or a lambda capture.
+///
+/// Phase 4a records these and enforces nothing. The count is what sizes 4b: it
+/// is how many places 4b's analysis has to be *correct* at, which is a much
+/// larger number than the places today's analysis reports on.
+#[derive(Clone, Debug)]
+pub struct OwningSite {
+    /// Which boundary — `bind`, `arg`, `return`, `assign`, `assign-global`,
+    /// `field`, `element`, `iterate`, `literal` or `capture`.
+    pub kind: &'static str,
+    pub line: usize,
+    /// The type moved, or `?` where the declared-types reading cannot name it.
+    pub ty: String,
+    /// Whether the value is read out of a **named place** (a variable or a
+    /// field) rather than produced fresh. A place read is what rule 1 turns into
+    /// a move, so this is the half of the count 4b must get right; a fresh value
+    /// has no earlier owner and can only transfer.
+    pub place: bool,
+}
+
+impl OwningSite {
+    /// Whether the declared-types reading could not name the type. 4b has to
+    /// decide what an unknown means, and `own.rs`'s answer — leak, never a wrong
+    /// free — is not available to it: a skipped move is a use-after-free.
+    pub fn unknown(&self) -> bool {
+        self.ty == "?"
+    }
+}
+
+/// Every [`OwningSite`] in `program`.
+///
+/// Runs the same walk [`check_accum`] runs, with recording on, and discards the
+/// diagnostics. 4a answers the question at every site; 4b enforces on the answer.
+pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
+    run(program, true).1
+}
 
 /// Check every function for use-after-consume, returning **all** problems found
 /// as structured [`Diagnostic`]s. Each function is checked independently, so
@@ -29,6 +76,13 @@ use crate::diagnostics::Diagnostic;
 /// sub-expression checking *before* mutating `consumed`/`scope`, so after an
 /// error the flow state is consistent for the next statement.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
+    run(program, false).0
+}
+
+/// The one walk, shared by [`check_accum`] and [`owning_sites`]. `record` turns
+/// the site collection on; with it off the pass still builds and carries its type
+/// environment, and asks `owns_heap` nowhere.
+fn run(program: &Program, record: bool) -> (Vec<Diagnostic>, Vec<OwningSite>) {
     let caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
@@ -40,10 +94,16 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
         })
         .collect();
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
+    let decl = Declared::new(program);
     let mc = MoveCheck {
         caps: &caps,
         globals: &globals,
         errors: RefCell::new(Vec::new()),
+        decl: &decl,
+        // Module state is the outermost frame and is built once, not per body.
+        vars: RefCell::new(Scopes::new(decl.globals())),
+        lambda_base: RefCell::new(Vec::new()),
+        sites: record.then(|| RefCell::new(Vec::new())),
     };
     let mut out = Vec::new();
     for f in &program.functions {
@@ -116,7 +176,8 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
     // exactly once" is a must-analysis. Folding them would have made one of the
     // two wrong at every branch.
     out.extend(streams::check(program));
-    out
+    let sites = mc.sites.map(RefCell::into_inner).unwrap_or_default();
+    (out, sites)
 }
 
 /// Check every function for use-after-consume. Runs after type checking. Returns
@@ -137,6 +198,21 @@ struct MoveCheck<'a> {
     /// Per-function statement-boundary error sink (RFC-0006 accumulation).
     /// Cleared at the start of each function, drained by `check_accum`.
     errors: RefCell<Vec<String>>,
+    /// The declared-types reading (RFC-0089 M2, Phase 4a) — the same one
+    /// `own.rs` decides releases with. **Nothing in this pass's diagnostics
+    /// reads it yet**; 4b is where it starts to decide.
+    decl: &'a Declared,
+    /// The type of every binding in scope. A second stack rather than types on
+    /// `scope`, because `scope` answers a different question: a `for` variable is
+    /// deliberately absent from it (which is what makes a loop variable shadowing
+    /// module state still refuse a `consume`), and it is typed here.
+    vars: RefCell<Scopes<Option<Type>>>,
+    /// The frame depth at each enclosing lambda's parameter frame. A name that
+    /// resolves BELOW the innermost of these is a capture, not a local.
+    lambda_base: RefCell<Vec<usize>>,
+    /// Where recorded [`OwningSite`]s go, or `None` on the ordinary check path —
+    /// which is what keeps a build and a keystroke paying for nothing.
+    sites: Option<RefCell<Vec<OwningSite>>>,
 }
 
 /// Consumed variables: name -> (line consumed, description of the consumer).
@@ -147,7 +223,63 @@ impl MoveCheck<'_> {
         let mut consumed: Consumed = HashMap::new();
         let mut scope: Vec<HashSet<String>> =
             vec![f.params.iter().map(|p| p.name.clone()).collect()];
+        // Module state is the outermost frame, the parameters the next one — the
+        // order every function body sees them in (RFC-0013).
+        {
+            let mut v = self.vars.borrow_mut();
+            v.truncate(1);
+            v.enter();
+            for p in &f.params {
+                v.bind(&p.name, Some(p.ty.clone()));
+            }
+        }
+        self.lambda_base.borrow_mut().clear();
         self.block(&f.body, &mut consumed, &mut scope);
+    }
+
+    /// The declared type of `e` here, or `None` where this reading cannot name it.
+    fn type_of(&self, e: &Expr) -> Option<Type> {
+        self.decl.type_of(&self.vars.borrow(), e)
+    }
+
+    /// Record one site RFC-0089 rule 1 governs. `declared` overrides the
+    /// expression's own type, for a `let` that carries an annotation.
+    ///
+    /// A no-op unless [`owning_sites`] asked for the record, so the ordinary
+    /// check path never asks `owns_heap` at all.
+    fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>) {
+        let Some(sink) = &self.sites else { return };
+        // A literal has no earlier owner, so nothing about it can be a move. The
+        // filter is here rather than at each call site because every one of them
+        // would need it.
+        if declared.is_none()
+            && matches!(
+                e,
+                Expr::Str(_) | Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_)
+            )
+        {
+            return;
+        }
+        let ty = match declared {
+            Some(t) => Some(t.clone()),
+            None => self.type_of(e),
+        };
+        let place = matches!(e, Expr::Var { .. } | Expr::Field { .. });
+        match ty {
+            Some(t) if self.decl.owns_heap(&t) => sink.borrow_mut().push(OwningSite {
+                kind,
+                line,
+                ty: t.to_string(),
+                place,
+            }),
+            None => sink.borrow_mut().push(OwningSite {
+                kind,
+                line,
+                ty: "?".to_string(),
+                place,
+            }),
+            Some(_) => {}
+        }
     }
 
     /// Returns whether this block **diverges** — every path out of it leaves via
@@ -156,6 +288,7 @@ impl MoveCheck<'_> {
     /// error), and its consumptions never flow to the block's exit.
     fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {
         scope.push(HashSet::new());
+        self.vars.borrow_mut().enter();
         let mut diverged = false;
         for s in &b.stmts {
             if diverged {
@@ -172,6 +305,7 @@ impl MoveCheck<'_> {
                 }
             }
         }
+        self.vars.borrow_mut().exit();
         scope.pop();
         diverged
     }
@@ -189,28 +323,57 @@ impl MoveCheck<'_> {
         scope: &mut Vec<HashSet<String>>,
     ) -> Result<bool, String> {
         match s {
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let {
+                name,
+                value,
+                ty,
+                line,
+                ..
+            } => {
                 self.expr(value, consumed, scope)?;
+                // The binding's type: what it was declared, else what the
+                // initializer yields — read against the PRE-binding environment,
+                // so `let x = x + b` resolves the old `x`.
+                let bty = ty.clone().or_else(|| self.type_of(value));
+                self.site("bind", *line, value, bty.as_ref());
+                self.vars.borrow_mut().bind(name, bty);
                 consumed.remove(name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
                 Ok(false)
             }
-            Stmt::Assign { name, value, .. } => {
+            Stmt::Assign { name, value, line } => {
                 self.expr(value, consumed, scope)?;
+                // Module state (RFC-0013) is a place with a whole-module lifetime,
+                // so 4b treats a store into it differently from a local's.
+                let kind = if self.globals.contains(name) && !Self::in_scope(scope, name) {
+                    "assign-global"
+                } else {
+                    "assign"
+                };
+                self.site(kind, *line, value, None);
                 consumed.remove(name); // reassignment revives it
                 Ok(false)
             }
-            Stmt::SetField { value, .. } => self.expr(value, consumed, scope).map(|_| false),
+            Stmt::SetField { value, line, .. } => {
+                self.site("field", *line, value, None);
+                self.expr(value, consumed, scope).map(|_| false)
+            }
             // `a[i] = v` — the stored value is consumed like a `push` argument
             // (neither `push` nor the store marks it consumed, since no user
             // `consume` capability is involved), so just check both sub-exprs.
-            Stmt::IndexSet { index, value, .. } => {
+            // An element store and a map-value store are the same node, so one
+            // row covers both places.
+            Stmt::IndexSet {
+                index, value, line, ..
+            } => {
                 self.expr(index, consumed, scope)?;
+                self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
                 Ok(false)
             }
-            Stmt::Return { value, .. } => {
+            Stmt::Return { value, line } => {
                 if let Some(e) = value {
+                    self.site("return", *line, e, None);
                     self.expr(e, consumed, scope)?;
                 }
                 Ok(true)
@@ -262,10 +425,17 @@ impl MoveCheck<'_> {
                 self.expr(scrutinee, consumed, scope)?;
                 let mut then_c = consumed.clone();
                 scope.push(HashSet::new());
+                self.vars.borrow_mut().enter();
                 for b in pattern_bindings(pattern) {
                     scope.last_mut().unwrap().insert(b.to_string());
+                    // A payload's type is not derived here, so it is recorded as
+                    // unknown. Recording it is the point: an unrecorded binder
+                    // falls through to whatever the enclosing scope calls that
+                    // name (`own.rs`'s shadowing lesson).
+                    self.vars.borrow_mut().bind(b, None);
                 }
                 let then_div = self.block(then_block, &mut then_c, scope);
+                self.vars.borrow_mut().exit();
                 scope.pop();
                 let mut else_c = consumed.clone();
                 let else_div = match else_block {
@@ -300,10 +470,22 @@ impl MoveCheck<'_> {
             }
             // A `for` loop consumes like a `while`: the iterable is read once,
             // and consuming an outer binding in the body is a use-again error.
-            Stmt::ForIn { iter, body, .. } => {
+            Stmt::ForIn {
+                var,
+                iter,
+                body,
+                line,
+            } => {
                 self.expr(iter, consumed, scope)?;
+                self.site("iterate", *line, iter, None);
+                // RFC-0089 decided the loop variable is a `read` borrow, so 4b
+                // needs its type. It is the iterable's element type.
+                let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
                 let mut body_c = consumed.clone();
+                self.vars.borrow_mut().enter();
+                self.vars.borrow_mut().bind(var, elem);
                 let body_div = self.block(body, &mut body_c, scope);
+                self.vars.borrow_mut().exit();
                 self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
                 for (k, v) in body_c {
                     consumed.entry(k).or_insert(v);
@@ -333,6 +515,36 @@ impl MoveCheck<'_> {
                 consumed.insert(name.clone(), (*line, "`drop`".to_string()));
                 Ok(false)
             }
+        }
+    }
+
+    /// Record a lambda capture: a name read inside a lambda that resolves to a
+    /// frame BELOW the lambda's own parameter frame.
+    ///
+    /// It counts mentions, not distinct names — a value captured and read twice
+    /// is two sites, because 4b checks each read.
+    fn capture_site(&self, name: &str, line: usize) {
+        if self.sites.is_none() {
+            return;
+        }
+        let inside = match self.lambda_base.borrow().last() {
+            Some(&base) => base,
+            None => return,
+        };
+        let (frame, ty) = {
+            let v = self.vars.borrow();
+            (v.frame_of(name), v.get(name).cloned().flatten())
+        };
+        if frame.is_some_and(|f| f < inside) {
+            self.site(
+                "capture",
+                line,
+                &Expr::Var {
+                    name: name.to_string(),
+                    line,
+                },
+                ty.as_ref(),
+            );
         }
     }
 
@@ -371,6 +583,7 @@ impl MoveCheck<'_> {
         match e {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
             Expr::Var { name, line } => {
+                self.capture_site(name, *line);
                 if let Some((cline, consumer)) = consumed.get(name) {
                     return Err(format!(
                         "line {line}: `{name}` is used here but was already consumed by {consumer} \
@@ -387,14 +600,18 @@ impl MoveCheck<'_> {
             }
             Expr::Field { expr, .. } => self.expr(expr, consumed, scope),
             Expr::Try { expr, .. } => self.expr(expr, consumed, scope),
-            Expr::StructLit { fields, .. } => {
+            // A literal's operands are places too: `Ring { slots: xs }` puts `xs`
+            // where the record owns it, exactly as an argument does.
+            Expr::StructLit { fields, line, .. } => {
                 for (_, v) in fields {
+                    self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
                 }
                 Ok(())
             }
-            Expr::TryConstruct { args, .. } => {
+            Expr::TryConstruct { args, line, .. } => {
                 for a in args {
+                    self.site("literal", *line, a, None);
                     self.expr(a, consumed, scope)?;
                 }
                 Ok(())
@@ -408,10 +625,14 @@ impl MoveCheck<'_> {
                 for arm in arms {
                     let mut c = base.clone();
                     scope.push(HashSet::new());
+                    self.vars.borrow_mut().enter();
                     for b in pattern_bindings(&arm.pattern) {
                         scope.last_mut().unwrap().insert(b.to_string());
+                        self.vars.borrow_mut().bind(b, None);
                     }
-                    self.expr(&arm.body, &mut c, scope)?;
+                    let r = self.expr(&arm.body, &mut c, scope);
+                    self.vars.borrow_mut().exit();
+                    r?;
                     scope.pop();
                     match &mut merged {
                         None => merged = Some(c),
@@ -454,6 +675,7 @@ impl MoveCheck<'_> {
                 // Left-to-right: check each argument, then apply its consumption,
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
+                    self.site("arg", *line, arg, None);
                     self.expr(arg, consumed, scope)?;
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         if let Expr::Var { name: v, line: vl } = arg {
@@ -468,15 +690,17 @@ impl MoveCheck<'_> {
                 }
                 Ok(())
             }
-            Expr::ArrayLit { elems, .. } => {
+            Expr::ArrayLit { elems, line } => {
                 for e in elems {
+                    self.site("literal", *line, e, None);
                     self.expr(e, consumed, scope)?;
                 }
                 Ok(())
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { entries, line } => {
                 for (k, v) in entries {
                     self.expr(k, consumed, scope)?;
+                    self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
                 }
                 Ok(())
@@ -488,9 +712,16 @@ impl MoveCheck<'_> {
             // use-after-consume error here too.
             Expr::Lambda { params, body, .. } => {
                 scope.push(HashSet::new());
+                self.vars.borrow_mut().enter();
                 for p in params {
                     scope.last_mut().unwrap().insert(p.clone());
+                    self.vars.borrow_mut().bind(p, None);
                 }
+                // Everything read below this frame is a capture (RFC-0089's
+                // no-retain rule is about exactly these).
+                self.lambda_base
+                    .borrow_mut()
+                    .push(self.vars.borrow().depth() - 1);
                 let r = match body {
                     LambdaBody::Expr(inner) => self.expr(inner, consumed, scope),
                     LambdaBody::Block(b) => {
@@ -498,6 +729,8 @@ impl MoveCheck<'_> {
                         Ok(())
                     }
                 };
+                self.lambda_base.borrow_mut().pop();
+                self.vars.borrow_mut().exit();
                 scope.pop();
                 r
             }
@@ -506,6 +739,7 @@ impl MoveCheck<'_> {
             Expr::Spawn { name, args, line } => {
                 let caps = self.caps.get(name);
                 for (i, arg) in args.iter().enumerate() {
+                    self.site("arg", *line, arg, None);
                     self.expr(arg, consumed, scope)?;
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         if let Expr::Var { name: v, line: vl } = arg {
@@ -994,6 +1228,9 @@ pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
     fn run(src: &str) -> Result<(), String> {
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
         super::check(&program)
@@ -1312,6 +1549,158 @@ mod tests {
                      fn main() -> Int64 { let s = mk([1, 2]) return 0 }")
             .unwrap_err();
         assert!(e.contains("`s` is a `Stream` and is never disposed"), "{e}");
+    }
+
+    // ---- RFC-0089 Phase 4a: the site census ------------------------------
+
+    fn sites_of(src: &str) -> Vec<OwningSite> {
+        let p = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        owning_sites(&p)
+    }
+
+    fn kinds(src: &str, kind: &str) -> Vec<String> {
+        sites_of(src)
+            .into_iter()
+            .filter(|s| s.kind == kind)
+            .map(|s| s.ty)
+            .collect()
+    }
+
+    #[test]
+    fn a_binding_of_an_owning_value_is_a_site() {
+        // The annotation answers where the initializer cannot: `[]` is three
+        // shapes, and only `Array<Int64>` says which.
+        let src = "fn main() -> Int64 { let a: Array<Int64> = [] return 0 }";
+        assert_eq!(kinds(src, "bind"), vec!["Array<Int64>"]);
+        // A scalar is not a site at all, and neither is a literal.
+        assert!(sites_of("fn main() -> Int64 { let i = 1 return i }").is_empty());
+    }
+
+    #[test]
+    fn an_argument_a_return_and_a_store_are_sites() {
+        let src = "type R = { s: String } \
+                   fn take(s: String) -> String { return s } \
+                   fn main() -> Int64 { let mut r = R { s: \"\" } let t = take(\"a\" + \"b\") \
+                   r.s = t return 0 }";
+        assert_eq!(kinds(src, "arg"), vec!["String"]);
+        assert_eq!(kinds(src, "return"), vec!["String"]);
+        assert_eq!(kinds(src, "field"), vec!["String"]);
+    }
+
+    #[test]
+    fn a_loop_variable_takes_its_element_type() {
+        // Without `elem_of` every loop variable is unknown, and so is everything
+        // read out of one after it.
+        let src = "fn main() -> Int64 { let xs: Array<String> = [] \
+                   for x in xs { print(x) } return 0 }";
+        assert_eq!(kinds(&src.to_string(), "iterate"), vec!["Array<String>"]);
+        assert_eq!(kinds(src, "arg"), vec!["String"]);
+    }
+
+    #[test]
+    fn a_capture_is_a_site_and_a_parameter_is_not() {
+        // The lambda's own parameter resolves in the lambda's frame; `s` does not.
+        let src = "fn apply(f: fn(String) -> Int64, x: String) -> Int64 { return f(x) } \
+                   fn main() -> Int64 { let s = \"a\" + \"b\" \
+                   return apply(|p| p.byteLength + s.byteLength, \"c\") }";
+        assert_eq!(kinds(src, "capture"), vec!["String"]);
+    }
+
+    #[test]
+    fn a_site_this_reading_cannot_name_is_recorded_as_unknown() {
+        // The half of the census that matters most: 4b may not treat an unknown
+        // as "no move", because a missed move is a use-after-free.
+        let src = "fn main() -> Int64 { let o: Option<String> = None \
+                   match o { Some(v) => print(v), None => print(\"\") } return 0 }";
+        let unknown: Vec<_> = sites_of(src).into_iter().filter(|s| s.unknown()).collect();
+        assert_eq!(unknown.len(), 1, "{unknown:?}");
+        assert_eq!(unknown[0].kind, "arg");
+    }
+
+    /// RFC-0089 Phase 4a's deliverable: how many places Phase 4b's analysis has
+    /// to be **correct** at, over the whole corpus.
+    ///
+    /// It parses each file ALONE — no loader, no linking — for the same reason
+    /// the M0 gate does: one number per source line rather than one per import
+    /// graph. A cross-module call's return type is therefore unknown here, which
+    /// is why the unknown column is an upper bound.
+    ///
+    /// Ignored by default: it reads the repository, so it is a measurement, not
+    /// a unit test. Run it with
+    /// `cargo test -p vyrn-frontend movecheck::tests::rfc0089 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn rfc0089_owning_sites_over_the_corpus() {
+        let mut files = Vec::new();
+        crate::own::tests::sources("examples", &mut files);
+        crate::own::tests::sources("std", &mut files);
+        files.sort();
+
+        let mut per_file: Vec<(String, usize, usize, usize)> = Vec::new();
+        let mut by_kind: BTreeMap<&'static str, [usize; 4]> = BTreeMap::new();
+        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
+        let (mut total, mut places, mut unknowns, mut parsed) = (0, 0, 0, 0);
+        // An unknown that reads a NAMED PLACE is the dangerous cell: it is where
+        // a move can be missed. An unknown that is a call result is mostly this
+        // measurement's own artifact — a file parsed alone cannot see an imported
+        // function's return type.
+        let mut unknown_places = 0;
+
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            let Ok(tokens) = crate::lexer::lex(&src) else { continue };
+            let (program, errs) = crate::parser::parse_accum(tokens);
+            if !errs.is_empty() {
+                continue;
+            }
+            parsed += 1;
+            let sites = owning_sites(&program);
+            let (mut p, mut u) = (0, 0);
+            for s in &sites {
+                let row = by_kind.entry(s.kind).or_default();
+                row[0] += 1;
+                if s.place {
+                    row[1] += 1;
+                    p += 1;
+                }
+                if s.unknown() {
+                    row[2] += 1;
+                    u += 1;
+                    if s.place {
+                        row[3] += 1;
+                        unknown_places += 1;
+                    }
+                } else {
+                    *by_type.entry(s.ty.clone()).or_default() += 1;
+                }
+            }
+            total += sites.len();
+            places += p;
+            unknowns += u;
+            if !sites.is_empty() {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                per_file.push((name, sites.len(), p, u));
+            }
+        }
+
+        per_file.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        println!("corpus: {} files ({parsed} parsed)", files.len());
+        println!("sites: {total} — {places} read a named place, {unknowns} of unknown type");
+        println!("unknown AND a named place: {unknown_places}");
+        println!("by kind (kind: total, place, unknown, unknown+place)");
+        for (k, r) in &by_kind {
+            println!("  {k:>14}: {:>5} {:>5} {:>5} {:>5}", r[0], r[1], r[2], r[3]);
+        }
+        println!("by type");
+        let mut types: Vec<_> = by_type.into_iter().collect();
+        types.sort_by(|a, b| b.1.cmp(&a.1));
+        for (t, c) in types.iter().take(20) {
+            println!("  {c:>5}  {t}");
+        }
+        println!("per file (file: total, place, unknown)");
+        for (f, t, p, u) in &per_file {
+            println!("  {t:>5} {p:>5} {u:>5}  {f}");
+        }
     }
 
     #[test]
