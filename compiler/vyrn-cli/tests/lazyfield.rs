@@ -47,6 +47,26 @@ fn run(name: &str, src: &str) -> String {
     norm(&out.stdout)
 }
 
+/// `examples/lazyfield.vyrn`'s own `test` blocks — the never/once/twice matrix
+/// and the `toJson` forcing — RUN.
+///
+/// The parity harness executes an example's `main` on three engines and never
+/// its tests, which is how M3 found two suites that had been green because
+/// someone ran them by hand. A floor on the count, since a suite that stops
+/// being discovered otherwise passes.
+#[test]
+fn the_corpus_examples_own_suite_runs() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/lazyfield.vyrn")
+        .canonicalize()
+        .unwrap();
+    let out = vyrn().arg("test").arg(&path).output().unwrap();
+    let text = format!("{}{}", norm(&out.stdout), norm(&out.stderr));
+    assert!(out.status.success(), "{text}");
+    let ran = text.matches("... ok").count();
+    assert!(ran >= 4, "only {ran} blocks ran:\n{text}");
+}
+
 /// The declaration needs a name, for the same reason an inline field `where`
 /// does: the deferral is a fact about a DECLARED field, and there is nothing to
 /// hang it on otherwise.
