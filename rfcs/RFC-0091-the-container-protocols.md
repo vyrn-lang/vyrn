@@ -1,0 +1,161 @@
+# RFC-0091 — The Container Protocols
+
+- **Status:** Proposed. The generalization layer over RFC-0089/0090: what makes
+  a third-party container indistinguishable from a built-in.
+- **Depends on:** RFC-0086 M1 (`Owned` — the pattern this repeats), RFC-0089
+  (conventions), RFC-0090 (`Slots` is the first customer), RFC-0080
+  (associated types), RFC-0084 (records dispatch), RFC-0082 (the thesis)
+- **Principle:** RFC-0086's rule, finished. *A type declares what it is. The
+  compiler looks it up.* This RFC enumerates what a container must be able to
+  declare.
+
+---
+
+## The test
+
+RFC-0090 says identity lives in containers you own, and `Slots<T>` is std Vyrn.
+Then a third party must be able to write their own — a pool, an interner, an
+LRU cache, a spatial grid — and have it *feel* like `Array`. Today it cannot,
+for four reasons, and each is a hardcoded capability of built-ins:
+
+| a built-in can | a user container cannot | because |
+|---|---|---|
+| be released automatically | ✅ can, since RFC-0086 M1 | `impl Owned` — **the pattern, already shipped** |
+| be indexed: `a[i]`, `a[i] = v`, `a[i].f = v` | ❌ | RFC-0011's lowering matches `Type::Array`/`Map`/`SmallArray` |
+| be iterated: `for x in xs` | ❌ | `ForIn` is Array-only |
+| be copied: `.copy()` | ❌ (nothing can yet) | RFC-0089 M1 ships it for built-ins |
+
+RFC-0086 M1 proved the shape: seed the built-in rows in the compiler, let
+`impl P for T` add rows, resolve nominally, no second list. This RFC applies
+that shape three more times.
+
+---
+
+## The three protocols
+
+### `Copy`
+
+```vyrn
+protocol Copy {
+    fn copy(read self) -> Self
+}
+```
+
+Derived structurally for every type whose fields are `Copy` (a record of
+copyables copies; `Array<T>` copies if `T` does). A container with extra
+invariants — an interner that must not duplicate its table, a handle that must
+not be deep-copied — overrides it. `-> Self` requires RFC-0084's dispatch-by-
+expected-type work or the associated-type spelling; this is the same blocker
+RFC-0086 M2 recorded, and this RFC inherits it rather than re-solving it.
+
+### `Iterate`
+
+```vyrn
+protocol Iterate {
+    type Item
+    fn size(read self) -> Int64
+    fn nth(read self, i: Int64) -> read Item     // see "the projection problem"
+}
+```
+
+`for x in xs` desugars to it; the loop variable is a `read` borrow per
+RFC-0090's iteration rule. `Array` gets the seeded row; `Slots` skips dead
+slots by implementing it; a user's tree walks itself.
+
+### `Index`
+
+```vyrn
+protocol Index {
+    type Key
+    type Value
+    fn at(read self, k: Key) -> read Value        // a[k]
+    fn atSet(modify self, k: Key, v: Value)       // a[k] = v
+}
+```
+
+`people[h]`, `grid[point]`, `cache[url]`. The seeded rows are `Array<T>` by
+`Int64`, `Map<String, V>` by `String`, `SmallArray` — and RFC-0011's hardcoded
+lowering becomes three rows in a table, which is RFC-0086 M1's move again.
+
+---
+
+## The projection problem — the one new mechanism
+
+Rule 3 of RFC-0089 says a function returns an *owned* value. Rule 2 says a
+borrow cannot be returned. Then what is `at`? If it returns an owned `Value`,
+`people[h]` copies — a hidden copy, forbidden by the law. If it returns a
+borrow, it violates rule 2.
+
+**Built-ins dodge this today by not being functions.** `a[i].field = v` is a
+compiler desugar with a temp (`ps[]`, RFC-0017-era); `a[i]` is inline lowering.
+The compiler reaches into the buffer because it is the compiler. A user
+container has no way to say "here is a *place* inside me" — and without it,
+`Index` and `Iterate` cannot be written.
+
+The answer the MVS literature converged on (Hylo's subscripts) is a **place
+projection**: a method form that *yields* a place instead of returning a value.
+The caller's access runs bracketed inside the callee's frame, so the borrow
+never escapes — rule 2 is preserved by construction, not by exception:
+
+```vyrn
+impl Index for Slots<T> {
+    type Key = Handle<T>
+    type Value = T
+    place at(read self, h: Handle<T>) -> T {
+        if self.gen[h.slot] != h.gen { panic("dead handle") }
+        yield self.data[h.slot]        // yields the PLACE, not the value
+    }
+}
+```
+
+`people[h].name` then means: enter `at`, check, and perform the field read
+against the yielded place before `at` finishes. A `place … modify self` form
+covers `people[h].name = v` and in-place growth (`cache[k].push(v)`).
+
+Monomorphization makes this free: the projection body inlines into the access
+site, which is byte-for-byte what the compiler's own `Array` lowering already
+emits. So the mechanism is not a coroutine at runtime — it is a named,
+type-checked macro-shaped inlining with the borrow rules enforced at its edges.
+
+**This is the one genuinely new language feature in the whole RFC chain.**
+Conventions extend `movecheck`; moves extend it further; `Owned`/`Copy`/
+`Iterate`/`Index` repeat RFC-0086 M1. Place projections are new. If they are
+rejected, user containers stay second-class (method calls only, `.get`
+returning `Option` copies), and RFC-0090 still works — but `Slots` reads like a
+library, not like the language.
+
+---
+
+## What this opens for reimplementation
+
+With the four protocols and projections, these become writable in Vyrn with no
+compiler change, and the census's "clean generators are the structured-
+reflection ones" lesson gets its container counterpart:
+
+- `Slots<T>` (RFC-0090 M1), pools, arenas with wholesale drop
+- interners, LRU caches, ring buffers, priority queues
+- ECS storage — SoA columns indexed by entity handle, the RFC-0016-era gap
+- the existing built-ins themselves, progressively: RFC-0082 M2's port resumes
+  with its blocker (escape-on-call) removed and its gate (performance) already
+  measured green by RFC-0090's 1.86×
+
+**Deliberately not opened:** the allocator. `malloc`/`free`/`memcpy` stay the
+compiler-emitted floor. An `Allocator` protocol is real multiplicity with no
+oracle (RFC-0081's objection) until a second allocator has a reason to exist;
+the workspace rule — gated multiplicity stays true, ungated rots — applies.
+Recorded as open, gated on a concrete need (arena-backed containers may be it).
+
+---
+
+## Milestones
+
+- **M1 — `Copy`**, derived + overridable. Unblocks RFC-0089 M1's `copy` as a
+  protocol row rather than a builtin special case.
+- **M2 — place projections**, the mechanism, proved on `Array` itself: delete
+  the hardcoded `a[i]`/`a[i]=v`/`a[i].f=v` lowerings and re-express them as the
+  seeded `Index` impl. The compiler eating its own dogfood is the test that the
+  mechanism is complete.
+- **M3 — `Index` + `Iterate`** open to users; `Slots` implements both;
+  `for x in slots` works.
+- **M4 — resume RFC-0082 M2**: port one built-in (`SmallArray` is the
+  smallest) to std Vyrn behind the protocols, three-way parity as the gate.
