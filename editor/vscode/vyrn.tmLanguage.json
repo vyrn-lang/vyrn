@@ -114,10 +114,11 @@
       "match": "\\b(?:test|bench)\\b(?=\\s+\")"
     },
     "contextual-keywords": {
-      "comment": "`as` (import aliasing: `{ x as y }`, `* as ns`), `gen fn`, and `extern fn` are CONTEXTUAL — the lexer emits them as plain identifiers and the parser recognizes them only in position (so `let as = 1` / `let gen = 1` stay ordinary bindings, per the parser tests). Match them contextually — `as` only when a name follows it, `gen`/`extern` only directly before `fn` — so a binding named `as`/`gen`/`extern` is never mis-coloured. Placed before #keywords/#function-calls/#identifiers so they win the position.",
+      "comment": "`as` (import aliasing: `{ x as y }`, `* as ns`), `gen fn`, `extern fn` and `lazy` (RFC-0085 M4a field modifier) are CONTEXTUAL — the lexer emits them as plain identifiers and the parser recognizes them only in position (so `let as = 1` / `let gen = 1` stay ordinary bindings, per the parser tests). Match them contextually — `as` only when a name follows it, `gen`/`extern` only directly before `fn`, `lazy` only in a record field's TYPE position (`name: lazy T`) — so a binding named `as`/`gen`/`extern` is never mis-coloured, and `std/ui`'s `lazy(..)` FUNCTION (RFC-0070, lazy pages — a different mechanism one layer up) keeps its call colour. Placed before #keywords/#function-calls/#identifiers so they win the position.",
       "patterns": [
         { "match": "\\bas\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
-        { "match": "\\b(gen|extern)\\b(?=\\s+fn\\b)", "name": "keyword.control.vyrn" }
+        { "match": "\\b(gen|extern)\\b(?=\\s+fn\\b)", "name": "keyword.control.vyrn" },
+        { "match": "(?<=:\\s)lazy\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" }
       ]
     },
     "keywords": {

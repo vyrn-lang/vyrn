@@ -185,20 +185,27 @@ impl Walk<'_> {
                 let (obj, fld) = (self.rt("JObj"), self.rt("JsonField"));
                 let mut out = format!("    let mut fs: Array<{fld}> = []\n");
                 for f in &fields {
+                    // A `lazy T` field encodes as a `T`, and `v.{name}` in the
+                    // generated source is the read that FORCES it (RFC-0085
+                    // M4a). Forcing here is correct and it is also exactly why
+                    // M4b needs a selective encoder: this encoder computes every
+                    // deferred field whether or not a GraphQL selection asked
+                    // for one.
+                    let fty = crate::types::forced(&f.ty);
                     // A `None` record field is OMITTED entirely (RFC-0018). Spelled
                     // as a `match` whose arms are the pushed array or the untouched
                     // one, rather than the `if let` that reads more naturally,
                     // because `push` RETURNS the array and `if let` is one of
                     // RFC-0077's own unlowered rows — the natural spelling would put
                     // every example with an `Option` field behind it.
-                    if let Type::Option(inner) = crate::types::resolve(&f.ty, self.types) {
+                    if let Type::Option(inner) = crate::types::resolve(&fty, self.types) {
                         let e = self.encoder(&inner)?;
                         out.push_str(&format!(
                             "    fs = match v.{0} {{ Some(x) => fs.push({fld} {{ key: \"{0}\", value: {e}(x) }}), None => fs }}\n",
                             f.name
                         ));
                     } else {
-                        let e = self.encoder(&f.ty)?;
+                        let e = self.encoder(&fty)?;
                         out.push_str(&format!(
                             "    fs.push({fld} {{ key: \"{0}\", value: {e}(v.{0}) }})\n",
                             f.name

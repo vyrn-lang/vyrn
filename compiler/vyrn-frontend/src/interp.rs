@@ -498,6 +498,19 @@ pub enum FnVal {
         param_tys: Vec<Type>,
         ret: Type,
     },
+    /// A thunk stored in a `lazy T` field (RFC-0085 M4a): the nullary closure
+    /// above, tagged so that reading the field FORCES it.
+    ///
+    /// The tag rides on the VALUE rather than being looked up from the field's
+    /// declared type, and that is the whole reason this variant exists. The two
+    /// compiled backends read `Field.ty` at the access site and see the marker
+    /// for free; the interpreter is walking a `Val` that has no type attached,
+    /// and a lookup through the record's stamped name would answer `None` for
+    /// every value that reached the read without crossing a naming boundary —
+    /// which is a wrong answer on exactly one engine, the failure mode parity
+    /// exists to catch. `coerce` sets it once, at the same boundary it stamps a
+    /// record's name.
+    Thunk(Box<FnVal>),
 }
 
 /// One slot in the interpreter's cell slab: a generation and the boxed value.
@@ -2266,6 +2279,9 @@ impl<'a> Interp<'a> {
     /// lambda binds its captured snapshot plus its arguments and runs its body.
     fn call_fnval(&self, fv: &FnVal, args: &[Val]) -> Result<Val, Ctrl> {
         match fv {
+            // Forcing a thunk is calling what it wraps — the tag is about where
+            // the value is READ, not about how it is invoked.
+            FnVal::Thunk(inner) => self.call_fnval(inner, args),
             FnVal::Named(name) => self.call(name, args),
             FnVal::Lambda {
                 params,
@@ -4958,10 +4974,19 @@ impl<'a> Interp<'a> {
                     // `str.byteLength` is the O(1) byte length (RFC-0058; matches
                     // `strlen`). `.length` on a String is rejected by the checker.
                     Val::Str(s) if field == "byteLength" => Ok(Val::Int(s.len() as i64)),
-                    Val::Record(map, _) => map
-                        .get(field)
-                        .cloned()
-                        .ok_or_else(|| Ctrl::Err(format!("no field `{field}`"))),
+                    Val::Record(map, _) => {
+                        match map.get(field) {
+                            // RFC-0085 M4a: reading a `lazy T` field FORCES it.
+                            // Nothing is cached, so a second read runs it again
+                            // (see the RFC's "M4a — as landed").
+                            Some(Val::Fn(fv)) => match &**fv {
+                                FnVal::Thunk(inner) => self.call_fnval(inner, &[]),
+                                _ => Ok(Val::Fn(fv.clone())),
+                            },
+                            Some(v) => Ok(v.clone()),
+                            None => Err(Ctrl::Err(format!("no field `{field}`"))),
+                        }
+                    }
                     other => Err(format!("field access on non-record {other:?}").into()),
                 }
             }
@@ -5634,6 +5659,23 @@ impl<'a> Interp<'a> {
             // type its invocations must honor — exactly what a `fn`-typed
             // parameter position supplies in v1. A named source needs nothing
             // (its own signature coerces at the call boundary).
+            // A function value flowing into a `lazy T` field (RFC-0085 M4a):
+            // adopt the `fn() -> T` signature exactly as above, then TAG it, so
+            // the read that forces it can tell it apart from an ordinary stored
+            // fn-typed field (`std/ui`'s `Query { run: fn() -> T }` is one, and
+            // reading THAT hands back the closure). Idempotent — a value already
+            // tagged crosses this boundary again on every copy.
+            (Type::Lazy(inner), Val::Fn(fv)) => {
+                let inner = Type::Fn(Vec::new(), inner.clone());
+                let bare = match *fv {
+                    FnVal::Thunk(t) => Val::Fn(t),
+                    other => Val::Fn(Box::new(other)),
+                };
+                match self.coerce(bare, &inner)? {
+                    Val::Fn(fv) => Ok(Val::Fn(Box::new(FnVal::Thunk(fv)))),
+                    other => Ok(other),
+                }
+            }
             (Type::Fn(ptys, ret), Val::Fn(fv)) => Ok(Val::Fn(Box::new(match *fv {
                 FnVal::Lambda {
                     params,
@@ -5834,7 +5876,12 @@ impl<'a> Interp<'a> {
             Expr::Field { expr, field, .. } => {
                 let pt = self.type_of(expr, scope)?;
                 let fields = crate::types::record_fields(&pt, &self.type_map)?;
-                fields.into_iter().find(|f| &f.name == field).map(|f| f.ty)
+                // A read of a `lazy T` field is a `T` — it has already been
+                // forced by the time anything asks what it is (RFC-0085 M4a).
+                fields
+                    .into_iter()
+                    .find(|f| &f.name == field)
+                    .map(|f| crate::types::forced(&f.ty))
             }
             Expr::Call { name, args, .. } => {
                 if name == "Some" {

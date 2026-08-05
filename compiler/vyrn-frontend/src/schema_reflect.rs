@@ -293,7 +293,11 @@ fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
         | Type::ArrayN(a, _)
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
-        | Type::Pick(a, _) => collect_type_names(a, out),
+        | Type::Pick(a, _)
+        // A `lazy T` field (RFC-0085 M4a) reaches `T` — the deferral changes
+        // when the value is computed, not which declarations an interface's
+        // type closure has to carry (RFC-0031).
+        | Type::Lazy(a) => collect_type_names(a, out),
         Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
             collect_type_names(a, out);
             collect_type_names(b, out);

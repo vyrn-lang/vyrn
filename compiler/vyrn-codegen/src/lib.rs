@@ -3368,6 +3368,14 @@ impl<'a> Gen<'a> {
                 let ll = self.llt(&ety);
                 let t = self.fresh_tmp();
                 self.emit(format!("{t} = extractvalue {ll} {v}, {idx}"));
+                // RFC-0085 M4a: reading a `lazy T` field FORCES it — the loaded
+                // `{ i64, i64 }` is a stored nullary closure and this is the
+                // call. Nothing is cached, so a second read is a second call
+                // (see the RFC's "M4a — as landed").
+                if let Some(inner) = vyrn_frontend::types::deferred(&fty) {
+                    let sig = Type::Fn(Vec::new(), Box::new(inner.clone()));
+                    return self.gen_fnval_call(t, &sig, &[]);
+                }
                 Ok((t, fty))
             }
             Expr::TryConstruct { name, args, .. } => self.gen_try_construct(name, &args[0]),
@@ -9238,6 +9246,10 @@ fn mangle_ty(t: &Type) -> String {
             ps.iter().map(mangle_ty).collect::<String>(),
             mangle_ty(r)
         ),
+        // A `lazy T` field (RFC-0085 M4a) mangles as what it IS — the nullary
+        // closure — so a generic instantiated at one cannot key differently
+        // from an instantiation at its representation.
+        Type::Lazy(inner) => format!("FnR{}", mangle_ty(inner)),
         // Neither is a type a monomorphization can be keyed on: `Err` is the
         // checker's recovery sentinel and never reaches codegen, and `Never`
         // (RFC-0079) is unspellable in a signature, so no type argument is one.
@@ -9416,6 +9428,10 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // the malloc'd capture block. v1 `fn`-typed PARAMETERS never reach
         // `llt` (they monomorphize away before lowering).
         Type::Fn(..) => "{ i64, i64 }".into(),
+        // Unreachable: `resolve` (above) answers `Fn([], T)` for a `lazy T`
+        // field, which is exactly the point — the deferral has no layout of its
+        // own (RFC-0085 M4a).
+        Type::Lazy(_) => "{ i64, i64 }".into(),
         // `Err` is the checker's recovery sentinel; a program with any `Err`
         // already has diagnostics and never reaches codegen. Lower to void
         // as a defensive fallback (never observed in practice).
