@@ -1356,7 +1356,9 @@ impl<'a> Checker<'a> {
     fn contains_fn(&self, ty: &Type) -> bool {
         fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
             match ty {
-                Type::Fn(..) => true,
+                // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
+                // position a stored function value is kept out of.
+                Type::Fn(..) | Type::Lazy(_) => true,
                 Type::Option(i)
                 | Type::Array(i)
                 | Type::ArrayN(i, _)
@@ -1416,6 +1418,16 @@ impl<'a> Checker<'a> {
         // swallow a real value.
         if matches!(from, Type::Never) {
             return true;
+        }
+        // RFC-0085 M4a: a `lazy T` field takes exactly what a `fn() -> T` field
+        // takes — a lambda, a named function, or another stored value of that
+        // signature. The construction site writes the thunk and is meant to see
+        // that it is one; only the READ hides it.
+        if let Type::Lazy(t) = to {
+            return self.assignable(from, &Type::Fn(Vec::new(), t.clone()));
+        }
+        if let Type::Lazy(t) = from {
+            return self.assignable(&Type::Fn(Vec::new(), t.clone()), to);
         }
         // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
         // DeleteResult = Result<Bool, String>`) is interchangeable with its
@@ -2856,7 +2868,8 @@ impl<'a> Checker<'a> {
             Type::Result(a, b) => self.contains_heap(&a) || self.contains_heap(&b),
             // A stored function value (RFC-0037) may hold heap captures
             // (a snapshotted String/Array/record), so treat it as heap-carrying.
-            Type::Fn(..) => true,
+            // A `lazy T` field is one (RFC-0085 M4a).
+            Type::Fn(..) | Type::Lazy(_) => true,
             _ => false,
         }
     }
@@ -3269,10 +3282,14 @@ impl<'a> Checker<'a> {
                         "line {line}: String has no `length`: use `byteLength` for bytes \
                          or `charCount()` for Unicode scalars"
                     )),
+                    // Reading a `lazy T` field yields `T` — the read IS the
+                    // forcing (RFC-0085 M4a). Nothing in the surface can name
+                    // the thunk, which is what makes the deferral a property of
+                    // the data rather than of the reader.
                     Type::Record(rfields) => rfields
                         .iter()
                         .find(|f| &f.name == field)
-                        .map(|f| f.ty.clone())
+                        .map(|f| crate::types::forced(&f.ty))
                         .ok_or_else(|| format!("line {line}: type {ety} has no field `{field}`")),
                     other => Err(format!(
                         "line {line}: cannot access field `{field}` on non-record type {other}"

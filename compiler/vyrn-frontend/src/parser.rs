@@ -2302,7 +2302,35 @@ impl Parser {
             while *self.peek() != Tok::RBrace {
                 let name = self.expect_ident()?;
                 self.eat(&Tok::Colon)?;
+                // RFC-0085 M4a: `field: lazy T`. A CONTEXTUAL modifier, exactly
+                // as `mut fn` is — `lazy` stays an ordinary identifier
+                // everywhere else, which is what lets `std/ui`'s `lazy(..)`
+                // function (RFC-0070, lazy PAGES) keep its name. Nothing has to
+                // tell them apart: this one is only ever read where a field's
+                // TYPE begins, and that is a position no call can occupy.
+                let lazy = matches!(self.peek(), Tok::Ident(w) if w == "lazy");
+                if lazy {
+                    let line = self.line();
+                    let col = self.col();
+                    self.advance();
+                    // Named record types only, and for the same reason an inline
+                    // field `where` needs one: the deferral is a fact about a
+                    // DECLARED field, and an anonymous record has no declaration
+                    // for a value to be stamped with when it crosses a boundary.
+                    if !collecting {
+                        return Err(Diagnostic::error(
+                            line,
+                            col,
+                            "parse",
+                            "a `lazy` field needs a named record type \
+                             (`type T = { field: lazy U }`); an anonymous record \
+                             has no declaration to defer against"
+                                .to_string(),
+                        ));
+                    }
+                }
                 let ty = self.type_()?;
+                let ty = if lazy { Type::Lazy(Box::new(ty)) } else { ty };
                 if *self.peek() == Tok::Where {
                     let line = self.line();
                     let col = self.col();
@@ -2316,6 +2344,20 @@ impl Parser {
                             "an inline field `where` needs a named record type \
                              (`type T = { field: .. where .. }`); an anonymous record \
                              has no name to attach the refinement to"
+                                .to_string(),
+                        ));
+                    }
+                    // An inline `where` desugars the field's type into a
+                    // synthetic named one, which would bury the `lazy` marker
+                    // where nothing looks for it and quietly stop forcing the
+                    // read. Refused by name rather than silently mis-lowered.
+                    if lazy {
+                        return Err(Diagnostic::error(
+                            line,
+                            col,
+                            "parse",
+                            "a `lazy` field may not carry an inline `where`: name the \
+                             validated type and defer that (`field: lazy Body`)"
                                 .to_string(),
                         ));
                     }

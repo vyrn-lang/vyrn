@@ -1,6 +1,6 @@
 # RFC-0085 — Answering a GraphQL Query
 
-- **Status:** M1, M2, M3 shipped. M4 designed.
+- **Status:** M1, M2, M3, M4a shipped. M4b designed.
 - **Depends on:** RFC-0038 (`std/graphql` — the SDL this executes against),
   RFC-0074 (protocol projections — M4b is the consumer), RFC-0021 (`gen fn`),
   RFC-0031 (`moduleInterface` reachable type closure), RFC-0059 (`std/json`)
@@ -506,3 +506,155 @@ passes.
 
 23 blocks in `std/graphql.vyrn` and 11 in `examples/graphql.vyrn`, now run; 110
 examples, three engines.
+
+---
+
+## M4a — as landed
+
+`type Book = { title: String, body: lazy String }` compiles, and
+`examples/lazyfield.vyrn` — an ordinary program with no GraphQL anywhere in it —
+prints `never read -> loads = 0` against a shelf whose bodies were never loaded.
+All three engines agree byte for byte.
+
+The demonstration is outside GraphQL on purpose, because that was the whole
+argument for putting the fact on the field: expensive-to-load is a property of
+the data, and a fact only one transport can observe is not a property of the
+data. So the evidence is `streamunfold`'s: a counter in module state, incremented
+by the work, printed afterwards. The VALUE proves nothing about WHEN it was
+computed; the count does.
+
+### Recomputed per read, not memoized — and that is the honest contract
+
+**A `lazy` field is computed on every read.** Read it twice and it runs twice;
+`examples/lazyfield.vyrn` asserts `loads == 2` for two reads rather than hiding
+that behind a number a cache would be needed to make true.
+
+"Computed on first read" implies a memo, and a memo in a record field is a write
+performed by a reader. Two things make that unaffordable, and only the first is
+about permission:
+
+- **A read is not a `mut`.** `b.body` on a `let b` mutates nothing today, and
+  RFC-0004 governs who may. Making a read a write would need the capability at
+  every reader, for a change no reader asked for.
+- **A record is a value, so "once" would have meant "once per copy."** Records
+  copy at boundaries — the interpreter's copy-on-write, both compiled backends'
+  by-value aggregates — so a cache filled in one copy is empty in the next.
+  "Computed once" would then be unpredictable from the source: once here, twice
+  after a call that took the record, and a program's cost would depend on how
+  many times its data crossed a boundary. Recompute-per-read is ONE rule, and it
+  is the same rule on all three engines.
+
+What the milestone exists to prove survives intact: **a field never read is never
+computed**, which is the distinction M1's `gqlProject` comment reserved and the
+only one M4b needs. A caller who wants the value twice binds it once — which is
+what a caller who wanted a cache would have written anyway.
+
+### The representation is RFC-0037's, and that is the whole lowering
+
+`lazy T` **is** `fn() -> T`. `types::resolve` answers `Fn([], T)` for it — one
+arm, one function — so everything downstream that resolves a type sees a stored
+function value the language already had: layout, ownership, movecheck, drop, the
+per-signature dispatcher, the direct wasm encoder. None of them gained a line.
+The arm deliberately does NOT reach a record's fields (`resolve` does not recurse
+into `Type::Record`), so `Field.ty` keeps the raw marker for the only three
+readers that must see it: the field read, the codec, and reflection.
+
+What the marker buys is the two ends, and they are asymmetric on purpose:
+
+- **Construction takes the thunk.** `Book { title: t, body: || loadBody(id) }`.
+  The deferral is written where the work is, so the site that could have been
+  eager can see that it is not.
+- **A read forces it.** `b.body` is a `String`, and nothing in the surface can
+  name the closure — `let f: fn() -> String = b.body` is a type error, so no
+  reader can capture the thunk and defeat the field's own contract.
+
+**That answers the objection this document recorded against its own choice.** "It
+leaves the resolver unassociated — something still has to say *how* `body` is
+filled." Nothing does: a nullary closure carries its arguments as captures, so
+the procedure that builds the record — the one already holding the id — writes
+the resolver at the point it has everything it needs. There was never a separate
+resolver to associate, which also removes the only thing the contract candidate
+(`fn *(_: Book) -> String`) was buying.
+
+### What a lazy field costs a record that has none: nothing
+
+No shape changed anywhere, so no record gained a word. The claim is checked
+rather than asserted: `a_lazy_field_lowers_exactly_as_the_stored_closure_it_is`
+in `vyrn-cli/tests/lazyfield.rs` emits IR for one program written both ways —
+`body: lazy String` read as `b.body`, and `body: fn() -> String` read as
+`let f = b.body; f()` — and asserts that **everything outside the function doing
+the reading is byte-identical**. The record is `{ ptr, { i64, i64 } }` in both,
+`vyrn_make` is the same function, and the force goes through the same
+synthesized dispatcher.
+
+Inside the reader the deferred spelling is *shorter*, by exactly the intermediate
+binding's alloca/store/load that the explicit form needs and the implicit read
+does not. The deferral is not a representation; it is a rule about two syntactic
+positions.
+
+### `toJson` forces, `fromJson` refuses
+
+`toJson` computes every deferred field, and that is correct: JSON that silently
+omitted a declared field would be worse than JSON that paid to produce one. The
+generated encoder needed no change to do it — it emits `v.body`, which IS the
+read that forces — and `codec::encodable` accepts `lazy T` exactly when `T` is.
+
+`fromJson` refuses, by name. A decoded value arrives as data with no thunk behind
+it; a decoder that manufactured a constant thunk would be laziness that had
+already done the work.
+
+**And that is exactly why M4b is a milestone rather than a corollary.** Every
+GraphQL reply today goes through `toJson`, so a lazy field is computed on every
+request whether or not it was selected — the feature buys nothing where it was
+asked for until the executor selects before it encodes. M4a makes the fact
+declarable; M4b is what makes it pay.
+
+### The word, kept apart
+
+`std/ui` has `Lazy<T>` and `lazy(..)` for lazy PAGES (RFC-0070) — data arriving
+after the shell, with a `Loading` state and a network behind it. A `lazy` FIELD
+is a different mechanism one layer down: computed on read, of a record, no
+`Loading` and no network.
+
+They never meet in the grammar, and `mut fn`'s trick is why: `lazy` is
+**contextual**, read only where a record field's type begins, so it never becomes
+a keyword and `lazy(q)` stays a call.
+`lazy_is_still_an_ordinary_identifier_everywhere_else` pins it with a program
+that declares `fn lazy(..)`, binds `let lazy = lazy(1)` and reads a `lazy` field
+in the same function. The VS Code grammar matches the modifier only after `: `,
+so the function keeps its call colour.
+
+That leaves prose as the only place the two can still be confused, which is why
+every doc comment either could be read from names them apart.
+
+### Refused by name
+
+Three, and each is a place the marker would otherwise have been silently lost
+rather than honoured:
+
+- **A named record type only** (`type T = { f: lazy U }`), for the reason an
+  inline field `where` needs one: an anonymous record has no declaration for its
+  field to be a fact about.
+- **No inline `where` on a lazy field.** That desugar rewrites the field's type
+  into a synthetic named one, which would bury the marker where nothing looks for
+  it and quietly stop forcing the read. Name the validated type and defer that.
+- **Not a decode target**, above.
+
+### Recorded, not fixed
+
+**`TypeInfo.source` renders the modifier verbatim**, because that field is
+documented as the canonical declaration text and contract types are re-emitted
+from it — dropping `lazy` would make verbatim re-emission a lie. So
+`std/graphql`'s `gqlMembers`, which parses that text, will meet `lazy String`
+where it expects a type spelling. Nothing in the corpus is lazy, so nothing is
+wrong today; **M4b cannot skip it**, and it is where the SDL decides that a
+deferred field is an ordinary `String` to a client. The reflected `Schema`
+already answers the forced type, deliberately — a schema describes what `toJson`
+writes.
+
+**Nothing carries the deferral into reflection as a flag.** A generator can read
+it out of `source`; a first-class `MemberInfo.lazy` is M4b's to add once it has
+the consumer that needs one, rather than M4a's to invent for a consumer that does
+not exist yet.
+
+111 examples, three engines.

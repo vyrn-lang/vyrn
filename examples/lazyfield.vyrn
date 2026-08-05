@@ -1,0 +1,135 @@
+/// A `lazy` record field (RFC-0085 M4a): computed when it is read, and not
+/// before.
+///
+/// **This file is deliberately not about GraphQL.** The whole argument for
+/// putting laziness on the FIELD rather than in a projection is that the fact is
+/// transport-free — a property of the data, the way `mut fn` is a property of a
+/// procedure. If the only thing that could demonstrate it were a GraphQL
+/// executor, the argument would have been wrong. So the evidence here is an
+/// ordinary program: a counter in module state, incremented by the expensive
+/// work, printed afterwards. `examples/streamunfold.vyrn` makes its case the same
+/// way, and for the same reason — the VALUE proves nothing about WHEN it was
+/// computed, so what is pinned is the count.
+///
+/// Not to be confused with `std/ui`'s `lazy(..)` (RFC-0070), which defers a
+/// PAGE's data behind a `Loading` state and a network round trip. This one is a
+/// field modifier in type position, has no `Loading` and touches no network.
+/// They never meet in the grammar; they must still be named apart in prose.
+
+/// How many times a body has actually been loaded. Module state rather than a
+/// capture, for `streamunfold`'s reason: a closure captures by value at its
+/// evaluation site (RFC-0037), and this has to be read from the outside, after.
+let mut loads = 0
+
+/// `body` is the deferred one. `lazy String` is a stored nullary closure at
+/// runtime, so the CONSTRUCTION site writes the thunk (`|| loadBody(..)`) and
+/// can see that nothing has run yet; a READ is a `String` and forces it.
+type Book = { title: String, body: lazy String }
+
+/// The expensive half. Nothing here is expensive, of course — the counter is the
+/// measurement, and a real one would be a file read or a second query.
+fn loadBody(id: Int64) -> String {
+    loads = loads + 1
+    return "body of book \{id}"
+}
+
+fn shelf() -> Array<Book> {
+    let mut out: Array<Book> = []
+    out.push(Book { title: "Dune", body: || loadBody(1) })
+    out.push(Book { title: "Solaris", body: || loadBody(2) })
+    return out
+}
+
+/// A field never read is never computed.
+fn neverRead() {
+    loads = 0
+    let books = shelf()
+    let mut titles = ""
+    for b in books {
+        titles = "\{titles}\{b.title};"
+    }
+    print("titles: \{titles}")
+    print("never read -> loads = \{loads}")
+}
+
+/// Read one of the two, and only that one is paid for.
+fn readOne() {
+    loads = 0
+    let books = shelf()
+    let first = books[0]
+    print("first body: \{first.body}")
+    print("read one of two -> loads = \{loads}")
+}
+
+/// Read the SAME field twice. Nothing is cached, so this is two calls — see the
+/// RFC's "M4a — as landed" for why a memo is not affordable in a value.
+fn readTwice() {
+    loads = 0
+    let b = Book { title: "Ubik", body: || loadBody(3) }
+    print("once: \{b.body}")
+    print("twice: \{b.body}")
+    print("read twice -> loads = \{loads}")
+}
+
+/// The thunk captures, exactly as RFC-0037 says: by value, at the moment the
+/// lambda is evaluated — so a later reassignment of `id` is invisible to it, and
+/// the deferral does not smuggle in a second capture rule.
+fn capturedAtConstruction() {
+    loads = 0
+    let mut id = 7
+    let b = Book { title: "Roadside Picnic", body: || loadBody(id) }
+    id = 99
+    print("captured: \{b.body}")
+}
+
+/// `toJson` FORCES a lazy field, and it has to: JSON that silently omitted a
+/// declared field would be worse than one that paid for it. This is also the
+/// whole reason RFC-0085 M4b needs an encoder that selects before it encodes.
+fn encodingForces() {
+    loads = 0
+    let b = Book { title: "Stalker", body: || loadBody(4) }
+    print("json: \{toJson(b)}")
+    print("toJson -> loads = \{loads}")
+}
+
+fn main() -> Int64 {
+    neverRead()
+    readOne()
+    readTwice()
+    capturedAtConstruction()
+    encodingForces()
+    return 0
+}
+
+test "a field never read is never computed" {
+    loads = 0
+    let books = shelf()
+    let mut n = 0
+    for b in books {
+        n = n + b.title.byteLength
+    }
+    assert(n > 0)
+    assertEq(loads, 0)
+}
+
+test "a field read once is computed once" {
+    loads = 0
+    let b = Book { title: "Dune", body: || loadBody(1) }
+    assertEq(b.body, "body of book 1")
+    assertEq(loads, 1)
+}
+
+test "a field read twice is computed twice" {
+    loads = 0
+    let b = Book { title: "Dune", body: || loadBody(1) }
+    assertEq(b.body, "body of book 1")
+    assertEq(b.body, "body of book 1")
+    assertEq(loads, 2)
+}
+
+test "toJson forces every deferred field" {
+    loads = 0
+    let b = Book { title: "Dune", body: || loadBody(1) }
+    assertEq(toJson(b), "{\"title\":\"Dune\",\"body\":\"body of book 1\"}")
+    assertEq(loads, 1)
+}

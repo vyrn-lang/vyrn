@@ -2600,7 +2600,39 @@ impl Fn_<'_> {
                         .ins(&Instruction::I32Add),
                     Repr::Unit => return unsupported("a Unit field", *line),
                 };
-                fty
+                // RFC-0085 M4a: reading a `lazy T` field FORCES it. The address
+                // now on the stack IS a stored nullary closure (`lazy T` lowers
+                // as `fn() -> T`), so the force is one call through that
+                // signature's dispatcher — no new machinery, which is the whole
+                // reason the deferral was given RFC-0037's representation.
+                //
+                // The copy-into-a-slot-and-name-it dance is `?`'s (RFC-0080 M3)
+                // verbatim, and for its reason: a dispatcher argument is emitted
+                // from an `Expr`, and an address sitting in a wasm local is the
+                // one thing a `Place` cannot name.
+                match vyrn_frontend::types::deferred(&fty) {
+                    None => fty,
+                    Some(inner) => {
+                        let sig = crate::normalize_fn_sig(
+                            &Type::Fn(Vec::new(), Box::new(inner.clone())),
+                            &self.cx.types,
+                        );
+                        let fl = self.layout_of(&sig, *line)?;
+                        let addr = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(addr));
+                        let slot = b.alloc(fl.size, fl.align);
+                        b.slot(slot);
+                        b.ins(&Instruction::LocalGet(addr));
+                        b.ins(&Instruction::I32Const(fl.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                        let mark = self.scope.len();
+                        self.scope.push(("@lazy".to_string(), Place::Slot(slot), sig.clone()));
+                        let recv = Expr::Var { name: "@lazy".to_string(), line: *line };
+                        let t = self.fnval_call(m, b, &recv, &sig, &[], *line);
+                        self.scope.truncate(mark);
+                        t?
+                    }
+                }
             }
             Expr::StructLit { name, fields, line } => {
                 let ty = self.applied_record(name, fields, *line)?;
@@ -3043,7 +3075,9 @@ impl Fn_<'_> {
                     ("byteLength", Type::Str)
                     | ("length", Type::Array(_))
                     | ("length", Type::ArrayN(..)) => Type::Int,
-                    _ => self.field_of(&base, field, line)?.1,
+                    // A read of a `lazy T` field is a `T` (RFC-0085 M4a) — it has
+                    // been forced by the time anything asks what it is.
+                    _ => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
                 }
             }
             Expr::StructLit { name, fields, .. } => self.applied_record(name, fields, line)?,

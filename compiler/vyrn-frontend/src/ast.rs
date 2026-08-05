@@ -777,6 +777,25 @@ pub enum Type {
     /// every use is monomorphized away, so no function value exists at runtime in
     /// any backend and this type has no runtime lowering (`llt` never sees it).
     Fn(Vec<Type>, Box<Type>),
+    /// A **deferred** record field: `type Book = { body: lazy String }` (RFC-0085
+    /// M4a). Field position only — the parser accepts the modifier nowhere else,
+    /// which is what keeps it from meeting `std/ui`'s `lazy(..)` *function*
+    /// (RFC-0070, lazy PAGES): one is in type position, the other is a call, so
+    /// `lazy` never has to become a keyword. Two different mechanisms one layer
+    /// apart; prose that mentions both must name them apart.
+    ///
+    /// **The representation is a stored nullary closure** — `lazy T` IS
+    /// `fn() -> T` at runtime, which is why RFC-0037 is the whole of the
+    /// lowering: [`crate::types::resolve`] answers `Fn([], T)` for it, so
+    /// layout, ownership, movecheck and every backend see a function value they
+    /// already know. What the marker buys is what happens at the two ends:
+    /// **construction takes the thunk** (`body: || load(id)`, so the deferral is
+    /// visible where the work is written) and **a read FORCES it** (`b.body` is a
+    /// `String`, not a `fn`), which is the whole difference from an ordinary
+    /// fn-typed field.
+    ///
+    /// **Recomputed per read, not memoized** — see the RFC's "M4a — as landed".
+    Lazy(Box<Type>),
     /// The type of an expression that never produces a value (RFC-0079). The
     /// only thing that has it is `panic(msg)`, which writes the message and
     /// exits 1, so no context downstream of one ever runs. It is the bottom
@@ -863,6 +882,7 @@ impl std::fmt::Display for Type {
                 }
                 Ok(())
             }
+            Type::Lazy(inner) => write!(f, "lazy {inner}"),
             Type::Never => write!(f, "Never"),
             Type::Err => write!(f, "<type error>"),
         }

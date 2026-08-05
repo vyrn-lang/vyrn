@@ -771,13 +771,16 @@ fn json_escape(s: &str) -> String {
 
 /// A record maps to a JSON Schema `object`; non-`Option` fields are `required`.
 fn record_schema(fields: &[Field], cx: &mut SchemaCx) -> String {
+    // A `lazy T` field is a `T` on the wire (RFC-0085 M4a): the schema describes
+    // what `toJson` writes, and `toJson` forces. Nothing about the deferral is
+    // visible to a client, which is the point of putting it on the field.
     let props: Vec<String> = fields
         .iter()
-        .map(|f| format!("\"{}\":{}", f.name, type_schema(&f.ty, cx)))
+        .map(|f| format!("\"{}\":{}", f.name, type_schema(&forced(&f.ty), cx)))
         .collect();
     let required: Vec<String> = fields
         .iter()
-        .filter(|f| !matches!(f.ty, Type::Option(_)))
+        .filter(|f| !matches!(forced(&f.ty), Type::Option(_)))
         .map(|f| format!("\"{}\"", f.name))
         .collect();
     let req = if required.is_empty() {
@@ -959,6 +962,9 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             params.iter().map(|p| substitute(p, subst)).collect(),
             Box::new(substitute(ret, subst)),
         ),
+        // A `lazy T` field (RFC-0085 M4a) substitutes into what it defers, so
+        // `type Box<T> = { v: lazy T }` monomorphizes with everything else.
+        Type::Lazy(inner) => Type::Lazy(Box::new(substitute(inner, subst))),
         other => other.clone(),
     }
 }
@@ -1060,8 +1066,34 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
             ),
             None => Type::Unit,
         },
+        // RFC-0085 M4a: `lazy T` IS a stored nullary closure, so resolving one
+        // answers the representation. This ONE arm is why the feature needs no
+        // layout, ownership, movecheck or dispatcher work of its own — every
+        // consumer that resolves a type sees the `fn() -> T` RFC-0037 already
+        // built. It does NOT reach a record's fields (this function does not
+        // recurse into `Type::Record`), so `Field.ty` keeps the raw marker for
+        // the three places that must see it: the field READ (which forces), the
+        // codec (which forces too) and reflection.
+        Type::Lazy(inner) => Type::Fn(Vec::new(), Box::new(resolve_d(inner, types, depth + 1))),
         other => other.clone(),
     }
+}
+
+/// What a `lazy T` field DEFERS, or `None` for an ordinary field (RFC-0085 M4a).
+///
+/// The one spelling of "is this field forced when read", so the checker, the
+/// interpreter, both backends and the codec cannot disagree about it.
+pub fn deferred(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Lazy(inner) => Some(inner),
+        _ => None,
+    }
+}
+
+/// A field's type as a *value* sees it: `lazy T` becomes `T`, everything else is
+/// itself. What a read of the field yields, and what the codec encodes.
+pub fn forced(ty: &Type) -> Type {
+    deferred(ty).cloned().unwrap_or_else(|| ty.clone())
 }
 
 fn fields_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Option<Vec<Field>> {

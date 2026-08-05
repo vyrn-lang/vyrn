@@ -540,6 +540,22 @@ fn codable(
                 }
             }
         }
+        // A `lazy T` field (RFC-0085 M4a) ENCODES as a `T`: `toJson` reads the
+        // field, the read forces the thunk, and the JSON carries the value. That
+        // is the right answer here — JSON that silently dropped a declared field
+        // would be worse than one that paid to compute it — and it is precisely
+        // why RFC-0085 M4b needs a selection-aware encoder rather than this one.
+        //
+        // It does NOT decode. A decoded value arrives as data with no thunk
+        // behind it, so there is nothing to defer; a decoder that manufactured a
+        // constant thunk would be laziness that had already done the work.
+        Type::Lazy(inner) => {
+            if decode {
+                Err(display)
+            } else {
+                codable(inner, types, decode, seen)
+            }
+        }
         // Everything else is off the wire in v1: Ref, Task, Template, Logger,
         // type transformers, Param, Unit, Err.
         _ => Err(display),
