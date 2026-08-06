@@ -300,8 +300,31 @@ carried the ownership fact — see the note under Phase 9.
   built-in `Array<T>` cannot say whether it owns its elements. The gate row
   holds at 2.0x, and a short-lived container is FASTER with the release than
   without it. See RFC-0090 "M1 as landed".
-- **8c. Streams re-host** their cursor on `std/slots` (RFC-0075 M2c logic
-  moves into std).
+- **8c. Streams re-host — LANDED.** A cursor is a slot in `std/stream`'s own
+  `Slots<CursorCell>`, and the compiler carries no slab logic for streams: the
+  fourth cell array, `__vyrn_cell_src`/`setsrc`/`nostream` and the whole of
+  `__vyrn_stream_close` are gone from the LLVM prelude, `cell_srcp` and
+  `CELL_SRC` from the direct backend.
+  **Linearity survived and got stronger.** `movecheck::streams` is untouched and
+  the `must-use` row still marks `Stream`, so the two abandoned-stream examples
+  produce the same diagnostics. A wrapper's release is now `close(src)` written
+  in its own step rather than a walk inside the runtime, so a chain that failed to
+  release does not compile where it used to leak.
+  **A release CALLS the step.** The slab is Vyrn and a release is type-erased, so
+  the step gives its own slot back: `fromStep` gained a `closing` flag, true
+  exactly once per stream. The drop site is still one straight-line call; the
+  callee is one function per ELEMENT TYPE rather than one per program, because
+  calling a step means dispatching by element type. It also frees the step's
+  capture block, which nothing did before.
+  **The public API changed in three places**, each forced: a step takes a
+  `Cursor` and reads it with `cursorGet`/`cursorSet` (Path B reserves
+  `get`/`set`); `pull` retired because its `T` is solvable only from the
+  expected type and the two backends disagreed about that; `fromWrap` became
+  `boxStream`/`unboxStream`/`pullAt`.
+  **It costs about 2.5x per element** — 2.60 -> 6.76 µs for 1000, three new
+  `membench` rows. The reason is that Path B's generation check was ELIDABLE
+  (RFC-0004 §5.3) and a `Slots` read has no such pass. See RFC-0075 "As landed —
+  M3" and RFC-0090 "M3 as landed".
 - **8d. Delete Path B.** `cell/get/set/release`, `Type::Ref`, the LLVM cell
   prelude (158 lines), `direct.rs` `cell_runtime` (212 lines), the
   interpreter slab, `fresh_refs` and the §5.3 elision pass, `DropKind::

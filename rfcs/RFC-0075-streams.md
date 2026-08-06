@@ -18,6 +18,13 @@
   three are M1's and M2b's own pins, and client disconnect was closed by
   RFC-0074 M3a and then a second time by M3b's `ws` **against the same file,
   unchanged**. The normalized signal is *the write failing*.
+  **The cursor moved in RFC-0090 M3.** It was a `Ref<Int64>` out of Path B's
+  slab; it is a slot in `std/stream`'s own `Slots` now, so the compiler carries
+  no slab logic for streams and Path B can be deleted. A step takes a `Cursor`
+  and reads it with `cursorGet`/`cursorSet`, `fromWrap`/`pull` became
+  `boxStream`/`unboxStream`/`pullAt`, and a release CALLS the step. Linearity is
+  unchanged and a wrapper's release is now checked rather than walked. It costs
+  about 2.5× per element. See "As landed — M3, the cursor re-host".
 - **Depends on:** RFC-0074 (`sse` / `ws` projections — the transports that
   consume streams), RFC-0072 (audience, derived RPC), RFC-0037 (stored closures
   / defunctionalization — the producer state below), RFC-0060 (`break` /
@@ -803,6 +810,100 @@ element is an encoded frame partly because mapping a feed hung. `serve.rs` now
 serves `map(unfold(0, nums), frame)`: the frames arrive, the client vanishes, the
 feed stops, and `/probe` traps on the INNER producer's cursor — a cell the host
 never touched, released because the walk reached it.
+
+## As landed — M3, the cursor re-host (RFC-0090 M3)
+
+A stream's cursor is not a Path B cell any more. It is a slot in a
+`Slots<CursorCell>` that lives in `std/stream`, and the compiler carries no slab
+logic for streams at all: the fourth cell-slab array, `__vyrn_cell_src`,
+`__vyrn_cell_setsrc`, `__vyrn_cell_nostream` and the whole of
+`__vyrn_stream_close` are gone from the LLVM prelude, and `cell_srcp` and the
+`CELL_SRC` array are gone from the direct backend. Three-way parity is green,
+`examples/streamunfold.vyrn` and `examples/streamlazy.vyrn` print the same bytes
+on all three engines, and every release-path pin M1 counted still counts.
+
+**Linearity survived, and it got stronger.** `movecheck::streams` is untouched:
+it is name-based and typeless, every mention of a stream binding is a move, and
+`fromArray`/`fromStep` are still the builtin producers. `unboxStream` joined that
+list, and Phase 4b's `must-use` row still marks `Stream`, so
+`examples/stream_abandoned.vyrn` and `examples/stream_combinator_abandoned.vyrn`
+produce the same three diagnostics they always did. What changed is that a
+wrapper's release is now written rather than walked: `close(src)` in the
+wrapper's own step, checked like any other release. A walk that stopped one
+stream early used to leak silently; the equivalent mistake does not compile.
+
+**A release calls the step.** The cursor slab is Vyrn now, and a release in the
+runtime is type-erased, so nothing in the runtime can give a slot back. The step
+can: `fromStep`'s signature gained a `closing` flag that is true exactly once per
+stream, and on that call the step releases its slot and — if it is a wrapper —
+takes its source out of its box and closes it. Two consequences worth recording:
+
+- **The drop site is still straight-line.** M2b put the variant branch inside a
+  runtime function because `emit_all_drops` runs mid-block before an early `ret`
+  and M1's pin says the release is IN the block that `ret` terminates. That still
+  holds — one call, one branch inside the callee. What changed is that the callee
+  is one function per ELEMENT TYPE (`@__vyrn_stream_close_i64`) rather than one
+  for the program, because calling a step means dispatching by element type. The
+  site count did not move; the number of functions the sites name did.
+- **The release now frees the step's capture block**, which nothing did before.
+  A stream owns the fn value it was built with, so the closer hands it back. This
+  is what keeps `unfold` flat: its registered step is an adapter that captures the
+  caller's step, so without the free every `unfold` would leak sixteen bytes.
+
+**A wrapper's source is a box, not a slab slot.** `boxStream(s)` moves a stream
+into one `malloc`'d `{ i64 magic, Stream }` and answers its address as an
+`Int64`; `pullAt(a)` asks the stream in that box for one element; `unboxStream(a)`
+takes it back out, clears the magic and frees the box. The magic is what keeps
+the trap: an address is an ordinary `Int64` a program can spell, so `pullAt(24)`
+prints `error: no stream in this box` and exits 1 on all three engines — the same
+guarantee `error: no stream behind this cursor` gave, with the wording moved.
+Clearing before freeing is the second half: unboxing one address twice traps
+rather than making two owners of one stream.
+
+**The public API of `std/stream` changed in three places**, and each was forced:
+
+- A step takes a `Cursor` — `std/stream`'s own two-word record — rather than a
+  `Ref<Int64>`, and reads it with `cursorGet`/`cursorSet` rather than
+  `get`/`set`. Path B's three names are what RFC-0090 M4 deletes, so a cursor
+  cannot keep using them.
+- `pull(c)` is gone. It was written as `pull<T>(c: Cursor) -> Option<T>`, whose
+  `T` appears only in the return type, so no call site can solve it from an
+  argument: the LLVM emitter took it from the expected type and the direct wasm
+  backend refused the unsolved parameter. Two backends specializing differently
+  for one call is the failure `solve_type_args` was centralised to prevent, so
+  the generic is not written. The three combinators call `pullAt(srcOf(cur))`.
+- `fromWrap` is gone, replaced by `boxStream`/`unboxStream`/`pullAt`. The
+  primitive census went 93 to 94 for it — three rows where there were two, and
+  the extra one is honest: M2c hid the source's release inside the runtime's
+  walk, so nothing named it.
+
+**The cost, measured.** `examples/membench.vyrn` gained three rows, run native on
+the same machine, before and after (median):
+
+| row | before (Path B) | after (`std/slots`) | factor |
+|---|---|---|---|
+| unfold + take, 1000 elements | 2.60 µs | 6.76 µs | **2.6× slower** |
+| map over unfold + take, 1000 elements | 4.02 µs | 9.38 µs | **2.3× slower** |
+| open and close, 1000 cycles | 18.61 µs | 28.60 µs | **1.5× slower** |
+
+That is about four nanoseconds per element, and it is real. RFC-0090's own
+benchmark says a Vyrn slab beats the built-in one by 2.02× on the churn shape,
+and a stream's cursor is the shape where it does not, for three reasons that were
+measured rather than guessed. The generation check on a cell was ELIDABLE — the
+§5.3 fresh-reference pass proves a cursor is never aliased and drops the check
+entirely — and a `Slots` read has no such pass. `cells` is module state behind a
+global, where the slab was a fixed array at a known address. And the registered
+step is an adapter, so every element costs one more dispatched call than it did.
+
+Spelling `cursorGet` as a direct `cells.vals[..]` read with one inline generation
+check, rather than through `Handle` and the `Index` projection, was tried and
+measured: 6.77 µs against 6.76 µs. The handle build is free at `-O2`; the call
+layers and the missing elision are not. The change was reverted, because a
+slower version of the tidier spelling is not a trade.
+
+Whether four nanoseconds per element matters is a question about the transports,
+and the answer there is that an SSE frame is a write to a socket. It is recorded
+here so RFC-0090 M4 makes it permanent knowingly.
 
 ## Acceptance
 
