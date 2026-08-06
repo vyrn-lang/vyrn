@@ -3152,28 +3152,27 @@ impl<'a> Gen<'a> {
     /// before projections existed.
     fn static_ty(&self, e: &Expr) -> Option<Type> {
         match e {
-            Expr::Var { name, .. } => self.lookup(name).map(|(_, t)| self.resolve(&t)),
+            // The DECLARED type, never its base: an `impl` head names `Window`,
+            // and resolving to the record it aliases loses the name the impl is
+            // keyed by. Structure is resolved below, where it is destructured.
+            Expr::Var { name, .. } => self.lookup(name).map(|(_, t)| t),
             Expr::Field { expr, field, .. } => {
                 let base = self.static_ty(expr)?;
                 match self.resolve(&base) {
-                    Type::Record(fs) => fs
-                        .iter()
-                        .find(|f| &f.name == field)
-                        .map(|f| self.resolve(&f.ty)),
+                    Type::Record(fs) => fs.iter().find(|f| &f.name == field).map(|f| f.ty.clone()),
                     _ => None,
                 }
             }
             Expr::Call { name, args, .. }
                 if (name == "at" || name == vyrn_frontend::project::ELEM) && args.len() == 2 =>
             {
-                match self.static_ty(&args[0])? {
-                    Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
-                        Some(self.resolve(&i))
-                    }
+                let base = self.static_ty(&args[0])?;
+                match self.resolve(&base) {
+                    Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => Some(*i),
                     _ => None,
                 }
             }
-            Expr::Call { name, .. } => self.ret_types.get(name).map(|t| self.resolve(t)),
+            Expr::Call { name, .. } => self.ret_types.get(name).cloned(),
             _ => None,
         }
     }
