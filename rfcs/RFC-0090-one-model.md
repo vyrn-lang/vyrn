@@ -112,10 +112,13 @@ an identity is data, and data is checked where you read it — same as every
   Phase 8b closed all three, and a `Slots<String>` is now flat across turns.
 - **M2** — RFC-0089 M2 (conventions) lands; the `Slots` port stops being
   blocked by escape-on-call.
-- **M3** — streams re-host their cursor on `std/slots` — **LANDED (Phase 8c).**
-  See "M3 as landed" at the end, and RFC-0075 "As landed — M3". The compiler
-  carries no slab logic for streams any more; it costs about 2.5x per element,
-  and the reason is that Path B's generation check was elidable.
+- **M3** — streams re-host their cursor on `std/slots` — **LANDED (Phase 8c),
+  and the cost it reported is mostly recovered (Phase 8d).** See "M3 as landed"
+  and "M3's cost, measured again" at the end, and RFC-0075 "As landed — M3".
+  The compiler carries no slab logic for streams any more. 8c measured 2.5x per
+  element and blamed the check; the check was not the reason and the check is
+  still there. 8d halved the two element rows by making a trap cost one cold
+  call instead of three inline ones.
 - **M4** — `cell`/`get`/`set`/`release` and the slab are deleted from all three
   engines. The language's memory runtime is malloc, free, memcpy.
 
@@ -438,6 +441,64 @@ three new rows. Three reasons, and only the first is about `Slots`:
 Only (1) is a property of the model. (2) and (3) are the price of the cursor
 being std's rather than the compiler's, and (3) would go if a step took the raw
 words, at the cost of every producer in every program spelling them.
+
+**Reason (1) is wrong, and Phase 8d measured why.** Read the paragraph below it
+instead. §5.3 elided 3 of 48 sites and says in writing which 45 it did not:
+"`genref`, `freelist`, `linkedlist`, `tree` **and the three stream examples**".
+A stream's `get(c)` took `c` as a parameter, and `fresh_refs_in` only ever sees a
+`let c = cell(..)` in the same block. So a stream under Path B paid its
+generation check at every access, exactly as it does now.
+
+## M3's cost, measured again — Phase 8d
+
+The two element rows recovered by about half, and none of it was elision.
+
+| row | before 8c | 8c | 8d | 8d, guard removed |
+|---|---|---|---|---|
+| unfold + take, 1000 elements | 2.60 µs | 6.54 µs | **3.32 µs** | 2.97 µs |
+| map over unfold + take, 1000 | 4.02 µs | 9.20 µs | **4.62 µs** | 4.10 µs |
+| open and close, 1000 cycles | 18.61 µs | 25.86 µs | **25.31 µs** | 24.73 µs |
+
+**What cost the time was the trap tail, not the check.** Every trap and every
+`panic` emitted three calls INLINE at its site: `@__vyrn_stderr`, an `fputs` or a
+variadic `fprintf`, and `exit`. LLVM's inliner reads cost before it reads
+probability, and three calls is about what a small function is allowed to cost in
+total. So `place at`'s one guard — a branch no program takes — made `cursorGet`,
+`cursorSet`, `srcOf` and `takeCursor` too expensive to inline into the step. The
+emitted assembly says so: four surviving calls per element before, none after.
+
+The trap tail is now one `noreturn cold` call to a shared function. **14,935 trap
+sites across the 121-example corpus**, three calls each and one now. Nothing
+about what is printed moved, which is why parity is byte-identical.
+
+**The check is elidable in principle and there is no customer.** Three
+measurements, in the order that settles it:
+
+1. A guard reading no memory at all (`h.slot < 0 || h.gen < 0`) cost the same as
+   the real four-condition guard: 6.33 µs against 6.37. So the cost was never the
+   `gens` load, and 8c's cheaper `cursorGet` was right to measure no difference.
+2. After 8d, removing the guard entirely buys 8% and 11% on the two element rows.
+   That is the whole remaining prize.
+3. On `slotsChurn` — the ONE corpus shape a §5.3-style proof could reach, where
+   `insert` and `s[h]` sit in one block over an unaliased local — removing the
+   guard changes nothing at all: 9.29 µs against 9.34. LLVM already folds it.
+
+So a frontend elision pass would delete the checks that are already free and
+would not reach the checks that cost. It does not reach `cursorGet` for a reason
+no pass can fix: `Cursor` is an exported record, any program can spell one, and
+the handle is built inside the accessor from a parameter. The guard there is
+doing real work, which is §5.3's own conclusion about the 94%.
+
+**What remains after 8d, for M4 to price.** The two element rows sit 1.28x and
+1.15x over Path B. A guard-free `Slots` sits at 1.14x and 1.02x, so most of the
+residue is reasons (2) and (3) above and not the check. The open-and-close row is
+still 1.36x, and neither the check nor inlining touches it: it is a `Slots`
+insert and remove against a fixed slab, plus the `malloc`/`free` of the step's
+capture block that Path B never did. That is the honest price of the re-host.
+
+**The wasm output did not move by one byte.** A wasm build already ran at a size
+level that outlines cold tails, so it had made this change for itself; native at
+`-O2` had not. Native binaries grow about 0.3%, which is the extra inlining.
 
 **M4 may now delete Path B.** Nothing in the compiler reaches the cell slab for a
 stream. What still does is listed in the PR body for this phase, and it is

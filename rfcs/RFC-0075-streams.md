@@ -905,6 +905,17 @@ Whether four nanoseconds per element matters is a question about the transports,
 and the answer there is that an SSE frame is a write to a socket. It is recorded
 here so RFC-0090 M4 makes it permanent knowingly.
 
+**Two of the three reasons above are wrong, and RFC-0090 Phase 8d has the
+measurement.** The check was not elidable for a stream — RFC-0004 §5.3 names the
+three stream examples among the sites it did NOT elide, because a step reads its
+cursor through a parameter. And the check was not what cost the time. What cost
+it was the trap tail: a `panic` emitted three calls inline at its site, and
+LLVM's inliner charges for a call, so the one guard inside `place at` made
+`cursorGet`, `cursorSet` and `srcOf` too expensive to inline into the step. The
+tail is one cold call now, the three helpers inline again, and the table reads
+3.32 / 4.62 / 25.31 µs — with the guard still in place. The `cells.vals[..]`
+experiment above measured no difference for the same reason: it kept a guard.
+
 ## Acceptance
 
 - A stream acquired and abandoned is a **compile error**; the `#6193` program

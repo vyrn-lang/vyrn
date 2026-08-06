@@ -399,6 +399,15 @@ change with a different risk.
 Parity is the proof. Removing a check that can never fire is unobservable, so
 `111 checked, 10 skipped, 0 failed` had to come out byte-identical, and did.
 
+**This section has been read wrong once, and the sentence above is the one to
+read.** RFC-0090 Phase 8c cited §5.3 for the claim that a stream's cursor check
+was elided under Path B, and it was not: the 45 that survive are named here and
+the three stream examples are among them. A stream's `get(c)` takes `c` as a
+parameter, and the pass only ever sees a `let c = cell(..)` in the same block.
+Phase 8d measured the same conclusion from the other end — the elidable sites are
+the ones an optimizer already folds, and the sites that cost are the ones no proof
+reaches. See RFC-0090 "M3's cost, measured again".
+
 ---
 
 ## Design constraints the winner must satisfy

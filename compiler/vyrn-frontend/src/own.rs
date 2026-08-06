@@ -761,7 +761,7 @@ impl Emit<'_> {
         // never fail: a `let c = cell(..)` nothing aliases has one possible
         // answer at every `get(c)`. That argument holds because `c` cannot be
         // re-pointed. A `mut` one can, so admitting it here would elide a check
-        // that can fail. Path B goes in Phase 8d and takes the question with it.
+        // that can fail. Path B goes in Phase 8e and takes the question with it.
         if mutable && kind == DropKind::ReleaseRef {
             return Fate::Leaked(Leak::Mutable);
         }

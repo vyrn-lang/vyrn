@@ -322,14 +322,41 @@ carried the ownership fact — see the note under Phase 9.
   expected type and the two backends disagreed about that; `fromWrap` became
   `boxStream`/`unboxStream`/`pullAt`.
   **It costs about 2.5x per element** — 2.60 -> 6.76 µs for 1000, three new
-  `membench` rows. The reason is that Path B's generation check was ELIDABLE
-  (RFC-0004 §5.3) and a `Slots` read has no such pass. See RFC-0075 "As landed —
-  M3" and RFC-0090 "M3 as landed".
-- **8d. Delete Path B.** `cell/get/set/release`, `Type::Ref`, the LLVM cell
+  `membench` rows. The reason it gave was that Path B's generation check was
+  ELIDABLE (RFC-0004 §5.3) and a `Slots` read has no such pass. **That reason is
+  wrong** — §5.3 names the three stream examples among the sites it did NOT
+  elide — and 8d found the real one. See RFC-0075 "As landed — M3" and RFC-0090
+  "M3 as landed".
+- **8d. The check is not what a guard costs — LANDED.** This phase was not in
+  the plan; 8c created it, and it moved "delete Path B" to 8e. It was asked to
+  make a handle check elidable the way §5.3 made a cell check elidable. It did
+  not, and it recovered the two stream element rows anyway: 6.54 -> 3.32 µs and
+  9.20 -> 4.62 µs, against 2.60 and 4.02 before 8c.
+  Every trap and every `panic` emitted three calls INLINE at its site
+  (`@__vyrn_stderr`, an `fputs` or a variadic `fprintf`, `exit`). LLVM's inliner
+  reads cost before probability, so a guard no program takes made the function
+  AROUND it too expensive to inline, and `cursorGet`/`cursorSet`/`srcOf`
+  survived as calls in the step. The tail is one `noreturn cold` call now:
+  **14,935 trap sites over the 121-example corpus**, three calls each and one
+  now. Parity is byte-identical, because nothing about what is printed changed.
+  **The elision has no customer, measured three ways.** A guard that reads no
+  memory cost the same as the real one; after 8d, removing the guard buys 8-11%
+  on two rows and nothing anywhere else; and on `slotsChurn` — the only corpus
+  shape a §5.3-style proof reaches — removing it changes nothing, because LLVM
+  already folds it. The sites that cost are the ones no proof reaches:
+  `Cursor` is an exported record and the handle is built inside the accessor
+  from a parameter. See RFC-0090 "M3's cost, measured again".
+- **8e. Delete Path B.** `cell/get/set/release`, `Type::Ref`, the LLVM cell
   prelude (158 lines), `direct.rs` `cell_runtime` (212 lines), the
   interpreter slab, `fresh_refs` and the §5.3 elision pass, `DropKind::
   ReleaseRef`. Update RFC-0004 with a "superseded by RFC-0090" section.
   The language's runtime memory surface after this: malloc, free, memcpy.
+  The remaining Path B surface is inventoried in Phase 8c's PR (#83).
+  **8d prices what deleting it costs:** the two element rows sit 1.28x and 1.15x
+  over Path B and a guard-free `Slots` would sit at 1.14x and 1.02x, so the check
+  is not the residue. The open-and-close row is 1.36x and stays there — that one
+  is a `Slots` insert and remove against a fixed slab, plus the step capture
+  block's `malloc`/`free`, and no elision touches it.
 
 ## Phase 9 — surface polish *(from RFC-0087 Part II, whatever remains)*
 
