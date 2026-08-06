@@ -182,6 +182,36 @@ pub struct Analysis {
     /// DECLARATION's own hover — the declaration's file reaches no generator, so
     /// the facts can only come from a root that does.
     pub symbol_maps: Vec<crate::symbolmap::MappedSymbol>,
+    /// RFC-0087 U1: what the ownership analysis decided about every `let` in
+    /// THIS document — is it reclaimed, and if not, why. The answer
+    /// `vyrn why --memory` prints, at the cursor.
+    ///
+    /// The model was invisible, and the census ranks that as the root usability
+    /// gap: a user cannot learn a rule they cannot observe. Read from
+    /// [`crate::own::analyze`], which reads from the walk that DECIDED — never
+    /// re-derived, because a second walk could disagree with the first.
+    ///
+    /// Empty when the checks did not run (a parse error, a failed link).
+    pub memory: Vec<MemoryNote>,
+}
+
+/// One binding's memory answer, positioned for the editor (RFC-0087 U1).
+///
+/// [`crate::own::BindingNote`] with the prose already rendered, so the LSP is an
+/// adapter rather than a second opinion.
+#[derive(Debug, Clone)]
+pub struct MemoryNote {
+    pub name: String,
+    /// 1-based line of the `let`.
+    pub line: usize,
+    /// What happens to the value, in one line — [`crate::own::Fate::words`].
+    pub text: String,
+    /// The line where the value stops being live, when there is one: a move or
+    /// a `drop`. `None` for a binding that lives to block exit.
+    pub last_use: Option<usize>,
+    /// What took it, for the inlay hint. `Some` exactly when `last_use` is a
+    /// move.
+    pub moved_into: Option<String>,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes
@@ -571,8 +601,19 @@ fn analyze_inner(
         css_constant(member_src).unwrap_or_default()
     };
 
+    // RFC-0087 U1. Only when the checks ran and found nothing: `own::analyze`
+    // reads a program the checker approved, and an answer about a body that does
+    // not compile is an answer about a body nobody will run. This is also what
+    // keeps it off the hot path — an editor spends most of a keystroke burst on
+    // a document that does not parse.
+    let memory = match &checked {
+        Some(prog) if !diags.iter().any(|d| d.severity == crate::diagnostics::Severity::Error) => memory_notes(prog),
+        _ => Vec::new(),
+    };
+
     Analysis {
         diagnostics: diags,
+        memory,
         symbols,
         tokens: tok_info,
         locals,
@@ -591,6 +632,39 @@ fn analyze_inner(
         remapped,
         symbol_maps: origin_index.all,
     }
+}
+
+/// Every `let` in the ROOT module, with what the ownership analysis decided
+/// (RFC-0087 U1).
+///
+/// A linked program carries every import's functions and they are another file's
+/// answer, so the filter is the same one `vyrn why --memory` uses: a function
+/// with no `module` tag is this document's.
+fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote> {
+    let own = crate::own::analyze(program);
+    let mut out = Vec::new();
+    for f in program.functions.iter().filter(|f| f.module.is_none() && !f.is_extern) {
+        let Some(notes) = own.notes.get(&f.name) else { continue };
+        for n in notes {
+            // A binding whose type owns no heap has nothing to reclaim, so
+            // "NOT reclaimed" is the wrong sentence about it. `vyrn why --memory`
+            // counts it in a summary; a hover on an `Int64` would just alarm.
+            if matches!(&n.fate, crate::own::Fate::Leaked(crate::own::Leak::NoRelease(_))) {
+                continue;
+            }
+            out.push(MemoryNote {
+                name: n.name.clone(),
+                line: n.line,
+                text: n.fate.words(),
+                last_use: n.fate.last_use(),
+                moved_into: match &n.fate {
+                    crate::own::Fate::Moved { into, .. } => Some(into.clone()),
+                    _ => None,
+                },
+            });
+        }
+    }
+    out
 }
 
 /// An `Analysis` with everything but `diagnostics` empty (lex/parse failure).
@@ -614,6 +688,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         origins: crate::origin::OriginMaps::default(),
         remapped: Vec::new(),
         symbol_maps: Vec::new(),
+        memory: Vec::new(),
     }
 }
 
@@ -2293,6 +2368,13 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
         },
         None => local_detail(b),
     };
+    // RFC-0087 U1: three bindings of one shape can have opposite outcomes, and
+    // nothing in the source says which. Matched on the DECLARATION line, so it is
+    // this binding's answer and not a same-named one from another scope.
+    let hover = match analysis.memory.iter().find(|m| m.name == b.name && m.line == b.line) {
+        Some(m) => format!("{hover}\n\nmemory: {}", m.text),
+        None => hover,
+    };
     Resolution {
         name: b.name.clone(),
         kind: match b.kind {
@@ -2723,6 +2805,9 @@ pub struct SemMods {
     pub declaration: bool,
     pub readonly: bool,
     pub default_library: bool,
+    /// RFC-0087 U1: this occurrence is where the binding's value stops being
+    /// live — the move or the `drop` that takes it. Set for locals only.
+    pub last_use: bool,
 }
 
 /// One classified identifier occurrence (RFC-0047 §1): its 1-based position, its
@@ -2796,6 +2881,46 @@ pub fn semantic_tokens(analysis: &Analysis) -> Vec<SemToken> {
             });
         }
     }
+    out
+}
+
+/// One inlay hint: a label the editor draws inside the line, without editing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlayHint {
+    /// 1-based position the label is drawn at.
+    pub line: usize,
+    pub col: usize,
+    pub label: String,
+}
+
+/// Move hints for a document (RFC-0087 U1).
+///
+/// A move is the one memory event with a source position of its own — block-exit
+/// reclamation happens at a brace, and a leak happens nowhere. So this marks the
+/// moves: at the occurrence that takes the value, `→ f(..)` says where it went.
+///
+/// Pure over the cached [`Analysis`], like [`semantic_tokens`]. A keystroke pays
+/// nothing for it.
+pub fn inlay_hints(analysis: &Analysis) -> Vec<InlayHint> {
+    let mut out = Vec::new();
+    for m in &analysis.memory {
+        let (Some(at), Some(into)) = (m.last_use, m.moved_into.as_ref()) else { continue };
+        // The occurrence of the name on the move line. A move is a use, so the
+        // token is there; if the source moved on since the analysis, no hint.
+        let Some(tok) = analysis
+            .tokens
+            .iter()
+            .find(|t| t.line == at && t.text == m.name)
+        else {
+            continue;
+        };
+        // `into` is written for a diagnostic, where a name wears backticks. An
+        // inlay hint is drawn in the code, where it must not.
+        let into = into.trim_matches('`');
+        out.push(InlayHint { line: at, col: tok.end_col, label: format!("→ {into}") });
+    }
+    out.sort_by_key(|h| (h.line, h.col));
+    out.dedup();
     out
 }
 
@@ -3086,7 +3211,18 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
             };
             let readonly = matches!(b.kind, LocalKind::Let { mutable: false } | LocalKind::ForVar);
             let declaration = b.line == tok.line && b.col == tok.col;
-            return Some((kind, SemMods { declaration, readonly, default_library: false }));
+            // RFC-0087 U1: the line where an owning value stops being live — a
+            // move or a `drop`. Marked so the point is visible rather than
+            // inferred by reading the rest of the body.
+            let last_use = !declaration
+                && analysis
+                    .memory
+                    .iter()
+                    .any(|m| m.name == b.name && m.line == b.line && m.last_use == Some(tok.line));
+            return Some((
+                kind,
+                SemMods { declaration, readonly, default_library: false, last_use },
+            ));
         }
     }
 
@@ -3108,6 +3244,7 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
                             declaration: false,
                             readonly: false,
                             default_library: is_std_file(&m.file),
+                            last_use: false,
                         },
                     ));
                 }
@@ -3150,7 +3287,7 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
             && !best.detail.starts_with("let mut");
         return Some((
             sem_of_symbol_kind(best.kind),
-            SemMods { declaration, readonly, default_library: is_std_file(&best.file) },
+            SemMods { declaration, readonly, default_library: is_std_file(&best.file), last_use: false },
         ));
     }
 
@@ -3170,7 +3307,7 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
 
 /// `SemMods` with only `default_library` set (the common builtin shape).
 fn mods_default_lib() -> SemMods {
-    SemMods { declaration: false, readonly: false, default_library: true }
+    SemMods { declaration: false, readonly: false, default_library: true, last_use: false }
 }
 
 // ---------------------------------------------------------------------------
@@ -3827,5 +3964,80 @@ return 0\n\
             d.exports[0].doc.as_deref(),
             Some("A diagram.\n\n```mermaid\nflowchart LR\n  a --> b\n```")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // RFC-0087 U1 — the memory model, in the editor
+    // -----------------------------------------------------------------------
+
+    /// One body with all four outcomes a binding can have.
+    const MEM_SRC: &str = r#"fn take(s: consume String) -> Int64 { return 1 }
+fn main() -> Int64 {
+    let a = "x" + "y"
+    let n = take(a)
+    let b = "p" + "q"
+    let c = b.copy()
+    drop c
+    print(b)
+    return n
+}
+"#;
+
+    #[test]
+    fn memory_notes_say_what_happens_to_each_binding() {
+        let a = analyze(MEM_SRC);
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        let note = |n: &str| {
+            a.memory.iter().find(|m| m.name == n).map(|m| m.text.clone()).unwrap_or_default()
+        };
+        assert_eq!(note("a"), "moved at line 4 into `take(..)`");
+        assert_eq!(note("b"), "reclaimed at block exit — freeing the String buffer");
+        assert_eq!(note("c"), "reclaimed by `drop` at line 7");
+        // `n` is an Int64. There is nothing to reclaim, so there is no sentence
+        // to say about it — a "NOT reclaimed" hover on a scalar is only alarm.
+        assert!(a.memory.iter().all(|m| m.name != "n"), "{:?}", a.memory);
+    }
+
+    #[test]
+    fn a_binding_hover_carries_its_memory_answer() {
+        let a = analyze(MEM_SRC);
+        // The `a` in `let a = ..` on line 3.
+        let r = resolve(&a, 3, 9).expect("a resolves");
+        assert!(r.hover.contains("memory: moved at line 4 into `take(..)`"), "{}", r.hover);
+    }
+
+    #[test]
+    fn a_move_gets_an_inlay_hint_where_the_value_goes() {
+        let a = analyze(MEM_SRC);
+        let hints = inlay_hints(&a);
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert_eq!(hints[0].line, 4);
+        assert_eq!(hints[0].label, "→ take(..)");
+    }
+
+    #[test]
+    fn the_last_use_of_an_owning_binding_is_marked() {
+        let a = analyze(MEM_SRC);
+        let marked: Vec<(usize, usize)> = semantic_tokens(&a)
+            .into_iter()
+            .filter(|t| t.mods.last_use)
+            .map(|t| (t.line, t.col))
+            .collect();
+        // The `a` handed to `take` (line 4) and the `c` a `drop` takes (line 7).
+        // The declaration is never the last use, and `b` has no such point —
+        // it lives to block exit.
+        assert_eq!(marked.len(), 2, "{marked:?}");
+        assert_eq!(marked[0].0, 4);
+        assert_eq!(marked[1].0, 7);
+    }
+
+    #[test]
+    fn a_document_that_does_not_check_gets_no_memory_answer() {
+        // An answer about a body the checker refused is an answer about a body
+        // nobody will run, and computing one is what would put an extra walk on
+        // the keystroke path for the buffers that need it least.
+        let a = analyze("fn main() -> Int64 { let s = nope() return 0 }");
+        assert!(!a.diagnostics.is_empty());
+        assert!(a.memory.is_empty());
     }
 }

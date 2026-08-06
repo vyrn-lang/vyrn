@@ -44,10 +44,11 @@ pub mod types;
 // pipeline lives in one place.
 pub use symbols::{
     analyze, analyze_linked, at_module_scope, class_completions, class_token_hover, classify_at,
-    completions, import_spec_at, member_completions, module_doc, references, references_to, resolve,
-    semantic_tokens,
-    string_literal_completions, Analysis, Completion, DocExport, LocalBinding, LocalKind, ModuleDoc,
-    RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
+    completions, import_spec_at, inlay_hints, member_completions, module_doc, references,
+    references_to, resolve, semantic_tokens,
+    string_literal_completions, Analysis, Completion, DocExport, InlayHint, LocalBinding, LocalKind,
+    MemoryNote, ModuleDoc, RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind,
+    TokenInfo,
 };
 
 // RFC-0071 M4: role → contract resolution and the editor queries over a

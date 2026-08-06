@@ -1068,8 +1068,6 @@ fn json_str(s: &str) -> String {
 ///
 /// It reports; it does not gate. Exit 0 whenever it could answer.
 fn why_memory(file: &str) -> ExitCode {
-    use vyrn_frontend::own::Fate;
-
     let path = match Path::new(file).canonicalize() {
         Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
         Err(e) => {
@@ -1118,7 +1116,7 @@ fn why_memory(file: &str) -> ExitCode {
         match own.owned_fns.get(&f.name) {
             Some(kind) => println!(
                 "    transfers: yes — the caller owns the result, and releases it by {}",
-                release_words(kind)
+                kind.words()
             ),
             // RFC-0089 rule 3: a return is owned. A heap return type always
             // transfers, so the only other answer is that the type owns nothing.
@@ -1132,34 +1130,22 @@ fn why_memory(file: &str) -> ExitCode {
             }
         };
         for n in notes {
+            use vyrn_frontend::own::Fate;
             bindings += 1;
-            let text = match &n.fate {
-                Fate::Reclaimed(kind) => {
-                    reclaimed += 1;
-                    format!("reclaimed at block exit — {}", release_words(kind))
-                }
-                Fate::Moved { line, into } => {
-                    moved += 1;
-                    format!("moved at line {line} into {into}")
-                }
-                Fate::Dropped { line } => {
-                    dropped += 1;
-                    format!("reclaimed by `drop` at line {line}")
-                }
-                Fate::Static => {
-                    statics += 1;
-                    "static data — nothing reclaims it, and nothing needs to".into()
-                }
+            match &n.fate {
+                Fate::Reclaimed(_) => reclaimed += 1,
+                Fate::Moved { .. } => moved += 1,
+                Fate::Dropped { .. } => dropped += 1,
+                Fate::Static => statics += 1,
                 Fate::Leaked(reason) => {
                     let key = reason.kind();
                     match leaked.iter_mut().find(|(k, _)| *k == key) {
                         Some((_, c)) => *c += 1,
                         None => leaked.push((key, 1)),
                     }
-                    format!("NOT reclaimed — {reason}")
                 }
-            };
-            println!("    line {:<5} {:<16} {}", n.line, n.name, text);
+            }
+            println!("    line {:<5} {:<16} {}", n.line, n.name, n.fate.words());
         }
     }
 
@@ -1174,20 +1160,6 @@ fn why_memory(file: &str) -> ExitCode {
         println!("    {count:>5}  {reason}");
     }
     ExitCode::SUCCESS
-}
-
-/// How a release kind reclaims, in words.
-fn release_words(kind: &vyrn_frontend::own::DropKind) -> String {
-    use vyrn_frontend::own::DropKind::*;
-    match kind {
-        FreeStr => "freeing the String buffer".into(),
-        FreeArr => "freeing the array buffer".into(),
-        FreeSmallArr => "freeing the spilled buffer, if it spilled".into(),
-        FreeMap => "freeing both map buffers".into(),
-        CloseStream => "closing the stream".into(),
-        Deep(ty) => format!("releasing what the {ty} holds"),
-        Release(f) => format!("calling `{f}`"),
-    }
 }
 
 /// `vyrn why <file>` (RFC-0072 M1) — the audience of a module, the path segment

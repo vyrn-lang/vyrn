@@ -43,7 +43,8 @@ use lsp_types::{
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeParams, InitializeResult, InsertTextFormat, Location, MarkupContent, MarkupKind,
+    InitializeParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
+    InsertTextFormat, Location, MarkupContent, MarkupKind,
     OneOf, Position, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, RenameOptions, RenameParams, SemanticToken,
     SemanticTokenModifier, SemanticTokenType,
@@ -466,6 +467,11 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
         // Semantic tokens (RFC-0047 §1): the server classifies every identifier
         // from the cached `Analysis` (function vs type vs variable vs …), which
         // TextMate cannot distinguish. `full` + `range` are both served.
+        // RFC-0087 U1: move hints. A move is the one memory event with a source
+        // position of its own, and the census's root gap is that nothing in the
+        // source says where a value went. No resolve provider — the label is
+        // already in the cached analysis, so there is nothing to resolve.
+        inlay_hint_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 work_done_progress_options: Default::default(),
@@ -621,6 +627,8 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
             Err(msg) => Response::new_err(req.id, -32803, msg),
         },
         "textDocument/formatting" => Response::new_ok(req.id, handle_formatting(server, req.params)),
+        // RFC-0087 U1: a `-> f(..)` label at every move.
+        "textDocument/inlayHint" => Response::new_ok(req.id, handle_inlay_hint(server, req.params)),
         "textDocument/semanticTokens/full" => {
             Response::new_ok(req.id, handle_semantic_tokens_full(server, req.params))
         }
@@ -1662,6 +1670,10 @@ fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenModifier::DECLARATION,     // bit 0
             SemanticTokenModifier::READONLY,        // bit 1
             SemanticTokenModifier::DEFAULT_LIBRARY, // bit 2
+            // RFC-0087 U1: where an owning value stops being live. `MODIFICATION`
+            // is a standard modifier, so a theme that never heard of Vyrn still
+            // has a rule for it, and the extension gives it its own colour.
+            SemanticTokenModifier::MODIFICATION, // bit 3
         ],
     }
 }
@@ -1692,6 +1704,9 @@ fn sem_mods_bits(m: SemMods) -> u32 {
     }
     if m.default_library {
         b |= 1 << 2;
+    }
+    if m.last_use {
+        b |= 1 << 3;
     }
     b
 }
@@ -1733,6 +1748,40 @@ fn document_sem_tokens(server: &Server, uri: &Url) -> Option<Vec<vyrn_frontend::
     } else {
         Some(vyx_semantic_tokens(server, uri))
     }
+}
+
+/// `textDocument/inlayHint` (RFC-0087 U1) — a label at every move, naming where
+/// the value went.
+///
+/// Pure over the cached analysis, filtered here to the requested line range.
+/// A `.vyx` gets nothing: its script is a synthesized module, so a hint built
+/// from it would land in the wrong coordinates.
+fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<InlayHint>> {
+    let p: InlayHintParams = serde_json::from_value(params).ok()?;
+    if !is_vyrn_uri(&p.text_document.uri) {
+        return Some(Vec::new());
+    }
+    let (analysis, _) = lookup(server, &p.text_document.uri)?;
+    let (from, to) = (p.range.start.line as usize + 1, p.range.end.line as usize + 1);
+    Some(
+        vyrn_frontend::inlay_hints(analysis)
+            .into_iter()
+            .filter(|h| h.line >= from && h.line <= to)
+            .map(|h| InlayHint {
+                position: Position {
+                    line: h.line.saturating_sub(1) as u32,
+                    character: h.col.saturating_sub(1) as u32,
+                },
+                label: InlayHintLabel::String(h.label),
+                kind: None,
+                text_edits: None,
+                tooltip: None,
+                padding_left: Some(true),
+                padding_right: None,
+                data: None,
+            })
+            .collect(),
+    )
 }
 
 /// Delta-encode classified tokens into the LSP wire form. Tokens are sorted by
