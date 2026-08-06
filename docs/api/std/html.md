@@ -140,6 +140,11 @@ Attach a list-identity `Key` to an element for the M2 keyed differ. Keying a
 non-element node is a no-op (the differ only reorders element children), so
 this is total.
 
+It takes the node. A return is owned (RFC-0089 rule 3), and three of the four
+arms hand the argument straight back, so a `read` parameter here would be a
+borrow the caller was told it still held. Every call site already passes a
+fresh node or a consumed loop element.
+
 ## toHtmlString
 
 ```vyrn

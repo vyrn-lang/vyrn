@@ -241,14 +241,18 @@ export gen fn openapi(contract: String) -> String {
     out = out + "    }\n"
     out = out + "    return JObj(ordered)\n"
     out = out + "}\n"
-    out = out + "fn oaWithId(id: String, j: Json) -> Json {\n"
+    // It TAKES the node, and every arm rebuilds rather than naming `j` again: a
+    // return is owned (RFC-0089 rule 3), so handing a `read` parameter straight
+    // back is a borrow the caller was told it still held. The one call site
+    // passes `oaNode(..)`, a fresh value.
+    out = out + "fn oaWithId(id: String, j: consume Json) -> Json {\n"
     out = out + "    return match j {\n"
     out = out + "        JObj(fs) => oaObjWithId(id, fs),\n"
-    out = out + "        JNull => j,\n"
-    out = out + "        JBool(b) => j,\n"
-    out = out + "        JNum(n) => j,\n"
-    out = out + "        JStr(s) => j,\n"
-    out = out + "        JArr(a) => j,\n"
+    out = out + "        JNull => JNull,\n"
+    out = out + "        JBool(b) => JBool(b),\n"
+    out = out + "        JNum(n) => JNum(n),\n"
+    out = out + "        JStr(s) => JStr(s),\n"
+    out = out + "        JArr(a) => JArr(a),\n"
     out = out + "    }\n"
     out = out + "}\n"
     out = out + "fn oaSchema(id: String, schema: String) -> Json {\n"

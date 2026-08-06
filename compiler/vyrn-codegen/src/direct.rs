@@ -349,6 +349,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         fnvals: RefCell::new(Vec::new()),
         dispatch: RefCell::new(Dispatch::default()),
         globals: HashMap::new(),
+        gappend: HashMap::new(),
         externs,
         droppable: ownership.droppable,
         owned: ownership.proto,
@@ -394,6 +395,19 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             return unsupported("module state of Unit", g.line);
         }
         cx.globals.insert(g.name.clone(), (Place::Static(m.reserve(l.size, l.align)), ty));
+    }
+
+    // One ownership word per module-state accumulator, in static memory for the
+    // reason the local's word sits in the frame: the helper writes it back, and
+    // wasm has no way to pass anything by reference. Reserved zeroed, and the
+    // initializer sets it to what the global's own initializer made true.
+    let gaccs: Vec<String> = crate::global_append_candidates(program)
+        .into_iter()
+        .filter(|n| cx.globals.get(n).is_some_and(|(_, ty)| cx.resolve(ty) == Type::Str))
+        .collect();
+    for name in gaccs {
+        let at = m.reserve(4, 4);
+        cx.gappend.insert(name, at);
     }
 
     // The initializer's index, reserved like every other so nothing depends on
@@ -760,6 +774,13 @@ struct Cx {
     /// [`Gen::lookup`] — the checker already forbids an initializer reading a
     /// global declared after it, so there is nothing for a partial view to catch.
     globals: HashMap<String, (Place, Type)>,
+    /// Module-state `String` accumulators (census P1): name → the fixed address of
+    /// its one ownership word. Present only for a global that
+    /// [`crate::global_append_candidates`] cleared, so `g = g + …` grows the
+    /// buffer in place instead of building a new one and dropping the old on the
+    /// floor. The local twin of this map is [`Fn_::str_append`], keyed by wasm
+    /// local; a global has no local, so it needs its own word in static memory.
+    gappend: HashMap<String, u32>,
     /// `extern fn` declarations by name (RFC-0012): the `vyrn` import's index and
     /// the signature the ABI is read off. There is no body to lower — a call is the
     /// only thing that crosses — and what one returns is the declaration's business
@@ -1039,7 +1060,7 @@ impl Cx {
 /// have held a record, and the textual backend's globals are memory too, so
 /// matching it costs nothing: a scalar global is a load and a store where a local
 /// would have been a `local.get`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Place {
     Local(u32),
     Slot(u32),
@@ -1078,6 +1099,12 @@ enum Rel {
     /// carrying the type would mean asking `layout_of` a second time at the
     /// release — the place a wrong answer is silent.
     Buffers(Vec<u32>),
+    /// An aggregate the engines copy by value, holding heap in its places
+    /// (RFC-0089 rule 4, Phase 5): a record field, an enum or `Option`/`Result`
+    /// payload, a closure's capture block. The walk is the type, so the type is
+    /// what this carries — a variant payload is chosen at run time and only the
+    /// live one is released.
+    Deep(Type),
     /// A type that declared `impl Owned` (RFC-0086 M1) — call the `release` it
     /// declared, whose flattened name this carries. The receiver's own type, so
     /// the call goes through the ordinary path rather than a second ABI.
@@ -1233,6 +1260,16 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<Fram
         let (place, ty) = cx.globals[&g.name].clone();
         let r = cx.repr(&ty, g.line)?;
         f.store_into(m, &mut b, place, &r, &g.init, &ty)?;
+        // The accumulator's ownership word starts true for every initializer but a
+        // literal, which is data-segment storage nothing allocated. Getting this
+        // wrong one way abandons the initializer's buffer at the first append; the
+        // other way frees a data segment, which `free` refuses anyway.
+        if let Some(&at) = cx.gappend.get(&g.name) {
+            let owns = !matches!(g.init, Expr::Str(_));
+            b.ins(&Instruction::I32Const(at as i32))
+                .ins(&Instruction::I32Const(owns as i32))
+                .ins(&Instruction::I32Store(word()));
+        }
     }
     Ok(b)
 }
@@ -1642,6 +1679,13 @@ impl Fn_<'_> {
                 }
                 Ok(())
             }
+            // The walk is the type, and it needs an address: an aggregate in a
+            // wasm local IS its address, and everything else has one.
+            Rel::Deep(ty) => {
+                let a = self.addr_local(b, p, 0);
+                let t = ty.clone();
+                self.rel_at(b, a, &t, line)
+            }
             // The receiver is parked under a reserved name so the ordinary call
             // path finds it as it finds any argument — the same trick `?` uses
             // for `@try` — and the release is then just a call.
@@ -1685,8 +1729,269 @@ impl Fn_<'_> {
             // null until the array spills, which is exactly the case `free`
             // refuses. The inline slots need no reclamation.
             Type::SmallArray(..) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[2]])),
+            // Phase 5: an aggregate owns its places.
+            Type::Option(_) | Type::Result(..) if self.owns_heap(&t) =>
+            {
+                Some(Rel::Deep(t))
+            }
             _ => None,
         })
+    }
+
+    /// Release the heap the value at `a` holds — the mirror of [`Fn_::copy_at`],
+    /// with `free` where that has `malloc`.
+    ///
+    /// One walk, both directions: `copy` decided what a value's own storage IS,
+    /// and a release of that value gives exactly that storage back. Writing the
+    /// two as one shape is what keeps them from disagreeing about a boxed enum
+    /// payload, which is the encoding Phase 3 measured and the one a hand-written
+    /// release gets wrong.
+    ///
+    /// It does NOT release container ELEMENTS. `m.keys()` hands back a fresh
+    /// buffer holding the map's OWN key pointers, so releasing an `Array<String>`
+    /// element by element would free each of them twice. That is census U4, and
+    /// it stays open for the phase that gives a shallow view a name.
+    fn rel_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
+        // A type that declares its own release keeps it. Reaching past the
+        // declaration into its fields would reclaim what the declaration says it
+        // reclaims, in a different order, and without the print a user `release`
+        // may do — and the interpreter runs the declared one only at a `let`.
+        if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Release(_))) {
+            return Ok(());
+        }
+        if !self.owns_heap(ty) {
+            return Ok(());
+        }
+        match self.cx.resolve(ty) {
+            Type::Str => {
+                b.ins(&Instruction::LocalGet(a)).ins(&Instruction::I32Load(word()));
+                str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
+                let offs = match self.rel_for(ty, line)? {
+                    Some(Rel::Buffers(o)) => o,
+                    _ => return Ok(()),
+                };
+                for off in offs {
+                    b.ins(&Instruction::LocalGet(a)).ins(&Instruction::I32Load(word_at(off)));
+                    b.ins(&Instruction::Call(self.cx.rt.free));
+                }
+                Ok(())
+            }
+            Type::Record(_) => {
+                let l = self.layout_of(ty, line)?;
+                let fields = self
+                    .cx
+                    .fields(ty)
+                    .ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
+                for (i, f) in fields.iter().enumerate() {
+                    if !self.owns_heap(&f.ty) {
+                        continue;
+                    }
+                    let p = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                    b.ins(&Instruction::I32Add);
+                    b.ins(&Instruction::LocalSet(p));
+                    self.rel_at(b, p, &f.ty, line)?;
+                }
+                Ok(())
+            }
+            Type::Option(inner) => {
+                let l = self.layout_of(ty, line)?;
+                let w = self.word2(&inner)?;
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load8U(byte()));
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.rel_word(b, a, l.fields[1], &inner, w, line)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                Ok(())
+            }
+            Type::Result(ok, err) => {
+                let l = self.layout_of(ty, line)?;
+                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load8U(byte()));
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.rel_word(b, a, l.fields[1], &ok, wo, line)?;
+                b.ins(&Instruction::Else);
+                self.rel_word(b, a, l.fields[1], &err, we, line)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                Ok(())
+            }
+            Type::Enum(vs) => {
+                let l = self.layout_of(ty, line)?;
+                for (tag, var) in vs.iter().enumerate() {
+                    if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                        continue;
+                    }
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I64Load(word8()));
+                    b.ins(&Instruction::I64Const(tag as i64));
+                    b.ins(&Instruction::I64Eq);
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    for (j, pty) in var.payload.clone().iter().enumerate() {
+                        if !self.owns_heap(pty) {
+                            continue;
+                        }
+                        let w = self.word1(pty);
+                        self.rel_word(b, a, l.fields[j + 1], pty, w, line)?;
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                Ok(())
+            }
+            // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
+            // The captures are one heap block, read by value at the construction
+            // site, and 0 when there are none — which `free` refuses. Census §16.
+            Type::Fn(..) => {
+                let l = self.layout_of(ty, line)?;
+                b.ins(&Instruction::LocalGet(a))
+                    .ins(&Instruction::I32Load(word_at(l.fields[1])))
+                    .ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            // A fixed `[N x T]` is a container, so its elements are U4's
+            // question, not this one. A handle names something somebody else
+            // reclaims.
+            _ => Ok(()),
+        }
+    }
+
+    /// Release the sum payload word at `a + off`.
+    ///
+    /// The mirror of [`Fn_::copy_word`], and the reason it is a function of its
+    /// own: a payload has two encodings. A `String` rides in the word, and
+    /// anything wider is a pointer to a block — Phase 3 measured that a user
+    /// enum's `String` payload boxes while an `Option<String>`'s does not, and a
+    /// release that knew only one of them would free a stack address or leak.
+    fn rel_word(
+        &mut self,
+        b: &mut Frame,
+        a: u32,
+        off: u32,
+        pty: &Type,
+        w: Word,
+        line: usize,
+    ) -> Result<(), String> {
+        match w {
+            Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            Word::Boxed => {
+                let p = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(p));
+                self.rel_at(b, p, pty, line)?;
+                b.ins(&Instruction::LocalGet(p)).ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The buffers a value of `ty` holds, as `(byte offset, carries a String
+    /// header)`, for a **store** that replaces it (RFC-0089 rule 4).
+    ///
+    /// A deliberate subset of [`Fn_::rel_for`]. A cell, a stream and a declared
+    /// `release` are all observable from inside the language — a stale cell traps
+    /// and a user `release` is ordinary Vyrn that may print — and the interpreter
+    /// reclaims those from the value the binding took at its `let`, not from the
+    /// slot's last one. Releasing them on a store would make the three engines run
+    /// different programs, so a store leaves all three alone. Phase 8c deletes the
+    /// first two outright.
+    fn store_bufs(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, bool)>, String> {
+        Ok(match self.rel_for(ty, line)? {
+            Some(Rel::Str) => vec![(0, true)],
+            Some(Rel::Buffers(offs)) => offs.into_iter().map(|o| (o, false)).collect(),
+            _ => Vec::new(),
+        })
+    }
+
+    /// Whether a store into `p` may release what `p` holds now.
+    ///
+    /// Two ways to own. Module state owns its contents by rule 4: reading a global
+    /// is a borrow and storing into one stores an owned value, because rule 2
+    /// refuses a borrow at a store. A local owns its contents when this block
+    /// already releases it at the exit — the same `droppable` fact, read as a
+    /// property of the slot rather than of the block, which is what RFC-0087 §4
+    /// asked for.
+    fn place_owns(&self, p: Place) -> bool {
+        matches!(p, Place::Static(_)) || self.releases.iter().flatten().any(|(q, _)| *q == p)
+    }
+
+    /// The address of `p` plus `off`, in a fresh local. A wasm local holding an
+    /// aggregate holds its ADDRESS, which is the one case [`Place::addr`] cannot
+    /// answer; a local holding a scalar has no address at all and never reaches
+    /// here (its caller snapshots the value itself).
+    fn addr_local(&mut self, b: &mut Frame, p: Place, off: u32) -> u32 {
+        match p {
+            Place::Local(l) => {
+                b.ins(&Instruction::LocalGet(l));
+                if off != 0 {
+                    b.ins(&Instruction::I32Const(off as i32)).ins(&Instruction::I32Add);
+                }
+            }
+            _ => {
+                p.addr(b, off);
+            }
+        }
+        let a = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(a));
+        a
+    }
+
+    /// Copy the buffer pointers a value of `ty` at `addr` holds into fresh locals,
+    /// so the store may overwrite the place before they are handed back.
+    ///
+    /// The snapshot is taken BEFORE the store and freed AFTER it, which is the
+    /// same order as "compute the new value, then release the old" and survives an
+    /// aggregate that is built destination-first. It is only ever reached where the
+    /// new value does not name the place ([`vyrn_frontend::movecheck::mentions`]),
+    /// so nothing the store computes can read the snapshot.
+    fn snap_at(
+        &mut self,
+        b: &mut Frame,
+        addr: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<Vec<(u32, bool)>, String> {
+        let mut out = Vec::new();
+        for (off, hdr) in self.store_bufs(ty, line)? {
+            b.ins(&Instruction::LocalGet(addr)).ins(&Instruction::I32Load(word_at(off)));
+            let t = b.local(ValType::I32);
+            b.ins(&Instruction::LocalSet(t));
+            out.push((t, hdr));
+        }
+        Ok(out)
+    }
+
+    /// Hand a snapshot back, after the store that replaced it. `free` refuses a
+    /// data-segment address and a null, so a place that held a literal or an
+    /// unspilled `SmallArray` costs one silent call and nothing else.
+    fn free_snap(&mut self, b: &mut Frame, snap: &[(u32, bool)]) {
+        for &(t, hdr) in snap {
+            b.ins(&Instruction::LocalGet(t));
+            if hdr {
+                str_hdr(b);
+            }
+            b.ins(&Instruction::Call(self.cx.rt.free));
+        }
     }
 
     /// Push a region scope: trap if this would be the 65th, else bump the counter.
@@ -1827,10 +2132,19 @@ impl Fn_<'_> {
                 // A String accumulator gets its append shadow here, at the one
                 // declaration site — the same place, under the same whitelist, as
                 // the textual backend's.
+                //
+                // It starts OWNED when this `let` owns its initializer, which is
+                // the fact `own` already decided. Starting it unowned abandoned
+                // the initializer's buffer at the first append — Phase 4c recorded
+                // that leak and this is where it closes. Starting it owned for a
+                // binding that names somebody else's storage (`let mut s = r.name`
+                // is a borrow, not a move) would free that storage instead, which
+                // is why the answer is read rather than assumed.
+                let owns = self.drops.contains_key(&(s as *const Stmt as usize));
                 if let Place::Local(l) = place {
                     if self.cx.resolve(&bound) == Type::Str && self.append_ok.contains(name.as_str())
                     {
-                        self.str_append_shadow(b, l);
+                        self.str_append_shadow(b, l, owns);
                     }
                 }
                 // A `let` that owns a heap value is reclaimed when this block
@@ -1838,7 +2152,6 @@ impl Fn_<'_> {
                 // own identity for it — the textual backend reads the same map with
                 // the same key, so the two cannot disagree about which `let` owns
                 // what.
-                let owns = self.drops.contains_key(&(s as *const Stmt as usize));
                 self.scope.push((name.clone(), place, bound.clone()));
                 if owns {
                     if let Some(r) = self.rel_for(&bound, *line)? {
@@ -1865,28 +2178,79 @@ impl Fn_<'_> {
                 // backend: what counts as a self-append is one rule, so the two
                 // backends cannot recognize different sets of writers and diverge
                 // on which one still copies.
-                if let Place::Local(l) = place {
-                    if self.region_depth == 0 && self.str_append.contains_key(&l) {
+                //
+                // Module state qualifies too since Phase 5: `Cx::gappend` is the
+                // same whitelist read over every body, and census P1 measured what
+                // the global's exclusion cost — 4.92 s and 12.2 GB against the
+                // local's 0.095 s, for the same eight lines.
+                let shadow = match place {
+                    Place::Local(l) => self.str_append.get(&l).copied().map(Place::Slot),
+                    Place::Static(_) => self.cx.gappend.get(name).copied().map(Place::Static),
+                    Place::Slot(_) => None,
+                };
+                if self.region_depth == 0 {
+                    if let Some(own) = shadow {
                         if let Some(parts) = crate::self_append_spine(name, value) {
-                            let slot = self.str_append[&l];
                             for p in parts {
-                                b.slot(slot).ins(&Instruction::LocalGet(l));
-                                self.expr_as(m, b, p, &Type::Str)?;
-                                self.emit_str_append(b, l);
+                                self.append_once(m, b, place, own, p)?;
                             }
                             return Ok(());
                         }
                     }
                 }
+                // RFC-0089 rule 4: the store releases what the place held. Not
+                // when the new value names the place — `a = push(a, i)` grows the
+                // old buffer and hands it back, so freeing it would be a double
+                // free. That shape is the self-append above where it is a String,
+                // and a recorded leak everywhere else.
+                let snap = if self.place_owns(place)
+                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                {
+                    match (place, &r) {
+                        // A scalar local IS the pointer; it has no address.
+                        (Place::Local(l), Repr::Scalar(_)) => {
+                            if self.store_bufs(&ty, *line)?.is_empty() {
+                                Vec::new()
+                            } else {
+                                let t = b.local(ValType::I32);
+                                b.ins(&Instruction::LocalGet(l)).ins(&Instruction::LocalSet(t));
+                                vec![(t, true)]
+                            }
+                        }
+                        _ => {
+                            let a = self.addr_local(b, place, 0);
+                            self.snap_at(b, a, &ty, *line)?
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
                 self.store_into(m, b, place, &r, value, &ty.clone())?;
-                if let Place::Local(l) = place {
-                    self.str_append_reset(b, l);
+                self.free_snap(b, snap.as_slice());
+                // The place now holds a pointer this path did not allocate, so the
+                // next append copies rather than grows. That costs one abandoned
+                // buffer per general store into an accumulator; claiming ownership
+                // here instead would free a borrowed buffer wherever rule 2 still
+                // lets one through, and a leak is a task where that is a bug.
+                if let Some(own) = shadow {
+                    own.addr(b, 0);
+                    b.ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
                 }
             }
             Stmt::SetField { name, field, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
                 let (foff, fty) = self.field_of(&ty, field, *line)?;
                 let fr = self.cx.repr(&fty, *line)?;
+                // Rule 4 through a field: the record owns what its field holds, so
+                // storing over it releases the old one. Census §4's second row.
+                let snap = if self.place_owns(place)
+                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                {
+                    let a = self.addr_local(b, place, foff);
+                    self.snap_at(b, a, &fty, *line)?
+                } else {
+                    Vec::new()
+                };
                 place
                     .addr(b, foff)
                     .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
@@ -1902,6 +2266,7 @@ impl Fn_<'_> {
                     }
                     Repr::Unit => return unsupported("a Unit field", *line),
                 }
+                self.free_snap(b, snap.as_slice());
             }
             Stmt::Return { value, line } => {
                 match (value, self.ret.clone()) {
@@ -2111,6 +2476,19 @@ impl Fn_<'_> {
                 self.bounds_check(b, &w, i, false);
                 self.elem_addr(b, &w, i);
                 let elem = w.elem.clone();
+                // Rule 4 through an element. The element address is already on the
+                // stack, so it is teed rather than recomputed; the snapshot is
+                // stack-neutral and the store finds its address where it left it.
+                let snap = if self.place_owns(place)
+                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                    && !vyrn_frontend::movecheck::mentions_place(index, name)
+                {
+                    let ea = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalTee(ea));
+                    self.snap_at(b, ea, &elem, *line)?
+                } else {
+                    Vec::new()
+                };
                 match self.cx.repr(&elem, *line)? {
                     Repr::Scalar(_) => {
                         self.expr_as(m, b, value, &elem)?;
@@ -2123,6 +2501,7 @@ impl Fn_<'_> {
                     }
                     Repr::Unit => return unsupported("an array of Unit", *line),
                 }
+                self.free_snap(b, snap.as_slice());
             }
             Stmt::Break { line } => {
                 let &(brk, _, boundary, regions) =
@@ -2210,26 +2589,48 @@ impl Fn_<'_> {
     ///
     /// Emitted at the `let`, so the second trip through an enclosing loop starts
     /// unowned again.
-    fn str_append_shadow(&mut self, b: &mut Frame, l: u32) {
+    fn str_append_shadow(&mut self, b: &mut Frame, l: u32, owns: bool) {
         let at = *self.str_append.entry(l).or_insert_with(|| b.alloc(4, 4));
-        b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+        b.slot(at)
+            .ins(&Instruction::I32Const(owns as i32))
+            .ins(&Instruction::I32Store(word()));
     }
 
-    /// Append the `String` on top of the stack to the accumulator in local `l`,
-    /// in place. The helper takes the flag's address, the current pointer and
-    /// the operand, and gives back the pointer to store — which is the whole
-    /// convention, and why the call site is five instructions.
-    fn emit_str_append(&mut self, b: &mut Frame, l: u32) {
-        b.ins(&Instruction::Call(self.cx.rt.str_append));
-        b.ins(&Instruction::LocalSet(l));
-    }
-
-    /// Clear the flag after any other write to the accumulator: the local now
-    /// holds a pointer this path did not allocate.
-    fn str_append_reset(&mut self, b: &mut Frame, l: u32) {
-        if let Some(&at) = self.str_append.get(&l) {
-            b.slot(at).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+    /// One in-place append into `place`: `own` is the ownership word's place, and
+    /// the helper hands back the pointer to store, because a wasm local has no
+    /// address to write through (RFC-0081).
+    ///
+    /// Two shapes, because the destination has two. A local is set; a global is
+    /// stored to a fixed address, which has to go down BEFORE the call, so the
+    /// result lands on top of it.
+    fn append_once(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        place: Place,
+        own: Place,
+        part: &Expr,
+    ) -> Result<(), String> {
+        let line = Expr::line(part);
+        match place {
+            Place::Local(l) => {
+                own.addr(b, 0).ok_or_else(|| gap("an append flag with no address", line))?;
+                b.ins(&Instruction::LocalGet(l));
+                self.expr_as(m, b, part, &Type::Str)?;
+                b.ins(&Instruction::Call(self.cx.rt.str_append));
+                b.ins(&Instruction::LocalSet(l));
+            }
+            Place::Static(at) => {
+                b.ins(&Instruction::I32Const(at as i32));
+                own.addr(b, 0).ok_or_else(|| gap("an append flag with no address", line))?;
+                b.ins(&Instruction::I32Const(at as i32)).ins(&Instruction::I32Load(word()));
+                self.expr_as(m, b, part, &Type::Str)?;
+                b.ins(&Instruction::Call(self.cx.rt.str_append));
+                b.ins(&Instruction::I32Store(word()));
+            }
+            Place::Slot(_) => return unsupported("an in-place append into a slot", line),
         }
+        Ok(())
     }
 
     /// Evaluate `value` into an existing place of known type.
@@ -13144,6 +13545,7 @@ mod tests {
             fnvals: RefCell::new(Vec::new()),
             dispatch: RefCell::new(Dispatch::default()),
             globals: HashMap::new(),
+            gappend: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),
             fresh_refs: std::collections::HashSet::new(),

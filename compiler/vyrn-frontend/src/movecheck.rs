@@ -585,6 +585,19 @@ impl MoveCheck<'_> {
     ///
     /// First answer wins: a value can only leave once, and the earliest reason
     /// is the one a reader needs.
+    /// The reclamation row of the place `e` names, or 0 for anything else.
+    ///
+    /// A pattern binder over a place is a PROJECTION of it, so what becomes of
+    /// the binder becomes of the place:
+    /// `if let Some(resp) = answer { return Some(apply(resp)) }` hands `answer`'s
+    /// payload to the caller. Keying the binder to the place's row is what
+    /// records that. Without it Phase 5 released `answer` on the way out and the
+    /// caller read freed memory — `examples/rest.vyrn`, in one parity run.
+    fn place_key(&self, e: &Expr) -> usize {
+        let Some((root, _)) = place_path(e) else { return 0 };
+        self.nodes.borrow().get(&root).copied().unwrap_or(0)
+    }
+
     fn took(&self, name: &str, gone: Gone) {
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
@@ -1329,12 +1342,30 @@ impl MoveCheck<'_> {
                 scope.push(HashSet::new());
                 self.enter();
                 let (tys, borrow) = self.payload_binding(scrutinee, pattern);
+                // Census §14 asked for the scrutinee of an `if let` over a FRESH
+                // value to be a binding of its own — `if let Some(s) = f()`
+                // matches a heap value with no name, and nothing releases it.
+                // Phase 5 built that and took it out again: the payload escapes
+                // the arm as a PROJECTION (`out.push(v.name)`) or through a call,
+                // and neither is recorded against the scrutinee, so the release
+                // freed what the arm had handed on. `std/contract`'s `headOf` read
+                // a cut String out of a freed buffer within one run of
+                // `examples/vyxdemo.vyrn`. It is the same gap that keeps a record
+                // and a user enum off `own::release_kind`'s list, and it closes
+                // with the same two mechanisms.
+                //
+                // A binder over a PLACE is keyed to that place's row, which is a
+                // different question and one this pass can answer.
+                let key = self.place_key(scrutinee);
                 for (i, b) in pattern_bindings(pattern).into_iter().enumerate() {
                     scope.last_mut().unwrap().insert(b.to_string());
                     // Recording it is the point: an unrecorded binder falls
                     // through to whatever the enclosing scope calls that name
                     // (`own.rs`'s shadowing lesson).
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                    if key != 0 {
+                        self.nodes.borrow_mut().bind(b, key);
+                    }
                 }
                 let then_div = self.block(then_block, &mut then_c, scope);
                 self.exit();
@@ -1679,9 +1710,13 @@ impl MoveCheck<'_> {
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
+                    let key = self.place_key(scrutinee);
                     for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         scope.last_mut().unwrap().insert(b.to_string());
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                        if key != 0 {
+                            self.nodes.borrow_mut().bind(b, key);
+                        }
                     }
                     let r = self.expr(&arm.body, &mut c, scope);
                     self.exit();
@@ -1922,6 +1957,73 @@ impl MoveCheck<'_> {
 /// so an inner `let s = 1` shadowing an outer stream `s` reads as a disposal of
 /// the outer one. Erring toward accepting matches the existing pass; a scope-id
 /// key would have to be introduced for both at once.
+///
+/// Whether `e` reads the place `base`, or anything derived from it.
+///
+/// The store half of RFC-0089 rule 4 asks this: a store releases what the place
+/// held, and the old value is usually an operand of the new one — `acc = acc +
+/// x` reads the old buffer and `a = push(a, i)` grows it. A value that names the
+/// place therefore releases nothing. The self-append spine reclaims that shape
+/// by not allocating at all; every other shape is a recorded leak, which is the
+/// side of the trade a language that promises memory safety takes.
+///
+/// **Derived, not just equal.** A place desugar (RFC-0082) names its temporary
+/// after the path it took: `t.xs[k] = v` becomes a move-out into `t.xs[]`, the
+/// element store, and the write-back `t.xs = t.xs[]` — which hands the SAME
+/// buffer back. Comparing the base name alone reads that write-back as a store of
+/// an unrelated value and frees what it is about to store. `placeorder.vyrn`
+/// caught it in one parity run, and it is the shape RFC-0087 §4 warned about in
+/// its own words.
+///
+/// A lambda with a block body answers `true` without being read. The question is
+/// "may this store free the old value", where `true` costs a leak and `false` can
+/// cost a use-after-free.
+pub fn mentions_place(e: &Expr, base: &str) -> bool {
+    fn derived(n: &str, base: &str) -> bool {
+        n == base
+            || (n.len() > base.len()
+                && n.starts_with(base)
+                && matches!(n.as_bytes()[base.len()], b'.' | b'['))
+    }
+    fn go(e: &Expr, base: &str) -> bool {
+        match e {
+            Expr::Var { name, .. } => derived(name, base),
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                go(expr, base)
+            }
+            Expr::Binary { lhs, rhs, .. } => go(lhs, base) || go(rhs, base),
+            Expr::Call { args, .. }
+            | Expr::Spawn { args, .. }
+            | Expr::TryConstruct { args, .. }
+            | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| go(a, base)),
+            Expr::MapLit { entries, .. } => {
+                entries.iter().any(|(k, v)| go(k, base) || go(v, base))
+            }
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| go(v, base)),
+            Expr::Match { scrutinee, arms, .. } => {
+                go(scrutinee, base) || arms.iter().any(|a| go(&a.body, base))
+            }
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                go(cond, base)
+                    || go(then_branch, base)
+                    || else_branch.as_ref().is_some_and(|x| go(x, base))
+            }
+            Expr::Lambda {
+                body: LambdaBody::Expr(inner),
+                ..
+            } => go(inner, base),
+            Expr::Lambda { .. } => true,
+        }
+    }
+    go(e, base)
+}
+
 mod streams {
     use std::collections::HashMap;
 

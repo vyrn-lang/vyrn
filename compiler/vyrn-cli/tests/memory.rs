@@ -42,11 +42,12 @@
 //! | `copyLocal` | U2 | steady | `x.copy()` transfers, so the copy has an owner (RFC-0089 M1b) |
 //! | `ifExpr` | §2a | steady | Phase 4c: the TYPE says the result owns a buffer, so the binding does |
 //! | `mutString` | §2c | steady | Phase 4c: rule 1 governs reassignment, so `mut` is trackable |
-//! | `selfAppend` | §4 / P1 | leaks | a module-state `String` overwrite never releases the old buffer |
-//! | `fieldOverwrite` | §4 | leaks | `r.field = v` never releases the old field |
+//! | `selfAppend` | §4 / P1 | steady | Phase 5: a store releases the old value, and a module-state accumulator grows in place |
+//! | `fieldOverwrite` | §4 | steady | Phase 5: `r.field = v` releases the old field |
 //! | `returnedString` | §9a | leaks | an exported return hands JS a pointer nobody frees |
-//! | `optionString` | §14 | leaks | an aggregate does not own its payload |
-//! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed |
+//! | `optionString` | §14 | leaks | an `Option` owns its payload since Phase 5, but this row binds nothing to release |
+//! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed — it needs `Copy` as a protocol first |
+//! | `elementLeak` | U4 | leaks | a heap element inside a container; `drop` is whole-container |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
 //!
 //! **§10 does not reach this harness.** The census says a `spawn` frame is
@@ -379,26 +380,46 @@ const ROWS: &[Row] = &[
     Row {
         export: "selfAppend",
         census: "§4/P1",
-        today: Shape::Leaks,
-        why: "a module-state String overwrite never releases the old buffer",
+        today: Shape::Steady,
+        why: "Phase 5: a store releases what the place held, and a module-state accumulator \
+              grows in place. The reset hands back the last call's buffer and the eight \
+              appends reallocate one",
     },
     Row {
         export: "fieldOverwrite",
         census: "§4",
-        today: Shape::Leaks,
-        why: "`r.field = v` stores over the old field and never releases it",
+        today: Shape::Steady,
+        why: "Phase 5: `r.field = v` releases the old field after the new value is built",
     },
     Row {
         export: "optionString",
         census: "§14",
         today: Shape::Leaks,
-        why: "an aggregate does not own its payload, so the String in the Option has no owner",
+        why: "an `Option` DOES own its payload since Phase 5, so `let o = maybe(x)` reclaims \
+              one. This row does not bind: `if let Some(s) = maybe(tag())` matches a value \
+              with no name, and releasing that needs the payload's escape from the arm to be \
+              tracked — the same gap that keeps a record and a user enum off the list. Phase \
+              5 built the release and took it out again; `own::release_kind` carries the \
+              measurement",
     },
     Row {
         export: "lambdaLoop",
         census: "§16",
         today: Shape::Leaks,
-        why: "a stored closure's capture block is never freed",
+        why: "a stored closure's capture block is never freed. Phase 5 measured the price of \
+              releasing it: a `fn` value would have to MOVE under rule 1, and the corpus \
+              copies them — `std/http`'s `httpCopy` hands `run` across into a new `Route` for \
+              each of seven combinators. The fix menu's `.copy()` cannot be written either: a \
+              capture block's layout is per TAG and chosen at run time, so `Copy` has to be a \
+              protocol first (RFC-0091 M1)",
+    },
+    Row {
+        export: "elementLeak",
+        census: "U4",
+        today: Shape::Leaks,
+        why: "a heap element inside a container. The array buffer is reclaimed and the String \
+              in it is not — releasing elements would free a `m.keys()` snapshot's pointers \
+              twice, because that snapshot holds the map's own",
     },
     Row {
         export: "returnedString",
@@ -472,8 +493,25 @@ export extern fn mutString() {{
     seen = seen + Int64(s.byteLength)
 }}
 
+/// Census §4/P1, and the shape a server has: module state reset and then grown.
+/// `examples/bin` and `examples/shelf` both rebuild module state per request.
+///
+/// Both halves of Phase 5 are here. The reset releases the buffer the last call
+/// built, and the self-append grows the new one IN PLACE rather than building a
+/// fresh buffer per turn and abandoning the old — which is what a module-state
+/// accumulator did until Phase 5, because the in-place whitelist read one body
+/// and a global is reachable from all of them.
+///
+/// It resets, and it has to. An accumulator that only ever grows has no bounded
+/// steady state to assert: its memory IS the string it built. What that costs is
+/// P1's question and `examples/membench.vyrn` answers it.
 export extern fn selfAppend() {{
-    acc = acc + "0123456789"
+    acc = ""
+    let mut i = 0
+    while i < 8 {{
+        acc = acc + "0123456789"
+        i = i + 1
+    }}
     seen = seen + Int64(acc.byteLength)
 }}
 
@@ -497,6 +535,20 @@ export extern fn lambdaLoop() {{
         seen = seen + f(i)
         i = i + 1
     }}
+}}
+
+/// Census U4: a heap value inside a container. The array's own buffer is
+/// reclaimed at block exit and the String in it is not — `drop` is
+/// whole-container, and no mechanism in the language reaches an element.
+///
+/// Phase 5 deliberately left it there. A release that walked elements would
+/// free the same pointers twice wherever a shallow view exists: `m.keys()`
+/// hands back a FRESH buffer holding the map's OWN key pointers, so a keys
+/// snapshot released element by element frees what the map still holds.
+export extern fn elementLeak() {{
+    let mut xs: Array<String> = []
+    xs.push(tag() + "!")
+    seen = seen + Int64(xs.length)
 }}
 
 export extern fn returnedString() -> String {{

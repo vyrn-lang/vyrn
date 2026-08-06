@@ -1313,6 +1313,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // this runs at runtime). It is called from `vyrn_entry` BEFORE `main`. Reads
     // and writes elsewhere resolve through `globals_map` via `Gen::lookup`.
     let mut globals_map: HashMap<String, (String, Type)> = HashMap::new();
+    // Census P1: the module-state accumulators, cleared by the same whitelist a
+    // local passes, read over every body because a global is reachable from all
+    // of them. Slot symbol → the symbol of its ownership flag.
+    let mut gappend: HashMap<String, String> = HashMap::new();
     let mut globals_init_ir = String::new();
     if !program.globals.is_empty() {
         let mut gi = Gen::new(
@@ -1324,6 +1328,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         gi.protocol_methods = protocol_methods.clone();
         gi.fnval_variants = std::mem::take(&mut fnval_registry);
         gi.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
+        let gaccs = global_append_candidates(program);
         let mut decls = String::new();
         for g in &program.globals {
             // RFC-0037: the declared type is a lambda initializer's signature.
@@ -1350,6 +1355,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
             // resolves through `lookup`'s globals fallback.
             gi.globals.insert(g.name.clone(), (sym.clone(), ty.clone()));
             decls.push_str(&format!("{sym} = internal global {ll} zeroinitializer\n"));
+            // The accumulator's ownership flag, and what the initializer made
+            // true: a literal is data-segment storage nothing allocated, and
+            // anything else this initializer built belongs to the global.
+            if gaccs.contains(&g.name) && gi.resolve(&ty) == Type::Str {
+                let flag = format!("{sym}.own");
+                decls.push_str(&format!("{flag} = internal global i64 0\n"));
+                gi.emit(format!("store i64 {}, ptr {flag}", !matches!(g.init, Expr::Str(_)) as i64));
+                gappend.insert(sym.clone(), flag);
+            }
             globals_map.insert(g.name.clone(), (sym, ty));
         }
         globals_init_ir.push_str("define internal void @__vyrn_globals_init() {\n");
@@ -1409,6 +1423,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         gen.log_sink = program.log_sink.clone();
         gen.protocol_methods = protocol_methods.clone();
         gen.globals = globals_map.clone();
+        gen.gappend = gappend.clone();
         gen.fnval_variants = std::mem::take(&mut fnval_registry);
         gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
         gen.function(f, &sym, &mut out)?;
@@ -1440,6 +1455,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.log_sink = program.log_sink.clone();
             gen.protocol_methods = protocol_methods.clone();
             gen.globals = globals_map.clone();
+            gen.gappend = gappend.clone();
             gen.fnval_variants = std::mem::take(&mut fnval_registry);
             gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
             gen.function(f, &sym, &mut out)?;
@@ -1463,6 +1479,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.log_sink = program.log_sink.clone();
             gen.protocol_methods = protocol_methods.clone();
             gen.globals = globals_map.clone();
+            gen.gappend = gappend.clone();
             gen.fnval_variants = std::mem::take(&mut fnval_registry);
             gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
             gen.ho_function(&inst, &mut out)?;
@@ -1492,6 +1509,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
+        dgen.gappend = gappend.clone();
         dgen.fnval_variants = fnval_registry.clone();
         let sigs = fnval_dispatch.clone();
         for sig in &sigs {
@@ -1671,6 +1689,12 @@ struct Gen<'a> {
     /// `String` in `append_ok`; its presence is what licenses the fast path.
     /// Length and capacity live in the String's own header (RFC-0089 M1a).
     str_append: HashMap<String, String>,
+    /// Module-state `String` accumulators (census P1): the global's symbol → the
+    /// symbol of its one ownership flag. Seeded into `str_append` at the top of
+    /// every body, so `g = g + …` takes the same in-place path a local does. A
+    /// global's flag has to be a global too: it says whether the buffer THE
+    /// PROGRAM holds was allocated by the program, and that outlives any call.
+    gappend: HashMap<String, String>,
 }
 
 /// One variant of a synthesized stored-function enum (RFC-0037): a source
@@ -1785,6 +1809,7 @@ impl<'a> Gen<'a> {
             fnval_dispatch: Vec::new(),
             append_ok: std::collections::HashSet::new(),
             str_append: HashMap::new(),
+            gappend: HashMap::new(),
         }
     }
 
@@ -2658,6 +2683,172 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Release the heap a value of `ty` holds — the mirror of
+    /// [`deep_copy`](Self::deep_copy), with `free` where that has `malloc`
+    /// (RFC-0089 rule 4, Phase 5).
+    ///
+    /// One walk, both directions: `copy` decided what a value's own storage IS,
+    /// and releasing that value gives exactly that storage back. Writing the two
+    /// as one shape is what keeps them from disagreeing about a boxed enum
+    /// payload — the encoding Phase 3 measured and the one a hand-written release
+    /// gets wrong.
+    ///
+    /// It does NOT release container ELEMENTS. `m.keys()` hands back a fresh
+    /// buffer holding the map's OWN key pointers, so releasing an
+    /// `Array<String>` element by element would free each of them twice. That is
+    /// census U4, and it stays open.
+    fn deep_release(&mut self, v: &str, ty: &Type) -> Result<(), String> {
+        // A type that declares its own release keeps it. Reaching past the
+        // declaration into its fields would reclaim what the declaration says it
+        // reclaims, in a different order, and without the print a user `release`
+        // may do.
+        if matches!(self.rel_kind(ty), Some(DropKind::Release(_))) || !self.owns_heap(ty) {
+            return Ok(());
+        }
+        match self.resolve(ty) {
+            Type::Str => {
+                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+                Ok(())
+            }
+            Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
+                let snap = self.snap_val(v, ty);
+                self.free_snap(&snap);
+                Ok(())
+            }
+            Type::Record(_) => {
+                let fields = self
+                    .record_fields(ty)
+                    .ok_or_else(|| format!("a release of a record with no fields: {ty:?}"))?;
+                let rll = self.llt(ty);
+                for (i, f) in fields.iter().enumerate() {
+                    if !self.owns_heap(&f.ty) {
+                        continue;
+                    }
+                    let fv = self.fresh_tmp();
+                    self.emit(format!("{fv} = extractvalue {rll} {v}, {i}"));
+                    self.deep_release(&fv, &f.ty)?;
+                }
+                Ok(())
+            }
+            Type::Option(inner) => self.release_sum(v, &[(Some("1"), *inner)]),
+            Type::Result(ok, err) => {
+                self.release_sum(v, &[(Some("1"), *ok), (Some("0"), *err)])
+            }
+            Type::Enum(vs) => self.release_enum(v, &vs),
+            // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
+            // The captures are one heap block, read by value at the construction
+            // site, and 0 when there are none — which `free` refuses. Census §16.
+            Type::Fn(..) => {
+                let p = self.fresh_tmp();
+                let q = self.fresh_tmp();
+                self.emit(format!("{p} = extractvalue {{ i64, i64 }} {v}, 1"));
+                self.emit(format!("{q} = inttoptr i64 {p} to ptr"));
+                self.emit(format!("call void @free(ptr {q})"));
+                Ok(())
+            }
+            // A fixed `[N x T]` is a container, so its elements are U4's
+            // question. A handle names something somebody else reclaims.
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether an `Option`/`Result` payload of type `ty` is a pointer to a block
+    /// rather than the word itself — the question [`decode_payload`] answers by
+    /// construction and a release has to ask out loud. Phase 3 measured that the
+    /// two encodings coexist: a `String` rides in the word, and a record does not.
+    fn payload_boxed(&mut self, ty: &Type) -> bool {
+        if matches!(
+            self.resolve(ty),
+            Type::Int | Type::Bool | Type::Str | Type::Ref(_) | Type::Fn(..)
+        ) {
+            return false;
+        }
+        self.llt(ty) != "i64"
+    }
+
+    /// The release of an `Option`/`Result`: one payload, selected by the `i1` tag.
+    fn release_sum(&mut self, v: &str, arms: &[(Option<&str>, Type)]) -> Result<(), String> {
+        let sll = "{ i1, i64, i64 }";
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
+        let end_l = self.fresh_label("rel.sum.end");
+        for (want, pty) in arms {
+            if !self.owns_heap(pty) {
+                continue;
+            }
+            let hit_l = self.fresh_label("rel.sum.hit");
+            let miss_l = self.fresh_label("rel.sum.miss");
+            let is = self.fresh_tmp();
+            self.emit(format!("{is} = icmp eq i1 {tag}, {}", want.unwrap_or("1")));
+            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
+            self.emit_label(&hit_l);
+            let w0 = self.fresh_tmp();
+            let w1 = self.fresh_tmp();
+            self.emit(format!("{w0} = extractvalue {sll} {v}, 1"));
+            self.emit(format!("{w1} = extractvalue {sll} {v}, 2"));
+            let pv = self.decode_payload(&w0, &w1, pty);
+            self.deep_release(&pv, pty)?;
+            // A payload wider than a word is a pointer to a block the sum owns,
+            // exactly as `encode_payload` allocated it.
+            if self.payload_boxed(pty) {
+                let q = self.fresh_tmp();
+                self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+                self.emit(format!("call void @free(ptr {q})"));
+            }
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&miss_l);
+        }
+        self.emit_term(format!("br label %{end_l}"));
+        self.emit_label(&end_l);
+        Ok(())
+    }
+
+    /// The release of a user enum: the payload slots of the live variant, and
+    /// only the ones whose declared type owns something. A wide payload is BOXED
+    /// here where an `Option`'s is not, so the block behind it is freed too —
+    /// `unbox_payload` is what says which.
+    fn release_enum(&mut self, v: &str, vs: &[EnumVariant]) -> Result<(), String> {
+        let arity = vs.iter().map(|x| x.payload.len()).max().unwrap_or(0);
+        let ell = enum_ll(arity);
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {ell} {v}, 0"));
+        let end_l = self.fresh_label("rel.enum.end");
+        for var in vs {
+            if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                continue;
+            }
+            let Some((n, _)) = self.variants.get(&var.name).cloned() else {
+                continue;
+            };
+            let hit_l = self.fresh_label("rel.enum.hit");
+            let miss_l = self.fresh_label("rel.enum.miss");
+            let is = self.fresh_tmp();
+            self.emit(format!("{is} = icmp eq i64 {tag}, {n}"));
+            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
+            self.emit_label(&hit_l);
+            for (j, pty) in var.payload.iter().enumerate() {
+                if !self.owns_heap(pty) {
+                    continue;
+                }
+                let w = self.fresh_tmp();
+                self.emit(format!("{w} = extractvalue {ell} {v}, {}", j + 1));
+                let pv = self.unbox_payload(&w, pty);
+                self.deep_release(&pv, pty)?;
+                // A boxed payload's block is the enum's too.
+                if pv != w {
+                    let q = self.fresh_tmp();
+                    self.emit(format!("{q} = inttoptr i64 {w} to ptr"));
+                    self.emit(format!("call void @free(ptr {q})"));
+                }
+            }
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&miss_l);
+        }
+        self.emit_term(format!("br label %{end_l}"));
+        self.emit_label(&end_l);
+        Ok(())
+    }
+
     /// The copy of an `Option`/`Result`: one payload, selected by the `i1` tag.
     /// `arms` pairs the tag value to test against with the payload types it
     /// carries (one, for both built-in sums).
@@ -2927,6 +3118,11 @@ impl<'a> Gen<'a> {
         self.droppable = self.droppable_map.get(&f.name).cloned().unwrap_or_default();
         self.append_ok = append_candidates(&f.body);
         self.str_append.clear();
+        // Module state is an accumulator every body shares, so its flag is seeded
+        // here rather than discovered by a `let` this body may not contain.
+        for (slot, flag) in &self.gappend {
+            self.str_append.insert(slot.clone(), flag.clone());
+        }
         self.modify_copyout.clear();
         let ret = self.llt(&f.ret);
         // A `modify` parameter is received by pointer (call-by-value-result).
@@ -3148,6 +3344,16 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {k})"));
                 self.emit(format!("call void @free(ptr {v})"));
             }
+            // Phase 5: an aggregate owns its places. The walk is the type.
+            DropKind::Deep(ty) => {
+                let ty = ty.clone();
+                let ll = self.llt(&ty);
+                let v = self.fresh_tmp();
+                self.emit(format!("{v} = load {ll}, ptr {slot}"));
+                // `emit_drop` is infallible by signature and this walk is not:
+                // a type it cannot name is a leak, never a wrong free.
+                let _ = self.deep_release(&v, &ty);
+            }
             // RFC-0086 M1: the type declared `impl Owned`, so its own `release`
             // is what reclaims it. An ordinary call to an ordinary function —
             // the protocol decided WHICH, and this is only the lowering.
@@ -3162,6 +3368,92 @@ impl<'a> Gen<'a> {
                 let v = self.fresh_tmp();
                 self.emit(format!("{v} = load {ll}, ptr {slot}"));
                 self.emit(format!("call void @vyrn_{f}({ll} {v})"));
+            }
+        }
+    }
+
+    /// How a value of `ty` is released, with this instantiation's substitution
+    /// applied — the same question `own` answered, asked of the same table.
+    fn rel_kind(&self, ty: &Type) -> Option<DropKind> {
+        self.owned
+            .release_kind(&vyrn_frontend::types::substitute(ty, self.subst))
+    }
+
+    /// Whether a store into `slot` may release what `slot` holds now
+    /// (RFC-0089 rule 4).
+    ///
+    /// Module state owns its contents by rule: reading a global is a borrow and
+    /// storing into one stores an owned value, because rule 2 refuses a borrow at
+    /// a store. A local owns its contents when this function already releases it —
+    /// the `droppable` fact read as a property of the slot rather than of the
+    /// block, which is what RFC-0087 §4 asked for. Inside a `region` nothing is
+    /// released: the arena owns what was allocated there.
+    fn slot_owns(&self, slot: &str) -> bool {
+        self.region_depth == 0
+            && (slot.starts_with('@')
+                || self.drop_stack.iter().flatten().any(|(s, _)| s == slot))
+    }
+
+    /// The heap buffers the value in `slot` holds right now, loaded so a store may
+    /// replace it before they are handed back.
+    ///
+    /// A deliberate subset of [`Gen::emit_drop`]. A cell, a stream and a declared
+    /// `release` are all observable from inside the language — a stale cell traps
+    /// and a user `release` is ordinary Vyrn that may print — and the interpreter
+    /// reclaims those from the value a binding took at its `let`, not from the
+    /// slot's last one. A store leaves all three alone rather than making the
+    /// three engines run different programs.
+    fn snap_old(&mut self, slot: &str, ty: &Type) -> Vec<(String, bool)> {
+        if self.rel_kind(ty).is_none() {
+            return Vec::new();
+        }
+        let ll = self.llt(ty);
+        let v = self.fresh_tmp();
+        self.emit(format!("{v} = load {ll}, ptr {slot}"));
+        self.snap_val(&v, ty)
+    }
+
+    /// The same, off a value already in a register — what a record field is.
+    fn snap_val(&mut self, v: &str, ty: &Type) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        match self.rel_kind(ty) {
+            // A `String` IS its buffer pointer.
+            Some(DropKind::FreeStr) => out.push((v.to_string(), true)),
+            Some(DropKind::FreeArr) => {
+                let d = self.fresh_tmp();
+                self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
+                out.push((d, false));
+            }
+            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, null
+            // while the array is still inline, which `free` refuses.
+            Some(DropKind::FreeSmallArr) => {
+                let ll = self.llt(ty);
+                let d = self.fresh_tmp();
+                self.emit(format!("{d} = extractvalue {ll} {v}, 2"));
+                out.push((d, false));
+            }
+            Some(DropKind::FreeMap) => {
+                let m = "{ ptr, ptr, i64, i64 }";
+                let k = self.fresh_tmp();
+                let vv = self.fresh_tmp();
+                self.emit(format!("{k} = extractvalue {m} {v}, 0"));
+                self.emit(format!("{vv} = extractvalue {m} {v}, 1"));
+                out.push((k, false));
+                out.push((vv, false));
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// Hand a snapshot back, after the store that replaced it. Both callees
+    /// refuse a null, and `@__vyrn_str_free` refuses a `cap == 0` literal.
+    fn free_snap(&mut self, snap: &[(String, bool)]) {
+        for (p, hdr) in snap {
+            if *hdr {
+                self.emit(format!("call void @__vyrn_str_free(ptr {p})"));
+            } else {
+                self.emit(format!("call void @free(ptr {p})"));
             }
         }
     }
@@ -3195,9 +3487,18 @@ impl<'a> Gen<'a> {
                 // declaration site, and starts every execution of this `let`
                 // unowned — including the second trip through an enclosing loop,
                 // where the slot has just been re-stored with the initializer.
+                //
+                // It starts OWNED when this `let` owns its initializer, which is
+                // the fact `own` already decided. Starting it unowned abandoned the
+                // initializer's buffer at the first append — Phase 4c recorded that
+                // leak and this is where it closes. Starting it owned for a binding
+                // that names somebody else's storage (`let mut s = r.name` is a
+                // borrow, not a move) would free that storage instead, which is why
+                // the answer is read rather than assumed.
                 if bty == Type::Str && self.append_ok.contains(name.as_str()) {
-                    self.str_append_shadow(&slot);
-                    self.str_append_reset(&slot);
+                    let flag = self.str_append_shadow(&slot);
+                    let owns = self.droppable.contains_key(&key) as i64;
+                    self.emit(format!("store i64 {owns}, ptr {flag}"));
                 }
                 // If ownership analysis proved this heap binding non-escaping,
                 // schedule it to be reclaimed when its block exits.
@@ -3233,8 +3534,22 @@ impl<'a> Gen<'a> {
                 self.expect.pop();
                 let (v, vty) = r?;
                 let (v, _) = self.coerce(v, &vty, &tty)?;
+                // RFC-0089 rule 4: the store releases what the place held. Not when
+                // the new value names the place — `a = push(a, i)` grows the old
+                // buffer and hands it back, so freeing it would be a double free.
+                // That shape is the self-append above where it is a String, and a
+                // recorded leak everywhere else. The release runs AFTER the value
+                // is built, which is the PR #61 sha1 lesson.
+                let snap = if self.slot_owns(&slot)
+                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                {
+                    self.snap_old(&slot, &tty)
+                } else {
+                    Vec::new()
+                };
                 let ll = self.llt(&tty);
                 self.emit(format!("store {ll} {v}, ptr {slot}"));
+                self.free_snap(&snap);
                 self.str_append_reset(&slot);
                 Ok(())
             }
@@ -3260,8 +3575,20 @@ impl<'a> Gen<'a> {
                 let cur = self.fresh_tmp();
                 let next = self.fresh_tmp();
                 self.emit(format!("{cur} = load {rec_ll}, ptr {slot}"));
+                // Rule 4 through a field: the record owns what its field holds, so
+                // storing over it releases the old one. Census §4's second row.
+                let snap = if self.slot_owns(&slot)
+                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                {
+                    let old = self.fresh_tmp();
+                    self.emit(format!("{old} = extractvalue {rec_ll} {cur}, {idx}"));
+                    self.snap_val(&old, &fty)
+                } else {
+                    Vec::new()
+                };
                 self.emit(format!("{next} = insertvalue {rec_ll} {cur}, {field_ll} {v}, {idx}"));
                 self.emit(format!("store {rec_ll} {next}, ptr {slot}"));
+                self.free_snap(&snap);
                 Ok(())
             }
             // `name[index] = value` — in-place element store (RFC-0011). The
@@ -3297,7 +3624,18 @@ impl<'a> Gen<'a> {
                         self.emit_label(&ok_l);
                         let ep = self.fresh_tmp();
                         self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {iv}"));
+                        // Rule 4 through an element: the container owns what its
+                        // element holds, so storing over it releases the old one.
+                        let snap = if self.slot_owns(&slot)
+                            && !vyrn_frontend::movecheck::mentions_place(value, name)
+                            && !vyrn_frontend::movecheck::mentions_place(index, name)
+                        {
+                            self.snap_old(&ep, &elem)
+                        } else {
+                            Vec::new()
+                        };
                         self.emit(format!("store {ell} {v}, ptr {ep}"));
+                        self.free_snap(&snap);
                         Ok(())
                     }
                     // `sa[i] = v` (RFC-0056): store into the live buffer (inline
@@ -9097,6 +9435,163 @@ fn append_candidates(body: &Block) -> std::collections::HashSet<String> {
     scan_append_block(body, &mut targets, &mut banned, false);
     targets.retain(|n| !banned.contains(n));
     targets
+}
+
+/// The **module-state** `String` accumulators of a whole program (census P1).
+///
+/// The same whitelist, read over every body instead of one, because a global is
+/// reachable from all of them: a name qualifies when some body grows it with
+/// `g = g + …` and NO body puts a pointer to it anywhere that could outlive the
+/// grow. `let t = g` is one of the things that bans a name, which is exactly the
+/// aliasing guard a global needs and a local already had.
+///
+/// P1 measured what not having this costs: 4.92 s and 12.2 GB to build a 160 KB
+/// string, against 0.095 s for the identical local. The global did not qualify
+/// for one reason — the whitelist read one body — and every server that
+/// accumulates a response body is a module-state accumulator.
+///
+/// A body that binds the name LOCALLY votes on neither side, because inside it
+/// the name is not the global. Without that filter one `let out` among the
+/// hundreds of linked `std/` functions disqualifies a module-state `out`, and the
+/// first measurement of this pass hit exactly that.
+pub(crate) fn global_append_candidates(program: &Program) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::new();
+    let mut banned = std::collections::HashSet::new();
+    let mut one = |body: &Block, params: &[Param]| {
+        let (mut t, mut ban) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+        scan_append_block(body, &mut t, &mut ban, false);
+        let mut shadowed: std::collections::HashSet<String> =
+            params.iter().map(|p| p.name.clone()).collect();
+        bound_names(body, &mut shadowed);
+        targets.extend(t.into_iter().filter(|n| !shadowed.contains(n)));
+        banned.extend(ban.into_iter().filter(|n| !shadowed.contains(n)));
+    };
+    for f in &program.functions {
+        one(&f.body, &f.params);
+    }
+    for t in &program.tests {
+        one(&t.body, &[]);
+    }
+    for bn in &program.benches {
+        one(&bn.body, &[]);
+    }
+    // A global's own initializer runs once and cannot append, but a name it reads
+    // is a name held somewhere this walk should see.
+    for g in &program.globals {
+        ban_append_expr(&g.init, &mut banned, false);
+    }
+    targets.retain(|n| !banned.contains(n));
+    targets.retain(|n| program.globals.iter().any(|g| &g.name == n));
+    targets
+}
+
+/// Every name a block binds anywhere inside it — `let`s, loop variables, pattern
+/// binders and lambda parameters. Over-collecting is safe here: the only use is
+/// to decide that a body is talking about its own name rather than about module
+/// state, and an extra name only costs a global the in-place append path.
+fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
+    fn in_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+        match e {
+            Expr::Lambda { params, body, .. } => {
+                out.extend(params.iter().cloned());
+                match body {
+                    LambdaBody::Expr(inner) => in_expr(inner, out),
+                    LambdaBody::Block(blk) => bound_names(blk, out),
+                }
+            }
+            Expr::Match { scrutinee, arms, .. } => {
+                in_expr(scrutinee, out);
+                for a in arms {
+                    out.extend(pattern_names(&a.pattern));
+                    in_expr(&a.body, out);
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                in_expr(expr, out)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                in_expr(lhs, out);
+                in_expr(rhs, out);
+            }
+            Expr::Call { args, .. }
+            | Expr::Spawn { args, .. }
+            | Expr::TryConstruct { args, .. }
+            | Expr::ArrayLit { elems: args, .. } => args.iter().for_each(|a| in_expr(a, out)),
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|(_, v)| in_expr(v, out)),
+            Expr::MapLit { entries, .. } => entries.iter().for_each(|(k, v)| {
+                in_expr(k, out);
+                in_expr(v, out);
+            }),
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                in_expr(cond, out);
+                in_expr(then_branch, out);
+                if let Some(eb) = else_branch {
+                    in_expr(eb, out);
+                }
+            }
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
+            | Expr::Var { .. } => {}
+        }
+    }
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { name, value, .. } => {
+                out.insert(name.clone());
+                in_expr(value, out);
+            }
+            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } | Stmt::Expr(value) => {
+                in_expr(value, out)
+            }
+            Stmt::IndexSet { index, value, .. } => {
+                in_expr(index, out);
+                in_expr(value, out);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(e) = value {
+                    in_expr(e, out);
+                }
+            }
+            Stmt::If { cond, then_block, else_block, .. } => {
+                in_expr(cond, out);
+                bound_names(then_block, out);
+                if let Some(eb) = else_block {
+                    bound_names(eb, out);
+                }
+            }
+            Stmt::IfLet { pattern, scrutinee, then_block, else_block, .. } => {
+                out.extend(pattern_names(pattern));
+                in_expr(scrutinee, out);
+                bound_names(then_block, out);
+                if let Some(eb) = else_block {
+                    bound_names(eb, out);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                in_expr(cond, out);
+                bound_names(body, out);
+            }
+            Stmt::ForIn { var, iter, body, .. } => {
+                out.insert(var.clone());
+                in_expr(iter, out);
+                bound_names(body, out);
+            }
+            Stmt::Region { body, .. } => bound_names(body, out),
+            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+}
+
+/// The names a refutable pattern binds.
+fn pattern_names(p: &Pattern) -> Vec<String> {
+    match p {
+        Pattern::Some(n)
+        | Pattern::Ok(n)
+        | Pattern::Err(n)
+        | Pattern::Success(n)
+        | Pattern::Failure(n) => vec![n.clone()],
+        Pattern::Variant(_, ns) => ns.clone(),
+        Pattern::None => Vec::new(),
+    }
 }
 
 /// Walk a block collecting append targets and banned names. `strict` marks a

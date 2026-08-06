@@ -2841,14 +2841,24 @@ impl<'a> Checker<'a> {
                 let b = self
                     .lookup(scope, name)
                     .ok_or_else(|| format!("line {line}: `drop` of unbound variable `{name}`"))?;
-                match self.base(&b.ty) {
-                    Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Ref(_)
-                    | Type::Map(..) => Ok(false),
-                    other => Err(format!(
-                        "line {line}: `drop` needs a heap value (String, Array, Map, or Ref), \
-                         but `{name}` is {other}"
-                    )),
+                // Phase 5 made `drop` deep, so an `Option`/`Result` carrying heap
+                // is droppable too — the two aggregates rule 4 now releases. A
+                // record and a user enum are NOT here, and `own::release_kind`
+                // carries the measurement that kept them off; this list follows it
+                // rather than deciding a second time.
+                let t = self.base(&b.ty);
+                if matches!(
+                    t,
+                    Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Ref(_) | Type::Map(..)
+                ) || (matches!(t, Type::Option(_) | Type::Result(..))
+                    && crate::own::owns_heap(&t, &self.types))
+                {
+                    return Ok(false);
                 }
+                Err(format!(
+                    "line {line}: `drop` needs a heap value (a String, an Array, a Map, a Ref, \
+                     or an Option/Result carrying one), but `{name}` is {t}"
+                ))
             }
             Stmt::Expr(e) => {
                 // A `panic` statement is `Never`-typed, so it satisfies the
