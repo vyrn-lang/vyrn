@@ -167,16 +167,32 @@ Split into three PRs, in order:
   emission. §2a/§2b/§2c rows in memory tests flip to steady-state. The
   interpreter must host the same drop order (newest-first).
 
-## Phase 5 — places *(RFC-0089 M3a)*
+## Phase 5 — places *(RFC-0089 M3a)* — SPLIT IN TWO
 
-A store releases the old contents: `x = v`, `r.f = v`, `a[i] = v`, `m[k] = v`,
-module-state assign. Release runs AFTER the new value is computed (the old
-value is usually an operand — the PR #61 sha1 lesson generalized).
-Conditionally-initialized `mut` needs an initializedness fact (movecheck
-already tracks flow). Deep drop: releasing an aggregate releases its places —
-enum payloads (variant-aware, `CloseStream` precedent), closure captures,
-container elements. Memory-test rows §4, §14, §16, U4, P1 flip to
-steady-state. Membench: module-state append must go amortized O(1).
+Phase 4c's transcript was measured: 64% of its wall clock was model inference,
+not tool time, and the lever on that is less to hold at once rather than fewer
+test runs. Phase 5 touches the same files and is nearly as large, so it lands
+as two PRs.
+
+- **5a. A store releases the old value.** `x = v`, `r.f = v`, `a[i] = v`,
+  `m[k] = v`, and module-state assign. The release runs AFTER the new value is
+  computed — the old value is usually an operand of the new one, which is
+  PR #61's sha1 lesson generalized. Conditionally-initialized `mut` needs an
+  initializedness fact, and movecheck already tracks flow. Rows §4
+  (`selfAppend`, `fieldOverwrite`) and P1 flip to steady. Membench: the
+  module-state append must go amortized O(1) — RFC-0087 P1 measured the
+  unfixed shape at 4.92 s and 12.2 GB for a 160 KB string.
+  Also closes 4c's recorded in-place-append shadow leak (`s = s + "x"`
+  abandoning the initializer's buffer), which is the same store rule.
+
+- **5b. Releasing an aggregate releases its places.** Deep drop: enum payloads
+  (variant-aware — `CloseStream` is the precedent, and note Phase 3's finding
+  that a user enum's String payload is boxed while an `Option<String>`'s rides
+  in the word, so both encodings must be handled), closure captures, container
+  elements. `drop` becomes deep. Rows §14 (`optionString`), §16 (`lambdaLoop`)
+  and U4 flip to steady. Takes 4c's other documented leaks: `mut` cells and
+  user `Owned::release`, stored-closure captures, returned projections, and
+  constructor arguments.
 
 ## Phase 6 — the boundary *(RFC-0089 M3b)*
 
