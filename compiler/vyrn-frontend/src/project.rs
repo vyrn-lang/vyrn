@@ -285,10 +285,24 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
         ));
     }
     let mut body = f.body.clone();
+    // One number per inline, so two inlines of one projection in one block bind
+    // different names.
+    //
+    // They land in the CALLER's block: the prologue is statements, not a scope
+    // of its own. `s[j] = s[k]` inlines the same body twice, and with a fixed
+    // `@b.name` the second `let` shadows the first for everything after it — the
+    // store read the wrong element, and only in the two compiling backends,
+    // because the interpreter gives each inline a frame. The names never reach
+    // the emitted output (a slot is `%tN`), so this costs nothing.
+    let tag = {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        N.fetch_add(1, Ordering::Relaxed)
+    };
     // Rename the body's own bindings out of the caller's namespace. A `let n`
     // inside a projection must not capture, or be captured by, a caller's `n`.
     let mut rename: HashMap<String, String> = HashMap::new();
-    collect_bindings(&body, &mut rename);
+    collect_bindings(&body, tag, &mut rename);
     if !rename.is_empty() {
         let renames: HashMap<String, Expr> = rename
             .iter()
@@ -308,7 +322,7 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
         if uses == 1 && !is_under_loop(&body, &p.name) {
             map.insert(p.name.clone(), a.clone());
         } else {
-            let tmp = format!("@p.{}", p.name);
+            let tmp = format!("@p{tag}.{}", p.name);
             prologue.push(Stmt::Let {
                 name: tmp.clone(),
                 mutable: false,
@@ -332,6 +346,95 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     body.stmts.pop();
     prologue.extend(body.stmts);
     Ok(Projection { prologue, place })
+}
+
+/// What a store through a projected place becomes (RFC-0091 M3).
+///
+/// 7a refused this by name: `a[i] = v` accepted a projection only where the
+/// yielded place was the binding's own element, because writing anywhere else
+/// "needs an address-of no backend has". **That reading was wrong, and the
+/// mechanism was already in the repo.** RFC-0082 M1 met the same problem for
+/// `r.a[i] = v` — a container that is not a slot — and answered it without an
+/// address-of: move the container out into a temp, mutate the temp, move it
+/// back. [`crate::parser::place_receiver`] is that desugar, it is pure AST, and
+/// it already handles the three shapes a place can take.
+///
+/// So a store through a user container is the same three statements the
+/// language emits for `r.a[i] = v`, wrapped around the store the projection
+/// resolved to. No engine gains an addressing mode.
+///
+/// The move-out is O(1) for a growable container — a header copy, sharing the
+/// buffer — and a whole-value copy for one held inline, which is what
+/// `a[i].f = v` has always cost.
+///
+/// `None` means the projection yields something no store can reach: a call
+/// result, a literal, a temporary. The caller keeps its own refusal.
+pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
+    match place {
+        // The whole receiver: `yield self` and nothing else.
+        Expr::Var { name, .. } => Some(vec![Stmt::Assign {
+            name: name.clone(),
+            value: value.clone(),
+            line,
+        }]),
+        // A field of a place: `yield self.count`.
+        Expr::Field { expr, field, .. } => {
+            let (recv, mut out, moves, post) = crate::parser::place_receiver(expr, line)?;
+            let value = if moves.is_empty() {
+                value.clone()
+            } else {
+                crate::parser::hoist_operand(
+                    value.clone(),
+                    format!("{recv}.{field}=val"),
+                    &mut out,
+                    line,
+                )
+            };
+            out.extend(moves);
+            out.push(Stmt::SetField {
+                name: recv,
+                field: field.clone(),
+                value,
+                line,
+            });
+            out.extend(post);
+            Some(out)
+        }
+        // An element of a place: `yield self.data[j]`, and the seeded row's
+        // `yield @slot(self, i)`.
+        Expr::Call { name, args, .. } if (name == "at" || name == ELEM) && args.len() == 2 => {
+            let (recv, mut out, moves, post) = crate::parser::place_receiver(&args[0], line)?;
+            // With a move-out in play the index and the value run before it, in
+            // source order: nothing may read the place while it is out.
+            let (index, value) = if moves.is_empty() {
+                (args[1].clone(), value.clone())
+            } else {
+                let i = crate::parser::hoist_operand(
+                    args[1].clone(),
+                    format!("{recv}[]idx"),
+                    &mut out,
+                    line,
+                );
+                let v = crate::parser::hoist_operand(
+                    value.clone(),
+                    format!("{recv}[]val"),
+                    &mut out,
+                    line,
+                );
+                (i, v)
+            };
+            out.extend(moves);
+            out.push(Stmt::IndexSet {
+                name: recv,
+                index,
+                value,
+                line,
+            });
+            out.extend(post);
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 /// What `for x in xs` becomes when `xs` is a user container (RFC-0091 M3).
@@ -457,11 +560,11 @@ pub fn iterate_loop(
 // ---------------------------------------------------------------------------
 
 /// Every binding a projection body introduces, mapped to an unspellable name.
-fn collect_bindings(b: &Block, out: &mut HashMap<String, String>) {
+fn collect_bindings(b: &Block, tag: usize, out: &mut HashMap<String, String>) {
     for s in &b.stmts {
         match s {
             Stmt::Let { name, .. } => {
-                out.insert(name.clone(), format!("@b.{name}"));
+                out.insert(name.clone(), format!("@b{tag}.{name}"));
             }
             Stmt::If {
                 then_block,
@@ -473,15 +576,15 @@ fn collect_bindings(b: &Block, out: &mut HashMap<String, String>) {
                 else_block,
                 ..
             } => {
-                collect_bindings(then_block, out);
+                collect_bindings(then_block, tag, out);
                 if let Some(e) = else_block {
-                    collect_bindings(e, out);
+                    collect_bindings(e, tag, out);
                 }
             }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => collect_bindings(body, out),
+            Stmt::While { body, .. } | Stmt::Region { body, .. } => collect_bindings(body, tag, out),
             Stmt::ForIn { var, body, .. } => {
-                out.insert(var.clone(), format!("@b.{var}"));
-                collect_bindings(body, out);
+                out.insert(var.clone(), format!("@b{tag}.{var}"));
+                collect_bindings(body, tag, out);
             }
             _ => {}
         }
@@ -958,6 +1061,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pr.prologue.len(), 1);
-        assert!(matches!(&pr.prologue[0], Stmt::Let { name, .. } if name == "@b.j"));
+        assert!(matches!(&pr.prologue[0], Stmt::Let { name, .. } if name.starts_with("@b") && name.ends_with(".j")));
     }
 }

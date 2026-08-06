@@ -770,7 +770,10 @@ fn is_index_field_chain(e: &Expr) -> bool {
 /// evaluation order is preserved: in `rows[f()][g()] = h()` the hoists are
 /// `f()`, `g()`, `h()` in that order — and `f()` now runs ONCE, where before it
 /// was cloned into both the load and the write-back.
-fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<Stmt>, Vec<Stmt>)> {
+pub fn place_receiver(
+    base: &Expr,
+    line: usize,
+) -> Option<(String, Vec<Stmt>, Vec<Stmt>, Vec<Stmt>)> {
     match base {
         // Already a slot: nothing to move, and the common case stays a single
         // statement.
@@ -894,7 +897,7 @@ fn reads_place(e: &Expr) -> bool {
 /// the expression the mutation should use instead. Operands that cannot reach a
 /// place are left alone, so `t.xs[k] = k * 2` still desugars to three statements
 /// rather than five.
-fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize) -> Expr {
+pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize) -> Expr {
     if !reads_place(&e) {
         return e;
     }

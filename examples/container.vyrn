@@ -25,6 +25,23 @@ impl Iterate for Window {
     }
 }
 
+/// A window that is written as well as read.
+///
+/// `place atSet(modify self, ..)` is the writing half of `Index`. 7a refused a
+/// store that yielded anywhere but the binding's own element; M3 lowers it as
+/// the move-out/mutate/move-back the language already uses for `r.a[i] = v`, so
+/// no engine gained an addressing mode.
+type Slice = { data: Array<Int64>, start: Int64 }
+
+impl Index for Slice {
+    place at(read self, i: Int64) -> Int64 {
+        yield self.data[self.start + i]
+    }
+    place atSet(modify self, i: Int64) -> Int64 {
+        yield self.data[self.start + i]
+    }
+}
+
 /// A pool that counts what it hands out.
 ///
 /// `impl Owned` says how the pool is released. Until RFC-0091 M1 that was also
@@ -95,6 +112,14 @@ fn main() -> Int64 {
         seen = seen + 1
     }
     print("window seen: \{seen}")
+
+    // Reading and writing through the same container. The second store reads a
+    // place the first one is writing to, which is why the index and the value
+    // are evaluated before the container moves out.
+    let mut sl = Slice { data: build(6), start: 2 }
+    sl[0] = 100
+    sl[3] = sl[1]
+    print("slice: \{sl[0]} \{sl[1]} \{sl[3]}")
 
     // The declared copy, over a type a structural copy is refused for.
     let p = Pool { slots: build(3), taken: 2 }

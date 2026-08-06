@@ -3010,8 +3010,14 @@ impl<'a> Interp<'a> {
             // automatic validation), then is written through the shared buffer;
             // an out-of-bounds index traps with the read path's wording.
             Stmt::IndexSet {
-                name, index, value, ..
+                name, index, value, line,
             } => {
+                // RFC-0091 M3: a user container declares where its element is,
+                // and `place atSet` is the writing half. Asked before the index
+                // is evaluated, because the projection's prologue runs first.
+                if let Some(stmts) = self.project_store(name, index, value, scope, *line)? {
+                    return self.block(&Block { stmts }, scope);
+                }
                 let iv = self.expr(index, scope)?;
                 // `m[k] = v` on a Map (RFC-0028) — insert or update in place.
                 // An existing key keeps its slot (order preserved); a new key is
@@ -3393,6 +3399,44 @@ impl<'a> Interp<'a> {
         };
         let v = scope.iter().rev().find_map(|f| f.get(name))?;
         self.val_type_key(&v.v)
+    }
+
+    /// `a[i] = v` where `a` is a container of the user's own (RFC-0091 M3):
+    /// inline the `place atSet` projection and hand back the statements that
+    /// write to the place it yields.
+    ///
+    /// `Ok(None)` means "not a projection" — a builtin container, or a receiver
+    /// whose type is not known here — and the caller keeps the builtin path.
+    fn project_store(
+        &self,
+        name: &str,
+        index: &Expr,
+        value: &Expr,
+        scope: &mut Vec<Frame>,
+        line: usize,
+    ) -> Result<Option<Vec<Stmt>>, Ctrl> {
+        let recv = Expr::Var {
+            name: name.to_string(),
+            line,
+        };
+        let Some(key) = self.index_receiver_key(&recv, scope) else {
+            return Ok(None);
+        };
+        let Some(f) = crate::project::lookup_by_key(self.impls, &key, "atSet") else {
+            return Ok(None);
+        };
+        let p = crate::project::inline(f, &recv, std::slice::from_ref(index), line)
+            .map_err(Ctrl::Err)?;
+        let Some(store) = crate::project::store_stmts(&p.place, value, line) else {
+            return Err(Ctrl::Err(format!(
+                "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
+                 something with no address — a call result or a temporary. A projection \
+                 yields a place: a binding, a field of one, or an element of one"
+            )));
+        };
+        let mut out = p.prologue;
+        out.extend(store);
+        Ok(Some(out))
     }
 
     fn project_read(

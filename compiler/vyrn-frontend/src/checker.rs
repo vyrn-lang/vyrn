@@ -2819,9 +2819,19 @@ impl<'a> Checker<'a> {
                     }
                     Type::Err => return Ok(false),
                     other => {
-                        return Err(format!(
-                            "line {line}: `{name}[i] = ..` needs an Array or Map, found {other}"
-                        ))
+                        // RFC-0091 M3: a user container declares where its
+                        // element is, and `place atSet` is the writing half of
+                        // that. The element type is what it yields. Keyed by the
+                        // DECLARED type — an impl head names the alias.
+                        match crate::project::lookup_in(self.impl_blocks, &b.ty, "atSet") {
+                            Some(f) => f.ret.clone(),
+                            None => {
+                                return Err(format!(
+                                    "line {line}: `{name}[i] = ..` needs an Array, a Map, or a \
+                                     type that declares `place atSet`, found {other}"
+                                ))
+                            }
+                        }
                     }
                 };
                 let i = self.base(&self.expr(index, scope, Some(&Type::Int), Some(ret))?);
@@ -9055,6 +9065,54 @@ mod tests {
              let r = Ring {{ data: d }}\n return r[0] }}"
         ))
         .is_ok());
+    }
+
+    /// RFC-0091 M3. `place atSet` is the writing half, and the element type a
+    /// store coerces into is what it yields.
+    #[test]
+    fn a_projection_types_a_store_into_a_user_container() {
+        assert!(check_src(&format!(
+            "{RING}\
+             impl Index for Ring {{ place atSet(modify self, i: Int64) -> Int64 \
+             {{ yield self.data[i] }} }}\n\
+             fn main() -> Int64 {{ let mut d: Array<Int64> = []\n d.push(7)\n \
+             let mut r = Ring {{ data: d }}\n r[0] = 9\n return 0 }}"
+        ))
+        .is_ok());
+        // Without the row the store has nowhere to land, and the refusal names
+        // what would give it one.
+        let e = check_src(&format!(
+            "{RING}\
+             fn main() -> Int64 {{ let mut r = Ring {{ data: [] }}\n r[0] = 9\n return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("place atSet"), "{e}");
+    }
+
+    /// RFC-0091 M3. A user container iterates through `Iterate`, and the loop
+    /// variable takes what `place nth` yields.
+    #[test]
+    fn a_for_loop_types_over_a_user_container() {
+        let head = "type Ring = { data: Array<Int64> }\n\
+                    impl Iterate for Ring {\n\
+                      fn size(self) -> Int64 { return self.data.length }\n\
+                      place nth(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                    }\n";
+        assert!(check_src(&format!(
+            "{head}fn main() -> Int64 {{ let r = Ring {{ data: [] }}\n let mut s = 0\n \
+             for x in r {{ s = s + x }}\n return s }}"
+        ))
+        .is_ok());
+        // A `size` alone is not an iterable, and the refusal says which half is
+        // missing.
+        let e = check_src(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Iterate for Ring { fn size(self) -> Int64 { return 0 } }\n\
+             fn main() -> Int64 { let r = Ring { data: [] }\n \
+             for x in r { print(x) }\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("place nth"), "{e}");
     }
 
     #[test]

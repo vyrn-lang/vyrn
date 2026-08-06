@@ -3102,16 +3102,21 @@ impl<'a> Gen<'a> {
         slot
     }
 
-    /// The index a store lowers with, after `place atSet` has had its say
-    /// (RFC-0091 M2).
+    /// The statements a store lowers as, after `place atSet` has had its say
+    /// (RFC-0091 M2, finished in M3).
     ///
-    /// The seeded row yields `@slot(a, i)` — the binding's own element — so a
-    /// builtin container's store is the index it was written with and the
-    /// lowering is unchanged. A user container's projection may yield somewhere
-    /// else entirely (`self.data[j]`), and writing *there* needs an address-of
-    /// for an arbitrary place, which no backend has. That is refused by name
-    /// rather than mis-lowered; RFC-0091 M3 builds it.
-    fn store_index(&self, name: &str, index: &Expr, aty: &Type) -> Result<Option<Expr>, String> {
+    /// `None` is the seeded row: it yields `@slot(a, i)` — this binding's own
+    /// element — so the identity inline keeps the ORIGINAL nodes and the
+    /// lowering below is unchanged. `Some` is a user container, whose store
+    /// becomes the projection's prologue and the move-out/mutate/move-back group
+    /// [`vyrn_frontend::project::store_stmts`] builds.
+    fn store_index(
+        &self,
+        name: &str,
+        index: &Expr,
+        value: &Expr,
+        aty: &Type,
+    ) -> Result<Option<Vec<Stmt>>, String> {
         let line = index.line();
         let Some(f) = vyrn_frontend::project::for_site(self.impls, Some(aty), "atSet") else {
             return Ok(None);
@@ -3121,16 +3126,19 @@ impl<'a> Gen<'a> {
             line,
         };
         let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
-        // `None` keeps the ORIGINAL index node, which is what the seeded row's
-        // identity inline asks for — see `Projection::is_identity`.
         if p.is_identity(&recv, std::slice::from_ref(index)) {
             return Ok(None);
         }
-        Err(format!(
-            "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
-             somewhere other than this binding's own element, and storing through \
-             an arbitrary place is not lowered yet (RFC-0091 M3)"
-        ))
+        let Some(store) = vyrn_frontend::project::store_stmts(&p.place, value, line) else {
+            return Err(format!(
+                "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
+                 something with no address — a call result or a temporary. A projection \
+                 yields a place: a binding, a field of one, or an element of one"
+            ));
+        };
+        let mut out = p.prologue;
+        out.extend(store);
+        Ok(Some(out))
     }
 
     /// The static type of an index receiver, where this emitter can name one
@@ -3676,8 +3684,11 @@ impl<'a> Gen<'a> {
                 // `a[i] = v` asks the receiver's type for `place atSet`. The
                 // seeded row yields `@slot(a, i)` — this binding's own element —
                 // and the lowering below is unchanged.
-                let projected = self.store_index(name, index, &self.resolve(&aty))?;
-                let index = projected.as_ref().unwrap_or(index);
+                // A user container's store is its own statement group, lowered
+                // by the statements this backend already has.
+                if let Some(stmts) = self.store_index(name, index, value, &aty)? {
+                    return self.gen_block(&Block { stmts });
+                }
                 let bad_l = self.fresh_label("set.oob");
                 let ok_l = self.fresh_label("set.ok");
                 match self.resolve(&aty) {

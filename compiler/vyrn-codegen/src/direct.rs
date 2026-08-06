@@ -747,20 +747,21 @@ struct FnBinding {
     cap_srcs: Vec<String>,
 }
 
-/// The index a store lowers with, after `place atSet` has had its say
-/// (RFC-0091 M2).
+/// The statements a store lowers as, after `place atSet` has had its say
+/// (RFC-0091 M2, finished in M3).
 ///
-/// The seeded row yields `@slot(a, i)` — the binding's own element — so a
-/// builtin container's store is the index it was written with. A user
-/// container's projection may yield somewhere else entirely (`self.data[j]`),
-/// and writing *there* needs an address-of for an arbitrary place, which no
-/// backend has. Refused by name rather than mis-lowered; RFC-0091 M3 builds it.
+/// `None` is the seeded row: it yields `@slot(a, i)` — this binding's own
+/// element — so the identity inline keeps the ORIGINAL nodes and the lowering
+/// is unchanged. `Some` is a user container, whose store becomes the
+/// projection's prologue and the move-out/mutate/move-back group
+/// [`vyrn_frontend::project::store_stmts`] builds.
 fn store_index(
     impls: &[vyrn_frontend::ast::ImplBlock],
     name: &str,
     index: &Expr,
+    value: &Expr,
     aty: &Type,
-) -> Result<Option<Expr>, String> {
+) -> Result<Option<Vec<Stmt>>, String> {
     let line = index.line();
     let Some(f) = vyrn_frontend::project::for_site(impls, Some(aty), "atSet") else {
         return Ok(None);
@@ -770,16 +771,19 @@ fn store_index(
         line,
     };
     let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
-    // `None` keeps the ORIGINAL index node, which is what the seeded row's
-    // identity inline asks for — see `Projection::is_identity`.
     if p.is_identity(&recv, std::slice::from_ref(index)) {
         return Ok(None);
     }
-    Err(format!(
-        "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
-         somewhere other than this binding's own element, and storing through \
-         an arbitrary place is not lowered yet (RFC-0091 M3)"
-    ))
+    let Some(store) = vyrn_frontend::project::store_stmts(&p.place, value, line) else {
+        return Err(format!(
+            "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
+             something with no address — a call result or a temporary. A projection \
+             yields a place: a binding, a field of one, or an element of one"
+        ));
+    };
+    let mut out = p.prologue;
+    out.extend(store);
+    Ok(Some(out))
 }
 
 struct Cx {
@@ -2521,9 +2525,11 @@ impl Fn_<'_> {
                 // The store dispatches exactly as the read does (RFC-0091 M2):
                 // `a[i] = v` asks the receiver's type for `place atSet`, and
                 // the seeded row yields this binding's own element.
-                let rty = self.cx.resolve(&ty);
-                let projected = store_index(&self.cx.impls, name, index, &rty)?;
-                let index = projected.as_ref().unwrap_or(index);
+                // A user container's store is its own statement group, lowered
+                // by the statements this backend already has.
+                if let Some(stmts) = store_index(&self.cx.impls, name, index, value, &ty)? {
+                    return self.block(m, b, &Block { stmts });
+                }
                 place
                     .addr(b, 0)
                     .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
