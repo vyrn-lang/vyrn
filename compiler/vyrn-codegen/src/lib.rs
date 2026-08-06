@@ -12328,6 +12328,49 @@ mod tests {
         );
     }
 
+    /// RFC-0090 phase 8d. A trap site is ONE call to a shared `noreturn cold`
+    /// tail. It was three inline calls, and LLVM's inliner charges for each, so
+    /// a guard no program takes made the function around it too expensive to
+    /// inline — which is what `std/slots`' `place at` paid at every access.
+    /// Both halves are pinned: the tail is shared, and it is marked cold.
+    #[test]
+    fn a_trap_site_is_one_cold_call() {
+        let src = "fn pick(xs: Array<Int64>, i: Int64) -> Int64 { \
+                   if i < 0 { panic(\"negative\") } \
+                   return xs[i] } \
+                   fn main() -> Int64 { return pick([1, 2], 0) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let body = {
+            let s = ir.find("define i64 @vyrn_pick(").expect("no `pick` in the IR");
+            let e = s + ir[s..].find("\n}\n").expect("unterminated body");
+            &ir[s..e]
+        };
+        // The index trap and the panic are each one call, and neither spells the
+        // tail out where it stands.
+        assert!(
+            body.contains("call void @__vyrn_panic(")
+                && body.contains("call void @__vyrn_trap_idx(ptr @.trap.aoob,"),
+            "both traps must route through the shared tail:\n{body}"
+        );
+        for inline in ["@__vyrn_stderr", "@fprintf", "@fputs", "@exit"] {
+            assert!(
+                !body.contains(inline),
+                "`{inline}` is emitted inline at a trap site again:\n{body}"
+            );
+        }
+        // `cold` is what keeps the call out of the inliner's cost for the
+        // caller; `noreturn` is what lets the block after it stay unreachable.
+        for tail in ["@__vyrn_trap_msg", "@__vyrn_trap_idx", "@__vyrn_panic"] {
+            let d = format!("define internal void {tail}(");
+            let s = ir.find(&d).unwrap_or_else(|| panic!("no `{tail}` definition"));
+            let head = &ir[s..s + ir[s..].find('{').unwrap()];
+            assert!(
+                head.contains("noreturn") && head.contains("cold"),
+                "`{tail}` must stay `noreturn cold`: {head}"
+            );
+        }
+    }
+
     #[test]
     fn runtime_construction_emits_check() {
         // A non-constant construction (through a parameter) is checked at runtime.
