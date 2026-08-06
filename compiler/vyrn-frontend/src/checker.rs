@@ -6265,8 +6265,8 @@ impl<'a> Checker<'a> {
         // released and says nothing about how it is duplicated. Copying its
         // fields would produce a second value with the same invariants claimed
         // over the same resources, and the release the type declared would then
-        // run twice. RFC-0091 makes `Copy` a protocol the type implements; until
-        // then the honest answer is a refusal that names the type.
+        // run twice. Since RFC-0091 M1 the type may say what duplicating it
+        // means — `impl Copy for T` — and the refusal is what it overrides.
         //
         // A `Stream<T>` is a producer with a cursor, not a container: RFC-0075
         // gave it a variant-aware release for that reason, and duplicating the
@@ -6286,11 +6286,23 @@ impl<'a> Checker<'a> {
             if matches!(self.base(&t), Type::Err) {
                 return Ok(Type::Err);
             }
+            // RFC-0091 M1: the type answers first. `Copy` is derived
+            // structurally for everything whose parts copy, and a type with an
+            // invariant a structural copy would break declares its own. This is
+            // the row and the dispatch; every refusal below is what it overrides.
+            if let Some(key) = crate::types::type_key(&t) {
+                if self.impls.contains(&(crate::types::COPY.to_string(), key.clone())) {
+                    let mangled =
+                        crate::types::impl_method_name(crate::types::COPY, &key, "copy");
+                    return self.call(&mangled, args, line, scope, expected, fn_ret);
+                }
+            }
             if let Some(declared) = self.declared_owned_in(&t, 0) {
                 return Err(format!(
                     "line {line}: `copy` cannot copy `{declared}`: it declares `impl Owned for \
-                     {declared}`, so only `{declared}` knows what duplicating it means. Give it a \
-                     copying method of its own, or copy the parts you need"
+                     {declared}`, so only `{declared}` knows what duplicating it means. Say what \
+                     duplicating it means with `impl Copy for {declared}`, or copy the parts you \
+                     need"
                 ));
             }
             if matches!(self.base(&t), Type::Stream(_)) {
@@ -6303,13 +6315,13 @@ impl<'a> Checker<'a> {
             // a structural walk. Both compiling backends expanded one until the
             // compiler's stack ran out — a crash with no line on it. Recursion in
             // the value needs recursion in the code, so the answer is a function
-            // (`std/json`'s `copyJson` is the worked example), and RFC-0091 M1's
-            // `Copy` protocol is where a type will declare its own.
+            // (`std/json`'s `copyJson` is the worked example), and since
+            // RFC-0091 M1 `impl Copy for T` is where that function goes.
             if let Some(name) = crate::own::self_referring(&t, &self.types) {
                 return Err(format!(
                     "line {line}: `copy` cannot copy `{name}`: it refers to itself, so a \
                      structural copy has no bottom to stop at. Write a recursive function that \
-                     copies it one variant at a time"
+                     copies it one variant at a time, and declare it with `impl Copy for {name}`"
                 ));
             }
             return Ok(t);
@@ -9148,6 +9160,33 @@ mod tests {
                       let q = h.copy()\n return 0 }";
         let e = check_src(nested).unwrap_err();
         assert!(e.contains("`copy` cannot copy `Ring`"), "{e}");
+    }
+
+    /// RFC-0091 M1: the refusal above is what `impl Copy for T` overrides. A
+    /// type that says what duplicating it means dispatches there instead, and
+    /// the type it hands back is the one the impl declares.
+    #[test]
+    fn copy_dispatches_to_a_declared_impl() {
+        let src = "protocol Owned { fn release(self) }\n\
+                   type Ring = { buf: Array<Int64> }\n\
+                   impl Owned for Ring { fn release(self) { print(1) } }\n\
+                   impl Copy for Ring { fn copy(self) -> Ring { return Ring { buf: [] } } }\n\
+                   fn main() -> Int64 { let r = Ring { buf: [] }\n let q = r.copy()\n \
+                   return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// A type that refers to itself has no structural bottom (M1b), and the
+    /// answer the diagnostic names is a function. RFC-0091 M1 is where that
+    /// function is declared, so the same refusal lifts.
+    #[test]
+    fn copy_dispatches_for_a_self_referring_type() {
+        let src = "type Node = { next: Option<Node>, n: Int64 }\n\
+                   impl Copy for Node { fn copy(self) -> Node { \
+                   return Node { next: None, n: self.n } } }\n\
+                   fn main() -> Int64 { let a = Node { next: None, n: 1 }\n \
+                   let b = a.copy()\n return b.n }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     /// A `Stream<T>` is a cursor over a producer, not a container.

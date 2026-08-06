@@ -3886,8 +3886,17 @@ impl Fn_<'_> {
                         }
                     }
                 }
-                // `x.copy()` (RFC-0089 M1b) has its receiver's type.
-                "@copy" if args.len() == 1 => self.peek(&args[0], line)?,
+                // `x.copy()` (RFC-0089 M1b) has its receiver's type — or, where
+                // the type declared its own (RFC-0091 M1), whatever that says.
+                "@copy" if args.len() == 1 => {
+                    let t = self.peek(&args[0], line)?;
+                    match ftypes::copy_impl(&self.cx.impls, &t)
+                        .and_then(|f| self.cx.sigs.get(&f).map(|s| s.ret_ty.clone()))
+                    {
+                        Some(r) => r,
+                        None => t,
+                    }
+                }
                 // The generational reference (M2l). `cell` and `get` are inverses
                 // and typed as such; `set` and `release` carry nothing, which a
                 // `match` arm may still be — an arm that only mutates.
@@ -5466,6 +5475,17 @@ impl Fn_<'_> {
             // `x.copy()` (RFC-0089 M1b) — the receiver's value, with heap of its
             // own. The reported type is the receiver's own.
             "@copy" if args.len() == 1 => {
+                // RFC-0091 M1: a type that declares `impl Copy for T` says what
+                // duplicating it means, so the call goes there instead. The
+                // receiver is named by `peek` rather than emitted first, because
+                // the dispatch has to choose before anything is emitted.
+                if let Some(f) = self
+                    .peek(&args[0], line)
+                    .ok()
+                    .and_then(|t| ftypes::copy_impl(&self.cx.impls, &t))
+                {
+                    return self.call(m, b, &f, args, line);
+                }
                 let ty = self.expr(m, b, &args[0])?;
                 self.copy_stack(b, &ty, line)?;
                 return Ok(ty);

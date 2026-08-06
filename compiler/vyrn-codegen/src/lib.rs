@@ -8677,6 +8677,16 @@ impl<'a> Gen<'a> {
         // no heap with it. The reported type is the receiver's own, so a copy of
         // a validated `type Email = String` is still an `Email`.
         if name == "@copy" {
+            // RFC-0091 M1: a type that declares `impl Copy for T` says what
+            // duplicating it means, so the call goes there instead. The
+            // receiver's type is named before it is emitted, exactly as the
+            // `place at` dispatch names it.
+            if let Some(m) = self
+                .static_ty(&args[0])
+                .and_then(|t| vyrn_frontend::types::copy_impl(self.impls, &t))
+            {
+                return self.gen_call(&m, args);
+            }
             let (v, ty) = self.gen_expr(&args[0])?;
             let c = self.deep_copy(&v, &ty)?;
             return Ok((c, ty));

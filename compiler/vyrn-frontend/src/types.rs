@@ -150,6 +150,71 @@ pub const OWNED: &str = "Owned";
 /// The one method [`OWNED`] declares.
 pub const OWNED_RELEASE: &str = "release";
 
+/// The protocol a type implements to say **how it is duplicated** (RFC-0091
+/// M1). `x.copy()` is structural for every type whose parts copy; a type with
+/// an invariant a structural copy would break declares this instead.
+///
+/// Known by name for the reason [`OWNED`] is: `vyrn run` on a bare file has no
+/// resolver, so the decision that allocates may not depend on a module lookup.
+pub const COPY: &str = "Copy";
+
+/// The one method [`COPY`] declares.
+pub const COPY_COPY: &str = "copy";
+
+/// The protocol a container implements to say **how it is iterated** (RFC-0091
+/// M3): `type Item`, `fn size(read self) -> Int64`, and
+/// `place nth(read self, i: Int64) -> Item`.
+///
+/// `for x in xs` reaches a builtin container through the compiler's own element
+/// walk and a user container through this row. There is no second list: the
+/// lookup is `place nth` under the receiver's type key, which is the same table
+/// `a[i]` reads (see [`crate::project`]).
+pub const ITERATE: &str = "Iterate";
+
+/// The counting method [`ITERATE`] declares.
+pub const ITERATE_SIZE: &str = "size";
+
+/// The projection [`ITERATE`] declares — a `place`, not a method.
+pub const ITERATE_NTH: &str = "nth";
+
+/// The `impl Copy for T` method a receiver of type `ty` dispatches to
+/// (RFC-0091 M1), or `None` where the copy stays structural.
+///
+/// The declaration wins over the derivation, exactly as an `impl Owned` row
+/// wins over the seeded release: a type that states what duplicating it means
+/// is what `copy` means for it.
+pub fn copy_impl(impls: &[ImplBlock], ty: &Type) -> Option<String> {
+    copy_impl_by_key(impls, &type_key(ty)?)
+}
+
+/// [`copy_impl`], by type key. The interpreter reaches this one: it dispatches
+/// on a runtime value, whose key is the name stamped on it.
+pub fn copy_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
+    impls
+        .iter()
+        .any(|i| {
+            i.protocol == COPY
+                && type_key(&i.ty).as_deref() == Some(key)
+                && i.methods.iter().any(|m| m.name == COPY_COPY)
+        })
+        .then(|| impl_method_name(COPY, key, COPY_COPY))
+}
+
+/// The `impl Iterate for T` rows a receiver of type `ty` iterates through
+/// (RFC-0091 M3): the flattened `size` name, and the `place nth` to inline.
+///
+/// Both halves are required. An impl carrying only one of them is not an
+/// iterable, and the checker says so where it is written.
+pub fn iterate_impl<'a>(impls: &'a [ImplBlock], ty: &Type) -> Option<(String, &'a Function)> {
+    let key = type_key(ty)?;
+    let imp = impls.iter().find(|i| {
+        i.protocol == ITERATE && type_key(&i.ty).as_deref() == Some(key.as_str())
+    })?;
+    let nth = imp.places.iter().find(|f| f.name == ITERATE_NTH)?;
+    imp.methods.iter().find(|m| m.name == ITERATE_SIZE)?;
+    Some((impl_method_name(ITERATE, &key, ITERATE_SIZE), nth))
+}
+
 /// Extract the `(min, max)` inclusive numeric bounds a validated type's `where`
 /// predicate implies (RFC-0003 reflection). Recognizes `value >=/> N`,
 /// `value <=/< N` in either operand order, and `&&` conjunctions. Anything else

@@ -4888,7 +4888,17 @@ impl<'a> Interp<'a> {
                     // test; it is written out anyway, because the two compiled
                     // backends allocate here and the three engines must describe
                     // one operation.
-                    "@copy" => Ok(deep_copy(&vals[0])),
+                    // RFC-0091 M1: the type answers first. `impl Copy for T`
+                    // is what duplicating a `T` means; everything else derives.
+                    "@copy" => {
+                        match self
+                            .val_type_key(&vals[0])
+                            .and_then(|k| crate::types::copy_impl_by_key(self.impls, &k))
+                        {
+                            Some(m) => self.call(&m, &vals),
+                            None => Ok(deep_copy(&vals[0])),
+                        }
+                    }
                     // `@join` (`t.join()`) awaits a task; eager tasks are in hand.
                     "@join" => Ok(vals.remove(0)),
                     "Some" => Ok(Val::Option(Some(Box::new(vals.remove(0))))),
