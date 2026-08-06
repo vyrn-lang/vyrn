@@ -1046,6 +1046,47 @@ pub fn emit(program: &Program) -> Result<String, String> {
         format!("@.trap.serve = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n\n")
     });
 
+    // ---- the trap tail, once (RFC-0090 phase 8d) ------------------------
+    // Every trap and every `panic` used to emit three calls INLINE at its site:
+    // `@__vyrn_stderr`, an `fputs` or a variadic `fprintf`, and `exit`. The
+    // block is cold and no program takes it, but LLVM's inliner reads cost
+    // before it reads probability — three calls is roughly what a small
+    // function is allowed to cost in total. So a guard the program never takes
+    // made the function AROUND it too expensive to inline, and `std/slots`'
+    // `place at` paid for that at every access.
+    //
+    // These three functions are that block, once. `noreturn cold` states both
+    // halves of the fact: the call does not come back, and it is not the hot
+    // path. A trap site is now one call, so the guard costs about what its
+    // compare costs. `internal` lets a program that traps in none of the three
+    // ways drop the ones it does not use.
+    //
+    // Nothing about WHAT is printed changed — same stream, same bytes, same
+    // exit code — which is why parity is byte-identical across the change.
+    out.push_str(
+        "define internal void @__vyrn_trap_msg(ptr %m) noreturn cold {\n\
+         entry:\n\
+         \x20 %e = call ptr @__vyrn_stderr()\n\
+         \x20 call i32 @fputs(ptr %m, ptr %e)\n\
+         \x20 call void @exit(i32 1)\n\
+         \x20 unreachable\n\
+         }\n\n\
+         define internal void @__vyrn_trap_idx(ptr %f, i64 %i) noreturn cold {\n\
+         entry:\n\
+         \x20 %e = call ptr @__vyrn_stderr()\n\
+         \x20 call i32 (ptr, ptr, ...) @fprintf(ptr %e, ptr %f, i64 %i)\n\
+         \x20 call void @exit(i32 1)\n\
+         \x20 unreachable\n\
+         }\n\n\
+         define internal void @__vyrn_panic(ptr %m) noreturn cold {\n\
+         entry:\n\
+         \x20 %e = call ptr @__vyrn_stderr()\n\
+         \x20 call i32 (ptr, ptr, ...) @fprintf(ptr %e, ptr @.panic.fmt, ptr %m)\n\
+         \x20 call void @exit(i32 1)\n\
+         \x20 unreachable\n\
+         }\n\n",
+    );
+
     // ---- region / arena runtime (RFC-0004 §4) ---------------------------
     // A `region { .. }` block gives heap allocations a deterministic lifetime:
     // everything allocated while the region is on the stack is freed when the
@@ -3106,10 +3147,7 @@ impl<'a> Gen<'a> {
         let ok_l = self.fresh_label(&format!("{prefix}.ok"));
         self.emit_term(format!("br i1 {cond}, label %{trap_l}, label %{ok_l}"));
         self.emit_label(&trap_l);
-        let e = self.fresh_tmp();
-        self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
-        self.emit(format!("call i32 @fputs(ptr {msg_global}, ptr {e})"));
-        self.emit("call void @exit(i32 1)".into());
+        self.emit(format!("call void @__vyrn_trap_msg(ptr {msg_global})"));
         self.emit_term("unreachable".into());
         self.emit_label(&ok_l);
     }
@@ -5799,12 +5837,9 @@ impl<'a> Gen<'a> {
     /// `swapRemove` so all three are byte-identical to the interpreter.
     fn emit_array_oob_trap(&mut self, label: &str, iv: &str) {
         self.emit_label(label);
-        let e = self.fresh_tmp();
-        self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
         self.emit(format!(
-            "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.trap.aoob, i64 {iv})"
+            "call void @__vyrn_trap_idx(ptr @.trap.aoob, i64 {iv})"
         ));
-        self.emit("call void @exit(i32 1)".into());
         self.emit_term("unreachable".into());
     }
 
@@ -6840,10 +6875,7 @@ impl<'a> Gen<'a> {
             }
         }
         self.emit_label(&bad);
-        let e = self.fresh_tmp();
-        self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
-        self.emit(format!("call i32 @fputs(ptr @.fnval.bad, ptr {e})"));
-        self.emit("call void @exit(i32 1)".into());
+        self.emit("call void @__vyrn_trap_msg(ptr @.fnval.bad)".into());
         self.emit_term("unreachable".into());
 
         writeln!(out, "define {retll} @{sym}({}) {{", sig_ll.join(", ")).unwrap();
@@ -7334,14 +7366,9 @@ impl<'a> Gen<'a> {
             // nothing for the nicety.
             let hi3 = self.fresh_tmp();
             let k = self.fresh_tmp();
-            let e = self.fresh_tmp();
             self.emit(format!("{hi3} = add i64 {iv}, {}", span - 1));
             self.emit(format!("{k} = select i1 {lo}, i64 {iv}, i64 {hi3}"));
-            self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
-            self.emit(format!(
-                "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.trap.aoob, i64 {k})"
-            ));
-            self.emit("call void @exit(i32 1)".into());
+            self.emit(format!("call void @__vyrn_trap_idx(ptr @.trap.aoob, i64 {k})"));
             self.emit_term("unreachable".into());
             self.emit_label(&ok_l);
             let ep = self.fresh_tmp();
@@ -7403,12 +7430,7 @@ impl<'a> Gen<'a> {
         // special case in the merge.
         if name == "panic" {
             let (v, _) = self.gen_expr(&args[0])?;
-            let e = self.fresh_tmp();
-            self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
-            self.emit(format!(
-                "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.panic.fmt, ptr {v})"
-            ));
-            self.emit("call void @exit(i32 1)".into());
+            self.emit(format!("call void @__vyrn_panic(ptr {v})"));
             self.emit_term("unreachable".into());
             let dead = self.fresh_label("panic.dead");
             self.emit_label(&dead);
@@ -7418,10 +7440,7 @@ impl<'a> Gen<'a> {
         // generated — the producer it names cannot be pulled here, so evaluating
         // it would only run a step whose values nothing can read.
         if name == "serveStream" {
-            let e = self.fresh_tmp();
-            self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
-            self.emit(format!("call i32 @fputs(ptr @.trap.serve, ptr {e})"));
-            self.emit("call void @exit(i32 1)".into());
+            self.emit("call void @__vyrn_trap_msg(ptr @.trap.serve)".into());
             self.emit_term("unreachable".into());
             let dead = self.fresh_label("serve.dead");
             self.emit_label(&dead);
@@ -8328,12 +8347,7 @@ impl<'a> Gen<'a> {
             // bounds`. Strings pick the "string index" wording.
             let emit_trap = |g: &mut Self, fmt: &str| {
                 g.emit_label(&bad_l);
-                let e = g.fresh_tmp();
-                g.emit(format!("{e} = call ptr @__vyrn_stderr()"));
-                g.emit(format!(
-                    "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr {fmt}, i64 {iv})"
-                ));
-                g.emit("call void @exit(i32 1)".into());
+                g.emit(format!("call void @__vyrn_trap_idx(ptr {fmt}, i64 {iv})"));
                 g.emit_term("unreachable".into());
             };
             match self.resolve(&aty) {
@@ -12292,8 +12306,10 @@ mod tests {
 
     // The runtime preamble contains a fixed number of `call void @exit` (the
     // cell slab's trap paths); a validation check is one *beyond* that baseline.
+    /// Trap sites in `ir`. Phase 8d made a trap one call to the shared cold
+    /// tail, so this counts the tail's call sites where it once counted `@exit`.
     fn exit_calls(ir: &str) -> usize {
-        ir.matches("call void @exit").count()
+        ir.matches("call void @__vyrn_trap_msg(").count()
     }
     fn exit_baseline() -> usize {
         exit_calls(&emit(&check("fn main() -> Int64 { return 0; }").unwrap()).unwrap())
@@ -12310,6 +12326,49 @@ mod tests {
             exit_baseline(),
             "const construction should not emit a runtime check: {ir}"
         );
+    }
+
+    /// RFC-0090 phase 8d. A trap site is ONE call to a shared `noreturn cold`
+    /// tail. It was three inline calls, and LLVM's inliner charges for each, so
+    /// a guard no program takes made the function around it too expensive to
+    /// inline — which is what `std/slots`' `place at` paid at every access.
+    /// Both halves are pinned: the tail is shared, and it is marked cold.
+    #[test]
+    fn a_trap_site_is_one_cold_call() {
+        let src = "fn pick(xs: Array<Int64>, i: Int64) -> Int64 { \
+                   if i < 0 { panic(\"negative\") } \
+                   return xs[i] } \
+                   fn main() -> Int64 { return pick([1, 2], 0) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let body = {
+            let s = ir.find("define i64 @vyrn_pick(").expect("no `pick` in the IR");
+            let e = s + ir[s..].find("\n}\n").expect("unterminated body");
+            &ir[s..e]
+        };
+        // The index trap and the panic are each one call, and neither spells the
+        // tail out where it stands.
+        assert!(
+            body.contains("call void @__vyrn_panic(")
+                && body.contains("call void @__vyrn_trap_idx(ptr @.trap.aoob,"),
+            "both traps must route through the shared tail:\n{body}"
+        );
+        for inline in ["@__vyrn_stderr", "@fprintf", "@fputs", "@exit"] {
+            assert!(
+                !body.contains(inline),
+                "`{inline}` is emitted inline at a trap site again:\n{body}"
+            );
+        }
+        // `cold` is what keeps the call out of the inliner's cost for the
+        // caller; `noreturn` is what lets the block after it stay unreachable.
+        for tail in ["@__vyrn_trap_msg", "@__vyrn_trap_idx", "@__vyrn_panic"] {
+            let d = format!("define internal void {tail}(");
+            let s = ir.find(&d).unwrap_or_else(|| panic!("no `{tail}` definition"));
+            let head = &ir[s..s + ir[s..].find('{').unwrap()];
+            assert!(
+                head.contains("noreturn") && head.contains("cold"),
+                "`{tail}` must stay `noreturn cold`: {head}"
+            );
+        }
     }
 
     #[test]
@@ -12881,7 +12940,7 @@ mod tests {
                    fn main() -> Int64 { return build(\"home\") }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("@.trap.verr.TransKey, ptr"),
+            ir.contains("@__vyrn_trap_msg(ptr @.trap.verr.TransKey)"),
             "a non-finite hole must keep the runtime validation: {ir}"
         );
     }
