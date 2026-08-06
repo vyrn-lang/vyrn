@@ -42,8 +42,8 @@
 //! | `copyLocal` | U2 | steady | `x.copy()` transfers, so the copy has an owner (RFC-0089 M1b) |
 //! | `ifExpr` | §2a | steady | Phase 4c: the TYPE says the result owns a buffer, so the binding does |
 //! | `mutString` | §2c | steady | Phase 4c: rule 1 governs reassignment, so `mut` is trackable |
-//! | `selfAppend` | §4 / P1 | leaks | a module-state `String` overwrite never releases the old buffer |
-//! | `fieldOverwrite` | §4 | leaks | `r.field = v` never releases the old field |
+//! | `selfAppend` | §4 / P1 | steady | Phase 5: a store releases the old value, and a module-state accumulator grows in place |
+//! | `fieldOverwrite` | §4 | steady | Phase 5: `r.field = v` releases the old field |
 //! | `returnedString` | §9a | leaks | an exported return hands JS a pointer nobody frees |
 //! | `optionString` | §14 | leaks | an aggregate does not own its payload |
 //! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed |
@@ -379,14 +379,16 @@ const ROWS: &[Row] = &[
     Row {
         export: "selfAppend",
         census: "§4/P1",
-        today: Shape::Leaks,
-        why: "a module-state String overwrite never releases the old buffer",
+        today: Shape::Steady,
+        why: "Phase 5: a store releases what the place held, and a module-state accumulator \
+              grows in place. The reset hands back the last call's buffer and the eight \
+              appends reallocate one",
     },
     Row {
         export: "fieldOverwrite",
         census: "§4",
-        today: Shape::Leaks,
-        why: "`r.field = v` stores over the old field and never releases it",
+        today: Shape::Steady,
+        why: "Phase 5: `r.field = v` releases the old field after the new value is built",
     },
     Row {
         export: "optionString",
@@ -472,8 +474,25 @@ export extern fn mutString() {{
     seen = seen + Int64(s.byteLength)
 }}
 
+/// Census §4/P1, and the shape a server has: module state reset and then grown.
+/// `examples/bin` and `examples/shelf` both rebuild module state per request.
+///
+/// Both halves of Phase 5 are here. The reset releases the buffer the last call
+/// built, and the self-append grows the new one IN PLACE rather than building a
+/// fresh buffer per turn and abandoning the old — which is what a module-state
+/// accumulator did until Phase 5, because the in-place whitelist read one body
+/// and a global is reachable from all of them.
+///
+/// It resets, and it has to. An accumulator that only ever grows has no bounded
+/// steady state to assert: its memory IS the string it built. What that costs is
+/// P1's question and `examples/membench.vyrn` answers it.
 export extern fn selfAppend() {{
-    acc = acc + "0123456789"
+    acc = ""
+    let mut i = 0
+    while i < 8 {{
+        acc = acc + "0123456789"
+        i = i + 1
+    }}
     seen = seen + Int64(acc.byteLength)
 }}
 

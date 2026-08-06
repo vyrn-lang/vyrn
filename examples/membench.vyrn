@@ -56,6 +56,33 @@ fn spine(n: Int64) -> String {
     return s
 }
 
+/// Module state, so the twin below accumulates where census P1's slow half did.
+let mut g: String = ""
+
+/// The module-state twin of `spine` — census P1's slow half, and the shape a
+/// server that accumulates a response body has.
+///
+/// P1 measured the pair at n = 160 000: 0.095 s for the local against 4.92 s and
+/// 12.2 GB for the global. One reason, two faces. The in-place whitelist read one
+/// function body, and a global is reachable from all of them, so a module-state
+/// accumulator got the general path — `malloc`, copy both halves, drop the old
+/// buffer on the floor — which is quadratic in time AND unbounded in memory.
+/// Phase 5 reads the whitelist over the whole program, so the two rows should now
+/// differ by nothing but the store.
+///
+/// It resets first: `vyrn bench` runs a block many times and module state
+/// survives between runs, so without the reset this would time a different `n`
+/// on every sample.
+fn globalSpine(n: Int64) -> Int64 {
+    g = ""
+    let mut i = 0
+    while i < n {
+        g = g + "0123456789"
+        i = i + 1
+    }
+    return Int64(g.byteLength)
+}
+
 /// Push churn: `n` pushes into a growable array, then the length.
 fn pushChurn(n: Int64) -> Int64 {
     let mut xs: Array<Int64> = []
@@ -228,6 +255,10 @@ bench "string append spine, 1000 appends" {
     blackBox(spine(blackBox(1000)).byteLength)
 }
 
+bench "module-state append spine, 1000 appends" {
+    blackBox(globalSpine(blackBox(1000)))
+}
+
 bench "byteLength of a 10 KB string, 500 reads" {
     // The string is built once per sample; 500 scans of 10 KB dwarf 1000
     // appends. `blackBox(s)` inside the loop is load-bearing: `byteLength` is a
@@ -268,6 +299,7 @@ fn main() -> Int64 {
     // themselves are stripped from `run`/`build`.
     print(concatFresh(4, pad(), pad()))
     print(spine(4).byteLength)
+    print(globalSpine(4))
     print(pushChurn(4))
     print(cellChurn(4))
     print(slabChurn(4))
