@@ -117,6 +117,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         type_aliases: Default::default(),
         field_preds: None,
         extra_stmts: Vec::new(),
+        in_place: false,
         errors: Vec::new(),
     }
     .program_accum();
@@ -718,6 +719,11 @@ struct Parser {
     /// the rest here; `block` drains them right after, preserving order. Only
     /// ever non-empty for the duration of one `stmt` call (its single caller).
     extra_stmts: Vec<Stmt>,
+    /// True while parsing the body of a `place` projection (RFC-0091 M2).
+    /// Inside one, `yield <place>` is the exit and `return` is a parse error;
+    /// outside one, `yield` is an ordinary identifier. One flag rather than a
+    /// second statement parser, because the two bodies differ in exactly this.
+    in_place: bool,
     /// Diagnostics accumulated by *within-body* statement recovery (RFC-0006):
     /// when a statement inside a block fails to parse, [`Parser::block`] records
     /// the error here and syncs to the next statement boundary instead of
@@ -1812,6 +1818,7 @@ impl Parser {
         let ty = self.type_()?;
         self.eat(&Tok::LBrace)?;
         let mut methods = Vec::new();
+        let mut places = Vec::new();
         let mut assoc: Vec<String> = Vec::new();
         let outer_aliases = std::mem::take(&mut self.type_aliases);
         while *self.peek() != Tok::RBrace {
@@ -1861,6 +1868,19 @@ impl Parser {
                 self.eat_semi();
                 continue;
             }
+            // `place name(read self, ..) -> T { .. yield <place> }` (RFC-0091
+            // M2). Contextual, like `gen fn` and `lazy`: `place` counts as the
+            // keyword only where a member begins AND a member name follows, so
+            // an ordinary `place` identifier keeps its meaning everywhere else.
+            if matches!(self.peek(), Tok::Ident(w) if w == "place")
+                && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_))
+            {
+                let mut p = self.place_member(&ty)?;
+                p.type_params = type_params.clone();
+                p.type_bounds = type_bounds.clone();
+                places.push(p);
+                continue;
+            }
             let mut m = self.impl_method(&ty)?;
             m.type_params = type_params.clone();
             m.type_bounds = type_bounds.clone();
@@ -1876,8 +1896,98 @@ impl Parser {
             ty,
             assoc,
             methods,
+            places,
             line,
         })
+    }
+
+    /// One `place name(read self, ..) -> T { .. yield <place> }` inside an
+    /// `impl` (RFC-0091 M2). Returns a [`Function`] shaped like an impl method:
+    /// the first parameter is `self`, carrying the receiver's capability
+    /// (`read self` projects for reading, `modify self` for writing).
+    ///
+    /// The body's `yield` becomes a [`Stmt::Return`]; see [`ImplBlock::places`]
+    /// for why. `return` inside a projection is refused here, because a
+    /// projection has no frame of its own to return from.
+    fn place_member(&mut self, self_ty: &Type) -> Result<Function, Diagnostic> {
+        let line = self.line();
+        self.advance(); // `place`
+        let name = self.expect_ident()?;
+        self.eat(&Tok::LParen)?;
+        let capability = self.parse_self_capability();
+        self.eat(&Tok::Vself)?;
+        let mut params = vec![Param {
+            name: "self".to_string(),
+            capability,
+            ty: self_ty.clone(),
+        }];
+        while *self.peek() == Tok::Comma {
+            self.advance();
+            let pname = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            let capability = self.parse_capability();
+            let ty = self.type_()?;
+            params.push(Param {
+                name: pname,
+                capability,
+                ty,
+            });
+        }
+        self.eat(&Tok::RParen)?;
+        let (rline, rcol) = (self.line(), self.col());
+        let ret = if *self.peek() == Tok::Arrow {
+            self.advance();
+            self.type_()?
+        } else {
+            return Err(Diagnostic::error(
+                rline,
+                rcol,
+                "parse",
+                format!(
+                    "`place {name}` needs a return type (`-> T`) — a projection \
+                     names the type of the place it yields"
+                ),
+            ));
+        };
+        let outer = std::mem::replace(&mut self.in_place, true);
+        let body = self.block();
+        self.in_place = outer;
+        Ok(Function {
+            exported: false,
+            module: None,
+            name,
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params,
+            ret,
+            body: body?,
+            line,
+            is_extern: false,
+            is_export_extern: false,
+            is_gen: false,
+            is_mut: false,
+        })
+    }
+
+    /// `read self` / `modify self` on a projection's receiver. Contextual, and
+    /// distinct from [`Parser::parse_capability`] because the token that follows
+    /// is `self` rather than a type name. Defaults to `read`.
+    fn parse_self_capability(&mut self) -> Capability {
+        if let Tok::Ident(id) = self.peek() {
+            let cap = match id.as_str() {
+                "read" => Some(Capability::Read),
+                "modify" => Some(Capability::Modify),
+                _ => None,
+            };
+            if let Some(c) = cap {
+                if self.tokens[self.pos + 1].tok == Tok::Vself {
+                    self.advance();
+                    return c;
+                }
+            }
+        }
+        Capability::Read
     }
 
     /// One `fn m(self, ..) -> R { .. }` inside an `impl`. Returns a [`Function`]
@@ -3255,6 +3365,30 @@ impl Parser {
                     line,
                 })
             }
+            Tok::Return if self.in_place => {
+                let col = self.col();
+                Err(Diagnostic::error(
+                    line,
+                    col,
+                    "parse",
+                    "a `place` projection yields, it does not return: write \
+                     `yield <place>`. A projection has no frame of its own — \
+                     its body runs inside the access site."
+                        .to_string(),
+                ))
+            }
+            // `yield <place>` — the exit of a `place` projection (RFC-0091 M2).
+            // Contextual: outside a projection body `yield` is an ordinary
+            // identifier, so no program that used the name has to change.
+            Tok::Ident(w) if self.in_place && w == "yield" => {
+                self.advance();
+                let value = self.expr()?;
+                self.eat_semi();
+                Ok(Stmt::Return {
+                    value: Some(value),
+                    line,
+                })
+            }
             Tok::Return => {
                 self.advance();
                 // A value follows unless we're at a terminator: `;`, block end
@@ -4278,6 +4412,7 @@ impl Parser {
             type_aliases: self.type_aliases.clone(),
             field_preds: None,
             extra_stmts: Vec::new(),
+            in_place: false,
             errors: Vec::new(),
         };
         // A sub-parser diagnostic carries line numbers relative to the hole
@@ -4492,6 +4627,7 @@ impl Parser {
             type_aliases: self.type_aliases.clone(),
             field_preds: None,
             extra_stmts: Vec::new(),
+            in_place: false,
             errors: Vec::new(),
         })
     }
@@ -5406,6 +5542,7 @@ mod tests {
             type_aliases: Default::default(),
             field_preds: None,
             extra_stmts: Vec::new(),
+            in_place: false,
             errors: Vec::new(),
         };
         let (prog, errors) = p.program_accum();
