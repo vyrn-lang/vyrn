@@ -1,5 +1,9 @@
 # PLAN — The Memory Model Overhaul (RFC-0087 → RFC-0091)
 
+**COMPLETE.** Phases 0 to 9, fifteen PRs. The census's final state is in
+RFC-0087, "The census, closed": nine of twelve memory rows steady, three leaking
+with a named reason each, and four design questions open and undesigned.
+
 Execution plan for delegation. Each phase is one agent arc: one branch, one PR,
 merged on local verification (do not wait for CI). Phases are ordered by
 dependency; a phase does not start until the previous one is merged, except
@@ -380,21 +384,50 @@ carried the ownership fact — see the note under Phase 9.
   has recorded, and it named the change before anything else did.
   See RFC-0090 "M4 as landed".
 
-## Phase 9 — surface polish *(from RFC-0087 Part II, whatever remains)*
+## Phase 9 — surface polish — LANDED. The last phase of the arc.
 
-LSP: ownership hovers, last-use token modifier, move inlay hints. `vyrn fix`
-applying the move-error menu. U5 and U3 went with Path B in Phase 8e and are
-struck from the census.
-Regenerate `docs/api`, update memory files and RFC statuses (headers must
-match the "as landed" truth — they have lied before).
+Four deliverables, one PR.
 
-**Carried from Phase 6: emit the export return types.** `hooks.exportReturns` is
-written by hand in four pages and one runtime. An export whose String return
-nobody named is decoded as a number and leaks, and since Phase 6 the hint also
-decides a `free`. The compiler knows every export's return type. One custom wasm
-section (`vyrn:exports`, name -> `"string"` / `"bool"`) read by the shim's own
-section walk deletes the map and the class of bug with it. Small, and it changes
-the shipped ABI, so it is an RFC-0012 edit rather than a phase's side effect.
+- **9a. The export return types are emitted (RFC-0012 M3).** `hooks.exportReturns`
+  was hand-written in five places, so an export whose String return nobody named
+  came back as a number — and since Phase 6 the hint also decided the `free`, so a
+  missed name leaked. The direct wasm backend writes a `vyrn:exports` custom
+  section (a vector of wasm-name pairs, export -> `string`/`bool`) and
+  `wasi-min.js` reads it in the section walk it already ran: one branch on section
+  id 0. All five maps are deleted. It changes the shipped ABI, so it is an
+  RFC-0012 edit and not a side effect; the change is additive in both directions.
+  The memory suite's `returnedString` row is its end-to-end test.
+- **9b. The LSP surface — RFC-0087 U1 CLOSED.** `Analysis` carries `memory`: every
+  `let` with what the ownership analysis decided, read from `own::analyze`. Three
+  surfaces come off that one table — a `memory:` line on a binding's hover, a
+  `modification` token modifier at the occurrence that takes the value, and an
+  inlay hint at every move naming where it went. The prose moved into `own.rs` as
+  `Fate::words`/`DropKind::words`, so the shell and the editor say one thing.
+  Measured: `graphql.vyrn` 48.5 -> 53.1 ms against the 97 ms budget. The answer
+  is computed only when the checks ran and found nothing, which is what keeps it
+  off the path for the buffers that need it least.
+- **9c. `vyrn fix`.** It applies the one entry on a move menu that is an edit —
+  `.copy()` — and refuses the other two by name, because they are decisions:
+  `consume` on a parameter changes what every caller may do with its argument,
+  and `for x in consume xs` decides that nothing after the loop wants the
+  container. It edits the file it was given and no other. It refuses a menu with
+  no edit, a path that appears twice on a line (a diagnostic carries a line and
+  no column), and a round whose edits did not reduce the diagnostic count, which
+  is rolled back whole. The compiler verifies every round, so the tool cannot
+  leave a file that compiles worse than it found it.
+- **9d. The record.** `docs/api` regenerated and verified; RFC-0086, 0089, 0090
+  and 0091 headers corrected against their own "as landed" sections; RFC-0087's
+  three ranked tables given their final state, plus "The census, closed" — the
+  score, what the arc found that the census did not name, and the open tail.
+
+**The correction this phase was given, and it was right.** This plan said "U5 and
+U3 went with Path B in Phase 8e and are struck from the census." **U3 did. U5 did
+not.** Phase 8e replaced the message with `panic("slots: handle is not alive")`,
+which is better in one way — a library author owns the wording — and no better in
+the other: `panic` lowers to `error: %s` and carries no source position on any
+engine. 8e checked this by running `examples/slots.vyrn` after its own first draft
+claimed otherwise. U5 is **narrowed, not closed**, and it stays in the census as
+RFC-0079's gap.
 
 ---
 

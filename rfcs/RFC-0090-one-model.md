@@ -1,7 +1,10 @@
 # RFC-0090 — One Model: Values, and Nothing Else
 
-- **Status:** Proposed. A delta on RFC-0089 — accept both or neither. It removes
-  RFC-0089's rule 5 and replaces it.
+- **Status:** **Implemented.** M1 landed in Phases 8a and 8b, M3 in 8c and 8d,
+  M4 in 8e; M2 is RFC-0089 M2 and landed there. A delta on RFC-0089 — accepted
+  with it. It removed RFC-0089's rule 5 and replaced it, and `Ref`, `cell`,
+  `get`, `set` and `release` no longer exist in any engine. Read the four
+  "as landed" sections at the end: each corrects something this RFC claimed.
 - **Depends on:** RFC-0089 (rules 1–4 stand), RFC-0079 (failure is a value),
   RFC-0082 (containers are Vyrn), RFC-0078 (the runtime is Vyrn)
 - **Premise:** RFC-0089 asked "can the model be better than inference?" This

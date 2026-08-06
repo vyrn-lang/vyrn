@@ -3768,3 +3768,128 @@ fn a_user_container_checks_and_hovers_in_the_editor() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// RFC-0087 U1 over the wire: the memory model in the editor.
+///
+/// One document, three surfaces, one table behind them. The point of driving it
+/// through the real server rather than the frontend API is the wire shapes: the
+/// modifier bit has to match the legend the server advertised, and an inlay hint
+/// has to arrive at a 0-based position the client can draw at.
+#[test]
+fn the_memory_model_reaches_hover_tokens_and_inlay_hints() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": init_id,
+        "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let init = client.read_response(&init_id);
+    let caps = init.pointer("/result/capabilities").expect("capabilities");
+    assert!(caps.get("inlayHintProvider").is_some(), "inlay hints advertised: {caps}");
+    // The legend the modifier bit is an index into. `modification` must be bit 3.
+    let mods = caps
+        .pointer("/semanticTokensProvider/legend/tokenModifiers")
+        .and_then(|m| m.as_array())
+        .expect("the token legend");
+    assert_eq!(mods[3].as_str(), Some("modification"), "legend: {mods:?}");
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+
+    let uri = "file:///memory/model.vyrn";
+    let src = "\
+fn take(s: consume String) -> Int64 { return 1 }
+fn main() -> Int64 {
+    let a = \"x\" + \"y\"
+    let n = take(a)
+    let b = \"p\" + \"q\"
+    print(b)
+    return n
+}
+";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src }
+        }
+    }));
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif.pointer("/params/diagnostics").and_then(|d| d.as_array()).unwrap();
+    assert!(diags.is_empty(), "clean source: {diags:?}");
+
+    let mut ids = Ids::new();
+
+    // 1. Hover on `a` in `let a = ..` (LSP line 2, char 8).
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": 2, "character": 8 } }
+    }));
+    let hover = client.read_response(&id);
+    let text = hover
+        .pointer("/result/contents/value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(text.contains("memory: moved at line 4 into `take(..)`"), "hover: {text}");
+
+    // 2. Hover on `b`, which lives to block exit — the other answer.
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": 4, "character": 8 } }
+    }));
+    let hover = client.read_response(&id);
+    let text = hover
+        .pointer("/result/contents/value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(text.contains("memory: reclaimed at block exit"), "hover: {text}");
+
+    // 3. The move gets an inlay hint at the end of `a` inside `take(a)`.
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 20, "character": 0 }
+            }
+        }
+    }));
+    let hints = client.read_response(&id);
+    let list = hints.get("result").and_then(|r| r.as_array()).expect("hints: {hints}");
+    assert_eq!(list.len(), 1, "one move, one hint: {list:?}");
+    assert_eq!(list[0].pointer("/position/line").unwrap().as_i64(), Some(3));
+    assert_eq!(list[0].get("label").unwrap().as_str(), Some("→ take(..)"));
+
+    // 4. The last use carries the modifier. Tokens are delta-encoded
+    //    `[Δline, Δstart, len, type, mods]`; bit 3 is `modification`.
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/semanticTokens/full",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let toks = client.read_response(&id);
+    let data: Vec<i64> = toks
+        .pointer("/result/data")
+        .and_then(|d| d.as_array())
+        .expect("token data")
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    let mut line = 0i64;
+    let mut marked = Vec::new();
+    for q in data.chunks(5) {
+        line += q[0];
+        if q[4] & (1 << 3) != 0 {
+            marked.push(line);
+        }
+    }
+    // Exactly the `a` handed to `take`, on LSP line 3. The declaration is never
+    // a last use, and `b` has no such point.
+    assert_eq!(marked, vec![3], "marked last uses: {marked:?}");
+}
