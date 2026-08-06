@@ -566,6 +566,23 @@ permanent.
 This is the largest silent restriction in the model, and it appears in no
 diagnostic and no document.
 
+**Half closed, Phase 8b.** A container that DECLARES what it owns reaches its
+elements. `std/slots` says `impl<T> Owned for Slots<T>` and its release walks
+the table and gives each payload back, because it knows every slot holds one
+payload it owns — `insert` takes `consume T`, and the only other writer is a
+store, which releases what it replaced. `drop v` where `v: T` is legal and the
+monomorphized instance decides: a `free` for a `Slots<String>`, no instruction
+at all for a `Slots<Int64>`.
+
+**The other half stays open, and the restriction is now the right one.** A
+built-in `Array<T>` releases no element and must not. An array cannot say
+whether it owns its elements or views somebody else's, and `m.keys()` is the
+view: a fresh buffer holding the map's own key pointers, which a per-element
+release would free twice. So the answer moved from "no mechanism exists" to
+"the mechanism is a declaration, and a built-in container has nothing to
+declare it with". The memory suite holds both halves — `elementLeak` leaking on
+a bare `Array<String>`, `slotsContainer` steady on the same String in a `Slots`.
+
 ---
 
 ## U5. The one runtime failure has no location
@@ -684,7 +701,7 @@ wasm section would delete the map.
 | 3 | **U10** the extern boundary cannot be declared | the one place the answer is required | falls out of §9a and §9b |
 | 4 | **U8** a declared container cannot be read | `impl Owned` is shipped and not yet usable | `read` as a real capability |
 | 5 | **U5** the failure message has no location | the worst moment to say the least | the slot already carries a pointer array |
-| 6 | **U4** an element is unreclaimable | the largest silent restriction | needs §14's answer first |
+| 6 | **U4** an element is unreclaimable | the largest silent restriction | half closed (Phase 8b): a DECLARED container reaches its elements; a built-in `Array<T>` still cannot say it owns them |
 | 7 | **U3** Path B is not subject-first | inconsistent beside `s.length` | a co-naming sweep, RFC-0022 precedent |
 | 8 | **U7** `consume` and linearity are two things | the surface implies one | a decision, then RFC-0086 M3 |
 | 9 | **U6** the arena excludes its own case | the model's best tool is unreachable | RFC-0004 Q3, undesigned |

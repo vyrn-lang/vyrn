@@ -47,7 +47,8 @@
 //! | `returnedString` | §9a | steady | Phase 6: a return is owned, so the wrapper frees it after decoding |
 //! | `optionString` | §14 | leaks | an `Option` owns its payload since Phase 5, but this row binds nothing to release |
 //! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed — it needs a copy derived over the defunctionalized enum, which `Copy` as a protocol does not give it |
-//! | `elementLeak` | U4 | leaks | a heap element inside a container; `drop` is whole-container |
+//! | `elementLeak` | U4 | leaks | a heap element inside a BUILT-IN container; an array cannot say whether it owns its elements |
+//! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
 //!
 //! **§10 does not reach this harness.** The census says a `spawn` frame is
@@ -421,9 +422,22 @@ const ROWS: &[Row] = &[
         export: "elementLeak",
         census: "U4",
         today: Shape::Leaks,
-        why: "a heap element inside a container. The array buffer is reclaimed and the String \
-              in it is not — releasing elements would free a `m.keys()` snapshot's pointers \
-              twice, because that snapshot holds the map's own",
+        why: "a heap element inside a BUILT-IN container. The array buffer is reclaimed and the \
+              String in it is not — releasing elements would free a `m.keys()` snapshot's \
+              pointers twice, because that snapshot holds the map's own. An `Array<T>` cannot \
+              say whether it owns its elements or views somebody else's. The row below is the \
+              same shape in a container that CAN say",
+    },
+    Row {
+        export: "slotsContainer",
+        census: "U4 / RFC-0090 M1",
+        today: Shape::Steady,
+        why: "Phase 8b: `std/slots` declares `impl<T> Owned for Slots<T>`, and the release gives \
+              back every element and then the five buffers. Three refusals had to move for it — \
+              a `mut` binding may take a declared release (the interpreter reads the slot now), \
+              a generic impl carries a row (the drop site solves the type arguments and asks for \
+              the instance), and `drop v` where `v: T` checks, because the instance decides. U4 \
+              opens for a container that knows what it owns, and stays open for one that cannot",
     },
     Row {
         export: "returnedString",
@@ -445,7 +459,9 @@ const ROWS: &[Row] = &[
 fn shapes_fixture() -> String {
     let pad = "x".repeat(900);
     format!(
-        r#"let mut seen: Int64 = 0
+        r#"import {{ Slots, newSlots, insert, count }} from "std/slots"
+
+let mut seen: Int64 = 0
 
 let mut acc: String = ""
 
@@ -553,6 +569,18 @@ export extern fn elementLeak() {{
     let mut xs: Array<String> = []
     xs.push(tag() + "!")
     seen = seen + Int64(xs.length)
+}}
+
+/// Census U4 through a container that DECLARES what it owns (RFC-0090 M1).
+///
+/// The same heap element as `elementLeak`, in a `Slots<String>` instead of a bare
+/// `Array<String>`. The slab is `mut` — `insert` takes `modify self` — so this
+/// row also proves the `mut` half: before Phase 8b a `mut` binding could not take
+/// a declared release at all, and every one of the five buffers stayed out.
+export extern fn slotsContainer() {{
+    let mut s: Slots<String> = newSlots()
+    let h = insert(s, tag() + "!")
+    seen = seen + count(s)
 }}
 
 export extern fn returnedString() -> String {{

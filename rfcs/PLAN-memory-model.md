@@ -275,18 +275,34 @@ carried the ownership fact — see the note under Phase 9.
   **The benchmark says 2.02×** in favour of `std/slots` (9.06 µs against
   `cell`'s 18.29 µs over the same five operations), where this RFC predicted
   1.86×.
-  **The reclamation claim does not hold, and 8c is blocked on it.** A `Slots` is
-  a `mut` record of `Array`s, and nothing releases it: `own::fate` refuses a
-  declared release for a `mut` binding, a generic `impl Owned` has no
-  monomorphized `release` at all, and U4 is still open under both. `cell`'s slab
-  DOES reclaim, so Path B must not be deleted until this is closed.
+  **The reclamation claim did not hold, and it created Phase 8b.** A `Slots` was
+  a `mut` record of `Array`s and nothing released it: `own::fate` refused a
+  declared release for a `mut` binding, a generic `impl Owned` had no
+  monomorphized `release` at all, and U4 was open under both. `cell`'s slab
+  DOES reclaim, so Path B could not be deleted until that was closed. 8b closed
+  it; the old 8b and 8c are now 8c and 8d.
   `.get(h)` is `fetch(s, h)` — `get` is reserved by Path B — and
   `people.insert(..)` is `insert(people, ..)`, because an impl method's receiver
   cannot be `modify`. See RFC-0090 "M1 as landed" and RFC-0091 "The
   generic-container correction".
-- **8b. Streams re-host** their cursor on `std/slots` (RFC-0075 M2c logic
+- **8b. A declared container is released — LANDED.** This phase was not in the
+  plan; Phase 8a created it, and 8c and 8d were both blocked on it. Three
+  refusals closed, all named at their sites in `own.rs`:
+  a `mut` binding may take a declared `release` (the interpreter reads the slot
+  now, so the three engines release the same value); a generic `impl Owned`
+  carries a row (the drop site solves the type arguments from the binding and
+  asks for the instance, which is the route a written call already took); and
+  census U4 opens for a container that DECLARES what it owns — `drop v` where
+  `v: T` checks, and the instance decides. `std/slots` gained
+  `impl<T> Owned for Slots<T>`, and a `Slots<String>` at block exit is flat:
+  720,896 -> 2,424,832 bytes before, 131,072 -> 131,072 after. The memory suite
+  gained a `slotsContainer` row. `elementLeak` did NOT flip and should not — a
+  built-in `Array<T>` cannot say whether it owns its elements. The gate row
+  holds at 2.0x, and a short-lived container is FASTER with the release than
+  without it. See RFC-0090 "M1 as landed".
+- **8c. Streams re-host** their cursor on `std/slots` (RFC-0075 M2c logic
   moves into std).
-- **8c. Delete Path B.** `cell/get/set/release`, `Type::Ref`, the LLVM cell
+- **8d. Delete Path B.** `cell/get/set/release`, `Type::Ref`, the LLVM cell
   prelude (158 lines), `direct.rs` `cell_runtime` (212 lines), the
   interpreter slab, `fresh_refs` and the §5.3 elision pass, `DropKind::
   ReleaseRef`. Update RFC-0004 with a "superseded by RFC-0090" section.
@@ -339,7 +355,7 @@ the shipped ABI, so it is an RFC-0012 edit rather than a phase's side effect.
 - Phase 4c changes drop *emission* in three engines at once; the interpreter's
   Rust values cannot leak, so interp==native divergence will surface as a
   native crash or a memory-test failure, not as output parity.
-- ~~Phase 7a (projections) is the only new mechanism; if it stalls, Phases 8a–8c
+- ~~Phase 7a (projections) is the only new mechanism; if it stalls, Phases 8a–8d
   can ship with `.get`/method access only, and 7 resumes after.~~ It did not
   stall. `Slots` can index through `place at`, and since 7b `slots[h] = v`
   stores through `place atSet` and `for x in slots` iterates.

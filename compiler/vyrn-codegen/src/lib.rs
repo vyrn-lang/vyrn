@@ -786,6 +786,11 @@ fn stream_step_sig(elem: &Type) -> Type {
 /// each of the six words means under each of the two producer tags.
 const STREAM_LL: &str = "{ ptr, i64, i64, i64, i64, i64 }";
 
+/// The reserved name a drop site parks a binding under so a declared `release`
+/// goes through the ordinary call path. Unlexable, so no program can name it.
+/// The direct backend parks its receiver under the same spelling.
+const REL_RECV: &str = "@rel";
+
 pub const GEN_MODE_READ: i32 = 0;
 pub const GEN_MODE_READ_BYTES: i32 = 1;
 pub const GEN_MODE_LIST: i32 = 2;
@@ -3192,6 +3197,21 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The declared type of the binding a drop-stack slot names.
+    ///
+    /// A slot name is minted once per `declare` and carries a serial, so this
+    /// reverse lookup has one answer. It is what a generic declared `release`
+    /// solves its type arguments from — the drop stack carries the storage and
+    /// the kind, and the concrete type lives with the binding.
+    fn slot_ty(&self, slot: &str) -> Option<Type> {
+        self.scope
+            .iter()
+            .rev()
+            .flat_map(|f| f.iter().rev())
+            .find(|(_, s, _)| s == slot)
+            .map(|(_, _, t)| t.clone())
+    }
+
     fn lookup(&self, name: &str) -> Option<(String, Type)> {
         for frame in self.scope.iter().rev() {
             for (n, slot, ty) in frame.iter().rev() {
@@ -3453,6 +3473,25 @@ impl<'a> Gen<'a> {
             // is what reclaims it. An ordinary call to an ordinary function —
             // the protocol decided WHICH, and this is only the lowering.
             DropKind::Release(f) => {
+                // A GENERIC declared release (`impl<T> Owned for Slots<T>`)
+                // flattens to a generic function, so its symbol depends on the
+                // type arguments and its definition has to be asked for. Park
+                // the binding under a reserved name and go through the ordinary
+                // call path, which solves them from the receiver, mangles the
+                // symbol and queues the instance — the same route a written
+                // call takes, and the one the direct backend already took.
+                // Errors are swallowed for the reason `Deep` swallows them: a
+                // drop this cannot emit is a leak, never a wrong free.
+                if self.funcs.get(f.as_str()).is_some_and(|c| !c.type_params.is_empty()) {
+                    if let Some(ty) = self.slot_ty(slot) {
+                        let f = f.clone();
+                        self.scope.push(vec![(REL_RECV.to_string(), slot.to_string(), ty)]);
+                        let recv = [Expr::Var { name: REL_RECV.to_string(), line: 0 }];
+                        let _ = self.gen_call(&f, &recv);
+                        self.scope.pop();
+                    }
+                    return;
+                }
                 let pty = self
                     .param_types
                     .get(f)
@@ -4098,11 +4137,20 @@ impl<'a> Gen<'a> {
                 // by the NAME, which resolving away would lose), then its
                 // structural form (which is where a generic substitution lands).
                 let rty = self.resolve(&ty);
-                let kind = self
+                // A type with no row releases nothing, and this is not an error:
+                // since Phase 8b the checker admits `drop v` where `v: T`, and
+                // the instance decides. `Slots<String>` frees a buffer here and
+                // `Slots<Person>` emits nothing, because a record is not on the
+                // list `own::release_kind` keeps. A concrete `drop` of a type
+                // that owns no heap was refused by the checker and never
+                // arrives.
+                let Some(kind) = self
                     .owned
                     .release_kind(&ty)
                     .or_else(|| self.owned.release_kind(&rty))
-                    .ok_or_else(|| format!("cannot drop non-heap value of type {rty:?}"))?;
+                else {
+                    return Ok(());
+                };
                 self.emit_drop(&slot, &kind);
                 Ok(())
             }

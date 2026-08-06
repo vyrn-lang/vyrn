@@ -2440,13 +2440,23 @@ impl<'a> Interp<'a> {
         // Values reclaimed when this frame exits (normally or via `return`),
         // mirroring the native backend's block-exit drops. Only a reference
         // release is observable here (the slab slot is recycled and stale
-        // aliases must trap); string/array buffers are host-reclaimed. The
-        // value is captured at the `let` (droppable bindings are immutable),
-        // which also keeps shadowed bindings reclaimable.
-        // Each entry is the captured value and, when the type declared
-        // `impl Owned` (RFC-0086 M1), the `release` to call on it.
-        let mut drops: Vec<(Val, Option<String>)> = Vec::new();
+        // aliases must trap); string/array buffers are host-reclaimed.
+        //
+        // Each entry is the binding's NAME, the value if it is already frozen,
+        // and — when the type declared `impl Owned` (RFC-0086 M1) — the
+        // `release` to call. The value is read out of the SLOT at exit, which is
+        // what both compiling backends load out of the alloca, so a `mut`
+        // binding releases what it holds last in all three engines (Phase 8b).
+        // A binding is frozen early only when a later `let` in this same block
+        // rebinds the name: the slot stops being this binding's there, and
+        // reading it at exit would release one value twice and the other never.
+        let mut drops: Vec<(&str, Option<Val>, Option<String>)> = Vec::new();
         for stmt in &block.stmts {
+            if let Stmt::Let { name, .. } = stmt {
+                for d in drops.iter_mut().filter(|d| d.0 == name && d.1.is_none()) {
+                    d.1 = scope.last().unwrap().get(name.as_str()).map(|s| s.v.clone());
+                }
+            }
             let flow = self.stmt(stmt, scope);
             match flow {
                 // Any early exit — `return`, `break`, or `continue` — runs this
@@ -2454,7 +2464,7 @@ impl<'a> Interp<'a> {
                 // does (RFC-0060: break/continue drop what a normal iteration
                 // end would). The signal then propagates to the enclosing loop.
                 Ok(flow @ (Flow::Return(_) | Flow::Break | Flow::Continue)) => {
-                    self.run_drops(&drops)?;
+                    self.run_drops(&drops, scope)?;
                     scope.pop();
                     return Ok(flow);
                 }
@@ -2470,9 +2480,7 @@ impl<'a> Interp<'a> {
                             _ => None,
                         };
                         if let Some(f) = release {
-                            if let Some(slot) = scope.last().unwrap().get(name) {
-                                drops.push((slot.v.clone(), f));
-                            }
+                            drops.push((name.as_str(), None, f));
                         }
                     }
                 }
@@ -2482,7 +2490,7 @@ impl<'a> Interp<'a> {
                 }
             }
         }
-        let r = self.run_drops(&drops);
+        let r = self.run_drops(&drops, scope);
         scope.pop();
         r?;
         Ok(Flow::Normal)
@@ -2496,15 +2504,30 @@ impl<'a> Interp<'a> {
     /// (`emit_all_drops` and `emit_releases_above` both walk their frame in
     /// reverse). It never mattered for a cell; a declared `release` can print, so
     /// now it does.
-    fn run_drops(&self, drops: &[(Val, Option<String>)]) -> Result<(), Ctrl> {
-        for (v, release) in drops.iter().rev() {
+    ///
+    /// An unfrozen entry reads its value out of the frame that is about to be
+    /// popped — the slot's last value, which is what the compiling backends
+    /// load. A name with no slot left is skipped rather than released as `Unit`.
+    fn run_drops(
+        &self,
+        drops: &[(&str, Option<Val>, Option<String>)],
+        scope: &[Frame],
+    ) -> Result<(), Ctrl> {
+        for (name, frozen, release) in drops.iter().rev() {
+            let v = match frozen {
+                Some(v) => v.clone(),
+                None => match scope.last().and_then(|f| f.get(*name)) {
+                    Some(s) => s.v.clone(),
+                    None => continue,
+                },
+            };
             match release {
                 Some(f) => {
-                    self.call(f, std::slice::from_ref(v))?;
+                    self.call(f, std::slice::from_ref(&v))?;
                 }
                 None => {
                     if let Val::Ref { slot, gen } = v {
-                        self.cell_release(*slot, *gen)?;
+                        self.cell_release(slot, gen)?;
                     }
                 }
             }

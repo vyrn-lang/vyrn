@@ -3083,9 +3083,21 @@ impl<'a> Checker<'a> {
                 // carries the measurement that kept them off; this list follows it
                 // rather than deciding a second time.
                 let t = self.base(&b.ty);
+                // A type PARAMETER passes, and the instance decides (Phase 8b).
+                // This body is checked once and lowered once per instantiation,
+                // so `drop v` where `v: T` is a `free` in `Slots<String>` and no
+                // instruction at all in `Slots<Int64>` — which is the plan's
+                // "conventions checked per monomorphized instance". Refusing it
+                // here is what kept a generic container from giving its elements
+                // back (census U4).
                 if matches!(
                     t,
-                    Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Ref(_) | Type::Map(..)
+                    Type::Str
+                        | Type::Array(_)
+                        | Type::SmallArray(..)
+                        | Type::Ref(_)
+                        | Type::Map(..)
+                        | Type::Param(_)
                 ) || (matches!(t, Type::Option(_) | Type::Result(..))
                     && crate::own::owns_heap(&t, &self.types))
                 {
