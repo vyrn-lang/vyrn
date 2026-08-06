@@ -107,7 +107,23 @@ linear memory. Because a `String`, `Bool`, and `Int32` all lower to a wasm
 string is allocated + copied) and *results* by an optional `exportReturns` hint
 (`"string"` → NUL-decoded, `"bool"` → `true`/`false`, else a number; `i64` is a
 BigInt, floats are numbers). The wrapper skips `memory`, `_start`,
-`__vyrn_malloc`, and any `__`-prefixed export. See the M2 section of
+`__vyrn_malloc`, and any `__`-prefixed export.
+
+**Who frees what.** Both directions are the caller's, and across this boundary
+the caller is the page. A String ARGUMENT is allocated here and released here,
+in a `finally` so a caught `panic` still frees it. A returned String is released
+here too, after decoding — RFC-0089 rule 3 says a return is owned, and Phase 6
+made an `export extern fn` that hands back something it does not own fail to
+compile: it may not return module state, may not return a projection, and may
+not declare a `consume` String parameter. Each refusal names `.copy()`. A String
+literal is the one pointer an export may return that is not heap, and it needs
+no rule — it carries `cap = 0` and sits below `HEAP_BASE`, which `__vyrn_free`
+ignores. `vyrn` exports `__vyrn_malloc` and `__vyrn_free` whenever an
+`export extern fn` takes OR returns a String.
+
+The release runs only for a result the page NAMED as a String. An export whose
+String return is missing from `exportReturns` is handed back as a number and
+leaks — the map is written by hand, and the compiler is the thing that knows. See the M2 section of
 [externdemo.html](externdemo.html) driving
 [examples/externdemo2.vyrn](../examples/externdemo2.vyrn).
 

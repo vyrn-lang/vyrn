@@ -147,6 +147,19 @@ A returned `String` is still not freed. Who owns one is `own::analyze`'s answer
 per function and nothing carries it across the boundary — see RFC-0077 "M6, as
 landed".
 
+**Both paragraphs are closed by RFC-0089.** Rule 2 refuses the stored parameter,
+for every function rather than only an exported one (M2, Phase 4b-2), and the
+five handlers write `.copy()` rather than `arg + ""` (M3b). Rule 3 makes a
+returned String the caller's, so `wasi-min.js` frees it after decoding (M3b) —
+nothing carries a fact across the boundary because there is only one answer.
+Making that true cost three refusals, all of them Phase 6's finding: an
+`export extern fn` may not return module state, may not return a projection, and
+may not declare a `consume` String parameter. The last one is this section's
+own ABI: RFC-0012 gives the argument to the caller, and `consume` said the
+callee took it. The signature compiled and the page freed the buffer anyway.
+`__vyrn_malloc` and `__vyrn_free` now go out whenever an `export extern fn`
+takes OR returns a String.
+
 **Zero-copy over a foreign buffer is impossible on wasm.** RFC-0082 lists
 "zero-copy over a buffer Vyrn does not own" among the capabilities a raw-memory
 view would serve. On this target that item is unreachable whatever the language

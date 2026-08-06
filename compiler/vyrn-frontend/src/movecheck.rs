@@ -2904,6 +2904,72 @@ mod tests {
             .is_ok());
     }
 
+    /// RFC-0089 rule 3, Phase 6. Module state is nobody's borrow, and that is
+    /// where `check_return` let a lend through: `return title` handed the caller
+    /// a buffer the module still holds, and the caller freed it at block exit.
+    /// The interpreter's values cannot dangle, so the wasm column printed the
+    /// next allocation's bytes where the interpreter printed the String.
+    #[test]
+    fn returning_module_state_is_refused() {
+        let src = "let mut title = \"x\" \
+                   fn get() -> String { return title } \
+                   fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`title` may not be returned") && e.contains("module state"), "{e}");
+        assert!(e.contains("fix: `title.copy()`"), "{e}");
+        // A field of module state is the same buffer through one more hop.
+        let src = "type R = { s: String } let mut r = R { s: \"x\" } \
+                   fn get() -> String { return r.s } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(run(src).unwrap_err().contains("`r.s` may not be returned"), "field");
+        // The named fix compiles.
+        assert!(run("let mut title = \"x\" fn get() -> String { return title.copy() } \
+                     fn main() -> Int64 { return 0 }")
+            .is_ok());
+        // A type nobody releases is not a use-after-free, so it is not refused.
+        assert!(run("type R = { s: String } let mut r = R { s: \"x\" } \
+                     fn get() -> R { return r } fn main() -> Int64 { return 0 }")
+            .is_ok());
+    }
+
+    /// Rule 3 admits a lend where the caller is Vyrn — `ownership` reads the
+    /// `lending` set and releases nothing. A JS caller reads nothing, and since
+    /// RFC-0089 M3b `wasi-min.js` frees every String an export hands back. So an
+    /// export owns its result or it does not compile.
+    #[test]
+    fn an_export_may_not_lend_its_result() {
+        let enum_and_state = "type Tag = | Word(String) | Num(Int64) \
+                              let mut tag = Word(\"w\") ";
+        let body = "return match tag { Word(s) => s, Num(n) => \"num\", } } \
+                    fn main() -> Int64 { return 0 }";
+        // An ordinary function may lend: the caller is Vyrn and knows not to free.
+        assert!(run(&format!("{enum_and_state} fn text() -> String {{ {body}")).is_ok());
+        let e = run(&format!("{enum_and_state} export extern fn text() -> String {{ {body}"))
+            .unwrap_err();
+        assert!(e.contains("may not be returned from an exported function"), "{e}");
+        assert!(e.contains("fix: `s.copy()`"), "{e}");
+        let fixed = "return match tag { Word(s) => s.copy(), Num(n) => \"num\", } } \
+                     fn main() -> Int64 { return 0 }";
+        assert!(run(&format!("{enum_and_state} export extern fn text() -> String {{ {fixed}"))
+            .is_ok());
+    }
+
+    /// Phase 6's other half of the menu: inside an `export extern fn` the
+    /// `consume` fix does not exist, so it is not offered.
+    #[test]
+    fn an_exports_borrow_menu_names_copy_alone() {
+        let src = "let mut kept = \"x\" \
+                   export extern fn set(arg: String) { kept = arg } \
+                   fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("fix: `arg.copy()`"), "{e}");
+        assert!(!e.contains("consume"), "an export may not consume a String: {e}");
+        assert!(run("let mut kept = \"x\" \
+                     export extern fn set(arg: String) { kept = arg.copy() } \
+                     fn main() -> Int64 { return 0 }")
+            .is_ok());
+    }
+
     #[test]
     fn rule_2_refuses_a_stored_borrow() {
         let src = "type R = { s: String }                    fn keep(x: String) -> R { return R { s: x } }                    fn main() -> Int64 { return 0 }";
