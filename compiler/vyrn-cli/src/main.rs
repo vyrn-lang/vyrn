@@ -31,6 +31,7 @@
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
 //!   vyrn why     --contract <file>      Print the contract governing a module (RFC-0071)
+//!   vyrn fix     [file.vyrn]            Apply the `.copy()` fixes the move diagnostics name.
 //!   vyrn why     --memory <file>        Print what is reclaimed, and why not (RFC-0087 U1)
 //!                                        and every export's status against it.
 //!
@@ -56,7 +57,8 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -373,6 +375,7 @@ fn real_main() -> ExitCode {
     };
 
     match cmd {
+        "fix" => fix_cmd(path, &source),
         "check" => match load_program(path, &source) {
             Ok(_) => {
                 println!("ok");
@@ -414,7 +417,7 @@ fn real_main() -> ExitCode {
         }
         "emit-gen" => emit_gen(path, &source, want_maps),
         other => {
-            eprintln!("unknown command `{other}` (expected run, check, emit-ir, emit-gen, build, test, bench, or serve)");
+            eprintln!("unknown command `{other}` (expected run, check, fix, emit-ir, emit-gen, build, test, bench, or serve)");
             ExitCode::from(2)
         }
     }
@@ -1068,8 +1071,6 @@ fn json_str(s: &str) -> String {
 ///
 /// It reports; it does not gate. Exit 0 whenever it could answer.
 fn why_memory(file: &str) -> ExitCode {
-    use vyrn_frontend::own::Fate;
-
     let path = match Path::new(file).canonicalize() {
         Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
         Err(e) => {
@@ -1118,7 +1119,7 @@ fn why_memory(file: &str) -> ExitCode {
         match own.owned_fns.get(&f.name) {
             Some(kind) => println!(
                 "    transfers: yes — the caller owns the result, and releases it by {}",
-                release_words(kind)
+                kind.words()
             ),
             // RFC-0089 rule 3: a return is owned. A heap return type always
             // transfers, so the only other answer is that the type owns nothing.
@@ -1132,34 +1133,22 @@ fn why_memory(file: &str) -> ExitCode {
             }
         };
         for n in notes {
+            use vyrn_frontend::own::Fate;
             bindings += 1;
-            let text = match &n.fate {
-                Fate::Reclaimed(kind) => {
-                    reclaimed += 1;
-                    format!("reclaimed at block exit — {}", release_words(kind))
-                }
-                Fate::Moved { line, into } => {
-                    moved += 1;
-                    format!("moved at line {line} into {into}")
-                }
-                Fate::Dropped { line } => {
-                    dropped += 1;
-                    format!("reclaimed by `drop` at line {line}")
-                }
-                Fate::Static => {
-                    statics += 1;
-                    "static data — nothing reclaims it, and nothing needs to".into()
-                }
+            match &n.fate {
+                Fate::Reclaimed(_) => reclaimed += 1,
+                Fate::Moved { .. } => moved += 1,
+                Fate::Dropped { .. } => dropped += 1,
+                Fate::Static => statics += 1,
                 Fate::Leaked(reason) => {
                     let key = reason.kind();
                     match leaked.iter_mut().find(|(k, _)| *k == key) {
                         Some((_, c)) => *c += 1,
                         None => leaked.push((key, 1)),
                     }
-                    format!("NOT reclaimed — {reason}")
                 }
-            };
-            println!("    line {:<5} {:<16} {}", n.line, n.name, text);
+            }
+            println!("    line {:<5} {:<16} {}", n.line, n.name, n.fate.words());
         }
     }
 
@@ -1174,20 +1163,6 @@ fn why_memory(file: &str) -> ExitCode {
         println!("    {count:>5}  {reason}");
     }
     ExitCode::SUCCESS
-}
-
-/// How a release kind reclaims, in words.
-fn release_words(kind: &vyrn_frontend::own::DropKind) -> String {
-    use vyrn_frontend::own::DropKind::*;
-    match kind {
-        FreeStr => "freeing the String buffer".into(),
-        FreeArr => "freeing the array buffer".into(),
-        FreeSmallArr => "freeing the spilled buffer, if it spilled".into(),
-        FreeMap => "freeing both map buffers".into(),
-        CloseStream => "closing the stream".into(),
-        Deep(ty) => format!("releasing what the {ty} holds"),
-        Release(f) => format!("calling `{f}`"),
-    }
 }
 
 /// `vyrn why <file>` (RFC-0072 M1) — the audience of a module, the path segment
@@ -2053,6 +2028,211 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// with compile-time diagnostics filtered out (`parity::runtime_err`) — the
 /// invariant is that the PROGRAM behaves identically on all three backends, and a
 /// warning is about the compile.
+/// `vyrn fix [file]` (RFC-0087 U2) — apply the `.copy()` a move diagnostic
+/// names, and refuse everything else.
+///
+/// Since Phase 4b every rule-1/2/3 error is a menu: the offending line, then one
+/// `fix:` per way out. Phase 4b migrated 65 sites by hand and 4b-2 another 262,
+/// and 299 of those 327 were the same edit — put `.copy()` on the path. This is
+/// that edit, made by the compiler that named it.
+///
+/// **It applies one fix and one only: `.copy()`.** The other two entries on the
+/// menu are decisions, not edits. `consume` on a parameter changes the
+/// signature, so it changes what every caller may do with its argument;
+/// `for x in consume xs` gives the loop the container, so it decides that
+/// nothing after the loop wants it. The compiler knows both are legal where it
+/// offers them and neither is what the author meant. A fix that guesses is worse
+/// than no fix, so this refuses them by name.
+///
+/// **It edits the file it was given and no other.** A diagnostic in an imported
+/// module is reported, not fixed: `std/` and a vendored remote are not the
+/// caller's to rewrite, and a file the caller does own is one more `vyrn fix`.
+///
+/// **The compiler verifies every round.** A round applies at most one edit per
+/// line, re-loads, and keeps the result only if the diagnostic count went down.
+/// The tool therefore cannot leave a file that compiles worse than it found it.
+fn fix_cmd(path: &str, source: &str) -> ExitCode {
+    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let mut text = source.to_string();
+    let mut rounds = 0usize;
+    let mut applied: Vec<String> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+
+    loop {
+        let diags = fix_diagnostics(&root_key, &text);
+        let mine: Vec<&vyrn_frontend::diagnostics::Diagnostic> = diags
+            .iter()
+            .filter(|d| d.stage == "movecheck" && d.file.is_none())
+            .collect();
+        // One edit per line: two fixes on one line are two searches over text
+        // that the first edit already moved.
+        let mut edits: Vec<(usize, String)> = Vec::new();
+        let mut seen_lines: Vec<usize> = Vec::new();
+        for d in &mine {
+            if seen_lines.contains(&d.line) {
+                continue;
+            }
+            match copy_path(&d.message) {
+                Some(p) => {
+                    seen_lines.push(d.line);
+                    edits.push((d.line, p));
+                }
+                None => {
+                    let first = d.message.lines().next().unwrap_or_default();
+                    let note = format!("{}:{}: {first}", root_key, d.line);
+                    if !refused.contains(&note) {
+                        refused.push(note);
+                    }
+                }
+            }
+        }
+        if edits.is_empty() {
+            for d in &diags {
+                if d.file.is_some() {
+                    let first = d.message.lines().next().unwrap_or_default();
+                    let where_ = d.file.as_deref().unwrap_or(&root_key);
+                    let note = format!("{where_}:{}: {first} (another file)", d.line);
+                    if !refused.contains(&note) {
+                        refused.push(note);
+                    }
+                }
+            }
+            break;
+        }
+        let mut next = text.clone();
+        let mut this_round: Vec<String> = Vec::new();
+        for (line, p) in &edits {
+            match insert_copy(&next, *line, p) {
+                Ok(t) => {
+                    next = t;
+                    this_round.push(format!("{root_key}:{line}: `{p}` -> `{p}.copy()`"));
+                }
+                Err(why) => {
+                    let note = format!("{root_key}:{line}: {why}");
+                    if !refused.contains(&note) {
+                        refused.push(note);
+                    }
+                }
+            }
+        }
+        if this_round.is_empty() {
+            break;
+        }
+        // The compiler is the check. An edit that does not reduce the problem
+        // count is discarded whole, because a fix that trades one error for
+        // another is a guess with extra steps.
+        if fix_diagnostics(&root_key, &next).len() >= diags.len() {
+            refused.push(format!(
+                "{root_key}: {} edit(s) rolled back — they did not reduce the diagnostics",
+                this_round.len()
+            ));
+            break;
+        }
+        text = next;
+        applied.extend(this_round);
+        rounds += 1;
+        // A round always reduces the count, so this bound is only reached by a
+        // file with hundreds of sites — and then it is worth running again.
+        if rounds >= 100 {
+            break;
+        }
+    }
+
+    if text != source {
+        if let Err(e) = std::fs::write(path, &text) {
+            eprintln!("error: cannot write {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    for a in &applied {
+        println!("{a}");
+    }
+    for r in &refused {
+        println!("not fixed: {r}");
+    }
+    println!(
+        "{} fix(es) applied, {} left",
+        applied.len(),
+        refused.len()
+    );
+    // Reports; does not gate. A file with nothing to fix and a file this refuses
+    // to touch both exit 0 — `vyrn check` is the gate.
+    ExitCode::SUCCESS
+}
+
+/// Load `text` as `root_key` and return every diagnostic, printing nothing.
+fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+    let opts = load_options(root_key);
+    let resolver = make_resolver(root_key);
+    match vyrn_frontend::load_warned(text, root_key, &opts, &resolver).0 {
+        Ok(_) => Vec::new(),
+        Err(d) => d,
+    }
+}
+
+/// The path a `.copy()` fix names, out of a diagnostic's menu.
+///
+/// A menu line is ``  fix: `PATH.copy()` <why>``. Nothing else in the message
+/// has that shape, so this is a read of the text `movecheck::menu` writes rather
+/// than a second table that would have to be kept in step with it.
+fn copy_path(message: &str) -> Option<String> {
+    for line in message.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("fix: `") else { continue };
+        let Some((quoted, _)) = rest.split_once('`') else { continue };
+        if let Some(p) = quoted.strip_suffix(".copy()") {
+            if !p.is_empty() {
+                return Some(p.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Put `.copy()` after the single occurrence of `path` on 1-based `line`.
+///
+/// Refuses rather than chooses. The occurrence must be whole — not the tail of a
+/// longer name, and not a receiver something else is read out of — and there must
+/// be exactly one of it. Two occurrences on one line means the diagnostic's line
+/// number cannot say which, and guessing is the failure this tool exists to
+/// avoid.
+fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let l = lines.get(line.saturating_sub(1)).ok_or_else(|| format!("no line {line}"))?;
+    let mut hits: Vec<usize> = Vec::new();
+    let mut from = 0usize;
+    while let Some(i) = l[from..].find(path) {
+        let at = from + i;
+        let end = at + path.len();
+        let before_ok = at == 0 || !l[..at].chars().next_back().is_some_and(|c| is_word(c) || c == '.');
+        // A following `.` or `(` means the occurrence is a receiver or a callee,
+        // not the value the diagnostic is about.
+        let after_ok = !l[end..].chars().next().is_some_and(|c| is_word(c) || c == '.' || c == '(');
+        if before_ok && after_ok {
+            hits.push(at);
+        }
+        from = at + 1;
+    }
+    match hits.len() {
+        1 => {
+            let at = hits[0] + path.len();
+            let mut out = String::with_capacity(text.len() + 7);
+            for (i, src) in lines.iter().enumerate() {
+                if i + 1 == line {
+                    out.push_str(&src[..at]);
+                    out.push_str(".copy()");
+                    out.push_str(&src[at..]);
+                } else {
+                    out.push_str(src);
+                }
+            }
+            Ok(out)
+        }
+        0 => Err(format!("`{path}` is not on the line as written")),
+        n => Err(format!("`{path}` appears {n} times on the line — which one is not said")),
+    }
+}
+
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.

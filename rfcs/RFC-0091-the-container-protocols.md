@@ -1,7 +1,11 @@
 # RFC-0091 — The Container Protocols
 
-- **Status:** Proposed. The generalization layer over RFC-0089/0090: what makes
-  a third-party container indistinguishable from a built-in.
+- **Status:** **M1, M2 and M3 implemented** (Phases 7a and 7b); M4 not started.
+  The generalization layer over RFC-0089/0090: what makes a third-party
+  container indistinguishable from a built-in. `place`/`yield` members, `Copy`,
+  `Iterate` and `Index` all ship, and `std/slots` is the customer that proved
+  them. Read "M2 as landed", "M1 and M3 as landed" and "The generic-container
+  correction" — the last records two things this RFC says that are wrong.
 - **Depends on:** RFC-0086 M1 (`Owned` — the pattern this repeats), RFC-0089
   (conventions), RFC-0090 (`Slots` is the first customer), RFC-0080
   (associated types), RFC-0084 (records dispatch), RFC-0082 (the thesis)

@@ -1,7 +1,15 @@
 # RFC-0086 — The Compiler Asks the Type
 
-- **Status:** M1 implemented. M2 blocked — the protocol needs a receiver-less
-  method and the language has none; see "M2 — what it needs". M3–M4 designed.
+- **Status:** M1 implemented, and extended twice since. M2 blocked — the protocol
+  needs a receiver-less method and the language has none; see "M2 — what it
+  needs". M3–M4 designed, and M3 is the open half of RFC-0087 U7.
+  **Two corrections to "M1 — as landed" below, both later than it.**
+  RFC-0089 Phase 4c deleted `Analysis::transfers` and the whole inference half of
+  `own.rs`: ownership is emission from the type, not inference over the
+  expression, so the "two questions" that section describes are one question now.
+  RFC-0090 Phase 8b gave a **generic** `impl Owned` a row — the drop site solves
+  the type arguments from the binding and asks for the instance — which is what
+  made `impl<T> Owned for Slots<T>` reclaim anything.
 - **Depends on:** RFC-0084 (records are legal protocol targets, and conformance
   is checked), RFC-0002 §5 (protocols, static monomorphized dispatch),
   RFC-0080 (generic impls, associated types)

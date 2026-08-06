@@ -1,8 +1,11 @@
 # RFC-0087 — Every Memory Scenario, and What Handles It
 
-- **Status:** Census. No milestone implemented. Part I is correctness — is memory
-  reclaimed. Part II is usability — can a person see the model. Part III is cost —
-  what does it spend. The three ranked tables are the proposed work.
+- **Status:** **Census, closed.** The arc it opened (RFC-0089, RFC-0090,
+  RFC-0091, nine phases) is finished, and "The census, closed" at the end of this
+  file is its final state: what closed, what did not, and what the arc found
+  instead. Part I is correctness — is memory reclaimed. Part II is usability —
+  can a person see the model. Part III is cost — what does it spend. The three
+  ranked tables were the proposed work; each now carries its outcome.
 - **Depends on:** RFC-0004 (the hybrid model), RFC-0011 (elements are a safe
   leak), RFC-0012 (the extern String ABI), RFC-0075 (linear streams),
   RFC-0077 M6 (the wasm allocator), RFC-0086 M1 (the compiler asks the type)
@@ -452,23 +455,28 @@ So the following are not re-litigated:
 
 ## The correctness gaps, ranked
 
-| # | gap | consequence | cost |
+The `outcome` column is the final state; the memory suite
+(`compiler/vyrn-cli/tests/memory.rs`) is the authority behind every row that
+names a test.
+
+| # | gap | consequence | outcome |
 |---|---|---|---|
-| 1 | **§9b** an export may retain its String param | use-after-free | a checker rule over an existing walker |
-| 2 | **§14** a heap value inside `Option`/`Result`/`Validation` | unbounded leak **in the recommended style** | variant-aware payload release; `CloseStream` is the precedent |
-| 3 | **§4** an overwrite never releases the old value | unbounded leak in the server shape | slot-level ownership, plus release-after-store ordering |
-| 4 | **§13** one memory test, one shape | every gap here is invisible | more entry points in one existing file |
-| 5 | **§9a** a returned String leaks | unbounded, per call | emit `owned_fns` into the export map |
-| 6 | **§7** linearity is hardcoded to `Stream` | a user resource gets no obligation | RFC-0086 M3 |
-| 7 | **§2a** six expression forms never transfer | leak | extend `transfers`; §14 covers `Match` and `Try` |
-| 8 | **§15** `bytes` and friends are not producers | leak | §14 covers the routed ones; `bytes` needs the list |
-| 9 | **§16** a closure capture block is never freed | leak per lambda evaluation | the same question as §14, in another aggregate |
-| 10 | **§10** a spawn frame is never freed | bounded leak | free at the first `join`, keep idempotence |
-| 11 | **§5** regions are hand-placed | the model's best tool is rarely reachable | RFC-0004 Q3, undesigned |
-| 12 | **§6** use-after-release traps at run time | not compile-time | region borrowing, undesigned |
+| 1 | **§9b** an export may retain its String param | use-after-free | **CLOSED**, Phase 4b-2 — rule 2 refuses the store for every function, not only an exported one |
+| 2 | **§14** a heap value inside `Option`/`Result`/`Validation` | unbounded leak **in the recommended style** | **HALF.** Phase 5 makes an `Option`/`Result` release its payload; `optionString` still leaks — see the open tail |
+| 3 | **§4** an overwrite never releases the old value | unbounded leak in the server shape | **CLOSED**, Phase 5 — both rows steady, and P1 with them |
+| 4 | **§13** one memory test, one shape | every gap here is invisible | **CLOSED**, Phase 1 — twelve rows, and every phase since flipped one or failed |
+| 5 | **§9a** a returned String leaks | unbounded, per call | **CLOSED**, Phase 6 — rule 3 makes a return owned, and RFC-0012 M3 makes the page know its type |
+| 6 | **§7** linearity is hardcoded to `Stream` | a user resource gets no obligation | **OPEN.** RFC-0086 M3, untouched by this arc. The `must-use` row exists (Phase 4b) and only the compiler may write it |
+| 7 | **§2a** six expression forms never transfer | leak | **CLOSED**, Phase 4c — the expression's form stopped deciding; the type decides |
+| 8 | **§15** `bytes` and friends are not producers | leak | **CLOSED**, Phase 4c — same deletion; `views` is the remaining hand-written list, and it is the opposite direction |
+| 9 | **§16** a closure capture block is never freed | leak per lambda evaluation | **OPEN.** `lambdaLoop` leaks — see the open tail |
+| 10 | **§10** a spawn frame is never freed | bounded leak | **OPEN on native, absent on wasm.** The direct backend lowers `spawn f(a)` to `f(a)` and allocates no frame, so this harness cannot see it |
+| 11 | **§5** regions are hand-placed | the model's best tool is rarely reachable | **OPEN.** RFC-0004 Q3, still undesigned. The arena survived Path B's deletion as Path A's second half |
+| 12 | **§6** use-after-release traps at run time | not compile-time | **STRUCK.** Path B is deleted (RFC-0090 M4); there is no `release` to use after |
 
 1 is a soundness defect and everything else is a leak. **§17 multiplies 2, 3, 8 and
 9 by the length of a browser session**, because the instance survives navigation.
+Of the four, 3 and 8 are closed, 2 is half, and 9 is the open tail.
 
 Read 2, 9 and 14 together. All three are the same question — *who releases a heap
 value held inside an aggregate the compiler copies* — asked about an enum payload, a
@@ -514,6 +522,31 @@ observe, so they never build the instinct the model needs.
 whether it is reclaimed and the reason it is not — aliased, escaped into a call,
 `mut`, inside a region, or a type with no release. Then the same text as an LSP
 hover. The analysis exists. This is a printer.
+
+**CLOSED, in two halves.** Phase 1 built `vyrn why --memory`: per binding,
+reclaimed or not, the release kind, and the reason when it is not. Phase 9 put
+the same answer in the editor, off the same table:
+
+- **hover** on a binding appends `memory: …` — reclaimed and how, moved and
+  where, reclaimed by `drop`, static, or the reason it is not reclaimed
+- **a token modifier** on the occurrence that takes the value, so the point where
+  a value stops being live is coloured rather than worked out by reading
+- **an inlay hint** at every move, naming where the value went
+
+One table feeds all three, and `Fate::words` is the one wording — the shell and
+the editor cannot say different things about the same binding, because they read
+the same function. A binding whose type owns no heap gets no note: "NOT
+reclaimed" is the wrong sentence about an `Int64`.
+
+The answer is computed only when the checks ran and found nothing, which is what
+keeps it off the keystroke path for the buffers that need it least. Measured:
+`examples/graphql.vyrn` went 48.5 ms to 53.1 ms against RFC-0084's 97 ms budget.
+
+The three lines this section opens with now read differently in the editor, and
+two of them stopped being true on the way: since Phase 4c a `mut` String IS
+tracked and an if-expression DOES transfer, because reclamation follows the type
+and the expression's form stopped deciding. The gap was never only that the model
+was invisible — it was that what you could not see was also wrong.
 
 ---
 
@@ -705,30 +738,42 @@ by the rules rather than by an analysis: the caller owns the parameter (so an
 export may not `consume` one, and may not store one without `.copy()`), and the
 caller owns the return (so an export may not lend one). A reader does not have to
 find out — there is only one answer, and the compiler says so when a program tries
-the other. What is still a convention is the *type* hint: `exportReturns` is
-hand-written per page, so an export whose String return nobody named is decoded as
-a number and leaks. The compiler knows the return type. Emitting it in a custom
-wasm section would delete the map.
+the other.
+
+**The type hint is closed too, by RFC-0012 M3 (Phase 9).** It was the last
+convention at this boundary: `exportReturns` was hand-written per page, so an
+export whose String return nobody named came back as a number — and since M3b the
+same hint also decided the `free`, so a missed name leaked as well. A module now
+carries a `vyrn:exports` custom section naming every `String`/`Bool` result, and
+`wasi-min.js` reads it in the section walk it already ran. Five hand-written maps
+are deleted. Nothing at this boundary is a convention now: the ownership is a
+rule, and the type is in the module.
 
 ---
 
 ## The usability gaps, ranked
 
-| # | gap | why it ranks here | cost |
+| # | gap | why it ranks here | outcome |
 |---|---|---|---|
-| 1 | **U1** the model is invisible | every other gap compounds; a user cannot learn it | a printer over `Ownership` |
-| 2 | **U2** no way to copy | the only fix for a use-after-free is a trick that leaks | one builtin, then a diagnostic names it |
-| 3 | **U10** the extern boundary cannot be declared | the one place the answer is required | falls out of §9a and §9b |
-| 4 | **U8** a declared container cannot be read | `impl Owned` is shipped and not yet usable | `read` as a real capability |
-| 5 | **U5** the failure message has no location | the worst moment to say the least | NARROWED by RFC-0090 M4 — it is `panic`'s missing line now, not the memory model's, and it belongs to RFC-0079 |
-| 6 | **U4** an element is unreclaimable | the largest silent restriction | half closed (Phase 8b): a DECLARED container reaches its elements; a built-in `Array<T>` still cannot say it owns them |
-| 7 | **U7** `consume` and linearity are two things | the surface implies one | a decision, then RFC-0086 M3 |
-| 8 | **U6** the arena excludes its own case | the model's best tool is unreachable | RFC-0004 Q3, undesigned |
-| 9 | **U9** three layouts, one syntax | justified, but unannounced | U1 covers it |
+| 1 | **U1** the model is invisible | every other gap compounds; a user cannot learn it | **CLOSED.** `vyrn why --memory` (Phase 1), then hover + last-use modifier + move inlay hints (Phase 9), all off one table |
+| 2 | **U2** no way to copy | the only fix for a use-after-free is a trick that leaks | **CLOSED.** `x.copy()` (RFC-0089 M1b), a protocol since RFC-0091 M1, named by every refusal, and applied by `vyrn fix` (Phase 9) |
+| 3 | **U10** the extern boundary cannot be declared | the one place the answer is required | **CLOSED.** Ownership by rule (RFC-0089 M3b), type by the `vyrn:exports` section (RFC-0012 M3) |
+| 4 | **U8** a declared container cannot be read | `impl Owned` is shipped and not yet usable | **CLOSED in practice.** Phase 4c deleted the escape walker that removed a read receiver from `droppable`, and `std/slots` is a declared container the corpus reads on every call |
+| 5 | **U5** the failure message has no location | the worst moment to say the least | **NARROWED, not closed.** RFC-0090 M4 replaced the message with `panic("slots: handle is not alive")`, which a library author owns — but `panic` lowers to `error: %s` with no line on any engine. RFC-0079's gap now |
+| 6 | **U4** an element is unreclaimable | the largest silent restriction | **HALF, and the other half is correct.** A DECLARED container reaches its elements (Phase 8b); a built-in `Array<T>` cannot say whether it owns them, and `m.keys()` is the view a per-element release would free twice |
+| 7 | **U7** `consume` and linearity are two things | the surface implies one | **OPEN.** RFC-0086 M3. The arc did not touch it, and the decision it asks for is still undecided |
+| 8 | **U6** the arena excludes its own case | the model's best tool is unreachable | **OPEN.** RFC-0004 Q3, undesigned. Path B went; Path A's arena stayed |
+| 9 | **U9** three layouts, one syntax | justified, but unannounced | **COVERED by U1** — hover names the layout, because it names the type |
 
 **U3 left this table entirely.** "Path B is not subject-first" was rank 7; the
 four names it was about are deleted (RFC-0090 M4) and the replacement is
 subject-first by construction. Ten gaps, nine now.
+
+**U5 did NOT leave with it.** The plan said U3 and U5 both went with Path B in
+Phase 8e. U3 did. U5 is narrowed: the message it names is gone, and the missing
+line is still missing, one level down. Phase 8e checked by running
+`examples/slots.vyrn` after a first draft claimed otherwise, and the output was
+`error: slots: handle is not alive` and nothing else.
 
 **U1 and U2 change how the language feels.** U1 costs a printer over data that
 already exists. U2 costs one builtin. Neither needs a new analysis, and between
@@ -901,15 +946,15 @@ P1 was found by writing eight lines and running them twice.
 
 ## The performance gaps, ranked
 
-| # | gap | measured | cost to close |
+| # | gap | measured | outcome |
 |---|---|---|---|
-| 1 | **P1** a module-state accumulator is quadratic and leaks | **52× slower, 12.2 GB for a 160 KB string** | §4's slot ownership, or extend `str_append` past locals |
-| 2 | **P3** Part I's leaks are the performance story | 3 → 279 pages, and P1 | Part I's ranked table |
-| 3 | **P2** a String has no length header | every `byteLength` and every concat scans | a header — which the allocator already pays for |
-| 4 | **P8** nothing benchmarks the model | — | benchmarks for alloc, concat, and `get` |
-| 5 | **P4** no coalescing, no splitting, no shrink | — | measure first; a phase-change workload decides |
-| 6 | **P6** the LLVM slab is static | BSS in every binary | copy the direct backend's lazy slab |
-| 7 | **P5** 94% of generation checks survive | 3 of 48 elided | needs a loop benchmark before it needs a change |
+| 1 | **P1** a module-state accumulator is quadratic and leaks | **52× slower, 12.2 GB for a 160 KB string** | **CLOSED**, Phase 5 — 5 ms and 4.6 MB. The in-place append whitelist reads the whole program, so module state is the same program as the local |
+| 2 | **P3** Part I's leaks are the performance story | 3 → 279 pages, and P1 | **CLOSED for the rows that closed** — nine of twelve memory rows are steady |
+| 3 | **P2** a String has no length header | every `byteLength` and every concat scans | **CLOSED**, Phase 2 — `{len, cap}` behind the pointer, so a String is still one word |
+| 4 | **P8** nothing benchmarks the model | — | **CLOSED**, Phase 1 — `examples/membench.vyrn`, which every phase since has read |
+| 5 | **P4** no coalescing, no splitting, no shrink | — | **OPEN.** Still unmeasured, and still the right order: measure first |
+| 6 | **P6** the LLVM slab is static | BSS in every binary | **STRUCK.** Both slabs are deleted (RFC-0090 M4). The LLVM one cost nothing anyway — its four arrays were `zeroinitializer`, so the linker dropped them |
+| 7 | **P5** 94% of generation checks survive | 3 of 48 elided | **STRUCK.** There is no generation check in any engine now, except in `std/slots.vyrn`, which is Vyrn. Phase 8d measured the elision three ways and found it had no customer |
 
 **P1 and P8 are the pair.** P1 is a 52× cliff with an invisible trigger, and P8 is
 why nobody found it. Four of the seven rows above would be numbers rather than
@@ -919,3 +964,111 @@ The three parts converge on one sentence. **§13**: the compiler cannot see its 
 leaks. **U1**: the user cannot see whether a value is reclaimed. **P8**: nothing
 measures what any of it costs. Three faces of the same absence, and the data for
 the first two already exists inside `own::Ownership`.
+
+**All three closed first, and in that order** — Phase 1 built the memory suite,
+the benchmark and `vyrn why --memory` in one PR, before any semantic change. Every
+phase after it was decided by a number one of the three produced. That was the
+plan's gate and it held: nothing in this arc was argued from reading alone.
+
+---
+---
+
+# The census, closed
+
+Nine phases, RFC-0089 + RFC-0090 + RFC-0091. What the three tables above came to.
+
+## The score
+
+- **Correctness (12 rows):** 6 closed, 1 half, 1 struck, 4 open — and 2 of the 4
+  are undesigned design questions (§5 regions, §7 linearity as a declaration)
+  rather than defects.
+- **Usability (10 rows, 9 after U3 left):** 4 closed, 1 closed in practice, 1
+  covered, 1 half, 1 narrowed, 2 open.
+- **Performance (7 rows):** 4 closed, 2 struck, 1 open and correctly unmeasured.
+
+The memory suite is the ledger: **nine of twelve rows steady, three leaking**, and
+each of the three leaking rows asserts that it leaks, so the day one of them stops
+is a test failure and not a silence.
+
+## What the arc found that the census did not name
+
+Every phase corrected the brief that launched it. The load-bearing ones:
+
+- **A three-word String would have moved a row this arc was required not to
+  move.** M1a intended `{ptr, len, cap}`; an `Option` payload is one word, so it
+  would have boxed, and `optionString` was already leaking. The header went behind
+  the pointer instead.
+- **Rule 2's real cost was measured per-file and was wrong.** 288 sites became 207
+  linked, and 137 of the 207 needed no copy at all — 91 of them were rule 2 being
+  wrong about a temporary. The number that looked like the design's price was
+  mostly the measurement's error.
+- **A self-referring type had no legal way out of a container.** Between M1b's
+  `copy` refusal and rule 2's store refusal, `Json` and `VyxNode` were stuck;
+  `for x in consume xs` is what unblocked them, and it was not in the design.
+- **The initializedness fact the plan asked for does not exist to need.** Every
+  place is initialized before it can be stored over, except a map key, which
+  decides at run time. What a store has to know is who OWNS what is there.
+- **Inlining a projection is free in instructions and not in node identity.** 118
+  `.ll` files and 119 `.wasm` modules came out byte-identical, and the bug that
+  found it was two inlines in one block sharing a binding name.
+- **A guard is not what a guard costs.** Phase 8c blamed a 2.5x on a missing
+  elision pass. Phase 8d found the real cause — every trap emitted three calls
+  inline, 14,935 sites over the corpus, which made the function around them too
+  expensive for LLVM to inline — and recovered the cost without touching the
+  guard. Then it measured the elision three ways and found it had no customer.
+- **A deletion is wider than the thing deleted.** Path B was estimated at 570–770
+  lines and came out 1,714 across 24 files: the `Type::Ref` arms in fourteen
+  files, the emission sites in two backends, 22 unit tests that existed to hold
+  the mechanism up, one parity pin and four census rows.
+- **The runtime surface is four primitives, not three.** malloc, **realloc**, free
+  and memcpy. `realloc` is how an `Array` and a `String` grow in place, and the
+  thesis never named it.
+
+## The open tail
+
+Three memory rows still leak. Each is blocked on work outside this arc, and each
+is named here so the next person starts from a list rather than a re-derivation.
+
+**`optionString` (§14) — needs arm-payload escape tracking.** An `Option` owns
+its payload since Phase 5 and a `Deep` release walks the live variant. This row
+still leaks because nothing in it binds the payload to a place that gets released:
+the String reaches a `match` arm, the arm binding is a projection out of the
+payload, and rule 3 records a returned projection as a lend rather than refusing
+it — which `check_return` decided in writing, because refusing it would demand
+`.copy()` from a self-referring type. Closing it means tracking where an arm
+payload escapes to, which is the same question Phase 5 recorded as the one gap
+that stopped deep drop for records, enums and fixed arrays.
+
+**`lambdaLoop` (§16) — needs a copy derived over the defunctionalized enum.** A
+stored closure's capture block is never freed. RFC-0091 M1 made `Copy` a protocol
+and this row did not flip, and the reason the census gave was wrong: a `Copy` row
+is keyed by a type key, and a `fn` type has none. RFC-0037 lowers a stored closure
+to a closed enum with the captures in the payloads, so the copy has to be derived
+over THAT enum, inside RFC-0037's own lowering, not over the `fn` type the user
+wrote. An alias over a `fn` type is refused where it is written today.
+
+**`elementLeak` (U4) — correctly stays.** A built-in `Array<T>` releases no
+element and must not. An array cannot say whether it owns its elements or views
+somebody else's, and `m.keys()` is the view: a fresh buffer holding the map's own
+key pointers, which a per-element release would free twice. The answer moved from
+"no mechanism exists" to "the mechanism is a declaration, and a built-in container
+has nothing to declare it with" — and `slotsContainer` is the row that proves the
+declaration works. This is a restriction, recorded, not a defect to chase.
+
+Beside the three rows, four design questions are open and undesigned: **§5/U6**
+inferred regions (RFC-0004 Q3), **§7/U7** linearity as a declaration (RFC-0086
+M3, and the undecided question of whether `consume` and `impl Owned` should be one
+declaration), **§10** the native spawn frame, and **U5** — `panic` has no source
+location on any engine, which is RFC-0079's.
+
+## What the model is now, in one paragraph
+
+Five strategies, not six. A value is a value; a capability is a calling
+convention; a function returns something the caller owns; a place owns its
+contents. Reclamation follows the TYPE, and the expression's form decides nothing.
+A store releases what it replaced. A copy is written `.copy()` and is never
+implicit. A container declares what it owns and the compiler asks it. The runtime
+underneath is malloc, realloc, free and memcpy, with a region arena beside it for
+a block-scoped lifetime. Nothing allocates from a fixed table and nothing checks a
+generation counter, except `std/slots.vyrn`, which is Vyrn and which any reader can
+open.

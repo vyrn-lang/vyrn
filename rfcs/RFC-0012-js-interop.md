@@ -1,6 +1,7 @@
 # RFC-0012 — JS Interop (`extern`)
 
-- **Status:** M1 + M2 implemented (imports and exports)
+- **Status:** M1 + M2 + M3 implemented (imports, exports, and the
+  `vyrn:exports` type section)
 - **Depends on:** RFC-0010 (modules — `export` already has a meaning),
   the wasm backend (ROADMAP "browser path"), `web/wasi-min.js` (stage-2 demo)
 
@@ -97,7 +98,8 @@ NUL-terminated `ptr` internally). A returned `String` is likewise a bare `ptr`
 the host NUL-decodes. Consequently, on the wasm side an exported `String`
 parameter and an `Int32`/`Bool` are both a single `i32`; `wasi-min.js` resolves
 the ambiguity by the runtime JS value (a JS string argument is encoded), and by
-an optional `exportReturns` hint for a `String`/`Bool` *result*.
+the module's `vyrn:exports` section for a `String`/`Bool` *result* (M3, below).
+Before M3 the result was resolved by a hand-written `exportReturns` hint.
 
 **Who frees an exported `String` parameter: nobody (measured).** The paragraph
 above says who allocates and never said who frees. The answer follows from a
@@ -225,6 +227,36 @@ depends on the concurrency model's threading story. DOM bindings as a
 library — belongs in `std/` or a package once this lands. Var-args,
 callbacks-as-values, JS object handles — all post-v1.
 
+## M3 — the module says what it returns
+
+M2 left one fact outside the module. An `i32` result is a `String`, a `Bool` or
+an `Int32`, and the only thing that said which was `hooks.exportReturns`, a map
+each page wrote by hand. A name nobody wrote came back as a number; after
+RFC-0089 M3b the same hint also decided the `free`, so a missed name leaked as
+well. Five sites carried the map — `web/externdemo.html`, `web/vyrn-dom.js`,
+`examples/bin/public/app.js`, `web/README.md` and the memory suite's driver —
+and the compiler knew the answer at every one of them.
+
+**A module carries it now.** `vyrn build --target wasm` writes a custom section
+named `vyrn:exports`: a vector of pairs, each a wasm name — a length, then its
+UTF-8 bytes. The name is the export, and the value is `string` or `bool`. An
+export whose result is unambiguous (`Unit`, `Int64`, a float) is left out, so a
+module with no such export carries no section at all.
+
+`wasi-min.js` reads it in the section walk it already runs to recover each
+export's signature — one more branch, on section id 0. The section wins over
+`hooks.exportReturns`, which stays as the fallback for a module from another
+producer.
+
+**This changes the shipped ABI**, which is why it is written here rather than in
+the phase that did it. The change is additive in both directions: an engine that
+does not know the name skips a custom section, and a host that does not read the
+section still works from the hook.
+
+The census recorded this as the last convention at the boundary (RFC-0087 U10).
+Both ownership answers were already fixed by RFC-0089's rules; the type was not.
+It is now.
+
 ## Milestones
 
 1. **M1 — imports:** `extern fn` declarations, wasm import emission, native/
@@ -240,3 +272,8 @@ callbacks-as-values, JS object handles — all post-v1.
    decodes String returns by NUL scan), `examples/externdemo2.vyrn`
    (three-way-parity-capable — no host imports), and a browser-verified section
    in `web/externdemo.html` driving `vyrnAdd`/`greet` live.
+3. **M3 — the `vyrn:exports` section (implemented):** the direct wasm backend
+   writes every `export extern fn` whose result is a `String` or a `Bool` into a
+   custom section, `wasi-min.js` reads it in its existing section walk, and the
+   five hand-written `exportReturns` maps are deleted. See the section above.
+

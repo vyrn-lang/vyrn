@@ -87,9 +87,7 @@ export extern fn greet(name: String) -> String { return "Hello, \{name}!" }
 ```
 
 ```js
-const { exitCode, stdout, exports } = await runVyrn(bytes, {
-  exportReturns: { greet: "string" },   // see the ABI note below
-});
+const { exitCode, stdout, exports } = await runVyrn(bytes);
 // _start already ran main(); now call the exports on the live instance:
 exports.vyrnAdd(40, 2);   // => 42n  (Int64 is a BigInt)
 exports.greet("world");   // => "Hello, world!"
@@ -104,10 +102,10 @@ the pointer; `vyrn` force-exports `__vyrn_malloc` whenever an `export extern fn`
 has a String parameter. A returned `String` is a `ptr` the shim NUL-decodes from
 linear memory. Because a `String`, `Bool`, and `Int32` all lower to a wasm
 `i32`, the wrapper resolves *arguments* by the JS value's runtime type (a JS
-string is allocated + copied) and *results* by an optional `exportReturns` hint
-(`"string"` → NUL-decoded, `"bool"` → `true`/`false`, else a number; `i64` is a
-BigInt, floats are numbers). The wrapper skips `memory`, `_start`,
-`__vyrn_malloc`, and any `__`-prefixed export.
+string is allocated + copied) and *results* by the module's own **`vyrn:exports`
+custom section** (`"string"` → NUL-decoded, `"bool"` → `true`/`false`, else a
+number; `i64` is a BigInt, floats are numbers). The wrapper skips `memory`,
+`_start`, `__vyrn_malloc`, and any `__`-prefixed export.
 
 **Who frees what.** Both directions are the caller's, and across this boundary
 the caller is the page. A String ARGUMENT is allocated here and released here,
@@ -121,9 +119,11 @@ no rule — it carries `cap = 0` and sits below `HEAP_BASE`, which `__vyrn_free`
 ignores. `vyrn` exports `__vyrn_malloc` and `__vyrn_free` whenever an
 `export extern fn` takes OR returns a String.
 
-The release runs only for a result the page NAMED as a String. An export whose
-String return is missing from `exportReturns` is handed back as a number and
-leaks — the map is written by hand, and the compiler is the thing that knows. See the M2 section of
+The release runs for every result the module DECLARES as a String, and the
+module declares them all. Until RFC-0012 M3 the page wrote the map by hand, so
+an export nobody named came back as a number and leaked. The compiler is the
+thing that knows, and it writes the section now. `hooks.exportReturns` remains
+as a fallback for a module built by another producer. See the M2 section of
 [externdemo.html](externdemo.html) driving
 [examples/externdemo2.vyrn](../examples/externdemo2.vyrn).
 
@@ -202,10 +202,7 @@ no framework, nothing new in the shim.
 
   ```js
   import { runVyrnRpc } from "./vyrn-rpc.js";
-  const { exports } = await runVyrnRpc(bytes, {
-    baseUrl: "",
-    exportReturns: { uiUser: "string" },   // name any String-returning getters
-  });
+  const { exports } = await runVyrnRpc(bytes, { baseUrl: "" });
   exports.loadUser(7n);   // your exported wrapper fires the typed stub; the
                           // reply flows to the callback it passed
   ```

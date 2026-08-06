@@ -85,6 +85,25 @@ pub enum DropKind {
     Release(String),
 }
 
+impl DropKind {
+    /// How this kind reclaims, in words.
+    ///
+    /// One source for two surfaces: `vyrn why --memory` prints it at the shell
+    /// and the LSP shows it on hover (RFC-0087 U1). A second wording would be a
+    /// second answer.
+    pub fn words(&self) -> String {
+        match self {
+            DropKind::FreeStr => "freeing the String buffer".into(),
+            DropKind::FreeArr => "freeing the array buffer".into(),
+            DropKind::FreeSmallArr => "freeing the spilled buffer, if it spilled".into(),
+            DropKind::FreeMap => "freeing both map buffers".into(),
+            DropKind::CloseStream => "closing the stream".into(),
+            DropKind::Deep(ty) => format!("releasing what the {ty} holds"),
+            DropKind::Release(f) => format!("calling `{f}`"),
+        }
+    }
+}
+
 /// The `Owned` protocol: **how a type is released**, and the only place that
 /// question is answered (RFC-0086 M1).
 ///
@@ -449,6 +468,34 @@ pub enum Fate {
     Static,
     /// Nothing reclaims it.
     Leaked(Leak),
+}
+
+impl Fate {
+    /// What happens to the value, in one line.
+    ///
+    /// The wording `vyrn why --memory` has printed since Phase 1, lifted here so
+    /// the editor says the same thing (RFC-0087 U1). Nothing re-derives it.
+    pub fn words(&self) -> String {
+        match self {
+            Fate::Reclaimed(kind) => format!("reclaimed at block exit — {}", kind.words()),
+            Fate::Moved { line, into } => format!("moved at line {line} into {into}"),
+            Fate::Dropped { line } => format!("reclaimed by `drop` at line {line}"),
+            Fate::Static => "static data — nothing reclaims it, and nothing needs to".into(),
+            Fate::Leaked(reason) => format!("NOT reclaimed — {reason}"),
+        }
+    }
+
+    /// The line where the value stops being live, when there is one.
+    ///
+    /// A move and a `drop` are points in the source; block-exit reclamation, a
+    /// literal and a leak are not. This is what the editor marks as the last use
+    /// (RFC-0087 U1) and what it writes an inlay hint beside.
+    pub fn last_use(&self) -> Option<usize> {
+        match self {
+            Fate::Moved { line, .. } | Fate::Dropped { line } => Some(*line),
+            _ => None,
+        }
+    }
 }
 
 /// One `let` binding and what happens to its value — the report behind

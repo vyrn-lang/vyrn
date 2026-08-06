@@ -32,8 +32,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
-    FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType,
+    CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType,
     TypeSection,
 };
 pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
@@ -199,6 +199,10 @@ pub struct Module {
     /// identical contents, which is what makes it a string pool.
     pool: Vec<u8>,
     pool_at: HashMap<Vec<u8>, u32>,
+    /// Custom sections, emitted last and in the order they were added. A custom
+    /// section is data for the host, not for the engine: nothing here changes
+    /// what the module does.
+    custom: Vec<(String, Vec<u8>)>,
 }
 
 impl Default for Module {
@@ -219,7 +223,18 @@ impl Module {
             sweep: false,
             pool: Vec::new(),
             pool_at: HashMap::new(),
+            custom: Vec::new(),
         }
+    }
+
+    /// Add a custom section, emitted after every defined section.
+    ///
+    /// The format lets a custom section sit anywhere between two defined ones;
+    /// last is the one position that needs no rule about which. An engine that
+    /// does not know the name skips it, so this can never change how a module
+    /// runs.
+    pub fn custom(&mut self, name: &str, payload: Vec<u8>) {
+        self.custom.push((name.to_string(), payload));
     }
 
     /// Take memory from the shared RFC-0076 shim instead of defining one. The
@@ -627,6 +642,12 @@ impl Module {
         m.section(&code);
         if !data.is_empty() {
             m.section(&data);
+        }
+        for (name, payload) in &self.custom {
+            m.section(&CustomSection {
+                name: name.as_str().into(),
+                data: payload.as_slice().into(),
+            });
         }
         m.finish()
     }

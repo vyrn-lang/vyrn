@@ -164,9 +164,10 @@ document.getElementById("load2").addEventListener("click", async () => {
       return;
     }
     const bytes = await resp.arrayBuffer();
-    // `greet` returns a String — an i32 result is ambiguous in wasm, so name it.
+    // `greet` returns a String. An i32 result is ambiguous in wasm, and the
+    // module's own `vyrn:exports` section says which (RFC-0012 M3), so this
+    // page names nothing.
     const r = await runVyrn(bytes, {
-      exportReturns: { greet: "string" },
       onStdout: (s) => (out2.textContent += s),
     });
     vyrnExports = r.exports;

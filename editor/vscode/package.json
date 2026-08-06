@@ -51,7 +51,8 @@
           "type": ["entity.name.type"],
           "parameter": ["variable.parameter"],
           "macro": ["entity.name.function.macro"],
-          "method": ["entity.name.function.member"]
+          "method": ["entity.name.function.member"],
+          "*.modification": ["markup.deleted"]
         }
       },
       {
@@ -62,7 +63,8 @@
           "type": ["entity.name.type"],
           "parameter": ["variable.parameter"],
           "macro": ["entity.name.function.macro"],
-          "method": ["entity.name.function.member"]
+          "method": ["entity.name.function.member"],
+          "*.modification": ["markup.deleted"]
         }
       }
     ],
