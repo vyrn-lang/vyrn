@@ -1,54 +1,69 @@
-// A singly-linked list — the first recursive heap data structure in Vyrn
-// (RFC-0004 §4) — now with deterministic reclamation. Three features combine:
+// A singly-linked list, over `std/slots` (RFC-0090 M1).
 //
-//   * `Ref<T>` gives a fixed-size handle, so `Node` can refer to its own type
-//     (`next: Option<Ref<Node>>`) without becoming infinitely large,
-//   * an `Option` payload can hold a `Ref` (boxed into the tag+word aggregate),
-//     so `None` cleanly terminates the list, and
-//   * `drop` frees a node's cell, so walking the list bottom-up reclaims the
-//     whole structure — proven by the stress loop in `examples/freelist.vyrn`,
-//     which builds and frees 100,000 nodes through a 65536-cell slab.
+// The list is the same list. What changed is where the nodes live and what a
+// link is. A node used to hold a `Ref<Node>` — a handle into a hidden slab of
+// 65,536 cells that every program in the process shared. It now holds a
+// `Handle<Node>` into a `Slots<Node>` this function owns, which is three
+// ordinary words: a slot, a generation, and the container's identity.
+//
+// Three properties survive the move, and none of them needs a runtime:
+//
+//   * `Handle<Node>` is fixed size, so `Node` can name its own type without
+//     becoming infinite — the reason `Ref` existed,
+//   * an `Option` payload holds one, so `None` still ends the list,
+//   * `remove` gives a node's slot back, so walking the list bottom-up
+//     reclaims every slot. `examples/freelist.vyrn` is that at 20,000 lists,
+//     and it now PRINTS the table size rather than proving it by not trapping.
+//
+// What is new is that the storage is named. `nodes` is a value in `main`, it
+// grows to fit, and no other program shares it.
 
-type Node = { value: Int64, next: Option<Ref<Node>> }
+import { Slots, Handle, newSlots, insert, remove } from "std/slots"
 
-// Recursive traversal: match peels off one node, recurse on its tail. (Match arms
-// are single expressions, so traversal is a recursive function, not a loop.)
-fn sum(o: Option<Ref<Node>>) -> Int64 {
+type Node = { value: Int64, next: Option<Handle<Node>> }
+
+// Recursive traversal: match peels off one node, recurse on its tail. (Match
+// arms are single expressions, so traversal is a recursive function, not a
+// loop.) `nodes[h]` reads the element where it lives — the projection checks
+// the generation and yields the place, so `.value` is one load.
+fn sum(nodes: Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
     return match o {
-        Some(r) => get(r).value + sum(get(r).next),
+        Some(h) => nodes[h].value + sum(nodes, nodes[h].next),
         None => 0,
     }
 }
-fn length(o: Option<Ref<Node>>) -> Int64 {
+fn length(nodes: Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
     return match o {
-        Some(r) => 1 + length(get(r).next),
+        Some(h) => 1 + length(nodes, nodes[h].next),
         None => 0,
     }
 }
 
-// Reclaim every node: read the tail *before* releasing the head, then recurse.
-fn freeList(o: Option<Ref<Node>>) -> Int64 {
-    return match o { Some(r) => freeNode(r), None => 0 }
+// Reclaim every node: read the tail *before* removing the head, then recurse.
+// A handle read after its slot is removed is dead, and `nodes[h]` traps on one.
+fn freeList(nodes: modify Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o { Some(h) => freeNode(nodes, h), None => 0 }
 }
-fn freeNode(r: Ref<Node>) -> Int64 {
-    let tail = get(r).next // read before drop, or the access would trap
-    drop r
-    return freeList(tail)
+fn freeNode(nodes: modify Slots<Node>, h: Handle<Node>) -> Int64 {
+    let tail = nodes[h].next // read before remove, or the access would trap
+    remove(nodes, h)
+    return freeList(nodes, tail)
 }
 
 fn main() -> Int64 {
-    // Build [1, 2, 3, 4, 5] by prepending cells to the head.
-    let mut head: Option<Ref<Node>> = None
+    // Build [1, 2, 3, 4, 5] by prepending nodes to the head.
+    let mut nodes: Slots<Node> = newSlots()
+    let mut head: Option<Handle<Node>> = None
     let mut i = 5
     while i > 0 {
-        head = Some(cell(Node { value: i, next: head }))
+        head = Some(insert(nodes, Node { value: i, next: head }))
         i = i - 1
     }
 
-    print(length(head)) // 5
-    let total = sum(head) // 15
+    print(length(nodes, head)) // 5
+    let total = sum(nodes, head) // 15
     print(total)
 
-    freeList(head) // every node's cell is dropped here
+    freeList(nodes, head) // every node's slot goes back here
     return total
 }

@@ -1,0 +1,80 @@
+/// `std/slots` — the container RFC-0090 replaces Path B with, on a tour.
+///
+/// `slottable.vyrn` asks the questions the hand-written table used to answer.
+/// This file asks the ones it could not: a payload that owns heap, a write
+/// through a handle into a field, a copy of a whole container, and the trap.
+///
+/// It ENDS in the trap, deliberately. `s[h]` on a dead handle stops the
+/// program, and the corpus should hold all three engines to the same wording and
+/// the same exit code — so everything printable is printed first and the last
+/// line is the one that never returns.
+
+import {
+    Slots,
+    Handle,
+    newSlots,
+    insert,
+    remove,
+    fetch,
+    alive,
+    count,
+    capacity,
+    handles,
+} from "std/slots"
+
+type Person = { name: String, age: Int64 }
+
+fn main() -> Int64 {
+    // ---- a payload that owns heap -----------------------------------------
+    let mut people: Slots<Person> = newSlots()
+    let ada = insert(people, Person { name: "ada", age: 36 })
+    let bob = insert(people, Person { name: "bob", age: 41 })
+
+    // A write through a handle reaches the field where it lives. `place at`
+    // yields the element's place, so nothing is copied on the way in or out.
+    people[ada].name = "lovelace"
+    print(people[ada].name) // lovelace
+    print(people[ada].age) // 36
+
+    // `fetch` copies the element out, so staleness is a value rather than a
+    // trap. A live handle answers `Some`.
+    print((fetch(people, bob) ?? Person { name: "?", age: 0 }).name) // bob
+
+    // ---- removal, reuse, and a handle that outlived its element ------------
+    remove(people, bob)
+    print(alive(people, bob)) // false
+    print((fetch(people, bob) ?? Person { name: "gone", age: 0 }).name) // gone
+    let carl = insert(people, Person { name: "carl", age: 7 })
+    print(carl.slot == bob.slot) // true — the slot came back
+    print(alive(people, bob)) // false — and the old handle did not
+    print(count(people)) // 2
+    print(capacity(people)) // 2
+
+    // ---- iteration walks the live elements ---------------------------------
+    let mut years = 0
+    for p in people {
+        years = years + p.age
+    }
+    print(years) // 43
+    print(handles(people).length) // 2
+
+    // ---- a String payload, moved in and replaced ---------------------------
+    let mut words: Slots<String> = newSlots()
+    let greeting = "hello" + " world"
+    let w = insert(words, greeting)
+    print(words[w]) // hello world
+    words[w] = "replaced" + "!" // the store releases what the slot held
+    print(words[w]) // replaced!
+
+    // ---- a copy is a second container --------------------------------------
+    // A structural copy would duplicate the identity word and let a handle from
+    // one read the other. `impl Copy` takes a fresh identity instead.
+    let twin = words.copy()
+    print(alive(words, w)) // true
+    print(alive(twin, w)) // false — same slot, same generation, other container
+
+    // ---- and the trap ------------------------------------------------------
+    remove(words, w)
+    print(words[w]) // stops here: slots: handle is not alive
+    return 0
+}

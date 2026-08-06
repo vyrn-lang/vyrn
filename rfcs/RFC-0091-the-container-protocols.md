@@ -415,3 +415,64 @@ of them flips, and one of the three reasons is a correction.
 (M4). A `place` member is still invisible to the LSP's symbol index: hover and
 completion work on a user container because the checker types it, but a `place`
 member has no definition site of its own to jump to.
+
+
+---
+
+## The generic-container correction (Phase 8a)
+
+Every container this RFC was dogfooded on is concrete. `Window`, `Slice`, `Ring`
+and `Pool` name their element type in the impl head, and `Slots<T>` — the
+customer the RFC was written for — does not. Six things broke, and each is one
+place a protocol member's type was read without solving the head it was declared
+under.
+
+- **`c[k] = v` and `for x in c` read a projection's return type literally.** A
+  `place atSet` or `place nth` declared `-> T` answered `T` rather than the
+  element type at the site. `place at` already solved the head, via
+  `place_result`; one helper now serves all three.
+- **`Index`'s `type Key` was not read by the store.** `c[k] = v` demanded an
+  `Int64` key whatever `place atSet` took. `Slots` is keyed by a `Handle<T>`.
+- **A record literal could not learn its parameters from context.** `vals: []`
+  for a field declared `Array<T>` says nothing, and `Handle<T>` — three `Int64`
+  fields and a parameter carried for branding — says nothing at all.
+- **A generic call could not learn its type arguments from context**, in the
+  checker and in both compiling backends, so `newSlots()` was unwritable.
+- **The textual backend passed a `modify` argument to a generic function by
+  value** while the definition took a pointer. That one is not a protocol bug at
+  all; it is a native miscompile that no corpus function was shaped to find.
+- **A `place` body's string literals never reached the textual backend's
+  pool.** A projection is inlined and never flattened into
+  `program.functions`, so the literal walk never saw one. `panic("..")` inside
+  `place at` is what a trapping index is FOR, and it was the one thing a
+  projection could not say.
+
+### `Iterate` cannot skip, and this RFC says it can
+
+"`Slots` skips dead slots by implementing it" is not achievable with the
+`size` + `place nth` shape M3 landed. A projection maps an index to a place; it
+has no cursor to advance, and "one `yield`, and it is the last statement" forbids
+a branch to yield from. A container that skips must do the skipping BEFORE the
+projection runs, which means holding a dense list of live positions — `Slots`
+keeps one, plus the map back from a slot to its place in it, and pays two arrays
+for O(1) removal and an honest `for x in s`.
+
+### A mutating operation cannot be a protocol method
+
+M1-as-landed records that an impl method's receiver is bare `self` and IS
+`Capability::Read`, and that making it writable is new syntax. The consequence
+was not drawn there: `insert` and `remove` mutate the container, so neither can
+be a method of any protocol, and `Slots` is free functions. RFC-0090's own
+example — `people.insert(..)` — does not compile. The subject-first surface this
+language migrated to over ten RFCs stops at the read/write line: `s[h]`,
+`s[h] = v` and `for x in s` are methods in all but name, and everything that
+grows or shrinks the container is a call.
+
+### A generic `impl Owned` has no release
+
+`Owned` predates this RFC and takes the same correction. A generic impl's
+`release` flattens to a generic function, and the drop site emits the flattened
+name with no type arguments — a symbol nothing defines, reported by clang at the
+end of a build. Phase 8a filters generic impls out of the `Owned` table, so the
+result is a missing release rather than a link error. Monomorphizing a declared
+release is the work; `Slots<T>` is what wants it.

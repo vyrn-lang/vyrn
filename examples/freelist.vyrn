@@ -1,37 +1,53 @@
-// Proof that recursive reclamation actually works (RFC-0004 §4).
+// Proof that a slab reuses what it reclaims (RFC-0090 M1).
 //
-// The generational-reference slab holds 65536 cells. This builds a 5-node list,
-// sums it, and frees it — 20,000 times over. That is 100,000 cell allocations,
-// well past the slab's 65536; they only fit because `freeList` drops every
-// node and its slot is reused. Without the frees this would trip "Vyrn: out of
-// reference cells" after the 65536th allocation. It runs to completion, so
-// reclamation holds. (The native binary handles far more — see the docs.)
+// This built a 5-node list, summed it and freed it 20,000 times — 100,000
+// allocations through a hidden slab of 65,536 cells — and the proof was that it
+// did not trap. Path B's slab was fixed, so exhaustion was reachable and
+// reaching it was the failure the file existed to avoid.
+//
+// A `Slots<T>` grows, so exhaustion is not reachable any more and "it finished"
+// proves nothing. The claim is now the stronger one the old file could only
+// imply: after 100,000 inserts the table holds FIVE slots. Every removal puts
+// its slot back and every insert takes one, so the high-water mark is the size
+// of one list and not the number of lists. That is a number, it is printed, and
+// all three engines are held to it.
+//
+// The list itself is unchanged in shape. `Handle<Node>` is a plain value of
+// three words, so `Node` can hold one without becoming infinite — the property
+// `Ref<Node>` used to supply, with no runtime behind it.
 
-type Node = { value: Int64, next: Option<Ref<Node>> }
+import { Slots, Handle, newSlots, insert, remove, capacity } from "std/slots"
 
-fn sum(o: Option<Ref<Node>>) -> Int64 {
-    return match o { Some(r) => get(r).value + sum(get(r).next), None => 0 }
+type Node = { value: Int64, next: Option<Handle<Node>> }
+
+fn sum(s: Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o { Some(h) => s[h].value + sum(s, s[h].next), None => 0 }
 }
-fn freeList(o: Option<Ref<Node>>) -> Int64 {
-    return match o { Some(r) => freeNode(r), None => 0 }
+fn freeList(s: modify Slots<Node>, o: Option<Handle<Node>>) -> Int64 {
+    return match o { Some(h) => freeNode(s, h), None => 0 }
 }
-fn freeNode(r: Ref<Node>) -> Int64 {
-    let tail = get(r).next
-    drop r
-    return freeList(tail)
+fn freeNode(s: modify Slots<Node>, h: Handle<Node>) -> Int64 {
+    let tail = s[h].next
+    remove(s, h)
+    return freeList(s, tail)
 }
 
 fn main() -> Int64 {
+    let mut nodes: Slots<Node> = newSlots()
     let mut i = 0
     let mut last = 0
     while i < 20000 {
-        let mut head: Option<Ref<Node>> = None
+        let mut head: Option<Handle<Node>> = None
         let mut j = 5
-        while j > 0 { head = Some(cell(Node { value: j, next: head })) j = j - 1 }
-        last = sum(head)
-        freeList(head) // reclaim all 5 nodes; slots reused next turn
+        while j > 0 {
+            head = Some(insert(nodes, Node { value: j, next: head }))
+            j = j - 1
+        }
+        last = sum(nodes, head)
+        freeList(nodes, head) // every slot goes back; the next turn takes them
         i = i + 1
     }
     print(last) // 15
+    print(capacity(nodes)) // 5 — 100,000 inserts, five slots
     return last
 }

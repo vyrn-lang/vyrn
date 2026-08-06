@@ -1,41 +1,49 @@
-// A binary tree — the `Ref<T>` + `Option<Ref>` shape extends from linear lists
-// to *branching* recursive structures with no new machinery (RFC-0004 §4). Each
-// node holds two optional child references; traversal and reclamation recurse
-// into both.
+// A binary tree over `std/slots` (RFC-0090 M1) — the handle shape extends from
+// linear lists to *branching* structures with no new machinery, exactly as
+// `Ref<T>` did. Each node holds two optional child handles; traversal and
+// reclamation recurse into both.
+//
+// One thing is different from the `Ref` version and it is worth naming. Every
+// node of this tree lives in ONE `Slots<Node>`, so the whole tree is two flat
+// arrays rather than a node's worth of `malloc` per node. Reclaiming it node by
+// node is what `treeFree` does below; dropping the container would reclaim all
+// of it at once, which a graph of boxed cells could never offer.
 
-type Tree = { value: Int64, left: Option<Ref<Tree>>, right: Option<Ref<Tree>> }
+import { Slots, Handle, newSlots, insert, remove } from "std/slots"
 
-fn treeSum(o: Option<Ref<Tree>>) -> Int64 {
+type Tree = { value: Int64, left: Option<Handle<Tree>>, right: Option<Handle<Tree>> }
+
+fn treeSum(t: Slots<Tree>, o: Option<Handle<Tree>>) -> Int64 {
     return match o {
-        Some(r) => get(r).value + treeSum(get(r).left) + treeSum(get(r).right),
+        Some(h) => t[h].value + treeSum(t, t[h].left) + treeSum(t, t[h].right),
         None => 0,
     }
 }
 
-fn treeDepth(o: Option<Ref<Tree>>) -> Int64 {
-    return match o { Some(r) => 1 + maxDepth(r), None => 0 }
+fn treeDepth(t: Slots<Tree>, o: Option<Handle<Tree>>) -> Int64 {
+    return match o { Some(h) => 1 + maxDepth(t, h), None => 0 }
 }
-fn maxDepth(r: Ref<Tree>) -> Int64 {
-    let l = treeDepth(get(r).left)
-    let d = treeDepth(get(r).right)
+fn maxDepth(t: Slots<Tree>, h: Handle<Tree>) -> Int64 {
+    let l = treeDepth(t, t[h].left)
+    let d = treeDepth(t, t[h].right)
     if l > d { return l }
     return d
 }
 
-// Reclaim the whole tree: capture both children before dropping this node, then
+// Reclaim the whole tree: capture both children before removing this node, then
 // recurse into each.
-fn treeFree(o: Option<Ref<Tree>>) -> Int64 {
-    return match o { Some(r) => freeNode(r), None => 0 }
+fn treeFree(t: modify Slots<Tree>, o: Option<Handle<Tree>>) -> Int64 {
+    return match o { Some(h) => freeNode(t, h), None => 0 }
 }
-fn freeNode(r: Ref<Tree>) -> Int64 {
-    let l = get(r).left
-    let rt = get(r).right
-    drop r
-    return treeFree(l) + treeFree(rt)
+fn freeNode(t: modify Slots<Tree>, h: Handle<Tree>) -> Int64 {
+    let l = t[h].left
+    let rt = t[h].right
+    remove(t, h)
+    return treeFree(t, l) + treeFree(t, rt)
 }
 
-fn leaf(v: Int64) -> Option<Ref<Tree>> {
-    return Some(cell(Tree { value: v, left: None, right: None }))
+fn leaf(t: modify Slots<Tree>, v: Int64) -> Option<Handle<Tree>> {
+    return Some(insert(t, Tree { value: v, left: None, right: None }))
 }
 
 fn main() -> Int64 {
@@ -44,13 +52,16 @@ fn main() -> Int64 {
     //      1   4
     //         /
     //        3
-    let deep = Some(cell(Tree { value: 4, left: leaf(3), right: None }))
-    let root = Some(cell(Tree { value: 2, left: leaf(1), right: deep }))
+    let mut nodes: Slots<Tree> = newSlots()
+    let three = leaf(nodes, 3)
+    let deep = Some(insert(nodes, Tree { value: 4, left: three, right: None }))
+    let one = leaf(nodes, 1)
+    let root = Some(insert(nodes, Tree { value: 2, left: one, right: deep }))
 
-    let total = treeSum(root) // 2 + 1 + 4 + 3
+    let total = treeSum(nodes, root) // 2 + 1 + 4 + 3
     print(total) // 10
-    print(treeDepth(root)) // 3
+    print(treeDepth(nodes, root)) // 3
 
-    treeFree(root) // every node reclaimed
+    treeFree(nodes, root) // every node's slot goes back
     return total
 }

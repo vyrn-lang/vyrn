@@ -266,12 +266,24 @@ carried the ownership fact — see the note under Phase 9.
 
 ## Phase 8 — handles replace Path B *(RFC-0090 M1, M3, M4)*
 
-- **8a. `std/slots`** in Vyrn over `Array`: `Slots<T>`, `Handle<T>` (plain
-  value: slot + gen + container identity word), `insert/remove`, `[h]`
-  (trapping, via `Index`), `.get(h) -> Option` and cross-container refusal.
-  Benchmark against `cell` under membench (expected ≥ parity with the 1.86×
-  measurement). Migrate `genref`, `freelist`, `linkedlist`, `tree`,
-  `autorelease`, `slottable`.
+- **8a. `std/slots` — LANDED.** `Slots<T>` and `Handle<T>` (a plain value: slot
+  + generation + container identity), `insert`/`remove`/`fetch`/`alive`/`count`
+  /`capacity`/`handles`, `s[h]` and `s[h] = v` through `Index`, `for x in s`
+  through `Iterate`, a fresh identity through `Copy`, and cross-container
+  refusal under test. All six examples migrated, plus a new `examples/slots.vyrn`
+  that ends in the trap.
+  **The benchmark says 2.02×** in favour of `std/slots` (9.06 µs against
+  `cell`'s 18.29 µs over the same five operations), where this RFC predicted
+  1.86×.
+  **The reclamation claim does not hold, and 8c is blocked on it.** A `Slots` is
+  a `mut` record of `Array`s, and nothing releases it: `own::fate` refuses a
+  declared release for a `mut` binding, a generic `impl Owned` has no
+  monomorphized `release` at all, and U4 is still open under both. `cell`'s slab
+  DOES reclaim, so Path B must not be deleted until this is closed.
+  `.get(h)` is `fetch(s, h)` — `get` is reserved by Path B — and
+  `people.insert(..)` is `insert(people, ..)`, because an impl method's receiver
+  cannot be `modify`. See RFC-0090 "M1 as landed" and RFC-0091 "The
+  generic-container correction".
 - **8b. Streams re-host** their cursor on `std/slots` (RFC-0075 M2c logic
   moves into std).
 - **8c. Delete Path B.** `cell/get/set/release`, `Type::Ref`, the LLVM cell

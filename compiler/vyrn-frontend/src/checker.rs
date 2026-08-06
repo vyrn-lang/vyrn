@@ -1447,6 +1447,22 @@ impl<'a> Checker<'a> {
         Ok(Some(crate::types::substitute(&f.ret, &subst)))
     }
 
+    /// Solve `impl<T> .. for Slots<T>` against the receiver, and read `ty`
+    /// through the answer — so a projection declared `-> T` names the element
+    /// type at THIS site (RFC-0091 M3, generic containers).
+    ///
+    /// One helper for the two sites that read a projection's return type
+    /// without going through [`Self::place_result`]: the store `c[k] = v` and
+    /// the loop `for x in c`. A concrete impl head substitutes nothing, which
+    /// is why neither site noticed until a generic container existed.
+    fn solve_head(&self, imp: &crate::ast::ImplBlock, recv: &Type, ty: &Type, line: usize) -> Type {
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        match self.unify(&imp.ty, recv, &mut subst, line) {
+            Ok(()) => crate::types::substitute(ty, &subst),
+            Err(_) => ty.clone(),
+        }
+    }
+
     /// The first type in `ty` — itself, or a part it reaches — that declares
     /// `impl Owned for T` (RFC-0086 M1).
     ///
@@ -2813,6 +2829,11 @@ impl<'a> Checker<'a> {
                     self.region_store_guard(name, &val, scope, *line)?;
                     return Ok(false);
                 }
+                // `type Key` is the container's to name (RFC-0091 `Index`): a
+                // built-in one is keyed by an `Int64`, and a user one by
+                // whatever its `place atSet` takes — a `Handle<T>`, for the
+                // slab this milestone is written for.
+                let mut key = Type::Int;
                 let elem = match self.base(&b.ty) {
                     Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
                         (*inner).clone()
@@ -2823,8 +2844,13 @@ impl<'a> Checker<'a> {
                         // element is, and `place atSet` is the writing half of
                         // that. The element type is what it yields. Keyed by the
                         // DECLARED type — an impl head names the alias.
-                        match crate::project::lookup_in(self.impl_blocks, &b.ty, "atSet") {
-                            Some(f) => f.ret.clone(),
+                        match crate::project::lookup_impl(self.impl_blocks, &b.ty, "atSet") {
+                            Some((imp, f)) => {
+                                if let Some(p) = f.params.get(1) {
+                                    key = self.solve_head(imp, &b.ty, &p.ty, *line);
+                                }
+                                self.solve_head(imp, &b.ty, &f.ret, *line)
+                            }
                             None => {
                                 return Err(format!(
                                     "line {line}: `{name}[i] = ..` needs an Array, a Map, or a \
@@ -2834,11 +2860,13 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
-                let i = self.base(&self.expr(index, scope, Some(&Type::Int), Some(ret))?);
-                if !matches!(i, Type::Int | Type::Err) {
-                    return Err(format!(
-                        "line {line}: array index must be an Int64, found {i}"
-                    ));
+                let i = self.expr(index, scope, Some(&key), Some(ret))?;
+                if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
+                    return Err(if key == Type::Int {
+                        format!("line {line}: array index must be an Int64, found {i}")
+                    } else {
+                        format!("line {line}: `{name}[..] = ..` is keyed by {key}, found {i}")
+                    });
                 }
                 let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
                 if !self.coercible(&vty, &elem) {
@@ -2991,7 +3019,18 @@ impl<'a> Checker<'a> {
                         // DECLARED type is what the row is keyed by — an impl
                         // head names the alias, not the record it aliases.
                         match crate::types::iterate_impl(self.impl_blocks, &ity) {
-                            Some((_, nth)) => nth.ret.clone(),
+                            Some((_, nth)) => {
+                                match crate::project::lookup_impl(
+                                    self.impl_blocks,
+                                    &ity,
+                                    crate::types::ITERATE_NTH,
+                                ) {
+                                    Some((imp, _)) => {
+                                        self.solve_head(imp, &ity, &nth.ret, *line)
+                                    }
+                                    None => nth.ret.clone(),
+                                }
+                            }
                             None => {
                                 return Err(format!(
                                     "line {line}: `for` needs an Array, a String, or a type that \
@@ -3498,7 +3537,7 @@ impl<'a> Checker<'a> {
             ),
             Expr::Try { expr, line } => self.check_try(expr, *line, scope, fn_ret),
             Expr::StructLit { name, fields, line } => {
-                self.check_struct_lit(name, fields, *line, scope, fn_ret)
+                self.check_struct_lit(name, fields, *line, scope, expected, fn_ret)
             }
             Expr::Field { expr, field, line } => {
                 let ety = self.expr(expr, scope, None, fn_ret)?;
@@ -3779,6 +3818,7 @@ impl<'a> Checker<'a> {
         fields: &[(String, Expr)],
         line: usize,
         scope: &Vec<HashMap<String, Binding>>,
+        expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
         let decl = self
@@ -3792,6 +3832,24 @@ impl<'a> Checker<'a> {
         // inferred from the field values (there is no turbofish in expressions).
         let mut provided = std::collections::HashSet::new();
         let mut subst: HashMap<String, Type> = HashMap::new();
+        // The context that named the type answers first, where it named one.
+        // `let s: Slots<Person> = Slots { vals: [], .. }` has an empty array
+        // literal for a field declared `Array<T>`, and a parameter the fields
+        // cannot determine at all — RFC-0090's `Handle<T>` carries `T` for
+        // branding and stores nothing of it. A field value still overrides what
+        // it can say, so a literal that checks today reaches the same answer.
+        if !decl.type_params.is_empty() {
+            if let Some(want) = expected {
+                let mine = Type::App(
+                    name.to_string(),
+                    decl.type_params
+                        .iter()
+                        .map(|tp| Type::Param(tp.clone()))
+                        .collect(),
+                );
+                let _ = self.unify(&mine, want, &mut subst, line);
+            }
+        }
         for (fname, value) in fields {
             let field = rfields
                 .iter()
@@ -3800,10 +3858,11 @@ impl<'a> Checker<'a> {
             if !provided.insert(fname.clone()) {
                 return Err(format!("line {line}: field `{fname}` set twice"));
             }
-            let vty = self.expr(value, scope, Some(&field.ty), fn_ret)?;
+            let fty = crate::types::substitute(&field.ty, &subst);
+            let vty = self.expr(value, scope, Some(&fty), fn_ret)?;
             self.unify(&field.ty, &vty, &mut subst, line)?;
-            self.prove_coercion(value, &field.ty, line)?;
-            self.prove_string_interpolation(value, &field.ty, scope, fn_ret, line)?;
+            self.prove_coercion(value, &fty, line)?;
+            self.prove_string_interpolation(value, &fty, scope, fn_ret, line)?;
         }
         // Every declared field must be provided.
         for f in &rfields {
@@ -6850,6 +6909,23 @@ impl<'a> Checker<'a> {
                 if caps.and_then(|c| c.get(i)) == Some(&Capability::Modify) {
                     let concrete_pty = crate::types::substitute(pty, &subst);
                     self.check_modify_arg(name, i, arg, &atys[i], &concrete_pty, scope, line)?;
+                }
+            }
+            // A parameter no argument mentions — `fn newSlots<T>() -> Slots<T>`,
+            // the empty-container constructor — has nothing to be inferred FROM.
+            // The expected type of the call answers instead. Strictly a
+            // fallback, like the record literal's above: it runs only for a
+            // parameter the arguments left unbound.
+            if type_params.iter().any(|tp| !subst.contains_key(tp)) {
+                if let Some(want) = expected {
+                    let mut from_ctx: HashMap<String, Type> = HashMap::new();
+                    if self.unify(ret, want, &mut from_ctx, line).is_ok() {
+                        for tp in type_params {
+                            if let (false, Some(t)) = (subst.contains_key(tp), from_ctx.get(tp)) {
+                                subst.insert(tp.clone(), t.clone());
+                            }
+                        }
+                    }
                 }
             }
             for tp in type_params {
