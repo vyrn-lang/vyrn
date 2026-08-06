@@ -362,9 +362,20 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             // store of a borrowed `fn`, and the fix menu's second entry —
             // `.copy()` — cannot be written: a capture block's layout is per
             // TAG, chosen at run time, so a structural copy has nothing to
-            // measure. `Copy` as a protocol (RFC-0091 M1) is what gives it one.
+            // measure.
             //
-            // So §16 waits, and it waits on a mechanism rather than on effort.
+            // **RFC-0091 M1 was named as the mechanism and is not it.** M1
+            // landed, and it keys a `Copy` row by a TYPE KEY. A `fn` type is
+            // structural and has none, and a `type Bump = fn(..) -> ..` alias
+            // over one is refused where it is written: the value erases at run
+            // time and carries no name to dispatch on. So §16 has nowhere to
+            // hang a declaration, and nothing to write in it either — the tags
+            // are the defunctionalizer's and have no source name.
+            //
+            // What it waits on is a copy DERIVED over the defunctionalized enum,
+            // emitted where RFC-0037 already emits that enum, which knows every
+            // tag's layout because it chose them. That is a job in the closure
+            // lowering, not a row in a protocol table.
             Type::Fn(..) => false,
             _ => false,
         }

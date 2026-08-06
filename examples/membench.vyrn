@@ -120,6 +120,24 @@ fn elemRead(n: Int64, xs: Array<Int64>) -> Int64 {
     return t
 }
 
+/// `for x in xs` over a builtin array (RFC-0091 M3).
+///
+/// A user container's loop is a desugar onto `size` and `place nth`. A builtin
+/// array's is not, and must not become one: the element walk is three pointer
+/// bumps and a bounds test, and a protocol that cost iteration speed would be a
+/// bad trade. Timed rather than asserted, like the two rows above.
+fn iterSum(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut k = 0
+    while k < n {
+        for x in xs {
+            t = t + x
+        }
+        k = k + 1
+    }
+    return t
+}
+
 /// `a[i] = v` through the same table.
 fn elemStore(n: Int64) -> Int64 {
     let mut xs: Array<Int64> = []
@@ -334,6 +352,10 @@ bench "array element read, 10000 reads" {
 
 bench "array element store, 10000 stores" {
     blackBox(elemStore(blackBox(10000)))
+}
+
+bench "array iteration, 10000 elements" {
+    blackBox(iterSum(blackBox(157), blackBox(oneToN(blackBox(64)))))
 }
 
 bench "cell insert/set/get/get/remove, 1000 times" {
