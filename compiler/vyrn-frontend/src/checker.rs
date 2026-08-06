@@ -2819,9 +2819,19 @@ impl<'a> Checker<'a> {
                     }
                     Type::Err => return Ok(false),
                     other => {
-                        return Err(format!(
-                            "line {line}: `{name}[i] = ..` needs an Array or Map, found {other}"
-                        ))
+                        // RFC-0091 M3: a user container declares where its
+                        // element is, and `place atSet` is the writing half of
+                        // that. The element type is what it yields. Keyed by the
+                        // DECLARED type — an impl head names the alias.
+                        match crate::project::lookup_in(self.impl_blocks, &b.ty, "atSet") {
+                            Some(f) => f.ret.clone(),
+                            None => {
+                                return Err(format!(
+                                    "line {line}: `{name}[i] = ..` needs an Array, a Map, or a \
+                                     type that declares `place atSet`, found {other}"
+                                ))
+                            }
+                        }
                     }
                 };
                 let i = self.base(&self.expr(index, scope, Some(&Type::Int), Some(ret))?);
@@ -2975,9 +2985,21 @@ impl<'a> Checker<'a> {
                     // Iterating a String yields each byte as an Int.
                     Type::Str => Type::Int,
                     other => {
-                        return Err(format!(
-                            "line {line}: `for` needs an Array or String to iterate, found {other}"
-                        ))
+                        // RFC-0091 M3: a user container declares how it is
+                        // iterated, and the element type is what its `place nth`
+                        // yields. The resolved shape cannot answer, so the
+                        // DECLARED type is what the row is keyed by — an impl
+                        // head names the alias, not the record it aliases.
+                        match crate::types::iterate_impl(self.impl_blocks, &ity) {
+                            Some((_, nth)) => nth.ret.clone(),
+                            None => {
+                                return Err(format!(
+                                    "line {line}: `for` needs an Array, a String, or a type that \
+                                     declares `impl Iterate` (a `size` method and a `place nth`), \
+                                     found {other}"
+                                ))
+                            }
+                        }
                     }
                 };
                 // Bind the loop variable (immutable, element-typed) in a scope
@@ -6265,8 +6287,8 @@ impl<'a> Checker<'a> {
         // released and says nothing about how it is duplicated. Copying its
         // fields would produce a second value with the same invariants claimed
         // over the same resources, and the release the type declared would then
-        // run twice. RFC-0091 makes `Copy` a protocol the type implements; until
-        // then the honest answer is a refusal that names the type.
+        // run twice. Since RFC-0091 M1 the type may say what duplicating it
+        // means — `impl Copy for T` — and the refusal is what it overrides.
         //
         // A `Stream<T>` is a producer with a cursor, not a container: RFC-0075
         // gave it a variant-aware release for that reason, and duplicating the
@@ -6286,11 +6308,23 @@ impl<'a> Checker<'a> {
             if matches!(self.base(&t), Type::Err) {
                 return Ok(Type::Err);
             }
+            // RFC-0091 M1: the type answers first. `Copy` is derived
+            // structurally for everything whose parts copy, and a type with an
+            // invariant a structural copy would break declares its own. This is
+            // the row and the dispatch; every refusal below is what it overrides.
+            if let Some(key) = crate::types::type_key(&t) {
+                if self.impls.contains(&(crate::types::COPY.to_string(), key.clone())) {
+                    let mangled =
+                        crate::types::impl_method_name(crate::types::COPY, &key, "copy");
+                    return self.call(&mangled, args, line, scope, expected, fn_ret);
+                }
+            }
             if let Some(declared) = self.declared_owned_in(&t, 0) {
                 return Err(format!(
                     "line {line}: `copy` cannot copy `{declared}`: it declares `impl Owned for \
-                     {declared}`, so only `{declared}` knows what duplicating it means. Give it a \
-                     copying method of its own, or copy the parts you need"
+                     {declared}`, so only `{declared}` knows what duplicating it means. Say what \
+                     duplicating it means with `impl Copy for {declared}`, or copy the parts you \
+                     need"
                 ));
             }
             if matches!(self.base(&t), Type::Stream(_)) {
@@ -6303,13 +6337,13 @@ impl<'a> Checker<'a> {
             // a structural walk. Both compiling backends expanded one until the
             // compiler's stack ran out — a crash with no line on it. Recursion in
             // the value needs recursion in the code, so the answer is a function
-            // (`std/json`'s `copyJson` is the worked example), and RFC-0091 M1's
-            // `Copy` protocol is where a type will declare its own.
+            // (`std/json`'s `copyJson` is the worked example), and since
+            // RFC-0091 M1 `impl Copy for T` is where that function goes.
             if let Some(name) = crate::own::self_referring(&t, &self.types) {
                 return Err(format!(
                     "line {line}: `copy` cannot copy `{name}`: it refers to itself, so a \
                      structural copy has no bottom to stop at. Write a recursive function that \
-                     copies it one variant at a time"
+                     copies it one variant at a time, and declare it with `impl Copy for {name}`"
                 ));
             }
             return Ok(t);
@@ -9033,6 +9067,54 @@ mod tests {
         .is_ok());
     }
 
+    /// RFC-0091 M3. `place atSet` is the writing half, and the element type a
+    /// store coerces into is what it yields.
+    #[test]
+    fn a_projection_types_a_store_into_a_user_container() {
+        assert!(check_src(&format!(
+            "{RING}\
+             impl Index for Ring {{ place atSet(modify self, i: Int64) -> Int64 \
+             {{ yield self.data[i] }} }}\n\
+             fn main() -> Int64 {{ let mut d: Array<Int64> = []\n d.push(7)\n \
+             let mut r = Ring {{ data: d }}\n r[0] = 9\n return 0 }}"
+        ))
+        .is_ok());
+        // Without the row the store has nowhere to land, and the refusal names
+        // what would give it one.
+        let e = check_src(&format!(
+            "{RING}\
+             fn main() -> Int64 {{ let mut r = Ring {{ data: [] }}\n r[0] = 9\n return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("place atSet"), "{e}");
+    }
+
+    /// RFC-0091 M3. A user container iterates through `Iterate`, and the loop
+    /// variable takes what `place nth` yields.
+    #[test]
+    fn a_for_loop_types_over_a_user_container() {
+        let head = "type Ring = { data: Array<Int64> }\n\
+                    impl Iterate for Ring {\n\
+                      fn size(self) -> Int64 { return self.data.length }\n\
+                      place nth(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                    }\n";
+        assert!(check_src(&format!(
+            "{head}fn main() -> Int64 {{ let r = Ring {{ data: [] }}\n let mut s = 0\n \
+             for x in r {{ s = s + x }}\n return s }}"
+        ))
+        .is_ok());
+        // A `size` alone is not an iterable, and the refusal says which half is
+        // missing.
+        let e = check_src(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Iterate for Ring { fn size(self) -> Int64 { return 0 } }\n\
+             fn main() -> Int64 { let r = Ring { data: [] }\n \
+             for x in r { print(x) }\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("place nth"), "{e}");
+    }
+
     #[test]
     fn a_projection_must_yield_a_place_not_a_value() {
         let e = check_src(&format!(
@@ -9148,6 +9230,33 @@ mod tests {
                       let q = h.copy()\n return 0 }";
         let e = check_src(nested).unwrap_err();
         assert!(e.contains("`copy` cannot copy `Ring`"), "{e}");
+    }
+
+    /// RFC-0091 M1: the refusal above is what `impl Copy for T` overrides. A
+    /// type that says what duplicating it means dispatches there instead, and
+    /// the type it hands back is the one the impl declares.
+    #[test]
+    fn copy_dispatches_to_a_declared_impl() {
+        let src = "protocol Owned { fn release(self) }\n\
+                   type Ring = { buf: Array<Int64> }\n\
+                   impl Owned for Ring { fn release(self) { print(1) } }\n\
+                   impl Copy for Ring { fn copy(self) -> Ring { return Ring { buf: [] } } }\n\
+                   fn main() -> Int64 { let r = Ring { buf: [] }\n let q = r.copy()\n \
+                   return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// A type that refers to itself has no structural bottom (M1b), and the
+    /// answer the diagnostic names is a function. RFC-0091 M1 is where that
+    /// function is declared, so the same refusal lifts.
+    #[test]
+    fn copy_dispatches_for_a_self_referring_type() {
+        let src = "type Node = { next: Option<Node>, n: Int64 }\n\
+                   impl Copy for Node { fn copy(self) -> Node { \
+                   return Node { next: None, n: self.n } } }\n\
+                   fn main() -> Int64 { let a = Node { next: None, n: 1 }\n \
+                   let b = a.copy()\n return b.n }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     /// A `Stream<T>` is a cursor over a producer, not a container.

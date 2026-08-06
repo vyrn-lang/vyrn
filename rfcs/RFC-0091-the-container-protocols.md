@@ -159,13 +159,14 @@ Recorded as open, gated on a concrete need (arena-backed containers may be it).
 
 ## Milestones
 
-- **M1 — `Copy`**, derived + overridable. Unblocks RFC-0089 M1's `copy` as a
-  protocol row rather than a builtin special case.
+- **M1 — `Copy`**, derived + overridable — **LANDED (Phase 7b).** See "M1 and M3
+  as landed".
 - **M2 — place projections** — **LANDED (Phase 7a).** The mechanism, proved on
   `Array` itself. See "M2 as landed" below for what the dogfood proof could and
   could not delete, and why the RFC did not see the difference.
-- **M3 — `Index` + `Iterate`** open to users; `Slots` implements both;
-  `for x in slots` works.
+- **M3 — `Index` + `Iterate`** open to users — **LANDED (Phase 7b).** Both
+  halves of `Index`, including the store 7a fenced off. `Slots` can implement
+  them; `for x in slots` works.
 - **M4 — resume RFC-0082 M2**: port one built-in (`SmallArray` is the
   smallest) to std Vyrn behind the protocols, three-way parity as the gate.
 
@@ -255,3 +256,162 @@ element, which is what the seeded row yields. A projection that yields somewhere
 else (`self.data[j]`) is refused by name: writing there needs an address-of for
 an arbitrary place, and no backend has one. That is M3's, and it is the read/
 write seam this milestone was allowed to stop at.
+
+---
+
+## M1 and M3 as landed
+
+Shipped in Phase 7b. `Copy`, `Iterate` and `Index` are protocols a type
+declares, resolved nominally by type key, seeded for the built-ins. RFC-0086
+M1's shape, three more times, with no second list anywhere.
+
+### `Copy`
+
+`x.copy()` asks the receiver's type first. A type with `impl Copy for T`
+dispatches to the `copy` it declares; every other type keeps the structural
+derivation `own::owns_heap` already defines. That is the row and the dispatch,
+and the three things this RFC said were already in place were: the derivation,
+the receiver convention, and the override point.
+
+The override point was two refusals, and both are now overridable. A type that
+declares `impl Owned for T` copies through the `copy` it declares. A type that
+refers to itself copies through the recursive function M1b's diagnostic already
+told the reader to write — that diagnostic now says where the function goes.
+A `Stream<T>` still refuses, and the reason is structural rather than a policy:
+it has no type key, so it can carry no row.
+
+### `-> Self` still blocks, and nothing since RFC-0086 M2 changed it
+
+`Self` is not a type name in this language. It is not in the lexer, not in the
+parser's type table, and not in the checker. RFC-0084 gave records dispatch and
+Phase 7a gave `place` members; neither introduced a receiver-typed name. A
+protocol method written `-> Self` therefore parses as `Type::Named("Self")`, and
+conformance checking compares it against the impl's `-> Ring` and reports a
+mismatch.
+
+So M1 takes the associated-type spelling this RFC allowed for:
+
+```vyrn
+protocol Copy {
+    type Copied
+    fn copy(self) -> Copied
+}
+```
+
+The declaration is optional, exactly as `Owned`'s is: the compiler knows the
+protocol name and the method name, so a bare file with no resolver still works.
+What a program must write is `impl Copy for T`.
+
+**The receiver convention needs a correction too.** This RFC spells the method
+`fn copy(read self)`. That does not parse: an impl method's receiver is written
+bare `self` and IS `Capability::Read` — the capability is right and the word is
+implicit. A `place` member is the one member form that spells it
+(`read self` / `modify self`), because it also offers `modify self`. The
+inconsistency is real and is left where it is; making an impl method's receiver
+capability writable is new syntax.
+
+### `Iterate`
+
+```vyrn
+impl Iterate for Window {
+    fn size(self) -> Int64 { .. }
+    place nth(read self, i: Int64) -> Int64 { yield self.data[self.start + i] }
+}
+```
+
+Both halves are required, and the refusal names the missing one. `for x in xs`
+over such a container becomes:
+
+```text
+let @i.n = size(xs)
+let mut @i.i = -1
+while @i.i + 1 < @i.n {
+    @i.i = @i.i + 1
+    <the projection's prologue>
+    let x = <the place it yields>
+    <the body>
+}
+```
+
+One function builds that, in `project.rs`, and each engine lowers it with the
+statements it already has. **The increment is the body's first statement, not
+its last**: a `continue` jumps to the condition, so an increment at the end
+would be skipped and the loop would spin on one element. Testing `@i.i + 1`
+rather than `@i.i` is what pays for that, and it keeps the index naming the
+element the turn is reading, so a `break` leaves it where a reader expects.
+
+An iterable named by a place is read where it lives, which is what makes the
+loop variable a borrow of it. An iterable that is not a place binds once — the
+decision log's rule, and evaluating it per turn would run its side effects
+`size + 1` times.
+
+A built-in array does NOT take this path. `for x in a` still reaches each
+engine's own element walk, and the emitted output says so: 119 `.ll` files and
+119 `.wasm` modules diffed against `main`, with the one exception recorded
+below. `for x in consume xs` is unchanged — `consuming` is a `movecheck` fact
+and no engine reads it.
+
+### `Index`, and the store 7a fenced off
+
+**7a's refusal named the wrong obstacle, and the mechanism was already in the
+repo.** It said a store through a user container "needs an address-of for an
+arbitrary place, and no backend has one". RFC-0082 M1 met exactly that problem
+for `r.a[i] = v` — a container that is not a slot — and answered it without an
+address-of: move the container out into a temp, mutate the temp, move it back.
+`parser::place_receiver` is that desugar, it is pure AST, and it already covers
+the three shapes a place takes.
+
+So `c[k] = v` through a user container is the projection's prologue followed by
+the same statements `r.a[i] = v` has always emitted. No engine gained an
+addressing mode. The move-out is O(1) for a growable container — a header copy
+sharing the buffer — and a whole-value copy for one held inline, which is what
+`a[i].f = v` has always cost.
+
+The refusal that remains is narrow and true: a projection that yields something
+with no address at all (a call result, a temporary) is refused, and the wording
+says a projection yields a place.
+
+### The one thing the proof had to move, and why
+
+Building the store found a 7a bug. `project::inline` renamed a projection body's
+own bindings to a fixed `@b.name`. The prologue lands in the **caller's** block —
+it is statements, not a scope of its own — so two inlines of one projection in
+one block bound the same name and the second shadowed the first. Nothing
+hoisted between two inlines until this store did, and then `s[j] = s[k]` read
+the wrong element. Only the two compiling backends were wrong; the interpreter
+gives each inline a frame of its own.
+
+Each inline now carries a number. Those names reach the textual backend as
+alloca names, so `examples/projection.ll` differs from `main` in exactly those
+names and nowhere else. The wasm is byte-identical, because a wasm local has no
+name.
+
+### What did not flip, and what each row is really waiting for
+
+Phase 5 left three memory rows leaking and said they waited on this work. None
+of them flips, and one of the three reasons is a correction.
+
+- **`optionString` (§14)** — `if let Some(s) = maybe(tag())` matches a payload
+  out of a value with no name. Releasing it needs the payload's escape from the
+  arm tracked. Neither M1 nor M3 touches that.
+- **`lambdaLoop` (§16)** — Phase 5 named M1 as the mechanism, **and it is not**.
+  A `Copy` row is keyed by a type key; a `fn` type is structural and has none,
+  and a `type Bump = fn(..) -> ..` alias over one is refused where it is
+  written, because the value erases at run time and carries no name to dispatch
+  on. So §16 has nowhere to hang a declaration, and nothing to write in it
+  either: the tags are the defunctionalizer's and have no source name. What it
+  waits on is a copy DERIVED over the defunctionalized enum, emitted where
+  RFC-0037 already emits that enum, which knows every tag's layout because it
+  chose them. That is a job in the closure lowering, not a row in a protocol
+  table.
+- **`elementLeak` (U4)** — `m.keys()` hands back a fresh buffer holding the
+  map's own key pointers, so releasing an `Array<String>` element by element
+  frees what the map still holds. A protocol row does not change what `keys`
+  returns.
+
+### What M1 and M3 do not open
+
+`Slots<T>` itself (RFC-0090 M1, Phase 8a) and the port of a built-in to std Vyrn
+(M4). A `place` member is still invisible to the LSP's symbol index: hover and
+completion work on a user container because the checker types it, but a `place`
+member has no definition site of its own to jump to.

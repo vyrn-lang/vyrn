@@ -240,9 +240,29 @@ carried the ownership fact — see the note under Phase 9.
   arbitrary place needs an address-of no backend has.
   See RFC-0091 "M2 as landed" for the three findings, of which the load-bearing
   one is that inlining is free in instructions and not in node identity.
-- **7b. `Copy` becomes a protocol** (derived + overridable), `Index` and
-  `Iterate` open to users, `for x in xs` desugars via `Iterate`. Seeded rows
-  for the built-ins per RFC-0086 M1's pattern.
+- **7b. `Copy`, `Iterate` and `Index` are protocols — LANDED.** `x.copy()` asks
+  the receiver's type first, and M1b's two refusals (a declared `impl Owned`, a
+  self-referring type) become the override point they were written as.
+  `for x in xs` over a user container desugars onto `size` and `place nth`, in
+  one function that builds AST; each engine lowers it with the statements it
+  already has. A built-in array does not take that path, and the emitted output
+  says so.
+  **7a's fenced-off store is open, and its refusal named the wrong obstacle.**
+  It said storing through a user container needs an address-of no backend has.
+  RFC-0082 M1 answered exactly that problem for `r.a[i] = v` without one — move
+  the container out, mutate the temp, move it back — and `parser::place_receiver`
+  is that desugar, pure AST, already covering the three shapes a place takes.
+  Building it found a 7a bug: a projection body's bindings were renamed to a
+  fixed name, so two inlines in one block collided; each inline now carries a
+  number, which moves `examples/projection.ll` in exactly those alloca names and
+  nothing else.
+  **`-> Self` still blocks.** `Self` is not a type name anywhere in this
+  compiler, and neither RFC-0084 nor 7a introduced one. M1 takes the
+  associated-type spelling. The RFC's `fn copy(read self)` also does not parse:
+  an impl method's receiver is bare `self` and IS `read`.
+  **No memory row flipped**, and §16's stated reason was wrong: a `Copy` row is
+  keyed by a type key, a `fn` type has none, and an alias over one is refused
+  where it is written. See RFC-0091 "M1 and M3 as landed".
 
 ## Phase 8 — handles replace Path B *(RFC-0090 M1, M3, M4)*
 
@@ -309,5 +329,5 @@ the shipped ABI, so it is an RFC-0012 edit rather than a phase's side effect.
   native crash or a memory-test failure, not as output parity.
 - ~~Phase 7a (projections) is the only new mechanism; if it stalls, Phases 8a–8c
   can ship with `.get`/method access only, and 7 resumes after.~~ It did not
-  stall. `Slots` can index through `place at` today; `slots[h] = v` waits on
-  7b's store form.
+  stall. `Slots` can index through `place at`, and since 7b `slots[h] = v`
+  stores through `place atSet` and `for x in slots` iterates.

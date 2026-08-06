@@ -3702,3 +3702,69 @@ fn renaming_a_procedure_in_the_corpus_reaches_a_pages_script_body() {
     let _ = client.child.kill();
 }
 
+
+// ===========================================================================
+// RFC-0091 M1/M3 — the container protocols in the editor.
+//
+// A `Copy` impl is an ordinary impl method, so it was already indexed. The two
+// new shapes are a `place nth` — which is not a function and never reaches
+// `Program::functions` — and a loop variable whose type comes from it. The
+// buffer must check clean and the loop variable must hover as its element type.
+// ===========================================================================
+
+const CONTAINER_SRC: &str = "type Ring = { data: Array<Int64> }
+
+impl Iterate for Ring {
+    fn size(self) -> Int64 {
+        return self.data.length
+    }
+    place nth(read self, i: Int64) -> Int64 {
+        yield self.data[i]
+    }
+}
+
+impl Copy for Ring {
+    fn copy(self) -> Ring {
+        return Ring { data: [] }
+    }
+}
+
+fn main() -> Int64 {
+    let r = Ring { data: [] }
+    let q = r.copy()
+    let mut t = 0
+    for x in q {
+        t = t + x
+    }
+    return t
+}
+";
+
+#[test]
+fn a_user_container_checks_and_hovers_in_the_editor() {
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_container_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("c.vyrn"), CONTAINER_SRC).unwrap();
+    let uri = file_uri(&dir.join("c.vyrn"));
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", CONTAINER_SRC);
+
+    // The buffer is clean: a `place` member and an `Iterate` loop are not
+    // errors, and neither is a declared `copy`.
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+
+    // The loop variable takes what `place nth` yields.
+    let (l, c) = pos_after(CONTAINER_SRC, "for x");
+    let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the loop variable");
+    assert!(hover.contains("Int64"), "the loop variable hovers as its element type: {hover}");
+
+    // The declared `copy` gives the binding the receiver's type.
+    let (l, c) = pos_after(CONTAINER_SRC, "let q");
+    let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the copy");
+    assert!(hover.contains("Ring"), "a declared copy hovers as its type: {hover}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

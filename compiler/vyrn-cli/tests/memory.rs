@@ -46,7 +46,7 @@
 //! | `fieldOverwrite` | §4 | steady | Phase 5: `r.field = v` releases the old field |
 //! | `returnedString` | §9a | steady | Phase 6: a return is owned, so the wrapper frees it after decoding |
 //! | `optionString` | §14 | leaks | an `Option` owns its payload since Phase 5, but this row binds nothing to release |
-//! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed — it needs `Copy` as a protocol first |
+//! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed — it needs a copy derived over the defunctionalized enum, which `Copy` as a protocol does not give it |
 //! | `elementLeak` | U4 | leaks | a heap element inside a container; `drop` is whole-container |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
 //!
@@ -410,8 +410,12 @@ const ROWS: &[Row] = &[
               releasing it: a `fn` value would have to MOVE under rule 1, and the corpus \
               copies them — `std/http`'s `httpCopy` hands `run` across into a new `Route` for \
               each of seven combinators. The fix menu's `.copy()` cannot be written either: a \
-              capture block's layout is per TAG and chosen at run time, so `Copy` has to be a \
-              protocol first (RFC-0091 M1)",
+              capture block's layout is per TAG and chosen at run time. Phase 5 named RFC-0091 \
+              M1 as the mechanism and 7b measured that it is not: a `Copy` row is keyed by a \
+              type key, a `fn` type has none, and an alias over one is refused where it is \
+              written because the value erases and carries no name to dispatch on. What it \
+              waits on is a copy DERIVED over the defunctionalized enum, in the closure \
+              lowering that chose the tags",
     },
     Row {
         export: "elementLeak",
