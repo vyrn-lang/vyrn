@@ -153,6 +153,7 @@ fn the_placeholder_a_field_does_name_is_accepted() {
 const ROOT: &str = "\
 import { mount, surface, Route } from \"std/http\"
 import * as api from \"./notes.http\"
+import * as stream from \"std/stream\"
 
 fn under(req: Request) -> Option<Response> {
     return if req.path.startsWith(\"/_/\") { Some(Response { status: 200, contentType: \"text/plain\", body: \"surface\", vary: \"\", headers: [:] }) } else { None }
@@ -506,22 +507,23 @@ fn the_derived_line_carries_the_policy() {
 const LIVE_ROOT: &str = "\
 import { mount, surface, event, sse, ws, Frames, Live, Route, Socket, Wire } from \"std/http\"
 import * as api from \"./notes.http\"
+import * as stream from \"std/stream\"
 
 fn under(req: Request) -> Option<Response> {
     return None
 }
 
-fn feedStep(c: Ref<Int64>) -> Option<String> {
-    let n = get(c)
+fn feedStep(c: stream.Cursor) -> Option<String> {
+    let n = stream.cursorGet(c)
     if n >= 3 {
         return None
     }
-    set(c, n + 1)
+    stream.cursorSet(c, n + 1)
     return Some(event(\"\\{n}\", \"note\", \"line\\{n}\"))
 }
 
 fn feed(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
-    return fromStep(since, feedStep)
+    return stream.unfold(since, feedStep)
 }
 
 fn feeds() -> Array<Live> {

@@ -14,7 +14,7 @@
 /// - 30 000 cycles of a three-deep chain acquire 90 000 cursor cells out of a
 ///   slab of 65 536, so a release that ran once too few would TRAP rather than
 ///   merely grow. That is the `#6156` row, through a chain.
-import { unfold, map, filter, take } from "std/stream"
+import { Cursor, cursorGet, cursorSet, unfold, map, filter, take } from "std/stream"
 
 /// How many times the feed's step has run. Module state rather than a capture,
 /// because a closure captures by value at its evaluation site (RFC-0037) and
@@ -23,9 +23,9 @@ let mut steps = 0
 
 /// The endless one. It never answers `None`, so nothing but a consumer that
 /// stops asking can end it.
-fn naturals(c: Ref<Int64>) -> Option<Int64> {
-    let n = get(c)
-    set(c, n + 1)
+fn naturals(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
+    cursorSet(c, n + 1)
     steps = steps + 1
     return Some(n)
 }
@@ -138,11 +138,11 @@ fn main() -> Int64 {
 }
 
 /// A producer that ends, so a chain over it terminates without a `take`.
-fn upToFive(c: Ref<Int64>) -> Option<Int64> {
-    let n = get(c)
+fn upToFive(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
     if n > 5 {
         return None
     }
-    set(c, n + 1)
+    cursorSet(c, n + 1)
     return Some(n)
 }

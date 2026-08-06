@@ -196,9 +196,12 @@ pub const RESERVED: &[&str] = &[
     "fromArray",
     "fromStep",
     "close",
-    // RFC-0075 M2c: the wrapper and the pull it is written in terms of.
-    "fromWrap",
-    "pull",
+    // RFC-0075 M2c, re-hosted by RFC-0090 M3: a wrapper's source is a boxed
+    // stream `std/stream` holds by address, so the primitives are the box, the
+    // unboxStream and the pull. `fromWrap` and `pull` were the cell-slab spellings.
+    "boxStream",
+    "unboxStream",
+    "pullAt",
     // RFC-0074 M3a: the handoff. A stream a request opened outlives the answer
     // that opened it, so it goes to the host rather than being consumed here.
     "serveStream",
@@ -6111,44 +6114,55 @@ impl<'a> Checker<'a> {
             };
             return Ok(Type::Stream(inner));
         }
-        // RFC-0075 M2b. `fromStep(seed, step)` is the pull producer: the stream
-        // owns a cursor cell holding `seed`, and every `next` hands that cell to
-        // `step`, which reads it, writes the next cursor into it, and answers
-        // `Some(v)` or `None`. The step runs when the consumer asks and never
-        // before, so `take(n)` over an endless producer allocates n.
+        // RFC-0075 M2b, re-hosted by RFC-0090 M3. `fromStep(slot, gen, step)` is
+        // the pull producer: the stream carries the two words of a cursor its
+        // CALLER minted, and every `next` hands them back to `step`, which reads
+        // the cursor, writes the next one, and answers `Some(v)` or `None`.
         //
-        // The cursor is a `Ref<Int64>` rather than the seed type `S` of the
-        // RFC's `unfold(seed, |s| Next(v, s'))` sketch, and that is the whole
-        // reason this fits: a `Ref<S>` is two words for every `S`, but the
-        // dispatcher a stream calls is keyed by the step's SIGNATURE, so `S`
-        // showing up there would put it back in `Stream<T>`'s type. Fixing it at
-        // `Int64` makes the signature a function of `T` alone. Richer producer
-        // state is a second cell the step closes over.
+        // The cursor used to be a `Ref<Int64>` — a Path B cell, allocated here.
+        // It is two plain `Int64`s now, and the slab they index lives in
+        // `std/stream` over `std/slots`. What did not change is the property the
+        // `Ref` was pinned at `Int64` for: the dispatcher a stream calls is keyed
+        // by the step's SIGNATURE, so that signature must be a function of the
+        // element type alone.
+        //
+        // The third parameter is how a release reaches the slab. A close is
+        // type-erased in the runtime and the slab is not, so `close` asks the
+        // step to release itself: `closing` is true exactly once per stream, and
+        // the step answers `None` after giving its slot back. That is also what
+        // makes a wrapper's walk ordinary Vyrn — it closes its own source, and
+        // `movecheck` checks that release like any other.
         if name == "fromStep" {
-            if args.len() != 2 {
+            if args.len() != 3 {
                 return Err(format!(
-                    "line {line}: `fromStep` takes 2 arguments, got {}",
+                    "line {line}: `fromStep` takes 3 arguments, got {}",
                     args.len()
                 ));
             }
-            let st = self.expr(&args[0], scope, Some(&Type::Int), fn_ret)?;
-            let st = self.base(&st);
-            if matches!(st, Type::Err) {
-                return Ok(Type::Err);
+            for (i, what) in ["slot", "generation"].iter().enumerate() {
+                let st = self.expr(&args[i], scope, Some(&Type::Int), fn_ret)?;
+                let st = self.base(&st);
+                if matches!(st, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if st != Type::Int {
+                    return Err(format!(
+                        "line {line}: `fromStep` needs an `Int64` cursor {what}, found {st}"
+                    ));
+                }
             }
-            if st != Type::Int {
-                return Err(format!(
-                    "line {line}: `fromStep` needs an `Int64` seed, found {st}"
-                ));
-            }
-            let ft = self.expr(&args[1], scope, None, fn_ret)?;
-            let want = "fn(Ref<Int64>) -> Option<T>";
+            let ft = self.expr(&args[2], scope, None, fn_ret)?;
+            let want = "fn(Int64, Int64, Bool) -> Option<T>";
             let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
                 return Err(format!(
                     "line {line}: `fromStep` needs a `{want}` step, found {ft}"
                 ));
             };
-            if ps.len() != 1 || self.base(&ps[0]) != Type::Ref(Box::new(Type::Int)) {
+            if ps.len() != 3
+                || self.base(&ps[0]) != Type::Int
+                || self.base(&ps[1]) != Type::Int
+                || self.base(&ps[2]) != Type::Bool
+            {
                 return Err(format!(
                     "line {line}: `fromStep` needs a `{want}` step, found {ft}"
                 ));
@@ -6160,82 +6174,68 @@ impl<'a> Checker<'a> {
             };
             return Ok(Type::Stream(inner));
         }
-        // RFC-0075 M2c. `fromWrap(src, step)` is `fromStep` with a source: the
-        // wrapper allocates the same cursor cell, parks the same
-        // `fn(Ref<Int64>) -> Option<U>` step in the same two header words, and
-        // additionally MOVES `src` into that cell, where `pull` finds it and
-        // `close` releases it. A wrapper is therefore an ordinary producer —
-        // `for … in` needs no arm for it, the dispatcher no new key, and the
-        // release path counts it the way it counts every other stream. It is
-        // what makes `map` a stream rather than a drain.
-        if name == "fromWrap" {
-            if args.len() != 2 {
+        // RFC-0075 M2c, re-hosted by RFC-0090 M3. `boxStream(s)` moves a
+        // stream into one heap box and hands back its address, `unboxStream(a)` takes
+        // it back out, and `pullAt(a)` asks the stream at `a` for one element.
+        // Those three are what a lazy combinator is written on: `std/stream`
+        // keeps the address in its own cursor slot, so the wrapper's source is
+        // held by the module that owns the wrapper rather than by a fourth
+        // parallel array inside the compiler.
+        //
+        // The address is an `Int64` because the language has no pointer, and
+        // that is the whole sharpness of the pair: `unboxStream` of anything else
+        // traps rather than reading a stream out of nowhere. `boxStream` and
+        // `unboxStream` are the two halves of ONE move — `movecheck` sees the first as
+        // a disposal and the second as an acquisition, so a chain that fails to
+        // close its source does not compile.
+        if name == "boxStream" {
+            if args.len() != 1 {
                 return Err(format!(
-                    "line {line}: `fromWrap` takes 2 arguments, got {}",
+                    "line {line}: `boxStream` takes 1 argument, got {}",
                     args.len()
                 ));
             }
             let st = self.expr(&args[0], scope, None, fn_ret)?;
             let st = self.base(&st);
             if matches!(st, Type::Err) {
-                return Ok(Type::Err);
+                return Ok(Type::Int);
             }
             if !matches!(st, Type::Stream(_)) {
                 return Err(format!(
-                    "line {line}: `fromWrap` needs a `Stream<T>` source, found {st}"
+                    "line {line}: `boxStream` needs a `Stream<T>`, found {st}"
                 ));
             }
-            let ft = self.expr(&args[1], scope, None, fn_ret)?;
-            let want = "fn(Ref<Int64>) -> Option<U>";
-            let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
-                return Err(format!(
-                    "line {line}: `fromWrap` needs a `{want}` step, found {ft}"
-                ));
-            };
-            if ps.len() != 1 || self.base(&ps[0]) != Type::Ref(Box::new(Type::Int)) {
-                return Err(format!(
-                    "line {line}: `fromWrap` needs a `{want}` step, found {ft}"
-                ));
-            }
-            let Type::Option(inner) = self.base(&ret) else {
-                return Err(format!(
-                    "line {line}: `fromWrap` needs a `{want}` step, found {ft}"
-                ));
-            };
-            return Ok(Type::Stream(inner));
+            return Ok(Type::Int);
         }
-        // RFC-0075 M2c. `pull(c)` is one element from the stream behind this
-        // cursor — the operation a wrapper's step is written in terms of.
-        //
-        // Its element type comes from the ANNOTATION, because nothing in the
-        // call carries it: the cursor is a `Ref<Int64>` for every stream (M2b),
-        // which is exactly the property that keeps the seed type out of
-        // `Stream<T>` and exactly what leaves `pull` with nothing to infer
-        // from. `let x: Option<T> = pull(c)` is the spelling, and the error
-        // below is what an unannotated one gets.
-        if name == "pull" {
+        if name == "unboxStream" || name == "pullAt" {
             if args.len() != 1 {
                 return Err(format!(
-                    "line {line}: `pull` takes 1 argument, got {}",
+                    "line {line}: `{name}` takes 1 argument, got {}",
                     args.len()
                 ));
             }
-            let ct = self.expr(&args[0], scope, Some(&Type::Ref(Box::new(Type::Int))), fn_ret)?;
-            let ct = self.base(&ct);
-            if !matches!(ct, Type::Err) && ct != Type::Ref(Box::new(Type::Int)) {
+            let at = self.expr(&args[0], scope, Some(&Type::Int), fn_ret)?;
+            let at = self.base(&at);
+            if !matches!(at, Type::Err) && at != Type::Int {
                 return Err(format!(
-                    "line {line}: `pull` needs a `Ref<Int64>` cursor, found {ct}"
+                    "line {line}: `{name}` needs a boxed stream's address, found {at}"
                 ));
             }
+            // Both answer a type nothing in the call carries, for the reason
+            // `pull` always did: an address is an `Int64` whatever it addresses.
+            let want = if name == "unboxStream" { "Stream<T>" } else { "Option<T>" };
             let Some(exp) = expected else {
                 return Err(format!(
-                    "line {line}: `pull` needs the element type from context — \
-                     write `let x: Option<T> = pull(c)`"
+                    "line {line}: `{name}` needs the element type from context —                      write `let x: {want} = {name}(a)`"
                 ));
             };
-            if !matches!(self.base(exp), Type::Option(_)) {
+            let ok = match name {
+                "unboxStream" => matches!(self.base(exp), Type::Stream(_)),
+                _ => matches!(self.base(exp), Type::Option(_)),
+            };
+            if !ok {
                 return Err(format!(
-                    "line {line}: `pull` answers an `Option<T>`, not {exp}"
+                    "line {line}: `{name}` answers a `{want}`, not {exp}"
                 ));
             }
             return Ok(exp.clone());
@@ -11006,8 +11006,8 @@ mod tests {
     #[test]
     fn accepts_generic_record() {
         let src = "type Box<T> = { value: T }; \
-                   fn unbox<T>(b: Box<T>) -> T { return b.value; } \
-                   fn main() -> Int64 { let n = Box { value: 41 }; return unbox(n); }";
+                   fn open<T>(b: Box<T>) -> T { return b.value; } \
+                   fn main() -> Int64 { let n = Box { value: 41 }; return open(n); }";
         assert!(check_src(src).is_ok());
     }
 

@@ -3198,9 +3198,10 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     // RFC-0075. `close` is offered on a `Stream<T>` below; `fromArray` is here
     // for hover only, since it takes an Array and produces the stream.
     BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
-    BuiltinMethod { name: "fromStep", detail: "fromStep(seed, step) -> Stream<T> — a stream that pulls from `step: fn(Ref<Int64>) -> Option<T>`; `std/stream`'s `unfold` is the one to call" },
-    BuiltinMethod { name: "fromWrap", detail: "fromWrap(source, step) -> Stream<U> — a producer that owns another stream; the step reads it with `pull` (RFC-0075 M2c); `std/stream`'s `map`/`filter`/`take` are the ones to call" },
-    BuiltinMethod { name: "pull", detail: "pull(cursor) -> Option<T> — one element from the stream a `fromWrap` put behind this cursor; needs its type from the annotation: `let x: Option<T> = pull(c)`" },
+    BuiltinMethod { name: "fromStep", detail: "fromStep(slot, generation, step) -> Stream<T> — a stream that pulls from `step: fn(Int64, Int64, Bool) -> Option<T>` over a cursor its caller minted; `std/stream`'s `unfold` is the one to call" },
+    BuiltinMethod { name: "boxStream", detail: "boxStream(s) -> Int64 — move a stream into one heap box and answer its address; `std/stream` keeps a wrapper's source this way (RFC-0090 M3)" },
+    BuiltinMethod { name: "unboxStream", detail: "unboxStream(address) -> Stream<T> — take a boxed stream back out; needs its type from the annotation: `let s: Stream<T> = unboxStream(a)`" },
+    BuiltinMethod { name: "pullAt", detail: "pullAt(address) -> Option<T> — one element from the stream in that box; needs its type from the annotation: `let x: Option<T> = pullAt(a)`" },
     BuiltinMethod { name: "close", detail: "close(stream) -> Unit — discharge a stream's disposal obligation without consuming it" },
     BuiltinMethod { name: "serveStream", detail: "serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails (RFC-0074 M3a); `std/http`'s `sse` is the one to call" },
     BuiltinMethod { name: "pop", detail: "array.pop() -> Option<T> — remove and return the last element (None if empty)" },

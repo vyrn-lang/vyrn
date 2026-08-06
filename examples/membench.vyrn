@@ -21,6 +21,7 @@
 //     empty inside a bench block, so each block builds what it needs.
 
 import { Slots, newSlots, insert, remove } from "std/slots"
+import * as stream from "std/stream"
 
 /// 32 bytes of data-segment literal. Reading it allocates nothing, so a
 /// concatenation of two of these measures the concatenation.
@@ -348,6 +349,57 @@ fn words(n: Int64) -> Array<String> {
     return out
 }
 
+/// The stream rows (RFC-0090 M3). A cursor was a Path B cell until this phase
+/// and is a slot in `std/stream`'s own `Slots` now, so what changed is what
+/// every element and every release costs. Three shapes, because they are three
+/// different costs: pulling from a bare producer, pulling through a wrapper, and
+/// opening and closing one.
+///
+/// `naturals` never ends, so `take` is what stops it — which is also what makes
+/// the count exact: n elements is n asks.
+fn naturals(c: stream.Cursor) -> Option<Int64> {
+    let n = stream.cursorGet(c)
+    stream.cursorSet(c, n + 1)
+    return Some(n)
+}
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+/// n elements out of a plain producer: one dispatch and one cursor read/write
+/// each.
+fn streamPull(n: Int64) -> Int64 {
+    let mut t = 0
+    for v in stream.take(stream.unfold(0, naturals), n) {
+        t = t + v
+    }
+    return t
+}
+
+/// The same n through a `map`, which is a second producer whose step pulls the
+/// first: two dispatches, two cursors, one box read.
+fn streamMapped(n: Int64) -> Int64 {
+    let mut t = 0
+    for v in stream.take(stream.map(stream.unfold(0, naturals), double), n) {
+        t = t + v
+    }
+    return t
+}
+
+/// Open and close, with nothing pulled: the acquisition and the release on their
+/// own. This is RFC-0075's "open-then-abandon cycles" row as a timing rather
+/// than as a ceiling.
+fn streamCycles(n: Int64) -> Int64 {
+    let mut i = 0
+    while i < n {
+        let s = stream.unfold(i, naturals)
+        close(s)
+        i = i + 1
+    }
+    return i
+}
+
 bench "copy of a 10 KB string, 1000 times" {
     let s = spine(blackBox(1000))
     blackBox(copyString(blackBox(1000), blackBox(s)))
@@ -430,6 +482,18 @@ bench "std/slots build and release, 1000 containers of 16" {
     blackBox(slotsLifetime(blackBox(1000)))
 }
 
+bench "stream unfold + take, 1000 elements" {
+    blackBox(streamPull(blackBox(1000)))
+}
+
+bench "stream map over unfold + take, 1000 elements" {
+    blackBox(streamMapped(blackBox(1000)))
+}
+
+bench "stream open and close, 1000 cycles" {
+    blackBox(streamCycles(blackBox(1000)))
+}
+
 fn main() -> Int64 {
     // Small, deterministic, and identical on all three engines — the benches
     // themselves are stripped from `run`/`build`.
@@ -442,5 +506,8 @@ fn main() -> Int64 {
     print(slotsChurn(4))
     print(copyString(4, pad()))
     print(copyArray(4, [1, 2, 3]))
+    print(streamPull(4))
+    print(streamMapped(4))
+    print(streamCycles(4))
     return 0
 }

@@ -112,7 +112,10 @@ an identity is data, and data is checked where you read it — same as every
   Phase 8b closed all three, and a `Slots<String>` is now flat across turns.
 - **M2** — RFC-0089 M2 (conventions) lands; the `Slots` port stops being
   blocked by escape-on-call.
-- **M3** — streams re-host their cursor on `std/slots`.
+- **M3** — streams re-host their cursor on `std/slots` — **LANDED (Phase 8c).**
+  See "M3 as landed" at the end, and RFC-0075 "As landed — M3". The compiler
+  carries no slab logic for streams any more; it costs about 2.5x per element,
+  and the reason is that Path B's generation check was elidable.
 - **M4** — `cell`/`get`/`set`/`release` and the slab are deleted from all three
   engines. The language's memory runtime is malloc, free, memcpy.
 
@@ -409,3 +412,53 @@ skips by keeping a dense array of live slots and a map back from a slot to its
 place in it, so the skipping happens before the projection runs. That is the
 standard slot-map layout, it is what makes `remove` O(1), and it costs the two
 arrays the benchmark above already pays for.
+
+## M3 as landed — the stream cursor
+
+The hardest migration on this RFC's own list, and it landed as the list
+predicted: a stream's cursor is a slot in a `Slots<CursorCell>` that lives in
+`std/stream`, and the slab logic is Vyrn anyone can read. RFC-0075's
+"As landed — M3, the cursor re-host" is the full account; four things belong
+here because they are this RFC's claims rather than that one's.
+
+**A Vyrn slab is not faster everywhere.** M1's gate row says `std/slots` beats
+`cell` by 2.02× on insert/set/get/get/remove. The stream cursor is the shape
+where it loses: about 2.5× slower per element, measured in `examples/membench`'s
+three new rows. Three reasons, and only the first is about `Slots`:
+
+1. **Path B's generation check was elidable and a `Slots` read is not.** RFC-0004
+   §5.3 proves a cursor is never aliased and drops the check; nothing proves the
+   equivalent about an `Array` index behind a handle.
+2. `cells` is module state behind a global, where the slab was a fixed array at a
+   known address.
+3. A stream's registered step is an adapter — it turns the two cursor words into
+   a `Cursor` and handles the closing call — so every element costs one more
+   dispatched call.
+
+Only (1) is a property of the model. (2) and (3) are the price of the cursor
+being std's rather than the compiler's, and (3) would go if a step took the raw
+words, at the cost of every producer in every program spelling them.
+
+**M4 may now delete Path B.** Nothing in the compiler reaches the cell slab for a
+stream. What still does is listed in the PR body for this phase, and it is
+exactly what the M4 bullet already named plus the two corpus sites that write
+`cell`/`get`/`set`/`release` on purpose (`examples/copy.vyrn`, and the
+`cellChurn` baseline row in `examples/membench.vyrn` — the row M1's 2.02× is
+measured against, which retires with the thing it measures).
+
+**"The slab logic inside std, now in Vyrn" was right about the slab and wrong
+about the release.** This RFC's migration line assumed the cursor could move and
+nothing else would. It could not: a release is type-erased in the runtime, and a
+slab in Vyrn cannot be named from there. So the release had to become a CALL into
+the stream's own step, which made the compiler's one `__vyrn_stream_close` into
+one function per element type. That is more code, not less — and it bought the
+thing the walk could not have: a wrapper's release is ordinary Vyrn, so
+`movecheck` proves the chain releases exactly once instead of a hand-written loop
+promising to.
+
+**A stream is where the handle model's ergonomics show.** M1's `Handle` carries a
+container identity word, and a stream carries two words, so the identity is
+recovered from `cells.owner` rather than stored. That works because there is
+exactly one cursor container in a program. It is the first place the model needed
+a container it could assume, and it is worth noticing before anything else copies
+the trick.

@@ -2,14 +2,13 @@
 
 std/stream — the `Stream<T>` combinators (RFC-0075 M2), written in Vyrn
 itself, exactly as std/arrays is. Being ordinary Vyrn they get
-interpreter == native == wasm parity for free, they add no builtin and no
-census row, and — the part that matters here — they inherit M1's linearity
-instead of restating it. Every function below takes a `Stream` parameter,
-which carries the obligation into the callee, discharges it with `for … in`,
-and hands back a stream the caller now owes. An abandoned `map(...)` result
-therefore fails to compile for precisely the reason an abandoned
-`fromArray(...)` does; there is no combinator-shaped hole to plug because
-there is no combinator-shaped rule.
+interpreter == native == wasm parity for free, and — the part that matters
+here — they inherit M1's linearity instead of restating it. Every function
+below takes a `Stream` parameter, which carries the obligation into the
+callee, discharges it, and hands back a stream the caller now owes. An
+abandoned `map(...)` result therefore fails to compile for precisely the
+reason an abandoned `fromArray(...)` does; there is no combinator-shaped hole
+to plug because there is no combinator-shaped rule.
 
 **Five, and two refused.** M2b made `Stream<T>` a producer rather than a
 buffer, so `unfold` is here now: it is the reason the representation
@@ -18,33 +17,66 @@ of a representation — both need to know which of several sources has a value
 READY, and this RFC states outright that it adds no concurrency while
 RFC-0013 leaves the loop to the host. There is nothing to ask.
 
-**Lazy since M2c.** `map`, `filter` and `take` no longer drain their source
-into a buffer. Each is a wrapper: a producer whose cursor cell holds the
-stream it wraps (`fromWrap`), whose step reads that source one element at a
-time (`pull`), and whose `close` releases the source on the way past — one
-release per stream, in a walk down the chain. So `map(unfold(..), f)` is a
-feed rather than a hang, which is the first thing anyone does with a feed.
+**Lazy since M2c.** `map`, `filter` and `take` do not drain their source into
+a buffer. Each is a wrapper: a producer whose cursor holds the stream it
+wraps, whose step reads that source one element at a time (`pullAt`), and whose
+close releases the source on the way past — one release per stream, down the
+chain. So `map(unfold(..), f)` is a feed rather than a hang, which is the
+first thing anyone does with a feed.
+
+**The slab is this module's, since RFC-0090 M3.** A cursor used to be a
+`Ref<Int64>` out of a slab the compiler carried, with a fourth parallel array
+holding "the stream behind this cursor". Both are gone. A cursor is a slot in
+the `Slots<CursorCell>` below, so the slab logic is Vyrn anyone can read, it
+grows instead of stopping at 65 536, and a cursor that outlived its stream
+traps as a dead handle rather than as a released cell.
+
+## Cursor
+
+```vyrn
+type Cursor = { slot: Int64, gen: Int64 }
+```
+
+A producer's cursor: which slot of this module's slab, and the generation
+that was live when the stream took it. Two plain words, so a stream carries
+one exactly where it used to carry a `Ref`.
+
+## cursorGet
+
+```vyrn
+fn cursorGet(c: Cursor) -> Int64
+```
+
+Read the cursor. Traps if the stream that owns it has been closed.
+
+## cursorSet
+
+```vyrn
+fn cursorSet(c: Cursor, v: Int64) -> Unit
+```
+
+Write the cursor.
 
 ## unfold
 
 ```vyrn
-fn unfold<T>(seed: Int64, step: fn(Ref<Int64>) -> Option<T>) -> Stream<T>
+fn unfold<T>(seed: Int64, step: fn(Cursor) -> Option<T>) -> Stream<T>
 ```
 
 A stream from a step function and a starting cursor (RFC-0075 M2b).
 
-`step` is handed the stream's own cursor cell once per element: read it with
-`get`, write the next cursor with `set`, and answer `Some(v)` to yield or
-`None` to end. Nothing runs until a consumer asks, so a step that never
-answers `None` is an endless feed rather than a hang — `take(unfold(..), n)`
-over one allocates n.
+`step` is handed the stream's own cursor once per element: read it with
+`cursorGet`, write the next cursor with `cursorSet`, and answer `Some(v)` to
+yield or `None` to end. Nothing runs until a consumer asks, so a step that
+never answers `None` is an endless feed rather than a hang —
+`take(unfold(..), n)` over one allocates n.
 
 The cursor is the resume token RFC-0074's `.resumable()` wants: hand a
 reconnecting client's `Last-Event-ID` in as `seed` and replay is the ordinary
 path. It is an `Int64` because the step's SIGNATURE is what a stream
-dispatches through, and a seed type in that signature would be a seed type
-in `Stream<T>` — which is exactly what M2 could not hide. Producer state that
-is not one integer goes in a second cell the step closes over.
+dispatches through, and a seed type in that signature would be a seed type in
+`Stream<T>` — which is exactly what M2 could not hide. Producer state that is
+not one integer goes in a second cursor the step closes over.
 
 ## map
 
@@ -58,6 +90,16 @@ Apply `f` to every element. `s` is consumed; the result is a new obligation.
 `map(unfold(..), f)` is a feed rather than a hang and `take(map(feed, f), n)`
 asks the feed n times. Nothing is buffered on the way through — a mapped
 buffer stream allocates less than the eager version did, not more.
+
+The three wrappers below share a shape and not a function. Each puts its
+source in a box, keeps the address in its own cursor slot, reads the source
+with `pullAt`, and on the closing call gives the slot back, takes the source out
+of the box and CLOSES it — an ordinary `close` in ordinary Vyrn, which is why
+`movecheck` checks the chain's releases the way it checks every other one.
+One shared `wrap` would be the better spelling and does not compile: its step
+would be a lambda capturing a `fn` parameter that itself has captures, and
+the LLVM backend loses the inner captures at that second level. See
+RFC-0075 "As landed — M3".
 
 ## filter
 
@@ -89,8 +131,8 @@ because the counter is checked before the source is asked at all. `take` is
 no longer the one combinator that escapes an endless feed; it is the one
 that ENDS one, which is a different job and the reason it still exists.
 
-The count lives in the wrapper's own cursor cell — `get`/`set` here are the
-ordinary cell operations, on the cell `fromWrap` allocated.
+The count lives in the wrapper's own cursor — `cursorGet`/`cursorSet` here
+are the ordinary cursor operations, on the slot this call took.
 
 ## merge
 
@@ -110,8 +152,8 @@ any stream that terminates.
 
 **Still eager, and therefore still a hang on an endless side** — the one
 combinator M2c did not make lazy, for a stated reason rather than an
-oversight: a wrapper owns ONE source, because a cursor cell has one stream
-behind it. Two sources want a second slot in that cell and a step that
-remembers whose turn it is, which is a second wrapper shape rather than a
-second use of this one. Wrap the endless side in `take` first; a merge that
-stops on its own needs both sides to.
+oversight: a wrapper owns ONE source, because a cursor holds one box. Two
+sources want a second address in that cell and a step that remembers whose
+turn it is, which is a second wrapper shape rather than a second use of this
+one. Wrap the endless side in `take` first; a merge that stops on its own
+needs both sides to.

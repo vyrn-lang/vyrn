@@ -2256,7 +2256,7 @@ mod streams {
         }
         match value {
             Expr::Call { name, .. }
-                if name == "fromArray" || name == "fromStep" || name == "fromWrap" =>
+                if name == "fromArray" || name == "fromStep" || name == "unboxStream" =>
             {
                 Some("Stream".to_string())
             }
@@ -3107,16 +3107,39 @@ mod tests {
 
     #[test]
     fn a_wrapper_carries_the_obligation_and_swallows_its_source() {
-        // RFC-0075 M2c's producer is a third builtin, and this pass keys on the
-        // NAME. Both halves matter: an abandoned wrapper is a leak, and the
-        // source it wrapped is DISCHARGED by being passed to it — releasing that
-        // source as well would be the double free the walk in `close` would then
-        // complete.
-        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1)                    return Some(n) }                    fn step(c: Ref<Int64>) -> Option<Int64> { let x: Option<Int64> = pull(c)                    return x }                    fn main() -> Int64 { let s = fromStep(0, tick)                    let w = fromWrap(s, step) return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("`w` is a `Stream` and is never disposed"), "{e}");
-        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1)                    return Some(n) }                    fn step(c: Ref<Int64>) -> Option<Int64> { let x: Option<Int64> = pull(c)                    return x }                    fn main() -> Int64 { let s = fromStep(0, tick)                    let w = fromWrap(s, step) close(w) return 0 }";
-        assert!(run(src).is_ok());
+        // A lazy wrapper's source is DISCHARGED by `boxStream`, which is an
+        // ordinary mention of the binding and therefore an ordinary move; the
+        // stream the wrapper hands back is a new obligation. Both halves matter,
+        // and RFC-0090 M3 added a third: the source comes back out of the box
+        // with `unboxStream`, which ACQUIRES one — so a wrapper's own release
+        // path is checked here rather than trusted to a walk inside the runtime.
+        let base = "fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> { \
+                    if cl { return None } return Some(sl) } ";
+        let src = format!(
+            "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
+             let a = boxStream(s) return 0 }}"
+        );
+        // The box is not a disposal: whatever holds the address owes the stream.
+        assert!(run(&src).is_ok(), "the wrapper owes it, not `main`");
+        let src = format!(
+            "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
+             let a = boxStream(s) let t: Stream<Int64> = unboxStream(a) return 0 }}"
+        );
+        let e = run(&src).unwrap_err();
+        assert!(e.contains("`t` is a `Stream<Int64>` and is never disposed"), "{e}");
+        let src = format!(
+            "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
+             let a = boxStream(s) let t: Stream<Int64> = unboxStream(a) close(t) return 0 }}"
+        );
+        assert!(run(&src).is_ok());
+        // And the source may not be closed as well as boxed — that is the double
+        // release the wrapper's own close would then complete.
+        let src = format!(
+            "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
+             let a = boxStream(s) close(s) return 0 }}"
+        );
+        let e = run(&src).unwrap_err();
+        assert!(e.contains("is disposed more than once"), "{e}");
     }
 
     #[test]

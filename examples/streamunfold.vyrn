@@ -13,7 +13,7 @@
 /// The number was 6 when this file was written, and M2c took the extra one away:
 /// an eager `take` read one element past its last before its `break` fired, and
 /// a lazy one checks its counter before it asks at all. See "As landed — M2c".
-import { unfold, map, filter, take } from "std/stream"
+import { Cursor, cursorGet, cursorSet, unfold, map, filter, take } from "std/stream"
 
 /// How many times a step function has run. Module state rather than a capture
 /// because a closure captures by value at its evaluation site (RFC-0037) and
@@ -22,32 +22,32 @@ let mut steps = 0
 
 /// The endless one. Reads the cursor, writes the next cursor, yields — and never
 /// answers `None`, so nothing but the consumer can stop it.
-fn naturals(c: Ref<Int64>) -> Option<Int64> {
-    let n = get(c)
-    set(c, n + 1)
+fn naturals(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
+    cursorSet(c, n + 1)
     steps = steps + 1
     return Some(n)
 }
 
 /// A producer that DOES end, so `for … in` over it terminates on its own and the
 /// buffer and stepped variants are proven to agree about what "the end" means.
-fn upToThree(c: Ref<Int64>) -> Option<Int64> {
-    let n = get(c)
+fn upToThree(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
     if n > 3 {
         return None
     }
-    set(c, n + 1)
+    cursorSet(c, n + 1)
     return Some(n * 10)
 }
 
 /// The cursor need not step by one — it is a cursor, not an index, which is what
 /// makes it a resume token rather than a loop counter.
-fn powers(c: Ref<Int64>) -> Option<Int64> {
-    let n = get(c)
+fn powers(c: Cursor) -> Option<Int64> {
+    let n = cursorGet(c)
     if n > 64 {
         return None
     }
-    set(c, n * 2)
+    cursorSet(c, n * 2)
     return Some(n)
 }
 

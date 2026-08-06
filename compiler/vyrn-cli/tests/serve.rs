@@ -472,21 +472,21 @@ fn request_raw(port: u16, raw: &str) -> (String, String) {
 //   client vanishes it must stop moving — that is the row's own wording.
 // - `/probe` reads the cursor cell the stream owns, through a `Ref` the step
 //   parked in module state. Releasing a stream releases that cell and bumps its
-//   generation, so a later read is the canonical "reference used after release"
+//   generation, so a later read is the canonical "slots: handle is not alive"
 //   trap. A 500 there is the release itself being observed, not inferred.
 const SSE_SRC: &str = r#"
-import { unfold, map } from "std/stream"
+import { Cursor, cursorGet, cursorSet, unfold, map } from "std/stream"
 
 let mut steps: Int64 = 0
-let mut saved: Ref<Int64> = cell(0)
+let mut saved: Cursor = Cursor { slot: 0 - 1, gen: 0 }
 
 /// An endless feed: it never answers `None`, so only the client going away can
 /// end it.
-fn tick(c: Ref<Int64>) -> Option<String> {
+fn tick(c: Cursor) -> Option<String> {
     steps = steps + 1
     saved = c
-    let n = get(c)
-    set(c, n + 1)
+    let n = cursorGet(c)
+    cursorSet(c, n + 1)
     return Some("id: \{n}\ndata: e\{n}\n\n")
 }
 
@@ -494,11 +494,11 @@ fn tick(c: Ref<Int64>) -> Option<String> {
 /// live feed is for, and what RFC-0075 M2c made possible: mapping one was a hang
 /// until the combinators became lazy, and M3a's element is an encoded frame
 /// partly because of it.
-fn nums(c: Ref<Int64>) -> Option<Int64> {
+fn nums(c: Cursor) -> Option<Int64> {
     steps = steps + 1
     saved = c
-    let n = get(c)
-    set(c, n + 1)
+    let n = cursorGet(c)
+    cursorSet(c, n + 1)
     return Some(n)
 }
 
@@ -507,14 +507,14 @@ fn frame(n: Int64) -> String {
 }
 
 /// A feed with nothing to say — the 204 path.
-fn silent(c: Ref<Int64>) -> Option<String> {
+fn silent(c: Cursor) -> Option<String> {
     steps = steps + 1
     return None
 }
 
 fn handle(req: Request) -> Response {
     if req.path == "/live" {
-        serveStream(fromStep(0, tick))
+        serveStream(unfold(0, tick))
         return Response { status: 200, contentType: "text/event-stream", body: "retry: 500\n\n", vary: "", headers: [:] }
     }
     if req.path == "/mapped" {
@@ -522,14 +522,14 @@ fn handle(req: Request) -> Response {
         return Response { status: 200, contentType: "text/event-stream", body: "retry: 500\n\n", vary: "", headers: [:] }
     }
     if req.path == "/empty" {
-        serveStream(fromStep(0, silent))
+        serveStream(unfold(0, silent))
         return Response { status: 200, contentType: "text/event-stream", body: "retry: 500\n\n", vary: "", headers: [:] }
     }
     if req.path == "/steps" {
         return Response { status: 200, contentType: "text/plain", body: "\{steps}", vary: "", headers: [:] }
     }
     if req.path == "/probe" {
-        return Response { status: 200, contentType: "text/plain", body: "\{get(saved)}", vary: "", headers: [:] }
+        return Response { status: 200, contentType: "text/plain", body: "\{cursorGet(saved)}", vary: "", headers: [:] }
     }
     return Response { status: 404, contentType: "text/plain", body: "no", vary: "", headers: [:] }
 }
@@ -624,8 +624,8 @@ fn a_client_that_vanishes_runs_the_producers_release_before_the_next_event() {
     // could only have come from `close`.
     let (status, body) = get(s.port, "/probe");
     assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "cursor still live: {body}");
-    let err = wait_for(&s.stderr, "reference used after release", Duration::from_secs(5));
-    assert!(err.contains("error: reference used after release"), "{err}");
+    let err = wait_for(&s.stderr, "slots: handle is not alive", Duration::from_secs(5));
+    assert!(err.contains("error: slots: handle is not alive"), "{err}");
 
     // One dropped client did not cost the server anything else.
     let (status, _) = get(s.port, "/steps");
@@ -659,8 +659,8 @@ fn a_mapped_feed_streams_and_its_release_walks_the_chain() {
 
     let (status, body) = get(s.port, "/probe");
     assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "cursor still live: {body}");
-    let err = wait_for(&s.stderr, "reference used after release", Duration::from_secs(5));
-    assert!(err.contains("error: reference used after release"), "{err}");
+    let err = wait_for(&s.stderr, "slots: handle is not alive", Duration::from_secs(5));
+    assert!(err.contains("error: slots: handle is not alive"), "{err}");
 }
 
 // ---- RFC-0074 M3b: the same signal, a second transport --------------------
@@ -678,30 +678,31 @@ fn a_mapped_feed_streams_and_its_release_walks_the_chain() {
 // `std/http`'s `ws` values are pinned in `tests/http.rs`, and `examples/bin`
 // serves the same paste tail over both transports.
 const WS_SRC: &str = r#"
+import { Cursor, cursorGet, cursorSet, unfold } from "std/stream"
 import { sha1 } from "std/hash"
 import { base64EncodeBytes } from "std/codecs"
 
 let mut steps: Int64 = 0
-let mut saved: Ref<Int64> = cell(0)
+let mut saved: Cursor = Cursor { slot: 0 - 1, gen: 0 }
 
 /// An endless feed of PAYLOADS, not frames: RFC-0074's rule is that Vyrn owns
 /// what the user chooses and the host owns what the protocol fixes, and there is
 /// no choice in an opcode, a length or a mask.
-fn tick(c: Ref<Int64>) -> Option<String> {
+fn tick(c: Cursor) -> Option<String> {
     steps = steps + 1
     saved = c
-    let n = get(c)
-    set(c, n + 1)
+    let n = cursorGet(c)
+    cursorSet(c, n + 1)
     return Some("e\{n}")
 }
 
 /// One 100-byte message, then the end — the fragmentation and close-code case.
-fn once(c: Ref<Int64>) -> Option<String> {
-    let n = get(c)
+fn once(c: Cursor) -> Option<String> {
+    let n = cursorGet(c)
     if n > 0 {
         return None
     }
-    set(c, n + 1)
+    cursorSet(c, n + 1)
     let mut s = ""
     let mut i = 0
     while i < 10 {
@@ -739,18 +740,18 @@ fn upgrade(req: Request, params: String) -> Response {
 
 fn handle(req: Request) -> Response {
     if req.path == "/socket" {
-        serveStream(fromStep(0, tick))
+        serveStream(unfold(0, tick))
         return upgrade(req, "1000 0")
     }
     if req.path == "/split" {
-        serveStream(fromStep(0, once))
+        serveStream(unfold(0, once))
         return upgrade(req, "1001 40")
     }
     if req.path == "/steps" {
         return Response { status: 200, contentType: "text/plain", body: "\{steps}", vary: "", headers: [:] }
     }
     if req.path == "/probe" {
-        return Response { status: 200, contentType: "text/plain", body: "\{get(saved)}", vary: "", headers: [:] }
+        return Response { status: 200, contentType: "text/plain", body: "\{cursorGet(saved)}", vary: "", headers: [:] }
     }
     return Response { status: 404, contentType: "text/plain", body: "no", vary: "", headers: [:] }
 }
@@ -896,8 +897,8 @@ fn a_socket_client_that_vanishes_runs_the_producers_release_before_the_next_even
 
     let (status, body) = get(s.port, "/probe");
     assert_eq!(status, "HTTP/1.1 500 Internal Server Error", "cursor still live: {body}");
-    let err = wait_for(&s.stderr, "reference used after release", Duration::from_secs(5));
-    assert!(err.contains("error: reference used after release"), "{err}");
+    let err = wait_for(&s.stderr, "slots: handle is not alive", Duration::from_secs(5));
+    assert!(err.contains("error: slots: handle is not alive"), "{err}");
 }
 
 #[test]
@@ -969,18 +970,19 @@ fn a_socket_upgrade_the_program_refuses_is_an_ordinary_response() {
 /// this file and not in that one.
 const WS_MOUNTED_SRC: &str = r#"
 import { Frames, Live, Route, Socket, mount, ws } from "std/http"
+import * as stream from "std/stream"
 
-fn step(c: Ref<Int64>) -> Option<String> {
-    let n = get(c)
+fn step(c: stream.Cursor) -> Option<String> {
+    let n = stream.cursorGet(c)
     if n > 1 {
         return None
     }
-    set(c, n + 1)
+    stream.cursorSet(c, n + 1)
     return Some("m\{n}")
 }
 
 fn feed(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
-    return fromStep(since, step)
+    return stream.unfold(since, step)
 }
 
 fn sockets() -> Array<Socket> {

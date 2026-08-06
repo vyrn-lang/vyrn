@@ -10,6 +10,7 @@
 import { event, http, Frames, Live, Policy, Route, Socket, sse, Wire, ws, GET, POST } from "std/http"
 import { recent, byId, create } from http("./pastes")
 import * as store from "../store"
+import * as stream from "std/stream"
 
 export fn routes() -> Array<Route> {
     return [
@@ -38,22 +39,24 @@ export fn routes() -> Array<Route> {
 ///
 /// The cursor IS the storage position, which is why the id written on each frame
 /// is `i + 1`: the id a client last saw is the index it wants to resume AT.
-fn tailStep(c: Ref<Int64>) -> Option<String> {
-    let i = get(c)
+fn tailStep(c: stream.Cursor) -> Option<String> {
+    let i = stream.cursorGet(c)
     if i < 0 || i >= store.pasteCount() {
         return None
     }
-    set(c, i + 1)
+    stream.cursorSet(c, i + 1)
     return Some(event("\{i + 1}", "paste", toJson(store.pasteAt(i))))
 }
 
-/// `fromStep` and not `std/stream`'s `unfold`, which is the spelling this should
-/// have: `std/arrays` and `std/stream` both export a `map` and a `filter`, and
-/// top-level names are unique across a linked program — so no program can import
-/// both, and this app already imports the first. `unfold` is a three-line wrapper
-/// over exactly this call, so the dogfood loses nothing but the better name.
+/// `stream.unfold` and not a bare `unfold`, because `std/arrays` and
+/// `std/stream` both export a `map` and a `filter` and a top-level name is
+/// program-wide. A namespace import (RFC-0027) keeps the second module's names
+/// out of the flat one, which is what the diagnostic for the collision says to
+/// do. This used to call `fromStep` directly to dodge the same collision;
+/// RFC-0090 M3 made the cursor `std/stream`'s to mint, so the module is imported
+/// now rather than avoided.
 fn tail(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
-    return fromStep(since, tailStep)
+    return stream.unfold(since, tailStep)
 }
 
 /// The streams this projection publishes. A separate list from `routes()`
@@ -68,18 +71,18 @@ export fn feeds() -> Array<Live> {
 /// concrete rather than argued: `tailStep` above hands `sse` an ENCODED frame,
 /// because `id:` and `event:` are choices this file makes, while this one hands
 /// `ws` the JSON payload and nothing else, because a frame's opcode, length and
-/// mask are not choices anybody makes. Same store, same cursor, same `fromStep`.
-fn socketStep(c: Ref<Int64>) -> Option<String> {
-    let i = get(c)
+/// mask are not choices anybody makes. Same store, same cursor, same `unfold`.
+fn socketStep(c: stream.Cursor) -> Option<String> {
+    let i = stream.cursorGet(c)
     if i < 0 || i >= store.pasteCount() {
         return None
     }
-    set(c, i + 1)
+    stream.cursorSet(c, i + 1)
     return Some(toJson(store.pasteAt(i)))
 }
 
 fn socketTail(req: Request, ps: Map<String, String>, since: Int64) -> Stream<String> {
-    return fromStep(since, socketStep)
+    return stream.unfold(since, socketStep)
 }
 
 /// 1001 ("going away") rather than 1000, because this feed ends by catching up
