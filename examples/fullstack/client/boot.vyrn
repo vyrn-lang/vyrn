@@ -119,11 +119,11 @@ fn view() -> Html {
 
 /// Store the id-input value on each keystroke (the `input` handler ABI sends the
 /// control's current value).
-/// `arg + ""` and not `arg`: a String argument is BORROWED (RFC-0012), and the
+/// `arg.copy()` and not `arg`: a String argument is BORROWED (RFC-0012), and the
 /// caller across this boundary is JS, which releases it when the call returns
 /// (RFC-0077 M6).
 export extern fn setId(arg: String) {
-    idText = arg + ""
+    idText = arg.copy()
 }
 
 /// Fire a typed `usersById` round trip for the current id; the reply flows to

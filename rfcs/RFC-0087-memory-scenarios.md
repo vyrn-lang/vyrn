@@ -236,7 +236,7 @@ reassignment see §4.
 |---|---|---|
 | import — Vyrn calls JS | `(ptr, len)` pair | JS reads; the module keeps the buffer |
 | export param — JS calls Vyrn | one `ptr`, NUL-terminated | **the caller owns it.** `wasi-min.js` allocates with `__vyrn_malloc` and frees with `__vyrn_free` in a `finally`, so a caught `panic` still releases |
-| export return | one `ptr` | **leaks** |
+| export return | one `ptr` | **the caller owns it** since RFC-0089 M3b — `wasi-min.js` decodes, then frees |
 
 **9a. A returned String leaks.** The decision is recorded in `wasi-min.js`:
 ownership differs per function, a module-state field or a literal is borrowed, and
@@ -248,6 +248,15 @@ per function. The wrapper already reads `hooks.exportReturns[name]` for the retu
 *type*; the same generated map can carry ownership, and the release becomes one
 more line beside the argument release. This costs no new analysis.
 
+**Closed by RFC-0089 M3b.** Nothing had to cross, because rule 3 removed the
+question rather than answering it: a return is owned. The paragraph above is
+wrong on two counts, and both mattered. `exportReturns` is **hand-written**, not
+generated — four pages and one runtime spell it out — so it could not have
+carried a compiler fact. And rule 3 did not yet hold: `check_return` let three
+shapes lend a String, one of which was a live use-after-free between two Vyrn
+functions. See RFC-0089 "M3b as landed". A literal needs no rule at all: Phase 2
+gave it `cap = 0` and `free` ignores any pointer below `HEAP_BASE`.
+
 **9b. An export that retains its String parameter is a use-after-free.** Five
 programs did exactly `state = arg`. It was always wrong under RFC-0012 and it was
 harmless only while nothing could free. Now the caller frees. All five copy, and
@@ -257,6 +266,12 @@ harmless only while nothing could free. Now the caller frees. All five copy, and
 parameter may not reach a global, a record field, an array element, a map value or
 a cell. `own`'s escape walker already computes precisely this set — it is the same
 question with a different consequence.
+
+**Closed by RFC-0089 M2 and M3b.** Rule 2 refuses the store, for every function
+rather than only an exported one, since Phase 4b-2. M3b made the message name
+`.copy()` alone inside an export, and refused the one escape hatch that was left:
+`consume` on an extern String parameter compiled, and it read as ownership of a
+buffer the page frees when the call returns.
 
 ---
 
@@ -515,10 +530,11 @@ is visible.
 **How it should be handled.** A `copy` that means it. Then §9b's rule gets a
 diagnostic that names the way out.
 
-**Closed by RFC-0089 M1b.** `x.copy()` ships in all three engines — structural,
-recursive, and refused on a type that declares its own `Owned` row. See
-"M1b as landed" in RFC-0089 for the four decisions it needed. The five `arg + ""`
-sites still stand: they migrate with the diagnostic, in M3b.
+**Closed by RFC-0089 M1b, and the corpus by M3b.** `x.copy()` ships in all three
+engines — structural, recursive, and refused on a type that declares its own
+`Owned` row. See "M1b as landed" in RFC-0089 for the four decisions it needed. The
+five `arg + ""` sites are `.copy()` as of Phase 6, and the diagnostic that refuses
+the store names it.
 
 ---
 
@@ -646,6 +662,16 @@ analysis with no surface (§9a). Both facts exist inside the compiler.
 
 This is U1 at the one place where the answer is not merely useful but required,
 because the other side of the boundary is a different language.
+
+**Closed by RFC-0089 M3b, by removing the question.** Both answers are now fixed
+by the rules rather than by an analysis: the caller owns the parameter (so an
+export may not `consume` one, and may not store one without `.copy()`), and the
+caller owns the return (so an export may not lend one). A reader does not have to
+find out — there is only one answer, and the compiler says so when a program tries
+the other. What is still a convention is the *type* hint: `exportReturns` is
+hand-written per page, so an export whose String return nobody named is decoded as
+a number and leaks. The compiler knows the return type. Emitting it in a custom
+wasm section would delete the map.
 
 ---
 

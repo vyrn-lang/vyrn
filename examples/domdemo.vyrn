@@ -134,13 +134,14 @@ export extern fn resetCount(arg: String) {
     count = 0
 }
 
-/// `arg + ""` and not `arg`, because a String ARGUMENT is borrowed: RFC-0012
+/// `arg.copy()` and not `arg`, because a String ARGUMENT is borrowed: RFC-0012
 /// gives it to the caller, and across this boundary the caller is JS, which
 /// releases it as soon as the call returns (RFC-0077 M6). Keeping the pointer
 /// past that is a use-after-free, and it read as `count = 0` in the page —
-/// whatever the next allocation put in the recycled block.
+/// whatever the next allocation put in the recycled block. The store also
+/// releases what `typed` held (RFC-0089 M3a), so the keystrokes do not pile up.
 export extern fn onType(arg: String) {
-    typed = arg + ""
+    typed = arg.copy()
 }
 
 export extern fn onTick(arg: String) {

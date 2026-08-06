@@ -44,7 +44,7 @@
 //! | `mutString` | §2c | steady | Phase 4c: rule 1 governs reassignment, so `mut` is trackable |
 //! | `selfAppend` | §4 / P1 | steady | Phase 5: a store releases the old value, and a module-state accumulator grows in place |
 //! | `fieldOverwrite` | §4 | steady | Phase 5: `r.field = v` releases the old field |
-//! | `returnedString` | §9a | leaks | an exported return hands JS a pointer nobody frees |
+//! | `returnedString` | §9a | steady | Phase 6: a return is owned, so the wrapper frees it after decoding |
 //! | `optionString` | §14 | leaks | an `Option` owns its payload since Phase 5, but this row binds nothing to release |
 //! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed — it needs `Copy` as a protocol first |
 //! | `elementLeak` | U4 | leaks | a heap element inside a container; `drop` is whole-container |
@@ -424,8 +424,8 @@ const ROWS: &[Row] = &[
     Row {
         export: "returnedString",
         census: "§9a",
-        today: Shape::Leaks,
-        why: "an exported return hands JS a pointer and nothing frees it",
+        today: Shape::Steady,
+        why: "Phase 6: rule 3 makes a return the caller's, and across this boundary the               caller is `wasi-min.js` — it decodes the String, then hands the block back               through `__vyrn_free`. An export that would lend one no longer compiles",
     },
     Row {
         export: "spawnFrame",
@@ -580,8 +580,12 @@ const bytes = await readFile(new URL("./shapes.wasm", import.meta.url));
 const names = process.argv.slice(3);
 const n = Number(process.argv[2]);
 
+// `returnedString` is the §9a row: the page names a String result so the wrapper
+// decodes it — and, since RFC-0089 M3b, releases it.
 async function after(name, calls) {
-  const { exports, memory } = await runVyrn(bytes, {});
+  const { exports, memory } = await runVyrn(bytes, {
+    exportReturns: { returnedString: "string" },
+  });
   for (let i = 0; i < calls; i++) exports[name]();
   return memory.buffer.byteLength;
 }

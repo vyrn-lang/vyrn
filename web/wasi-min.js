@@ -31,6 +31,8 @@
 // fn` (RFC-0012 M2): pass a JS string for a String param, get a decoded string
 // back for a String return. `exportReturns` disambiguates an `i32` result
 // (String / Bool / Int32 share the wasm type) — "string" or "bool", else number.
+// A String named "string" is DECODED AND FREED (RFC-0089 M3b): a return is
+// owned, so the buffer is this side's to release.
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
@@ -409,7 +411,9 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       // so this list is what has to be handed back. Before RFC-0077 M6 there was
       // nothing to hand it to: `__vyrn_malloc` was the only allocator symbol a
       // module exported, and 20000 keystrokes cost 18 MB.
-      const owned = [];
+      // A Set, not a list: an export declared `consume s: String` may hand back
+      // the very pointer it was given, and one block must be released once.
+      const owned = new Set();
       for (let k = 0; k < params.length; k++) {
         const t = params[k];
         const a = jsArgs[k];
@@ -418,7 +422,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         } else if (t === "i32") {
           if (typeof a === "string") {
             const p = encodeString(a);
-            owned.push(p);
+            owned.add(p);
             call.push(p);
           } else if (typeof a === "boolean") call.push(a ? 1 : 0);
           else call.push(Number(a) | 0);
@@ -434,8 +438,16 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         if (result === undefined) out = undefined; // Unit
         else if (result === "i64") out = r; // BigInt
         else if (result === "i32") {
-          if (hint === "string") out = decodeCString(r);
-          else if (hint === "bool") out = r !== 0;
+          if (hint === "string") {
+            out = decodeCString(r);
+            // A returned String is the CALLER's (RFC-0089 rule 3), and across
+            // this boundary the caller is here. The module refuses to compile a
+            // lend out of an `export extern fn` — module state, a projection —
+            // so the pointer is either a heap block this release reclaims or a
+            // data-segment literal, which sits below `HEAP_BASE` and which
+            // `__vyrn_free` therefore ignores.
+            owned.add(Number(r) >>> 0);
+          } else if (hint === "bool") out = r !== 0;
           else out = r;
         } else out = r; // f32 / f64 — number
       } finally {
@@ -447,11 +459,11 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         if (typeof free === "function") for (const p of owned) free(p - STR_HDR);
       }
       return out;
-      // NOT freed: a returned String. Who owns one is `own::analyze`'s answer and
-      // it differs per function — a module-state field or a literal is borrowed,
-      // and releasing it here would be a use-after-free. Nothing crosses this
-      // boundary that says which, so a returned String still leaks. See RFC-0077
-      // "M6 — as landed".
+      // A returned String used to leak here, and the reason was that ownership
+      // "differs per function and nothing crosses this boundary that says which"
+      // (RFC-0087 §9a). Rule 3 removed the question rather than answering it: a
+      // return is owned, and Phase 6 made an `export extern fn` that lends fail
+      // to compile. So nothing has to cross — the fact is true of every export.
     };
   }
 

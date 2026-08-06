@@ -498,6 +498,55 @@ them landed. Compile time did not move: `vyrn check examples/vyxdemo.vyrn` goes
 
 ---
 
+## M3b as landed — the boundary, and the three shapes rule 3 was missing
+
+Phase 6 is rule 3 at the extern edge. `wasi-min.js` now decodes a returned
+String and hands the block back through `__vyrn_free`, beside the argument
+release it already ran in the same `finally`. Census §9a is closed and the
+memory row flips to steady.
+
+**The premise was wrong, and this is the finding.** The plan said rule 3 makes
+the answer always yes: a heap return type transfers, and no compiling program
+can say otherwise. `owned_fns` does read the return type and nothing else, and
+`vyrn why --memory` does print "transfers: yes" for every String-returning
+function. It was printing it for functions that lend. Three shapes:
+
+1. **Module state named at a `return`.** `borrow_of` knows parameters, loop
+   variables and projections of locals. A global is none of those, so
+   `return title` passed every check, and the caller released the buffer the
+   module still held. This is not only a boundary defect — it is a live
+   use-after-free between two Vyrn functions, and an interp/wasm divergence
+   parity never saw because no example writes it. `examples/` is why: the
+   corpus reads module state and returns a value built from it.
+2. **A lend out of an `export extern fn`.** `check_return` records a returned
+   projection as a lend rather than refusing it (Phase 5's finding, kept), and
+   `ownership` then tells the Vyrn caller not to release it. A JS caller is told
+   nothing.
+3. **`consume` on an extern String parameter.** RFC-0012 gives the argument to
+   the caller, and across this boundary the caller is JS — `wasi-min.js` frees
+   it when the call returns whatever the signature says. `consume` read as
+   ownership and delivered a pointer the page was about to reclaim.
+
+All three are refused, each naming `.copy()`. What makes the wrapper's release
+sound is therefore not the return TYPE but the pair: rule 3 plus the refusal of
+a lend out of an export. A data-segment literal is the one thing an export may
+still hand back that is not heap, and it needs no rule — Phase 2 gave it
+`cap = 0` and the allocator ignores any pointer below `HEAP_BASE`.
+
+Two smaller repairs travelled with it. The direct backend exported
+`__vyrn_free` only when an export took a String PARAMETER, so a module that
+only returned one had nothing to release with. And the borrow menu's first fix
+printed ``consume x``, which the parser rejects — the form is `x: consume T`.
+
+**Measured, in a page.** `externdemo2.greet` over 20 000 calls: every result
+byte-correct, and the growth per call falls from about 87 bytes to about 30.
+What remains is an intermediate concat temporary — `"Hello, " + name` inside
+the interpolation has no binding, so nothing releases it. `domdemo.vyrnView`
+over 2 000 calls sheds 4 MiB, exactly the returned JSON; the ~90 KB per call it
+still leaks is the `Html` tree, which is Phase 7's record and enum row.
+
+---
+
 ## Rejected
 
 - **RFC-0088 alone** — keeps the silent-leak fallback as defined behavior;

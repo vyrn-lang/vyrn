@@ -77,18 +77,18 @@ fn setIssues(s: Array<api.RpcIssue>) {
 
 // ---- event handlers (exported to JS, one String arg) ------------------------
 
-// `arg + ""` and not `arg` in all three: a String argument is BORROWED. RFC-0012
-// gives it to the caller, and across this boundary the caller is JS, which
-// releases it when the call returns (RFC-0077 M6). A draft that kept the pointer
-// would render whatever the next allocation put in the recycled block.
+// `arg.copy()` and not `arg` in all three: a String argument is BORROWED.
+// RFC-0012 gives it to the caller, and across this boundary the caller is JS,
+// which releases it when the call returns (RFC-0077 M6). A draft that kept the
+// pointer would render whatever the next allocation put in the recycled block.
 export extern fn setDraftTitle(arg: String) {
-    draftTitle = arg + ""
+    draftTitle = arg.copy()
 }
 export extern fn setDraftBody(arg: String) {
-    draftBody = arg + ""
+    draftBody = arg.copy()
 }
 export extern fn setDraftLang(arg: String) {
-    draftLang = arg + ""
+    draftLang = arg.copy()
 }
 
 /// Validate the draft with fromJson; valid => fire the typed stub, invalid =>

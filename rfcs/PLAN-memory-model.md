@@ -200,13 +200,24 @@ argument did not survive.
 `Copy` protocol and 7a's place projections are the two mechanisms the record,
 the enum and the closure capture all wait on.
 
-## Phase 6 — the boundary *(RFC-0089 M3b)*
+## Phase 6 — the boundary *(RFC-0089 M3b)* — LANDED
 
-Rule 3 at the extern edge: a returned String is always the caller's —
-`wasi-min.js` frees it after decode. A stored borrowed String param is already
-a compile error since 4b; delete the five `arg + ""` copies in favor of
-`.copy()` and add the diagnostic text pointing at it. Memory-test §9a flips.
-Browser check by hand (CI ignores `web/`): domdemo type/+1/rotate/subscription.
+`wasi-min.js` decodes a returned String and frees it, beside the argument
+release in the same `finally`. The five `arg + ""` sites are `.copy()`, the
+borrow menu inside an export names `.copy()` alone, and memory-test §9a is
+steady.
+
+**The premise did not hold, and closing it was the phase.** Rule 3 makes a
+return owned by TYPE, and `check_return` was letting three shapes lend one: a
+`return` of module state (a live use-after-free between two Vyrn functions, and
+an interp/wasm divergence parity never saw), a lend out of an `export extern fn`
+(legal for a Vyrn caller, which reads `lending`; not for JS, which reads
+nothing), and `consume` on an extern String parameter (the page frees it
+regardless). All three are refused, each naming `.copy()`. See RFC-0089
+"M3b as landed".
+
+`exportReturns` is **hand-written**, not generated, so it never could have
+carried the ownership fact — see the note under Phase 9.
 
 ## Phase 7 — the protocols *(RFC-0091 M1–M3)*
 
@@ -242,6 +253,14 @@ LSP: ownership hovers, last-use token modifier, move inlay hints. `vyrn fix`
 applying the move-error menu. U5 is gone with Path B; U3 is gone with `cell`.
 Regenerate `docs/api`, update memory files and RFC statuses (headers must
 match the "as landed" truth — they have lied before).
+
+**Carried from Phase 6: emit the export return types.** `hooks.exportReturns` is
+written by hand in four pages and one runtime. An export whose String return
+nobody named is decoded as a number and leaks, and since Phase 6 the hint also
+decides a `free`. The compiler knows every export's return type. One custom wasm
+section (`vyrn:exports`, name -> `"string"` / `"bool"`) read by the shim's own
+section walk deletes the map and the class of bug with it. Small, and it changes
+the shipped ABI, so it is an RFC-0012 edit rather than a phase's side effect.
 
 ---
 

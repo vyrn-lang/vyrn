@@ -2238,6 +2238,20 @@ impl<'a> Checker<'a> {
                     f.line, f.name, p.name, p.ty
                 ));
             }
+            // `consume` is not sayable across this boundary (RFC-0089 M3b).
+            // RFC-0012 gives a String argument to the CALLER, and on the other
+            // side of an extern the caller is JS: `wasi-min.js` frees the buffer
+            // when the call returns, whatever the declaration says. A `consume`
+            // here reads as ownership and delivers a dangling pointer, so the
+            // one honest way to keep the value is to copy it.
+            if matches!(p.capability, Capability::Consume) && matches!(p.ty, Type::Str) {
+                self.errors.borrow_mut().push(format!(
+                    "line {}: extern fn `{}` parameter `{}` may not be `consume` — the caller \
+                     across this boundary is JS, and it releases the String when the call \
+                     returns\n  fix: take `{}: String` and store `{}.copy()`",
+                    f.line, f.name, p.name, p.name, p.name
+                ));
+            }
         }
         if !extern_abi_type_ok(&f.ret, true) {
             self.errors.borrow_mut().push(format!(
@@ -9659,6 +9673,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("cannot cross the JS boundary"), "{e}");
+    }
+
+    /// RFC-0089 M3b. `consume` is not sayable across this boundary: RFC-0012
+    /// gives a String argument to the caller, and on the other side of an extern
+    /// the caller is JS, which frees the buffer when the call returns whatever
+    /// the declaration says. It compiled before Phase 6, and it stored a pointer
+    /// the page was about to reclaim.
+    #[test]
+    fn an_extern_string_parameter_may_not_be_consume() {
+        let e = check_src(
+            "let mut kept = \"x\" \
+             export extern fn setIt(arg: consume String) { kept = arg } \
+             fn main() -> Int64 { return 0; }",
+        )
+        .unwrap_err();
+        assert!(e.contains("may not be `consume`"), "{e}");
+        assert!(e.contains("arg.copy()"), "{e}");
+        // A scalar carries no ownership, so it is untouched.
+        assert!(check_src(
+            "extern fn jsAdd(a: consume Int64) -> Int64 fn main() -> Int64 { return 0; }"
+        )
+        .is_ok());
     }
 
     #[test]

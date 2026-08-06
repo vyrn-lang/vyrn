@@ -3,10 +3,10 @@
 - **Status:** IMPLEMENTED (M0–M2p, M5, M6; M3 and M4 struck — see their lines
   below). M6 gave this backend an allocator that frees: the same 20000 exported
   calls that grew linear memory by 18 MB now leave it flat at 4 pages. What still
-  leaks is named in "M6 — as landed", and none of it is the allocator: a returned
-  `String` needs an ownership bit this ABI does not carry, an `Array` bound from a
-  literal is a gap in `own::analyze` that predates this backend, and a `region` is
-  still a counter.
+  leaks is named in "M6 — as landed", and none of it is the allocator: an `Array`
+  bound from a literal is a gap in `own::analyze` that predates this backend, and
+  a `region` is still a counter. The returned `String` on that list is closed by
+  RFC-0089 M3b, and not by the ownership bit this line predicted.
 - **Depends on:** RFC-0076 (generators as wasm; the shared runtime shim and the
   memory map it established), RFC-0012 (the `extern` ABI), RFC-0037
   (defunctionalized closures — the reason *closures* need no function table),
@@ -4157,12 +4157,14 @@ rather than a backend one.
 
 ### What still leaks, named rather than implied
 
-- **A returned `String` crossing to JS.** Who owns one is `own::analyze`'s answer
-  and it differs per function: a fresh concat transfers, a module-state field or a
-  literal does not. Nothing crosses the boundary that says which, so
-  `wasi-min.js` cannot free it without a use-after-free on the second case. It
-  needs a fact from the compiler -- an ownership bit per export -- which is ABI,
-  not allocator.
+- ~~**A returned `String` crossing to JS.**~~ **Closed by RFC-0089 M3b.** The
+  answer was not an ownership bit per export. Rule 3 says a return is owned, so
+  the two cases this bullet names are refused rather than reported: an
+  `export extern fn` may not return module state and may not return a
+  projection, each naming `.copy()`. `wasi-min.js` frees every String result the
+  page named. A literal is the third case and needs nothing — it carries
+  `cap = 0` and sits below `HEAP_BASE`, which this allocator's `free` already
+  ignores. `__vyrn_free` now goes out for a String RETURN too, which it did not.
 - **An `Array` bound from a literal.** `own::owner_producing` has an arm for
   `Expr::MapLit` and none for `Expr::ArrayLit`, so `let mut xs: Array<UInt8> = []`
   is not tracked and never released -- on every engine, `realloc` and all. Found
