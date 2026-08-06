@@ -1,49 +1,54 @@
-//! Ownership / drop analysis for heap temporaries (RFC-0004 §4).
+//! Drop **emission** for owned bindings (RFC-0089 rule 4, Phase 4c).
 //!
 //! This is the *ownership* half of the memory model's Path A — the counterpart
 //! to `region` arenas. It decides, per function, three things:
 //!
-//!   * **droppable** `let` bindings — ones that own a fresh heap allocation and
-//!     provably do not escape their block, so the backend frees them at block
-//!     exit; and
-//!   * whether the function **returns an owned value** — every heap-typed return
-//!     hands the caller a fresh, unaliased allocation, transferring ownership out
-//!     so the *caller's* receiving binding becomes droppable in turn; and
+//!   * **droppable** `let` bindings — ones that still own their value where
+//!     their block ends, so the backend releases them there; and
+//!   * whether the function **transfers** its result, which since rule 3 is the
+//!     return type and nothing else; and
 //!   * which `get`/`set` sites read a **provably fresh** reference, so their
 //!     generation check cannot fail and no engine emits it (RFC-0004 §5.3). That
 //!     one is a second pass over the finished `droppable` set — see
 //!     [`fresh_refs_in`].
 //!
-//! **Two questions, and only one of them is about the expression** (RFC-0086 M1).
-//! A binding needs cleanup when its initializer *transfers* a value nobody else
-//! holds AND its **type** says how that value is released. Transfer is a property
-//! of the expression form — `at(a, 0)` and `m.keys()` have the same `Array` type
-//! and opposite answers — and [`Analysis::transfers`] answers it exhaustively, so
-//! a new expression form has to. Release is a property of the type, and [`Owned`]
-//! is the only place it is answered: seeded built-in rows plus every
-//! `impl Owned for T` in the program. There is no second list.
+//! **The rule is one sentence.** Every owning binding that was not moved out
+//! releases at scope exit. Both halves come from somewhere else, and that is the
+//! point of this phase:
 //!
-//! A binding is droppable unless it
-//! is `mut`, lexically inside a `region` (the arena owns it), or *escapes*: it
-//! appears anywhere except as a whole argument of `print`/`@concat` (which only
-//! read a string), an operand of a binary operator (`==`/`+`/…, all reads), or
-//! `s.length`.
-//! Returning a local owner is a *move* (the value leaves, so it is not dropped
-//! here); aliasing it (`let t = x`) or passing it to any other function escapes
-//! it. Anything not provably single-owned is simply left to leak — always safe,
-//! never a use-after-free or double-free.
+//!   * **What owns** is a property of the type, and [`Owned`] is the only place
+//!     it is answered — seeded built-in rows plus every `impl Owned for T` in the
+//!     program. There is no second list.
+//!   * **What moved** is a property of the program's flow, and
+//!     [`crate::movecheck`] is the only place it is answered. Rules 1 to 3 are
+//!     enforced and last-use aware, so the pass that refuses a use-after-move
+//!     already knows, at every store, return, drop and capture, whether a binding
+//!     still holds its value.
+//!
+//! Until Phase 4c this file inferred both. It carried a list of expression forms
+//! that "transfer", a list of built-in calls that produce, a list of argument
+//! positions that only read, and a fixpoint over which functions return an owned
+//! value. Every one of those was a guess made in parallel with a rule the
+//! compiler was separately enforcing, and where the guess was unsure it leaked.
+//! The lists are gone. What is left is a walk that finds the `let`s, asks the two
+//! questions, and writes down the answer.
+//!
+//! Two conditions are still this file's own, because neither is about the value:
+//! a `String` allocated inside a `region` belongs to the arena and must not also
+//! be freed, and a `String` literal is data-segment storage that nothing
+//! allocated.
 //!
 //! Identities are `Stmt::Let` node addresses (`*const Stmt as usize`): the
 //! backend runs this on the same borrowed AST it emits, so the addresses match
 //! one-to-one — a collision-free key where a source line is not (two `let`s can
-//! share a line). Because a non-region string concat uses `malloc` and a region
-//! one uses the arena, and this analysis skips the region case, the two
-//! reclamation mechanisms partition every allocation — nothing is freed twice.
+//! share a line). `movecheck` is keyed the same way and walks the same borrowed
+//! AST, which is what lets the two agree by construction.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
-use crate::declared::{builtin_producers, Declared, Scopes};
+use crate::declared::Scopes;
+use crate::movecheck::{Gone, LetOwnership};
 
 /// How a droppable binding is reclaimed at block exit.
 ///
@@ -299,45 +304,41 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
 
 /// Why a binding is **not** reclaimed at block exit (RFC-0087 U1).
 ///
-/// Every row is recorded at the point the decision is made, by the walker that
-/// makes it. There is no second pass. A separate walker over `Expr` could
-/// disagree with this one, and the census records that defect three times.
+/// Three of the rows come straight from [`crate::movecheck`], which decided them
+/// while it was enforcing rules 1 to 3. The other two are this file's, because
+/// neither is about the value: an arena owns what is allocated inside it, and a
+/// literal was never allocated.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Leak {
-    /// The initializer reads a place somebody else owns. Carries the form of
-    /// the expression, in words — see [`expr_form`].
-    NoTransfer(String),
     /// The type releases nothing. Carries the type, or `unknown`.
     NoRelease(String),
-    /// `mut`, and not a container that keeps its identity across a self-update.
+    /// The binding names storage somebody else owns (rule 2). Carries what it
+    /// is, in words.
+    Borrowed(&'static str),
+    /// `mut`, and reclaimed by something the engines can observe — see the
+    /// [`Fate`] decision for why those two cannot yet move together.
     Mutable,
     /// Lexically inside a `region` — the arena owns it.
     Region,
-    /// A second binding took the value.
+    /// A lambda or a `spawn` holds it, and either can outlive this block.
+    Captured { line: usize },
+    /// A second name reads it without taking it, so neither name is the owner.
     Aliased { line: usize },
     /// It reached a call that may retain it.
     Escaped { callee: String, line: usize },
-    /// A lambda captured it, and a stored closure can outlive this block.
-    Captured { line: usize },
-    /// The binding was reassigned, so who owns the old value is no longer clear.
-    Reassigned { line: usize },
-    /// It was used somewhere this pass cannot prove is only a read.
-    Used { line: usize },
 }
 
 impl Leak {
     /// The reason with its lines and names removed, so a corpus of them groups.
     pub fn kind(&self) -> &'static str {
         match self {
-            Leak::NoTransfer(_) => "the initializer does not transfer",
             Leak::NoRelease(_) => "the type owns no heap",
-            Leak::Mutable => "`mut`, and not a self-updating container",
+            Leak::Borrowed(_) => "it names somebody else's value",
+            Leak::Mutable => "`mut`, and observably reclaimed",
             Leak::Region => "inside a `region`",
+            Leak::Captured { .. } => "captured by a lambda or a spawn",
             Leak::Aliased { .. } => "aliased by another binding",
             Leak::Escaped { .. } => "escaped into a call",
-            Leak::Captured { .. } => "captured by a lambda",
-            Leak::Reassigned { .. } => "reassigned",
-            Leak::Used { .. } => "used where retention is possible",
         }
     }
 }
@@ -345,17 +346,17 @@ impl Leak {
 impl std::fmt::Display for Leak {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Leak::NoTransfer(form) => write!(f, "{form} does not transfer ownership"),
             Leak::NoRelease(ty) => write!(f, "the type {ty} owns no heap"),
-            Leak::Mutable => write!(f, "it is `mut`, and not a container that updates itself"),
+            Leak::Borrowed(what) => write!(f, "it is {what}"),
+            Leak::Mutable => write!(f, "it is `mut`, and its release is observable"),
             Leak::Region => write!(f, "it is inside a `region` — the arena owns it"),
+            Leak::Captured { line } => {
+                write!(f, "a lambda or a spawn captures it at line {line}")
+            }
             Leak::Aliased { line } => write!(f, "another binding aliases it at line {line}"),
             Leak::Escaped { callee, line } => {
                 write!(f, "it escapes into the call to `{callee}` at line {line}")
             }
-            Leak::Captured { line } => write!(f, "a lambda captures it at line {line}"),
-            Leak::Reassigned { line } => write!(f, "it is reassigned at line {line}"),
-            Leak::Used { line } => write!(f, "it is used at line {line}, which may retain it"),
         }
     }
 }
@@ -365,8 +366,9 @@ impl std::fmt::Display for Leak {
 pub enum Fate {
     /// The engines release it here, this way.
     Reclaimed(DropKind),
-    /// A `return` moves it out; the caller owns it.
-    Moved { line: usize },
+    /// It left: a `return` carried it out, or a store took it. Whoever holds it
+    /// now reclaims it, so this block must not.
+    Moved { line: usize, into: String },
     /// `drop name` reclaims it, so the automatic path must not.
     Dropped { line: usize },
     /// It is static data in the module's data segment. Nothing reclaims it,
@@ -385,35 +387,15 @@ pub struct BindingNote {
     pub fate: Fate,
 }
 
-/// The form of an expression, in the words a diagnostic uses.
-///
-/// A formatter, not a decision: [`Analysis::transfers`] already answered.
-fn expr_form(e: &Expr) -> String {
-    match e {
-        Expr::Str(_) => "a string literal".into(),
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) => "a literal".into(),
-        Expr::Var { name, .. } => format!("reading `{name}`"),
-        Expr::Field { field, .. } => format!("reading the field `{field}`"),
-        // A method-only builtin arrives under its internal `@` spelling, which
-        // no user can type. Report what they wrote.
-        Expr::Call { name, .. } => {
-            format!("the call to `{}`", name.strip_prefix('@').unwrap_or(name))
-        }
-        Expr::Try { .. } => "a `?` propagation".into(),
-        Expr::Match { .. } => "a match expression".into(),
-        Expr::IfExpr { .. } => "an if-expression".into(),
-        Expr::TryConstruct { .. } => "a fallible construction".into(),
-        Expr::Spawn { .. } => "a spawn".into(),
-        Expr::Lambda { .. } => "a lambda".into(),
-        Expr::ArrayLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. } => "a literal".into(),
-        Expr::Binary { .. } | Expr::Unary { .. } => "an operator result".into(),
-    }
-}
-
 /// Whole-program ownership facts.
 pub struct Ownership {
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
+    ///
+    /// Since RFC-0089 rule 3 this is the return type and nothing else: a return
+    /// is owned, and `movecheck` refuses the program where it is not. The
+    /// fixpoint that used to compute it asked a question the language now
+    /// answers.
     pub owned_fns: HashMap<String, DropKind>,
     /// Per function: identity of each droppable `let` and how to reclaim it.
     pub droppable: HashMap<String, HashMap<usize, DropKind>>,
@@ -436,77 +418,38 @@ pub struct Ownership {
 /// Analyse ownership across a whole program.
 pub fn analyze(program: &Program) -> Ownership {
     let proto = Owned::new(program);
+    // What every `let` in the program still owns where its block ends, decided
+    // by the pass that enforces the rules. One walk, one answer, no second
+    // opinion (RFC-0087 records three defects that were two walkers disagreeing).
+    let lets = crate::movecheck::ownership(program);
 
-    // The declared-types reading, shared with `movecheck` (RFC-0089 M2). It
-    // carries the return type of every callable this analysis can name: the
-    // program's functions, plus the built-in producers.
-    let decl = Declared::new(program);
-
-    // Callables whose result the caller owns. The built-ins are seeded and stay;
-    // every heap-returning function is assumed owned and may be removed below.
-    let seeded: HashSet<String> = builtin_producers().map(|(n, _)| n.to_string()).collect();
-    let mut owned: HashSet<String> = seeded.clone();
-    owned.extend(
-        program
-            .functions
-            .iter()
-            .filter(|f| proto.release_kind(&f.ret).is_some())
-            .map(|f| f.name.clone()),
-    );
-
-    // Fixpoint: remove any function that has a non-owned heap return under the
-    // current assumptions. Monotone (only shrinks), so it terminates.
-    loop {
-        let mut changed = false;
-        let snapshot = owned.clone();
-        for f in &program.functions {
-            if snapshot.contains(&f.name)
-                && !seeded.contains(&f.name)
-                && !analyze_fn(f, &snapshot, &decl, &proto).is_owned
-            {
-                owned.remove(&f.name);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    // Final droppable sets, computed under the fixed owned set.
     let mut droppable = HashMap::new();
     let mut notes = HashMap::new();
     let mut fresh_refs = HashSet::new();
+    let mut emit = |name: String, body: &Block| {
+        let r = emit_body(body, &lets, &proto);
+        fresh_refs.extend(fresh_refs_in(body, &r.droppable));
+        droppable.insert(name.clone(), r.droppable);
+        notes.insert(name, r.notes);
+    };
     for f in &program.functions {
-        let r = analyze_fn(f, &owned, &decl, &proto);
-        fresh_refs.extend(fresh_refs_in(&f.body, &r.droppable));
-        droppable.insert(f.name.clone(), r.droppable);
-        notes.insert(f.name.clone(), r.notes);
+        emit(f.name.clone(), &f.body);
     }
-    // Test bodies (RFC-0015) get the same block-exit drop analysis so a `let` in
-    // a test reclaims its heap value exactly as it would in a function. The body
-    // is the REAL node the interpreter walks, so the by-address droppable keys
-    // match at run time. Tests never return an owned value (they are `Unit`).
+    // Test bodies (RFC-0015) get the same block-exit drops, so a `let` in a test
+    // reclaims its heap value exactly as it would in a function. The body is the
+    // REAL node the interpreter walks, so the by-address keys match at run time.
     for (i, t) in program.tests.iter().enumerate() {
-        let r = analyze_body(&[], &t.body, &Type::Unit, &owned, &decl, &proto);
-        fresh_refs.extend(fresh_refs_in(&t.body, &r.droppable));
-        droppable.insert(format!("test@{i}"), r.droppable);
-        notes.insert(format!("test@{i}"), r.notes);
+        emit(format!("test@{i}"), &t.body);
     }
-    // Bench bodies (RFC-0055) get the same block-exit drop analysis, keyed by the
-    // synthetic `bench@<index>` name the interpreter (`--check`) walks.
+    // Bench bodies (RFC-0055), keyed by the synthetic `bench@<index>` name the
+    // interpreter (`--check`) walks.
     for (i, b) in program.benches.iter().enumerate() {
-        let r = analyze_body(&[], &b.body, &Type::Unit, &owned, &decl, &proto);
-        fresh_refs.extend(fresh_refs_in(&b.body, &r.droppable));
-        droppable.insert(format!("bench@{i}"), r.droppable);
-        notes.insert(format!("bench@{i}"), r.notes);
+        emit(format!("bench@{i}"), &b.body);
     }
-    // The public view is about the PROGRAM's functions: a built-in producer is
-    // seeded knowledge, not a fact discovered about a declaration.
+    // Rule 3: a return is owned. The return type is the whole answer.
     let owned_fns = program
         .functions
         .iter()
-        .filter(|f| owned.contains(&f.name))
         .filter_map(|f| proto.release_kind(&f.ret).map(|k| (f.name.clone(), k)))
         .collect();
     Ownership {
@@ -521,54 +464,25 @@ pub fn analyze(program: &Program) -> Ownership {
 struct FnResult {
     droppable: HashMap<usize, DropKind>,
     notes: Vec<BindingNote>,
-    is_owned: bool,
 }
 
-fn analyze_fn(
-    f: &Function,
-    owned: &HashSet<String>,
-    decl: &Declared,
-    proto: &Owned,
-) -> FnResult {
-    analyze_body(&f.params, &f.body, &f.ret, owned, decl, proto)
-}
-
-/// The core of [`analyze_fn`], parameterized over a body directly so a test body
-/// (RFC-0015) — which has no surrounding `Function` node — can be analysed with
-/// the SAME node addresses the interpreter walks (a clone would not match).
-fn analyze_body(
-    params_list: &[Param],
+/// One body's drop sites, in source order.
+fn emit_body(
     body: &Block,
-    ret: &Type,
-    owned: &HashSet<String>,
-    decl: &Declared,
+    lets: &HashMap<usize, LetOwnership>,
     proto: &Owned,
 ) -> FnResult {
-    // Seed the outermost scope with every parameter and its declared type.
-    let params: HashMap<String, Option<Type>> = params_list
-        .iter()
-        .map(|p| (p.name.clone(), Some(p.ty.clone())))
-        .collect();
-    let mut a = Analysis {
+    let mut e = Emit {
         droppable: HashMap::new(),
         notes: Vec::new(),
-        note_at: HashMap::new(),
-        why: None,
-        line: 0,
-        live: vec![HashMap::new()],
         region_depth: 0,
-        owned,
-        ret_is_heap: proto.release_kind(ret).is_some(),
-        all_returns_owned: true,
-        decl,
+        lets,
         proto,
-        var_types: Scopes::new(params),
     };
-    a.block(body);
+    e.block(body);
     FnResult {
-        droppable: a.droppable,
-        notes: a.notes,
-        is_owned: a.ret_is_heap && a.all_returns_owned,
+        droppable: e.droppable,
+        notes: e.notes,
     }
 }
 
@@ -577,387 +491,128 @@ fn id(s: &Stmt) -> usize {
     s as *const Stmt as usize
 }
 
-struct Analysis<'a> {
+/// The walk that finds the `let`s and writes down what happens to each.
+///
+/// It decides two things of its own — a `region` owns what is allocated inside
+/// it, and a string literal is data-segment storage — and reads the rest from
+/// [`crate::movecheck`]. There is no expression analysis here at all.
+struct Emit<'a> {
     droppable: HashMap<usize, DropKind>,
     /// One row per `let`, in source order, with what happens to its value.
     notes: Vec<BindingNote>,
-    /// `let` node identity -> its row in `notes`, so a later escape rewrites the
-    /// row the same walker wrote.
-    note_at: HashMap<usize, usize>,
-    /// Why the binding an `escape` is about to remove leaves. `None` means the
-    /// generic "used at the current line".
-    why: Option<Leak>,
-    /// The line of the statement being walked, for the generic reason.
-    line: usize,
-    /// Scope stack of live candidate owners: name -> declaring `let` identity.
-    live: Vec<HashMap<String, usize>>,
     region_depth: usize,
-    /// Callables currently believed to hand the caller a value it owns — the
-    /// program's functions under the running fixpoint, plus the seeded built-in
-    /// producers.
-    owned: &'a HashSet<String>,
-    /// Whether the function under analysis returns a heap value.
-    ret_is_heap: bool,
-    /// Whether every heap return seen so far transfers a fresh owned value.
-    all_returns_owned: bool,
-    /// The declared-types reading, shared with `movecheck` — the one place a
-    /// call's result type, a nominal type's base and `owns_heap` are answered.
-    decl: &'a Declared,
+    /// What every `let` in the program still owns where its block ends.
+    lets: &'a HashMap<usize, LetOwnership>,
     /// The `Owned` table — the only thing that decides how a type is released.
     proto: &'a Owned,
-    /// Scope stack of every binding in scope with its type where one is known.
-    /// Kept in lock-step with `live`. It under-approximates: a binding whose type
-    /// this cannot name is left to leak, never freed as something it is not.
-    var_types: Scopes<Option<Type>>,
 }
 
-impl Analysis<'_> {
+impl Emit<'_> {
     fn block(&mut self, b: &Block) {
-        self.live.push(HashMap::new());
-        self.var_types.enter();
         for s in &b.stmts {
             self.stmt(s);
         }
-        self.var_types.exit();
-        self.live.pop();
-    }
-
-    /// Run `body` with `binders` in scope ahead of it — a `for` variable, an
-    /// `if let` arm's payload, a lambda's parameters. None of them carries a type
-    /// this pass can name, so each is recorded as unknown. Recording is the point:
-    /// an unrecorded binder falls through to whatever the enclosing scope calls
-    /// that name, which is how an integer loop variable inherited a String.
-    fn scoped_block(&mut self, binders: &[String], body: &Block) {
-        self.var_types.enter();
-        for n in binders {
-            self.var_types.bind(n, None);
-        }
-        self.block(body);
-        self.var_types.exit();
     }
 
     fn stmt(&mut self, s: &Stmt) {
-        self.line = stmt_line(s).unwrap_or(self.line);
         match s {
             Stmt::Let {
                 name,
                 mutable,
                 value,
-                ty,
                 line,
+                ..
             } => {
-                // Account for uses in the initializer *before* the new binding
-                // exists (so `let x = x + b` escapes the old `x`). A bare
-                // variable initializer is the alias case, and it is worth saying
-                // so by name — RFC-0089 rule 1 is about exactly these.
-                let outer = self.why.take();
-                self.why = match value {
-                    Expr::Var { .. } => Some(Leak::Aliased { line: *line }),
-                    _ => outer.clone(),
-                };
-                self.visit(value);
-                self.why = outer;
-                // The binding's type: what it was declared, else what the
-                // initializer yields. Computed against the *pre-binding* env, so
-                // a self-reference resolves to the old value's type. An unknown
-                // type is recorded as unknown rather than left out: that is what
-                // shadows an outer binding of the same name.
-                let bty = ty.clone().or_else(|| self.expr_type(value));
-                self.var_types.bind(name, bty.clone());
-                // The two questions (RFC-0086 M1). Does the initializer hand over
-                // a value nobody else holds? Then the TYPE says how it is
-                // released. Neither half is a list of expression forms.
-                //
-                // Each branch below records WHY, in the same place it decides.
-                //
-                // The REPORT asks the type first, though the decision needs
-                // both: "the type owns no heap" is the whole answer for a
-                // scalar, and saying "a literal does not transfer" about
-                // `let i = 0` would be true and useless. Where the type does own
-                // heap, transfer is the remaining question, which is exactly the
-                // §2a cases.
-                let fate = match bty.as_ref().and_then(|t| self.proto.release_kind(t)) {
-                    // A named type that releases nothing is the whole answer.
-                    // An UNNAMED one is not: "unknown" says nothing, and the
-                    // form of the initializer is what a reader can act on.
-                    None if bty.is_some() => {
-                        Fate::Leaked(Leak::NoRelease(bty.as_ref().unwrap().to_string()))
-                    }
-                    None if self.transfers(value) => Fate::Leaked(Leak::NoRelease("unknown".into())),
-                    None => Fate::Leaked(Leak::NoTransfer(expr_form(value))),
-                    // A string literal lives in the data segment. Nothing
-                    // reclaims it and nothing needs to (census §1).
-                    Some(_) if matches!(value, Expr::Str(_)) => Fate::Static,
-                    Some(_) if !self.transfers(value) => {
-                        Fate::Leaked(Leak::NoTransfer(expr_form(value)))
-                    }
-                    Some(kind) => {
-                        // A dynamic string inside a region is owned by the arena,
-                        // so skip it. A cell (`ReleaseRef`) lives in the separate
-                        // slab, which the region does not touch, so release it
-                        // regardless.
-                        let region_owns = kind == DropKind::FreeStr && self.region_depth > 0;
-                        // Arrays are reassigned in place (`a = push(a, x)`), so a
-                        // `mut` array can still own a buffer; strings/refs must be
-                        // single-assignment to be tracked. A `mut` Map is mutated
-                        // in place (`m[k] = v`) and keeps its identity, so — like
-                        // an array — it can still own its buffers.
-                        let assignable_ok = !*mutable
-                            || kind == DropKind::FreeArr
-                            || kind == DropKind::FreeSmallArr
-                            || kind == DropKind::FreeMap;
-                        if region_owns {
-                            Fate::Leaked(Leak::Region)
-                        } else if !assignable_ok {
-                            Fate::Leaked(Leak::Mutable)
-                        } else {
-                            let key = id(s);
-                            self.live.last_mut().unwrap().insert(name.clone(), key);
-                            self.droppable.insert(key, kind.clone());
-                            Fate::Reclaimed(kind)
-                        }
-                    }
-                };
-                self.note_at.insert(id(s), self.notes.len());
+                let fate = self.fate(s, *mutable, value);
+                if let Fate::Reclaimed(kind) = &fate {
+                    self.droppable.insert(id(s), kind.clone());
+                }
                 self.notes.push(BindingNote {
                     name: name.clone(),
                     line: *line,
                     fate,
                 });
             }
-            Stmt::Assign { name, value, line } => {
-                // `a = push(a, ..)` is an in-place self-update: the array keeps
-                // its owner. Any *other* reassignment of a tracked binding makes
-                // its ownership unclear, so it is dropped from tracking (a safe
-                // leak). Pushed values are still accounted for as escapes.
-                if self.is_candidate(name) {
-                    if let Expr::Call {
-                        name: fname, args, ..
-                    } = value
-                    {
-                        let self_update = fname == "push"
-                            && matches!(args.first(), Some(Expr::Var { name: a, .. }) if a == name);
-                        if self_update {
-                            for arg in &args[1..] {
-                                self.visit(arg);
-                            }
-                            return;
-                        }
-                    }
-                    self.escape_with(name, Fate::Leaked(Leak::Reassigned { line: *line }));
-                }
-                self.visit(value);
-            }
-            // `name.field = value` stores `value` into a record field; a heap
-            // value put there escapes (the record now owns it).
-            Stmt::SetField { value, .. } => self.visit(value),
-            // `name[i] = value` stores into an array element; a heap value put
-            // there escapes (the array now owns it), and an overwritten heap
-            // element is not freed (a safe leak — RFC-0011). The array binding
-            // itself keeps its owner (the buffer is unchanged), so it is not
-            // escaped here. `index` is a scalar; visit it for completeness.
-            Stmt::IndexSet { index, value, .. } => {
-                self.visit(index);
-                self.visit(value);
-            }
-            Stmt::Return { value, line } => self.ret(value.as_ref(), *line),
-            // `break`/`continue` (RFC-0060) touch no bindings — nothing escapes.
-            // Drop emission for the exited scopes is handled by codegen/interp.
-            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::If {
-                cond,
+                then_block,
+                else_block,
+                ..
+            }
+            | Stmt::IfLet {
                 then_block,
                 else_block,
                 ..
             } => {
-                self.visit(cond);
                 self.block(then_block);
                 if let Some(eb) = else_block {
                     self.block(eb);
                 }
             }
-            // `if let` (RFC-0060): the scrutinee is visited like any expression;
-            // the binders are payload borrows (never auto-freed), so the blocks
-            // are walked exactly as an `if`'s are — except that the binders go
-            // into scope, so one shadowing an outer String is not read as one.
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.visit(scrutinee);
-                self.scoped_block(&pattern_binders(pattern), then_block);
-                if let Some(eb) = else_block {
-                    self.block(eb);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                self.visit(cond);
-                self.block(body);
-            }
-            // Iterating escapes the array conservatively: an element may be a
-            // pointer into its buffer, so we must not auto-free the array while a
-            // bound element could outlive the loop. (Safe leak, never a UAF;
-            // an explicit `drop` still reclaims it.)
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                self.visit(iter);
-                self.scoped_block(std::slice::from_ref(var), body);
-            }
-            Stmt::Expr(e) => self.visit(e),
-            // `drop name;` reclaims the value explicitly, so it must escape the
-            // automatic-drop analysis — otherwise it would be freed twice.
-            Stmt::Drop { name, line } => {
-                self.escape_with(name, Fate::Dropped { line: *line })
-            }
+            Stmt::While { body, .. } | Stmt::ForIn { body, .. } => self.block(body),
             Stmt::Region { body, .. } => {
                 self.region_depth += 1;
                 self.block(body);
                 self.region_depth -= 1;
             }
-        }
-    }
-
-    /// Classify a `return`. For a heap-returning function, decide whether the
-    /// returned value is a fresh owned allocation being moved out (keeping the
-    /// function's owned status) or something borrowed/aliased (which downgrades
-    /// it). For a non-heap return, just account for uses.
-    fn ret(&mut self, value: Option<&Expr>, line: usize) {
-        let Some(e) = value else { return };
-        if !self.ret_is_heap {
-            self.visit(e);
-            return;
-        }
-        if self.transfers(e) {
-            // `concat(..)`/`cell(..)` read their args (safe); an owned call
-            // escapes its args conservatively. Either way the *result* is a
-            // fresh owned move. The function's return TYPE already said this is
-            // a heap value, so transfer is the whole remaining question.
-            self.visit(e);
-        } else if let Expr::Var { name, .. } = e {
-            if self.is_candidate(name) {
-                // Moving a local owner out: it leaves the function, so it must
-                // NOT also be dropped here.
-                self.escape_with(name, Fate::Moved { line });
-            } else {
-                // Returning a parameter or an already-escaped value — borrowed.
-                self.visit(e);
-                self.all_returns_owned = false;
+            // A lambda's block body carries `let`s of its own, and the engines
+            // walk it as part of this function's AST.
+            Stmt::Expr(e) => self.lambdas(e),
+            Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::IndexSet { value, .. } => self.lambdas(value),
+            Stmt::Return { value, .. } => {
+                if let Some(e) = value {
+                    self.lambdas(e);
+                }
             }
-        } else {
-            self.visit(e);
-            self.all_returns_owned = false;
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
         }
     }
 
-    /// Whether `e` hands over a value **nobody else holds** — a transfer rather
-    /// than an alias.
+    /// Walk into any lambda block body inside `e`, so its `let`s get rows too.
     ///
-    /// This is the half of the decision that is genuinely about the expression,
-    /// and it cannot be asked of the type: `at(a, 0)` and `m.keys()` both have an
-    /// `Array`'s element or an `Array` for a type, and only one of them allocates.
-    /// A literal or an operator result is a value that did not exist a moment ago;
-    /// a call answers by its callee (the fixpoint for a declared function, the
-    /// seed for a built-in); everything else reads a place somebody else owns.
-    ///
-    /// Exhaustive on purpose — a new expression form has to answer.
-    fn transfers(&self, e: &Expr) -> bool {
+    /// Only the statement-carrying case needs the descent: an expression-bodied
+    /// lambda has no `let` to reclaim.
+    fn lambdas(&mut self, e: &Expr) {
         match e {
-            // `x.copy()` (RFC-0089 M1b) is a producer whose type is its
-            // receiver's, so it cannot be one row of [`builtin_producers`]. It
-            // transfers whenever it allocates, and it allocates for exactly the
-            // types [`owns_heap`] counts. A `Ref<T>` is the case that matters:
-            // copying one shares the cell, so calling it a transfer would
-            // release that cell twice.
-            Expr::Call { name, args, .. } if name == "@copy" => args
-                .first()
-                .and_then(|a| self.expr_type(a))
-                .is_some_and(|t| self.decl.owns_heap(&t)),
-            Expr::ArrayLit { .. }
-            | Expr::MapLit { .. }
-            | Expr::StructLit { .. }
-            | Expr::Binary { .. }
-            | Expr::Unary { .. } => true,
-            Expr::Call { name, .. } => self.owned.contains(name.as_str()),
-            // A string literal is static storage, not an allocation.
-            Expr::Str(_)
-            | Expr::Int(_)
-            | Expr::Byte(_)
-            | Expr::Float(_)
-            | Expr::Bool(_)
-            // A place read is an alias of what it reads.
-            | Expr::Var { .. }
-            | Expr::Field { .. }
-            // The rest may each yield a fresh value, and none of them is
-            // *provably* doing so from the form alone, so each is left to leak —
-            // always safe, never a double free.
-            | Expr::Try { .. }
-            | Expr::Match { .. }
-            | Expr::IfExpr { .. }
-            | Expr::TryConstruct { .. }
-            | Expr::Spawn { .. }
-            | Expr::Lambda { .. } => false,
-        }
-    }
-
-    /// The type of `e`, where this pass can name it.
-    ///
-    /// The reading itself lives in [`crate::declared`], because `movecheck` asks
-    /// the same question and a second implementation could answer differently.
-    /// When unsure it answers `None`, which leaves the binding to leak — always
-    /// safe, never freed as something it is not.
-    fn expr_type(&self, e: &Expr) -> Option<Type> {
-        self.decl.type_of(&self.var_types, e)
-    }
-
-    /// Walk an expression, escaping any candidate used outside a safe read.
-    fn visit(&mut self, e: &Expr) {
-        match e {
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-            Expr::Var { name, .. } => self.escape(name),
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } => self.visit(expr),
-            // `x.length` / `s.byteLength` read the length header only — a safe read
-            // of a candidate (RFC-0058 renamed a String's byte length). Any other
-            // field access is a conservative escape.
-            Expr::Field { expr, field, .. } if field == "length" || field == "byteLength" => {
-                self.operand(expr)
+            Expr::Lambda {
+                body: LambdaBody::Block(b),
+                ..
+            } => self.block(b),
+            Expr::Lambda {
+                body: LambdaBody::Expr(inner),
+                ..
             }
-            Expr::Field { expr, .. } => self.visit(expr),
+            | Expr::Unary { expr: inner, .. }
+            | Expr::Try { expr: inner, .. }
+            | Expr::Field { expr: inner, .. } => self.lambdas(inner),
             Expr::Binary { lhs, rhs, .. } => {
-                // `==`/`!=` and string `+` only *read* their operands (concat
-                // copies both into a fresh buffer, never retaining them), so a
-                // whole candidate on either side is a safe read. Other operators
-                // are numeric, whose operands are never tracked candidates — so
-                // treating them as reads too is harmless and simpler.
-                self.operand(lhs);
-                self.operand(rhs);
+                self.lambdas(lhs);
+                self.lambdas(rhs);
             }
-            Expr::Call { name, args, line } => {
-                // An argument that is not a safe read escapes INTO this call, and
-                // naming the callee is most of the value of saying so.
-                let outer = self.why.replace(Leak::Escaped {
-                    callee: name.clone(),
-                    line: *line,
-                });
-                self.call(name, args);
-                self.why = outer;
+            Expr::Call { args, .. }
+            | Expr::TryConstruct { args, .. }
+            | Expr::ArrayLit { elems: args, .. }
+            | Expr::Spawn { args, .. } => {
+                for a in args {
+                    self.lambdas(a);
+                }
             }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.visit(scrutinee);
-                for arm in arms {
-                    // The arm's payload binders shadow the enclosing scope for
-                    // the arm body, exactly as a `let` would.
-                    self.var_types.enter();
-                    for n in pattern_binders(&arm.pattern) {
-                        self.var_types.bind(&n, None);
-                    }
-                    self.visit(&arm.body);
-                    self.var_types.exit();
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    self.lambdas(v);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.lambdas(k);
+                    self.lambdas(v);
+                }
+            }
+            Expr::Match { scrutinee, arms, .. } => {
+                self.lambdas(scrutinee);
+                for a in arms {
+                    self.lambdas(&a.body);
                 }
             }
             Expr::IfExpr {
@@ -966,170 +621,75 @@ impl Analysis<'_> {
                 else_branch,
                 ..
             } => {
-                self.visit(cond);
-                self.visit(then_branch);
+                self.lambdas(cond);
+                self.lambdas(then_branch);
                 if let Some(eb) = else_branch {
-                    self.visit(eb);
+                    self.lambdas(eb);
                 }
             }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    self.visit(v);
-                }
-            }
-            Expr::TryConstruct { args, .. } => {
-                for a in args {
-                    self.visit(a);
-                }
-            }
-            Expr::ArrayLit { elems, .. } => {
-                for e in elems {
-                    self.visit(e);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    self.visit(k);
-                    self.visit(v);
-                }
-            }
-            Expr::Spawn { args, .. } => {
-                for e in args {
-                    self.visit(e);
-                }
-            }
-            // A lambda body (RFC-0023): a captured heap binding is passed by value
-            // into the monomorphized lambda function, which never frees it (the
-            // enclosing scope keeps ownership). Walking the body conservatively
-            // treats a captured candidate as escaped, so it is not auto-freed at
-            // the capture site — sound (never a double-free; at worst a leak, which
-            // does not affect observable behavior or parity).
-            //
-            // The parameters are untyped here, so none of them is provably a
-            // String and each is recorded as not one — which costs nothing a
-            // parameter did not already lack, and stops one named like an
-            // enclosing String from being read as that String.
-            Expr::Lambda { params, body, line } => {
-                let outer = self.why.replace(Leak::Captured { line: *line });
-                self.var_types.enter();
-                for p in params {
-                    self.var_types.bind(p, None);
-                }
-                match body {
-                    LambdaBody::Expr(e2) => self.visit(e2),
-                    LambdaBody::Block(b) => {
-                        for s in &b.stmts {
-                            self.stmt(s);
-                        }
-                    }
-                }
-                self.var_types.exit();
-                self.why = outer;
-            }
+            Expr::Int(_)
+            | Expr::Byte(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            | Expr::Str(_)
+            | Expr::Var { .. } => {}
         }
     }
 
-    /// The arguments of a call.
+    /// What happens to one `let` binding's value — RFC-0089 rule 4, in full.
     ///
-    /// These builtins only *read* their heap argument and never retain it — a
-    /// whole candidate passed to one is a safe use: `print` / `@concat` for
-    /// strings, `get` for references, and the log methods (which
-    /// format-and-write their message). `release` is intentionally excluded: it
-    /// hands the cell off, so it escapes the binding (no auto-release on top of
-    /// it). `logger` is excluded too: it *returns* its name argument (an alias).
-    /// Any other call may alias its argument into its result (e.g.
-    /// `fn id(s) { return s; }`), so it counts as an escape too.
-    ///
-    /// `set(c, v)` reads its *Ref* argument but STORES `v` in the cell — the cell
-    /// outlives the block, so `v` must escape (a droppable `v` would be freed at
-    /// block exit while the cell still points at it: a use-after-free on the next
-    /// `get`).
-    fn call(&mut self, name: &str, args: &[Expr]) {
-        if name == "set" {
-            if let Some((c, rest)) = args.split_first() {
-                self.operand(c);
-                for a in rest {
-                    self.visit(a);
-                }
-            }
-        } else if matches!(
-            name,
-            "print" | "@concat" | "get" | "at" | "alen"
-                // `@pop`/`@swapRemove` mutate the array in place but do not free
-                // its buffer, so the receiver stays a live owner (a safe read);
-                // the removed element is a safe leak.
-                | "@pop" | "@swapRemove"
-                // Map methods (RFC-0028) mutate/read in place but never free the
-                // map's buffers, so the receiver stays a live owner (a safe
-                // read); `@keys` returns a fresh snapshot.
-                | "@has" | "@remove" | "@keys"
-                // `x.copy()` (RFC-0089 M1b) reads the receiver and allocates a
-                // duplicate — the receiver stays a live owner.
-                | "@copy"
-                | "trace" | "debug" | "info" | "warn" | "error"
-        ) {
-            for a in args {
-                self.operand(a);
-            }
-        } else {
-            for a in args {
-                self.visit(a);
-            }
+    /// The order of the questions is the order a reader needs them. What does
+    /// the TYPE release? Nothing, and there is nothing more to say. Something,
+    /// and then: does anything else own this storage?
+    fn fate(&self, s: &Stmt, mutable: bool, value: &Expr) -> Fate {
+        let row = self.lets.get(&id(s));
+        let bty = row.and_then(|r| r.ty.as_ref());
+        let Some(kind) = bty.and_then(|t| self.proto.release_kind(t)) else {
+            return Fate::Leaked(Leak::NoRelease(match bty {
+                Some(t) => t.to_string(),
+                None => "unknown".into(),
+            }));
+        };
+        // A string literal lives in the data segment. Nothing allocated it and
+        // nothing reclaims it (census §1).
+        if matches!(value, Expr::Str(_)) {
+            return Fate::Static;
         }
-    }
-
-    /// A position where a whole candidate variable is only *read*, not retained.
-    fn operand(&mut self, e: &Expr) {
-        match e {
-            Expr::Var { name, .. } if self.is_candidate(name) => { /* safe read */ }
-            _ => self.visit(e),
+        // A dynamic string inside a region is the arena's, and the two
+        // mechanisms partition every allocation — nothing is freed twice. A cell
+        // (`ReleaseRef`) lives in the separate slab, which the region does not
+        // touch, so it is released regardless.
+        if kind == DropKind::FreeStr && self.region_depth > 0 {
+            return Fate::Leaked(Leak::Region);
         }
-    }
-
-    fn is_candidate(&self, name: &str) -> bool {
-        self.live.iter().rev().any(|f| f.contains_key(name))
-    }
-
-    /// Mark the innermost candidate named `name`, if any, as escaped: no longer
-    /// droppable and no longer tracked. The reason is whatever context the
-    /// walker is in — see [`Analysis::why`].
-    fn escape(&mut self, name: &str) {
-        let reason = self.why.clone().unwrap_or(Leak::Used { line: self.line });
-        self.escape_with(name, Fate::Leaked(reason));
-    }
-
-    /// The same removal, with the fate stated by the caller: a `return` moves,
-    /// a `drop` reclaims, an assignment loses track.
-    fn escape_with(&mut self, name: &str, fate: Fate) {
-        for frame in self.live.iter_mut().rev() {
-            if let Some(key) = frame.remove(name) {
-                self.droppable.remove(&key);
-                if let Some(&i) = self.note_at.get(&key) {
-                    self.notes[i].fate = fate;
-                }
-                return;
-            }
+        // A `mut` binding is released by its slot's FINAL value in both
+        // compiling backends and by the value captured at the `let` in the
+        // interpreter. For a `free` that is the same program — neither engine
+        // can see the difference. For a cell release and for a user type's
+        // `release`, which prints, it is not, so those two wait for a phase that
+        // makes the interpreter read the slot.
+        if mutable && matches!(kind, DropKind::ReleaseRef | DropKind::Release(_)) {
+            return Fate::Leaked(Leak::Mutable);
         }
-    }
-}
-
-/// The source line of a statement, where it carries one.
-fn stmt_line(s: &Stmt) -> Option<usize> {
-    match s {
-        Stmt::Let { line, .. }
-        | Stmt::Assign { line, .. }
-        | Stmt::SetField { line, .. }
-        | Stmt::IndexSet { line, .. }
-        | Stmt::Return { line, .. }
-        | Stmt::Break { line }
-        | Stmt::Continue { line }
-        | Stmt::If { line, .. }
-        | Stmt::IfLet { line, .. }
-        | Stmt::While { line, .. }
-        | Stmt::ForIn { line, .. }
-        | Stmt::Drop { line, .. }
-        | Stmt::Region { line, .. } => Some(*line),
-        Stmt::Expr(_) => None,
+        match row.and_then(|r| r.gone.as_ref()) {
+            None => Fate::Reclaimed(kind),
+            Some(Gone::Borrowed(what)) => Fate::Leaked(Leak::Borrowed(what)),
+            Some(Gone::Aliased { line }) => Fate::Leaked(Leak::Aliased { line: *line }),
+            Some(Gone::Lent { line, to }) => Fate::Leaked(Leak::Escaped {
+                callee: to.clone(),
+                line: *line,
+            }),
+            Some(Gone::Captured { line }) => Fate::Leaked(Leak::Captured { line: *line }),
+            Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
+            Some(Gone::Returned { line }) => Fate::Moved {
+                line: *line,
+                into: "the return".into(),
+            },
+            Some(Gone::Moved { line, by }) => Fate::Moved {
+                line: *line,
+                into: by.clone(),
+            },
+        }
     }
 }
 
@@ -1367,11 +927,15 @@ pub(crate) mod tests {
         assert_eq!(drop_count(src, "main"), 1);
     }
 
+    /// RFC-0089 rule 1, Phase 4c. `let t = s` MOVES: the new name owns the
+    /// buffer and the old one no longer does, so the block still frees it once.
+    /// Before the rules were enforced this pass could not tell an alias from a
+    /// move and left both to leak.
     #[test]
-    fn does_not_free_aliased_temporary() {
+    fn an_alias_moves_the_owner_rather_than_duplicating_it() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let t = s; return t.length; }";
-        assert_eq!(drop_count(src, "main"), 0);
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
     }
 
     #[test]
@@ -1409,10 +973,24 @@ pub(crate) mod tests {
         assert_eq!(drop_count(src, "main"), 0);
     }
 
+    /// Census §2c, closed in Phase 4c. `mut` used to mean "who owns the old value
+    /// after a reassignment is unclear", so a `mut` String was left to leak. Rule
+    /// 1 governs reassignment now, so the binding owns whatever it holds last and
+    /// the block frees that.
     #[test]
-    fn skips_mutable_binding() {
+    fn a_mutable_string_is_reclaimed() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let mut s = a + b; return s.length; }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
+    }
+
+    /// The two kinds `mut` still excludes, and why: both compiling engines
+    /// release a `mut` slot's FINAL value, and the interpreter releases the value
+    /// captured at the `let`. A `free` cannot tell the two apart; a cell release
+    /// can, and a declared `release` prints.
+    #[test]
+    fn a_mutable_cell_is_not_auto_released() {
+        let src = "fn main() -> Int64 { let mut c = cell(1); c = cell(2); return get(c); }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
@@ -1434,7 +1012,9 @@ pub(crate) mod tests {
         let src = "fn main() -> Int64 { let s = \"x\"; print(s); \
                    let ns: Array<Int64> = array(); \
                    for s in ns { let t = s + 1; print(t); } return 0; }";
-        assert_eq!(drop_count(src, "main"), 0);
+        // The array, and only the array: `s` is a literal, and `t` is the
+        // integer add this test is about. A String `t` here freed an integer.
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
     }
 
     #[test]
@@ -1509,20 +1089,18 @@ pub(crate) mod tests {
         assert_eq!(drop_count(src, "main"), 1);
     }
 
+    /// RFC-0089 rule 3, Phase 4c. A return is owned, so the return TYPE is the
+    /// whole answer and the fixpoint that used to look for a borrowed return path
+    /// asked a question the language now answers. `movecheck` refuses the
+    /// programs this used to describe (`return s` on a `read` parameter).
     #[test]
-    fn identity_returning_param_is_not_owned() {
-        let src = "fn id(s: String) -> String { return s; } fn main() -> Int64 { return 0; }";
-        let (o, _) = analyze_src(src);
-        assert!(!o.owned_fns.contains_key("id"));
-    }
-
-    #[test]
-    fn mixed_return_paths_are_not_owned() {
-        let src = "fn pick(c: Bool, a: String, b: String) -> String { \
-                       if c { return a + b; } return a; } \
+    fn a_heap_return_type_always_transfers() {
+        let src = "fn id(s: String) -> String { return s.copy(); } \
+                   fn count(s: String) -> Int64 { return s.byteLength; } \
                    fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
-        assert!(!o.owned_fns.contains_key("pick"));
+        assert_eq!(o.owned_fns.get("id"), Some(&DropKind::FreeStr));
+        assert!(!o.owned_fns.contains_key("count"));
     }
 
     #[test]
@@ -1535,15 +1113,17 @@ pub(crate) mod tests {
         assert_eq!(o.droppable.get("main").map(|s| s.len()).unwrap_or(0), 1);
     }
 
+    /// A `read` parameter is a promise that the caller keeps the value (rule 2),
+    /// so passing a local to one takes nothing: the caller still frees its own
+    /// String, and the callee's result is a second one it owns. Two frees, two
+    /// buffers. Before Phase 4c every call was treated as a possible retention
+    /// and both leaked.
     #[test]
-    fn caller_does_not_free_borrowed_call_result() {
-        // `id` is not owned, so its result must not be freed by the caller.
-        let src = "fn id(s: String) -> String { return s; } \
+    fn passing_to_a_read_parameter_keeps_the_caller_the_owner() {
+        let src = "fn tail(s: String) -> String { return s + \"!\"; } \
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                       let s = a + b; let y = id(s); return y.length; }";
-        let (o, _) = analyze_src(src);
-        // `s` escapes into the `id(..)` call, `y` is not an owned result:
-        assert_eq!(o.droppable.get("main").map(|s| s.len()).unwrap_or(0), 0);
+                       let s = a + b; let y = tail(s); return y.length; }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr; 2]);
     }
 
     // ---- inferred release for references --------------------------------

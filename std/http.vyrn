@@ -960,7 +960,7 @@ fn httpAnyMatch(field: String, tag: String) -> Bool {
 }
 
 fn httpUnweak(t: String) -> String {
-    return if t.startsWith("W/") { substring(t, 2, t.byteLength) } else { t }
+    return if t.startsWith("W/") { substring(t, 2, t.byteLength) } else { t.copy() }
 }
 
 /// `notFoundWhen`'s answer: a procedure that returned `Err(why)` for a reason this
@@ -1149,7 +1149,7 @@ fn httpMatch(r: Route, req: Request) -> Option<Map<String, String>> {
 fn httpPathOnly(path: String) -> String {
     return match indexOf(path, "?") {
         Some(i) => substring(path, 0, i),
-        None => path,
+        None => path.copy(),
     }
 }
 

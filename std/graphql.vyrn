@@ -1326,7 +1326,11 @@ fn gqlPick(
             gqlProject(gqlMemberOf(fields, s.name), s.subs, fref, at, schema)
         }
         for e in r.errs {
-            errs.push(e)
+            // `r` owns its errors, so the element is a borrow (RFC-0089 rule 2)
+            // and this array needs one of its own. `copy` refuses a `GqlErr`
+            // because it holds a `Json`, which refers to itself — hence the
+            // hand-written copy above.
+            errs.push(gqlCopyErr(e))
         }
         if r.failed {
             failed = true
@@ -1364,7 +1368,7 @@ fn gqlFieldFault(
 export fn gqlQueryText(body: String) -> String {
     return match parseJson(body) {
         Ok(doc) => gqlEnvelopeQuery(doc, body),
-        Err(e) => body,
+        Err(e) => body.copy(),
     }
 }
 
@@ -1372,11 +1376,11 @@ export fn gqlQueryText(body: String) -> String {
 fn gqlEnvelopeQuery(doc: Json, fallback: String) -> String {
     return match doc {
         JObj(fields) => gqlStrOr(gqlMemberOf(fields, "query"), fallback),
-        JNull => fallback,
-        JBool(b) => fallback,
-        JNum(n) => fallback,
-        JStr(s) => fallback,
-        JArr(xs) => fallback,
+        JNull => fallback.copy(),
+        JBool(b) => fallback.copy(),
+        JNum(n) => fallback.copy(),
+        JStr(s) => fallback.copy(),
+        JArr(xs) => fallback.copy(),
     }
 }
 
@@ -1384,11 +1388,11 @@ fn gqlEnvelopeQuery(doc: Json, fallback: String) -> String {
 fn gqlStrOr(j: Json, fallback: String) -> String {
     return match j {
         JStr(s) => s,
-        JNull => fallback,
-        JBool(b) => fallback,
-        JNum(n) => fallback,
-        JArr(xs) => fallback,
-        JObj(o) => fallback,
+        JNull => fallback.copy(),
+        JBool(b) => fallback.copy(),
+        JNum(n) => fallback.copy(),
+        JArr(xs) => fallback.copy(),
+        JObj(o) => fallback.copy(),
     }
 }
 

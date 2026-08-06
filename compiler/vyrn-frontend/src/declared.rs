@@ -77,15 +77,19 @@ impl<T> Scopes<T> {
     }
 }
 
-/// The built-in calls that hand the caller a fresh heap value, with the type of
-/// that value. **This is a fact about a function, not about a type** — `at(a, 0)`
-/// and `m.keys()` both return an element of a container and only one of them
-/// allocates — so it cannot be derived from a signature and the compiler knows it
-/// intrinsically, exactly as it knows the seeded `Owned` rows.
+/// The **return type** of the built-ins this reading can name.
 ///
-/// It under-approximates on purpose. A builtin missing from here leaks, which is
-/// always safe; one wrongly present frees memory somebody still holds.
-pub fn builtin_producers() -> impl Iterator<Item = (&'static str, Type)> {
+/// It was `builtin_producers` until Phase 4c, and it decided ownership: a call
+/// listed here transferred and every other call leaked. That shape was wrong
+/// twice over. It cannot express `copy`, whose result type is its receiver's
+/// (Phase 3 recorded this), and ownership is not a property of a name — a
+/// return is owned because RFC-0089 rule 3 says so, and a builtin that reads a
+/// place is a borrow because rule 2 says so. What survives is the part that was
+/// only ever about types.
+///
+/// It still under-approximates. A builtin missing from here has no type this
+/// reading can name, so a binding to it is left alone.
+fn builtin_returns() -> impl Iterator<Item = (&'static str, Type)> {
     [
         // `a + b` on Strings, and `"..\{x}"` interpolation.
         ("@concat", Type::Str),
@@ -113,19 +117,35 @@ pub struct Declared {
     /// Module state (RFC-0013), with its declared type where it has one. Seeded
     /// into the outermost scope frame by a pass that wants globals typed.
     globals: HashMap<String, Option<Type>>,
+    /// The `Owned` table, so a pass can ask what a type RELEASES and not only
+    /// what it reaches. See [`Declared::releases`].
+    owned: crate::own::Owned,
+    /// Every enum variant name the program declares, plus the built-in sum
+    /// constructors. See [`Declared::constructs`].
+    variants: std::collections::HashSet<String>,
 }
 
 impl Declared {
     pub fn new(program: &Program) -> Self {
         let mut rets: HashMap<String, Type> = HashMap::new();
-        for (n, t) in builtin_producers() {
+        for (n, t) in builtin_returns() {
             rets.insert(n.to_string(), t);
         }
         for f in &program.functions {
             rets.insert(f.name.clone(), f.ret.clone());
         }
+        let decls = crate::types::decl_map(program);
+        let mut variants: std::collections::HashSet<String> =
+            ["Some", "Ok", "Err", "Success", "Failure"].into_iter().map(String::from).collect();
+        for d in decls.values() {
+            if let Type::Enum(vs) = &d.base {
+                variants.extend(vs.iter().map(|v| v.name.clone()));
+            }
+        }
         Declared {
-            decls: crate::types::decl_map(program),
+            owned: crate::own::Owned::new(program),
+            variants,
+            decls,
             rets,
             globals: program
                 .globals
@@ -155,6 +175,28 @@ impl Declared {
     /// row, through the one implementation in [`crate::own::must_use`].
     pub fn must_use(&self, ty: &Type) -> bool {
         crate::own::must_use(ty, &self.decls)
+    }
+
+    /// Whether a value of `ty` is **released** by whoever holds it — the `Owned`
+    /// table's own question (RFC-0086 M1), not the transitive one.
+    ///
+    /// `owns_heap` and this are different questions and Phase 4c needs both. A
+    /// record of Strings owns heap and releases nothing, so handing one out
+    /// costs a leak; an `Array<T>` releases its buffer, so handing out somebody
+    /// else's is a use-after-free.
+    pub fn releases(&self, ty: &Type) -> bool {
+        self.owned.release_kind(ty).is_some()
+    }
+
+    /// Whether `name` CONSTRUCTS a sum value out of its arguments.
+    ///
+    /// A variant constructor reads like a call and behaves like a literal: the
+    /// value it builds holds the argument and outlives the call. Phase 4c needs
+    /// to know, because a payload the caller still names would otherwise be
+    /// released while the constructed value holds it — `JArr(out)` handed a
+    /// freed buffer to its caller and the walk over it never terminated.
+    pub fn constructs(&self, name: &str) -> bool {
+        self.variants.contains(name)
     }
 
     /// The element type of an iterable, where this reading can name it.
@@ -208,6 +250,33 @@ impl Declared {
             // is nothing else it could be.
             Expr::MapLit { .. } => Some(Type::Map(Box::new(Type::Str), Box::new(Type::Unit))),
             Expr::StructLit { name, .. } => Some(Type::Named(name.clone())),
+            // ---- the forms whose result is a value, not a place (census §2a) --
+            // Each of these yields one of its arms, and the checker has already
+            // made the arms agree, so the first one that names a type answers for
+            // all of them. Until Phase 4c they were absent, which is why an
+            // if-expression that built a String had no owner.
+            // An if-expression binds nothing, so its arms read in this scope.
+            // A `match` arm does bind, and the binders have to be in scope before
+            // its body can be read — `match o { Some(m) => m + 1 }` under an
+            // outer String `m` reads as a concatenation otherwise, and the
+            // backend then frees the integer 2. `movecheck` answers that one,
+            // because it is the pass that can bind a payload.
+            Expr::IfExpr { then_branch, else_branch, .. } => self
+                .type_of(vars, then_branch)
+                .or_else(|| else_branch.as_ref().and_then(|e| self.type_of(vars, e))),
+            // `e?` yields the success payload of what `e` is.
+            Expr::Try { expr, .. } => match crate::types::resolve(
+                &self.type_of(vars, expr)?,
+                &self.decls,
+            ) {
+                Type::Option(t) | Type::Result(t, _) => Some(*t),
+                _ => None,
+            },
+            // A fallible construction (RFC-0009) names its own type.
+            Expr::TryConstruct { name, .. } => Some(Type::Named(name.clone())),
+            Expr::Spawn { name, .. } => {
+                self.rets.get(name).cloned().map(|t| Type::Task(Box::new(t)))
+            }
             _ => None,
         }
     }
