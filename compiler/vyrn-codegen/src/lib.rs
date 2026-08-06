@@ -12306,8 +12306,10 @@ mod tests {
 
     // The runtime preamble contains a fixed number of `call void @exit` (the
     // cell slab's trap paths); a validation check is one *beyond* that baseline.
+    /// Trap sites in `ir`. Phase 8d made a trap one call to the shared cold
+    /// tail, so this counts the tail's call sites where it once counted `@exit`.
     fn exit_calls(ir: &str) -> usize {
-        ir.matches("call void @exit").count()
+        ir.matches("call void @__vyrn_trap_msg(").count()
     }
     fn exit_baseline() -> usize {
         exit_calls(&emit(&check("fn main() -> Int64 { return 0; }").unwrap()).unwrap())
@@ -12895,7 +12897,7 @@ mod tests {
                    fn main() -> Int64 { return build(\"home\") }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("@.trap.verr.TransKey, ptr"),
+            ir.contains("@__vyrn_trap_msg(ptr @.trap.verr.TransKey)"),
             "a non-finite hole must keep the runtime validation: {ir}"
         );
     }

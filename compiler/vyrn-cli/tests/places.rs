@@ -34,14 +34,23 @@ fn body_of(src: &str, name: &str) -> String {
 }
 
 /// Every `call` in a body, minus the trap path — which is unreachable on the
-/// hot path and is `stderr`/`fprintf`/`exit`, never an allocation.
+/// hot path and prints and exits, never allocates. Phase 8d made that path one
+/// `@__vyrn_trap_*` call where it was `stderr`/`fprintf`/`exit` inline, so both
+/// spellings are listed and neither counts.
 fn allocating_calls(body: &str) -> Vec<&str> {
     body.lines()
         .filter(|l| l.contains("call ") || l.contains("call("))
         .filter(|l| {
-            !["@__vyrn_stderr", "@fprintf", "@exit"]
-                .iter()
-                .any(|f| l.contains(f))
+            [
+                "@__vyrn_stderr",
+                "@fprintf",
+                "@exit",
+                "@__vyrn_trap_msg",
+                "@__vyrn_trap_idx",
+                "@__vyrn_panic",
+            ]
+            .iter()
+            .all(|f| !l.contains(f))
         })
         .collect()
 }
