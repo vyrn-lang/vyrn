@@ -615,13 +615,13 @@ mod tests {
         assert!(encodable(&nested, &types).is_ok());
         assert!(decodable(&nested, &types).is_ok());
 
-        // A non-codable value type (a `Ref`) makes the whole map non-codable,
+        // A non-codable value type (a `Task`) makes the whole map non-codable,
         // and the offender is named.
         let bad = Type::Map(
             Box::new(Type::Str),
-            Box::new(Type::Ref(Box::new(Type::Int))),
+            Box::new(Type::Task(Box::new(Type::Int))),
         );
-        assert_eq!(encodable(&bad, &types).unwrap_err(), "Ref");
+        assert_eq!(encodable(&bad, &types).unwrap_err(), "Task");
     }
 
     /// The decode-side `expected` phrase for a map value is `object` (a Map IS a
@@ -639,7 +639,6 @@ fn type_display(ty: &Type) -> String {
     match ty {
         Type::Named(n) => n.clone(),
         Type::Result(..) => "Result".to_string(),
-        Type::Ref(_) => "Ref".to_string(),
         Type::Task(_) => "Task".to_string(),
         Type::Logger => "Logger".to_string(),
         Type::ArrayN(inner, n) => format!("Array<{}, {}>", type_display(inner), n),

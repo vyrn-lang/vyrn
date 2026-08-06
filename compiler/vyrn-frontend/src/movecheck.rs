@@ -107,8 +107,10 @@ pub enum Gone {
     /// A lambda or a `spawn` holds it, and either can outlive this block.
     Captured { line: usize },
     /// A second name reads it without taking it: `let d = c` on a type rule 1
-    /// leaves alone, which is every handle (`Ref<T>` — RFC-0089 §5). Neither
-    /// name may be released, because neither of them is the owner.
+    /// leaves alone. `Ref<T>` was the built-in case and is deleted (RFC-0090 M4);
+    /// what reaches here now is a type that DECLARES `impl Owned` and holds no
+    /// heap of its own — census U4's shape. Neither name may be released, because
+    /// neither of them is the owner.
     Aliased { line: usize },
     /// It was handed to a declared function, which may keep it.
     Lent { line: usize, to: String },
@@ -667,8 +669,8 @@ impl MoveCheck<'_> {
             Expr::Match { arms, .. } => arms.iter().find_map(|a| self.names_a_place(&a.body)),
             // `x.copy()` allocates for exactly the types `owns_heap` counts
             // (RFC-0089 M1b). Everything else it is called on is a handle, and a
-            // copied handle SHARES what it points at — releasing both copies of a
-            // `Ref<T>` releases one cell twice (RFC-0089 §5).
+            // copied handle SHARES what it points at — releasing both copies of
+            // a declared container would release one value twice.
             Expr::Call { name, args, .. } if name == "@copy" => (!args
                 .first()
                 .and_then(|a| self.type_of(a))
@@ -1270,9 +1272,8 @@ impl MoveCheck<'_> {
                 // `s` and the move of the old one lands on the old row.
                 let mut place = self.names_a_place(value);
                 // A whole place that did NOT move is an alias: rule 1 leaves the
-                // type alone (`Ref<T>` is the case — RFC-0089 §5 keeps a handle
-                // freely copied), so this name did not take it. Neither name may
-                // be released, or one cell is released twice.
+                // type alone, so this name did not take it. Neither name may be
+                // released, or one value is released twice.
                 if place.is_none() && !moved {
                     if let Some((root, path)) = place_path(value) {
                         if root == path {
@@ -1861,14 +1862,6 @@ impl MoveCheck<'_> {
                                 format!("`{name}(..)`"),
                             ));
                         }
-                    } else if name == "release" && i == 0 {
-                        // `release(c)` is `drop` spelled as a call (RFC-0004 Path
-                        // B). It hands the cell back, so the automatic release at
-                        // block exit must not run on top of it. Recorded only
-                        // here: a later `get(c)` is a stale alias the generation
-                        // check catches at run time, which is the whole point of
-                        // Path B, so it is not a compile error.
-                        self.gave_up(arg, &Gone::Moved { line: *line, by: "`release(..)`".into() });
                     } else if self.decl.constructs(name) {
                         self.note_retention(arg);
                         // A variant constructor is a literal that reads like a
@@ -2516,13 +2509,15 @@ mod streams {
 
 /// Whether parameter `i` of the builtin `name` **stores** its argument.
 ///
-/// A builtin has no signature to carry a capability, so the three that put a
-/// value somewhere it outlives the call are listed here (RFC-0087 §2b — the
+/// A builtin has no signature to carry a capability, so the one that puts a
+/// value somewhere it outlives the call is listed here (RFC-0087 §2b — the
 /// hand list this replaces was the producer half of the same gap). Everything
 /// else a builtin does with a heap argument is a read: `print` formats it,
 /// `@concat` copies out of it, `at` looks inside it.
+///
+/// It was three until RFC-0090 M4 deleted `set` and `cell` with Path B.
 fn sinks(name: &str, i: usize) -> bool {
-    matches!((name, i), ("push", 1) | ("set", 1) | ("cell", 0))
+    matches!((name, i), ("push", 1))
 }
 
 /// Every name `e` reads, root names only, in no particular order.

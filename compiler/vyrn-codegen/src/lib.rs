@@ -112,108 +112,6 @@ done:
 
 ";
 
-/// LLVM IR for the generational-reference cell slab (RFC-0004 §4, Path B).
-/// A fixed slab of 65536 `Int` cells, each with a generation counter. Allocation
-/// hands out `{ slot, generation }`; every access checks the reference's captured
-/// generation against the slot's current one and traps on a mismatch, so a
-/// reference used after `release` fails a cheap check instead of dangling. A
-/// released slot is reused with a bumped generation, invalidating old references.
-///
-/// RFC-0090 M3 took one array back out: `src`, the stream a `fromWrap` put
-/// behind a cursor. A stream's cursor is not a cell any more — it is a slot in
-/// `std/stream`'s own `Slots` — so what remains here is Path B and nothing else,
-/// which is the state RFC-0090 M4 deletes.
-const CELL_RUNTIME: &str = "\
-@__vyrn_cell_gen = global [65536 x i64] zeroinitializer
-@__vyrn_cell_ptr_arr = global [65536 x ptr] zeroinitializer
-@__vyrn_cell_top = global i64 0
-@__vyrn_cell_free = global [65536 x i64] zeroinitializer
-@__vyrn_cell_freetop = global i64 0
-@.fmt.uaf = private unnamed_addr constant [37 x i8] c\"error: reference used after release\\0A\\00\"
-@.fmt.oom = private unnamed_addr constant [31 x i8] c\"error: out of reference cells\\0A\\00\"
-
-define void @__vyrn_cell_trap() {
-entry:
-  %e = call ptr @__vyrn_stderr()
-  %r = call i32 @fputs(ptr @.fmt.uaf, ptr %e)
-  call void @exit(i32 1)
-  unreachable
-}
-
-define i64 @__vyrn_cell_alloc(ptr %p) {
-entry:
-  %ft = load i64, ptr @__vyrn_cell_freetop
-  %hasfree = icmp sgt i64 %ft, 0
-  br i1 %hasfree, label %reuse, label %fresh
-reuse:
-  %ft1 = sub i64 %ft, 1
-  store i64 %ft1, ptr @__vyrn_cell_freetop
-  %fp = getelementptr [65536 x i64], ptr @__vyrn_cell_free, i64 0, i64 %ft1
-  %rslot = load i64, ptr %fp
-  br label %done
-fresh:
-  %top = load i64, ptr @__vyrn_cell_top
-  %oob = icmp sge i64 %top, 65536
-  br i1 %oob, label %overflow, label %ok
-overflow:
-  %eo = call ptr @__vyrn_stderr()
-  %ro = call i32 @fputs(ptr @.fmt.oom, ptr %eo)
-  call void @exit(i32 1)
-  unreachable
-ok:
-  %top1 = add i64 %top, 1
-  store i64 %top1, ptr @__vyrn_cell_top
-  br label %done
-done:
-  %slot = phi i64 [ %rslot, %reuse ], [ %top, %ok ]
-  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_ptr_arr, i64 0, i64 %slot
-  store ptr %p, ptr %pp
-  ret i64 %slot
-}
-
-define i64 @__vyrn_cell_getgen(i64 %slot) {
-entry:
-  %gp = getelementptr [65536 x i64], ptr @__vyrn_cell_gen, i64 0, i64 %slot
-  %g = load i64, ptr %gp
-  ret i64 %g
-}
-
-define ptr @__vyrn_cell_ptr(i64 %slot) {
-entry:
-  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_ptr_arr, i64 0, i64 %slot
-  %p = load ptr, ptr %pp
-  ret ptr %p
-}
-
-define void @__vyrn_cell_check(i64 %slot, i64 %gen) {
-entry:
-  %gp = getelementptr [65536 x i64], ptr @__vyrn_cell_gen, i64 0, i64 %slot
-  %cur = load i64, ptr %gp
-  %ok = icmp eq i64 %cur, %gen
-  br i1 %ok, label %pass, label %fail
-fail:
-  call void @__vyrn_cell_trap()
-  unreachable
-pass:
-  ret void
-}
-
-define void @__vyrn_cell_release_slot(i64 %slot) {
-entry:
-  %gp = getelementptr [65536 x i64], ptr @__vyrn_cell_gen, i64 0, i64 %slot
-  %g = load i64, ptr %gp
-  %g1 = add i64 %g, 1
-  store i64 %g1, ptr %gp
-  %ft = load i64, ptr @__vyrn_cell_freetop
-  %fp = getelementptr [65536 x i64], ptr @__vyrn_cell_free, i64 0, i64 %ft
-  store i64 %slot, ptr %fp
-  %ft1 = add i64 %ft, 1
-  store i64 %ft1, ptr @__vyrn_cell_freetop
-  ret void
-}
-
-";
-
 /// A boxed stream (RFC-0075 M2c, re-hosted by RFC-0090 M3). A lazy combinator
 /// owns the stream it wraps, and a `Stream<T>` cannot be a field of anything —
 /// M1 refuses it, because a field would erase the disposal obligation. So the
@@ -1097,10 +995,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // `concat` routes through the arena at runtime when a region is active.
     out.push_str(REGION_RUNTIME);
 
-    // ---- generational-reference cell slab (RFC-0004 §4, Path B) ----------
-    // Backs `cell`/`get`/`set`/`release`: a stale reference is caught by a
-    // generation check instead of dangling.
-    out.push_str(CELL_RUNTIME);
     out.push_str(STREAM_RUNTIME);
     out.push_str(STRING_RUNTIME);
     // The UTF-8 validator DFA table, then the validator. (The base64 alphabet
@@ -1337,7 +1231,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // which `let` bindings each function must free at block exit (RFC-0004 §4).
     let ownership = vyrn_frontend::own::analyze(program);
     let droppable_map = &ownership.droppable;
-    let fresh_refs = &ownership.fresh_refs;
     let owned_proto = &ownership.proto;
 
     let protocol_methods: HashMap<String, String> = program
@@ -1361,7 +1254,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     if !program.globals.is_empty() {
         let mut gi = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
+            &funcs, droppable_map, owned_proto, &regex_globals, &program.impls,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -1459,7 +1352,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let sym = if f.name == "main" { "vyrn_main".to_string() } else { format!("vyrn_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
+            &funcs, droppable_map, owned_proto, &regex_globals, &program.impls,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -1493,7 +1386,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 f.type_params.iter().cloned().zip(type_args.iter().cloned()).collect();
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &subst,
-                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
+                &funcs, droppable_map, owned_proto, &regex_globals, &program.impls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1519,7 +1412,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             }
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &inst.subst,
-                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
+                &funcs, droppable_map, owned_proto, &regex_globals, &program.impls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1553,7 +1446,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ));
         let mut dgen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
+            &funcs, droppable_map, owned_proto, &regex_globals, &program.impls,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -1571,7 +1464,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     if !stream_closers.is_empty() {
         let mut cgen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
+            &funcs, droppable_map, owned_proto, &regex_globals, &program.impls,
         );
         cgen.protocol_methods = protocol_methods.clone();
         cgen.globals = globals_map.clone();
@@ -1689,11 +1582,6 @@ struct Gen<'a> {
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `funcs` cannot answer for it.
     impls: &'a [vyrn_frontend::ast::ImplBlock],
-    /// `get`/`set` reference arguments (by `Expr` node address) whose generation
-    /// check the ownership analysis proved cannot fail (RFC-0004 §5). Flat across
-    /// the program, so a monomorphized instance reads it without a key — it
-    /// re-emits the callee's own body nodes.
-    fresh_refs: &'a std::collections::HashSet<usize>,
     /// Per-block stack of (slot register, kind) to reclaim when the block exits.
     drop_stack: Vec<Vec<(String, DropKind)>>,
     /// Active loop targets for `break`/`continue` (RFC-0060), innermost last.
@@ -1837,7 +1725,6 @@ impl<'a> Gen<'a> {
         subst: &'a HashMap<String, Type>,
         funcs: &'a HashMap<String, &'a Function>,
         droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
-        fresh_refs: &'a std::collections::HashSet<usize>,
         owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
@@ -1864,7 +1751,6 @@ impl<'a> Gen<'a> {
             region_depth: 0,
             droppable: HashMap::new(),
             droppable_map,
-            fresh_refs,
             owned,
             impls,
             drop_stack: Vec::new(),
@@ -2623,8 +2509,8 @@ impl<'a> Gen<'a> {
     /// Structural and recursive. A type that owns nothing IS its own copy, which
     /// is what makes `copy` one word with one meaning in a monomorphized
     /// generic: the same call site is a fresh buffer for `String` and the value
-    /// itself for `Int64`. A `Ref<T>` and a `Task<T>` fall in the second group on
-    /// purpose — both are handles, and copying a handle names the same thing.
+    /// itself for `Int64`. A `Task<T>` falls in the second group on purpose — it
+    /// is a handle, and copying a handle names the same thing.
     fn deep_copy(&mut self, v: &str, ty: &Type) -> Result<String, String> {
         if !self.owns_heap(ty) {
             return Ok(v.to_string());
@@ -2751,8 +2637,7 @@ impl<'a> Gen<'a> {
             }
             Type::Enum(vs) => self.copy_enum(v, &vs),
             // A handle names something; copying it names the same thing. A
-            // `Ref<T>` never reaches here (it owns no heap by rule), and a
-            // `Task<T>`/`lazy T` is the same shape of promise.
+            // `Task<T>`/`lazy T` is a promise, which is the same shape.
             Type::Task(_) | Type::Lazy(_) => Ok(v.to_string()),
             other => Err(format!(
                 "`copy` of {other:?} is not lowered — the checker should have refused it"
@@ -2836,7 +2721,7 @@ impl<'a> Gen<'a> {
     fn payload_boxed(&mut self, ty: &Type) -> bool {
         if matches!(
             self.resolve(ty),
-            Type::Int | Type::Bool | Type::Str | Type::Ref(_) | Type::Fn(..)
+            Type::Int | Type::Bool | Type::Str | Type::Fn(..)
         ) {
             return false;
         }
@@ -3456,20 +3341,6 @@ impl<'a> Gen<'a> {
                 let p = self.fresh_tmp();
                 self.emit(format!("{p} = load ptr, ptr {slot}"));
                 self.emit(format!("call void @__vyrn_str_free(ptr {p})"));
-            }
-            DropKind::ReleaseRef => {
-                // Auto-release: validate, free the boxed payload, invalidate slot.
-                let r = self.fresh_tmp();
-                let s = self.fresh_tmp();
-                let g = self.fresh_tmp();
-                let p = self.fresh_tmp();
-                self.emit(format!("{r} = load {{ i64, i64 }}, ptr {slot}"));
-                self.emit(format!("{s} = extractvalue {{ i64, i64 }} {r}, 0"));
-                self.emit(format!("{g} = extractvalue {{ i64, i64 }} {r}, 1"));
-                self.emit(format!("call void @__vyrn_cell_check(i64 {s}, i64 {g})"));
-                self.emit(format!("{p} = call ptr @__vyrn_cell_ptr(i64 {s})"));
-                self.emit(format!("call void @free(ptr {p})"));
-                self.emit(format!("call void @__vyrn_cell_release_slot(i64 {s})"));
             }
             DropKind::CloseStream => {
                 // RFC-0075 M2b: one call, and the variant is settled inside it.
@@ -5239,9 +5110,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{w} = ptrtoint ptr {v} to i64"));
                 (w, "0".into())
             }
-            // A `Ref` and a stored function value (RFC-0037) are both two-word
-            // `{ i64, i64 }` aggregates — they fit inline with no heap box.
-            Type::Ref(_) | Type::Fn(..) => {
+            // A stored function value (RFC-0037) is a two-word
+            // `{ i64, i64 }` aggregate — it fits inline with no heap box.
+            Type::Fn(..) => {
                 let w0 = self.fresh_tmp();
                 let w1 = self.fresh_tmp();
                 self.emit(format!("{w0} = extractvalue {{ i64, i64 }} {v}, 0"));
@@ -5266,7 +5137,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{v} = inttoptr i64 {w0} to ptr"));
                 v
             }
-            Type::Ref(_) | Type::Fn(..) => {
+            Type::Fn(..) => {
                 let a = self.fresh_tmp();
                 let b = self.fresh_tmp();
                 self.emit(format!("{a} = insertvalue {{ i64, i64 }} undef, i64 {w0}, 0"));
@@ -6155,7 +6026,7 @@ impl<'a> Gen<'a> {
 /// Deep-normalize a stored-fn signature (RFC-0037) so structurally identical
 /// spellings — a `type Transform = fn(Int64) -> Int64` alias, a validated scalar,
 /// transformer sugar — register and dispatch as ONE synthesized enum.
-/// `Ref`/`Task` interiors are left resolved: they cannot hold fn values, and
+/// `Task` interiors are left resolved: they cannot hold fn values, and
 /// recursing would cycle.
 ///
 /// Shared with the direct wasm backend, because it decides which constructions a
@@ -8172,72 +8043,6 @@ impl<'a> Gen<'a> {
                 }
             }
             return Ok((o2, Type::Option(Box::new(Type::Int))));
-        }
-
-        // Generational references (RFC-0004 §4, Path B). A `Ref<T>` is
-        // { i64 slot, i64 generation }; the payload is a boxed `T` held by the
-        // slab, and every access checks the generation against the slot's.
-        if name == "cell" {
-            let (v, vty) = self.gen_expr(&args[0])?;
-            let ll = self.llt(&vty);
-            // Box the value: allocate sizeof(T), store it, register the pointer.
-            let size = self.fresh_tmp();
-            let payload = self.fresh_tmp();
-            self.emit(format!(
-                "{size} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"
-            ));
-            self.emit(format!("{payload} = call ptr @__vyrn_malloc(i64 {size})"));
-            self.emit(format!("store {ll} {v}, ptr {payload}"));
-            let slot = self.fresh_tmp();
-            self.emit(format!("{slot} = call i64 @__vyrn_cell_alloc(ptr {payload})"));
-            let g = self.fresh_tmp();
-            self.emit(format!("{g} = call i64 @__vyrn_cell_getgen(i64 {slot})"));
-            let a = self.fresh_tmp();
-            let b = self.fresh_tmp();
-            self.emit(format!("{a} = insertvalue {{ i64, i64 }} undef, i64 {slot}, 0"));
-            self.emit(format!("{b} = insertvalue {{ i64, i64 }} {a}, i64 {g}, 1"));
-            return Ok((b, Type::Ref(Box::new(vty))));
-        }
-        if name == "get" || name == "set" || name == "release" {
-            let (r, rty) = self.gen_expr(&args[0])?;
-            let elem = match self.resolve(&rty) {
-                Type::Ref(inner) => *inner,
-                _ => return Err(format!("`{name}` on a non-Ref value")),
-            };
-            let slot = self.fresh_tmp();
-            let g = self.fresh_tmp();
-            self.emit(format!("{slot} = extractvalue {{ i64, i64 }} {r}, 0"));
-            self.emit(format!("{g} = extractvalue {{ i64, i64 }} {r}, 1"));
-            // Every access validates the generation first (traps on a stale ref)
-            // — unless ownership proved this reference fresh (RFC-0004 §5), in
-            // which case the check has one possible answer and is not emitted.
-            // A check that survives marks a reference the analysis could not
-            // follow, which is what makes the remaining ones worth reading.
-            if !self.fresh_refs.contains(&(&args[0] as *const Expr as usize)) {
-                self.emit(format!("call void @__vyrn_cell_check(i64 {slot}, i64 {g})"));
-            }
-            let payload = self.fresh_tmp();
-            self.emit(format!("{payload} = call ptr @__vyrn_cell_ptr(i64 {slot})"));
-            let ll = self.llt(&elem);
-            match name {
-                "get" => {
-                    let v = self.fresh_tmp();
-                    self.emit(format!("{v} = load {ll}, ptr {payload}"));
-                    return Ok((v, elem));
-                }
-                "set" => {
-                    let (v, vty) = self.gen_expr(&args[1])?;
-                    let (v, _) = self.coerce(v, &vty, &elem)?;
-                    self.emit(format!("store {ll} {v}, ptr {payload}"));
-                    return Ok((String::new(), Type::Unit));
-                }
-                _ => {
-                    // release: free the boxed payload and invalidate the slot.
-                    self.emit(format!("call void @free(ptr {payload})"));
-                    self.emit(format!("call void @__vyrn_cell_release_slot(i64 {slot})"));
-                    return Ok((String::new(), Type::Unit));
-                }
-            }
         }
 
         // `Some(x)` / `Ok(x)` / `Err(e)` — build a { i1 tag, i64 payload } value.
@@ -10450,7 +10255,6 @@ pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Ty
             solve_param(pk, ak, subst);
             solve_param(pv, av, subst);
         }
-        (Type::Ref(p), Type::Ref(a)) => solve_param(p, a, subst),
         // A `fn` type (RFC-0023/RFC-0037), parameter-wise then on the return.
         // Without this a generic record holding a `fn` whose parameter is the
         // record's own type parameter — `Deferred<P, T> = { run: fn(P) -> T }`,
@@ -10632,7 +10436,6 @@ fn mangle_ty(t: &Type) -> String {
         }
         Type::Omit(..) | Type::Pick(..) | Type::Merge(..) | Type::Partial(..) => "Xf".into(),
         Type::Param(p) => sanitize(p),
-        Type::Ref(inner) => format!("Ref{}", mangle_ty(inner)),
         Type::Array(inner) => format!("Arr{}", mangle_ty(inner)),
         // Distinct from `Arr` even though the layout is identical: a generic
         // instantiated at `Stream<T>` must not share a symbol with one at
@@ -10768,9 +10571,6 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // { tag, word0, word1 } — two payload words so a `Ref` (which is two
         // words) fits inline without a heap box.
         Type::Option(_) | Type::Result(..) => "{ i1, i64, i64 }".into(),
-        // A generational reference is { i64 slot, i64 generation } for any T
-        // (the payload is boxed), so it is a fixed-size handle.
-        Type::Ref(_) => "{ i64, i64 }".into(),
         // A growable array is { ptr data, i64 len, i64 cap }.
         Type::Array(_) => "{ ptr, i64, i64 }".into(),
         // A `Stream<T>` (RFC-0075 M2b) is a tagged header over two producers,
@@ -10884,9 +10684,9 @@ mod tests {
     /// escape the layout check that stands between it and a silent miscompile.
     #[test]
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
-        let (rt, pt, pc, ty, va, sg, sb, fs, dm, fr, rg) = Default::default();
+        let (rt, pt, pc, ty, va, sg, sb, fs, dm, rg) = Default::default();
         let ow = vyrn_frontend::own::Owned::default();
-        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &fr, &ow, &rg, &[]);
+        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &ow, &rg, &[]);
         let rec = |fs: &[Type]| {
             Type::Record(
                 fs.iter()
@@ -10909,7 +10709,6 @@ mod tests {
             ("Option/Result", Type::Result(Box::new(Type::Int), Box::new(Type::Str))),
             ("Array", Type::Array(Box::new(Type::Str))),
             ("Map", Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
-            ("Ref", Type::Ref(Box::new(Type::Int))),
             ("Fn", Type::Fn(Vec::new(), Box::new(Type::Int))),
             ("RecordEmpty", rec(&[])),
             ("RecordMixed", rec(&[Type::Bool, Type::Str, Type::Int, i8t.clone(), Type::Float])),
@@ -12051,12 +11850,6 @@ mod tests {
                    if c { return None } return Some(s) } \
                    fn main() -> Int64 { for v in fromStep(0, 1, tick) { print(v) break } return 0 }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        // And the cursor is NOT a Path B cell any more (RFC-0090 M3): the two
-        // words came from the caller, so building a producer allocates nothing.
-        assert!(
-            !ir.contains("call i64 @__vyrn_cell_alloc"),
-            "a producer takes its cursor, it does not mint one: {ir}"
-        );
         assert!(
             block_at(&ir, &label_like(&ir, "ncall")).contains("call { i1, i64, i64 } @__vyrn_fndispatch_"),
             "the step must be called from inside the loop: {ir}"
@@ -12180,10 +11973,6 @@ mod tests {
             ir.contains("call ptr @__vyrn_stream_box(i64"),
             "the source goes in a box the step reads: {ir}"
         );
-        assert!(
-            !ir.contains("@__vyrn_cell_src"),
-            "no fourth cell array survives: {ir}"
-        );
     }
 
     #[test]
@@ -12229,52 +12018,6 @@ mod tests {
     }
 
     #[test]
-    fn generational_reference_lowers_to_slab_calls() {
-        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); \
-                   let v = get(c); release(c); return v; }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @__vyrn_cell_alloc"), "{ir}");
-        assert!(ir.contains("call ptr @__vyrn_cell_ptr"), "{ir}");
-        assert!(ir.contains("call void @__vyrn_cell_release_slot"), "{ir}");
-        // The generation check is what makes a stale reference safe.
-        assert!(ir.contains("call void @__vyrn_cell_check"), "{ir}");
-    }
-
-    #[test]
-    fn non_escaping_cell_is_auto_released() {
-        // No explicit `release` in the source, yet the non-escaping cell must be
-        // released at block exit (inferred by the ownership analysis).
-        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call void @__vyrn_cell_release"), "expected auto-release: {ir}");
-    }
-
-    #[test]
-    fn a_provably_fresh_reference_is_read_without_a_generation_check() {
-        // Same body as `non_escaping_cell_is_auto_released`, read for what it does
-        // NOT emit: `c` is never aliased, never handed to a function and never
-        // released by hand, so the only release is the block-exit one below every
-        // access. Every check here has one possible answer (RFC-0004 §5).
-        //
-        // The auto-release keeps its own check — this elides accesses, not drops.
-        // `checks` counts the fixed prelude's own call inside `@__vyrn_stream_close`
-        // as well, so read the two numbers against each other, not alone.
-        let checks = |src: &str| {
-            emit(&check(src).unwrap())
-                .unwrap()
-                .matches("call void @__vyrn_cell_check")
-                .count()
-        };
-        let body = "let c = cell(1); set(c, get(c) + 1);";
-        let fresh = checks(&format!("fn main() -> Int64 {{ {body} return get(c); }}"));
-        // One `release(c)` is all it takes to put the three accesses back.
-        let kept = checks(&format!(
-            "fn main() -> Int64 {{ {body} let v = get(c); release(c); return v; }}"
-        ));
-        assert_eq!(kept - fresh, 3, "three accesses, all of them provable");
-    }
-
-    #[test]
     fn caller_frees_owned_transfer_result() {
         // `make` returns a fresh owned String; `main` must free the result it
         // receives, but `make` must NOT free what it moves out.
@@ -12304,8 +12047,8 @@ mod tests {
         assert!(ir.contains("load i64, ptr @__vyrn_region_sp"), "{ir}");
     }
 
-    // The runtime preamble contains a fixed number of `call void @exit` (the
-    // cell slab's trap paths); a validation check is one *beyond* that baseline.
+    // The runtime preamble contains a fixed number of trap sites; a validation
+    // check is one *beyond* that baseline.
     /// Trap sites in `ir`. Phase 8d made a trap one call to the shared cold
     /// tail, so this counts the tail's call sites where it once counted `@exit`.
     fn exit_calls(ir: &str) -> usize {
@@ -12804,15 +12547,21 @@ mod tests {
     }
 
     #[test]
-    fn option_holds_a_ref_inline() {
-        // A `Ref` (two words) fits inline in the widened Option aggregate — no box.
-        let src = "fn main() -> Int64 { let r = cell(7); let o = Some(r); \
-                   return match o { Some(x) => get(x), None => 0 }; }";
+    fn option_holds_a_two_word_payload_inline() {
+        // A stored `fn` value (RFC-0037) is `{ i64 tag, i64 captures }` and fits
+        // inline in the widened Option aggregate — no box. `Ref` was the other
+        // two-word case until RFC-0090 M4 deleted it, so this is the whole of
+        // what `payload_boxed` still answers `false` for above one word.
+        let src = "type Bump = fn(Int64) -> Int64
+                   fn main() -> Int64 { let n = 7 let f: Bump = |x| x + n
+                   let o: Option<Bump> = Some(f)
+                   return match o { Some(g) => g(1), None => 0 } }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        // The Option is the three-word aggregate, and the Ref is rebuilt inline
-        // on match (insertvalue into { i64, i64 }) rather than loaded from a box.
+        // The Option is the three-word aggregate, and the fn value is rebuilt
+        // inline on match (insertvalue into { i64, i64 }) rather than loaded from
+        // a box.
         assert!(ir.contains("insertvalue { i1, i64, i64 }"), "widened aggregate: {ir}");
-        assert!(ir.contains("insertvalue { i64, i64 }"), "Ref rebuilt inline: {ir}");
+        assert!(ir.contains("insertvalue { i64, i64 }"), "fn value rebuilt inline: {ir}");
     }
 
     #[test]

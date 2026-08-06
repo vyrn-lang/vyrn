@@ -346,22 +346,45 @@ carried the ownership fact — see the note under Phase 9.
   already folds it. The sites that cost are the ones no proof reaches:
   `Cursor` is an exported record and the handle is built inside the accessor
   from a parameter. See RFC-0090 "M3's cost, measured again".
-- **8e. Delete Path B.** `cell/get/set/release`, `Type::Ref`, the LLVM cell
-  prelude (158 lines), `direct.rs` `cell_runtime` (212 lines), the
-  interpreter slab, `fresh_refs` and the §5.3 elision pass, `DropKind::
-  ReleaseRef`. Update RFC-0004 with a "superseded by RFC-0090" section.
-  The language's runtime memory surface after this: malloc, free, memcpy.
-  The remaining Path B surface is inventoried in Phase 8c's PR (#83).
-  **8d prices what deleting it costs:** the two element rows sit 1.28x and 1.15x
-  over Path B and a guard-free `Slots` would sit at 1.14x and 1.02x, so the check
-  is not the residue. The open-and-close row is 1.36x and stays there — that one
-  is a `Slots` insert and remove against a fixed slab, plus the step capture
-  block's `malloc`/`free`, and no elision touches it.
+- **8e. Delete Path B — LANDED.** `cell`/`get`/`set`/`release`, `Type::Ref`,
+  `Val::Ref`, `DropKind::ReleaseRef`, `Rel::Cell`, the LLVM `CELL_RUNTIME`
+  prelude, `direct.rs`'s `cell_runtime` and its `CELLS` constants, the
+  interpreter's slab, `fresh_refs` and the §5.3 elision pass are all gone.
+  **1,714 lines of code deleted, 186 added, 24 files.** Parity is
+  `120 checked, 10 skipped, 0 failed` and no memory row moved. RFC-0004 gained
+  §5.4; RFC-0087's §6 is struck and U3 leaves the census. **U5 is NARROWED, not
+  closed** — the replacement trap is `panic("slots: handle is not alive")` and
+  `panic` lowers to `error: %s` with no line, which was checked by running the
+  example after the first draft claimed otherwise. The gap is RFC-0079's now.
+  **The runtime surface is malloc, REALLOC, free and memcpy** — the plan's
+  three-word version was one short. `realloc` is how an `Array` and a `String`
+  grow in place, and `region`'s arena survives as RFC-0004 §4's Path A. What went
+  is the second ALLOCATOR, not the second lifetime. Nothing in any engine
+  allocates from a fixed table or checks a generation counter now, except
+  `std/slots.vyrn`, which is Vyrn.
+  **The estimate was 570-770 lines and the truth is 1,714.** It counted the three
+  runtimes and missed what surrounded them: the `Type::Ref` arms across fourteen
+  files, the emission sites in both backends, 22 unit tests that existed to hold
+  the mechanism up, one parity pin and four census rows. A deletion is wider than
+  the thing deleted.
+  Binary size: every `.wasm` this backend emits loses 100 bytes, every `.ll`
+  loses 2,551, and the linked native binary barely moves — the prelude's four
+  `[65536 x i64]` arrays were `zeroinitializer`, so they lived in `.bss` and the
+  linker dropped them unreferenced. The direct backend's 1 MiB slab never
+  appeared in a module at all: it was one lazy `malloc`.
+  `cellChurn` retired and its numbers did not — 18.29 µs against `std/slots`'
+  9.06 µs, 2.02x — now in RFC-0090 "M1 as landed", RFC-0004 §5.4, and the doc
+  comment on `slabChurn` where a reader of the benchmark will look.
+  `cell`, `get`, `set` and `release` are a user's names again; `fn get(..)`
+  compiles. **The primitive census went 94 to 90** — the largest single drop it
+  has recorded, and it named the change before anything else did.
+  See RFC-0090 "M4 as landed".
 
 ## Phase 9 — surface polish *(from RFC-0087 Part II, whatever remains)*
 
 LSP: ownership hovers, last-use token modifier, move inlay hints. `vyrn fix`
-applying the move-error menu. U5 is gone with Path B; U3 is gone with `cell`.
+applying the move-error menu. U5 and U3 went with Path B in Phase 8e and are
+struck from the census.
 Regenerate `docs/api`, update memory files and RFC statuses (headers must
 match the "as landed" truth — they have lied before).
 

@@ -146,7 +146,7 @@ fn contractError(detail: String) -> String {
 /// what `toJson`/`fromJson` accept, and reflection now carries its verdict — so
 /// this is the same predicate that governs the generated code, not a second one
 /// that could drift from it. It is what makes the check TOTAL: a record whose
-/// field is a `fn`, a `Ref` or a `Map<String, Ref<..>>` is a perfectly nameable
+/// field is a `fn`, a `Task` or a `Map<String, Task<..>>` is a perfectly nameable
 /// type that cannot be encoded, and before this it passed the rule and failed
 /// inside the generated module instead.
 ///

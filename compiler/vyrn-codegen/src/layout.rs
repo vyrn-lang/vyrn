@@ -245,7 +245,7 @@ mod tests {
         // Option/Result: the `i1` is a byte, then 7 bytes of hole.
         let o = of_ll("{ i1, i64, i64 }").unwrap();
         assert_eq!((o.size, o.align, &o.fields[..]), (24, 8, &[0, 8, 16][..]));
-        // A generational reference, and a defunctionalized `fn` value.
+        // A defunctionalized `fn` value (RFC-0037): tag plus capture block.
         let r = of_ll("{ i64, i64 }").unwrap();
         assert_eq!((r.size, r.align, &r.fields[..]), (16, 8, &[0, 8][..]));
     }

@@ -2384,7 +2384,6 @@ impl NsResolver<'_> {
                 }
             }
             Type::Option(a)
-            | Type::Ref(a)
             | Type::Array(a)
             | Type::Task(a)
             | Type::Stream(a)
@@ -3591,7 +3590,6 @@ fn type_names(ty: &Type) -> Vec<String> {
                 }
             }
             Type::Option(a)
-            | Type::Ref(a)
             | Type::Array(a)
             | Type::Task(a)
             | Type::Stream(a)
@@ -3659,7 +3657,6 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
             }
         }
         Type::Option(a)
-        | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)

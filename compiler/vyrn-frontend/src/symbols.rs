@@ -2747,7 +2747,7 @@ static MACRO_BUILTINS: &[&str] = &[
     "base64Encode", "base64Decode", "urlEncode", "urlDecode", "args", "readLine",
     "readFile", "writeFile", "renameFile", "fsyncFile", "readFileBytes",
     "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "contractOf", "jsonSchema",
-    "toJson", "fromJson", "assert", "assertEq", "cell", "array", "parse", "str", "panic",
+    "toJson", "fromJson", "assert", "assertEq", "array", "parse", "str", "panic",
 ];
 
 /// Option / result constructors — builtin enum-like variants, coloured as
@@ -3209,11 +3209,8 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "has", detail: "map.has(key) -> Bool — whether the map contains the key (RFC-0028)" },
     BuiltinMethod { name: "remove", detail: "map.remove(key) -> Bool — remove the entry (order-preserving); was it present? (RFC-0028)" },
     BuiltinMethod { name: "keys", detail: "map.keys() -> Array<String> — a snapshot of the keys, in insertion order (RFC-0028)" },
-    BuiltinMethod { name: "get", detail: "get(ref) -> T — read through a generational reference" },
-    BuiltinMethod { name: "set", detail: "set(ref, value) -> Unit — write through a generational reference" },
-    BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
     BuiltinMethod { name: "toArray", detail: "smallArray.toArray() -> Array<T> — copy a SmallArray's elements out to a growable Array (RFC-0056)" },
-    BuiltinMethod { name: "copy", detail: "x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural (RFC-0089). A `Ref<T>` copy still names the same cell" },
+    BuiltinMethod { name: "copy", detail: "x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural (RFC-0089). A handle copies as the value it is, so the copy names the same thing" },
     BuiltinMethod { name: "toString", detail: "x.toString() -> String — render a number, Bool, or String" },
     BuiltinMethod { name: "charCount", detail: "s.charCount() -> Int64 — number of Unicode scalar values (O(n); counts non-continuation bytes)" },
     BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result" },
@@ -3296,10 +3293,6 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
         // A `Map<String, V>` (RFC-0028): `has`/`remove`/`keys` methods plus the
         // `.length` field (surfaced by field completion, like a String's length).
         Type::Map(..) => vec![by_name("has"), by_name("remove"), by_name("keys")]
-            .into_iter()
-            .flatten()
-            .collect(),
-        Type::Ref(_) => vec![by_name("get"), by_name("set"), by_name("release")]
             .into_iter()
             .flatten()
             .collect(),

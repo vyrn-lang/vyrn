@@ -37,7 +37,6 @@ fn mark_member_type_params(ty: &mut Type) {
             }
         }
         Type::Option(a)
-        | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
@@ -2927,13 +2926,6 @@ impl Parser {
             "Unit" => Type::Unit,
             // A logger handle (RFC-0008), e.g. `fn f(l: Logger)`.
             "Logger" => Type::Logger,
-            // A generational reference to a heap cell (RFC-0004 §4, Path B).
-            "Ref" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                self.eat(&Tok::Gt)?;
-                Type::Ref(Box::new(inner))
-            }
             // A concurrent task's result handle.
             "Task" => {
                 self.eat(&Tok::Lt)?;

@@ -1184,7 +1184,6 @@ fn release_words(kind: &vyrn_frontend::own::DropKind) -> String {
         FreeArr => "freeing the array buffer".into(),
         FreeSmallArr => "freeing the spilled buffer, if it spilled".into(),
         FreeMap => "freeing both map buffers".into(),
-        ReleaseRef => "releasing the cell".into(),
         CloseStream => "closing the stream".into(),
         Deep(ty) => format!("releasing what the {ty} holds"),
         Release(f) => format!("calling `{f}`"),

@@ -1,9 +1,10 @@
 # RFC-0004 — Capabilities & Memory
 
-- **Status:** Draft — **`consume`/`modify` capabilities, both memory-model
-  lowerings, and structured concurrency implemented in v0.1**; the model is a
-  **decided hybrid** (§5.2), measured not argued. Remaining: surface refinements +
-  *parallel execution* of the shipped concurrency model (runtime, not design).
+- **Status:** Draft — capabilities and structured concurrency ship. **§4 and §5's
+  memory model is SUPERSEDED by RFC-0090: the hybrid is gone and Path B with it.**
+  Read §5.4 first; §4, §5.1, §5.2 and §5.3 are kept as the record of a decision
+  that was made on evidence and reversed on evidence. Remaining: surface
+  refinements + *parallel execution* of the shipped concurrency model.
 - **Depends on:** RFC-0001
 - **Related:** RFC-0002 (views), RFC-0006 (how conflicts are reported)
 
@@ -181,10 +182,11 @@ Three decisions, all now settled:
 - **Firm:** the surface model is capabilities, attached to *operations*, not a
   ledger the programmer maintains.
 - **Firm:** deterministic destruction, no tracing GC.
-- **Decided (§5.2):** the underlying mechanism is a **hybrid defaulting to
-  ownership** — inferred single-ownership + regions for single-owner values,
-  generational references for the aliasing case — chosen after prototyping and
-  measuring both (the generational check proved essentially free in a hot loop).
+- **~~Decided (§5.2): a hybrid defaulting to ownership~~ — REVERSED (§5.4).** The
+  hybrid shipped and ran for a year. RFC-0090 measured its aliasing half against a
+  container written in Vyrn, found the container 2.02x faster, and deleted the
+  mechanism. There is one path now: ownership, and a handle into a container you
+  own where you need aliasing.
 
 ---
 
@@ -332,7 +334,11 @@ invisible) when ownership can't be proven. Path B's is a *loud, clean trap*
 (`Vyrn: reference used after release`) — a diagnosable runtime error, never a
 dangling read.
 
-### 5.2 Decision — a hybrid, defaulting to ownership (answering Q1)
+### 5.2 Decision — a hybrid, defaulting to ownership (answering Q1) — REVERSED (§5.4)
+
+**Read this as history.** The hybrid shipped and ran. RFC-0090 M4 deleted Path B
+on evidence, and §5.4 records what replaced it. The paragraph below is what the
+decision was and why, which is worth keeping.
 
 The evidence supports the **hybrid** the summary anticipated, with a clear default:
 
@@ -351,7 +357,10 @@ work (inferred/invisible regions per Q3, `share`-by-reference, and *parallel
 execution* of the already-shipped concurrency model per Q4) is refinement of the
 surface and the runtime, not a change of mechanism.
 
-### 5.3 How many of those checks are necessary
+### 5.3 How many of those checks are necessary — the pass is DELETED (§5.4)
+
+**Read this as history.** The elision pass described below shipped, and RFC-0090
+M4 deleted it with the mechanism it served. §5.4 records why it was not ported.
 
 §5.1 asked whether the check is fast enough and answered yes. It never asked how
 many checks a program needs. That is a different question and its answer is not
@@ -408,6 +417,56 @@ Phase 8d measured the same conclusion from the other end — the elidable sites 
 the ones an optimizer already folds, and the sites that cost are the ones no proof
 reaches. See RFC-0090 "M3's cost, measured again".
 
+### 5.4 Superseded by RFC-0090 — Path B is deleted
+
+**§5.2 decided a hybrid. RFC-0090 M4 deleted half of it, and this section records
+what replaced it and why the reversal is not a reversal of method.**
+
+What went: `cell`, `get`, `set`, `release`, `Ref<T>`, the fixed slab of 65,536
+generation-counted slots in every engine, and §5.3's elision pass. Four names the
+compiler owned are a user's again.
+
+What replaced it: `std/slots` — `Slots<T>` and `Handle<T>`, ordinary Vyrn in
+`std/slots.vyrn` that any reader can open. A handle is slot + generation +
+container identity, the same three facts a `Ref<T>` carried, held in a value the
+language has no special case for. The container identity is the fact Path B could
+not carry: one global slab has no owner, so a stale handle was the only mistake it
+could catch. A `Slots<T>` catches a handle used against the wrong container too.
+
+**§5.2 was right about the requirement and wrong about the mechanism.** Aliasing
+still needs a tool, the tool is still a generation check, and the failure mode is
+still a loud trap rather than a dangling read. What changed is where the check
+lives. Path B put it behind a compiler builtin over a slab no program could name;
+`std/slots` puts it in a library function over arrays a program owns. Nothing in
+§5.2's argument required the first.
+
+The numbers, from RFC-0090 M1 and M3:
+
+| row | Path B | `std/slots` |
+|---|---|---|
+| insert/set/get/get/remove, 1000 times | 18.29 µs | **9.06 µs** |
+
+**2.02x in favour of the replacement**, where RFC-0090 predicted 1.86x. Path B
+boxed every payload through the allocator and freed it on release; a `Slots` keeps
+its payloads flat in an `Array<T>`. That is the whole difference.
+
+**§5.3's elision pass went with it, and it was already known to have no customer.**
+The pass proved 3 of 48 corpus checks unnecessary. Phase 8d then measured the same
+conclusion from the other end: a guard that reads no memory costs the same as the
+real one, and on the only corpus shape a §5.3-style proof reaches, removing the
+guard changes nothing because LLVM already folds it. The sites that cost are the
+ones no proof reaches. So the pass was deleted rather than ported.
+
+The four `Ref<T>` corpus programs §5.3 named — `genref`, `freelist`, `linkedlist`,
+`tree` — are all still in the corpus and all still run, on `std/slots`. So do
+`autorelease` and `slottable`. **Aliasing did not go away; it stopped being the
+compiler's business.**
+
+Q1 and Q2 are re-answered in "Open questions" below. §4's candidate list and
+§5.1's measurement stand as written: they are what a decision made on evidence
+looks like, and this deletion is the same method applied a second time with more
+of the language built.
+
 ---
 
 ## Design constraints the winner must satisfy
@@ -421,20 +480,21 @@ reaches. See RFC-0090 "M3's cost, measured again".
 
 ## Open questions
 
-- **Q1. Resolved (§5.2).** Hybrid, defaulting to ownership. The "which strategy?"
-  load stays low because ownership is the default and `Ref<T>` is opted into
-  exactly when aliasing is needed — where the type already makes the choice clear.
-- **Q2. Resolved (§5.1).** Yes — generational-reference checks are acceptable in
-  hot loops (measured within noise in steady state; ~10 % cold, on an access-only
-  loop). A statically-checked escape hatch is optional, not required.
+- **Q1. Re-answered (§5.4).** Not a hybrid. There is ONE strategy — ownership —
+  and aliasing is a handle into a container you own (`std/slots`). The "which
+  strategy?" load is zero, because there is no second strategy to be in.
+- **Q2. Resolved (§5.1), and the answer outlived the mechanism.** Generation
+  checks are acceptable in hot loops. That is why `std/slots` is built on one.
+  §5.4 records the check moving from a compiler builtin into a library, which
+  changed neither the cost nor the guarantee.
 - **Q3.** How are regions *named/introduced* in surface syntax, if at all? Ideal:
   inferred and invisible; fallback: an explicit `region { ... }` block. *(v0.1
   ships the explicit-block fallback as the first prototype; inferred/invisible
   regions remain the goal.)*
 - **Q4. Implemented as a deterministic model; only parallel *execution* remains.**
   Structured concurrency ships in v0.1 — `spawn f(args) -> Task<T>` / `join(t) -> T`
-  over functions the compiler *proves* isolated (no `print`, no `cell`/`set`/`release`,
-  no `modify` params, transitively). Because tasks are pure, the result is
+  over functions the compiler *proves* isolated (no `print`, no `modify` params,
+  transitively; the `cell`/`set`/`release` refusals went with Path B). Because tasks are pure, the result is
   schedule-independent, so the interpreter (running them eagerly) and native code
   agree; a parallel scheduler is a drop-in backend optimisation that changes no
   answers. `share` is the capability for concurrent read access. See below.
@@ -447,8 +507,8 @@ threads interleave observable effects nondeterministically, so concurrency here 
 to be **structured and deterministic in its observable result**. It is:
 
 - A task runs work that is *pure*: it may `read`/`share` immutable data but cannot
-  `print`, `modify` outside state, or touch the shared reference slab
-  (`cell`/`set`/`release`). The compiler **proves** this — `spawn f(..)` is a
+  `print` or `modify` outside state. (It could not touch the shared reference slab
+  either; there is no slab now — §5.4.) The compiler **proves** this — `spawn f(..)` is a
   compile error unless `f`, and everything it transitively calls, is isolated. That
   is data-race freedom by construction, expressed through the capability system:
   `share` is exactly the capability that lets several tasks hold concurrent read
