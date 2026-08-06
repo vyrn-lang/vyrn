@@ -11005,10 +11005,27 @@ mod tests {
     }
 
     #[test]
-    fn escaping_temporary_is_not_freed() {
-        // `s` is aliased into `t`, so it must not be auto-freed (would dangle).
+    fn an_alias_is_freed_once_and_only_once() {
+        // `let t = s` MOVES the buffer under RFC-0089 rule 1: `t` owns it and `s`
+        // no longer does. One buffer, one free — the pair used to leak, because
+        // this pass could not tell an alias from a move.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let t = s; return t.byteLength; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 1,
+            "exactly one auto-free is expected: {ir}"
+        );
+    }
+
+    #[test]
+    fn a_captured_temporary_is_not_freed() {
+        // A stored closure holds the buffer by value (RFC-0037) and can outlive
+        // this block, so nothing here may release it — census §16, Phase 5.
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
+                   let s = a + b; let f: fn(Int64) -> Int64 = |x| x + s.byteLength; \
+                   return f(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
             free_calls(&ir),

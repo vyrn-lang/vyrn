@@ -40,7 +40,8 @@
 //! |---|---|---|---|
 //! | `control` | §2 | steady | a local concat, freed at block exit — the whole model working |
 //! | `copyLocal` | U2 | steady | `x.copy()` transfers, so the copy has an owner (RFC-0089 M1b) |
-//! | `ifExpr` | §2a | leaks | `transfers` answers `false` for an if-expression |
+//! | `ifExpr` | §2a | steady | Phase 4c: the TYPE says the result owns a buffer, so the binding does |
+//! | `mutString` | §2c | steady | Phase 4c: rule 1 governs reassignment, so `mut` is trackable |
 //! | `selfAppend` | §4 / P1 | leaks | a module-state `String` overwrite never releases the old buffer |
 //! | `fieldOverwrite` | §4 | leaks | `r.field = v` never releases the old field |
 //! | `returnedString` | §9a | leaks | an exported return hands JS a pointer nobody frees |
@@ -180,8 +181,11 @@ fn the_wasm_heap_reaches_a_steady_state() {
 // ---------------------------------------------------------------------------
 
 /// The census U1 program, plus one binding for every reason the printer names.
-const WHY_FIXTURE: &str = r#"fn takes(s: String) -> Int64 {
-    return s.byteLength
+const WHY_FIXTURE: &str = r#"type Sizer = fn(Int64) -> Int64
+
+fn takes(s: String) -> Int64 {
+    let named = s
+    return named.byteLength
 }
 
 fn make(a: String, b: String) -> String {
@@ -206,6 +210,11 @@ fn main() -> Int64 {
     let n = takes(given)
     let gone = a + b
     drop gone
+    let cellA = cell(1)
+    let cellB = cellA
+    let mut cellC = cell(2)
+    let held = a + b
+    let f: Sizer = |x| x + held.byteLength
     region {
         let arena = a + b
         print(arena)
@@ -214,7 +223,8 @@ fn main() -> Int64 {
     print(grown)
     print(branch)
     print(alias)
-    return n
+    print(given)
+    return n + get(cellB) + get(cellC) + f(1)
 }
 "#;
 
@@ -244,19 +254,28 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     let has = |needle: &str| {
         assert!(text.contains(needle), "expected {needle:?} in:\n{text}");
     };
-    // The reclaimed one, and how.
+    // The reclaimed ones, and how. Three of these were leaks until Phase 4c:
+    // `grown` because it is `mut`, `branch` because an if-expression was not on
+    // a list of expression forms, and `given` because any call might retain its
+    // argument. Rules 1 to 3 answer all three, so the rule answers them here.
     has("kept             reclaimed at block exit — freeing the String buffer");
-    // Every reason the census asks the printer to distinguish.
-    has("grown            NOT reclaimed — it is `mut`");
-    has("branch           NOT reclaimed — an if-expression does not transfer ownership");
-    has("owner            NOT reclaimed — another binding aliases it at line");
-    has("given            NOT reclaimed — it escapes into the call to `takes` at line");
+    has("grown            reclaimed at block exit — freeing the String buffer");
+    has("branch           reclaimed at block exit — freeing the String buffer");
+    has("given            reclaimed at block exit — freeing the String buffer");
+    has("alias            reclaimed at block exit — freeing the String buffer");
+    // Every reason the printer can still name.
     has("arena            NOT reclaimed — it is inside a `region`");
     has("c                NOT reclaimed — the type Bool owns no heap");
+    has("cellA            NOT reclaimed — another binding aliases it at line");
+    has("cellB            NOT reclaimed — it is a second name for a value it did not take");
+    has("cellC            NOT reclaimed — it is `mut`, and its release is observable");
+    has("held             NOT reclaimed — a lambda or a spawn captures it at line");
+    has("named            NOT reclaimed — it is a borrow of somebody else's value");
     // Not leaks, and the report must not call them leaks.
     has("a                static data");
     has("gone             reclaimed by `drop` at line");
-    has("whole            moved out by the return at line");
+    has("whole            moved at line");
+    has("owner            moved at line");
 }
 
 #[test]
@@ -298,7 +317,8 @@ fn why_memory_counts_the_whole_file() {
     assert!(text.contains(" reclaimed, "), "{text}");
     assert!(text.contains("not reclaimed"), "{text}");
     assert!(text.contains("aliased by another binding"), "{text}");
-    assert!(text.contains("escaped into a call"), "{text}");
+    assert!(text.contains("captured by a lambda or a spawn"), "{text}");
+    assert!(text.contains("it names somebody else's value"), "{text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -341,8 +361,20 @@ const ROWS: &[Row] = &[
     Row {
         export: "ifExpr",
         census: "§2a",
-        today: Shape::Leaks,
-        why: "`transfers` answers `false` for an if-expression, so nothing owns the result",
+        today: Shape::Steady,
+        why: "Phase 4c: reclamation follows the type, and an if-expression that yields a \
+              String yields a String — the expression's FORM stopped deciding",
+    },
+    Row {
+        export: "mutString",
+        census: "§2c",
+        today: Shape::Steady,
+        why: "Phase 4c: `mut` used to mean nobody could say who owned the value after a \
+              reassignment. Rule 1 says: the binding does, and it owns whatever it holds \
+              last. Releasing the OLD value on a store is Phase 5, so this row does \
+              not reassign. An in-place append (`s = s + \"x\"`) is a second leak of \
+              its own: the accumulator shadow starts every `let` unowned, so the \
+              first append abandons the initializer's buffer",
     },
     Row {
         export: "selfAppend",
@@ -426,6 +458,17 @@ export extern fn copyLocal() {{
 export extern fn ifExpr() {{
     let c = seen % 2 == 0
     let s = if c {{ tag() + "a" }} else {{ tag() + "b" }}
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// Census §2c. A `mut` String. The keyword alone used to disqualify a binding
+/// from reclamation; now the binding owns its buffer and the block frees it.
+///
+/// It does not reassign. A store that overwrites an owning place must release
+/// what was there, and that is Phase 5 — see `selfAppend` below, which is the
+/// same hole through module state.
+export extern fn mutString() {{
+    let mut s = tag() + "!"
     seen = seen + Int64(s.byteLength)
 }}
 

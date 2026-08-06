@@ -1120,11 +1120,8 @@ fn why_memory(file: &str) -> ExitCode {
                 "    transfers: yes — the caller owns the result, and releases it by {}",
                 release_words(kind)
             ),
-            None if own.proto.release_kind(&f.ret).is_some() => println!(
-                "    transfers: no — the return type {} owns heap, but a return path hands back \
-                 a value this function does not own",
-                f.ret
-            ),
+            // RFC-0089 rule 3: a return is owned. A heap return type always
+            // transfers, so the only other answer is that the type owns nothing.
             None => println!("    transfers: no — the return type {} owns no heap", f.ret),
         }
         let notes = match own.notes.get(&f.name) {
@@ -1141,9 +1138,9 @@ fn why_memory(file: &str) -> ExitCode {
                     reclaimed += 1;
                     format!("reclaimed at block exit — {}", release_words(kind))
                 }
-                Fate::Moved { line } => {
+                Fate::Moved { line, into } => {
                     moved += 1;
-                    format!("moved out by the return at line {line}")
+                    format!("moved at line {line} into {into}")
                 }
                 Fate::Dropped { line } => {
                     dropped += 1;

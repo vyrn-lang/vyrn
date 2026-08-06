@@ -3761,7 +3761,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     let sb = bytes(script)
     let pb = vyxFindKwBlock(sb, "params")
     let mut paramFields = ""
-    let mut restScript = script
+    let mut restScript = script.copy()
     if pb.found && pb.malformed == false {
         let end = vyxMatchCurly(sb, pb.braceAt)
         paramFields = trim(vyxSlice(sb, pb.braceAt + 1, end - 1))

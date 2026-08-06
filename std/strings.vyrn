@@ -42,7 +42,7 @@ import { SliceError } from "std/strpred"
 export fn fromBytesOr(b: Array<UInt8>, fallback: String) -> String {
     return match stringFromBytes(b) {
         Ok(v) => v,
-        Err(e) => fallback,
+        Err(e) => fallback.copy(),
     }
 }
 
