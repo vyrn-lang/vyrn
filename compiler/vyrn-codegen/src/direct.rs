@@ -541,8 +541,16 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // the caller is JS — so before M6 the only allocator symbol a module exported
     // had no counterpart and `wasi-min.js` could not do anything but forget the
     // pointer. 20000 keystrokes into `domdemo` cost 18 MB that way.
+    //
+    // A String RETURN asks for the same pair (RFC-0089 M3b). Rule 3 makes the
+    // result the caller's, and across this boundary the caller is JS, so the
+    // wrapper frees it after decoding — which it cannot do without the symbol.
+    // `__vyrn_malloc` goes out with `__vyrn_free` rather than alone, because the
+    // free list is the allocator's and half of it is not a boundary.
     if user.iter().any(|f| {
-        f.is_export_extern && f.params.iter().any(|p| matches!(p.ty, Type::Str))
+        f.is_export_extern
+            && (f.params.iter().any(|p| matches!(p.ty, Type::Str))
+                || matches!(f.ret, Type::Str))
     }) {
         m.export("__vyrn_malloc", cx.rt.malloc);
         m.export("__vyrn_free", cx.rt.free);

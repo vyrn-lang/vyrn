@@ -245,10 +245,19 @@ fn run(program: &Program, want: Want) -> Run {
         })
         .collect();
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
+    // `export extern fn` names. Rule 3 is stricter here, because the caller is
+    // JS and JS frees every String it is handed (RFC-0089 M3b).
+    let exported: HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_export_extern)
+        .map(|f| f.name.clone())
+        .collect();
     let decl = Declared::new(program);
     let mc = MoveCheck {
         caps: &caps,
         globals: &globals,
+        exported: &exported,
         errors: RefCell::new(Vec::new()),
         decl: &decl,
         // Module state is the outermost frame and is built once, not per body.
@@ -371,6 +380,10 @@ struct MoveCheck<'a> {
     /// Module-state binding names (RFC-0013). A global may never be passed to a
     /// `consume` parameter — nothing may take ownership of module state.
     globals: &'a HashSet<String>,
+    /// Every `export extern fn` (RFC-0012). Rule 3 admits no lend here: the
+    /// caller is JS, and since RFC-0089 M3b the wrapper frees every String an
+    /// export hands back. See [`MoveCheck::check_return`].
+    exported: &'a HashSet<String>,
     /// Per-function statement-boundary error sink (RFC-0006 accumulation).
     /// Cleared at the start of each function, drained by `check_accum`.
     errors: RefCell<Vec<String>>,
@@ -468,7 +481,7 @@ impl Borrow {
         let copy = format!("`{path}.copy()` if both sides need a value");
         match self {
             Borrow::Read | Borrow::Modify => vec![
-                format!("declare the parameter `consume {root}` if this function should own it"),
+                format!("declare the parameter `{root}: consume ..` if this function should own it"),
                 copy,
             ],
             // A loop variable has a second way out: let the loop take the
@@ -665,6 +678,32 @@ impl MoveCheck<'_> {
         }
     }
 
+    /// The ways out of a borrow error in THIS function.
+    ///
+    /// [`Borrow::fixes`] offers `consume` first, and inside an `export extern fn`
+    /// that fix does not exist: the caller is JS, which frees the String when the
+    /// call returns whatever the declaration says, so `consume` is refused at the
+    /// signature (RFC-0089 M3b). Offering it would send a reader to a second
+    /// error. `.copy()` is the one answer, so it is the only one named.
+    fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String> {
+        if matches!(b, Borrow::Read | Borrow::Modify)
+            && self.exported.contains(&*self.cur_fn.borrow())
+        {
+            return vec![format!(
+                "`{path}.copy()` — an `export extern fn` may not take ownership of a String \
+                 its JS caller releases"
+            )];
+        }
+        b.fixes(root, path)
+    }
+
+    /// Whether `name` names module state here (RFC-0013) rather than a local
+    /// that shadows one. Frame 0 IS the globals frame, which is what tells them
+    /// apart — the same reading [`MoveCheck::names_a_place`] makes.
+    fn is_module_state(&self, name: &str) -> bool {
+        self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0)
+    }
+
     /// Whether `name` names a borrow here.
     fn borrow_of(&self, name: &str) -> Option<Borrow> {
         self.borrows.borrow().get(name).cloned().flatten()
@@ -770,7 +809,7 @@ impl MoveCheck<'_> {
             return Err(menu(
                 line,
                 format!("`{path}` may not be stored into {} — it is {}", into(), b.what()),
-                b.fixes(&root, &path),
+                self.fixes_here(&b, &root, &path),
             ));
         }
         // Reading a field out of a record does not take the record: the binding
@@ -935,12 +974,34 @@ impl MoveCheck<'_> {
         // A place named straight at the `return` keeps Phase 4b's rule whole:
         // every borrow is refused, whatever kind it is.
         if let Some((root, path)) = place_path(e) {
-            let Some(b) = self.borrow_of(&root) else { return Ok(()) };
-            return Err(menu(
-                line,
-                format!("`{path}` may not be returned — it is {}, and a return is owned", b.what()),
-                b.fixes(&root, &path),
-            ));
+            if let Some(b) = self.borrow_of(&root) {
+                return Err(menu(
+                    line,
+                    format!(
+                        "`{path}` may not be returned — it is {}, and a return is owned",
+                        b.what()
+                    ),
+                    b.fixes(&root, &path),
+                ));
+            }
+            // Module state is not a borrow, and Phase 6 found that this is where
+            // that costs a use-after-free. A global lives for the whole module
+            // and nothing may take it (RFC-0013), so `return title` hands the
+            // caller a buffer the module still holds — and rule 3 makes the
+            // caller free it. `examples/` never wrote it, so parity never saw it:
+            // the interpreter's values cannot dangle and the wasm allocator
+            // handed the block straight back out.
+            if self.decl.releases(&self.ret.borrow()) && self.is_module_state(&root) {
+                return Err(menu(
+                    line,
+                    format!(
+                        "`{path}` may not be returned — it is module state, which nothing \
+                         may take, and a return is owned"
+                    ),
+                    vec![format!("`{path}.copy()` — the caller releases what it is handed")],
+                ));
+            }
+            return Ok(());
         }
         if !self.decl.releases(&self.ret.borrow()) {
             return Ok(());
@@ -963,6 +1024,21 @@ impl MoveCheck<'_> {
         // instead, so nothing releases them, and RFC-0091 M1's `Copy` protocol
         // plus 7a's place projections are what make the wider rule sayable.
         if !matches!(b, Borrow::Read | Borrow::Modify) {
+            // …unless the caller is JS. A Vyrn caller reads the lend out of
+            // `lending` and releases nothing; a JS caller reads nothing, and
+            // since RFC-0089 M3b `wasi-min.js` frees every String an export
+            // hands back. So an export owns its result or it does not compile.
+            if self.exported.contains(&*self.cur_fn.borrow()) {
+                return Err(menu(
+                    line,
+                    format!(
+                        "`{path}` may not be returned from an exported function — it is {}, \
+                         and the JS caller releases what it is handed",
+                        b.what()
+                    ),
+                    vec![format!("`{path}.copy()` — an `export extern fn` owns its result")],
+                ));
+            }
             return Ok(());
         }
         Err(menu(
@@ -2781,7 +2857,7 @@ mod tests {
         let src = "fn id(s: String) -> String { return s } fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
         assert!(e.contains("`s` may not be returned"), "{e}");
-        assert!(e.contains("fix: declare the parameter `consume s`"), "{e}");
+        assert!(e.contains("fix: declare the parameter `s: consume ..`"), "{e}");
         assert!(e.contains("fix: `s.copy()`"), "{e}");
         // Both named fixes work.
         assert!(run("fn id(s: consume String) -> String { return s } \
@@ -2833,7 +2909,7 @@ mod tests {
         let src = "type R = { s: String }                    fn keep(x: String) -> R { return R { s: x } }                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
         assert!(e.contains("may not be stored into the field `R.s`"), "{e}");
-        assert!(e.contains("fix: declare the parameter `consume x`"), "{e}");
+        assert!(e.contains("fix: declare the parameter `x: consume ..`"), "{e}");
         // Both named fixes work.
         assert!(run("type R = { s: String } fn keep(x: consume String) -> R { return R { s: x } }                      fn main() -> Int64 { return 0 }")
             .is_ok());
