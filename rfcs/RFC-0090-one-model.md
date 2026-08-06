@@ -107,8 +107,9 @@ an identity is data, and data is checked where you read it — same as every
 
 - **M0** — unchanged: the instrument (RFC-0088 M1 / RFC-0089 M0).
 - **M1** — `std/slots` in Vyrn over `Array`, alongside `Ref` — **LANDED
-  (Phase 8a).** See "M1 as landed" at the end of this RFC: the benchmark says
-  2.02x and the reclamation claim does not hold.
+  (Phase 8a, completed in Phase 8b).** See "M1 as landed" at the end of this
+  RFC: the benchmark says 2.02x, and reclamation was three refusals away.
+  Phase 8b closed all three, and a `Slots<String>` is now flat across turns.
 - **M2** — RFC-0089 M2 (conventions) lands; the `Slots` port stops being
   blocked by escape-on-call.
 - **M3** — streams re-host their cursor on `std/slots`.
@@ -290,33 +291,53 @@ example — `people.insert(..)` and `people.remove(h)` — are unavailable. `s[h
 `s[h] = v` and `for x in s` DO work, because those three are what a `place`
 member reaches.
 
-**`drop people` does not reclaim anything, and cannot yet.** Three reasons, all
-of them the memory model's rather than the container's:
+**`drop people` did not reclaim anything, and Phase 8b is why it does now.**
+Phase 8a found three refusals between a slab and its buffers, all of them the
+memory model's rather than the container's. Phase 8b closed all three.
 
-1. `own::fate` refuses a declared `release` for a `mut` binding, and a slab is
-   always `mut` because `insert` takes `modify self`. The reason is written
-   where the refusal is: the interpreter releases what the `let` captured and
-   the two compiling backends release the slot's final value — the same program
-   for a `free`, two programs for a `release` that can print.
-2. A generic `impl Owned` flattens its `release` to a generic function, and the
-   drop site emits that name with no type arguments on it — a symbol nothing
-   defines. Phase 8a filters generic impls out of the `Owned` table so the miss
-   is a missing release rather than a linker error at the end of a build.
-3. Census U4 is still open, so even a working release would not reach the
-   elements inside `vals`.
+1. `own::fate` refused a declared `release` for a `mut` binding, and a slab is
+   always `mut` because `insert` takes `modify self`. The reason written at the
+   refusal was an engine disagreement: the interpreter released what the `let`
+   captured and the two compiling backends release the slot's final value — the
+   same program for a `free`, two programs for a `release` that can print. The
+   interpreter reads the slot now, so all three release the same value.
+2. A generic `impl Owned` flattened its `release` to a generic function, and the
+   drop site emitted that name with no type arguments on it — a symbol nothing
+   defines. The row is recorded like any other now, keyed by the type
+   CONSTRUCTOR, and each drop site solves the arguments from the binding's own
+   type and asks for that instance. It is the route a written call already took,
+   and the route the direct backend already took for a declared release.
+3. Census U4 is open **for a container that declares what it owns**. A built-in
+   `Array<T>` still releases no element and should not: an array cannot say
+   whether it owns its elements or views somebody else's, and `m.keys()` is the
+   view that would be freed twice. `Slots` can say. Its release walks every slot
+   from 0 to `vals.length` and gives the payload back — every slot holds exactly
+   one payload the slab owns, because `insert` takes `consume T` and the only
+   other writer is a store, which releases what it replaced.
 
-Measured on the Node and `wasi-min.js` harness the memory suite uses: a
-`Slots<String>` built and left at block exit grows the heap every turn. A
-`Slots` is a record holding `Array`s, and Phase 5 left a record's fields
-unreleased on purpose.
+`drop v` where `v: T` also had to become legal. A generic body is checked once
+and lowered once per instantiation, so the instance decides: a `free` in a
+`Slots<String>`, no instruction at all in a `Slots<Int64>`. That is this plan's
+own rule — conventions checked per monomorphized instance — reaching `drop`.
 
-This is the one prediction here that the implementation contradicts, and **M4
-must not delete Path B until it is closed** — `cell`'s slab does reclaim.
+Measured on the Node and `wasi-min.js` harness the memory suite uses, 500 calls
+against 2000: **720,896 -> 2,424,832 bytes before, 131,072 -> 131,072 after.**
+Flat, at the two pages the module starts with. **M4 may now delete Path B on
+this ground** — the replacement reclaims what `cell`'s slab reclaimed.
 
-**`elementLeak` (U4) did not flip.** The memory suite's eleven rows are
-unchanged: eight steady, three leaking. A `Slots` releases no element by any
-mechanism, because no mechanism exists — and a generic `T` cannot be told from
-an `Int64` that must not be released at all.
+**`elementLeak` (U4) still does not flip, and that is the correct answer.** It
+is a bare `Array<String>`, and the array is the container that cannot say. The
+suite gained a `slotsContainer` row instead: the same heap element in a
+container that declares its ownership, steady. Twelve rows now — nine steady,
+three leaking. `optionString` and `lambdaLoop` are blocked elsewhere and did not
+move.
+
+**Releasing the container is faster than leaking it.** A thousand short-lived
+slabs of sixteen elements each cost 348 µs with the release and 481 µs without
+it, same machine, same session (`std/slots build and release` in
+`examples/membench.vyrn`). Handing the buffers back lets the allocator hand the
+same blocks out again; leaking makes it ask the system for more. The gate row is
+unchanged at 2.0x.
 
 ### What the migrated corpus proves now
 
@@ -374,10 +395,11 @@ an `Int64` that must not be released at all.
 7. **The direct backend could not name a user container's element type in a
    branch**, so `match o { Some(h) => s[h].value .. }` refused to lower.
 
-Two more are recorded rather than fixed: a generic `impl Owned` has no
-monomorphized release (above), and `insert(s, i)` on a `Slots<Int64>` is refused
-because `consume T` is conservative for a `T` movecheck cannot resolve — the
-caller writes `let v = i` first.
+Two more were recorded rather than fixed. The first — a generic `impl Owned`
+with no monomorphized release — is closed by Phase 8b, above. The second stands:
+`insert(s, i)` on a `Slots<Int64>` is refused because `consume T` is
+conservative for a `T` movecheck cannot resolve, so the caller writes
+`let v = i` first.
 
 **RFC-0091's stated motivation for `Iterate` is not achievable as it landed.**
 It says "`Slots` skips dead slots by implementing it". A `place nth` cannot
