@@ -26,7 +26,7 @@
 //! The pins are the other half. Every one of them exists because no example
 //! reaches the path: a bounds message whose wrong wording reads exactly like a
 //! check that never fires, a DFA walk over a non-ASCII byte, a column off both
-//! ends of a buffer, a stale cell and a full slab, a suppressed log call, a
+//! ends of a buffer, a suppressed log call, a
 //! renumbering after the sweep. Each compares against the INTERPRETER's own
 //! answer rather than against a spelling written here, because two backends can be
 //! confidently wrong together.
@@ -483,68 +483,6 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
         assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
         assert!(runtime_err(&w.stderr).contains(&format!("{what} index")), "{what}: wrong wording");
-    }
-}
-
-/// The two ways the generational slot table (RFC-0077 M2l) fails, neither of
-/// which any example reaches.
-///
-/// `genref.vyrn` drops a cell and never touches it again, and `autorelease.vyrn`
-/// only proves the slab does NOT fill. So a `cell_addr` that skipped the
-/// generation compare would pass every listed example, and so would a slab of the
-/// wrong size — the exhaustion message is exactly what a too-small one would
-/// print, and exactly what a release that never fired would print too. Both are
-/// pinned against the interpreter rather than against a spelling written here.
-#[test]
-#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
-fn a_stale_reference_and_a_full_slab_say_what_the_interpreter_says() {
-    let Some(wasmtime) = wasmtime() else {
-        eprintln!("SKIP: no wasmtime");
-        return;
-    };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-cells");
-    std::fs::create_dir_all(&dir).unwrap();
-    for (what, src) in [
-        // Read through a copy of a reference whose cell has been released.
-        (
-            "stale",
-            "fn main() -> Int64 {\n let c = cell(7)\n let alias = c\n drop c\n \
-             print(get(alias))\n return 0\n}\n",
-        ),
-        // 70000 cells with no release: past the 65536-slot slab, which is the
-        // number the other two engines use.
-        (
-            "full",
-            "fn main() -> Int64 {\n let mut i = 0\n let mut keep: Array<Ref<Int64>> = []\n \
-             while i < 70000 {\n keep = keep.push(cell(i))\n i = i + 1\n }\n \
-             print(keep.length)\n return 0\n}\n",
-        ),
-    ] {
-        let path = dir.join(format!("{what}.vyrn"));
-        std::fs::write(&path, src).unwrap();
-        let module = dir.join(format!("{what}.wasm"));
-        let build = vyrn()
-            .arg("build")
-            .arg(&path)
-            .arg("--target")
-            .arg("wasm")
-            .arg("-o")
-            .arg(&module)
-            .output()
-            .expect("build wasm");
-        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
-
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
-        let mut wasm_cmd = Command::new(&wasmtime);
-        wasm_cmd.arg("run").arg(&module);
-        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
-
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
-        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
-        assert!(!runtime_err(&w.stderr).is_empty(), "{what}: no trap at all");
     }
 }
 
@@ -3037,7 +2975,7 @@ fn main() -> Int64 {
 /// leaving and RFC-0004's escape guard examines stores into named bindings, not
 /// return values. So reclamation on the return edge is deferred rather than
 /// attempted — it needs an escape analysis that does not exist, and this backend
-/// already frees nothing for `push`, for a cell payload or for `Stmt::Drop`.
+/// already frees nothing for `push` or for `Stmt::Drop`.
 ///
 /// `break` and `continue` were checked for the same hole and do not have it:
 /// `emit_loop_exit_cleanup` has unwound the regions opened inside a loop body since

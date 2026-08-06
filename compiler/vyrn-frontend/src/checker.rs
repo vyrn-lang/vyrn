@@ -133,10 +133,6 @@ pub const RESERVED: &[&str] = &[
     "Ok",
     "Err",
     "match",
-    "cell",
-    "get",
-    "set",
-    "release",
     "array",
     "push",
     "at",
@@ -1520,7 +1516,6 @@ impl<'a> Checker<'a> {
                 | Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
-                | Type::Ref(i)
                 | Type::Task(i)
                 | Type::Partial(i) => walk(i, types, seen),
                 Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
@@ -1562,7 +1557,7 @@ impl<'a> Checker<'a> {
 
     /// Whether `ty` transitively contains a function-value type (RFC-0037),
     /// resolving named types (cycle-safe). Used to keep function values out of
-    /// the positions that stay illegal: `extern`/`gen` signatures, `Ref`/`Task`
+    /// the positions that stay illegal: `extern`/`gen` signatures, `Task`
     /// payloads, and nested function signatures.
     fn contains_fn(&self, ty: &Type) -> bool {
         fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
@@ -1574,7 +1569,6 @@ impl<'a> Checker<'a> {
                 | Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
-                | Type::Ref(i)
                 | Type::Task(i)
                 | Type::Partial(i) => walk(i, types, seen),
                 Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
@@ -1991,13 +1985,12 @@ impl<'a> Checker<'a> {
                      takes an integer argument"
                 ))
             }
-            // A `Ref`/`Task` cannot hold a function value (RFC-0037 defers it):
-            // a cell would make the closure's capture snapshot mutable-by-alias,
-            // and a task result slot has no dispatcher to receive one yet.
-            Type::Ref(inner) | Type::Task(inner) => {
+            // A `Task` cannot hold a function value (RFC-0037 defers it): a
+            // task result slot has no dispatcher to receive one yet.
+            Type::Task(inner) => {
                 if self.contains_fn(inner) {
                     return Err(format!(
-                        "line {line}: a `Ref`/`Task` cannot hold a function value \
+                        "line {line}: a `Task` cannot hold a function value \
                          (RFC-0037 defers it)"
                     ));
                 }
@@ -2024,7 +2017,7 @@ impl<'a> Checker<'a> {
             // `Option`/`Result`, enum payloads, returns, and module state.
             // Its own parameter and return types must not themselves carry a
             // function type (no higher-order-of-higher-order), and the
-            // still-illegal positions (`extern`/`gen` signatures, `Ref`/`Task`,
+            // still-illegal positions (`extern`/`gen` signatures, `Task`,
             // codec/schema) are rejected at their own sites with named
             // diagnostics.
             Type::Fn(ptys, ret) => {
@@ -3098,7 +3091,6 @@ impl<'a> Checker<'a> {
                     Type::Str
                         | Type::Array(_)
                         | Type::SmallArray(..)
-                        | Type::Ref(_)
                         | Type::Map(..)
                         | Type::Param(_)
                 ) || (matches!(t, Type::Option(_) | Type::Result(..))
@@ -3135,14 +3127,14 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a value of this type can carry a heap allocation (a dynamic
-    /// `String`, an `Array` buffer, a `Ref` cell, a `Task` payload, or a
+    /// `String`, an `Array` buffer, a `Task` payload, or a
     /// record/enum/Option/Result that transitively contains one).
     /// Used by the `region` escape guard.
     fn contains_heap(&self, ty: &Type) -> bool {
         match self.base(ty) {
             Type::Str => true,
-            // Array buffers and the cell slab are always malloc'd (never in the
-            // region arena), so only their *contents* can dangle.
+            // Array buffers are always malloc'd (never in the region arena), so
+            // only their *contents* can dangle.
             // A `Stream<T>` is an `Array<T>`'s three words with a malloc'd buffer
             // (RFC-0075), so it dangles exactly where an array does.
             Type::Array(inner)
@@ -3152,7 +3144,7 @@ impl<'a> Checker<'a> {
             // A Map's buffers are malloc'd; its keys are always heap (String) and
             // its values may be — either way it carries heap (RFC-0028).
             Type::Map(..) => true,
-            Type::Ref(inner) | Type::Task(inner) => self.contains_heap(&inner),
+            Type::Task(inner) => self.contains_heap(&inner),
             Type::Record(fs) => fs.iter().any(|f| self.contains_heap(&f.ty)),
             Type::Enum(vs) => vs
                 .iter()
@@ -5848,96 +5840,6 @@ impl<'a> Checker<'a> {
             return Ok(Type::Option(Box::new(Type::Int)));
         }
 
-        // built-in: generational references (RFC-0004 §4, Path B).
-        //   cell(Int) -> Ref    get(Ref) -> Int    set(Ref, Int) -> Unit
-        //   release(Ref) -> Unit
-        // cell(v: T) -> Ref<T> — the element type is inferred from `v`.
-        if name == "cell" {
-            if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `cell` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let elem_expected = match expected {
-                Some(Type::Ref(t)) => Some((**t).clone()),
-                _ => None,
-            };
-            let t = self.expr(&args[0], scope, elem_expected.as_ref(), fn_ret)?;
-            if matches!(self.base(&t), Type::Err) {
-                return Ok(Type::Err);
-            }
-            if self.base(&t) == Type::Unit {
-                return Err(format!("line {line}: `cell` cannot hold a Unit value"));
-            }
-            return Ok(Type::Ref(Box::new(elem_expected.unwrap_or(t))));
-        }
-        // get(r: Ref<T>) -> T
-        if name == "get" {
-            if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `get` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let rt = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&rt) {
-                Type::Ref(inner) => return Ok((*inner).clone()),
-                Type::Err => return Ok(Type::Err),
-                other => return Err(format!("line {line}: `get` needs a Ref, found {other}")),
-            }
-        }
-        // set(r: Ref<T>, v: T) -> Unit
-        if name == "set" {
-            if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `set` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let rt = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&rt) {
-                Type::Ref(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(format!(
-                        "line {line}: `set` needs a Ref as its first argument, found {other}"
-                    ))
-                }
-            };
-            let v = self.expr(&args[1], scope, Some(&elem), fn_ret)?;
-            if !self.coercible(&v, &elem) {
-                return Err(format!(
-                    "line {line}: `set` value is {v} but the cell holds {elem}"
-                ));
-            }
-            self.prove_coercion(&args[1], &elem, line)?;
-            // A store through a cell is a store into wherever the cell lives:
-            // `set(outer, <heap>)` inside a `region` would dangle at exit.
-            if let Expr::Var { name: cname, .. } = &args[0] {
-                self.region_store_guard(cname, &elem, scope, line)?;
-            }
-            return Ok(Type::Unit);
-        }
-        // release(r: Ref<T>) -> Unit
-        if name == "release" {
-            if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `release` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let rt = self.expr(&args[0], scope, None, fn_ret)?;
-            let rt = self.base(&rt);
-            if matches!(rt, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            if !matches!(rt, Type::Ref(_)) {
-                return Err(format!("line {line}: `release` needs a Ref, found {rt}"));
-            }
-            return Ok(Type::Unit);
-        }
-
         // Growable arrays: array() -> Array<T> (T from context), push(Array<T>, T)
         // -> Array<T>, at(Array<T>, Int) -> T, alen(Array<T>) -> Int.
         if name == "array" {
@@ -6367,7 +6269,7 @@ impl<'a> Checker<'a> {
         //
         // Every other receiver is accepted, including a scalar. `copy` means
         // "a value of this type that shares nothing with the receiver", and for
-        // a type that owns no heap — an `Int64`, a record of scalars, a `Ref<T>`
+        // a type that owns no heap — an `Int64`, a record of scalars, a handle
         // — the receiver already is one, so the copy is the value. That keeps
         // one meaning for one word across a monomorphized generic, where the
         // same `x.copy()` is a String in one instance and an `Int64` in the next.
@@ -7756,10 +7658,6 @@ impl<'a> Checker<'a> {
                 Type::SmallArray(a, m) if m == *n => self.unify(inner, &a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
-            Type::Ref(inner) => match aty {
-                Type::Ref(a) => self.unify(inner, a, subst, line),
-                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
-            },
             // A generic function type binds its parameters through the function
             // value's own signature — `{ run: fn() -> T }` learns `T` from a
             // `fn() -> Array<Paste>` exactly as `Array<T>` learns it from an
@@ -7983,7 +7881,6 @@ fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
     f(ty);
     match ty {
         Type::Option(a)
-        | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
@@ -8030,8 +7927,9 @@ fn has_nested_wrap(ty: &Type) -> bool {
     match ty {
         Type::Option(t) => wrapped(t) || has_nested_wrap(t),
         Type::Result(a, b) => wrapped(a) || wrapped(b) || has_nested_wrap(a) || has_nested_wrap(b),
-        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Ref(t)
-        | Type::Task(t) => has_nested_wrap(t),
+        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Task(t) => {
+            has_nested_wrap(t)
+        }
         Type::Map(k, v) => has_nested_wrap(k) || has_nested_wrap(v),
         Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty)),
         _ => false,
@@ -8084,18 +7982,14 @@ fn render_int_literal(n: i64) -> String {
     }
 }
 
-/// Builtins a concurrent task may not use: `print` (observable ordering),
-/// `cell`/`set`/`release` (mutate the shared reference slab), and the log
-/// methods. `get` is a read-only slab access and is allowed.
+/// Builtins a concurrent task may not use: `print` (observable ordering) and
+/// the log methods.
 ///
 /// Every name here is also in [`RESERVED`], and has to be: a name the compiler
 /// does not own is a user function, which this list would then forbid by
 /// coincidence of spelling. `spawn_forbidden_names_are_reserved` checks it.
 const SPAWN_FORBIDDEN: &[&str] = &[
     "print",
-    "cell",
-    "set",
-    "release",
     // `close` frees a stream's buffer: the caller may still hold it across the
     // task boundary.
     "close",
@@ -8425,7 +8319,6 @@ fn fn_sigs_match(a: &Type, b: &Type) -> bool {
         }
         (Type::Option(x), Type::Option(y))
         | (Type::Array(x), Type::Array(y))
-        | (Type::Ref(x), Type::Ref(y))
         | (Type::Task(x), Type::Task(y))
         | (Type::Stream(x), Type::Stream(y)) => fn_sigs_match(x, y),
         (Type::Result(x1, x2), Type::Result(y1, y2)) | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
@@ -9295,7 +9188,6 @@ mod tests {
     #[test]
     fn copy_of_a_scalar_is_the_value() {
         assert!(check_src("fn main() -> Int64 { let n = 5\n return n.copy() }").is_ok());
-        assert!(check_src("fn main() -> Int64 { let c = cell(5)\n return get(c.copy()) }").is_ok());
     }
 
     /// A type that declares `impl Owned for T` (RFC-0086 M1) says how it is
@@ -9772,30 +9664,6 @@ mod tests {
         assert!(e.contains("must return"), "{e}");
     }
 
-    // ---- generational references ----------------------------------------
-
-    #[test]
-    fn accepts_reference_roundtrip() {
-        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c)); \
-                   let v = get(c); release(c); return v; }";
-        assert!(check_src(src).is_ok());
-    }
-
-    #[test]
-    fn cell_is_generic_over_element_type() {
-        // A cell can hold any type; `get` returns exactly that type.
-        let src = "fn main() -> Int64 { let c = cell(\"hi\"); \
-                   let n = get(c).byteLength; release(c); return n; }";
-        assert!(check_src(src).is_ok());
-    }
-
-    #[test]
-    fn rejects_set_of_wrong_element_type() {
-        // `c : Ref<Int>`, so setting a String is a type error.
-        let e = check_src("fn main() -> Int64 { let c = cell(1); set(c, \"x\"); return 0; }")
-            .unwrap_err();
-        assert!(e.contains("the cell holds"), "{e}");
-    }
 
     // ---- input I/O (RFC-0014) ---------------------------------------------
 
@@ -9933,16 +9801,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_get_of_non_ref() {
-        let e = check_src("fn main() -> Int64 { return get(5); }").unwrap_err();
-        assert!(e.contains("`get` needs a Ref"), "{e}");
-    }
-
-    #[test]
-    fn rejects_binding_unit_release() {
-        // `release` yields Unit, which cannot be bound.
-        let e = check_src("fn main() -> Int64 { let c = cell(1); let x = release(c); return 0; }")
-            .unwrap_err();
+    fn rejects_binding_a_unit_call() {
+        // `print` yields Unit, which cannot be bound.
+        let e = check_src("fn main() -> Int64 { let x = print(1); return 0; }").unwrap_err();
         assert!(e.contains("Unit"), "{e}");
     }
 
@@ -10288,11 +10149,12 @@ mod tests {
 
     #[test]
     fn rejects_spawn_of_function_that_drops() {
-        // `drop` can release a shared Ref (a shared-state mutation), so a task
+        // `drop` reclaims storage the spawning frame may still name, so a task
         // must not contain it — even though `drop` is a statement, not a call.
         let e = check_src(
-            "fn work(r: Ref<Int64>) -> Int64 { let v = get(r); drop r; return v; } \
-             fn main() -> Int64 { let c = cell(1); let t = spawn work(c); return t.join(); }",
+            "fn work(n: Int64) -> Int64 { let mut a: Array<Int64> = array() \
+             a = push(a, n) let v = at(a, 0) drop a return v } \
+             fn main() -> Int64 { let t = spawn work(1); return t.join(); }",
         )
         .unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
@@ -10522,38 +10384,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_heap_escaping_region_via_set() {
-        // Storing an arena string through an outer cell dangles at region exit.
-        let src = "fn main() -> Int64 { \
-                       let c = cell(\"seed\") \
-                       region { set(c, \"a\" + \"b\") } \
-                       print(get(c)) release(c) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("outlives the enclosing `region`"), "{e}");
-    }
-
-    #[test]
     fn allows_nonheap_stores_out_of_region() {
-        // Ints carry no arena memory: pushing into an outer Array<Int> and
-        // setting an outer Ref<Int> from inside a region are both fine.
+        // Ints carry no arena memory, so pushing one into an outer Array<Int64>
+        // from inside a region is fine.
         let src = "fn main() -> Int64 { \
                        let mut a: Array<Int64> = array() \
-                       let c = cell(1) \
-                       region { a = push(a, 2) set(c, 3) } \
-                       release(c) return at(a, 0) }";
-        assert!(check_src(src).is_ok());
-    }
-
-    #[test]
-    fn allows_region_local_cell_and_array_heap_stores() {
-        // A region-local cell/array dies with the region — heap stores are fine.
-        let src = "fn main() -> Int64 { \
-                       region { \
-                           let c = cell(\"seed\") \
-                           set(c, \"a\" + \"b\") \
-                           print(get(c)) release(c) \
-                       } \
-                       return 0 }";
+                       region { a = push(a, 2) } \
+                       return at(a, 0) }";
         assert!(check_src(src).is_ok());
     }
 
@@ -11747,15 +11584,6 @@ mod tests {
 
     #[test]
     fn fn_types_still_rejected_where_illegal() {
-        // `Ref` cannot hold a function value (RFC-0037 defers it).
-        let refv = "fn main() -> Int64 { let c: Ref<fn(Int64) -> Int64> = cell(0)  return 0 }";
-        assert!(
-            check_src(refv)
-                .unwrap_err()
-                .contains("cannot hold a function value"),
-            "{:?}",
-            check_src(refv)
-        );
         // No higher-order-of-higher-order: a stored fn type may not take or
         // return another function value.
         let hof = "fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = |x| 0  return 0 }";

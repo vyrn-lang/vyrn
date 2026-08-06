@@ -36,8 +36,11 @@ answer is wrong or absent.
 | stack | the frame | function exit |
 | owned heap (Path A) | `own::analyze` | block exit, `return`, `break`, `continue`, `?` |
 | region arena | `__vyrn_region_exit` | `region { }` exit |
-| slab + generation (Path B) | `release` | explicit, or block exit |
 | linear obligation | `movecheck` | compile time; the program must say where |
+
+There were six. **Path B — a slab of 65,536 generation-counted slots, reclaimed
+by `release` — is deleted (RFC-0090 M4, Phase 8e), and §6 below records what it
+was.** Five remain.
 
 Every allocation belongs to exactly one. That is what stops a double free: a
 concat inside a `region` draws from the arena and `own` skips it; a concat
@@ -186,27 +189,33 @@ loop that builds many values with one lifetime — is the case `push` excludes.
 
 ---
 
-## 6. Generational references — Path B
+## 6. ~~Generational references — Path B~~ — DELETED (RFC-0090 M4)
 
-`cell(v)` takes a slot from a fixed slab of 65536. A `Ref<T>` is `{slot, gen}`.
-Every `get`/`set` compares its generation against the slot's. `release` bumps the
-slot's generation and returns the slot to a free stack, so a stale reference fails
-the comparison.
+**This strategy no longer exists.** `cell(v)` took a slot from a fixed slab of
+65,536; a `Ref<T>` was `{slot, gen}`; every `get`/`set` compared its generation
+against the slot's. Phase 8e deleted the builtins, the type and the slab from all
+three engines.
 
-- Slot exhaustion traps. The bound is checked (`%oob` against 65536).
-- **6% of lowered check sites are elided** (RFC-0004 §5.3): 3 of 48 across the
-  corpus, all in one example. The other 45 are references that genuinely escape.
-- A surviving check is now a signal — it marks a reference the compiler could not
-  follow.
+**What replaced it is `std/slots` — the same three facts, in Vyrn.** A `Handle<T>`
+is slot + generation + container identity, and the check is an integer compare in
+`std/slots.vyrn` that a reader can open. It measured **2.02x faster** than the
+slab it replaces (RFC-0090 "M1 as landed"), because Path B boxed every payload
+through the allocator and a `Slots` keeps its payloads flat in an `Array<T>`.
 
-**Issue, and it is the known one.** A use-after-release is a **run-time trap**, not
-a compile error. That is the price RFC-0004 §5.2 accepted for aliasing with no
-annotations. The 94% number says the corpus reaches for a `Ref` exactly where
-single ownership cannot follow the value, so the trap is doing real work rather
-than covering for a weak analysis.
+The aliasing case did not go away and is not the compiler's business any more.
+`genref`, `freelist`, `linkedlist`, `tree`, `autorelease` and `slottable` — the
+six corpus programs that were written against `Ref<T>` — all still run, on
+`std/slots`, under three-way parity.
 
-The compile-time answer for the aliased case is region borrowing, and it is not
-designed. That is the open RFC.
+**The old issue, and what happened to it.** A use-after-release was a run-time
+trap rather than a compile error, and RFC-0004 §5.2 accepted that price for
+aliasing with no annotations. A dead-handle use is still a run-time trap, and it
+still has no location — see U5 below, which is narrowed rather than closed. What
+did change is that a `Slots` also catches a handle used against the WRONG
+container, which one global slab could not.
+
+The compile-time answer for the aliased case is still region borrowing, and it is
+still not designed.
 
 ---
 
@@ -538,21 +547,21 @@ the store names it.
 
 ---
 
-## U3. Path B never joined the subject-first surface
+## U3. ~~Path B never joined the subject-first surface~~ — CLOSED by deletion
 
-```vyrn
-let s = cell("hello")
-set(s, get(s) + " world")
-print(get(s))
-```
+`cell`, `get`, `set` and `release` were free functions in a language whose
+surface redesign had moved everything else to `sq.push(x)`, `sq[j]`, `sq.length`
+and `x.toString()`. Path B was in neither sweep.
 
-`cell`, `get`, `set` and `release` are free functions. There are **zero**
-method-form uses in `examples/` or `std/`.
+**RFC-0090 M4 deleted all four names, and its replacement is subject-first by
+construction**: `s[h]` and `s[h] = v` through `Index`, `for x in s` through
+`Iterate`, `s.copy()` through `Copy`. The two that are not — `insert(s, v)` and
+`remove(s, h)` — are free functions for a stated reason rather than an oversight:
+an impl method's receiver cannot be `modify` (RFC-0091, "The generic-container
+correction"). That is a live gap in the protocol surface, not in the memory
+model, and it is recorded where it belongs.
 
-The surface redesign moved collections to `sq.push(x)`, `sq[j]`, `sq.length` and
-`t.join()`. RFC-0062 migrated the remaining builtins to `x.toString()` and
-`s.byteLength`. Path B was in neither sweep, so the language's memory tool is
-written in the one style the language rejected — on the line above `s.length`.
+The four names are a user's again. `fn get(..)` compiles.
 
 ---
 
@@ -585,18 +594,29 @@ a bare `Array<String>`, `slotsContainer` steady on the same String in a `Slots`.
 
 ---
 
-## U5. The one runtime failure has no location
+## U5. The one runtime failure has no location — NARROWED, not closed
 
-```
-error: reference used after release
-```
+The message was `error: reference used after release`: no line, no binding name,
+no origin, emitted from hand-written IR that no source position reached. RFC-0006
+and RFC-0009 make diagnostics a stated feature of this language, and the memory
+model's only failure message was below that bar.
 
-No line, no binding name, no origin. The slab carries a per-slot pointer array
-(`__vyrn_cell_src_arr`), but it serves stream cursors rather than diagnostics.
+**RFC-0090 M4 deleted that message with the mechanism. The replacement is better
+in one way and no better in the other, and it is worth being exact about which.**
+A dead handle now hits `panic("slots: handle is not alive")` written in
+`std/slots.vyrn`. What improved: the wording belongs to a library author who can
+change it, and it names the container rather than a slab nothing could name.
 
-RFC-0006 and RFC-0009 make diagnostics a stated feature of this language:
-structured, accumulating, translatable. The memory model's only failure message is
-below that bar, and a user meets it at the moment they understand least.
+**What did NOT improve: there is still no line.** `panic` lowers to
+`@.panic.fmt`, which is `error: %s`, and it carries no source position on any
+engine. The gap moved from "the compiler's only memory failure has no location"
+to "`panic` has no location", which is a smaller and more general problem than
+the one this census opened with, and it belongs to RFC-0079 rather than here.
+
+**This entry was written the other way first, and the check caught it.** Phase 8e
+claimed `panic` carried a location because it is a language construct at a source
+site. Running `examples/slots.vyrn` printed `error: slots: handle is not alive`
+and nothing else. A claim about a diagnostic is worth running.
 
 ---
 
@@ -700,12 +720,15 @@ wasm section would delete the map.
 | 2 | **U2** no way to copy | the only fix for a use-after-free is a trick that leaks | one builtin, then a diagnostic names it |
 | 3 | **U10** the extern boundary cannot be declared | the one place the answer is required | falls out of §9a and §9b |
 | 4 | **U8** a declared container cannot be read | `impl Owned` is shipped and not yet usable | `read` as a real capability |
-| 5 | **U5** the failure message has no location | the worst moment to say the least | the slot already carries a pointer array |
+| 5 | **U5** the failure message has no location | the worst moment to say the least | NARROWED by RFC-0090 M4 — it is `panic`'s missing line now, not the memory model's, and it belongs to RFC-0079 |
 | 6 | **U4** an element is unreclaimable | the largest silent restriction | half closed (Phase 8b): a DECLARED container reaches its elements; a built-in `Array<T>` still cannot say it owns them |
-| 7 | **U3** Path B is not subject-first | inconsistent beside `s.length` | a co-naming sweep, RFC-0022 precedent |
-| 8 | **U7** `consume` and linearity are two things | the surface implies one | a decision, then RFC-0086 M3 |
-| 9 | **U6** the arena excludes its own case | the model's best tool is unreachable | RFC-0004 Q3, undesigned |
-| 10 | **U9** three layouts, one syntax | justified, but unannounced | U1 covers it |
+| 7 | **U7** `consume` and linearity are two things | the surface implies one | a decision, then RFC-0086 M3 |
+| 8 | **U6** the arena excludes its own case | the model's best tool is unreachable | RFC-0004 Q3, undesigned |
+| 9 | **U9** three layouts, one syntax | justified, but unannounced | U1 covers it |
+
+**U3 left this table entirely.** "Path B is not subject-first" was rank 7; the
+four names it was about are deleted (RFC-0090 M4) and the replacement is
+subject-first by construction. Ten gaps, nine now.
 
 **U1 and U2 change how the language feels.** U1 costs a printer over data that
 already exists. U2 costs one builtin. Neither needs a new analysis, and between

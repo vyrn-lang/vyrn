@@ -172,13 +172,6 @@ pub enum Val {
     Record(HashMap<String, Val>, Option<std::rc::Rc<str>>),
     /// A user-enum value (RFC-0002 §4): variant name + payload values.
     Enum(String, Vec<Val>),
-    /// A generational reference (RFC-0004 §4, Path B): a slab slot index plus
-    /// the generation captured when the reference was made. Access checks it
-    /// against the slot's current generation.
-    Ref {
-        slot: usize,
-        gen: u64,
-    },
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
     /// Copy-on-write, and — just as importantly — an IDENTITY.
     ///
@@ -538,13 +531,6 @@ pub enum FnVal {
     /// exists to catch. `coerce` sets it once, at the same boundary it stamps a
     /// record's name.
     Thunk(Box<FnVal>),
-}
-
-/// One slot in the interpreter's cell slab: a generation and the boxed value.
-#[derive(Debug, Clone)]
-struct CellSlot {
-    gen: u64,
-    val: Val,
 }
 
 /// A control signal carried in the error channel.
@@ -1852,15 +1838,11 @@ pub fn generate_interpreted(
 /// sink. Does NOT initialize module state — call [`Interp::init_globals`].
 fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'a>, String> {
     // The same ownership analysis the native backend uses to reclaim heap
-    // values at block exit. Freeing a string/array buffer is invisible from
-    // inside the language, but auto-*releasing* a reference cell is not: the
-    // slot returns to the slab (a million loop iterations fit in 65536 cells)
-    // and any illegally retained alias must trap. The interpreter executes the
-    // identical plan so both backends observe the same slab behavior.
+    // values at block exit. The interpreter executes the identical plan, so the
+    // three engines release the same bindings at the same points.
     // Identities are `Stmt` node addresses — unique program-wide, so the
     // per-function maps flatten into one.
     let ownership = crate::own::analyze(program);
-    let fresh_refs = ownership.fresh_refs;
     let droppable: HashMap<usize, crate::own::DropKind> =
         ownership.droppable.into_values().flatten().collect();
     let funcs: HashMap<&str, &Function> = program
@@ -1912,9 +1894,6 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         type_map,
         variants,
         droppable,
-        fresh_refs,
-        cells: RefCell::new(Vec::new()),
-        free: RefCell::new(Vec::new()),
         boxes: RefCell::new(HashMap::new()),
         next_box: std::cell::Cell::new(1),
         log_level: program.log_level,
@@ -1959,15 +1938,6 @@ struct Interp<'a> {
     /// Droppable `let` bindings (by `Stmt` node address) and their reclamation
     /// kind — the ownership analysis shared with the native backend.
     droppable: HashMap<usize, crate::own::DropKind>,
-    /// `get`/`set` reference arguments (by `Expr` node address) whose generation
-    /// check the ownership analysis proved cannot fail (RFC-0004 §5). The same
-    /// set both backends read; here the check it removes is a Rust comparison
-    /// rather than emitted code, but it is the same check on the same sites.
-    fresh_refs: std::collections::HashSet<usize>,
-    /// The generational-reference cell slab (RFC-0004 §4, Path B).
-    cells: RefCell<Vec<CellSlot>>,
-    /// Free slots available for reuse (their generation was already bumped).
-    free: RefCell<Vec<usize>>,
     /// The boxed streams (RFC-0075 M2c, re-hosted by RFC-0090 M3): what
     /// `boxStream` moved out of the program and `unboxStream` moves back in, keyed by
     /// the address it handed back. The compiled backends `malloc` one header and
@@ -2480,11 +2450,10 @@ impl<'a> Interp<'a> {
                 Ok(Flow::Normal) => {
                     if let Stmt::Let { name, .. } = stmt {
                         let release = match self.droppable.get(&(stmt as *const Stmt as usize)) {
-                            Some(crate::own::DropKind::ReleaseRef) => Some(None),
                             // A user type's `release` is ordinary Vyrn and may
                             // print, so this engine has to run it too — it is the
-                            // only auto-reclamation besides a cell that is
-                            // observable from inside the language.
+                            // only auto-reclamation that is observable from inside
+                            // the language.
                             Some(crate::own::DropKind::Release(f)) => Some(Some(f.clone())),
                             _ => None,
                         };
@@ -2534,11 +2503,7 @@ impl<'a> Interp<'a> {
                 Some(f) => {
                     self.call(f, std::slice::from_ref(&v))?;
                 }
-                None => {
-                    if let Val::Ref { slot, gen } = v {
-                        self.cell_release(slot, gen)?;
-                    }
-                }
+                None => {}
             }
         }
         Ok(())
@@ -3376,9 +3341,7 @@ impl<'a> Interp<'a> {
                     .find_map(|f| f.get(name))
                     .map(|s| s.v.clone())
                     .or_else(|| self.globals.borrow().get(name).map(|s| s.v.clone()));
-                if let Some(Val::Ref { slot, gen }) = v {
-                    self.cell_release(slot, gen)?;
-                }
+                let _ = v;
                 Ok(Flow::Normal)
             }
             Stmt::Expr(e) => {
@@ -4718,21 +4681,6 @@ impl<'a> Interp<'a> {
                         Val::Str(s) => Ok(Val::Option(parse_int(s).map(|n| Box::new(Val::Int(n))))),
                         other => Err(format!("parse of non-String {other:?}").into()),
                     },
-                    "cell" => self.cell_alloc(vals.remove(0)),
-                    "get" => {
-                        let (slot, gen) = self.as_ref(&vals[0])?;
-                        self.cell_get(slot, gen, self.fresh(&args[0]))
-                    }
-                    "set" => {
-                        let (slot, gen) = self.as_ref(&vals[0])?;
-                        self.cell_set(slot, gen, vals[1].clone(), self.fresh(&args[0]))?;
-                        Ok(Val::Unit)
-                    }
-                    "release" => {
-                        let (slot, gen) = self.as_ref(&vals[0])?;
-                        self.cell_release(slot, gen)?;
-                        Ok(Val::Unit)
-                    }
                     // `lineAt(bytes, off)` / `colAt(bytes, off)`, 1-based.
                     //
                     // Memoized on the buffer's contents: a scanner asks once per
@@ -6146,21 +6094,6 @@ impl<'a> Interp<'a> {
         None
     }
 
-    fn as_ref(&self, v: &Val) -> Result<(usize, u64), Ctrl> {
-        match v {
-            Val::Ref { slot, gen } => Ok((*slot, *gen)),
-            other => Err(format!("expected Ref, found {other:?}").into()),
-        }
-    }
-
-    // ---- generational-reference cell slab (RFC-0004 §4, Path B) ----------
-
-    /// The trap raised when a released reference is used — the whole point of
-    /// generational references (native prints a message and exits 1 to match).
-    fn stale() -> Ctrl {
-        Ctrl::Err("reference used after release".into())
-    }
-
     /// `unboxStream`/`pullAt` on an address that names no boxed stream (RFC-0090 M3).
     /// The compiled backends print this and exit 1; the wording is theirs.
     fn stream_int(v: &Val) -> Result<i64, Ctrl> {
@@ -6274,63 +6207,6 @@ impl<'a> Interp<'a> {
         Ok(Flow::Normal)
     }
 
-    fn cell_alloc(&self, v: Val) -> Result<Val, Ctrl> {
-        let mut cells = self.cells.borrow_mut();
-        if let Some(slot) = self.free.borrow_mut().pop() {
-            cells[slot].val = v; // generation already bumped at release
-            return Ok(Val::Ref {
-                slot,
-                gen: cells[slot].gen,
-            });
-        }
-        let slot = cells.len();
-        // The native slab is a fixed 65536-slot array; mirror its capacity (and
-        // its trap message) exactly rather than growing without bound.
-        if slot >= 65536 {
-            return Err("out of reference cells".into());
-        }
-        cells.push(CellSlot { gen: 0, val: v });
-        Ok(Val::Ref { slot, gen: 0 })
-    }
-
-    /// Whether the generation check on this reference argument was proved
-    /// unnecessary (RFC-0004 §5) — the binding owns its cell, nothing else can
-    /// reach it, and the only release is the compiler's, after this access.
-    fn fresh(&self, e: &Expr) -> bool {
-        self.fresh_refs.contains(&(e as *const Expr as usize))
-    }
-
-    fn cell_get(&self, slot: usize, gen: u64, fresh: bool) -> Result<Val, Ctrl> {
-        let cells = self.cells.borrow();
-        match cells.get(slot) {
-            Some(c) if fresh || c.gen == gen => Ok(c.val.clone()),
-            _ => Err(Self::stale()),
-        }
-    }
-
-    fn cell_set(&self, slot: usize, gen: u64, v: Val, fresh: bool) -> Result<(), Ctrl> {
-        let mut cells = self.cells.borrow_mut();
-        match cells.get_mut(slot) {
-            Some(c) if fresh || c.gen == gen => {
-                c.val = v;
-                Ok(())
-            }
-            _ => Err(Self::stale()),
-        }
-    }
-
-    fn cell_release(&self, slot: usize, gen: u64) -> Result<(), Ctrl> {
-        let mut cells = self.cells.borrow_mut();
-        match cells.get_mut(slot) {
-            Some(c) if c.gen == gen => {
-                c.gen += 1; // stale refs (old gen) now fail the check
-                drop(cells);
-                self.free.borrow_mut().push(slot);
-                Ok(())
-            }
-            _ => Err(Self::stale()),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -6795,31 +6671,6 @@ mod tests {
     }
 
     #[test]
-    fn generational_reference_roundtrip() {
-        let src = "fn main() -> Int64 { \
-                       let c = cell(10); set(c, get(c) + 5); \
-                       let v = get(c); release(c); return v; }";
-        assert_eq!(run(src).unwrap(), 15);
-    }
-
-    #[test]
-    fn linked_list_via_option_ref() {
-        // A nil-terminated recursive list: Option<Ref<Node>> holds each edge.
-        let src = "
-            type Node = { value: Int64, next: Option<Ref<Node>> };
-            fn sum(o: Option<Ref<Node>>) -> Int64 {
-                return match o { Some(r) => get(r).value + sum(get(r).next), None => 0 };
-            }
-            fn main() -> Int64 {
-                let n2 = cell(Node { value: 2, next: None });
-                let n1 = cell(Node { value: 1, next: Some(n2) });
-                return sum(Some(n1));
-            }
-        ";
-        assert_eq!(run(src).unwrap(), 3);
-    }
-
-    #[test]
     fn str_and_parse_roundtrip() {
         let src = "fn main() -> Int64 { \
                        let s = (0 - 123).toString(); \
@@ -6846,15 +6697,15 @@ mod tests {
 
     #[test]
     fn result_holds_non_int_payloads() {
-        // Ok carries a Ref, Err carries a String.
+        // Ok carries an Array, Err carries a String — neither rides in the word.
         let src = "
-            fn lookup(k: Int64) -> Result<Ref<Int64>, String> {
+            fn lookup(k: Int64) -> Result<Array<Int64>, String> {
                 if k == 0 { return Err(\"nope\"); }
-                return Ok(cell(k * 10));
+                let mut a: Array<Int64> = array(); a = push(a, k * 10); return Ok(a);
             }
             fn main() -> Int64 {
-                let a = match lookup(5) { Ok(r) => get(r), Err(e) => 0 - e.byteLength };
-                let b = match lookup(0) { Ok(r) => get(r), Err(e) => 0 - e.byteLength };
+                let a = match lookup(5) { Ok(r) => at(r, 0), Err(e) => 0 - e.byteLength };
+                let b = match lookup(0) { Ok(r) => at(r, 0), Err(e) => 0 - e.byteLength };
                 return a + b;  // 50 + (-4)
             }
         ";
@@ -6964,15 +6815,6 @@ mod tests {
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(1); \
                    drop a; return a.length; }";
         assert!(run(src).is_err());
-    }
-
-    #[test]
-    fn drop_of_reference_releases_it() {
-        // After `drop r`, the reference is released, so reading it would trap —
-        // but here we just confirm a well-formed drop runs and returns.
-        let src = "fn main() -> Int64 { let r = cell(7); let v = get(r); \
-                   drop r; return v; }";
-        assert_eq!(run(src).unwrap(), 7);
     }
 
     #[test]
@@ -7608,40 +7450,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_release_recycles_the_slab() {
-        // A non-escaping cell per iteration: the inferred release returns each
-        // slot to the slab, so 70k allocations fit in 65536 cells — the
-        // interpreter executes the same drop plan as the native backend.
-        let src = "fn main() -> Int64 { \
-                       let mut i = 0 \
-                       let mut last = 0 \
-                       while i < 70000 { \
-                           let c = cell(i) \
-                           set(c, get(c) + 1) \
-                           last = get(c) \
-                           i = i + 1 \
-                       } \
-                       if last == 70000 { return 1 } return 0 }";
-        assert_eq!(run(src).unwrap(), 1);
-    }
-
-    #[test]
-    fn slab_exhaustion_traps_like_native() {
-        // Cells that ESCAPE (aliased) are not auto-released; the 65537th live
-        // allocation must trap with the native slab's exact message.
-        let src = "fn main() -> Int64 { \
-                       let mut i = 0 \
-                       while i < 70000 { \
-                           let c = cell(1) \
-                           let d = c \
-                           i = i + 1 \
-                       } \
-                       return 0 }";
-        let e = run(src).unwrap_err();
-        assert_eq!(e, "out of reference cells");
-    }
-
-    #[test]
     fn validation_trap_message_is_canonical() {
         let src = "type Age = Int64 where value >= 18; \
                    fn mk(n: Int64) -> Age { return Age(n); } \
@@ -8117,83 +7925,6 @@ mod tests {
     fn file_sink_needs_a_string_path() {
         let src = "logging { sink: file(main) } fn main() -> Int64 { return 0; }";
         assert!(run(src).is_err());
-    }
-
-    #[test]
-    fn recursive_release_reclaims_the_slab() {
-        // Build+free a list many more times than the cell budget: only possible
-        // if `freeList` reclaims each node and its slot is reused.
-        let src = "
-            type Node = { value: Int64, next: Option<Ref<Node>> };
-            fn freeList(o: Option<Ref<Node>>) -> Int64 {
-                return match o { Some(r) => freeNode(r), None => 0 };
-            }
-            fn freeNode(r: Ref<Node>) -> Int64 {
-                let tail = get(r).next; release(r); return freeList(tail);
-            }
-            fn main() -> Int64 {
-                let mut i = 0;
-                while i < 200 {
-                    let mut head: Option<Ref<Node>> = None;
-                    let mut j = 3;
-                    while j > 0 { head = Some(cell(Node { value: j, next: head })); j = j - 1; }
-                    freeList(head);
-                    i = i + 1;
-                }
-                return 7;
-            }
-        ";
-        assert_eq!(run(src).unwrap(), 7);
-    }
-
-    #[test]
-    fn binary_tree_sum() {
-        let src = "
-            type Tree = { value: Int64, left: Option<Ref<Tree>>, right: Option<Ref<Tree>> };
-            fn tsum(o: Option<Ref<Tree>>) -> Int64 {
-                return match o {
-                    Some(r) => get(r).value + tsum(get(r).left) + tsum(get(r).right),
-                    None => 0,
-                };
-            }
-            fn leaf(v: Int64) -> Option<Ref<Tree>> {
-                return Some(cell(Tree { value: v, left: None, right: None }));
-            }
-            fn main() -> Int64 {
-                let root = Some(cell(Tree { value: 2, left: leaf(1), right: leaf(4) }));
-                return tsum(root);
-            }
-        ";
-        assert_eq!(run(src).unwrap(), 7);
-    }
-
-    #[test]
-    fn generic_reference_holds_any_type() {
-        // A Ref<String> mutated in place, then measured.
-        let src = "fn main() -> Int64 { let s = cell(\"ab\"); \
-                       set(s, get(s) + \"cd\"); \
-                       let n = get(s).byteLength; release(s); return n; }";
-        assert_eq!(run(src).unwrap(), 4);
-    }
-
-    #[test]
-    fn use_after_release_is_caught() {
-        // Access through a stale alias must fail the generation check, not dangle.
-        let src = "fn main() -> Int64 { \
-                       let c = cell(10); let d = c; release(c); return get(d); }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("used after release"), "{e}");
-    }
-
-    #[test]
-    fn released_slot_is_reused_with_a_new_generation() {
-        // After release, a fresh cell reuses the slot; the old reference is stale.
-        let ok = "fn main() -> Int64 { \
-                      let c = cell(1); release(c); let d = cell(2); return get(d); }";
-        assert_eq!(run(ok).unwrap(), 2);
-        let stale = "fn main() -> Int64 { \
-                        let c = cell(1); release(c); let d = cell(2); return get(c); }";
-        assert!(run(stale).unwrap_err().contains("used after release"));
     }
 
     #[test]

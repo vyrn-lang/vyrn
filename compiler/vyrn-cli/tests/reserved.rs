@@ -27,7 +27,10 @@ fn check(src: &str) -> String {
 /// return to 53 messages that merely happened to be shorter.
 #[test]
 fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
-    for name in ["at", "push", "slice", "len", "get", "cell", "pop", "toString"] {
+    // `get`, `set`, `cell` and `release` left this list with Path B (RFC-0090 M4).
+    // A user owns those four names now, which is the deletion visible from the
+    // surface: `fn get(..)` compiles.
+    for name in ["at", "push", "slice", "len", "pop", "toString"] {
         // The `print` is load-bearing: it is what links `std/num`, and linking a
         // std module that uses the builtin is what used to trigger the flood.
         let src = format!(

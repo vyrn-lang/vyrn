@@ -180,10 +180,12 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // stream leaves the call that made it — which is the point, since the host
     // then owes it the `close` above.
     ("serveStream", Syscall, "the host's socket: hand a producer to the accept loop, which pulls and closes it"),
-    ("cell", Memory, "the slot table: allocate a slot and a generation"),
-    ("get", Memory, "the slot table: generation-checked read"),
-    ("set", Memory, "the slot table: generation-checked write"),
-    ("release", Memory, "the slot table: invalidate the generation"),
+    // `cell`, `get`, `set` and `release` stood here — four `Memory` rows for
+    // Path B's slot table. RFC-0090 M4 deleted them, and this is the SECOND time
+    // this test named a change before anything else did (the first was `afree`).
+    // They did not become Vyrn routines: `std/slots` is a library a program
+    // imports, not a route the loader installs, so the four names are simply
+    // gone and the surface is four names smaller.
     // ---- Syscall: RFC-0077 M2j's twelve WASI imports ------------------------
     ("print", Syscall, "fd_write on stdout"),
     ("logger", Syscall, "RFC-0008: the handle for the five level methods below"),
@@ -529,7 +531,11 @@ fn the_census_is_the_code() {
     // Vyrn has no way to ask what a value is made of.
     // 93 -> 94 when RFC-0090 M3 re-hosted the stream cursor: `fromWrap` and
     // `pull` retired and `boxStream`, `unboxStream` and `pullAt` arrived.
-    assert_eq!(found.len(), 94, "the primitive core changed size");
+    // 94 -> 90 when RFC-0090 M4 deleted Path B. Four rows, and the largest single
+    // drop the census has recorded — the only other row that ever left was
+    // `afree`, alone. Nothing replaced them in the core: `std/slots` is a Vyrn
+    // library, so the primitive count went down by four and stayed down.
+    assert_eq!(found.len(), 90, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

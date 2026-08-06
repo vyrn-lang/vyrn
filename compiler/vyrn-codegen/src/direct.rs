@@ -354,7 +354,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         externs,
         droppable: ownership.droppable,
         owned: ownership.proto,
-        fresh_refs: ownership.fresh_refs,
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
         // Reserved only for a file sink, so every console-sink module — which is
@@ -851,11 +850,6 @@ struct Cx {
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
-    /// `get`/`set` reference arguments (by `Expr` node address) whose generation
-    /// check `own` proved cannot fail (RFC-0004 §5) — the same set, read with the
-    /// same key, as the textual backend's and the interpreter's. Flat rather than
-    /// keyed by function, because node addresses already are.
-    fresh_refs: std::collections::HashSet<usize>,
     /// RFC-0008's threshold, as an ordinal. Compile-time, and that is the point:
     /// with `logging { level: warn }` a `.debug(..)` call emits no write at all,
     /// which is what makes a disabled log site cost nothing on every engine. A
@@ -1028,7 +1022,7 @@ impl Cx {
         }
         match self.resolve(ty) {
             Type::Record(fs) => fs.iter().find_map(|f| self.ty_gap(&f.ty, depth + 1)),
-            Type::Option(i) | Type::Array(i) | Type::Ref(i) | Type::ArrayN(i, _) => {
+            Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) => {
                 self.ty_gap(&i, depth + 1)
             }
             Type::Result(a, b) | Type::Map(a, b) => {
@@ -1138,9 +1132,6 @@ fn stream_step_sig(elem: &Type) -> Type {
 /// RFC-0077 M6 the last two).
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Rel {
-    /// A `Ref<T>` binding — check the generation, free the payload, hand the slot
-    /// back.
-    Cell,
     /// A `Stream<T>` — its buffer if it is one, its cursor slot if it is a
     /// producer. The element type comes along because releasing a producer means
     /// CALLING its step, and a step is dispatched by element type (RFC-0090 M3).
@@ -1698,7 +1689,6 @@ impl Fn_<'_> {
         line: usize,
     ) -> Result<(), String> {
         match k {
-            Rel::Cell => self.emit_release(b, p, line),
             Rel::Stream(elem) => {
                 let elem = elem.clone();
                 self.stream_release(m, b, p, &elem, line)
@@ -1778,7 +1768,6 @@ impl Fn_<'_> {
         let t = self.cx.resolve(ty);
         Ok(match &t {
             Type::Str => Some(Rel::Str),
-            Type::Ref(_) => Some(Rel::Cell),
             Type::Stream(i) => Some(Rel::Stream((**i).clone())),
             Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
             Type::Map(..) => {
@@ -2607,8 +2596,8 @@ impl Fn_<'_> {
             // that is a counter and its trap — see `region_exit` for why the arena
             // itself is the allocator's ceiling rather than a region-shaped hole.
             //
-            // The body is an ordinary block, so its scope and its `ReleaseRef`
-            // frame come free; a region is one more frame the exit edges close, the
+            // The body is an ordinary block, so its scope and its release frame
+            // come free; a region is one more frame the exit edges close, the
             // same shape M2l gave the inferred release. No `if !terminated` guard
             // like the textual backend's: a fall-through exit after a `br` is code
             // wasm has already marked unreachable, which is the same argument
@@ -3937,18 +3926,6 @@ impl Fn_<'_> {
                         None => t,
                     }
                 }
-                // The generational reference (M2l). `cell` and `get` are inverses
-                // and typed as such; `set` and `release` carry nothing, which a
-                // `match` arm may still be — an arm that only mutates.
-                "cell" if args.len() == 1 => Type::Ref(Box::new(self.peek(&args[0], line)?)),
-                "get" if args.len() == 1 => {
-                    let r = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&r) {
-                        Type::Ref(i) => *i,
-                        other => return unsupported(&format!("a branch reading `{other}`"), line),
-                    }
-                }
-                "set" | "release" => Type::Unit,
                 "parse" if args.len() == 1 => Type::Option(Box::new(Type::Int)),
                 // M2l's rule: a builtin `call` types as it emits owes this a row,
                 // and these two are `call`'s newest. Both are 1-based positions, so
@@ -5390,77 +5367,6 @@ impl Fn_<'_> {
                 let to = ftypes::numeric_conv_target(name).unwrap();
                 self.expr_as(m, b, &args[0], &to)?;
                 return Ok(to);
-            }
-            // RFC-0004 §4's generational references (M2l). The slab and the
-            // generation check are `cell_runtime`'s; what belongs here is the
-            // BOXING, because only this file knows the payload's layout — the slab
-            // stores one `ptr` per slot and has no idea what it points at.
-            "cell" if args.len() == 1 => {
-                let vty = self.expr(m, b, &args[0])?;
-                if self.cx.resolve(&vty) == Type::Unit {
-                    return unsupported("a `cell` holding Unit", line);
-                }
-                self.box_value(b, &vty, line)?;
-                b.ins(&Instruction::I32WrapI64);
-                let payload = self.scratch(b, ValType::I32, 4);
-                b.ins(&Instruction::LocalSet(payload));
-                let rty = Type::Ref(Box::new(vty));
-                let Repr::Agg(l) = self.cx.repr(&rty, line)? else {
-                    return unsupported("a `Ref` that is not an aggregate", line);
-                };
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::LocalGet(payload));
-                b.ins(&Instruction::Call(self.cx.rt.cell_new));
-                b.slot(off);
-                return Ok(rty);
-            }
-            "get" | "set" | "release" if !args.is_empty() => {
-                let elem = self.ref_addr(m, b, &args[0], line)?;
-                if name == "release" {
-                    b.ins(&Instruction::Drop);
-                    return Ok(Type::Unit);
-                }
-                let r = self.cx.repr(&elem, line)?;
-                if name == "set" {
-                    if args.len() != 2 {
-                        return unsupported("`set` at this arity", line);
-                    }
-                    let dest = self.scratch(b, ValType::I32, 5);
-                    b.ins(&Instruction::LocalTee(dest));
-                    self.expr_as(m, b, &args[1], &elem)?;
-                    match &r {
-                        Repr::Scalar(_) => b.ins(&store_of(&self.cx.ll(&elem))),
-                        Repr::Agg(l) => {
-                            b.ins(&Instruction::I32Const(l.size as i32));
-                            b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
-                        }
-                        Repr::Unit => return unsupported("a `Ref` to Unit", line),
-                    };
-                    // The `LocalTee` above left the destination under the value, so
-                    // the store consumed it; nothing is left on the stack.
-                    return Ok(Type::Unit);
-                }
-                match &r {
-                    Repr::Scalar(_) => {
-                        b.ins(&load_of(&self.cx.ll(&elem), 0, self.cx.signed(&elem)));
-                    }
-                    // A by-VALUE read, like the LLVM backend's `load {ll}`: the
-                    // payload address is the slab's, and handing it out would make
-                    // `get(r)` an alias into the cell rather than a copy of it.
-                    Repr::Agg(l) => {
-                        let src = self.scratch(b, ValType::I32, 5);
-                        b.ins(&Instruction::LocalSet(src));
-                        let off = b.alloc(l.size, l.align);
-                        b.slot(off);
-                        b.ins(&Instruction::LocalGet(src));
-                        b.ins(&Instruction::I32Const(l.size as i32));
-                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-                        b.slot(off);
-                    }
-                    Repr::Unit => return unsupported("a `Ref` to Unit", line),
-                }
-                return Ok(elem);
             }
             // `t.join()` (RFC-0025). The task already ran, at the spawn point, so
             // there is nothing to wait for: this is a read out of its heap box.
@@ -8072,69 +7978,6 @@ impl Fn_<'_> {
     /// The binding a mutating array method is applied to. Anything else is a gap
     /// rather than a silent no-op: a `pop` whose shrink went nowhere is a wrong
     /// program.
-    /// Release the cell a `Ref` binding names: check the generation, free the
-    /// payload, then hand the slot back.
-    ///
-    /// `{ i64 slot, i64 generation }` whatever the `T`, so the layout is asked for
-    /// once with a stand-in rather than threaded through every caller. The payload
-    /// is one `malloc` at `cell(..)` whatever the `T` as well, so freeing it needs
-    /// no type either — which is why the generation check's own result is the
-    /// address handed to `free` rather than being dropped (M6).
-    fn emit_release(&mut self, b: &mut Frame, place: Place, line: usize) -> Result<(), String> {
-        let l = self.layout_of(&Type::Ref(Box::new(Type::Int)), line)?;
-        let r = self.scratch(b, ValType::I32, 6);
-        if place.addr(b, 0).is_none() {
-            return unsupported("a `Ref` held in a wasm local", line);
-        }
-        b.ins(&Instruction::LocalTee(r));
-        b.ins(&Instruction::I64Load(at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(r));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::Call(self.cx.rt.cell_addr));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(r));
-        b.ins(&Instruction::I64Load(at(l.fields[0])));
-        b.ins(&Instruction::Call(self.cx.rt.cell_release));
-        Ok(())
-    }
-
-    /// Evaluate a `Ref<T>` expression and leave its generation-checked payload
-    /// address on the stack, giving `T`.
-    ///
-    /// One helper for all four operations because the check is not optional on
-    /// most of them: `get`, `set`, `release` and a `drop` of a reference all trap
-    /// on a stale handle, which is the whole of what Path B buys over dangling.
-    ///
-    /// The exception is a `get`/`set` whose reference `own` proved fresh
-    /// (RFC-0004 §5). That one loads the payload address and reads no generation
-    /// at all — so a check left standing in the output marks a reference the
-    /// analysis could not follow, rather than merely one it was asked about.
-    fn ref_addr(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        e: &Expr,
-        line: usize,
-    ) -> Result<Type, String> {
-        let rty = self.expr(m, b, e)?;
-        let Type::Ref(elem) = self.cx.resolve(&rty) else {
-            return unsupported(&format!("a reference operation on `{rty}`"), line);
-        };
-        let l = self.layout_of(&rty, line)?;
-        if self.cx.fresh_refs.contains(&(e as *const Expr as usize)) {
-            b.ins(&Instruction::I64Load(at(l.fields[0])));
-            b.ins(&Instruction::Call(self.cx.rt.cell_ptr));
-            return Ok(*elem);
-        }
-        let r = self.scratch(b, ValType::I32, 6);
-        b.ins(&Instruction::LocalTee(r));
-        b.ins(&Instruction::I64Load(at(l.fields[0])));
-        b.ins(&Instruction::LocalGet(r));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::Call(self.cx.rt.cell_addr));
-        Ok(*elem)
-    }
-
     fn receiver(
         &mut self,
         args: &[Expr],
@@ -10370,18 +10213,6 @@ struct Rt {
     /// COMPUTED — `slot` appends — so an absent entry shifts the ones after it and
     /// nothing outside one compile depends on where they land.
     list_dir: Option<u32>,
-    // RFC-0004 §4's generational slot table (M2l). Three entries, not the LLVM
-    // prelude's five, because two of them only ever appear together: every
-    // `get`/`set`/`release`/`drop` checks the generation and then wants the
-    // payload address, so `cell_addr` IS the check.
-    cell_new: u32,
-    cell_addr: u32,
-    cell_release: u32,
-    /// The same payload address `cell_addr` returns, with no generation check —
-    /// for a `get`/`set` on a reference `own` proved fresh (RFC-0004 §5). It is
-    /// the second half of `cell_addr` and nothing else, so the two cannot drift
-    /// apart in what they compute, only in what they verify first.
-    cell_ptr: u32,
     /// RFC-0028's `Map<String, V>` key scan (M2l). The ONE piece of the map that
     /// is a function: `reserve`, `remove_at` and `keys_copy` are each reached from
     /// a single site and are a `malloc` plus a copy, so they are emitted there.
@@ -10505,10 +10336,6 @@ impl Rt {
             write_file: slot("write_file"),
             rename_file: slot("rename_file"),
             list_dir: gen_host.then(|| slot("list_dir")),
-            cell_new: slot("cell_new"),
-            cell_addr: slot("cell_addr"),
-            cell_release: slot("cell_release"),
-            cell_ptr: slot("cell_ptr"),
             map_find: slot("map_find"),
             regex_run: slot("regex_run"),
             parse_i64: slot("parse_i64"),
@@ -11506,7 +11333,6 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // order — the third removal it has seen, after `charcount` and `slice`.)
 
     io_runtime(m, &rt, wasi, gen);
-    cell_runtime(m, &rt);
 
     // map_find(keys, len, key) -> the entry's index, or -1.
     //
@@ -11866,219 +11692,6 @@ fn clamp_off(b: &mut Frame) {
         .ins(&Instruction::LocalGet(1))
         .ins(&Instruction::LocalSet(2))
         .ins(&Instruction::End);
-}
-
-/// How many generational reference cells the slab holds, and where each of its
-/// four parallel arrays starts inside one allocation.
-///
-/// 65536 is the LLVM prelude's number and it is not decoration: `autorelease` and
-/// `freelist` both run past it on purpose, so a slab of a different size would
-/// either exhaust where the other engines do not or hide a release that never
-/// fired. The four arrays are one `malloc` because the slab is allocated LAZILY
-/// — statically reserving 1 MiB would put a megabyte of zeroes in every module
-/// this backend emits, including `fib`.
-const CELLS: u32 = 65_536;
-const CELL_PTRS: u32 = CELLS * 8;
-const CELL_FREE: u32 = CELL_PTRS + CELLS * 4;
-const CELL_SLAB: u32 = CELL_FREE + CELLS * 4;
-
-/// The generational slot table (RFC-0004 §4, Path B), as three functions.
-///
-/// The LLVM build gets this from a hand-written IR prelude — it is not in the C
-/// shim at all, so there was never anything to import and it is the one runtime
-/// piece M2i's split could not have supplied. What it has to reproduce is the
-/// *behaviour*, not the shape: allocation hands out `{ slot, generation }`, a
-/// release bumps the slot's generation and pushes the slot on a LIFO free list,
-/// and every access compares the reference's captured generation against the
-/// slot's. A stale reference therefore fails a check instead of dangling, and
-/// reuse order matches the prelude's because both free lists are stacks.
-///
-/// The payload is NOT freed on release. This backend's allocator is a bump
-/// pointer (see `runtime`), so a free is unobservable — but the *slot* very much
-/// is: `autorelease.vyrn` puts a million allocations through 65536 slots.
-fn cell_runtime(m: &mut Module, rt: &Rt) {
-    let (malloc, trap) = (rt.malloc, rt.trap);
-    let uaf = rt.intern(m, "error: reference used after release\n");
-    let oom = rt.intern(m, "error: out of reference cells\n");
-    // slab base, next fresh slot, free-list height. Twelve bytes, versus the
-    // megabyte the arrays themselves would have cost as statics.
-    let st = m.reserve(12, 4);
-    let (slab, top) = (st, st + 4);
-    let freetop = st + 8;
-
-    // cell_new(dest, payload) — writes `{ i64 slot, i64 generation }` through
-    // `dest`, which is the aggregate ABI (M2b rule 3) rather than a special case:
-    // a Ref is an aggregate, so it travels as the address of a caller's slot.
-    let (s, p) = (2, 3);
-    rt.next_is(m, rt.cell_new);
-    m.func(&[ValType::I32, ValType::I32], &[], &[ValType::I32, ValType::I32], 0, |b| {
-        // Lazily allocate the slab on the first `cell`. Bump-allocated memory is
-        // fresh wasm pages, which are zero — so the generations start at 0 and
-        // the pointer array starts null, exactly as the prelude's
-        // `zeroinitializer` globals do.
-        b.ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I64Const(CELL_SLAB as i64))
-            .ins(&Instruction::Call(malloc))
-            .ins(&Instruction::I32Store(word()))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::I32Const(slab as i32)).ins(&Instruction::I32Load(word())).ins(&Instruction::LocalSet(p));
-        // A freed slot if there is one, else the next fresh one.
-        b.ins(&Instruction::I32Const(freetop as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(freetop as i32))
-            .ins(&Instruction::I32Const(freetop as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Store(word()))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(CELL_FREE as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(freetop as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalSet(s))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(top as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalTee(s))
-            .ins(&Instruction::I32Const(CELLS as i32))
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(oom as i32))
-            .ins(&Instruction::Call(trap))
-            .ins(&Instruction::End)
-            .ins(&Instruction::I32Const(top as i32))
-            .ins(&Instruction::LocalGet(s))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Store(word()))
-            .ins(&Instruction::End);
-        // ptr[slot] = payload
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(CELL_PTRS as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(s))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(1))
-            .ins(&Instruction::I32Store(word()));
-        // dest = { slot, gen[slot] }
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalGet(s))
-            .ins(&Instruction::I64ExtendI32U)
-            .ins(&Instruction::I64Store(word8()));
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Const(8))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(s))
-            .ins(&Instruction::I32Const(8))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I64Load(word8()))
-            .ins(&Instruction::I64Store(word8()));
-    });
-
-    // cell_addr(slot, generation) -> the payload's address, having checked the
-    // generation. The check and the load are one function because no caller wants
-    // one without the other — `release` included, which calls this for the check
-    // and drops the address.
-    let base = 2;
-    rt.next_is(m, rt.cell_addr);
-    m.func(&[ValType::I64, ValType::I64], &[ValType::I32], &[ValType::I32], 0, |b| {
-        b.ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Const(8))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(base))
-            .ins(&Instruction::I64Load(word8()))
-            .ins(&Instruction::LocalGet(1))
-            .ins(&Instruction::I64Ne)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(uaf as i32))
-            .ins(&Instruction::Call(trap))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(CELL_PTRS as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Load(word()));
-    });
-
-    // cell_release(slot) — bump the generation (invalidating every copy of the
-    // reference) and push the slot for reuse.
-    rt.next_is(m, rt.cell_release);
-    m.func(&[ValType::I64], &[], &[ValType::I32, ValType::I32], 0, |b| {
-        let (sl, g) = (1, 2);
-        b.ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalSet(sl));
-        b.ins(&Instruction::LocalGet(sl))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Const(8))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(g))
-            .ins(&Instruction::LocalGet(g))
-            .ins(&Instruction::I64Load(word8()))
-            .ins(&Instruction::I64Const(1))
-            .ins(&Instruction::I64Add)
-            .ins(&Instruction::I64Store(word8()));
-        b.ins(&Instruction::LocalGet(sl))
-            .ins(&Instruction::I32Const(CELL_FREE as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(freetop as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::I32Const(freetop as i32))
-            .ins(&Instruction::I32Const(freetop as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Store(word()));
-    });
-
-    // cell_ptr(slot) -> the payload's address, unchecked (RFC-0004 §5). The
-    // second half of `cell_addr` with the first half removed, for a reference the
-    // ownership analysis proved fresh: the binding owns its cell, nothing else can
-    // name it, and the only release is the one this block exits into.
-    rt.next_is(m, rt.cell_ptr);
-    m.func(&[ValType::I64], &[ValType::I32], &[], 0, |b| {
-        b.ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(CELL_PTRS as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Load(word()));
-    });
 }
 
 /// Rights and flags from the `wasi_snapshot_preview1` witx, named rather than
@@ -13685,7 +13298,6 @@ mod tests {
             gappend: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),
-            fresh_refs: std::collections::HashSet::new(),
             // RFC-0008's defaults, which are `Program`'s: nothing here logs.
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,

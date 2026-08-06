@@ -120,7 +120,8 @@ an identity is data, and data is checked where you read it — same as every
   still there. 8d halved the two element rows by making a trap cost one cold
   call instead of three inline ones.
 - **M4** — `cell`/`get`/`set`/`release` and the slab are deleted from all three
-  engines. The language's memory runtime is malloc, free, memcpy.
+  engines — **LANDED (Phase 8e).** See "M4 as landed" at the end. The language's
+  memory runtime is malloc, free and memcpy, checked rather than claimed.
 
 ## Measured predictions
 
@@ -523,3 +524,154 @@ recovered from `cells.owner` rather than stored. That works because there is
 exactly one cursor container in a program. It is the first place the model needed
 a container it could assume, and it is worth noticing before anything else copies
 the trick.
+
+---
+
+## M4 as landed — Path B is deleted
+
+**1,714 lines of code removed, 186 added, across 24 files** (the RFC edits are
+separate: +279 / -72). Path B is gone from every engine: no `cell`, `get`, `set`
+or `release`, no `Type::Ref`, no `Val::Ref`, no `DropKind::ReleaseRef`, no
+`Rel::Cell`, no `fresh_refs`, no §5.3 elision pass.
+The LLVM `CELL_RUNTIME` prelude, `direct.rs`'s `cell_runtime` and its four
+`CELLS` constants, and the interpreter's `CellSlot`/`cells`/`free` and four
+`cell_*` methods are all deleted. RFC-0004 gained §5.4, which records the
+reversal and where the evidence for it is.
+
+### The runtime, as a checked fact
+
+This RFC's thesis was "the language's runtime memory surface after this: malloc,
+free, memcpy". It was checked against the emitted output rather than asserted, and
+**the check found one more primitive and one surviving mechanism. Both are named
+here, because a slogan that needs a footnote is better written with the footnote
+in it.**
+
+The **native/LLVM** engine's emitted IR declares exactly these memory primitives:
+`@__vyrn_malloc`, `@__vyrn_realloc`, `@free`, `@llvm.memcpy`, and `@strcpy` /
+`@strcat`. So the honest list is **malloc, realloc, free and memcpy**. `realloc`
+is not an oversight and not a fifth mechanism: it is how an `Array` and a `String`
+grow in place, and RFC-0089 M1a's header is what makes an in-place grow legal.
+`strcpy`/`strcat` copy; they allocate nothing.
+
+Two wrappers sit above `malloc`/`free` and neither is a mechanism either:
+`@__vyrn_str_free` reads a String's header and returns on `cap == 0` (a
+data-segment literal), and `@__vyrn_stream_box`/`_unbox` is one `malloc` plus one
+`free` with a magic word between them (M3, above).
+
+**`region` survives, and it should.** It is RFC-0004 §4's Path A arena and this
+RFC never proposed removing it: a chain of `malloc`ed blocks, freed together at
+the block's end, over a thread-local stack of 64 chain heads. Two lifetimes, one
+allocator. What went is the second ALLOCATOR, not the second lifetime.
+
+The **direct wasm** engine has a bump allocator over `memory.grow` and a
+`memory.copy`. It has no `realloc`: a grow is a `malloc` plus a `memory.copy`. Its
+`free` is a no-op, which is a property of a bump allocator rather than of the
+memory model.
+
+The **interpreter** holds Rust values and reclaims them the way Rust does.
+
+**Nothing in any engine now allocates from a fixed table, checks a generation
+counter, or recycles a slot** — except `std/slots.vyrn`, which is ordinary Vyrn
+that a reader can open, and which is the point. The one remaining static table in
+the emitted output is `@__vyrn_utf8d`, the UTF-8 validator's DFA, and that is
+data.
+
+### Binary size
+
+The slab cost every module that never used it. Two measurements, before and
+after, same compiler build:
+
+| artefact | before | after | delta |
+|---|---|---|---|
+| `fib.wasm` (direct backend) | 1,590 B | 1,490 B | **-100 B** |
+| hello-world `.wasm` | 1,461 B | 1,361 B | **-100 B** |
+| `fib.ll` (LLVM IR) | 138,508 B | 135,957 B | **-2,551 B** |
+| hello-world `.ll` | 138,032 B | 135,481 B | **-2,551 B** |
+| `fib.exe` (native, linked) | 181,248 B | 181,248 B | 0 |
+| hello-world `.exe` | 181,760 B | 181,248 B | -512 B |
+
+**The direct backend's 100 bytes are the whole story there.** `fib` allocates
+nothing and never named a cell, and it carried four cell functions anyway. The
+1 MiB slab does NOT appear: it was one lazy `malloc` at first use, so a module
+that never allocated one never paid for it in bytes — the comment in `direct.rs`
+said so and was right.
+
+**The LLVM prelude's four `[65536 x i64]` arrays do not show in the linked
+binary, and that is not a null result.** They were `zeroinitializer` globals, so
+they lived in `.bss` and cost file bytes nowhere; the linker then dropped them as
+unreferenced. What they cost was 2,551 bytes of IR in every `.ll` this compiler
+emits, plus the compile time to parse and discard it. The one native binary that
+moved dropped 512 bytes, which is one section-alignment step.
+
+### The two corpus sites
+
+- **`examples/copy.vyrn`** — `handles()` pinned that a `Ref<T>` copies as the two
+  words it is. It now pins the same statement about a `Handle<T>` from
+  `std/slots`: a handle copies as the plain value it is, a store through the copy
+  is visible through the original, and the printed output is byte-identical.
+  `examples/slots.vyrn` already pinned the other half — that a whole `Slots`
+  copies as a SECOND container with a fresh identity.
+- **`examples/membench.vyrn`** — `cellChurn` is retired, and **its numbers are
+  not.** 18.29 µs against `std/slots`' 9.06 µs, 2.02x, is in "M1 as landed" above
+  and is now also quoted in the doc comment on `slabChurn`, which is where a
+  reader of the benchmark file will look for it. RFC-0004 §5.4 carries it a third
+  time, as the evidence for the reversal.
+
+### The primitive census, 94 to 90
+
+`vyrn-frontend/tests/primitives.rs` holds one row per builtin the interpreter
+implements in Rust, with the category and the reason. Four rows left: `cell`,
+`get`, `set` and `release`, all `Memory`, all "the slot table".
+
+**94 to 90 is the largest single drop the census has recorded.** The only other
+row that ever left was `afree`, alone, and it left for having no callers. These
+four left because the mechanism did.
+
+Nothing replaced them. `std/slots` is a library a program imports, not a route
+the loader installs, so this is not a builtin moving into Vyrn — it is four
+builtins ceasing to exist and a library appearing beside them. **The test named
+the change before anything else did**, which is the second time it has done that.
+
+### What the record got wrong
+
+- **The line count.** This RFC estimated 158 (LLVM prelude) + 212 (`cell_runtime`)
+  + ~200 (interpreter) + `own.rs`'s elision pass — about 570 to 770. The real
+  figure is **1,714 deleted lines of code**, more than double. The estimate
+  counted the three runtimes and missed everything around them: the `Type::Ref`
+  arms across fourteen files, the emission sites in both backends, and above all
+  the TESTS. Twenty-two unit tests in the checker and the interpreter existed to
+  hold the mechanism up, plus one parity pin and four census rows. A deletion is
+  wider than the thing being deleted, every time.
+
+  The four biggest files, deleted lines: `direct.rs` 389, `own.rs` 386,
+  `lib.rs` 283, `interp.rs` 280.
+
+- **`Leak::Mutable` was Path B's, not `mut`'s.** `own.rs` refused a declared
+  release for a `mut` binding, and Phase 8b narrowed that refusal to cells alone —
+  because `fresh_refs_in` read the same `droppable` set and a re-pointable binding
+  would have elided a check that could fail. Deleting Path B deleted the last
+  reason, so the refusal, the `Leak` variant and the `mutable` parameter of
+  `own::fate` all went with it. Nothing in `own.rs` asks whether a binding is `mut`
+  any more.
+
+- **`Gone::Aliased` looked dead and is not.** It fires when a whole place did not
+  move, which needs a type with a release kind that rule 1 leaves alone. `Ref<T>`
+  was the built-in case and the only one, so the reason "aliased by another
+  binding" stopped appearing in `vyrn why --memory` over the whole corpus. It is
+  still reachable, through `impl Owned for T` on a type that holds no heap of its
+  own — census U4's shape. The memory suite's `why` fixture now carries exactly
+  that, which is a better test than the cell was: it exercises the live path
+  instead of the built-in one.
+
+- **`movecheck::sinks` was three entries and is one.** It lists the builtins that
+  STORE an argument somewhere it outlives the call, and two of the three were
+  `("set", 1)` and `("cell", 0)`. What is left is `push`. The `release(c)` arm in
+  the same file — `drop` spelled as a call — went with them.
+
+- **Four names came back to the user.** `cell`, `get`, `set` and `release` left
+  `RESERVED`, so `fn get(..)` compiles now. `std/stream` renamed its cursor
+  accessors to `cursorGet`/`cursorSet` in Phase 8c *because* Path B held the short
+  names (see RFC-0075 "As landed — M3"). They are free again. Renaming back is an
+  API break for no gain, so it was not done — but the reason those functions have
+  the names they have no longer exists, and a future reader should know that.
+

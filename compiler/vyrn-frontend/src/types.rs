@@ -1024,7 +1024,6 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             Box::new(substitute(b, subst)),
         ),
         Type::Partial(b) => Type::Partial(Box::new(substitute(b, subst))),
-        Type::Ref(inner) => Type::Ref(Box::new(substitute(inner, subst))),
         Type::Array(inner) => Type::Array(Box::new(substitute(inner, subst))),
         Type::ArrayN(inner, n) => Type::ArrayN(Box::new(substitute(inner, subst)), *n),
         Type::SmallArray(inner, n) => Type::SmallArray(Box::new(substitute(inner, subst)), *n),

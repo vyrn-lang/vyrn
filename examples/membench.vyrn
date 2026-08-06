@@ -157,24 +157,6 @@ fn elemStore(n: Int64) -> Int64 {
     return xs[0]
 }
 
-/// Path B churn, in the shape RFC-0090 measured: insert, set, get, get, remove.
-///
-/// Each `cell` boxes its payload through the allocator and each `release`
-/// returns it, so this times a malloc and a free per iteration on top of four
-/// generation checks.
-fn cellChurn(n: Int64) -> Int64 {
-    let mut t = 0
-    let mut i = 0
-    while i < n {
-        let c = cell(i)
-        set(c, i + 1)
-        t = t + get(c) + get(c)
-        release(c)
-        i = i + 1
-    }
-    return t
-}
-
 /// The same five operations as handles over two `Array<Int64>` — RFC-0090's
 /// replacement for Path B, written in Vyrn with no compiler support.
 ///
@@ -187,10 +169,15 @@ fn cellChurn(n: Int64) -> Int64 {
 ///
 /// Read the number with one caveat. The handle is made and used in the same
 /// block, so the optimizer proves the four generation checks true and removes
-/// them; the `cell` row cannot fold its checks, because they happen inside
-/// opaque runtime calls. So this row times the allocation difference and not the
-/// check difference. A workload that stores a handle and uses it later pays the
-/// checks — and `cell` pays them plus a `malloc` and a `free`.
+/// them. So this row times an allocation difference and not a check difference.
+///
+/// **The `cellChurn` row it was written against is gone**, with the mechanism it
+/// measured (RFC-0090 M4, Phase 8e). Its numbers are not: `cell` ran the same
+/// five operations in **18.29 µs** where `std/slots` ran them in **9.06 µs** —
+/// **2.02x** — and RFC-0090 "M1 as landed" holds the table. That measurement is
+/// what decided the deletion, so it outlives the row that produced it. The two
+/// rows below still measure each other, which is the comparison that is still
+/// live: a hand-written slab against the std container.
 fn slabChurn(n: Int64) -> Int64 {
     let mut vals: Array<Int64> = []
     let mut gens: Array<Int64> = []
@@ -243,7 +230,8 @@ fn slabChurn(n: Int64) -> Int64 {
 /// `for x in s`.
 ///
 /// So this is the number the gate cares about: what the corpus pays for the
-/// container it will actually import, against `cell` which it replaces.
+/// container it will actually import. It replaced `cell`, whose own row retired
+/// with the mechanism — see the note on `slabChurn` for the measurement.
 fn slotsChurn(n: Int64) -> Int64 {
     let mut s: Slots<Int64> = newSlots()
     let mut t = 0
@@ -266,9 +254,9 @@ fn slotsChurn(n: Int64) -> Int64 {
 /// release runs once and disappears into the row. This one builds and abandons a
 /// slab per turn, so every turn pays the whole release: a walk of the table plus
 /// five `free`s. Sixteen elements, which is a small container — the cost per
-/// container is what a program that makes many short-lived ones pays, and it has
-/// no `cell` counterpart to compare against, because Path B has one global slab
-/// and no per-container lifetime at all.
+/// container is what a program that makes many short-lived ones pays, and it
+/// never had a Path B counterpart to compare against: a global slab has no
+/// per-container lifetime at all.
 fn slotsLifetime(n: Int64) -> Int64 {
     let mut t = 0
     let mut i = 0
@@ -349,7 +337,7 @@ fn words(n: Int64) -> Array<String> {
     return out
 }
 
-/// The stream rows (RFC-0090 M3). A cursor was a Path B cell until this phase
+/// The stream rows (RFC-0090 M3). A cursor was a Path B cell until Phase 8c
 /// and is a slot in `std/stream`'s own `Slots` now, so what changed is what
 /// every element and every release costs. Three shapes, because they are three
 /// different costs: pulling from a bare producer, pulling through a wrapper, and
@@ -466,10 +454,6 @@ bench "array iteration, 10000 elements" {
     blackBox(iterSum(blackBox(157), blackBox(oneToN(blackBox(64)))))
 }
 
-bench "cell insert/set/get/get/remove, 1000 times" {
-    blackBox(cellChurn(blackBox(1000)))
-}
-
 bench "handle insert/set/get/get/remove, 1000 times" {
     blackBox(slabChurn(blackBox(1000)))
 }
@@ -501,7 +485,6 @@ fn main() -> Int64 {
     print(spine(4).byteLength)
     print(globalSpine(4))
     print(pushChurn(4))
-    print(cellChurn(4))
     print(slabChurn(4))
     print(slotsChurn(4))
     print(copyString(4, pad()))

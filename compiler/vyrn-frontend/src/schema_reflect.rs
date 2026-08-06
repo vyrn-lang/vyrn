@@ -285,7 +285,6 @@ fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
             }
         }
         Type::Option(a)
-        | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)

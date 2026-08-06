@@ -11,11 +11,13 @@
 // payload of the variant it holds. It stops at two places, and both are
 // deliberate. A type that owns no heap IS its own copy — an `Int64`, a record of
 // numbers — so `copy` costs nothing there and means the same thing. And a
-// `Ref<T>` copies as the two words it is, so the copy names the same cell: `Ref`
-// is how a Vyrn program says "share this", and copying a handle does not
+// `Handle<T>` copies as the plain value it is, so the copy names the same slot:
+// a handle is how a Vyrn program says "share this", and copying one does not
 // un-share it.
 //
 // Every pair below mutates one side and prints both.
+
+import { Slots, newSlots, insert } from "std/slots"
 
 type Inner = { tag: String }
 
@@ -149,13 +151,19 @@ fn sums() {
         })
 }
 
-/// A handle copies as a handle. `set` through the copy is visible through the
-/// original, because both name one cell.
+/// A handle copies as a handle. A store through the copy is visible through the
+/// original, because both name one slot in one container.
+///
+/// This used to be a `Ref<T>` — Path B's two words, deleted by RFC-0090 M4. The
+/// statement did not change with the mechanism: a handle is a plain value, so
+/// copying one does not un-share what it names. What copies as a second CONTAINER
+/// is the `Slots` itself, and `examples/slots.vyrn` pins that half.
 fn handles() {
-    let c = cell(41)
-    let d = c.copy()
-    set(d, 42)
-    print(get(c))
+    let mut numbers: Slots<Int64> = newSlots()
+    let h = insert(numbers, 41)
+    let g = h.copy()
+    numbers[g] = 42
+    print(numbers[h])
 }
 
 /// A scalar copies to itself, and that is what makes `copy` usable in generic

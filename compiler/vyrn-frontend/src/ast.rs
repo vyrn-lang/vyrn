@@ -415,7 +415,6 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
             }
         }
         Type::Option(a)
-        | Type::Ref(a)
         | Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
@@ -723,13 +722,6 @@ pub enum Type {
     /// An application of a generic named type, e.g. `Box<Int>` — resolved by
     /// substituting the declaration's parameters with these arguments.
     App(String, Vec<Type>),
-    /// A generational reference to a mutable heap cell holding a `T` (RFC-0004
-    /// §4, Path B). Freely copyable; a stale reference is caught by a generation
-    /// check at each access instead of dangling. Lowers to `{ i64 slot, i64 gen }`
-    /// regardless of `T` (the payload is boxed), so `Ref<T>` is a fixed-size
-    /// handle — a record may hold a `Ref` to its own type without becoming
-    /// infinite.
-    Ref(Box<Type>),
     /// A growable heap array of `T` (RFC-0002-ish; a `Vec`). Lowers to
     /// `{ ptr data, i64 len, i64 cap }`. Used linearly: `push` returns the
     /// updated array (the backing buffer may be reallocated).
@@ -878,7 +870,6 @@ impl std::fmt::Display for Type {
                 let rendered: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "{n}<{}>", rendered.join(", "))
             }
-            Type::Ref(t) => write!(f, "Ref<{t}>"),
             Type::Array(t) => write!(f, "Array<{t}>"),
             Type::ArrayN(t, n) => write!(f, "Array<{t}, {n}>"),
             Type::SmallArray(t, n) => write!(f, "SmallArray<{t}, {n}>"),

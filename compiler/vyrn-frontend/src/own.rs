@@ -6,11 +6,7 @@
 //!   * **droppable** `let` bindings — ones that still own their value where
 //!     their block ends, so the backend releases them there; and
 //!   * whether the function **transfers** its result, which since rule 3 is the
-//!     return type and nothing else; and
-//!   * which `get`/`set` sites read a **provably fresh** reference, so their
-//!     generation check cannot fail and no engine emits it (RFC-0004 §5.3). That
-//!     one is a second pass over the finished `droppable` set — see
-//!     [`fresh_refs_in`].
+//!     return type and nothing else.
 //!
 //! **The rule is one sentence.** Every owning binding that was not moved out
 //! releases at scope exit. Both halves come from somewhere else, and that is the
@@ -44,10 +40,9 @@
 //! share a line). `movecheck` is keyed the same way and walks the same borrowed
 //! AST, which is what lets the two agree by construction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::ast::*;
-use crate::declared::Scopes;
 use crate::movecheck::{Gone, LetOwnership};
 
 /// How a droppable binding is reclaimed at block exit.
@@ -58,8 +53,6 @@ use crate::movecheck::{Gone, LetOwnership};
 pub enum DropKind {
     /// A dynamic `String` — `free` the buffer (Path A).
     FreeStr,
-    /// A generational reference — `release` the cell (Path B).
-    ReleaseRef,
     /// A growable array — free the backing buffer.
     FreeArr,
     /// A `SmallArray<T, N>` (RFC-0056) — free its `data` buffer, which is null
@@ -162,7 +155,6 @@ impl Owned {
         match crate::types::resolve(ty, &self.types) {
             // ---- the seeded built-in rows ----------------------------------
             Type::Str => Some(DropKind::FreeStr),
-            Type::Ref(_) => Some(DropKind::ReleaseRef),
             Type::Array(_) => Some(DropKind::FreeArr),
             Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
             Type::Map(..) => Some(DropKind::FreeMap),
@@ -298,8 +290,7 @@ pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<St
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
             | Type::Task(t)
-            | Type::Stream(t)
-            | Type::Ref(t) => deeper(t),
+            | Type::Stream(t) => deeper(t),
             Type::Result(a, b) | Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
             Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, seen)),
             Type::Enum(vs) => vs
@@ -334,9 +325,7 @@ pub fn must_use(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
 ///
 /// [`Owned::release_kind`] answers about the value's OWN storage; this asks
 /// about everything it reaches, because a record of Strings moves under rule 1
-/// even though releasing the record releases nothing today. `Ref<T>` is excluded
-/// on purpose: RFC-0089 §5 keeps it a freely copied handle, so `r.copy()` shares
-/// the cell rather than duplicating it.
+/// even though releasing the record releases nothing today.
 ///
 /// The depth limit is the same guard the rest of this file uses against a
 /// declaration that refers to itself; a type that deep is answered `false`, which
@@ -404,9 +393,6 @@ pub enum Leak {
     /// The binding names storage somebody else owns (rule 2). Carries what it
     /// is, in words.
     Borrowed(&'static str),
-    /// `mut`, and reclaimed by something the engines can observe — see the
-    /// [`Fate`] decision for why those two cannot yet move together.
-    Mutable,
     /// Lexically inside a `region` — the arena owns it.
     Region,
     /// A lambda or a `spawn` holds it, and either can outlive this block.
@@ -423,7 +409,6 @@ impl Leak {
         match self {
             Leak::NoRelease(_) => "the type owns no heap",
             Leak::Borrowed(_) => "it names somebody else's value",
-            Leak::Mutable => "`mut`, and observably reclaimed",
             Leak::Region => "inside a `region`",
             Leak::Captured { .. } => "captured by a lambda or a spawn",
             Leak::Aliased { .. } => "aliased by another binding",
@@ -437,7 +422,6 @@ impl std::fmt::Display for Leak {
         match self {
             Leak::NoRelease(ty) => write!(f, "the type {ty} owns no heap"),
             Leak::Borrowed(what) => write!(f, "it is {what}"),
-            Leak::Mutable => write!(f, "it is `mut`, and its release is observable"),
             Leak::Region => write!(f, "it is inside a `region` — the arena owns it"),
             Leak::Captured { line } => {
                 write!(f, "a lambda or a spawn captures it at line {line}")
@@ -493,11 +477,6 @@ pub struct Ownership {
     /// this analysis did NOT take. Recorded by the walker that decides, so the
     /// report and the emission cannot disagree (RFC-0087 U1).
     pub notes: HashMap<String, Vec<BindingNote>>,
-    /// The `Ref` argument of every `get`/`set` whose generation check cannot
-    /// fail, keyed by that argument expression's node address — RFC-0004 §5.3.
-    /// See [`fresh_refs_in`] for the condition. Flat across the program, because
-    /// node addresses are already unique.
-    pub fresh_refs: HashSet<usize>,
     /// The `Owned` table this analysis decided with. Handed out so a backend
     /// lowering an explicit `drop x` asks the SAME question the automatic path
     /// asked, instead of keeping a second copy of the answer.
@@ -514,10 +493,8 @@ pub fn analyze(program: &Program) -> Ownership {
 
     let mut droppable = HashMap::new();
     let mut notes = HashMap::new();
-    let mut fresh_refs = HashSet::new();
     let mut emit = |name: String, body: &Block| {
         let r = emit_body(body, &lets, &proto);
-        fresh_refs.extend(fresh_refs_in(body, &r.droppable));
         droppable.insert(name.clone(), r.droppable);
         notes.insert(name, r.notes);
     };
@@ -545,7 +522,6 @@ pub fn analyze(program: &Program) -> Ownership {
         owned_fns,
         droppable,
         notes,
-        fresh_refs,
         proto,
     }
 }
@@ -606,13 +582,9 @@ impl Emit<'_> {
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let {
-                name,
-                mutable,
-                value,
-                line,
-                ..
+                name, value, line, ..
             } => {
-                let fate = self.fate(s, *mutable, value);
+                let fate = self.fate(s, value);
                 if let Fate::Reclaimed(kind) = &fate {
                     self.droppable.insert(id(s), kind.clone());
                 }
@@ -730,7 +702,7 @@ impl Emit<'_> {
     /// The order of the questions is the order a reader needs them. What does
     /// the TYPE release? Nothing, and there is nothing more to say. Something,
     /// and then: does anything else own this storage?
-    fn fate(&self, s: &Stmt, mutable: bool, value: &Expr) -> Fate {
+    fn fate(&self, s: &Stmt, value: &Expr) -> Fate {
         let row = self.lets.get(&id(s));
         let bty = row.and_then(|r| r.ty.as_ref());
         let Some(kind) = bty.and_then(|t| self.proto.release_kind(t)) else {
@@ -745,26 +717,14 @@ impl Emit<'_> {
             return Fate::Static;
         }
         // A dynamic string inside a region is the arena's, and the two
-        // mechanisms partition every allocation — nothing is freed twice. A cell
-        // (`ReleaseRef`) lives in the separate slab, which the region does not
-        // touch, so it is released regardless.
+        // mechanisms partition every allocation — nothing is freed twice.
         if kind == DropKind::FreeStr && self.region_depth > 0 {
             return Fate::Leaked(Leak::Region);
         }
-        // A `mut` binding is released by its slot's FINAL value in both
-        // compiling backends. Phase 8b made the interpreter read the slot too,
-        // so a declared `release` — ordinary Vyrn that may print — now runs on
-        // the same value in all three engines and a `mut` container reclaims.
-        //
-        // A **cell** stays refused, and not for the old reason. `fresh_refs_in`
-        // reads this same `droppable` set to decide which generation check can
-        // never fail: a `let c = cell(..)` nothing aliases has one possible
-        // answer at every `get(c)`. That argument holds because `c` cannot be
-        // re-pointed. A `mut` one can, so admitting it here would elide a check
-        // that can fail. Path B goes in Phase 8e and takes the question with it.
-        if mutable && kind == DropKind::ReleaseRef {
-            return Fate::Leaked(Leak::Mutable);
-        }
+        // A `mut` binding is released by its slot's FINAL value in all three
+        // engines (Phase 8b), so a declared `release` — ordinary Vyrn that may
+        // print — runs on the same value everywhere and a `mut` container
+        // reclaims. Nothing refuses a binding for being `mut` any more.
         match row.and_then(|r| r.gone.as_ref()) {
             None => Fate::Reclaimed(kind),
             Some(Gone::Borrowed(what)) => Fate::Leaked(Leak::Borrowed(what)),
@@ -787,220 +747,11 @@ impl Emit<'_> {
     }
 }
 
-/// The `get`/`set` sites in `body` whose generation check can never fail
-/// (RFC-0004 §5), given that function's *final* `droppable` set.
-///
-/// A `let c = cell(..)` survives into `droppable` with [`DropKind::ReleaseRef`]
-/// only if nothing aliased it, nothing was handed it, and no `release(c)`
-/// reached it — `release` is deliberately outside the safe-read list in
-/// [`Analysis::visit`], so an explicit release removes the binding. The one
-/// release left is the compiler's own at block exit, which runs after every
-/// access in the block. So the reference a `get(c)`/`set(c, ..)` reads is the
-/// one `cell(..)` just handed out and its generation is the slot's: the check
-/// has one possible answer.
-///
-/// This has to be a second pass. `droppable` is order-independent only once it
-/// is final — a `get(c)` can precede the `release(c)` that escapes `c`.
-///
-/// The key is the *argument* expression's node address, which is what all three
-/// engines hold at their check site.
-fn fresh_refs_in(body: &Block, droppable: &HashMap<usize, DropKind>) -> HashSet<usize> {
-    let mut f = Fresh {
-        droppable,
-        scopes: Scopes::new(HashMap::new()),
-        out: HashSet::new(),
-    };
-    f.block(body);
-    f.out
-}
-
-struct Fresh<'a> {
-    droppable: &'a HashMap<usize, DropKind>,
-    /// Scope stack of every name in scope: a `let` maps to its node identity, a
-    /// pattern or loop binder to 0. Parameters are absent. Only a `let` can name
-    /// a droppable cell, so 0 and "absent" both answer "not fresh" — but the
-    /// binder still has to be *recorded*, or a `for c in refs` inside a block
-    /// that also has `let c = cell(..)` would resolve to the wrong one.
-    scopes: Scopes<usize>,
-    out: HashSet<usize>,
-}
-
-impl Fresh<'_> {
-    fn block(&mut self, b: &Block) {
-        self.scopes.enter();
-        for s in &b.stmts {
-            self.stmt(s);
-        }
-        self.scopes.exit();
-    }
-
-    /// Run `body` with `binders` in scope ahead of it (an `if let` arm, a `for`).
-    fn scoped(&mut self, binders: &[String], body: &Block) {
-        self.scopes.enter();
-        for n in binders {
-            self.scopes.bind(n, 0);
-        }
-        self.block(body);
-        self.scopes.exit();
-    }
-
-    /// Whether `name` is bound by a `let` that owns a cell nothing else can reach.
-    fn is_fresh_cell(&self, name: &str) -> bool {
-        self.scopes
-            .get(name)
-            .is_some_and(|key| self.droppable.get(key) == Some(&DropKind::ReleaseRef))
-    }
-
-    fn stmt(&mut self, s: &Stmt) {
-        match s {
-            Stmt::Let { name, value, .. } => {
-                self.expr(value);
-                self.scopes.bind(name, id(s));
-            }
-            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => self.expr(value),
-            Stmt::IndexSet { index, value, .. } => {
-                self.expr(index);
-                self.expr(value);
-            }
-            Stmt::Return { value, .. } => {
-                if let Some(e) = value {
-                    self.expr(e);
-                }
-            }
-            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.expr(cond);
-                self.block(then_block);
-                if let Some(eb) = else_block {
-                    self.block(eb);
-                }
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.expr(scrutinee);
-                self.scoped(&pattern_binders(pattern), then_block);
-                if let Some(eb) = else_block {
-                    self.block(eb);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                self.expr(cond);
-                self.block(body);
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                self.expr(iter);
-                self.scoped(std::slice::from_ref(var), body);
-            }
-            Stmt::Expr(e) => self.expr(e),
-            Stmt::Region { body, .. } => self.block(body),
-        }
-    }
-
-    fn expr(&mut self, e: &Expr) {
-        match e {
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-            Expr::Var { .. } => {}
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                self.expr(expr)
-            }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.expr(lhs);
-                self.expr(rhs);
-            }
-            Expr::Call { name, args, .. } => {
-                if (name == "get" || name == "set") && !args.is_empty() {
-                    if let Expr::Var { name: c, .. } = &args[0] {
-                        if self.is_fresh_cell(c) {
-                            self.out.insert(&args[0] as *const Expr as usize);
-                        }
-                    }
-                }
-                for a in args {
-                    self.expr(a);
-                }
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.expr(scrutinee);
-                for arm in arms {
-                    self.scopes.enter();
-                    for n in pattern_binders(&arm.pattern) {
-                        self.scopes.bind(&n, 0);
-                    }
-                    self.expr(&arm.body);
-                    self.scopes.exit();
-                }
-            }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.expr(cond);
-                self.expr(then_branch);
-                if let Some(eb) = else_branch {
-                    self.expr(eb);
-                }
-            }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    self.expr(v);
-                }
-            }
-            Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. }
-            | Expr::Spawn { args, .. } => {
-                for a in args {
-                    self.expr(a);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    self.expr(k);
-                    self.expr(v);
-                }
-            }
-            // A lambda body is NOT walked. Its `get(c)` on a captured cell runs
-            // whenever the closure runs, and a stored closure (RFC-0037) can run
-            // after the block that released `c` has exited. `visit` counts that
-            // `get` as a safe read, so `c` stays droppable — the block-exit
-            // release is what the check would then catch. Elide nothing there.
-            Expr::Lambda { .. } => {}
-        }
-    }
-}
-
-/// The names a refutable pattern binds.
-fn pattern_binders(p: &Pattern) -> Vec<String> {
-    match p {
-        Pattern::Some(n)
-        | Pattern::Ok(n)
-        | Pattern::Err(n)
-        | Pattern::Success(n)
-        | Pattern::Failure(n) => vec![n.clone()],
-        Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None => Vec::new(),
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::{lexer::lex, parser::parse};
+    use std::collections::HashSet;
 
     fn analyze_src(src: &str) -> (Ownership, Program) {
         let p = parse(lex(src).unwrap()).unwrap();
@@ -1040,24 +791,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn set_value_argument_escapes() {
-        // `set(c, s)` stores `s` in the cell, which outlives the block — `s`
-        // must NOT stay droppable (auto-freeing it would leave the cell
-        // dangling; the next `get` would be a use-after-free).
+    fn a_value_stored_into_an_outer_container_escapes() {
+        // `xs.push(s)` moves `s` into a container that outlives the inner block,
+        // so `s` must NOT stay droppable — freeing it would leave the array
+        // holding a dangling buffer. Only the array is released here.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let c = cell(\"seed\"); \
-                   if true { let s = a + b; set(c, s); } \
-                   print(get(c)); release(c); return 0; }";
-        assert_eq!(drop_count(src, "main"), 0);
-    }
-
-    #[test]
-    fn set_ref_argument_is_a_safe_read() {
-        // Passing an owned *cell* to `set`/`get` does not escape the cell
-        // binding — with no explicit `release`, it stays auto-releasable.
-        let src = "fn main() -> Int64 { let c = cell(1); set(c, 2); \
-                   let n = get(c); return n; }";
-        assert_eq!(drop_count(src, "main"), 1);
+                   let mut xs: Array<String> = []; \
+                   if true { let s = a + b; xs.push(s); } \
+                   return xs.length; }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
     }
 
     #[test]
@@ -1076,16 +818,6 @@ pub(crate) mod tests {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let mut s = a + b; return s.length; }";
         assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
-    }
-
-    /// The two kinds `mut` still excludes, and why: both compiling engines
-    /// release a `mut` slot's FINAL value, and the interpreter releases the value
-    /// captured at the `let`. A `free` cannot tell the two apart; a cell release
-    /// can, and a declared `release` prints.
-    #[test]
-    fn a_mutable_cell_is_not_auto_released() {
-        let src = "fn main() -> Int64 { let mut c = cell(1); c = cell(2); return get(c); }";
-        assert_eq!(drop_count(src, "main"), 0);
     }
 
     // ---- ownership transfer ---------------------------------------------
@@ -1174,15 +906,6 @@ pub(crate) mod tests {
         assert_eq!(drop_count(src, "main"), 2);
     }
 
-    /// A `Ref<T>` copy shares the cell (RFC-0089 §5), so calling it a transfer
-    /// would release one cell twice.
-    #[test]
-    fn copying_a_ref_is_not_a_transfer() {
-        let src = "fn main() -> Int64 { let c = cell(5); let d = c.copy(); \
-                   set(d, 7); return get(c); }";
-        assert_eq!(drop_count(src, "main"), 1);
-    }
-
     /// RFC-0089 rule 3, Phase 4c. A return is owned, so the return TYPE is the
     /// whole answer and the fixpoint that used to look for a borrowed return path
     /// asked a question the language now answers. `movecheck` refuses the
@@ -1230,36 +953,6 @@ pub(crate) mod tests {
             .unwrap_or_default()
     }
 
-    #[test]
-    fn non_escaping_cell_is_auto_released() {
-        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
-        assert_eq!(drop_kinds(src, "main"), vec![DropKind::ReleaseRef]);
-    }
-
-    #[test]
-    fn aliased_cell_is_not_auto_released() {
-        // `c` is aliased into `d`, so it must not be auto-released.
-        let src = "fn main() -> Int64 { let c = cell(1); let d = c; return get(d); }";
-        assert_eq!(drop_count(src, "main"), 0);
-    }
-
-    #[test]
-    fn explicitly_released_cell_is_not_auto_released() {
-        // Passing `c` to `release` hands the cell off — no auto-release on top,
-        // which would double-release and trap.
-        let src = "fn main() -> Int64 { let c = cell(1); let v = get(c); release(c); return v; }";
-        assert_eq!(drop_count(src, "main"), 0);
-    }
-
-    #[test]
-    fn cell_inside_region_is_still_released() {
-        // The cell slab is separate from the arena, so a region does not reclaim
-        // it — ownership still auto-releases the reference.
-        let src = "fn main() -> Int64 { let mut n = 0; \
-                   region { let c = cell(7); n = get(c); } return n; }";
-        assert_eq!(drop_kinds(src, "main"), vec![DropKind::ReleaseRef]);
-    }
-
     // ---- auto-free for mutable arrays -----------------------------------
 
     #[test]
@@ -1283,57 +976,6 @@ pub(crate) mod tests {
                    a = push(a, 1); return a; } fn main() -> Int64 { return 0; }";
         // `a` is moved out by the return, so it is not freed inside `build`.
         assert_eq!(drop_count(src, "build"), 0);
-    }
-
-    // ---- elided generation checks (RFC-0004 §5) --------------------------
-
-    fn fresh_count(src: &str) -> usize {
-        let p = parse(lex(src).unwrap()).unwrap();
-        analyze(&p).fresh_refs.len()
-    }
-
-    #[test]
-    fn accesses_to_a_non_escaping_cell_are_fresh() {
-        // `set`, the `get` inside it, and the trailing `get` — three sites.
-        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
-        assert_eq!(fresh_count(src), 3);
-    }
-
-    #[test]
-    fn an_explicit_release_makes_every_access_checked() {
-        // The `release` is textually last, so only the final `droppable` says so.
-        let src = "fn main() -> Int64 { let c = cell(1); let v = get(c); release(c); return v; }";
-        assert_eq!(fresh_count(src), 0);
-    }
-
-    #[test]
-    fn an_aliased_cell_stays_checked() {
-        let src = "fn main() -> Int64 { let c = cell(1); let d = c; return get(d) + get(c); }";
-        assert_eq!(fresh_count(src), 0);
-    }
-
-    #[test]
-    fn a_parameter_reference_stays_checked() {
-        let src = "fn bump(r: Ref<Int64>) -> Int64 { set(r, get(r) + 1); return get(r); } \
-                   fn main() -> Int64 { return 0; }";
-        assert_eq!(fresh_count(src), 0);
-    }
-
-    #[test]
-    fn a_loop_binder_does_not_borrow_an_outer_cells_freshness() {
-        // `c` inside the loop is the element, not the cell — resolving it to the
-        // outer `let` would elide a check on a reference this analysis never saw.
-        let src = "fn main() -> Int64 { let c = cell(1); let rs: Array<Ref<Int64>> = array(); \
-                   for c in rs { print(get(c)); } return get(c); }";
-        assert_eq!(fresh_count(src), 1);
-    }
-
-    #[test]
-    fn a_captured_cell_is_never_fresh_inside_the_lambda() {
-        // The closure can outlive the block that releases `c`.
-        let src = "fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x); } \
-                   fn main() -> Int64 { let c = cell(1); return apply(|x| x + get(c), 2); }";
-        assert_eq!(fresh_count(src), 0);
     }
 
     // ---- the type answers, not the expression (RFC-0086 M1) --------------
@@ -1646,11 +1288,4 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn factory_returning_cell_is_owned() {
-        let src =
-            "fn make(v: Int64) -> Ref<Int64> { return cell(v); } fn main() -> Int64 { return 0; }";
-        let (o, _) = analyze_src(src);
-        assert_eq!(o.owned_fns.get("make"), Some(&DropKind::ReleaseRef));
-    }
 }

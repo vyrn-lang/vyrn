@@ -185,6 +185,23 @@ fn the_wasm_heap_reaches_a_steady_state() {
 /// The census U1 program, plus one binding for every reason the printer names.
 const WHY_FIXTURE: &str = r#"type Sizer = fn(Int64) -> Int64
 
+// A type that DECLARES what it owns (RFC-0086 M1), holding no heap of its own.
+// Phase 8e's replacement for the two `cell` bindings this fixture used to carry:
+// a value rule 1 does not move, so a second name for one is an alias and neither
+// name may release it. `Ref<T>` was the built-in case and is gone; a declared
+// container is the live one, and it is census U4's own shape.
+type Ticket = { id: Int64 }
+
+impl Owned for Ticket {
+    fn release(self) {
+        print("released")
+    }
+}
+
+fn mint(n: Int64) -> Ticket {
+    return Ticket { id: n }
+}
+
 fn takes(s: String) -> Int64 {
     let named = s
     return named.byteLength
@@ -212,9 +229,8 @@ fn main() -> Int64 {
     let n = takes(given)
     let gone = a + b
     drop gone
-    let cellA = cell(1)
-    let cellB = cellA
-    let mut cellC = cell(2)
+    let ticket = mint(1)
+    let second = ticket
     let held = a + b
     let f: Sizer = |x| x + held.byteLength
     region {
@@ -226,7 +242,7 @@ fn main() -> Int64 {
     print(branch)
     print(alias)
     print(given)
-    return n + get(cellB) + get(cellC) + f(1)
+    return n + second.id + f(1)
 }
 "#;
 
@@ -268,11 +284,10 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     // Every reason the printer can still name.
     has("arena            NOT reclaimed — it is inside a `region`");
     has("c                NOT reclaimed — the type Bool owns no heap");
-    has("cellA            NOT reclaimed — another binding aliases it at line");
-    has("cellB            NOT reclaimed — it is a second name for a value it did not take");
-    has("cellC            NOT reclaimed — it is `mut`, and its release is observable");
     has("held             NOT reclaimed — a lambda or a spawn captures it at line");
     has("named            NOT reclaimed — it is a borrow of somebody else's value");
+    has("ticket           NOT reclaimed — another binding aliases it at line");
+    has("second           NOT reclaimed — it is a second name for a value it did not take");
     // Not leaks, and the report must not call them leaks.
     has("a                static data");
     has("gone             reclaimed by `drop` at line");

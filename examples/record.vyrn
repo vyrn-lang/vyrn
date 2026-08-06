@@ -3,9 +3,10 @@
 //
 // A value with more fields is usable where fewer are expected — width
 // subtyping, no cast (it lowers to a copy coercion natively). Records are
-// values: functions return updated copies; `Ref<Account>` cells cover shared
-// mutation. (Records with a `where` invariant are the exception: their fields
-// cannot be mutated in place — rebuild the value, which re-validates.)
+// values: functions return updated copies, and a `Slots<Account>` handle covers
+// shared mutation (RFC-0090). (Records with a `where` invariant are the
+// exception: their fields cannot be mutated in place — rebuild the value, which
+// re-validates.)
 
 type Named = { name: Int64 }
 type User = { name: Int64, age: Int64 }
