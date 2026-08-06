@@ -458,6 +458,16 @@ protocol** and **7a's place projections**. Until then a leak is a task and a
 double free is a bug in a language that promises memory safety, so the rows
 wait.
 
+**Phase 7a landed the projections and did NOT unblock these four.** That was
+expected of it and the expectation was wrong, which is worth writing down. A
+`place` member yields ONE place, as its last statement, rooted at `self`. Three
+of the four sites want something else: `tagOf` yields a different payload per
+variant, `gqlScanner` and `gqlParseQuery` build a record around the borrow. A
+per-variant yield makes the access site a branch over two places, and that is
+neither built nor designed. So the mechanism the rows wait on is narrower than
+"place projections": it is the **conditional** form, and it is still open. The
+`Copy` protocol (RFC-0091 M1) is untouched by 7a and remains the other half.
+
 Two smaller findings, recorded where they were found:
 
 - **`drop` of a projection is a double free the moment its place is released.**

@@ -1901,6 +1901,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     };
     let interp = Interp {
         funcs,
+        impls: &program.impls,
         types,
         contracts,
         type_map,
@@ -1939,6 +1940,9 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
 
 struct Interp<'a> {
     funcs: HashMap<&'a str, &'a Function>,
+    /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
+    /// projection is not a function, so `funcs` cannot answer for it.
+    impls: &'a [crate::ast::ImplBlock],
     types: HashMap<&'a str, &'a TypeDecl>,
     /// Module contracts (RFC-0071), keyed by name — the source `contractOf`
     /// reflects. Comptime-only, so this is read by exactly one builtin.
@@ -3348,6 +3352,59 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// `a[i]` where `a` is a container of the user's own (RFC-0091 M2): inline
+    /// the `place at` projection and read the place it yields.
+    ///
+    /// `Ok(None)` means "not a projection" — a builtin container, or a receiver
+    /// whose type is not known here — and the caller keeps the builtin path. A
+    /// builtin container deliberately does NOT come through here: the
+    /// interpreter has no lowering to re-express, so `at` stays its own
+    /// element-place primitive and only the two compiling backends carry the
+    /// `@slot` spelling the dogfood proof introduced.
+    /// The type key of an index receiver: its static type where one is known,
+    /// else the name a record value carries. Both, because a `let` of a record
+    /// literal may have no annotation to read and a record is otherwise
+    /// anonymous.
+    fn index_receiver_key(&self, recv: &Expr, scope: &mut Vec<Frame>) -> Option<String> {
+        if let Some(ty) = self.type_of(recv, scope) {
+            if let Some(k) = crate::types::type_key(&ty) {
+                return Some(k);
+            }
+        }
+        // Reading a plain binding has no side effect, so peeking is free. Any
+        // other receiver shape would have to be evaluated, and evaluating it
+        // twice is worse than not dispatching.
+        let Expr::Var { name, .. } = recv else {
+            return None;
+        };
+        let v = scope.iter().rev().find_map(|f| f.get(name))?;
+        self.val_type_key(&v.v)
+    }
+
+    fn project_read(
+        &self,
+        args: &[Expr],
+        scope: &mut Vec<Frame>,
+        line: usize,
+    ) -> Result<Option<Val>, Ctrl> {
+        let Some(key) = self.index_receiver_key(&args[0], scope) else {
+            return Ok(None);
+        };
+        let Some(f) = crate::project::lookup_by_key(self.impls, &key, "at") else {
+            return Ok(None);
+        };
+        let p = crate::project::inline(f, &args[0], &args[1..], line).map_err(Ctrl::Err)?;
+        scope.push(Frame::default());
+        let out = (|| -> Result<Val, Ctrl> {
+            for s in &p.prologue {
+                self.stmt(s, scope)?;
+            }
+            self.expr(&p.place, scope)
+        })();
+        scope.pop();
+        out.map(Some)
+    }
+
     fn expr(&self, expr: &Expr, scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {
         match expr {
             Expr::Int(n) => Ok(Val::Int(*n)),
@@ -3508,6 +3565,16 @@ impl<'a> Interp<'a> {
                 }
             }
             Expr::Call { name, args, line } => {
+                // `a[i]` on a container of the user's own (RFC-0091 M2): inline
+                // the `place at` projection here and read the place it yields.
+                // A builtin container falls through to `at` below, which is the
+                // element-place primitive under its old name — the interpreter
+                // has no lowering to delete, so it keeps one spelling.
+                if name == "at" && args.len() == 2 {
+                    if let Some(v) = self.project_read(args, scope, *line)? {
+                        return Ok(v);
+                    }
+                }
                 // Calling a `fn`-typed parameter (RFC-0023): `f(x)` where `f` is a
                 // local bound to a function value. Resolved before the builtins so
                 // a parameter always shadows a same-named builtin, and evaluated by

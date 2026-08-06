@@ -94,6 +94,48 @@ fn pushChurn(n: Int64) -> Int64 {
     return xs.length
 }
 
+/// `[0, 1, .., n-1]` — a buffer for the element benches to read.
+fn oneToN(n: Int64) -> Array<Int64> {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        xs.push(i)
+        i = i + 1
+    }
+    return xs
+}
+
+/// `a[i]` through the seeded `Index` projection (RFC-0091 M2).
+///
+/// The read used to be a hardcoded lowering keyed on `Type::Array`; it is now a
+/// projection the compiler looks up like any other. The mechanism claims to be
+/// free, so it is timed rather than asserted.
+fn elemRead(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + xs[i % xs.length]
+        i = i + 1
+    }
+    return t
+}
+
+/// `a[i] = v` through the same table.
+fn elemStore(n: Int64) -> Int64 {
+    let mut xs: Array<Int64> = []
+    let mut k = 0
+    while k < 64 {
+        xs.push(0)
+        k = k + 1
+    }
+    let mut i = 0
+    while i < n {
+        xs[i % 64] = i
+        i = i + 1
+    }
+    return xs[0]
+}
+
 /// Path B churn, in the shape RFC-0090 measured: insert, set, get, get, remove.
 ///
 /// Each `cell` boxes its payload through the allocator and each `release`
@@ -284,6 +326,14 @@ bench "splice 1000 Strings, copying loop" {
 
 bench "array push churn, 1000 pushes" {
     blackBox(pushChurn(blackBox(1000)))
+}
+
+bench "array element read, 10000 reads" {
+    blackBox(elemRead(blackBox(10000), blackBox(oneToN(blackBox(64)))))
+}
+
+bench "array element store, 10000 stores" {
+    blackBox(elemStore(blackBox(10000)))
 }
 
 bench "cell insert/set/get/get/remove, 1000 times" {

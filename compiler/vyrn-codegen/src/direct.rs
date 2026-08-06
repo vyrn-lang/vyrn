@@ -337,6 +337,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let ownership = vyrn_frontend::own::analyze(program);
     let mut cx = Cx {
         types,
+        impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
         gen,
@@ -746,8 +747,46 @@ struct FnBinding {
     cap_srcs: Vec<String>,
 }
 
+/// The index a store lowers with, after `place atSet` has had its say
+/// (RFC-0091 M2).
+///
+/// The seeded row yields `@slot(a, i)` — the binding's own element — so a
+/// builtin container's store is the index it was written with. A user
+/// container's projection may yield somewhere else entirely (`self.data[j]`),
+/// and writing *there* needs an address-of for an arbitrary place, which no
+/// backend has. Refused by name rather than mis-lowered; RFC-0091 M3 builds it.
+fn store_index(
+    impls: &[vyrn_frontend::ast::ImplBlock],
+    name: &str,
+    index: &Expr,
+    aty: &Type,
+) -> Result<Option<Expr>, String> {
+    let line = index.line();
+    let Some(f) = vyrn_frontend::project::for_site(impls, Some(aty), "atSet") else {
+        return Ok(None);
+    };
+    let recv = Expr::Var {
+        name: name.to_string(),
+        line,
+    };
+    let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
+    // `None` keeps the ORIGINAL index node, which is what the seeded row's
+    // identity inline asks for — see `Projection::is_identity`.
+    if p.is_identity(&recv, std::slice::from_ref(index)) {
+        return Ok(None);
+    }
+    Err(format!(
+        "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
+         somewhere other than this binding's own element, and storing through \
+         an arbitrary place is not lowered yet (RFC-0091 M3)"
+    ))
+}
+
 struct Cx {
     types: HashMap<String, TypeDecl>,
+    /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
+    /// projection is not a function, so `sigs` cannot answer for it.
+    impls: Vec<vyrn_frontend::ast::ImplBlock>,
     sigs: HashMap<String, Sig>,
     rt: Rt,
     /// The `vyrn_gen` host imports, on the generator path only (RFC-0076 M7).
@@ -2463,6 +2502,12 @@ impl Fn_<'_> {
             }
             Stmt::IndexSet { name, index, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
+                // The store dispatches exactly as the read does (RFC-0091 M2):
+                // `a[i] = v` asks the receiver's type for `place atSet`, and
+                // the seeded row yields this binding's own element.
+                let rty = self.cx.resolve(&ty);
+                let projected = store_index(&self.cx.impls, name, index, &rty)?;
+                let index = projected.as_ref().unwrap_or(index);
                 place
                     .addr(b, 0)
                     .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
@@ -3757,14 +3802,16 @@ impl Fn_<'_> {
                     _ => Type::Float32,
                 },
                 "@anyTrue" | "@allTrue" => Type::Bool,
-                "at" | "@swapRemove" if args.len() == 2 => {
+                // `@slot` is `vyrn_frontend::project::ELEM`, spelled out because
+                // a match pattern cannot name it through the path.
+                "at" | "@slot" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
                         Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
                         Type::Str => Type::IntN { bits: 8, signed: false },
                         // `m[k]` is an honest lookup, so it is an `Option` where
                         // an array index is the element (RFC-0028).
-                        Type::Map(_, v) if name == "at" => Type::Option(v),
+                        Type::Map(_, v) if name != "@swapRemove" => Type::Option(v),
                         other => return unsupported(&format!("a branch indexing `{other}`"), line),
                     }
                 }
@@ -5407,7 +5454,15 @@ impl Fn_<'_> {
                 return self.map_method(m, b, name, args, line)
             }
             "@keys" if args.len() == 1 => return self.map_method(m, b, name, args, line),
-            "at" if args.len() == 2 => return self.at(m, b, args, line),
+            // `a[i]` dispatches (RFC-0091 M2): it asks the receiver's type for a
+            // `place at` projection and inlines its body here. A builtin
+            // container takes the seeded row, whose body is `yield @slot(self,
+            // i)`, so the element lowering below is reached through the same
+            // table a user container reaches its own through.
+            "at" if args.len() == 2 => return self.project_at(m, b, args, line),
+            n if n == vyrn_frontend::project::ELEM && args.len() == 2 => {
+                return self.at(m, b, args, line)
+            }
             // `x.copy()` (RFC-0089 M1b) — the receiver's value, with heap of its
             // own. The reported type is the receiver's own.
             "@copy" if args.len() == 1 => {
@@ -7740,6 +7795,40 @@ impl Fn_<'_> {
     }
 
     /// `xs[i]` — bounds-checked, and a String's `s[i]` with it.
+    /// `a[i]` (RFC-0091 M2): resolve the `place at` projection for the
+    /// receiver's type, inline its body here, and read the place it yields.
+    ///
+    /// A builtin container resolves to the seeded row, which yields
+    /// `@slot(self, i)` with an empty prologue — the substitution is the
+    /// identity, so [`Fn_::at`] below emits exactly the bytes it emitted when
+    /// it was reached by name.
+    fn project_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        // Naming the receiver's type here costs a type probe, and the probe is
+        // `&mut self`. A program with no projection at all never needs it.
+        let recv = if vyrn_frontend::project::any(&self.cx.impls) {
+            self.peek(&args[0], line).ok()
+        } else {
+            None
+        };
+        let Some(f) = vyrn_frontend::project::for_site(&self.cx.impls, recv.as_ref(), "at") else {
+            return unsupported("indexing a receiver with no `place at`", line);
+        };
+        let p = vyrn_frontend::project::inline(f, &args[0], &args[1..], line)?;
+        if p.is_identity(&args[0], &args[1..]) {
+            return self.at(m, b, args, line);
+        }
+        for s in &p.prologue {
+            self.stmt(m, b, s)?;
+        }
+        self.expr(m, b, &p.place)
+    }
+
     fn at(
         &mut self,
         m: &mut Module,
@@ -13541,6 +13630,7 @@ mod tests {
     fn cx() -> Cx {
         Cx {
             types: HashMap::new(),
+            impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,
             variants: HashMap::new(),

@@ -1,0 +1,74 @@
+/// Place projections — a container of your own that indexes like a built-in
+/// (RFC-0091 M2).
+///
+/// A `place` member yields a place inside its receiver instead of returning a
+/// value. It is not a function: the access site inlines its body, so the borrow
+/// it hands out lives inside the caller's frame and cannot escape. Rule 2 of
+/// RFC-0089 holds by construction rather than by a check.
+///
+/// `Array` itself indexes through the same table. Its seeded row yields the one
+/// primitive the compiler keeps — the element place — and every `a[i]` in this
+/// file reaches it that way.
+
+/// A fixed window over a buffer. `w[i]` reads element `start + i`, so the
+/// window's own zero is somewhere in the middle of what it borrows.
+type Window = { data: Array<Int64>, start: Int64 }
+
+impl Index for Window {
+    /// The simple shape: yield straight into a field.
+    place at(read self, i: Int64) -> Int64 {
+        yield self.data[self.start + i]
+    }
+}
+
+/// Every `stride`-th element of a buffer — the SoA column shape.
+type Strided = { data: Array<Int64>, stride: Int64 }
+
+impl Index for Strided {
+    /// A prologue: the projection computes before it yields, and those
+    /// statements run in the caller's frame ahead of the access.
+    place at(read self, i: Int64) -> Int64 {
+        let k = i * self.stride
+        yield self.data[k]
+    }
+}
+
+/// A view that clamps instead of trapping. Its index parameter is read twice,
+/// so the access site binds it once and the index expression runs exactly once.
+type Clamped = { data: Array<Int64> }
+
+impl Index for Clamped {
+    place at(read self, i: Int64) -> Int64 {
+        let n = self.data.length
+        let j = if i < n { i } else { n - 1 }
+        yield self.data[j]
+    }
+}
+
+fn build(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        out.push(i * 10)
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    let w = Window { data: build(6), start: 2 }
+    print("window: \{w[0]} \{w[1]} \{w[3]}")
+
+    let s = Strided { data: build(9), stride: 3 }
+    print("strided: \{s[0]} \{s[1]} \{s[2]}")
+
+    let c = Clamped { data: build(3) }
+    print("clamped: \{c[0]} \{c[2]} \{c[9]}")
+
+    // The built-in path, unchanged: `a[i]` and `a[i] = v` reach the element
+    // place through the seeded row of the same table.
+    let mut a = build(4)
+    a[1] = 99
+    print("array: \{a[0]} \{a[1]} \{a[3]}")
+    return 0
+}

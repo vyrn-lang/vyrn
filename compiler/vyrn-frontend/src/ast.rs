@@ -514,6 +514,19 @@ pub struct ImplBlock {
     /// first time someone believed it.
     pub assoc: Vec<String>,
     pub methods: Vec<Function>,
+    /// `place at(read self, i: Int64) -> T { yield self.data[i] }` — the place
+    /// projections this impl declares (RFC-0091 M2). A projection is NOT a
+    /// function: it is never called, never flattened into
+    /// [`Program::functions`], and never emitted. Every access site inlines its
+    /// body, so the borrow it yields cannot outlive the access — rule 2 of
+    /// RFC-0089 holds by construction rather than by a check.
+    ///
+    /// The body is an ordinary [`Block`] whose last statement is a
+    /// [`Stmt::Return`]: that node IS the `yield`. Keeping the `yield` out of
+    /// the `Stmt` enum keeps ten exhaustive matches across the frontend and the
+    /// three backends unchanged, and the two forms never mix — the parser
+    /// accepts `yield` only inside a projection and `return` only outside one.
+    pub places: Vec<Function>,
     pub line: usize,
 }
 

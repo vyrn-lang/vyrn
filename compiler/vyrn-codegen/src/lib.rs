@@ -1321,7 +1321,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     if !program.globals.is_empty() {
         let mut gi = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
+            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -1417,7 +1417,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let sym = if f.name == "main" { "vyrn_main".to_string() } else { format!("vyrn_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
+            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -1449,7 +1449,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 f.type_params.iter().cloned().zip(type_args.iter().cloned()).collect();
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &subst,
-                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
+                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1473,7 +1473,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             }
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &inst.subst,
-                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
+                &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1505,7 +1505,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ));
         let mut dgen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
-            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals,
+            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -1622,6 +1622,9 @@ struct Gen<'a> {
     /// this type reclaimed", shared with the automatic block-exit path so an
     /// explicit `drop x` cannot free a different set.
     owned: &'a vyrn_frontend::own::Owned,
+    /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
+    /// projection is not a function, so `funcs` cannot answer for it.
+    impls: &'a [vyrn_frontend::ast::ImplBlock],
     /// `get`/`set` reference arguments (by `Expr` node address) whose generation
     /// check the ownership analysis proved cannot fail (RFC-0004 §5). Flat across
     /// the program, so a monomorphized instance reads it without a key — it
@@ -1767,6 +1770,7 @@ impl<'a> Gen<'a> {
         fresh_refs: &'a std::collections::HashSet<usize>,
         owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
+        impls: &'a [vyrn_frontend::ast::ImplBlock],
     ) -> Self {
         Gen {
             tmp: 0,
@@ -1792,6 +1796,7 @@ impl<'a> Gen<'a> {
             droppable_map,
             fresh_refs,
             owned,
+            impls,
             drop_stack: Vec::new(),
             loop_ctx: Vec::new(),
             log_level: DEFAULT_LOG_LEVEL,
@@ -3097,6 +3102,74 @@ impl<'a> Gen<'a> {
         slot
     }
 
+    /// The index a store lowers with, after `place atSet` has had its say
+    /// (RFC-0091 M2).
+    ///
+    /// The seeded row yields `@slot(a, i)` — the binding's own element — so a
+    /// builtin container's store is the index it was written with and the
+    /// lowering is unchanged. A user container's projection may yield somewhere
+    /// else entirely (`self.data[j]`), and writing *there* needs an address-of
+    /// for an arbitrary place, which no backend has. That is refused by name
+    /// rather than mis-lowered; RFC-0091 M3 builds it.
+    fn store_index(&self, name: &str, index: &Expr, aty: &Type) -> Result<Option<Expr>, String> {
+        let line = index.line();
+        let Some(f) = vyrn_frontend::project::for_site(self.impls, Some(aty), "atSet") else {
+            return Ok(None);
+        };
+        let recv = Expr::Var {
+            name: name.to_string(),
+            line,
+        };
+        let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
+        // `None` keeps the ORIGINAL index node, which is what the seeded row's
+        // identity inline asks for — see `Projection::is_identity`.
+        if p.is_identity(&recv, std::slice::from_ref(index)) {
+            return Ok(None);
+        }
+        Err(format!(
+            "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
+             somewhere other than this binding's own element, and storing through \
+             an arbitrary place is not lowered yet (RFC-0091 M3)"
+        ))
+    }
+
+    /// The static type of an index receiver, where this emitter can name one
+    /// without generating code for it (RFC-0091 M2).
+    ///
+    /// This backend has no general type-of-expression: it learns a type by
+    /// emitting the expression and reading the type back. That is fine for
+    /// lowering and useless for *dispatch*, which must choose before it emits.
+    /// So this covers the shapes a container receiver actually takes — a
+    /// binding, a field of one, an element of one, a call result — and answers
+    /// `None` for the rest, which then takes the seeded row exactly as it did
+    /// before projections existed.
+    fn static_ty(&self, e: &Expr) -> Option<Type> {
+        match e {
+            // The DECLARED type, never its base: an `impl` head names `Window`,
+            // and resolving to the record it aliases loses the name the impl is
+            // keyed by. Structure is resolved below, where it is destructured.
+            Expr::Var { name, .. } => self.lookup(name).map(|(_, t)| t),
+            Expr::Field { expr, field, .. } => {
+                let base = self.static_ty(expr)?;
+                match self.resolve(&base) {
+                    Type::Record(fs) => fs.iter().find(|f| &f.name == field).map(|f| f.ty.clone()),
+                    _ => None,
+                }
+            }
+            Expr::Call { name, args, .. }
+                if (name == "at" || name == vyrn_frontend::project::ELEM) && args.len() == 2 =>
+            {
+                let base = self.static_ty(&args[0])?;
+                match self.resolve(&base) {
+                    Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => Some(*i),
+                    _ => None,
+                }
+            }
+            Expr::Call { name, .. } => self.ret_types.get(name).cloned(),
+            _ => None,
+        }
+    }
+
     fn lookup(&self, name: &str) -> Option<(String, Type)> {
         for frame in self.scope.iter().rev() {
             for (n, slot, ty) in frame.iter().rev() {
@@ -3599,6 +3672,12 @@ impl<'a> Gen<'a> {
             // unchanged. A fixed `Array<T, N>` stores straight into its stack slot.
             Stmt::IndexSet { name, index, value, .. } => {
                 let (slot, aty) = self.lookup(name).ok_or_else(|| format!("unbound `{name}`"))?;
+                // The store dispatches exactly as the read does (RFC-0091 M2):
+                // `a[i] = v` asks the receiver's type for `place atSet`. The
+                // seeded row yields `@slot(a, i)` — this binding's own element —
+                // and the lowering below is unchanged.
+                let projected = self.store_index(name, index, &self.resolve(&aty))?;
+                let index = projected.as_ref().unwrap_or(index);
                 let bad_l = self.fresh_label("set.oob");
                 let ok_l = self.fresh_label("set.ok");
                 match self.resolve(&aty) {
@@ -8011,7 +8090,31 @@ impl<'a> Gen<'a> {
             self.emit(format!("{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {c}, 2"));
             return Ok((r2, Type::Array(Box::new(elem))));
         }
-        if name == "at" {
+        // `a[i]` is the DISPATCH site (RFC-0091 M2), not a lowering. It asks
+        // the receiver's type for a `place at` projection and inlines its body
+        // here. Every builtin container takes the seeded row, whose body is
+        // `yield @slot(self, i)` — so the element lowering below is reached
+        // through the same table a user container reaches its own through, and
+        // the emitted IR is the same text it was when this block was named
+        // `at`.
+        if name == "at" && args.len() == 2 {
+            let line = args[0].line();
+            let recv = self.static_ty(&args[0]);
+            let Some(f) = vyrn_frontend::project::for_site(self.impls, recv.as_ref(), "at") else {
+                return Err(format!("line {line}: no `place at` for this receiver"));
+            };
+            let p = vyrn_frontend::project::inline(f, &args[0], &args[1..], line)?;
+            // The identity inline lowers the ORIGINAL nodes; see
+            // `Projection::is_identity` for why the copies are not equivalent.
+            if p.is_identity(&args[0], &args[1..]) {
+                return self.gen_call(vyrn_frontend::project::ELEM, args);
+            }
+            for s in &p.prologue {
+                self.gen_stmt(s)?;
+            }
+            return self.gen_expr(&p.place);
+        }
+        if name == vyrn_frontend::project::ELEM {
             let (av, aty) = self.gen_expr(&args[0])?;
             let (iv, _) = self.gen_expr(&args[1])?;
             let bad_l = self.fresh_label("at.oob");
@@ -10495,7 +10598,7 @@ mod tests {
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
         let (rt, pt, pc, ty, va, sg, sb, fs, dm, fr, rg) = Default::default();
         let ow = vyrn_frontend::own::Owned::default();
-        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &fr, &ow, &rg);
+        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &fr, &ow, &rg, &[]);
         let rec = |fs: &[Type]| {
             Type::Record(
                 fs.iter()
