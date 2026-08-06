@@ -45,8 +45,9 @@
 //! | `selfAppend` | §4 / P1 | steady | Phase 5: a store releases the old value, and a module-state accumulator grows in place |
 //! | `fieldOverwrite` | §4 | steady | Phase 5: `r.field = v` releases the old field |
 //! | `returnedString` | §9a | leaks | an exported return hands JS a pointer nobody frees |
-//! | `optionString` | §14 | leaks | an aggregate does not own its payload |
-//! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed |
+//! | `optionString` | §14 | leaks | an `Option` owns its payload since Phase 5, but this row binds nothing to release |
+//! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed — it needs `Copy` as a protocol first |
+//! | `elementLeak` | U4 | leaks | a heap element inside a container; `drop` is whole-container |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
 //!
 //! **§10 does not reach this harness.** The census says a `spawn` frame is
@@ -394,13 +395,31 @@ const ROWS: &[Row] = &[
         export: "optionString",
         census: "§14",
         today: Shape::Leaks,
-        why: "an aggregate does not own its payload, so the String in the Option has no owner",
+        why: "an `Option` DOES own its payload since Phase 5, so `let o = maybe(x)` reclaims \
+              one. This row does not bind: `if let Some(s) = maybe(tag())` matches a value \
+              with no name, and releasing that needs the payload's escape from the arm to be \
+              tracked — the same gap that keeps a record and a user enum off the list. Phase \
+              5 built the release and took it out again; `own::release_kind` carries the \
+              measurement",
     },
     Row {
         export: "lambdaLoop",
         census: "§16",
         today: Shape::Leaks,
-        why: "a stored closure's capture block is never freed",
+        why: "a stored closure's capture block is never freed. Phase 5 measured the price of \
+              releasing it: a `fn` value would have to MOVE under rule 1, and the corpus \
+              copies them — `std/http`'s `httpCopy` hands `run` across into a new `Route` for \
+              each of seven combinators. The fix menu's `.copy()` cannot be written either: a \
+              capture block's layout is per TAG and chosen at run time, so `Copy` has to be a \
+              protocol first (RFC-0091 M1)",
+    },
+    Row {
+        export: "elementLeak",
+        census: "U4",
+        today: Shape::Leaks,
+        why: "a heap element inside a container. The array buffer is reclaimed and the String \
+              in it is not — releasing elements would free a `m.keys()` snapshot's pointers \
+              twice, because that snapshot holds the map's own",
     },
     Row {
         export: "returnedString",
@@ -516,6 +535,20 @@ export extern fn lambdaLoop() {{
         seen = seen + f(i)
         i = i + 1
     }}
+}}
+
+/// Census U4: a heap value inside a container. The array's own buffer is
+/// reclaimed at block exit and the String in it is not — `drop` is
+/// whole-container, and no mechanism in the language reaches an element.
+///
+/// Phase 5 deliberately left it there. A release that walked elements would
+/// free the same pointers twice wherever a shallow view exists: `m.keys()`
+/// hands back a FRESH buffer holding the map's OWN key pointers, so a keys
+/// snapshot released element by element frees what the map still holds.
+export extern fn elementLeak() {{
+    let mut xs: Array<String> = []
+    xs.push(tag() + "!")
+    seen = seen + Int64(xs.length)
 }}
 
 export extern fn returnedString() -> String {{

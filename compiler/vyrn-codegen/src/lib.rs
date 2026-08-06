@@ -2683,6 +2683,172 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Release the heap a value of `ty` holds — the mirror of
+    /// [`deep_copy`](Self::deep_copy), with `free` where that has `malloc`
+    /// (RFC-0089 rule 4, Phase 5).
+    ///
+    /// One walk, both directions: `copy` decided what a value's own storage IS,
+    /// and releasing that value gives exactly that storage back. Writing the two
+    /// as one shape is what keeps them from disagreeing about a boxed enum
+    /// payload — the encoding Phase 3 measured and the one a hand-written release
+    /// gets wrong.
+    ///
+    /// It does NOT release container ELEMENTS. `m.keys()` hands back a fresh
+    /// buffer holding the map's OWN key pointers, so releasing an
+    /// `Array<String>` element by element would free each of them twice. That is
+    /// census U4, and it stays open.
+    fn deep_release(&mut self, v: &str, ty: &Type) -> Result<(), String> {
+        // A type that declares its own release keeps it. Reaching past the
+        // declaration into its fields would reclaim what the declaration says it
+        // reclaims, in a different order, and without the print a user `release`
+        // may do.
+        if matches!(self.rel_kind(ty), Some(DropKind::Release(_))) || !self.owns_heap(ty) {
+            return Ok(());
+        }
+        match self.resolve(ty) {
+            Type::Str => {
+                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+                Ok(())
+            }
+            Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
+                let snap = self.snap_val(v, ty);
+                self.free_snap(&snap);
+                Ok(())
+            }
+            Type::Record(_) => {
+                let fields = self
+                    .record_fields(ty)
+                    .ok_or_else(|| format!("a release of a record with no fields: {ty:?}"))?;
+                let rll = self.llt(ty);
+                for (i, f) in fields.iter().enumerate() {
+                    if !self.owns_heap(&f.ty) {
+                        continue;
+                    }
+                    let fv = self.fresh_tmp();
+                    self.emit(format!("{fv} = extractvalue {rll} {v}, {i}"));
+                    self.deep_release(&fv, &f.ty)?;
+                }
+                Ok(())
+            }
+            Type::Option(inner) => self.release_sum(v, &[(Some("1"), *inner)]),
+            Type::Result(ok, err) => {
+                self.release_sum(v, &[(Some("1"), *ok), (Some("0"), *err)])
+            }
+            Type::Enum(vs) => self.release_enum(v, &vs),
+            // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
+            // The captures are one heap block, read by value at the construction
+            // site, and 0 when there are none — which `free` refuses. Census §16.
+            Type::Fn(..) => {
+                let p = self.fresh_tmp();
+                let q = self.fresh_tmp();
+                self.emit(format!("{p} = extractvalue {{ i64, i64 }} {v}, 1"));
+                self.emit(format!("{q} = inttoptr i64 {p} to ptr"));
+                self.emit(format!("call void @free(ptr {q})"));
+                Ok(())
+            }
+            // A fixed `[N x T]` is a container, so its elements are U4's
+            // question. A handle names something somebody else reclaims.
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether an `Option`/`Result` payload of type `ty` is a pointer to a block
+    /// rather than the word itself — the question [`decode_payload`] answers by
+    /// construction and a release has to ask out loud. Phase 3 measured that the
+    /// two encodings coexist: a `String` rides in the word, and a record does not.
+    fn payload_boxed(&mut self, ty: &Type) -> bool {
+        if matches!(
+            self.resolve(ty),
+            Type::Int | Type::Bool | Type::Str | Type::Ref(_) | Type::Fn(..)
+        ) {
+            return false;
+        }
+        self.llt(ty) != "i64"
+    }
+
+    /// The release of an `Option`/`Result`: one payload, selected by the `i1` tag.
+    fn release_sum(&mut self, v: &str, arms: &[(Option<&str>, Type)]) -> Result<(), String> {
+        let sll = "{ i1, i64, i64 }";
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
+        let end_l = self.fresh_label("rel.sum.end");
+        for (want, pty) in arms {
+            if !self.owns_heap(pty) {
+                continue;
+            }
+            let hit_l = self.fresh_label("rel.sum.hit");
+            let miss_l = self.fresh_label("rel.sum.miss");
+            let is = self.fresh_tmp();
+            self.emit(format!("{is} = icmp eq i1 {tag}, {}", want.unwrap_or("1")));
+            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
+            self.emit_label(&hit_l);
+            let w0 = self.fresh_tmp();
+            let w1 = self.fresh_tmp();
+            self.emit(format!("{w0} = extractvalue {sll} {v}, 1"));
+            self.emit(format!("{w1} = extractvalue {sll} {v}, 2"));
+            let pv = self.decode_payload(&w0, &w1, pty);
+            self.deep_release(&pv, pty)?;
+            // A payload wider than a word is a pointer to a block the sum owns,
+            // exactly as `encode_payload` allocated it.
+            if self.payload_boxed(pty) {
+                let q = self.fresh_tmp();
+                self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+                self.emit(format!("call void @free(ptr {q})"));
+            }
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&miss_l);
+        }
+        self.emit_term(format!("br label %{end_l}"));
+        self.emit_label(&end_l);
+        Ok(())
+    }
+
+    /// The release of a user enum: the payload slots of the live variant, and
+    /// only the ones whose declared type owns something. A wide payload is BOXED
+    /// here where an `Option`'s is not, so the block behind it is freed too —
+    /// `unbox_payload` is what says which.
+    fn release_enum(&mut self, v: &str, vs: &[EnumVariant]) -> Result<(), String> {
+        let arity = vs.iter().map(|x| x.payload.len()).max().unwrap_or(0);
+        let ell = enum_ll(arity);
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {ell} {v}, 0"));
+        let end_l = self.fresh_label("rel.enum.end");
+        for var in vs {
+            if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                continue;
+            }
+            let Some((n, _)) = self.variants.get(&var.name).cloned() else {
+                continue;
+            };
+            let hit_l = self.fresh_label("rel.enum.hit");
+            let miss_l = self.fresh_label("rel.enum.miss");
+            let is = self.fresh_tmp();
+            self.emit(format!("{is} = icmp eq i64 {tag}, {n}"));
+            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
+            self.emit_label(&hit_l);
+            for (j, pty) in var.payload.iter().enumerate() {
+                if !self.owns_heap(pty) {
+                    continue;
+                }
+                let w = self.fresh_tmp();
+                self.emit(format!("{w} = extractvalue {ell} {v}, {}", j + 1));
+                let pv = self.unbox_payload(&w, pty);
+                self.deep_release(&pv, pty)?;
+                // A boxed payload's block is the enum's too.
+                if pv != w {
+                    let q = self.fresh_tmp();
+                    self.emit(format!("{q} = inttoptr i64 {w} to ptr"));
+                    self.emit(format!("call void @free(ptr {q})"));
+                }
+            }
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&miss_l);
+        }
+        self.emit_term(format!("br label %{end_l}"));
+        self.emit_label(&end_l);
+        Ok(())
+    }
+
     /// The copy of an `Option`/`Result`: one payload, selected by the `i1` tag.
     /// `arms` pairs the tag value to test against with the payload types it
     /// carries (one, for both built-in sums).
@@ -3177,6 +3343,16 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{v} = extractvalue {{ ptr, ptr, i64, i64 }} {a}, 1"));
                 self.emit(format!("call void @free(ptr {k})"));
                 self.emit(format!("call void @free(ptr {v})"));
+            }
+            // Phase 5: an aggregate owns its places. The walk is the type.
+            DropKind::Deep(ty) => {
+                let ty = ty.clone();
+                let ll = self.llt(&ty);
+                let v = self.fresh_tmp();
+                self.emit(format!("{v} = load {ll}, ptr {slot}"));
+                // `emit_drop` is infallible by signature and this walk is not:
+                // a type it cannot name is a leak, never a wrong free.
+                let _ = self.deep_release(&v, &ty);
             }
             // RFC-0086 M1: the type declared `impl Owned`, so its own `release`
             // is what reclaims it. An ordinary call to an ordinary function —

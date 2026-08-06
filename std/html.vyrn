@@ -122,18 +122,25 @@ export fn on(event: String, handler: String, payload: String) -> Attr {
 /// Attach a list-identity `Key` to an element for the M2 keyed differ. Keying a
 /// non-element node is a no-op (the differ only reorders element children), so
 /// this is total.
-export fn keyed(k: String, node: Html) -> Html {
+///
+/// It takes the node. A return is owned (RFC-0089 rule 3), and three of the four
+/// arms hand the argument straight back, so a `read` parameter here would be a
+/// borrow the caller was told it still held. Every call site already passes a
+/// fresh node or a consumed loop element.
+export fn keyed(k: String, node: consume Html) -> Html {
     return match node {
         El(tag, attrs, kids) => El(tag, withKey(attrs, k), kids),
-        Empty => node,
-        Text(s) => node,
-        Raw(s) => node,
+        Empty => Empty,
+        Text(s) => Text(s),
+        Raw(s) => Raw(s),
     }
 }
 
-/// `attrs` with a trailing `Key(k)`.
-fn withKey(attrs: Array<Attr>, k: String) -> Array<Attr> {
-    let mut out = attrs.copy()
+/// `attrs` with a trailing `Key(k)`. It takes the array: the only caller owns
+/// the node it took the attributes out of, so a copy here would build a second
+/// buffer and abandon the first.
+fn withKey(attrs: consume Array<Attr>, k: String) -> Array<Attr> {
+    let mut out = attrs
     out.push(Key(k))
     return out
 }

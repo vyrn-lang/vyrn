@@ -76,6 +76,15 @@ pub enum DropKind {
     /// also keeps every drop SITE straight-line, which the early-return path
     /// (`emit_all_drops`, mid-block) depends on.
     CloseStream,
+    /// An aggregate the engines copy by value, holding heap in its places
+    /// (RFC-0089 rule 4, Phase 5): a record field, a fixed-array slot, an enum or
+    /// `Option`/`Result` payload, a closure's capture block. Releasing it releases
+    /// them, and the walk is the type — the same walk `copy` already makes, with
+    /// `free` where `copy` has `malloc`.
+    ///
+    /// It carries the type because the shape is not one offset list: a variant
+    /// payload is selected at run time, and only the live variant is released.
+    Deep(Type),
     /// A type that declared `impl Owned for T` (RFC-0086 M1) — call its own
     /// `release`, whose flattened name this carries. The compiler emits an
     /// ordinary call, so a third party's container is reclaimed by the same
@@ -169,20 +178,62 @@ impl Owned {
             | Type::Logger
             | Type::Never
             | Type::Err => None,
-            // ---- aggregates whose ELEMENTS are a safe leak (RFC-0011) -------
-            // Each of these is a value the engines copy; anything heap inside is
-            // owned by whoever produced it. A row here would free a payload the
-            // producer still holds, so the honest answer is that they own nothing
-            // of their own.
-            Type::Option(_)
-            | Type::Result(..)
-            | Type::Record(_)
+            // ---- aggregates that own their places (Phase 5) -----------------
+            // Until rule 2 landed, each of these was a value the engines copy
+            // whose heap contents belonged to whoever produced them, so a row
+            // here would have freed a payload the producer still held. Rule 2
+            // moved the answer: a store into a place is a move, a struct literal
+            // and a variant constructor ARE stores, and a borrow may not be
+            // stored at all. So an aggregate holds what it holds, and rule 4
+            // says releasing it releases those places.
+            //
+            // Two rows, and only two. Census §14 is the whole reason: `Option`
+            // and `Result` are how this language is told to write a fallible
+            // function, so a String built inside one had no owner in the
+            // RECOMMENDED style.
+            t @ (Type::Option(_) | Type::Result(..)) => {
+                owns_heap(&t, &self.types).then(|| DropKind::Deep(t))
+            }
+            // A **record** and a **user enum** are not on the list, and Phase 5
+            // measured why rather than assuming either way.
+            //
+            // Both hand their insides out as PROJECTIONS, and rule 3 records a
+            // returned projection as a LEND rather than refusing it.
+            // `check_return` says in its own words why: refusing one would demand
+            // `.copy()` from `Json` and `Html`, which refer to themselves and have
+            // no structural copy (M1b). Its note ends "so nothing releases them".
+            // A row here is exactly what releases them, and three parity runs
+            // said so within a minute of each other:
+            //
+            //   * `std/jsondec`'s `tagOf(v)` is `match v { JStr(s) => s, .. }` —
+            //     a `String` the `Json` still holds. The decoder read a freed
+            //     `note` field (`examples/jsondecbytes.vyrn`).
+            //   * `std/graphql`'s `gqlScanner(src)` returns a RECORD holding
+            //     `bytes(src)`, a view of the argument's buffer. Nothing sees
+            //     that lend at all: `returned_borrow` reads a returned place and
+            //     a struct literal is not one. Releasing the scanner freed the
+            //     source String through the wrong pointer (`examples/graphql.vyrn`).
+            //   * `gqlParseQuery` writes `GqlQuery { sels: set.sels }` — a field
+            //     read stored into a literal, which `store` allows and does not
+            //     count as a move, so two records name one buffer.
+            //
+            // The lend is recorded per `let` and not through a store or through a
+            // container, so the analysis cannot answer this today. RFC-0091 M1's
+            // `Copy` protocol and 7a's place projections are the two mechanisms
+            // that make the wider rule sayable — the same two `check_return`
+            // already names.
+            //
+            // A fixed `[N x T]` is off for census U4's reason: releasing an
+            // element would free a `m.keys()` snapshot's pointers twice. A `Fn`
+            // is off for the reason `owns_heap` records. A `Task<T>` is a handle
+            // to a frame the join owns, and `lazy T` IS `fn() -> T` (RFC-0085
+            // M4a) — `resolve` normally answers that, and this is the
+            // depth-limited fallback.
+            Type::Record(_)
             | Type::Enum(_)
             | Type::ArrayN(..)
-            | Type::Task(_)
             | Type::Fn(..)
-            // `lazy T` IS `fn() -> T` (RFC-0085 M4a); `resolve` normally answers
-            // that, and this is the depth-limited fallback.
+            | Type::Task(_)
             | Type::Lazy(_) => None,
             // ---- shapes that are not a runtime value ------------------------
             // A type operator survives only until `resolve` reaches its base, a
@@ -296,6 +347,25 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             Type::Result(a, b) => deeper(&a) || deeper(&b),
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
             Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(&deeper)),
+            // A stored function value (RFC-0037) is `{ tag, captures }` and the
+            // capture block IS heap — one `malloc` per evaluation of the lambda,
+            // which is census §16. It answers `false` anyway, and Phase 5
+            // measured the price of the honest answer before writing this down.
+            //
+            // Saying `true` makes a `Fn` move under rule 1, which is the only
+            // thing that would let rule 4 release it: a value that copies freely
+            // is two names for one block and the release runs twice. The corpus
+            // copies them. `std/http`'s `httpCopy` rebuilds a `Route` thirteen
+            // fields at a time and hands `run` and `whole` straight across, which
+            // is where seven combinators get their new route; `std/ui` and
+            // `examples/rest` do the same. Under rule 1 every one of those is a
+            // store of a borrowed `fn`, and the fix menu's second entry —
+            // `.copy()` — cannot be written: a capture block's layout is per
+            // TAG, chosen at run time, so a structural copy has nothing to
+            // measure. `Copy` as a protocol (RFC-0091 M1) is what gives it one.
+            //
+            // So §16 waits, and it waits on a mechanism rather than on effort.
+            Type::Fn(..) => false,
             _ => false,
         }
     }
@@ -1310,16 +1380,41 @@ pub(crate) mod tests {
         );
     }
 
+    /// A record is still reclaimed by nothing, and Phase 5 kept it that way with
+    /// a measurement rather than with the old argument. See
+    /// [`Owned::release_kind`] for the three parity failures a row here produced:
+    /// a record hands its insides out as projections, and rule 3 records a
+    /// returned projection as a lend rather than refusing it.
     #[test]
-    fn a_record_that_declares_nothing_is_reclaimed_by_nothing() {
-        // The mirror. A record is a value the engines copy; without a declared row
-        // there is nothing to call, and inventing one would free a field somebody
-        // else still holds.
+    fn a_record_is_reclaimed_by_nothing() {
         let src = "type Ring = { slots: Array<Int64> } \
                    fn make() -> Ring { return Ring { slots: [] } } \
                    fn main() -> Int64 { let r = make(); return 0; }";
         let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("make"));
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    /// Census §14, Phase 5. An `Option` and a `Result` DO own their payload:
+    /// the recommended way to write a fallible function was also the leaking one.
+    #[test]
+    fn a_sum_owns_its_payload() {
+        let src = "fn pick(a: String, b: String) -> Option<String> { return Some(a + b); } \
+                   fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
+                       let o = pick(a, b); return 0; }";
+        let (o, _) = analyze_src(src);
+        let want = DropKind::Deep(Type::Option(Box::new(Type::Str)));
+        assert_eq!(o.owned_fns.get("pick"), Some(&want));
+        assert_eq!(drop_kinds(src, "main"), vec![want]);
+    }
+
+    /// And an `Option` of a scalar is not, which keeps the rule about heap.
+    #[test]
+    fn a_sum_of_scalars_is_reclaimed_by_nothing() {
+        let src = "fn pick(n: Int64) -> Option<Int64> { return Some(n); } \
+                   fn main() -> Int64 { let o = pick(1); return 0; }";
+        let (o, _) = analyze_src(src);
+        assert!(!o.owned_fns.contains_key("pick"));
         assert_eq!(drop_count(src, "main"), 0);
     }
 

@@ -585,6 +585,19 @@ impl MoveCheck<'_> {
     ///
     /// First answer wins: a value can only leave once, and the earliest reason
     /// is the one a reader needs.
+    /// The reclamation row of the place `e` names, or 0 for anything else.
+    ///
+    /// A pattern binder over a place is a PROJECTION of it, so what becomes of
+    /// the binder becomes of the place:
+    /// `if let Some(resp) = answer { return Some(apply(resp)) }` hands `answer`'s
+    /// payload to the caller. Keying the binder to the place's row is what
+    /// records that. Without it Phase 5 released `answer` on the way out and the
+    /// caller read freed memory — `examples/rest.vyrn`, in one parity run.
+    fn place_key(&self, e: &Expr) -> usize {
+        let Some((root, _)) = place_path(e) else { return 0 };
+        self.nodes.borrow().get(&root).copied().unwrap_or(0)
+    }
+
     fn took(&self, name: &str, gone: Gone) {
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
@@ -1329,12 +1342,30 @@ impl MoveCheck<'_> {
                 scope.push(HashSet::new());
                 self.enter();
                 let (tys, borrow) = self.payload_binding(scrutinee, pattern);
+                // Census §14 asked for the scrutinee of an `if let` over a FRESH
+                // value to be a binding of its own — `if let Some(s) = f()`
+                // matches a heap value with no name, and nothing releases it.
+                // Phase 5 built that and took it out again: the payload escapes
+                // the arm as a PROJECTION (`out.push(v.name)`) or through a call,
+                // and neither is recorded against the scrutinee, so the release
+                // freed what the arm had handed on. `std/contract`'s `headOf` read
+                // a cut String out of a freed buffer within one run of
+                // `examples/vyxdemo.vyrn`. It is the same gap that keeps a record
+                // and a user enum off `own::release_kind`'s list, and it closes
+                // with the same two mechanisms.
+                //
+                // A binder over a PLACE is keyed to that place's row, which is a
+                // different question and one this pass can answer.
+                let key = self.place_key(scrutinee);
                 for (i, b) in pattern_bindings(pattern).into_iter().enumerate() {
                     scope.last_mut().unwrap().insert(b.to_string());
                     // Recording it is the point: an unrecorded binder falls
                     // through to whatever the enclosing scope calls that name
                     // (`own.rs`'s shadowing lesson).
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                    if key != 0 {
+                        self.nodes.borrow_mut().bind(b, key);
+                    }
                 }
                 let then_div = self.block(then_block, &mut then_c, scope);
                 self.exit();
@@ -1679,9 +1710,13 @@ impl MoveCheck<'_> {
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
+                    let key = self.place_key(scrutinee);
                     for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         scope.last_mut().unwrap().insert(b.to_string());
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                        if key != 0 {
+                            self.nodes.borrow_mut().bind(b, key);
+                        }
                     }
                     let r = self.expr(&arm.body, &mut c, scope);
                     self.exit();

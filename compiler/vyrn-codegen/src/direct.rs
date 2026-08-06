@@ -1099,6 +1099,12 @@ enum Rel {
     /// carrying the type would mean asking `layout_of` a second time at the
     /// release — the place a wrong answer is silent.
     Buffers(Vec<u32>),
+    /// An aggregate the engines copy by value, holding heap in its places
+    /// (RFC-0089 rule 4, Phase 5): a record field, an enum or `Option`/`Result`
+    /// payload, a closure's capture block. The walk is the type, so the type is
+    /// what this carries — a variant payload is chosen at run time and only the
+    /// live one is released.
+    Deep(Type),
     /// A type that declared `impl Owned` (RFC-0086 M1) — call the `release` it
     /// declared, whose flattened name this carries. The receiver's own type, so
     /// the call goes through the ordinary path rather than a second ABI.
@@ -1673,6 +1679,13 @@ impl Fn_<'_> {
                 }
                 Ok(())
             }
+            // The walk is the type, and it needs an address: an aggregate in a
+            // wasm local IS its address, and everything else has one.
+            Rel::Deep(ty) => {
+                let a = self.addr_local(b, p, 0);
+                let t = ty.clone();
+                self.rel_at(b, a, &t, line)
+            }
             // The receiver is parked under a reserved name so the ordinary call
             // path finds it as it finds any argument — the same trick `?` uses
             // for `@try` — and the release is then just a call.
@@ -1716,8 +1729,180 @@ impl Fn_<'_> {
             // null until the array spills, which is exactly the case `free`
             // refuses. The inline slots need no reclamation.
             Type::SmallArray(..) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[2]])),
+            // Phase 5: an aggregate owns its places.
+            Type::Option(_) | Type::Result(..) if self.owns_heap(&t) =>
+            {
+                Some(Rel::Deep(t))
+            }
             _ => None,
         })
+    }
+
+    /// Release the heap the value at `a` holds — the mirror of [`Fn_::copy_at`],
+    /// with `free` where that has `malloc`.
+    ///
+    /// One walk, both directions: `copy` decided what a value's own storage IS,
+    /// and a release of that value gives exactly that storage back. Writing the
+    /// two as one shape is what keeps them from disagreeing about a boxed enum
+    /// payload, which is the encoding Phase 3 measured and the one a hand-written
+    /// release gets wrong.
+    ///
+    /// It does NOT release container ELEMENTS. `m.keys()` hands back a fresh
+    /// buffer holding the map's OWN key pointers, so releasing an `Array<String>`
+    /// element by element would free each of them twice. That is census U4, and
+    /// it stays open for the phase that gives a shallow view a name.
+    fn rel_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
+        // A type that declares its own release keeps it. Reaching past the
+        // declaration into its fields would reclaim what the declaration says it
+        // reclaims, in a different order, and without the print a user `release`
+        // may do — and the interpreter runs the declared one only at a `let`.
+        if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Release(_))) {
+            return Ok(());
+        }
+        if !self.owns_heap(ty) {
+            return Ok(());
+        }
+        match self.cx.resolve(ty) {
+            Type::Str => {
+                b.ins(&Instruction::LocalGet(a)).ins(&Instruction::I32Load(word()));
+                str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
+                let offs = match self.rel_for(ty, line)? {
+                    Some(Rel::Buffers(o)) => o,
+                    _ => return Ok(()),
+                };
+                for off in offs {
+                    b.ins(&Instruction::LocalGet(a)).ins(&Instruction::I32Load(word_at(off)));
+                    b.ins(&Instruction::Call(self.cx.rt.free));
+                }
+                Ok(())
+            }
+            Type::Record(_) => {
+                let l = self.layout_of(ty, line)?;
+                let fields = self
+                    .cx
+                    .fields(ty)
+                    .ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
+                for (i, f) in fields.iter().enumerate() {
+                    if !self.owns_heap(&f.ty) {
+                        continue;
+                    }
+                    let p = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                    b.ins(&Instruction::I32Add);
+                    b.ins(&Instruction::LocalSet(p));
+                    self.rel_at(b, p, &f.ty, line)?;
+                }
+                Ok(())
+            }
+            Type::Option(inner) => {
+                let l = self.layout_of(ty, line)?;
+                let w = self.word2(&inner)?;
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load8U(byte()));
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.rel_word(b, a, l.fields[1], &inner, w, line)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                Ok(())
+            }
+            Type::Result(ok, err) => {
+                let l = self.layout_of(ty, line)?;
+                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load8U(byte()));
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.rel_word(b, a, l.fields[1], &ok, wo, line)?;
+                b.ins(&Instruction::Else);
+                self.rel_word(b, a, l.fields[1], &err, we, line)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                Ok(())
+            }
+            Type::Enum(vs) => {
+                let l = self.layout_of(ty, line)?;
+                for (tag, var) in vs.iter().enumerate() {
+                    if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                        continue;
+                    }
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I64Load(word8()));
+                    b.ins(&Instruction::I64Const(tag as i64));
+                    b.ins(&Instruction::I64Eq);
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    for (j, pty) in var.payload.clone().iter().enumerate() {
+                        if !self.owns_heap(pty) {
+                            continue;
+                        }
+                        let w = self.word1(pty);
+                        self.rel_word(b, a, l.fields[j + 1], pty, w, line)?;
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                Ok(())
+            }
+            // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
+            // The captures are one heap block, read by value at the construction
+            // site, and 0 when there are none — which `free` refuses. Census §16.
+            Type::Fn(..) => {
+                let l = self.layout_of(ty, line)?;
+                b.ins(&Instruction::LocalGet(a))
+                    .ins(&Instruction::I32Load(word_at(l.fields[1])))
+                    .ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            // A fixed `[N x T]` is a container, so its elements are U4's
+            // question, not this one. A handle names something somebody else
+            // reclaims.
+            _ => Ok(()),
+        }
+    }
+
+    /// Release the sum payload word at `a + off`.
+    ///
+    /// The mirror of [`Fn_::copy_word`], and the reason it is a function of its
+    /// own: a payload has two encodings. A `String` rides in the word, and
+    /// anything wider is a pointer to a block — Phase 3 measured that a user
+    /// enum's `String` payload boxes while an `Option<String>`'s does not, and a
+    /// release that knew only one of them would free a stack address or leak.
+    fn rel_word(
+        &mut self,
+        b: &mut Frame,
+        a: u32,
+        off: u32,
+        pty: &Type,
+        w: Word,
+        line: usize,
+    ) -> Result<(), String> {
+        match w {
+            Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            Word::Boxed => {
+                let p = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(p));
+                self.rel_at(b, p, pty, line)?;
+                b.ins(&Instruction::LocalGet(p)).ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The buffers a value of `ty` holds, as `(byte offset, carries a String
