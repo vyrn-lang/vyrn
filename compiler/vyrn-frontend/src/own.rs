@@ -122,13 +122,14 @@ impl Owned {
             .impls
             .iter()
             .filter(|i| i.protocol == crate::types::OWNED)
-            // A GENERIC impl head carries no row yet. Its `release` flattens to
-            // a generic function, and the drop site below calls the flattened
-            // name unmangled — which is a symbol nothing defines. Recording the
-            // row would turn a missing feature into a linker error at the end
-            // of a build. Monomorphizing a declared release is the work this
-            // waits on; `Slots<T>` is what wants it.
-            .filter(|i| i.type_params.is_empty())
+            // A GENERIC impl head carries a row like any other since Phase 8b.
+            // The key is the type CONSTRUCTOR (`Slots`), exactly as every other
+            // protocol keys one, and the flattened `release` is a generic
+            // function. Each drop site solves the type arguments from the
+            // binding's own type and asks for that instance — the same route a
+            // written call takes. Before 8b the row was filtered out, because a
+            // drop site emitted the flattened name unmangled and clang reported
+            // the missing symbol at the end of a build.
             .filter_map(|i| crate::types::type_key(&i.ty))
             .map(|k| {
                 let m = crate::types::impl_method_name(
@@ -751,12 +752,17 @@ impl Emit<'_> {
             return Fate::Leaked(Leak::Region);
         }
         // A `mut` binding is released by its slot's FINAL value in both
-        // compiling backends and by the value captured at the `let` in the
-        // interpreter. For a `free` that is the same program — neither engine
-        // can see the difference. For a cell release and for a user type's
-        // `release`, which prints, it is not, so those two wait for a phase that
-        // makes the interpreter read the slot.
-        if mutable && matches!(kind, DropKind::ReleaseRef | DropKind::Release(_)) {
+        // compiling backends. Phase 8b made the interpreter read the slot too,
+        // so a declared `release` — ordinary Vyrn that may print — now runs on
+        // the same value in all three engines and a `mut` container reclaims.
+        //
+        // A **cell** stays refused, and not for the old reason. `fresh_refs_in`
+        // reads this same `droppable` set to decide which generation check can
+        // never fail: a `let c = cell(..)` nothing aliases has one possible
+        // answer at every `get(c)`. That argument holds because `c` cannot be
+        // re-pointed. A `mut` one can, so admitting it here would elide a check
+        // that can fail. Path B goes in Phase 8d and takes the question with it.
+        if mutable && kind == DropKind::ReleaseRef {
             return Fate::Leaked(Leak::Mutable);
         }
         match row.and_then(|r| r.gone.as_ref()) {
