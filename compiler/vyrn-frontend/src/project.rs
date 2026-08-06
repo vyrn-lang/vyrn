@@ -40,10 +40,6 @@ use std::collections::HashMap;
 /// about by name. `at` — what `a[i]` parses to — is now the *dispatch* site.
 pub const ELEM: &str = "@slot";
 
-/// How deep a projection may inline into another before the compiler calls it a
-/// cycle. A projection that yields into itself would otherwise inline forever.
-const MAX_DEPTH: usize = 16;
-
 /// One access site's lowering: statements to run first, then the place.
 #[derive(Debug, Clone)]
 pub struct Projection {
@@ -180,10 +176,7 @@ pub fn lookup_by_key<'a>(
 }
 
 /// The seeded projection named `method`, for a builtin container.
-///
-/// Separate from [`lookup`] because it borrows from a cached parse rather than
-/// from `program`; callers that only need "is there one" ask [`resolve`].
-fn seeded(method: &str) -> Option<&'static Function> {
+pub fn seeded(method: &str) -> Option<&'static Function> {
     use std::sync::OnceLock;
     static ROWS: OnceLock<Vec<Function>> = OnceLock::new();
     let rows = ROWS.get_or_init(seeded_rows);
@@ -198,6 +191,22 @@ pub fn resolve<'a>(impls: &'a [ImplBlock], ty: &Type, method: &str) -> Option<&'
         return seeded(method);
     }
     lookup_in(impls, ty, method)
+}
+
+/// The projection an access site lowers through, given whatever static type the
+/// engine could work out for the receiver.
+///
+/// A receiver whose type the engine cannot name takes the seeded row, which is
+/// what every builtin container takes: it yields [`ELEM`] and the engine's own
+/// element lowering answers from there. That is also the pre-RFC-0091 behaviour
+/// for such a receiver, so nothing regressed on the way in.
+pub fn for_site<'a>(
+    impls: &'a [ImplBlock],
+    recv: Option<&Type>,
+    method: &str,
+) -> Option<&'a Function> {
+    recv.and_then(|t| lookup_in(impls, t, method))
+        .or_else(|| seeded(method))
 }
 
 /// Inline `f` at an access site whose receiver is `recv` and whose arguments
@@ -264,12 +273,6 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     body.stmts.pop();
     prologue.extend(body.stmts);
     Ok(Projection { prologue, place })
-}
-
-/// Guard against a projection that yields into itself: an engine increments a
-/// depth counter per nested inline and stops here.
-pub fn too_deep(depth: usize) -> bool {
-    depth >= MAX_DEPTH
 }
 
 // ---------------------------------------------------------------------------
