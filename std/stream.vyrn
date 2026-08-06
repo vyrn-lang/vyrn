@@ -17,7 +17,7 @@
 ///
 /// **Lazy since M2c.** `map`, `filter` and `take` do not drain their source into
 /// a buffer. Each is a wrapper: a producer whose cursor holds the stream it
-/// wraps, whose step reads that source one element at a time (`pull`), and whose
+/// wraps, whose step reads that source one element at a time (`pullAt`), and whose
 /// close releases the source on the way past — one release per stream, down the
 /// chain. So `map(unfold(..), f)` is a feed rather than a hang, which is the
 /// first thing anyone does with a feed.
@@ -72,12 +72,17 @@ export fn cursorSet(c: Cursor, v: Int64) {
     cells[handleOf(c)].pos = v
 }
 
-/// One element from the stream behind this cursor — the operation a wrapper's
-/// step is written in terms of. Its type comes from the annotation:
-/// `let x: Option<T> = pull(c)`.
-export fn pull<T>(c: Cursor) -> Option<T> {
-    let x: Option<T> = pullAt(cells[handleOf(c)].src)
-    return x
+/// The address of the boxed stream behind this cursor, which is what a
+/// wrapper's step reads its source through: `pullAt(srcOf(c))`.
+///
+/// A generic `pull<T>(c)` would read better and does not compile. `T` appears
+/// only in its RETURN type, so no call site can solve it from an argument, and
+/// the direct wasm backend refuses the unsolved parameter where the LLVM
+/// emitter takes it from the expected type. Two backends disagreeing about one
+/// call is the failure `solve_type_args` was centralised to prevent, so the
+/// generic is not written. See RFC-0075 "As landed — M3".
+fn srcOf(c: Cursor) -> Int64 {
+    return cells[handleOf(c)].src
 }
 
 /// A stream from a step function and a starting cursor (RFC-0075 M2b).
@@ -111,42 +116,38 @@ export fn unfold<T>(seed: Int64, step: fn(Cursor) -> Option<T>) -> Stream<T> {
     return fromStep(c.slot, c.gen, run)
 }
 
-/// A producer that owns another stream: the source goes in a box whose address
-/// the cursor holds, `pull` reads it, and the closing call gives both back.
-///
-/// The source is closed HERE, in Vyrn, by an ordinary `close` that `movecheck`
-/// checks like any other. A chain of three combinators over one producer is four
-/// streams and four releases, one per step, each one statement long.
-fn wrap<T, U>(s: Stream<T>, step: fn(Cursor) -> Option<U>) -> Stream<U> {
-    let c = newCursor(0, boxStream(s))
-    let run: fn(Int64, Int64, Bool) -> Option<U> = |slot, gen, closing| {
-        let cur = Cursor { slot: slot, gen: gen }
-        if closing {
-            let addr = takeCursor(cur)
-            let src: Stream<T> = unbox(addr)
-            close(src)
-            return None
-        }
-        return step(cur)
-    }
-    return fromStep(c.slot, c.gen, run)
-}
-
 /// Apply `f` to every element. `s` is consumed; the result is a new obligation.
 ///
 /// **Lazy** (M2c): `f` runs once per element the consumer actually asks for, so
 /// `map(unfold(..), f)` is a feed rather than a hang and `take(map(feed, f), n)`
 /// asks the feed n times. Nothing is buffered on the way through — a mapped
 /// buffer stream allocates less than the eager version did, not more.
+///
+/// The three wrappers below share a shape and not a function. Each puts its
+/// source in a box, keeps the address in its own cursor slot, reads the source
+/// with `pullAt`, and on the closing call gives the slot back, takes the source out
+/// of the box and CLOSES it — an ordinary `close` in ordinary Vyrn, which is why
+/// `movecheck` checks the chain's releases the way it checks every other one.
+/// One shared `wrap` would be the better spelling and does not compile: its step
+/// would be a lambda capturing a `fn` parameter that itself has captures, and
+/// the LLVM backend loses the inner captures at that second level. See
+/// RFC-0075 "As landed — M3".
 export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
-    let step: fn(Cursor) -> Option<U> = |c| {
-        let x: Option<T> = pull(c)
+    let c = newCursor(0, boxStream(s))
+    let run: fn(Int64, Int64, Bool) -> Option<U> = |slot, gen, closing| {
+        let cur = Cursor { slot: slot, gen: gen }
+        if closing {
+            let src: Stream<T> = unbox(takeCursor(cur))
+            close(src)
+            return None
+        }
+        let x: Option<T> = pullAt(srcOf(cur))
         if let Some(v) = x {
             return Some(f(v))
         }
         return None
     }
-    return wrap(s, step)
+    return fromStep(c.slot, c.gen, run)
 }
 
 /// Keep only the elements for which `pred` holds.
@@ -158,9 +159,16 @@ export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
 /// nothing ever passes — which is the honest behaviour of a filter, not a bug
 /// laziness introduced.
 export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
-    let step: fn(Cursor) -> Option<T> = |c| {
+    let c = newCursor(0, boxStream(s))
+    let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
+        let cur = Cursor { slot: slot, gen: gen }
+        if closing {
+            let src: Stream<T> = unbox(takeCursor(cur))
+            close(src)
+            return None
+        }
         while true {
-            let x: Option<T> = pull(c)
+            let x: Option<T> = pullAt(srcOf(cur))
             if let Some(v) = x {
                 if pred(v) {
                     return Some(v)
@@ -171,7 +179,7 @@ export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
         }
         return None
     }
-    return wrap(s, step)
+    return fromStep(c.slot, c.gen, run)
 }
 
 /// The first `n` elements (fewer if the stream is shorter; none if `n <= 0`).
@@ -184,18 +192,25 @@ export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
 /// that ENDS one, which is a different job and the reason it still exists.
 ///
 /// The count lives in the wrapper's own cursor — `cursorGet`/`cursorSet` here
-/// are the ordinary cursor operations, on the slot `wrap` took.
+/// are the ordinary cursor operations, on the slot this call took.
 export fn take<T>(s: Stream<T>, n: Int64) -> Stream<T> {
-    let step: fn(Cursor) -> Option<T> = |c| {
-        let i = cursorGet(c)
+    let c = newCursor(0, boxStream(s))
+    let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
+        let cur = Cursor { slot: slot, gen: gen }
+        if closing {
+            let src: Stream<T> = unbox(takeCursor(cur))
+            close(src)
+            return None
+        }
+        let i = cursorGet(cur)
         if i >= n {
             return None
         }
-        cursorSet(c, i + 1)
-        let x: Option<T> = pull(c)
+        cursorSet(cur, i + 1)
+        let x: Option<T> = pullAt(srcOf(cur))
         return x
     }
-    return wrap(s, step)
+    return fromStep(c.slot, c.gen, run)
 }
 
 /// Interleave two streams one element at a time, draining whichever outlasts

@@ -1119,13 +1119,17 @@ enum Place {
 }
 
 /// A stream's step signature (RFC-0075 M2b), which is a function of the ELEMENT
-/// type and nothing else — the cursor is a `Ref<Int64>` precisely so that it is.
-/// Both the construction site and the loop that dispatches through it derive the
-/// signature from here, because a stored `fn` value is keyed by its signature and
-/// two spellings of one type would be two dispatchers.
+/// type and nothing else — the cursor is two plain `Int64`s precisely so that it
+/// is. Both the construction site and the loop that dispatches through it derive
+/// the signature from here, because a stored `fn` value is keyed by its signature
+/// and two spellings of one type would be two dispatchers.
+///
+/// The third parameter is the closing flag (RFC-0090 M3): a stream gives its
+/// cursor slot back by asking its own step, because the slab is `std/stream`'s
+/// and a release cannot name it.
 fn stream_step_sig(elem: &Type) -> Type {
     Type::Fn(
-        vec![Type::Ref(Box::new(Type::Int))],
+        vec![Type::Int, Type::Int, Type::Bool],
         Box::new(Type::Option(Box::new(elem.clone()))),
     )
 }
@@ -1137,9 +1141,10 @@ enum Rel {
     /// A `Ref<T>` binding — check the generation, free the payload, hand the slot
     /// back.
     Cell,
-    /// A `Stream<T>` — its buffer if it is one, its cursor cell if it is a
-    /// producer.
-    Stream,
+    /// A `Stream<T>` — its buffer if it is one, its cursor slot if it is a
+    /// producer. The element type comes along because releasing a producer means
+    /// CALLING its step, and a step is dispatched by element type (RFC-0090 M3).
+    Stream(Type),
     /// A `String` — the place holds the buffer pointer itself.
     Str,
     /// An aggregate owning heap buffers at these byte offsets: an `Array`'s data,
@@ -1694,7 +1699,10 @@ impl Fn_<'_> {
     ) -> Result<(), String> {
         match k {
             Rel::Cell => self.emit_release(b, p, line),
-            Rel::Stream => self.stream_release(b, p, line),
+            Rel::Stream(elem) => {
+                let elem = elem.clone();
+                self.stream_release(m, b, p, &elem, line)
+            }
             Rel::Str => {
                 // A `String` is a scalar, so a `Place::Local` holds the pointer —
                 // the opposite of what a local holding an aggregate means, which is
@@ -1771,6 +1779,7 @@ impl Fn_<'_> {
         Ok(match &t {
             Type::Str => Some(Rel::Str),
             Type::Ref(_) => Some(Rel::Cell),
+            Type::Stream(i) => Some(Rel::Stream((**i).clone())),
             Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
             Type::Map(..) => {
                 let l = self.layout_of(&t, line)?;
@@ -3865,10 +3874,10 @@ impl Fn_<'_> {
                         }
                     }
                 }
-                // The element type is the step's, not the seed's — the seed is
-                // always `Int64` (RFC-0075 M2b).
-                "fromStep" if args.len() == 2 => {
-                    match self.cx.resolve(&self.peek(&args[1], line)?) {
+                // The element type is the step's, not the cursor's — the cursor
+                // is always two `Int64`s (RFC-0075 M2b).
+                "fromStep" if args.len() == 3 => {
+                    match self.cx.resolve(&self.peek(&args[2], line)?) {
                         Type::Fn(_, r) => match self.cx.resolve(&r) {
                             Type::Option(i) => Type::Stream(i),
                             other => {
@@ -3878,25 +3887,16 @@ impl Fn_<'_> {
                         other => return unsupported(&format!("`fromStep` of `{other}`"), line),
                     }
                 }
-                // RFC-0075 M2c. A wrapper's element type is its STEP's, exactly
-                // as `fromStep`'s is — the source it wraps says nothing about
-                // what comes out.
-                "fromWrap" if args.len() == 2 => {
-                    match self.cx.resolve(&self.peek(&args[1], line)?) {
-                        Type::Fn(_, r) => match self.cx.resolve(&r) {
-                            Type::Option(i) => Type::Stream(i),
-                            other => {
-                                return unsupported(&format!("a step returning `{other}`"), line)
-                            }
-                        },
-                        other => return unsupported(&format!("`fromWrap` of `{other}`"), line),
-                    }
-                }
-                // `pull` has nothing to infer from: every cursor is a
-                // `Ref<Int64>`. The annotation is the type (RFC-0075 M2c).
-                "pull" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t)) {
+                // RFC-0090 M3. A boxed stream is an address, so `boxStream`
+                // answers an `Int64` and its two readers answer the annotation.
+                "boxStream" if args.len() == 1 => Type::Int,
+                "unbox" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t)) {
+                    Some(t @ Type::Stream(_)) => t,
+                    _ => return unsupported("an `unbox` with no expected Stream type", line),
+                },
+                "pullAt" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t)) {
                     Some(t @ Type::Option(_)) => t,
-                    _ => return unsupported("a `pull` with no expected Option type", line),
+                    _ => return unsupported("a `pullAt` with no expected Option type", line),
                 },
                 "close" => Type::Unit,
                 "@has" | "@remove" => Type::Bool,
@@ -5564,9 +5564,10 @@ impl Fn_<'_> {
                 };
                 return self.stream_from_array(b, &inner, line);
             }
-            "fromStep" if args.len() == 2 => return self.stream_from_step(m, b, args, line),
-            "fromWrap" if args.len() == 2 => return self.stream_from_wrap(m, b, args, line),
-            "pull" if args.len() == 1 => return self.stream_pull(m, b, args, line),
+            "fromStep" if args.len() == 3 => return self.stream_from_step(m, b, args, line),
+            "boxStream" if args.len() == 1 => return self.stream_box(m, b, args, line),
+            "unbox" if args.len() == 1 => return self.stream_unbox(m, b, args, line),
+            "pullAt" if args.len() == 1 => return self.stream_pull_at(m, b, args, line),
             // `close` reclaims what this backend CAN reclaim. Its `malloc` is a
             // bump pointer that never frees, so a buffer stream's teardown is
             // still nothing — but a stepped one owns a cell, and cells come from
@@ -5574,12 +5575,13 @@ impl Fn_<'_> {
             // it is, is the tag.
             "close" if args.len() == 1 => {
                 let got = self.expr(m, b, &args[0])?;
-                if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
-                    return unsupported(&format!("`close` of `{got}`"), line);
-                }
+                let elem = match self.cx.resolve(&got) {
+                    Type::Stream(i) => *i,
+                    other => return unsupported(&format!("`close` of `{other}`"), line),
+                };
                 let s = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(s));
-                self.stream_release(b, Place::Local(s), line)?;
+                self.stream_release(m, b, Place::Local(s), &elem, line)?;
                 return Ok(Type::Unit);
             }
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
@@ -6911,8 +6913,10 @@ impl Fn_<'_> {
         Ok(Type::Stream(Box::new(inner.clone())))
     }
 
-    /// `fromStep(seed, step)`: the step's two words and the cursor cell's two,
+    /// `fromStep(slot, gen, step)`: the step's two words and the cursor's two,
     /// each written straight into the pair of header fields that IS that value.
+    /// The cursor arrives from the caller since RFC-0090 M3 — `std/stream` minted
+    /// it out of its own `Slots` — so nothing is allocated here.
     fn stream_from_step(
         &mut self,
         m: &mut Module,
@@ -6921,7 +6925,7 @@ impl Fn_<'_> {
         line: usize,
     ) -> Result<Type, String> {
         // The step first, because its signature names the element type.
-        let fty = self.expr(m, b, &args[1])?;
+        let fty = self.expr(m, b, &args[2])?;
         let fv = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(fv));
         let sig = self.cx.resolve(&fty);
@@ -6953,97 +6957,125 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalGet(fv));
         b.ins(&Instruction::I32Const(fl.size as i32));
         b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-        // `cell_new(dest, payload)` writes `{ slot, generation }` at `dest`, and
-        // fields 4 and 5 are adjacent and 8-aligned, so `dest` is that pair.
         b.slot(off + sl.fields[4]);
         self.expr_as(m, b, &args[0], &Type::Int)?;
-        self.box_value(b, &Type::Int, line)?;
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::Call(self.cx.rt.cell_new));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + sl.fields[5]);
+        self.expr_as(m, b, &args[1], &Type::Int)?;
+        b.ins(&Instruction::I64Store(word8()));
         b.slot(off);
         Ok(Type::Stream(Box::new(elem)))
     }
 
-    /// `fromWrap(src, step)`: `fromStep` with a source (RFC-0075 M2c).
-    ///
-    /// The cell payload is `{ i64 cursor, Stream src }` in ONE allocation — the
-    /// cursor a plain producer's cell holds, with the wrapped stream behind it —
-    /// so `get`/`set` inside the step are the ordinary cell operations (that is
-    /// `take`'s counter) and `src[slot]` points at the second half. Non-null is
-    /// what makes a cell a wrapper: `pull` reads it and the release walks it.
-    fn stream_from_wrap(
+    /// The word every boxed stream starts with (RFC-0090 M3). An address is an
+    /// ordinary `Int64` a program can spell, so `unbox` and `pullAt` check this
+    /// before they read a `Stream` out of it, and `unbox` clears it before it
+    /// frees — a second `unbox` of one address is the trap rather than a second
+    /// owner of one stream.
+    const BOX_MAGIC: i64 = 3735928559;
+
+    /// Leave the address of a checked box's `Stream` on the stack, or trap.
+    fn stream_box_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<u32, String> {
+        let a = b.local(ValType::I32);
+        self.expr_as(m, b, &args[0], &Type::Int)?;
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalTee(a));
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let msg = self.cx.rt.intern(m, "error: no stream in this box\n");
+        b.ins(&Instruction::I32Const(msg as i32));
+        b.ins(&Instruction::Call(self.cx.rt.trap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Const(Self::BOX_MAGIC));
+        b.ins(&Instruction::I64Ne);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let msg = self.cx.rt.intern(m, "error: no stream in this box\n");
+        b.ins(&Instruction::I32Const(msg as i32));
+        b.ins(&Instruction::Call(self.cx.rt.trap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        Ok(a)
+    }
+
+    /// `boxStream(s)` (RFC-0090 M3): the stream moves into one heap box and the
+    /// call answers its address. A `Stream<T>` may not be a field of anything —
+    /// M1 refuses it, because a field erases the disposal obligation — so this is
+    /// where a lazy combinator's source lives, with `std/stream` holding the
+    /// address in its own cursor slot.
+    fn stream_box(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        // The step first, because its signature names the element type.
-        let fty = self.expr(m, b, &args[1])?;
-        let fv = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(fv));
-        let sig = self.cx.resolve(&fty);
-        let elem = match &sig {
-            Type::Fn(_, r) => match self.cx.resolve(r) {
-                Type::Option(i) => *i,
-                other => return unsupported(&format!("a step returning `{other}`"), line),
-            },
-            other => return unsupported(&format!("`fromWrap` of `{other}`"), line),
-        };
-        if sig != stream_step_sig(&elem) {
-            return unsupported(&format!("a step of type `{sig}`"), line);
-        }
-        let Repr::Agg(fl) = self.cx.repr(&sig, line)? else {
-            return unsupported("a step value that is not an aggregate", line);
-        };
         let sl = self.stream_layout(line)?;
-        // The payload: a cursor word, then the source header.
-        let pay = b.local(ValType::I32);
+        let p = b.local(ValType::I32);
         b.ins(&Instruction::I64Const((8 + sl.size) as i64));
         b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalSet(pay));
-        b.ins(&Instruction::LocalGet(pay));
-        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::LocalTee(p));
+        b.ins(&Instruction::I64Const(Self::BOX_MAGIC));
         b.ins(&Instruction::I64Store(word8()));
-        b.ins(&Instruction::LocalGet(pay));
+        b.ins(&Instruction::LocalGet(p));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        self.expr(m, b, &args[0])?;
+        let got = self.expr(m, b, &args[0])?;
+        if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
+            return unsupported(&format!("`boxStream` of `{got}`"), line);
+        }
         b.ins(&Instruction::I32Const(sl.size as i32));
         b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::LocalGet(p));
+        b.ins(&Instruction::I64ExtendI32U);
+        Ok(Type::Int)
+    }
 
+    /// `unbox(a)`: the stream comes back out and the box is freed.
+    fn stream_unbox(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
+            Some(Type::Stream(i)) => *i,
+            _ => return unsupported("an `unbox` with no expected Stream type", line),
+        };
+        let sl = self.stream_layout(line)?;
+        let a = self.stream_box_at(m, b, args, line)?;
         let off = b.alloc(sl.size, sl.align);
-        b.slot(off + sl.fields[0]);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + sl.fields[1]);
-        b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + sl.fields[2]);
-        b.ins(&Instruction::LocalGet(fv));
-        b.ins(&Instruction::I32Const(fl.size as i32));
-        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-        b.slot(off + sl.fields[4]);
-        b.ins(&Instruction::LocalGet(pay));
-        b.ins(&Instruction::Call(self.cx.rt.cell_new));
-        // After the allocation, which clears whatever the recycled slot held.
-        b.slot(off + sl.fields[4]);
-        b.ins(&Instruction::I64Load(word8()));
-        b.ins(&Instruction::Call(self.cx.rt.cell_srcp));
-        b.ins(&Instruction::LocalGet(pay));
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Const(sl.size as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::Call(self.cx.rt.free));
         b.slot(off);
         Ok(Type::Stream(Box::new(elem)))
     }
 
-    /// `pull(c)`: one element from the stream behind this cursor (RFC-0075 M2c).
-    ///
-    /// The generation check is `cell_addr`'s, so a cursor that outlived its
-    /// stream traps here exactly as `get` would; a cursor with no stream behind
-    /// it traps on its own wording rather than reading past an 8-byte box.
-    fn stream_pull(
+    /// `pullAt(a)`: one element from the stream in that box (RFC-0075 M2c),
+    /// which is the whole of what a wrapper's step can do that an ordinary
+    /// producer's cannot. The element type is the annotation's: an address is an
+    /// `Int64` whatever it addresses.
+    fn stream_pull_at(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
@@ -7052,38 +7084,18 @@ impl Fn_<'_> {
     ) -> Result<Type, String> {
         let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
             Some(Type::Option(i)) => *i,
-            _ => return unsupported("a `pull` with no expected Option type", line),
+            _ => return unsupported("a `pullAt` with no expected Option type", line),
         };
         let opt = Type::Option(Box::new(elem.clone()));
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        // The cursor: a two-word `{ slot, generation }` aggregate.
-        let c = b.local(ValType::I32);
-        self.expr_as(m, b, &args[0], &Type::Ref(Box::new(Type::Int)))?;
-        b.ins(&Instruction::LocalSet(c));
-        b.ins(&Instruction::LocalGet(c));
-        b.ins(&Instruction::I64Load(word8()));
-        b.ins(&Instruction::LocalGet(c));
+        let a = self.stream_box_at(m, b, args, line)?;
+        let src = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::I64Load(word8()));
-        b.ins(&Instruction::Call(self.cx.rt.cell_addr));
-        b.ins(&Instruction::Drop);
-        let src = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(c));
-        b.ins(&Instruction::I64Load(word8()));
-        b.ins(&Instruction::Call(self.cx.rt.cell_srcp));
-        b.ins(&Instruction::I32Load(word()));
-        b.ins(&Instruction::LocalTee(src));
-        b.ins(&Instruction::I32Eqz);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        let msg = self.cx.rt.intern(m, "error: no stream behind this cursor\n");
-        b.ins(&Instruction::I32Const(msg as i32));
-        b.ins(&Instruction::Call(self.cx.rt.trap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalSet(src));
 
         // The element, then the `Option` this call's own signature owes.
         let r = self.cx.repr(&elem, line)?;
@@ -7165,97 +7177,81 @@ impl Fn_<'_> {
         Ok(())
     }
 
-    /// A stream's release: a buffer hands back the array data it was given, a
-    /// producer its cursor cell and the cursor itself. What
-    /// `__vyrn_stream_close` does, in the same order.
+    /// A stream's release (RFC-0075 M2b, re-hosted by RFC-0090 M3): a buffer
+    /// hands back the array data it was given, a producer gives its cursor slot
+    /// back by CALLING its own step.
+    ///
+    /// The slab is `std/stream`'s now, so nothing here can name it. The step can:
+    /// it is asked once with `closing` true, releases its slot and — if it is a
+    /// wrapper — takes its source out of the box and `close`s it, which is an
+    /// ordinary Vyrn `close` that `movecheck` checks. So the M2c walk down a
+    /// chain is recursion in Vyrn rather than a loop here.
     fn stream_release(
         &mut self,
+        m: &mut Module,
         b: &mut Frame,
         place: Place,
+        elem: &Type,
         line: usize,
     ) -> Result<(), String> {
         // A stream is an aggregate, so a `Place::Local` holding one holds its
         // ADDRESS — the opposite of what it means for a scalar, and the reason
         // this does not just call `place.addr`.
         if let Place::Local(a) = place {
-            return self.stream_release_at(b, a, line);
+            return self.stream_release_at(m, b, a, elem, line);
         }
         let a = b.local(ValType::I32);
         place
             .addr(b, 0)
             .ok_or_else(|| gap("a stream with no address", line))?;
         b.ins(&Instruction::LocalSet(a));
-        self.stream_release_at(b, a, line)
+        self.stream_release_at(m, b, a, elem, line)
     }
 
-    /// One release is a WALK since M2c: a wrapper holds the stream it wraps in
-    /// its own cursor cell, so a chain of three combinators over one producer is
-    /// four streams and this loop visits each of them once. A loop rather than a
-    /// recursion because a chain is a list — the textual backend runs the same
-    /// one, spelled as a `phi`.
-    fn stream_release_at(&mut self, b: &mut Frame, a: u32, line: usize) -> Result<(), String> {
+    fn stream_release_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        elem: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         let sl = self.stream_layout(line)?;
-        let cur = b.local(ValType::I32);
-        let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(a));
-        b.ins(&Instruction::LocalSet(cur));
-
-        let out = self.depth;
-        b.ins(&Instruction::Block(BlockType::Empty));
-        self.depth += 1;
-        let again = self.depth;
-        b.ins(&Instruction::Loop(BlockType::Empty));
-        self.depth += 1;
-
-        // A buffer owns the array data it was handed, and that is where the walk
-        // ends.
-        b.ins(&Instruction::LocalGet(cur));
         b.ins(&Instruction::I64Load(at(sl.fields[2])));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        b.ins(&Instruction::LocalGet(cur));
+        // A buffer owns the array data it was handed.
+        b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
         b.ins(&Instruction::Call(self.cx.rt.free));
-        let out_of_if = self.br_to(out);
-        b.ins(&Instruction::Br(out_of_if));
         self.depth -= 1;
-        b.ins(&Instruction::End);
-        let leave = self.br_to(out);
-
-        // The generation check, then the cell's two halves: the stream behind it
-        // (null unless this is a wrapper) and the slot itself. The payload is the
-        // cursor, freed on both exits — the order `__vyrn_stream_close` frees it
-        // in, so the two backends release the same things in the same sequence.
-        let pay = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(cur));
+        b.ins(&Instruction::Else);
+        self.depth += 1;
+        let opt = Type::Option(Box::new(elem.clone()));
+        let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
+            return unsupported("an Option that is not an aggregate", line);
+        };
+        let dsig = self.dispatcher(m, &stream_step_sig(elem), line)?;
+        let ooff = b.alloc(ol.size, ol.align);
+        b.slot(ooff);
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I32Const(sl.fields[2] as i32));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I64Load(at(sl.fields[4])));
-        b.ins(&Instruction::LocalGet(cur));
+        b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I64Load(at(sl.fields[5])));
-        b.ins(&Instruction::Call(self.cx.rt.cell_addr));
-        b.ins(&Instruction::LocalSet(pay));
-        b.ins(&Instruction::LocalGet(cur));
-        b.ins(&Instruction::I64Load(at(sl.fields[4])));
-        b.ins(&Instruction::Call(self.cx.rt.cell_srcp));
-        b.ins(&Instruction::I32Load(word()));
-        b.ins(&Instruction::LocalSet(src));
-        b.ins(&Instruction::LocalGet(cur));
-        b.ins(&Instruction::I64Load(at(sl.fields[4])));
-        b.ins(&Instruction::Call(self.cx.rt.cell_release));
-        b.ins(&Instruction::LocalGet(pay));
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::Call(dsig.index));
+        // The step's capture block. A stream owns the fn value it was built
+        // with, so this is the one place that can hand it back; an empty capture
+        // set is payload 0, which `free` refuses.
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I32Load(word_at(sl.fields[3])));
         b.ins(&Instruction::Call(self.cx.rt.free));
-
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Eqz);
-        b.ins(&Instruction::BrIf(leave));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::LocalSet(cur));
-        let back = self.br_to(again);
-        b.ins(&Instruction::Br(back));
-
-        self.depth -= 1;
-        b.ins(&Instruction::End);
         self.depth -= 1;
         b.ins(&Instruction::End);
         Ok(())
@@ -7360,8 +7356,10 @@ impl Fn_<'_> {
         b.ins(&Instruction::I32Const(sl.fields[2] as i32));
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(s));
-        b.ins(&Instruction::I32Const(sl.fields[4] as i32));
-        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::I64Load(at(sl.fields[4])));
+        b.ins(&Instruction::LocalGet(s));
+        b.ins(&Instruction::I64Load(at(sl.fields[5])));
+        b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::Call(dsig.index));
         let oaddr = b.local(ValType::I32);
         b.slot(ooff);
@@ -7436,7 +7434,7 @@ impl Fn_<'_> {
         self.scope.push((var.to_string(), place, elem.clone()));
         // The stream's own release frame, so a `break` or an early `return` out
         // of the body leaves through it — `emit_releases_above` walks it.
-        self.releases.push(vec![(Place::Local(s), Rel::Stream)]);
+        self.releases.push(vec![(Place::Local(s), Rel::Stream(elem.clone()))]);
         let cont = self.depth;
         b.ins(&Instruction::Block(BlockType::Empty));
         self.depth += 1;
@@ -7459,7 +7457,7 @@ impl Fn_<'_> {
         b.ins(&Instruction::End);
 
         // Normal end and `break` both land here.
-        self.stream_release_at(b, s, line)
+        self.stream_release_at(m, b, s, elem, line)
     }
 
     /// Take the indexable value on the stack apart into locals.

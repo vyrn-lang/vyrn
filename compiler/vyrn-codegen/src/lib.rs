@@ -4968,23 +4968,28 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {isover}, label %{empty_l}, label %{call_l}"));
 
         self.emit_label(&call_l);
-        // `tag`/`pay` and `cur`/`gen` are adjacent 8-aligned pairs, which is why
-        // the fn value and the `Ref` load whole rather than word by word.
+        // `tag`/`pay` are an adjacent 8-aligned pair, which is why the fn value
+        // loads whole rather than word by word. The cursor's two words are
+        // separate arguments (RFC-0090 M3), so they load separately.
         let fp = self.fresh_tmp();
-        let rp = self.fresh_tmp();
+        let cp2 = self.fresh_tmp();
+        let gp2 = self.fresh_tmp();
         let fv = self.fresh_tmp();
-        let rf = self.fresh_tmp();
+        let cw = self.fresh_tmp();
+        let gw = self.fresh_tmp();
         self.emit(format!("{fp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(2)));
-        self.emit(format!("{rp} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(4)));
+        self.emit(format!("{cp2} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(4)));
+        self.emit(format!("{gp2} = getelementptr {STREAM_LL}, ptr {sslot}, {}", fld(5)));
         self.emit(format!("{fv} = load {{ i64, i64 }}, ptr {fp}"));
-        self.emit(format!("{rf} = load {{ i64, i64 }}, ptr {rp}"));
+        self.emit(format!("{cw} = load i64, ptr {cp2}"));
+        self.emit(format!("{gw} = load i64, ptr {gp2}"));
         // The dispatcher is keyed on the step's signature, which is a function of
-        // the ELEMENT type alone — the reason the cursor is a `Ref<Int64>`.
+        // the ELEMENT type alone — the reason the cursor is two `Int64`s.
         let sig = self.normalize_sig(&stream_step_sig(elem));
         let sym = self.fnval_dispatcher_sym(&sig);
         let o = self.fresh_tmp();
         self.emit(format!(
-            "{o} = call {optll} @{sym}({{ i64, i64 }} {fv}, {{ i64, i64 }} {rf})"
+            "{o} = call {optll} @{sym}({{ i64, i64 }} {fv}, i64 {cw}, i64 {gw}, i1 0)"
         ));
         let ot = self.fresh_tmp();
         self.emit(format!("{ot} = extractvalue {optll} {o}, 0"));
