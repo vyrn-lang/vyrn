@@ -161,11 +161,97 @@ Recorded as open, gated on a concrete need (arena-backed containers may be it).
 
 - **M1 — `Copy`**, derived + overridable. Unblocks RFC-0089 M1's `copy` as a
   protocol row rather than a builtin special case.
-- **M2 — place projections**, the mechanism, proved on `Array` itself: delete
-  the hardcoded `a[i]`/`a[i]=v`/`a[i].f=v` lowerings and re-express them as the
-  seeded `Index` impl. The compiler eating its own dogfood is the test that the
-  mechanism is complete.
+- **M2 — place projections** — **LANDED (Phase 7a).** The mechanism, proved on
+  `Array` itself. See "M2 as landed" below for what the dogfood proof could and
+  could not delete, and why the RFC did not see the difference.
 - **M3 — `Index` + `Iterate`** open to users; `Slots` implements both;
   `for x in slots` works.
 - **M4 — resume RFC-0082 M2**: port one built-in (`SmallArray` is the
   smallest) to std Vyrn behind the protocols, three-way parity as the gate.
+
+---
+
+## M2 as landed
+
+Shipped in Phase 7a. `place name(read|modify self, ..) -> T { .. yield <place> }`
+parses inside an `impl`, is checked as a body of its own, and is inlined at
+every `a[i]` and `a[i] = v` by all three engines. `yield` and `place` are
+contextual, so no program that used either word has to change.
+
+### The dogfood proof, and the one thing it cannot delete
+
+The IR and the wasm are **byte-identical** across the whole corpus — 118 emitted
+`.ll` files and 119 emitted `.wasm` modules, diffed against `main`, zero
+differences. What that proves is that indexing now goes through a table, and
+that going through it costs nothing.
+
+What it does not do is delete the addressing. **This RFC asked for something its
+own chain had already made impossible.** It was written before RFC-0080/0081
+withdrew raw memory, and `Array`'s `at` has nothing to write its body *with*:
+there is no way in Vyrn to say "the element at offset i of my buffer". So one
+primitive survives, under a name no source can spell — `@slot(container,
+index)`, unlexable because the lexer rejects `@`. It is the addressing floor, and
+it sits beside the allocation floor this RFC deliberately leaves closed.
+
+What the proof does delete is the **dispatch**. `a[i]` no longer means "the
+compiler knows about arrays". It parses to `at(a, i)`, which asks the receiver's
+type for a `place at`; `Array`, `SmallArray`, `Array<T, N>`, `String` and `Map`
+all take the seeded row, whose body is `yield @slot(self, i)`. A user container
+reaches its own projection through the same lookup, and its `yield self.data[i]`
+inlines to `@slot` through one more turn of the same machinery.
+
+### The rules a projection obeys
+
+Checked by `checker::check_places`, each with its reason:
+
+1. **One `yield`, and it is the last statement.** A conditional yield would need
+   the access site to become a branch over two places. Refused, not
+   mis-lowered.
+2. **What it yields is a place** — a variable, a field of one, an element of
+   one. A value would be a copy, and a hidden copy is what rule 3 of RFC-0089
+   forbids.
+3. **Rooted at `self` or a parameter.** A projection into module state hands out
+   a place the access site does not own.
+4. **No `?`.** `?` propagates by returning, and an inlined projection has no
+   frame to return from. `return` is refused by the parser for the same reason.
+
+### Three findings
+
+**Inlining is free in instructions and not in node identity.** This compiler
+keys two side tables by AST node address — the elided `get`/`set` generation
+checks and the lambda monomorphization keys — because Phase 4a found a
+`(line, name)` key cannot identify a statement. A substituted body is a clone,
+with an address of its own, so it loses whatever was recorded against the
+original. Both misses are conservative today (one extra check, one duplicated
+instance), and the seeded row sidesteps them entirely: `Projection::is_identity`
+recognizes the identity substitution and each engine then lowers the ORIGINAL
+nodes. That is what makes byte-identity a property of the code rather than a
+measurement.
+
+**The textual backend has no static type-of-expression.** It learns a type by
+emitting the expression and reading the type back, which is fine for lowering
+and useless for dispatch, which must choose before it emits. `Gen::static_ty`
+now covers the shapes a container receiver takes — a binding, a field of one, an
+element of one, a call result — and answers `None` for the rest, which then
+takes the seeded row exactly as it did before projections existed. The
+interpreter has `type_of` and the direct backend has `peek`; only this one
+needed a new function.
+
+**A record is keyed by the name it was declared with, not by the record it
+aliases.** Three separate sites resolved the receiver type before looking up the
+impl, and each one turned `Window` into `{ data: Array<Int64>, start: Int64 }`,
+whose type key is nothing. An impl head names the alias.
+
+### What 7a does not open
+
+`Index`, `Copy` and `Iterate` as declared, conformance-checked protocols are M1
+and M3. In 7a the protocol name on an `impl` carrying `place` members is not
+read: lookup is by (type key, member name). A projection is also not callable by
+name — `c.at(1)` is an unknown function — because it is not a function.
+
+**Storing through a user container is not lowered.** `a[i] = v` resolves
+`place atSet` and accepts it only where the yielded place is the binding's own
+element, which is what the seeded row yields. A projection that yields somewhere
+else (`self.data[j]`) is refused by name: writing there needs an address-of for
+an arbitrary place, and no backend has one. That is M3's, and it is the read/
+write seam this milestone was allowed to stop at.

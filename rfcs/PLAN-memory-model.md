@@ -221,12 +221,25 @@ carried the ownership fact — see the note under Phase 9.
 
 ## Phase 7 — the protocols *(RFC-0091 M1–M3)*
 
-- **7a. Place projections.** The `place …(read|modify self, …) -> T { yield … }`
-  member form: parse, check (the yielded expression is a place of type T; the
-  borrow cannot escape — enforced by inlining the body at the access site),
-  monomorphized inlining in all three engines. **Proof: delete the hardcoded
-  `a[i]` / `a[i] = v` / `a[i].f = v` lowerings for `Array` and re-express them
-  as the seeded `Index` impl — parity byte-identical.**
+- **7a. Place projections — LANDED.** The `place name(read|modify self, …) -> T
+  { … yield … }` member form: parsed, checked as a body of its own, and inlined
+  at every access site by all three engines. `place` and `yield` are contextual,
+  so no existing program changes.
+  **The proof came out byte-identical** — 118 emitted `.ll` files and 119
+  emitted `.wasm` modules against `main`, zero differences — but it deletes the
+  *dispatch*, not the addressing. RFC-0091 asked for something its own chain had
+  made impossible: RFC-0080/0081 withdrew raw memory, so `Array`'s `at` has
+  nothing to write its body with. One primitive survives under an unlexable name
+  (`@slot`), beside the allocator floor the RFC already leaves closed. `a[i]` now
+  means "ask this receiver's type for a `place at`", and every builtin container
+  answers through the seeded row.
+  Two things 7a does not open, both M3's: `Index`/`Copy`/`Iterate` as declared
+  protocols (an `impl` carrying `place` members has its protocol name ignored),
+  and **storing through a user container** — `a[i] = v` accepts a projection
+  only where it yields the binding's own element, because writing to an
+  arbitrary place needs an address-of no backend has.
+  See RFC-0091 "M2 as landed" for the three findings, of which the load-bearing
+  one is that inlining is free in instructions and not in node identity.
 - **7b. `Copy` becomes a protocol** (derived + overridable), `Index` and
   `Iterate` open to users, `for x in xs` desugars via `Iterate`. Seeded rows
   for the built-ins per RFC-0086 M1's pattern.
@@ -294,5 +307,7 @@ the shipped ABI, so it is an RFC-0012 edit rather than a phase's side effect.
 - Phase 4c changes drop *emission* in three engines at once; the interpreter's
   Rust values cannot leak, so interp==native divergence will surface as a
   native crash or a memory-test failure, not as output parity.
-- Phase 7a (projections) is the only new mechanism; if it stalls, Phases 8a–8c
-  can ship with `.get`/method access only, and 7 resumes after.
+- ~~Phase 7a (projections) is the only new mechanism; if it stalls, Phases 8a–8c
+  can ship with `.get`/method access only, and 7 resumes after.~~ It did not
+  stall. `Slots` can index through `place at` today; `slots[h] = v` waits on
+  7b's store form.
