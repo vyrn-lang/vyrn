@@ -148,9 +148,28 @@ fn is_builtin_container(ty: &Type) -> bool {
 /// A user `impl` wins over the seeded row: a type key can only be one or the
 /// other, since a program may not declare an impl for a builtin container.
 pub fn lookup<'a>(program: &'a Program, ty: &Type, method: &str) -> Option<&'a Function> {
-    let key = crate::types::type_key(ty)?;
-    for imp in &program.impls {
-        if crate::types::type_key(&imp.ty).as_deref() != Some(key.as_str()) {
+    lookup_in(&program.impls, ty, method)
+}
+
+/// [`lookup`], over an impl list rather than a whole program — the shape the
+/// engines hold.
+pub fn lookup_in<'a>(impls: &'a [ImplBlock], ty: &Type, method: &str) -> Option<&'a Function> {
+    if is_builtin_container(ty) {
+        return None;
+    }
+    lookup_by_key(impls, &crate::types::type_key(ty)?, method)
+}
+
+/// [`lookup_in`], by type key rather than by type. The interpreter reaches this
+/// one: a record value carries the name `coerce` stamped on it, which is the
+/// key, where its static type may only be the anonymous record it aliases.
+pub fn lookup_by_key<'a>(
+    impls: &'a [ImplBlock],
+    key: &str,
+    method: &str,
+) -> Option<&'a Function> {
+    for imp in impls {
+        if crate::types::type_key(&imp.ty).as_deref() != Some(key) {
             continue;
         }
         if let Some(f) = imp.places.iter().find(|f| f.name == method) {
@@ -174,14 +193,11 @@ fn seeded(method: &str) -> Option<&'static Function> {
 /// The projection an access site resolves to: a user `impl`'s, or the seeded
 /// row for a builtin container. `None` means the receiver cannot be indexed,
 /// and the caller keeps its own diagnostic.
-pub fn resolve<'a>(program: &'a Program, ty: &Type, method: &str) -> Option<&'a Function>
-where
-    'static: 'a,
-{
+pub fn resolve<'a>(impls: &'a [ImplBlock], ty: &Type, method: &str) -> Option<&'a Function> {
     if is_builtin_container(ty) {
         return seeded(method);
     }
-    lookup(program, ty, method)
+    lookup_in(impls, ty, method)
 }
 
 /// Inline `f` at an access site whose receiver is `recv` and whose arguments
@@ -519,6 +535,47 @@ fn walk_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
         },
     }
     f(e);
+}
+
+/// Is `e` a place — something with an address the access site can read from or
+/// write to, rather than a value it would have to copy?
+///
+/// A variable, a field of a place, and an element of a place. Nothing else: a
+/// call result, a literal and an arithmetic result are all values.
+pub fn is_place(e: &Expr) -> bool {
+    match e {
+        Expr::Var { .. } => true,
+        Expr::Field { expr, .. } => is_place(expr),
+        Expr::Call { name, args, .. } if (name == "at" || name == ELEM) && args.len() == 2 => {
+            is_place(&args[0])
+        }
+        _ => false,
+    }
+}
+
+/// The variable a place is rooted at, e.g. `self` for `self.data[i]`.
+pub fn place_root(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Var { name, .. } => Some(name.clone()),
+        Expr::Field { expr, .. } => place_root(expr),
+        Expr::Call { name, args, .. } if (name == "at" || name == ELEM) && args.len() == 2 => {
+            place_root(&args[0])
+        }
+        _ => None,
+    }
+}
+
+/// Does `b` use `?` anywhere? A projection may not: `?` propagates by
+/// returning, and an inlined projection has no frame of its own to return from.
+pub fn has_try(b: &Block) -> bool {
+    let mut found = false;
+    let mut probe = b.clone();
+    walk_block(&mut probe, &mut |e: &mut Expr| {
+        if matches!(e, Expr::Try { .. }) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// The `place` members of every impl in `p`, for the checker and the LSP.

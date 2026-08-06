@@ -783,6 +783,7 @@ fn check_accum_inner(
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
         impls: &impls,
+        impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
         in_loop: RefCell::new(false),
@@ -984,6 +985,7 @@ fn check_accum_inner(
     //    purity, region) applies unchanged. Tests are NOT registered in `sigs`,
     //    so user code can never call one. Duplicate names within a single file
     //    are rejected here (a better message than a parse error).
+    check_places(&checker, program, &mut out);
     check_tests(&checker, program, &mut out);
 
     // 6b. Check bench bodies (RFC-0055). Identical treatment to tests: each is a
@@ -1037,6 +1039,106 @@ fn check_accum_inner(
     let mut json_dec_types = checker.json_dec_types.borrow().clone();
     json_dec_types.dedup_by_key(|t| format!("{t:?}"));
     (out, let_types, effects, json_types, json_dec_types)
+}
+
+/// Check every `place` projection body (RFC-0091 M2).
+///
+/// The body is checked exactly like a function body: `self` and the parameters
+/// are the scope, and the `yield` — a [`Stmt::Return`], see [`ImplBlock::places`]
+/// — must produce the declared type. Three rules are the projection's own:
+///
+/// 1. It yields **once**, as its last statement. A projection is inlined, so a
+///    conditional yield would need the access site to become a branch over two
+///    places; that is not built and is refused rather than mis-lowered.
+/// 2. What it yields is a **place**, not a value. A value would be a copy, and a
+///    hidden copy is what rule 3 of RFC-0089 forbids.
+/// 3. Its root is `self` or a parameter. A projection into module state or into
+///    a local of its own body yields a place that the access site does not own.
+fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
+    for (imp, f) in crate::project::all(program) {
+        let mut push = |msg: String| {
+            let mut d = Diagnostic::from_rendered(msg, "check");
+            d.file = f.module.clone();
+            out.push(d);
+        };
+        let yields = count_yields(&f.body);
+        if yields != 1 || !matches!(f.body.stmts.last(), Some(Stmt::Return { value: Some(_), .. }))
+        {
+            push(format!(
+                "line {}: `place {}` must end with exactly one `yield <place>` — \
+                 a projection is inlined at the access site, so it has one exit",
+                f.line, f.name
+            ));
+            continue;
+        }
+        let Some(Stmt::Return { value: Some(y), .. }) = f.body.stmts.last() else {
+            unreachable!("checked just above")
+        };
+        if !crate::project::is_place(y) {
+            push(format!(
+                "line {}: `place {}` yields a value, not a place — write \
+                 `yield <field or element of self>`; a projection that computes \
+                 a new value is an ordinary `fn`",
+                f.line, f.name
+            ));
+            continue;
+        }
+        match crate::project::place_root(y) {
+            Some(root) if root == "self" || f.params.iter().any(|p| p.name == root) => {}
+            Some(root) => push(format!(
+                "line {}: `place {}` yields a place rooted at `{root}`, which the \
+                 access site does not own — a projection may only yield into \
+                 `self` or one of its parameters",
+                f.line, f.name
+            )),
+            None => {}
+        }
+        // `e?` propagates by RETURNING, and a projection has no frame to
+        // return from — inlined, it would exit the access site's function.
+        if crate::project::has_try(&f.body) {
+            push(format!(
+                "line {}: `place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.",
+                f.line, f.name
+            ));
+            continue;
+        }
+        // The body itself, with `self` typed to the implementing type.
+        let r = checker.function(f);
+        if let Err(s) = r {
+            push(s);
+        }
+        for s in checker.errors.borrow_mut().drain(..) {
+            push(s);
+        }
+        let _ = imp;
+    }
+}
+
+/// How many `yield`s a projection body has, counting every branch.
+fn count_yields(b: &crate::ast::Block) -> usize {
+    b.stmts
+        .iter()
+        .map(|s| match s {
+            Stmt::Return { value: Some(_), .. } => 1,
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | Stmt::IfLet {
+                then_block,
+                else_block,
+                ..
+            } => {
+                count_yields(then_block)
+                    + else_block.as_ref().map(count_yields).unwrap_or(0)
+            }
+            Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
+                count_yields(body)
+            }
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Check every `test` body (RFC-0015). Duplicate names per module are reported;
@@ -1188,6 +1290,10 @@ struct Checker<'a> {
     protocol_methods: &'a HashMap<String, (String, MethodSig)>,
     /// Implemented (protocol, type-key) pairs, for dispatch and bound checking.
     impls: &'a std::collections::HashSet<(String, String)>,
+    /// Every `impl` block, for resolving a `place` projection by receiver type
+    /// (RFC-0091 M2). The set above cannot answer this: a projection is not a
+    /// method, so it has no mangled name and no signature row.
+    impl_blocks: &'a [crate::ast::ImplBlock],
     /// Bounds of the function currently being checked (for operators on `T`).
     cur_bounds: RefCell<HashMap<String, Vec<String>>>,
     /// Stack of `region` entry depths (scope-frame counts). Non-empty means we
@@ -1284,6 +1390,64 @@ impl<'a> Checker<'a> {
     /// its base (`Int`/`Bool`); everything else is itself.
     fn base(&self, ty: &Type) -> Type {
         crate::types::resolve(ty, self.types)
+    }
+
+    /// The type `recv[..]` has when `recv` is a container of the user's own
+    /// (RFC-0091 M2): the `place` projection's declared return type, with the
+    /// impl head's type variables solved from the receiver.
+    ///
+    /// `Ok(None)` means "not a projection" — a builtin container, or a type
+    /// with no such member — and the caller keeps its own typing and its own
+    /// diagnostic. The arguments are checked here against the projection's
+    /// parameters, exactly as an ordinary call checks its own.
+    fn place_result(
+        &self,
+        recv: &Type,
+        method: &str,
+        args: &[Expr],
+        scope: &Vec<HashMap<String, Binding>>,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<Option<Type>, String> {
+        // The DECLARED type, not its base: an impl head names `Ring`, and
+        // resolving to the record it aliases loses the name the impl is keyed
+        // by. A validated type still decays, so both keys are tried.
+        let recv = recv.clone();
+        let Some(key) = crate::types::type_key(&recv)
+            .or_else(|| crate::types::type_key(&self.base(&recv)))
+        else {
+            return Ok(None);
+        };
+        let Some((imp, f)) = self.impl_blocks.iter().find_map(|i| {
+            if crate::types::type_key(&i.ty).as_deref() != Some(key.as_str()) {
+                return None;
+            }
+            i.places.iter().find(|p| p.name == method).map(|p| (i, p))
+        }) else {
+            return Ok(None);
+        };
+        if args.len() - 1 != f.params.len() - 1 {
+            return Err(format!(
+                "line {line}: `place {method}` expects {} argument(s) besides `self`, got {}",
+                f.params.len() - 1,
+                args.len() - 1
+            ));
+        }
+        // Solve `impl<T> .. for Ring<T>` against the receiver, so a projection
+        // declared `-> T` answers with the element type at this call.
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        self.unify(&imp.ty, &recv, &mut subst, line)?;
+        for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
+            let want = crate::types::substitute(&p.ty, &subst);
+            let got = self.expr(arg, scope, Some(&want), fn_ret)?;
+            if !self.coercible(&got, &want) {
+                return Err(format!(
+                    "line {line}: `place {method}` argument is {got}, expected {want}"
+                ));
+            }
+            self.prove_coercion(arg, &want, line)?;
+        }
+        Ok(Some(crate::types::substitute(&f.ret, &subst)))
     }
 
     /// The first type in `ty` — itself, or a part it reaches — that declares
@@ -5751,7 +5915,12 @@ impl<'a> Checker<'a> {
             }
             return Ok(rebuild(elem));
         }
-        if name == "at" {
+        // `a[i]` parses to `at(a, i)` and is the DISPATCH site (RFC-0091 M2):
+        // it asks the receiver's type for a `place at` projection. `@slot` is
+        // the element-place primitive the seeded row bottoms out in, and it is
+        // the only indexing this compiler still knows about by name. The two
+        // type alike; only `at` dispatches.
+        if name == "at" || name == crate::project::ELEM {
             if args.len() != 2 {
                 return Err(format!(
                     "line {line}: `at` takes 2 arguments, got {}",
@@ -5759,6 +5928,14 @@ impl<'a> Checker<'a> {
                 ));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
+            // A container of the user's own: the projection's declared return
+            // type, with the impl head's type variables solved from the
+            // receiver. Lowering inlines the body; the type is the declaration.
+            if name == "at" {
+                if let Some(t) = self.place_result(&at, "at", args, scope, fn_ret, line)? {
+                    return Ok(t);
+                }
+            }
             // `m[k]` on a Map (RFC-0028): the key coerces to `String` and the
             // result is `Option<V>` (a missing key is `None`, never a trap).
             if let Type::Map(_, val) = self.base(&at) {
