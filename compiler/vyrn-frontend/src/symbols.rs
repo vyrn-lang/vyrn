@@ -3200,7 +3200,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
     BuiltinMethod { name: "fromStep", detail: "fromStep(slot, generation, step) -> Stream<T> — a stream that pulls from `step: fn(Int64, Int64, Bool) -> Option<T>` over a cursor its caller minted; `std/stream`'s `unfold` is the one to call" },
     BuiltinMethod { name: "boxStream", detail: "boxStream(s) -> Int64 — move a stream into one heap box and answer its address; `std/stream` keeps a wrapper's source this way (RFC-0090 M3)" },
-    BuiltinMethod { name: "unbox", detail: "unbox(address) -> Stream<T> — take a boxed stream back out; needs its type from the annotation: `let s: Stream<T> = unbox(a)`" },
+    BuiltinMethod { name: "unboxStream", detail: "unboxStream(address) -> Stream<T> — take a boxed stream back out; needs its type from the annotation: `let s: Stream<T> = unboxStream(a)`" },
     BuiltinMethod { name: "pullAt", detail: "pullAt(address) -> Option<T> — one element from the stream in that box; needs its type from the annotation: `let x: Option<T> = pullAt(a)`" },
     BuiltinMethod { name: "close", detail: "close(stream) -> Unit — discharge a stream's disposal obligation without consuming it" },
     BuiltinMethod { name: "serveStream", detail: "serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails (RFC-0074 M3a); `std/http`'s `sse` is the one to call" },

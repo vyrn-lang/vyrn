@@ -1969,11 +1969,11 @@ struct Interp<'a> {
     /// Free slots available for reuse (their generation was already bumped).
     free: RefCell<Vec<usize>>,
     /// The boxed streams (RFC-0075 M2c, re-hosted by RFC-0090 M3): what
-    /// `boxStream` moved out of the program and `unbox` moves back in, keyed by
+    /// `boxStream` moved out of the program and `unboxStream` moves back in, keyed by
     /// the address it handed back. The compiled backends `malloc` one header and
     /// answer its address; here the address is a serial number, which is the
     /// same statement — an address either names a boxed stream or it does not,
-    /// and `unbox` and `pullAt` trap when it does not.
+    /// and `unboxStream` and `pullAt` trap when it does not.
     boxes: RefCell<HashMap<i64, StreamVal>>,
     /// The next address `boxStream` hands out. Never reused, so a stale address
     /// is a trap rather than a different stream.
@@ -4889,7 +4889,7 @@ impl<'a> Interp<'a> {
                         }
                         other => Err(format!("boxStream of non-Stream {other:?}").into()),
                     },
-                    "unbox" => {
+                    "unboxStream" => {
                         let a = Self::stream_int(&vals[0])?;
                         match self.boxes.borrow_mut().remove(&a) {
                             Some(s) => Ok(Val::Stream(Box::new(s))),
@@ -6161,7 +6161,7 @@ impl<'a> Interp<'a> {
         Ctrl::Err("reference used after release".into())
     }
 
-    /// `unbox`/`pullAt` on an address that names no boxed stream (RFC-0090 M3).
+    /// `unboxStream`/`pullAt` on an address that names no boxed stream (RFC-0090 M3).
     /// The compiled backends print this and exit 1; the wording is theirs.
     fn stream_int(v: &Val) -> Result<i64, Ctrl> {
         match v {
@@ -8921,25 +8921,37 @@ mod tests {
         // `None`, so this program does not terminate under the representation M1
         // shipped — it terminates here, and the count is the reason: eight `next`
         // calls out of a feed with no end.
+        //
+        // The cursor is module state rather than a slot, because these tests run
+        // one file with no `std`: the slab a real producer's cursor comes from is
+        // `std/stream`'s since RFC-0090 M3, and what the ENGINE owes is to hand
+        // the two words back to the step and to call it once with `closing`.
         let src = "let mut steps = 0 \
-                   fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1) \
+                   let mut cur = 0 \
+                   fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> { \
+                   if cl { return None } \
+                   let n = cur cur = n + 1 \
                    steps = steps + 1 return Some(n) } \
                    fn main() -> Int64 { \
                      let mut seen = 0 \
-                     for v in fromStep(0, tick) { seen = seen + v if v == 7 { break } } \
+                     for v in fromStep(0, 1, tick) { seen = seen + v if v == 7 { break } } \
                      return steps }";
         assert_eq!(crate::run(src), Ok(8));
     }
 
     /// RFC-0075 M2c's `map`, spelled the way `std/stream` spells it: no
-    /// `for … in` at all, a step that reads its source with `pull`, and a
-    /// wrapper that owns it.
+    /// `for … in` at all, a step that reads its source with `pullAt`, and a
+    /// wrapper that owns the box the source moved into. Its closing call takes
+    /// the source back out and closes it, which is the whole of what M2c used to
+    /// do inside the runtime's walk.
     const LMAP: &str = "fn lmap<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> { \
+                        let a = boxStream(s) \
                         let g: fn(T) -> U = f \
-                        let step: fn(Ref<Int64>) -> Option<U> = |c| { \
-                        let x: Option<T> = pull(c) \
+                        let step: fn(Int64, Int64, Bool) -> Option<U> = |sl, gn, cl| { \
+                        if cl { let src: Stream<T> = unboxStream(a) close(src) return None } \
+                        let x: Option<T> = pullAt(a) \
                         if let Some(v) = x { return Some(g(v)) } return None } \
-                        return fromWrap(s, step) } ";
+                        return fromStep(0, 1, step) } ";
 
     #[test]
     fn a_wrapper_asks_its_source_once_per_element_it_is_asked_for() {
@@ -8949,13 +8961,16 @@ mod tests {
         // in.
         let src = format!(
             "let mut steps = 0 \
-             fn tick(c: Ref<Int64>) -> Option<Int64> {{ let n = get(c) set(c, n + 1) \
+             let mut cur = 0 \
+             fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> {{ \
+             if cl {{ return None }} \
+             let n = cur cur = n + 1 \
              steps = steps + 1 return Some(n) }} \
              fn double(n: Int64) -> Int64 {{ return n * 2 }} \
              {LMAP} \
              fn main() -> Int64 {{ \
                let mut seen = 0 \
-               for v in lmap(fromStep(0, tick), double) {{ seen = seen + v \
+               for v in lmap(fromStep(0, 1, tick), double) {{ seen = seen + v \
                  if v == 6 {{ break }} }} \
                return steps }}"
         );
@@ -8963,54 +8978,64 @@ mod tests {
     }
 
     #[test]
-    fn releasing_a_chain_hands_back_one_cell_per_stream() {
-        // Three wrappers over one producer is four streams and four cursor cells,
-        // and the slab is 65536 slots — so 40 000 acquisitions through 10 000
-        // cycles trap unless the release WALKS. Releasing twice would be a double
-        // free of the payload rather than a trap, which is why the value below is
-        // checked as well: a slot handed back twice comes out of the free list
-        // twice and two live streams end up sharing a cursor.
+    fn releasing_a_chain_closes_one_stream_per_link() {
+        // Three wrappers over one producer is four streams and four releases, and
+        // the walk M2c ran inside the runtime is now the wrappers closing their
+        // own sources. Each `unboxStream` empties its box, so a release that ran
+        // twice would trap on the second — and one that stopped early would leave
+        // a box behind, which the count below catches: 10 000 cycles, four closes
+        // each, and the producer's own closing call is what `closed` counts.
         let src = format!(
-            "fn tick(c: Ref<Int64>) -> Option<Int64> {{ let n = get(c) set(c, n + 1) \
-             return Some(n) }} \
+            "let mut cur = 0 \
+             let mut closed = 0 \
+             fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> {{ \
+             if cl {{ closed = closed + 1 return None }} \
+             let n = cur cur = n + 1 return Some(n) }} \
              fn double(n: Int64) -> Int64 {{ return n * 2 }} \
              {LMAP} \
              fn main() -> Int64 {{ let mut i = 0 \
                while i < 10000 {{ \
-                 let s = lmap(lmap(lmap(fromStep(i, tick), double), double), double) \
+                 let s = lmap(lmap(lmap(fromStep(0, 1, tick), double), double), double) \
                  close(s) i = i + 1 }} \
-               let mut sum = 0 \
-               for v in lmap(fromStep(3, tick), double) {{ sum = sum + v break }} \
-               return sum }}"
+               return closed }}"
         );
-        assert_eq!(crate::run(&src), Ok(6));
+        assert_eq!(crate::run(&src), Ok(10000));
     }
 
     #[test]
-    fn pull_on_a_cursor_with_no_stream_traps() {
-        // `pull` is a builtin, so nothing stops a program from calling it on an
-        // ordinary cell. The wording is the one the compiled backends print.
-        let src = "fn main() -> Int64 { let c = cell(0) \
-                   let x: Option<Int64> = pull(c) release(c) return 0 }";
+    fn pull_at_an_address_with_no_stream_traps() {
+        // `pullAt` is a builtin and an address is an ordinary `Int64`, so nothing
+        // stops a program from calling it on a number. The wording is the one the
+        // compiled backends print.
+        let src = "fn main() -> Int64 { let x: Option<Int64> = pullAt(24) return 0 }";
         match crate::run(src) {
-            Err(e) => assert!(
-                e.contains("no stream behind this cursor"),
-                "unexpected trap: {e}"
-            ),
+            Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
+            other => panic!("expected a trap, got {other:?}"),
+        }
+        // And an address that HELD a stream is empty once it is taken out, which
+        // is what makes a second release a trap rather than a second owner.
+        let src = "fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> { return None } \
+                   fn main() -> Int64 { let a = boxStream(fromStep(0, 1, tick)) \
+                     let s: Stream<Int64> = unboxStream(a) close(s) \
+                     let t: Stream<Int64> = unboxStream(a) close(t) return 0 }";
+        match crate::run(src) {
+            Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
             other => panic!("expected a trap, got {other:?}"),
         }
     }
 
     #[test]
-    fn a_released_stream_hands_its_cursor_cell_back() {
-        // The slab is 65536 slots on every engine, so a `close` that did not
-        // release would trap here rather than merely grow — which is what makes
-        // RFC-0075's "10 000 open-then-abandon cycles" row observable at all.
-        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1) \
-                   return Some(n) } \
+    fn every_released_stream_asks_its_step_to_close_exactly_once() {
+        // RFC-0075's "10 000 open-then-abandon cycles" row, as the engine can see
+        // it: the release is the step's closing call, so counting those counts
+        // releases. A `close` that did not run would leave the count short and a
+        // double release would run it over.
+        let src = "let mut closed = 0 \
+                   fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> { \
+                   if cl { closed = closed + 1 return None } return Some(sl) } \
                    fn main() -> Int64 { let mut i = 0 \
-                     while i < 100000 { let s = fromStep(i, tick) close(s) i = i + 1 } \
-                     return i }";
+                     while i < 100000 { let s = fromStep(i, 1, tick) close(s) i = i + 1 } \
+                     return closed }";
         assert_eq!(crate::run(src), Ok(100000));
     }
 }

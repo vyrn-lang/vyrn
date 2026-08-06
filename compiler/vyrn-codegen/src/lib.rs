@@ -219,10 +219,10 @@ entry:
 /// M1 refuses it, because a field would erase the disposal obligation. So the
 /// source lives in one heap box and `std/stream` holds its ADDRESS in its own
 /// cursor slot: `boxStream` puts it there, `pullAt` asks it for an element, and
-/// `unbox` takes it back out so the wrapper's step can `close` it in Vyrn.
+/// `unboxStream` takes it back out so the wrapper's step can `close` it in Vyrn.
 ///
-/// The box is `{ i64 magic, Stream }`. `unbox` clears the magic before it frees,
-/// so a second `unbox` of one address is the trap below rather than a stream
+/// The box is `{ i64 magic, Stream }`. `unboxStream` clears the magic before it frees,
+/// so a second `unboxStream` of one address is the trap below rather than a stream
 /// read out of freed memory. That check is the whole reason the magic exists:
 /// an address is an ordinary `Int64` a program can spell.
 const STREAM_RUNTIME: &str = "\
@@ -1707,6 +1707,9 @@ struct Gen<'a> {
     /// Signatures called through a stored value anywhere in the module — each
     /// gets one synthesized dispatcher `@__vyrn_fndispatch_<sig>` at the end.
     fnval_dispatch: Vec<Type>,
+    /// The element type of each stream header slot, for the release sites whose
+    /// slot is a `fresh_alloca` rather than a declared binding (RFC-0090 M3).
+    stream_slots: HashMap<String, Type>,
     /// Every element type whose `Stream` is released anywhere (RFC-0090 M3),
     /// threaded exactly as `fnval_dispatch` is and emitted beside it.
     stream_closers: Vec<Type>,
@@ -1839,6 +1842,7 @@ impl<'a> Gen<'a> {
             fnval_variants: Vec::new(),
             fnval_dispatch: Vec::new(),
             stream_closers: Vec::new(),
+            stream_slots: HashMap::new(),
             append_ok: std::collections::HashSet::new(),
             str_append: HashMap::new(),
             gappend: HashMap::new(),
@@ -3439,11 +3443,21 @@ impl<'a> Gen<'a> {
                 // program, because releasing a producer means calling its step
                 // and a step is dispatched by element type. The site count did
                 // not move; only how many functions the sites name.
-                let elem = match self.slot_ty(slot).map(|t| self.resolve(&t)) {
-                    Some(Type::Stream(i)) => *i,
+                // The loop's header slot is a `fresh_alloca`, not a declared
+                // binding, so `slot_ty` cannot answer for it — the element type
+                // is recorded where the slot is made.
+                let elem = match self
+                    .stream_slots
+                    .get(slot)
+                    .cloned()
+                    .or_else(|| match self.slot_ty(slot).map(|t| self.resolve(&t)) {
+                        Some(Type::Stream(i)) => Some(*i),
+                        _ => None,
+                    }) {
+                    Some(e) => e,
                     // A drop this cannot name is a leak, never a wrong free —
                     // the reason `Deep` and `Release` swallow theirs.
-                    _ => return,
+                    None => return,
                 };
                 let sym = self.stream_closer_sym(&elem);
                 self.emit(format!("call void @{sym}(ptr {slot})"));
@@ -5041,6 +5055,7 @@ impl<'a> Gen<'a> {
     ) -> Result<(), String> {
         let ell = self.llt(elem);
         let sslot = self.fresh_alloca(STREAM_LL);
+        self.stream_slots.insert(sslot.clone(), elem.clone());
         self.emit(format!("store {STREAM_LL} {av}, ptr {sslot}"));
 
         let cond_l = self.fresh_label("fcond");
@@ -8556,14 +8571,14 @@ impl<'a> Gen<'a> {
             self.emit(format!("{a} = ptrtoint ptr {boxed} to i64"));
             return Ok((a, Type::Int));
         }
-        // `unbox(a)` takes the stream back out and frees the box. The magic word
+        // `unboxStream(a)` takes the stream back out and frees the box. The magic word
         // is cleared first, so unboxing one address twice is the trap rather
         // than a second owner of one stream.
-        if name == "unbox" {
+        if name == "unboxStream" {
             let elem = match self.expect.last().map(|t| self.resolve(t)) {
                 Some(Type::Stream(i)) => *i,
                 other => {
-                    return Err(format!("`unbox` needs a `Stream<T>` context, found {other:?}"))
+                    return Err(format!("`unboxStream` needs a `Stream<T>` context, found {other:?}"))
                 }
             };
             let (av, aty) = self.gen_expr(&args[0])?;
@@ -9081,7 +9096,7 @@ impl<'a> Gen<'a> {
             // values whose literal form differs from their declared form: an
             // array literal is a fixed `[N x T]` value, but a declared
             // `Array<T>` payload is the growable `{ptr,len,cap}` triple — box the
-            // former and unbox the latter and the raw elements are reinterpreted
+            // former and unboxStream the latter and the raw elements are reinterpreted
             // as a header (the RFC-0026 corruption bug). A generic variant whose
             // payload is still an unresolved type parameter keeps the argument's
             // own type (the inline-monomorphized path).
@@ -11834,17 +11849,23 @@ mod tests {
 
     // The always-present runtime contributes exactly RUNTIME_FREES release
     // occurrences: one `@free` in `__vyrn_region_exit`, one inside
-    // `@__vyrn_str_free` itself, one `@__vyrn_str_free` in the
-    // `__vyrn_bytes_dup` NUL path, and three `@free` in `__vyrn_stream_close`
-    // (a buffer's data, and a cursor cell's payload on each of the two ways out
-    // of the walk M2c made that function — the chain continues, or it stops.
-    // Three sites, still one per stream released). An *auto*-free is a release
-    // beyond that baseline.
+    // `@__vyrn_str_free` itself, and one `@__vyrn_str_free` in the
+    // `__vyrn_bytes_dup` NUL path. An *auto*-free is a release beyond that
+    // baseline.
+    //
+    // It was 6 until RFC-0090 M3, which took `__vyrn_stream_close` out of the
+    // always-present prelude: a release is one function per element type now,
+    // emitted only for a program that has a stream to release, and it carries
+    // STREAM_CLOSER_FREES of its own.
     //
     // Both spellings count. A `String` drop is `@__vyrn_str_free` since
     // RFC-0089 M1a — it reads the header cap and returns on a static — and the
     // tests below ask how many bindings are reclaimed, not which call does it.
-    const RUNTIME_FREES: usize = 6;
+    const RUNTIME_FREES: usize = 3;
+
+    /// What one element type's release costs in `free`s: a buffer stream's data,
+    /// and a producer's step capture block.
+    const STREAM_CLOSER_FREES: usize = 2;
     fn free_calls(ir: &str) -> usize {
         ir.matches("call void @free(ptr").count()
             + ir.matches("call void @__vyrn_str_free(ptr").count()
@@ -11927,7 +11948,7 @@ mod tests {
     /// helper, so a `free` at the call site would mean something had gone back
     /// to reclaiming a stream as if it were an array.
     fn stream_closes(ir: &str) -> usize {
-        ir.matches("call void @__vyrn_stream_close(ptr").count()
+        ir.matches("call void @__vyrn_stream_close_").count()
     }
 
     #[test]
@@ -11940,12 +11961,13 @@ mod tests {
             "the loop should release the stream exactly once: {ir}"
         );
         // And nothing frees a stream's buffer at the call site any more — which
-        // of the two producers it holds is not knowable there.
-        assert_eq!(free_calls(&ir), RUNTIME_FREES, "{ir}");
+        // of the two producers it holds is not knowable there. The only frees
+        // beyond the runtime's are the element's own release function.
+        assert_eq!(free_calls(&ir), RUNTIME_FREES + STREAM_CLOSER_FREES, "{ir}");
         // The release is at the loop's exit block, which is where the
         // zero-element, the exhausted-buffer and the `None` paths all land.
         assert!(
-            block_at(&ir, &label_like(&ir, "fend")).contains("call void @__vyrn_stream_close(ptr"),
+            block_at(&ir, &label_like(&ir, "fend")).contains("call void @__vyrn_stream_close_"),
             "the release belongs in the loop's end block: {ir}"
         );
     }
@@ -11961,7 +11983,7 @@ mod tests {
         assert_eq!(stream_closes(&ir), 1, "one release, on the one path out: {ir}");
         let fend = label_like(&ir, "fend");
         let end = block_at(&ir, &fend);
-        assert!(end.contains("call void @__vyrn_stream_close(ptr"), "{ir}");
+        assert!(end.contains("call void @__vyrn_stream_close_"), "{ir}");
         assert!(
             ir.contains(&format!("br label %{fend}")),
             "`break` must branch to the releasing block: {ir}"
@@ -11987,7 +12009,7 @@ mod tests {
         let upto = &ir[..ir.find("ret i64 7").expect("the early return is in the IR")];
         let then = &upto[upto.rfind(":\n").expect("a label precedes the early ret")..];
         assert!(
-            then.contains("call void @__vyrn_stream_close(ptr"),
+            then.contains("call void @__vyrn_stream_close_"),
             "the release must precede the early `ret`: {ir}"
         );
     }
@@ -12001,7 +12023,7 @@ mod tests {
             1,
             "`close` releases it, and nothing releases it a second time: {ir}"
         );
-        assert_eq!(free_calls(&ir), RUNTIME_FREES, "{ir}");
+        assert_eq!(free_calls(&ir), RUNTIME_FREES + STREAM_CLOSER_FREES, "{ir}");
     }
 
     #[test]
@@ -12011,11 +12033,15 @@ mod tests {
         // runs once per iteration — which is what makes an endless feed a program
         // rather than a hang. Under M1 there was no call at all: the buffer had to
         // exist before the loop started.
-        let src = "fn tick(c: Ref<Int64>) -> Option<Int64> { let n = get(c) set(c, n + 1)                    return Some(n) }                    fn main() -> Int64 { for v in fromStep(0, tick) { print(v) break } return 0 }";
+        let src = "fn tick(s: Int64, g: Int64, c: Bool) -> Option<Int64> { \
+                   if c { return None } return Some(s) } \
+                   fn main() -> Int64 { for v in fromStep(0, 1, tick) { print(v) break } return 0 }";
         let ir = emit(&check(src).unwrap()).unwrap();
+        // And the cursor is NOT a Path B cell any more (RFC-0090 M3): the two
+        // words came from the caller, so building a producer allocates nothing.
         assert!(
-            ir.contains("call i64 @__vyrn_cell_alloc"),
-            "the cursor is a cell the stream owns: {ir}"
+            !ir.contains("call i64 @__vyrn_cell_alloc"),
+            "a producer takes its cursor, it does not mint one: {ir}"
         );
         assert!(
             block_at(&ir, &label_like(&ir, "ncall")).contains("call { i1, i64, i64 } @__vyrn_fndispatch_"),
@@ -12074,36 +12100,45 @@ mod tests {
         let upto = &ir[..ir.find("ret i64 7").expect("the early return is in the IR")];
         let blk = &upto[upto.rfind(":\n").expect("a label precedes the early ret")..];
         assert!(
-            blk.contains("call void @__vyrn_stream_close(ptr"),
+            blk.contains("call void @__vyrn_stream_close_"),
             "the release must precede the early `ret`: {ir}"
         );
     }
 
     /// RFC-0075 M2c's combinator, spelled locally, as `std/stream`'s `map` is:
-    /// no `for … in` at all, a step that reads its source with `pull`, and a
-    /// wrapper that owns it. The `let g = f` is load-bearing and not decoration
-    /// — a lambda cannot capture an RFC-0023 `fn` parameter, so the parameter is
-    /// re-materialized as a stored value first.
+    /// no `for … in` at all, a step that reads its source with `pullAt`, and a
+    /// wrapper that owns the box that source moved into.
+    ///
+    /// Since RFC-0090 M3 the step also RELEASES: `closing` is true exactly once,
+    /// and the source comes back out of its box and is closed by an ordinary
+    /// `close`. That is the walk M2c wrote inside the runtime, moved to where
+    /// `movecheck` can see it. The cursor words are 0 here because this
+    /// combinator keeps its state in the capture rather than in a slab —
+    /// `std/stream` mints a real cursor, and a step that never reads one does
+    /// not need it to be real.
     const LMAP: &str = "fn lmap(s: Stream<Int64>, f: fn(Int64) -> Int64) -> Stream<Int64> { \
+                        let a = boxStream(s) \
                         let g: fn(Int64) -> Int64 = f \
-                        let step: fn(Ref<Int64>) -> Option<Int64> = |c| { \
-                        let x: Option<Int64> = pull(c) \
+                        let step: fn(Int64, Int64, Bool) -> Option<Int64> = |sl, gn, cl| { \
+                        if cl { let src: Stream<Int64> = unboxStream(a) close(src) return None } \
+                        let x: Option<Int64> = pullAt(a) \
                         if let Some(v) = x { return Some(g(v)) } return None } \
-                        return fromWrap(s, step) }";
+                        return fromStep(0, 0, step) }";
 
     #[test]
     fn a_lazy_combinator_releases_at_one_site_and_walks_the_rest() {
-        // The M2c re-count, against M2b's table. An eager `map` had a `for … in`
-        // of its own, so a chain of two streams was TWO release sites, one per
-        // owning function. A wrapper owns its source inside a cursor cell
-        // instead, where no function can name it — so the chain is ONE site, and
-        // the second release happens inside `@__vyrn_stream_close`, which walks
-        // from the wrapper to what it wraps.
+        // The M3 re-count, against M2c's table. An eager `map` had a `for … in`
+        // of its own, so a chain of two streams was two release sites, one per
+        // owning function. M2c made the second one a WALK inside the runtime, so
+        // the count fell to one. RFC-0090 M3 puts it back at two, and the second
+        // is better than the one it replaces: the walk is now `close(src)` in the
+        // wrapper's own step, ordinary Vyrn that `movecheck` checks. A wrapper
+        // that failed to close its source would not compile, where a walk that
+        // stopped one stream early only leaked.
         //
-        // One site is therefore not one release: it is one per stream, counted
-        // at run time by `examples/streamlazy.vyrn`, whose 30 000 cycles of a
-        // three-deep chain would exhaust the 65 536-slot slab if the walk stopped
-        // early and would double-free if it went round twice.
+        // Still one release per stream, counted at run time by
+        // `examples/streamlazy.vyrn`: 30 000 cycles of a three-deep chain, whose
+        // cursor slots come back to `std/stream`'s slab or do not.
         let src = format!(
             "{FEED} {LMAP} fn double(n: Int64) -> Int64 {{ return n * 2 }} \
              fn main() -> Int64 {{ for p in lmap(feed(), double) {{ print(p) }} return 0 }}"
@@ -12111,36 +12146,44 @@ mod tests {
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(
             stream_closes(&ir),
-            1,
-            "a wrapper chain is released from the one place that can name it: {ir}"
+            2,
+            "one release site per stream: the consumer's, and the wrapper step's own: {ir}"
         );
         // And `lmap` itself releases nothing — it has no stream to release, which
-        // is the whole difference from the eager version.
+        // is the whole difference from the eager version. Its STEP does, and the
+        // step is a different function.
         let body = ir
             .split("\ndefine ")
             .find(|d| d.lines().next().is_some_and(|l| l.contains("@vyrn_lmap")))
             .expect("lmap is in the IR");
         assert!(
-            !body.contains("@__vyrn_stream_close"),
+            !body.contains("call void @__vyrn_stream_close_"),
             "a lazy combinator consumes nothing, so it releases nothing: {ir}"
         );
-        // The wrapper's source lives in its cursor cell's second half.
+        // The wrapper's source lives in a box it holds the address of, and
+        // nothing in the compiler holds it any more (RFC-0090 M3).
         assert!(
-            ir.contains("call void @__vyrn_cell_setsrc"),
-            "the source goes behind the cursor: {ir}"
+            ir.contains("call ptr @__vyrn_stream_box(i64"),
+            "the source goes in a box the step reads: {ir}"
+        );
+        assert!(
+            !ir.contains("@__vyrn_cell_src"),
+            "no fourth cell array survives: {ir}"
         );
     }
 
     #[test]
     fn a_lazy_chain_keeps_the_early_return_and_break_counts() {
         // M1's numbers, unchanged by laziness: `break` leaves through the block
-        // that releases, and an early `return` carries its own release.
+        // that releases, and an early `return` carries its own release. Each
+        // count is one higher than M2c's, and it is always the same one — the
+        // step's `close(src)`, which no path through `main` can add or lose.
         let src = format!(
             "{FEED} {LMAP} fn double(n: Int64) -> Int64 {{ return n * 2 }} \
              fn main() -> Int64 {{ for p in lmap(feed(), double) {{ print(p) break }} return 0 }}"
         );
         let ir = emit(&check(&src).unwrap()).unwrap();
-        assert_eq!(stream_closes(&ir), 1, "break path: {ir}");
+        assert_eq!(stream_closes(&ir), 2, "break path: {ir}");
 
         let src = format!(
             "{FEED} {LMAP} fn double(n: Int64) -> Int64 {{ return n * 2 }} \
@@ -12150,24 +12193,23 @@ mod tests {
         let ir = emit(&check(&src).unwrap()).unwrap();
         assert_eq!(
             stream_closes(&ir),
-            2,
+            3,
             "the early-return path needs its own release: {ir}"
         );
     }
 
     #[test]
-    fn pull_traps_on_a_cursor_with_no_stream_behind_it() {
-        // `pull` is a builtin, so nothing stops a program from calling it on an
-        // ordinary `cell`. The fourth slab array is what makes that a trap with
-        // the interpreter's own wording rather than a read of whatever follows an
-        // 8-byte box.
-        let src = "fn main() -> Int64 { let c = cell(0) \
-                   let x: Option<Int64> = pull(c) release(c) return 0 }";
+    fn pull_traps_on_an_address_with_no_stream_in_it() {
+        // `pullAt` is a builtin and an address is an ordinary `Int64`, so nothing
+        // stops a program from calling it on a number. The box's magic word is
+        // what makes that a trap with the interpreter's own wording rather than a
+        // read of whatever happens to be at that address.
+        let src = "fn main() -> Int64 { let x: Option<Int64> = pullAt(24) return 0 }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call ptr @__vyrn_cell_src"), "{ir}");
-        assert!(ir.contains("call void @__vyrn_cell_nostream()"), "{ir}");
+        assert!(ir.contains("call ptr @__vyrn_stream_box(i64"), "{ir}");
+        assert!(ir.contains("call void @__vyrn_stream_nobox()"), "{ir}");
         assert!(
-            ir.contains("error: no stream behind this cursor"),
+            ir.contains("error: no stream in this box"),
             "the wording is the interpreter's: {ir}"
         );
     }
@@ -12471,7 +12513,7 @@ mod tests {
         );
         assert!(
             ir.contains("load { ptr, i64, i64 }"),
-            "match must unbox the payload as the growable triple:\n{ir}"
+            "match must unboxStream the payload as the growable triple:\n{ir}"
         );
     }
 
@@ -12504,7 +12546,7 @@ mod tests {
         );
         assert!(
             ir.contains("load { ptr, i64, i64 }"),
-            "the Ok arm must unbox the payload as the growable triple:\n{ir}"
+            "the Ok arm must unboxStream the payload as the growable triple:\n{ir}"
         );
         assert!(!ir.contains("rebox."), "the payload is reshaped at construction, not repaired after it:\n{ir}");
     }

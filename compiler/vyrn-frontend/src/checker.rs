@@ -198,9 +198,9 @@ pub const RESERVED: &[&str] = &[
     "close",
     // RFC-0075 M2c, re-hosted by RFC-0090 M3: a wrapper's source is a boxed
     // stream `std/stream` holds by address, so the primitives are the box, the
-    // unbox and the pull. `fromWrap` and `pull` were the cell-slab spellings.
+    // unboxStream and the pull. `fromWrap` and `pull` were the cell-slab spellings.
     "boxStream",
-    "unbox",
+    "unboxStream",
     "pullAt",
     // RFC-0074 M3a: the handoff. A stream a request opened outlives the answer
     // that opened it, so it goes to the host rather than being consumed here.
@@ -6175,7 +6175,7 @@ impl<'a> Checker<'a> {
             return Ok(Type::Stream(inner));
         }
         // RFC-0075 M2c, re-hosted by RFC-0090 M3. `boxStream(s)` moves a
-        // stream into one heap box and hands back its address, `unbox(a)` takes
+        // stream into one heap box and hands back its address, `unboxStream(a)` takes
         // it back out, and `pullAt(a)` asks the stream at `a` for one element.
         // Those three are what a lazy combinator is written on: `std/stream`
         // keeps the address in its own cursor slot, so the wrapper's source is
@@ -6183,9 +6183,9 @@ impl<'a> Checker<'a> {
         // parallel array inside the compiler.
         //
         // The address is an `Int64` because the language has no pointer, and
-        // that is the whole sharpness of the pair: `unbox` of anything else
+        // that is the whole sharpness of the pair: `unboxStream` of anything else
         // traps rather than reading a stream out of nowhere. `boxStream` and
-        // `unbox` are the two halves of ONE move — `movecheck` sees the first as
+        // `unboxStream` are the two halves of ONE move — `movecheck` sees the first as
         // a disposal and the second as an acquisition, so a chain that fails to
         // close its source does not compile.
         if name == "boxStream" {
@@ -6207,7 +6207,7 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Int);
         }
-        if name == "unbox" || name == "pullAt" {
+        if name == "unboxStream" || name == "pullAt" {
             if args.len() != 1 {
                 return Err(format!(
                     "line {line}: `{name}` takes 1 argument, got {}",
@@ -6223,14 +6223,14 @@ impl<'a> Checker<'a> {
             }
             // Both answer a type nothing in the call carries, for the reason
             // `pull` always did: an address is an `Int64` whatever it addresses.
-            let want = if name == "unbox" { "Stream<T>" } else { "Option<T>" };
+            let want = if name == "unboxStream" { "Stream<T>" } else { "Option<T>" };
             let Some(exp) = expected else {
                 return Err(format!(
                     "line {line}: `{name}` needs the element type from context —                      write `let x: {want} = {name}(a)`"
                 ));
             };
             let ok = match name {
-                "unbox" => matches!(self.base(exp), Type::Stream(_)),
+                "unboxStream" => matches!(self.base(exp), Type::Stream(_)),
                 _ => matches!(self.base(exp), Type::Option(_)),
             };
             if !ok {
@@ -11006,8 +11006,8 @@ mod tests {
     #[test]
     fn accepts_generic_record() {
         let src = "type Box<T> = { value: T }; \
-                   fn unbox<T>(b: Box<T>) -> T { return b.value; } \
-                   fn main() -> Int64 { let n = Box { value: 41 }; return unbox(n); }";
+                   fn open<T>(b: Box<T>) -> T { return b.value; } \
+                   fn main() -> Int64 { let n = Box { value: 41 }; return open(n); }";
         assert!(check_src(src).is_ok());
     }
 

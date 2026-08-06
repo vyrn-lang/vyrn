@@ -165,13 +165,15 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // being the array free under another name. (The array free had a surface
     // name of its own then, `afree`; it has none now.)
     ("fromArray", Memory, "Stream: the array's buffer, moved into a buffer-tagged header"),
-    ("fromStep", Memory, "Stream: a cursor cell plus a step, pulled once per element"),
-    // RFC-0075 M2c: the wrapper is the same cursor cell with a source moved into
-    // it, so `map` is a stream rather than a drain, and `pull` is the one way to
-    // read what is behind one.
-    ("fromWrap", Memory, "Stream: a cursor cell holding the source it wraps"),
-    ("pull", Memory, "Stream: one element from the stream behind a cursor"),
-    ("close", Memory, "Stream: variant-aware reclamation (a buffer, or a cursor cell and what it holds)"),
+    ("fromStep", Memory, "Stream: a caller's cursor plus a step, pulled once per element"),
+    // RFC-0075 M2c: a lazy combinator owns the stream it wraps, so `map` is a
+    // stream rather than a drain. RFC-0090 M3 moved where that source LIVES —
+    // out of a fourth cell-slab array and into one heap box `std/stream` holds
+    // the address of — so the three rows are the box, the unbox and the read.
+    ("boxStream", Memory, "Stream: a stream moved into one heap box, by address"),
+    ("unboxStream", Memory, "Stream: a boxed stream moved back out, and the box freed"),
+    ("pullAt", Memory, "Stream: one element from the stream in that box"),
+    ("close", Memory, "Stream: variant-aware reclamation (a buffer, or the step's own release)"),
     // RFC-0074 M3a. `Syscall` rather than `Memory`: it is not about the stream's
     // storage, it is the one call that reaches the host's accept loop, which is
     // the same argument `print` makes one row down. It is also the only way a
@@ -500,6 +502,12 @@ fn the_census_is_the_code() {
     // emitted inside `for … in` rather than named, and a lazy `map` is exactly
     // the thing that has to name it. A combinator written in Vyrn cannot be
     // written without it.
+    // 86 -> 87 when RFC-0090 M3 took the stream cursor off Path B: `fromWrap`
+    // and `pull` became `boxStream`, `unboxStream` and `pullAt`, which is three
+    // rows where there were two. The extra row is the honest one — M2c hid the
+    // source's release inside the runtime's walk, so nothing named it; the
+    // wrapper takes its own source back out now, and a name is what makes
+    // `movecheck` able to check that release.
     // 86 -> 93 when RFC-0083 M4 added the third width: two `View` rows for
     // building an `F64x2`, two `Memory` rows for moving one, `sqrt` as
     // `Semantics` for the reason the narrow one is, and `min`/`max` as the only
@@ -519,7 +527,9 @@ fn the_census_is_the_code() {
     // routine for the reason `@toArray` is one: the operation is the memory
     // model, so its answer is the shape of the value, and a library written in
     // Vyrn has no way to ask what a value is made of.
-    assert_eq!(found.len(), 93, "the primitive core changed size");
+    // 93 -> 94 when RFC-0090 M3 re-hosted the stream cursor: `fromWrap` and
+    // `pull` retired and `boxStream`, `unboxStream` and `pullAt` arrived.
+    assert_eq!(found.len(), 94, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

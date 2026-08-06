@@ -3890,9 +3890,9 @@ impl Fn_<'_> {
                 // RFC-0090 M3. A boxed stream is an address, so `boxStream`
                 // answers an `Int64` and its two readers answer the annotation.
                 "boxStream" if args.len() == 1 => Type::Int,
-                "unbox" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t)) {
+                "unboxStream" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t)) {
                     Some(t @ Type::Stream(_)) => t,
-                    _ => return unsupported("an `unbox` with no expected Stream type", line),
+                    _ => return unsupported("an `unboxStream` with no expected Stream type", line),
                 },
                 "pullAt" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t)) {
                     Some(t @ Type::Option(_)) => t,
@@ -5566,7 +5566,7 @@ impl Fn_<'_> {
             }
             "fromStep" if args.len() == 3 => return self.stream_from_step(m, b, args, line),
             "boxStream" if args.len() == 1 => return self.stream_box(m, b, args, line),
-            "unbox" if args.len() == 1 => return self.stream_unbox(m, b, args, line),
+            "unboxStream" if args.len() == 1 => return self.stream_unbox(m, b, args, line),
             "pullAt" if args.len() == 1 => return self.stream_pull_at(m, b, args, line),
             // `close` reclaims what this backend CAN reclaim. Its `malloc` is a
             // bump pointer that never frees, so a buffer stream's teardown is
@@ -6968,9 +6968,9 @@ impl Fn_<'_> {
     }
 
     /// The word every boxed stream starts with (RFC-0090 M3). An address is an
-    /// ordinary `Int64` a program can spell, so `unbox` and `pullAt` check this
-    /// before they read a `Stream` out of it, and `unbox` clears it before it
-    /// frees — a second `unbox` of one address is the trap rather than a second
+    /// ordinary `Int64` a program can spell, so `unboxStream` and `pullAt` check this
+    /// before they read a `Stream` out of it, and `unboxStream` clears it before it
+    /// frees — a second `unboxStream` of one address is the trap rather than a second
     /// owner of one stream.
     const BOX_MAGIC: i64 = 3735928559;
 
@@ -6980,7 +6980,7 @@ impl Fn_<'_> {
         m: &mut Module,
         b: &mut Frame,
         args: &[Expr],
-        line: usize,
+        _line: usize,
     ) -> Result<u32, String> {
         let a = b.local(ValType::I32);
         self.expr_as(m, b, &args[0], &Type::Int)?;
@@ -7041,7 +7041,7 @@ impl Fn_<'_> {
         Ok(Type::Int)
     }
 
-    /// `unbox(a)`: the stream comes back out and the box is freed.
+    /// `unboxStream(a)`: the stream comes back out and the box is freed.
     fn stream_unbox(
         &mut self,
         m: &mut Module,
@@ -7051,7 +7051,7 @@ impl Fn_<'_> {
     ) -> Result<Type, String> {
         let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
             Some(Type::Stream(i)) => *i,
-            _ => return unsupported("an `unbox` with no expected Stream type", line),
+            _ => return unsupported("an `unboxStream` with no expected Stream type", line),
         };
         let sl = self.stream_layout(line)?;
         let a = self.stream_box_at(m, b, args, line)?;
@@ -10382,11 +10382,6 @@ struct Rt {
     /// the second half of `cell_addr` and nothing else, so the two cannot drift
     /// apart in what they compute, only in what they verify first.
     cell_ptr: u32,
-    /// RFC-0075 M2c's fourth array: the ADDRESS of `src[slot]`, the stream a
-    /// `fromWrap` put behind a cursor. An address rather than a getter and a
-    /// setter, because the slab's base is a lazily-allocated pointer this
-    /// function is the only one outside `cell_runtime` that needs.
-    cell_srcp: u32,
     /// RFC-0028's `Map<String, V>` key scan (M2l). The ONE piece of the map that
     /// is a function: `reserve`, `remove_at` and `keys_copy` are each reached from
     /// a single site and are a `malloc` plus a copy, so they are emitted there.
@@ -10514,7 +10509,6 @@ impl Rt {
             cell_addr: slot("cell_addr"),
             cell_release: slot("cell_release"),
             cell_ptr: slot("cell_ptr"),
-            cell_srcp: slot("cell_srcp"),
             map_find: slot("map_find"),
             regex_run: slot("regex_run"),
             parse_i64: slot("parse_i64"),
@@ -11886,9 +11880,7 @@ fn clamp_off(b: &mut Frame) {
 const CELLS: u32 = 65_536;
 const CELL_PTRS: u32 = CELLS * 8;
 const CELL_FREE: u32 = CELL_PTRS + CELLS * 4;
-/// RFC-0075 M2c: the stream behind each cursor, null for every ordinary cell.
-const CELL_SRC: u32 = CELL_FREE + CELLS * 4;
-const CELL_SLAB: u32 = CELL_SRC + CELLS * 4;
+const CELL_SLAB: u32 = CELL_FREE + CELLS * 4;
 
 /// The generational slot table (RFC-0004 §4, Path B), as three functions.
 ///
@@ -11979,17 +11971,6 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
             .ins(&Instruction::I32Mul)
             .ins(&Instruction::I32Add)
             .ins(&Instruction::LocalGet(1))
-            .ins(&Instruction::I32Store(word()));
-        // src[slot] = 0 — a recycled slot starts with nothing behind it
-        // (RFC-0075 M2c), which is what keeps `pull` on an ordinary cell a trap.
-        b.ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(CELL_SRC as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(s))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Const(0))
             .ins(&Instruction::I32Store(word()));
         // dest = { slot, gen[slot] }
         b.ins(&Instruction::LocalGet(0))
@@ -12097,23 +12078,6 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
             .ins(&Instruction::I32Mul)
             .ins(&Instruction::I32Add)
             .ins(&Instruction::I32Load(word()));
-    });
-
-    // cell_srcp(slot) -> the address of src[slot] (RFC-0075 M2c). The address
-    // rather than the value, so one function serves the wrapper that writes it,
-    // the `pull` that reads it and the release that walks it. No generation
-    // check: every caller has just done one, or is `close` itself.
-    rt.next_is(m, rt.cell_srcp);
-    m.func(&[ValType::I64], &[ValType::I32], &[], 0, |b| {
-        b.ins(&Instruction::I32Const(slab as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(CELL_SRC as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Mul)
-            .ins(&Instruction::I32Add);
     });
 }
 

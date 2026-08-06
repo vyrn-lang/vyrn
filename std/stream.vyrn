@@ -137,7 +137,7 @@ export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
     let run: fn(Int64, Int64, Bool) -> Option<U> = |slot, gen, closing| {
         let cur = Cursor { slot: slot, gen: gen }
         if closing {
-            let src: Stream<T> = unbox(takeCursor(cur))
+            let src: Stream<T> = unboxStream(takeCursor(cur))
             close(src)
             return None
         }
@@ -163,7 +163,7 @@ export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
     let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
         let cur = Cursor { slot: slot, gen: gen }
         if closing {
-            let src: Stream<T> = unbox(takeCursor(cur))
+            let src: Stream<T> = unboxStream(takeCursor(cur))
             close(src)
             return None
         }
@@ -198,7 +198,7 @@ export fn take<T>(s: Stream<T>, n: Int64) -> Stream<T> {
     let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
         let cur = Cursor { slot: slot, gen: gen }
         if closing {
-            let src: Stream<T> = unbox(takeCursor(cur))
+            let src: Stream<T> = unboxStream(takeCursor(cur))
             close(src)
             return None
         }
