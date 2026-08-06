@@ -258,6 +258,33 @@ fn slotsChurn(n: Int64) -> Int64 {
     return t
 }
 
+/// What a container's RECLAMATION costs — Phase 8b, and the number `slotsChurn`
+/// cannot show.
+///
+/// `slotsChurn` builds one slab and works it a thousand times, so the declared
+/// release runs once and disappears into the row. This one builds and abandons a
+/// slab per turn, so every turn pays the whole release: a walk of the table plus
+/// five `free`s. Sixteen elements, which is a small container — the cost per
+/// container is what a program that makes many short-lived ones pays, and it has
+/// no `cell` counterpart to compare against, because Path B has one global slab
+/// and no per-container lifetime at all.
+fn slotsLifetime(n: Int64) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let mut s: Slots<Int64> = newSlots()
+        let mut j = 0
+        while j < 16 {
+            let v = j
+            let h = insert(s, v)
+            t = t + h.slot
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return t
+}
+
 /// `copy` of a long String (RFC-0089 M1b): a header read, one allocation and one
 /// `memcpy` per turn. The row it replaces is `s + ""`, which the corpus wrote for
 /// the same purpose — so the pair of numbers says what the named operation costs
@@ -397,6 +424,10 @@ bench "handle insert/set/get/get/remove, 1000 times" {
 
 bench "std/slots insert/set/get/get/remove, 1000 times" {
     blackBox(slotsChurn(blackBox(1000)))
+}
+
+bench "std/slots build and release, 1000 containers of 16" {
+    blackBox(slotsLifetime(blackBox(1000)))
 }
 
 fn main() -> Int64 {
