@@ -167,16 +167,38 @@ Split into three PRs, in order:
   emission. §2a/§2b/§2c rows in memory tests flip to steady-state. The
   interpreter must host the same drop order (newest-first).
 
-## Phase 5 — places *(RFC-0089 M3a)*
+## Phase 5 — places *(RFC-0089 M3a)* — LANDED, one half of two
 
-A store releases the old contents: `x = v`, `r.f = v`, `a[i] = v`, `m[k] = v`,
-module-state assign. Release runs AFTER the new value is computed (the old
-value is usually an operand — the PR #61 sha1 lesson generalized).
-Conditionally-initialized `mut` needs an initializedness fact (movecheck
-already tracks flow). Deep drop: releasing an aggregate releases its places —
-enum payloads (variant-aware, `CloseStream` precedent), closure captures,
-container elements. Memory-test rows §4, §14, §16, U4, P1 flip to
-steady-state. Membench: module-state append must go amortized O(1).
+**A store releases the old contents** — `x = v`, `r.f = v`, `a[i] = v` and a
+module-state assign, in both compiling backends. Two conditions: the place must
+own what it holds, and the new value must not name the place (by PATH, so the
+`t.xs[]` write-back is seen). Census P1 is closed — the in-place append
+whitelist reads the whole program, and the module-state accumulator is now the
+same program as the local: 5 ms and 4.6 MB where P1 measured 4.92 s and 12.2 GB.
+§4's two memory rows flip.
+
+The **initializedness fact this plan asked for does not exist to need**: every
+place in the language is initialized before it can be stored over, except a map
+key, which decides at run time. What a store has to know is whether the place
+OWNS what is there.
+
+**Deep drop landed for `Option` and `Result` only.** A record, a user enum, a
+fixed array and a `fn` value are not released, and each is off for a measured
+reason rather than a judgment. Three of them are ONE gap: a projection out of
+an aggregate escapes as a value, and rule 3 records a returned projection as a
+lend rather than refusing it — which `check_return` already decided, in writing,
+because refusing one would demand `.copy()` from a self-referring type.
+Releasing them is what breaks it, and four corpus sites proved it in one parity
+run. §14 and §16 hold leaking with the reason; U4 gains a row.
+
+`m[k] = v` is not covered: an insert has no old value and the branch is
+runtime, so it wants the same site `map_set` already has. The release is
+INLINE, not a runtime function — see "M3a as landed" for why the `CloseStream`
+argument did not survive.
+
+**What unblocks the rest is Phase 7, not more of Phase 5.** RFC-0091 M1's
+`Copy` protocol and 7a's place projections are the two mechanisms the record,
+the enum and the closure capture all wait on.
 
 ## Phase 6 — the boundary *(RFC-0089 M3b)*
 

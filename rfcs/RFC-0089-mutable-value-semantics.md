@@ -1,9 +1,12 @@
 # RFC-0089 — Mutable Value Semantics
 
-- **Status:** Accepted, landing. M0, M1a, M1b and M2 are implemented — see the
-  "as landed" sections, which are the truth where they and the design differ.
-  M3 (places and the boundary) is not built. Supersedes RFC-0088; RFC-0088's M1
-  (make it visible) survives unchanged as this RFC's M0.
+- **Status:** Accepted, landing. M0, M1a, M1b and M2 are implemented, and M3a is
+  half implemented — see the "as landed" sections, which are the truth where
+  they and the design differ. A store releases the old value; an aggregate
+  releases its places for `Option` and `Result` and for nothing else yet, and
+  "M3a as landed" carries the measurement that says why. M3b (the boundary) is
+  not built. Supersedes RFC-0088; RFC-0088's M1 (make it visible) survives
+  unchanged as this RFC's M0.
 - **Depends on:** RFC-0004 §1 (the capability surface — this RFC finishes it),
   RFC-0086 (the compiler asks the type), RFC-0087 (the census)
 - **Premise:** backwards compatibility is not required. The corpus migrates.
@@ -383,6 +386,117 @@ M1b measured per copy. Compile time did not move: `movecheck` over
 `std/vyx.vyrn` goes 1,071 → 1,100 µs (min of 30) and `vyrn check
 examples/vyxdemo.vyrn` stays at 60 ms. Rule 2's analysis already ran in 4b; only
 the refusal was gated, so turning it on costs nothing.
+
+## M3a as landed — places, and the one gap that stopped the other half
+
+Phase 5 is rule 4. It has two halves and only one of them landed whole.
+
+**A store releases what the place held.** `x = v`, `r.f = v`, `a[i] = v` and a
+module-state assign all release the old contents, in both compiling backends.
+Two conditions, and both are read rather than assumed:
+
+1. **The place must own what it holds.** Module state does by rule — reading a
+   global is a borrow and storing into one stores an owned value, because rule 2
+   refuses a borrow at a store. A local owns its contents when the block already
+   releases it, which is `droppable` read as a property of the slot rather than
+   of the block. That is what RFC-0087 §4 asked for in its own words.
+2. **The new value must not name the place.** `a = push(a, i)` grows the old
+   buffer and hands it back, so releasing it would be a double free. The test is
+   by PATH and not by name: a place desugar (RFC-0082) calls its temporary
+   `t.xs[]`, and the write-back `t.xs = t.xs[]` hands the same buffer back.
+   Reading only the base name freed what it was about to store, and
+   `examples/placeorder.vyrn` caught it in one parity run.
+
+**Census P1 is closed.** The in-place append whitelist now reads the whole
+program, so a module-state accumulator grows its buffer instead of building a
+new one per turn. P1 measured the pair at n = 160 000: 0.095 s for the local
+against **4.92 s and 12.2 GB** for the global. They are now the same program:
+5 ms each, 4.6 MB peak, on one machine in one run. The accumulator's ownership
+word also starts TRUE where the binding owns its initializer, which closes the
+leak Phase 4c recorded — the first append used to abandon the initializer's
+buffer.
+
+**The initializedness fact the plan asked for is not needed.** A Vyrn `let`
+always has an initializer, module state always has one, a record's fields are
+set by its literal, and an array element must be pushed before it can be
+stored over. The only conditionally-initialized place in the language is a map
+key, and `m[k] = v` decides insert against update at run time. What a store
+actually has to know is not whether the place is initialized but whether it
+OWNS what is there, which is condition 1 above.
+
+### Releasing an aggregate: `Option` and `Result`, and nothing else yet
+
+`Option<T>` and `Result<T, E>` release their payload. That is census §14 — the
+recommended way to write a fallible function was also the leaking one — and
+the walk is `copy` run backwards, written as one shape so the two cannot
+disagree about a boxed payload.
+
+A **record**, a **user enum**, a fixed array and a `fn` value are not released,
+and each is off the list for a measurement rather than for a judgment. Three of
+them are one gap:
+
+> **A projection out of an aggregate escapes as a value, and rule 3 records a
+> returned projection as a LEND rather than refusing it.**
+
+`check_return` already carries that decision and its reason: refusing a
+returned projection would demand `.copy()` from `Json` and `Html`, which refer
+to themselves and have no structural copy (M1b). Its note ends *"so nothing
+releases them"*. A release row is exactly what releases them, and the corpus
+said so four times inside one parity run:
+
+| site | shape |
+|---|---|
+| `std/jsondec`'s `tagOf(v)` | `match v { JStr(s) => s, .. }` — a `String` the `Json` still holds |
+| `std/graphql`'s `gqlScanner(src)` | a RECORD holding `bytes(src)`, a view of the argument; `returned_borrow` reads a returned PLACE and a struct literal is not one, so nothing sees the lend at all |
+| `gqlParseQuery` | `GqlQuery { sels: set.sels }` — a field read stored into a literal, which `store` allows and does not count as a move |
+| `std/contract`'s `headOf` | reached a cut String out of a freed buffer once an `if let` scrutinee was released |
+
+The lend is recorded per `let` and travels neither through a store nor through
+a container, so the analysis cannot answer this today. The two mechanisms that
+make it sayable are already named in this RFC: **RFC-0091 M1's `Copy`
+protocol** and **7a's place projections**. Until then a leak is a task and a
+double free is a bug in a language that promises memory safety, so the rows
+wait.
+
+Two smaller findings, recorded where they were found:
+
+- **`drop` of a projection is a double free the moment its place is released.**
+  `let owned = r.items` then `drop owned` reads as a move and is not one.
+  Refusing it is rule 2 and it is written down in `movecheck` as a comment
+  rather than as a check, because the one legitimate way to reclaim a declared
+  container's buffer is `impl Owned for Ring { fn release(self) { let slots =
+  self.slots  drop slots } }` — and `self` is a `read` parameter, so the rule
+  would refuse the mechanism RFC-0086 M1 shipped. It needs `consume self` on
+  `Owned::release` first.
+- **§16 needs `Copy` before it needs effort.** Releasing a stored closure's
+  capture block means a `fn` value must MOVE under rule 1, and the corpus
+  copies them: `std/http`'s `httpCopy` rebuilds a `Route` thirteen fields at a
+  time and hands `run` and `whole` straight across, which is where seven
+  combinators get their new route. The move diagnostic's second fix — `.copy()`
+  — cannot be written for a `fn`: a capture block's layout is per TAG and
+  chosen at run time, so a structural copy has nothing to measure.
+
+### Where the release lives
+
+The census and this RFC both said a variant-aware release belongs in a runtime
+function, with `CloseStream` as the precedent, so that every drop SITE stays
+straight-line. It is INLINE, and the argument for the runtime function did not
+survive contact: `CloseStream` is one function because a `Stream`'s variants
+are compiler-known, while a per-type release needs per-type synthesis in two
+backends. `copy` settles the question by example — `copy_sum` and `copy_enum`
+already branch inline at arbitrary points in both emitters, including before a
+`ret` and mid-block, and the release is the same walk with `free` where `copy`
+has `malloc`. Writing the two as one shape is also what keeps them from
+disagreeing about the two payload encodings Phase 3 measured.
+
+### Measured
+
+`vyrn why --memory` over the corpus: 1,173 → 1,186 handled bindings of 3,546.
+Small, and honest — the count moves with the aggregate rows, and only two of
+them landed. Compile time did not move: `vyrn check examples/vyxdemo.vyrn` goes
+62 → 63 ms and `examples/shelf/server.vyrn` 154 → 155 ms (best of five).
+
+---
 
 ## Rejected
 
