@@ -222,12 +222,17 @@ pub enum StreamVal {
     /// `fromArray(xs)`: a buffer that already exists, plus how far the consumer
     /// has read it.
     Buf(std::rc::Rc<Vec<Val>>, usize),
-    /// `fromStep(seed, f)`: a cursor cell holding the seed, the step, and whether
-    /// the step has already answered `None` (after which it is never called
-    /// again — a stream that ended stays ended).
+    /// `fromStep(slot, gen, f)`: the two words of a cursor its maker minted, the
+    /// step, and whether the step has already answered `None` (after which it is
+    /// never called again — a stream that ended stays ended).
+    ///
+    /// The two words used to index the interpreter's own cell slab (RFC-0004
+    /// Path B). Since RFC-0090 M3 they index a `Slots` that lives in
+    /// `std/stream`, so nothing here reads them — they are carried and handed
+    /// back to the step, which is the only thing that knows what they mean.
     Step {
-        slot: usize,
-        gen: u64,
+        slot: i64,
+        gen: i64,
         step: Box<FnVal>,
         done: bool,
     },
@@ -1910,7 +1915,8 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         fresh_refs,
         cells: RefCell::new(Vec::new()),
         free: RefCell::new(Vec::new()),
-        sources: RefCell::new(HashMap::new()),
+        boxes: RefCell::new(HashMap::new()),
+        next_box: std::cell::Cell::new(1),
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
         log_file,
@@ -1962,13 +1968,16 @@ struct Interp<'a> {
     cells: RefCell<Vec<CellSlot>>,
     /// Free slots available for reuse (their generation was already bumped).
     free: RefCell<Vec<usize>>,
-    /// The second half of a wrapper's cursor cell (RFC-0075 M2c): the source
-    /// stream a `fromWrap` moved in, keyed by the slot that holds its cursor.
-    /// The compiled backends keep it in a fourth parallel array beside the
-    /// slab's generations, pointers and free list; here it is a map, which is
-    /// the same statement — a cell either has a stream behind it or it does
-    /// not, `pull` traps when it does not, and the release walks it.
-    sources: RefCell<HashMap<usize, StreamVal>>,
+    /// The boxed streams (RFC-0075 M2c, re-hosted by RFC-0090 M3): what
+    /// `boxStream` moved out of the program and `unbox` moves back in, keyed by
+    /// the address it handed back. The compiled backends `malloc` one header and
+    /// answer its address; here the address is a serial number, which is the
+    /// same statement — an address either names a boxed stream or it does not,
+    /// and `unbox` and `pullAt` trap when it does not.
+    boxes: RefCell<HashMap<i64, StreamVal>>,
+    /// The next address `boxStream` hands out. Never reused, so a stale address
+    /// is a trap rather than a different stream.
+    next_box: std::cell::Cell<i64>,
     /// The logging threshold ordinal (RFC-0008); calls below it are skipped.
     log_level: usize,
     /// Where log records are written (RFC-0008).
@@ -4853,15 +4862,12 @@ impl<'a> Interp<'a> {
                         other => Err(format!("fromArray of non-Array {other:?}").into()),
                     },
                     "fromStep" => {
-                        let seed = vals.remove(0);
-                        let step = match vals.remove(0) {
+                        let slot = Self::stream_int(&vals[0])?;
+                        let gen = Self::stream_int(&vals[1])?;
+                        let step = match vals.remove(2) {
                             Val::Fn(f) => f,
                             other => return Err(format!("fromStep of non-fn {other:?}").into()),
                         };
-                        let (slot, gen) = match self.cell_alloc(seed)? {
-                            Val::Ref { slot, gen } => (slot, gen),
-                            other => return Err(format!("cell of {other:?}").into()),
-                        };
                         Ok(Val::Stream(Box::new(StreamVal::Step {
                             slot,
                             gen,
@@ -4869,46 +4875,39 @@ impl<'a> Interp<'a> {
                             done: false,
                         })))
                     }
-                    // RFC-0075 M2c. A wrapper is a producer whose cursor cell
-                    // also holds the source it wraps: same header, same step
-                    // signature, same dispatcher, one more thing to release.
-                    "fromWrap" => {
-                        let src = match vals.remove(0) {
-                            Val::Stream(s) => *s,
-                            other => {
-                                return Err(format!("fromWrap of non-Stream {other:?}").into())
-                            }
-                        };
-                        let step = match vals.remove(0) {
-                            Val::Fn(f) => f,
-                            other => return Err(format!("fromWrap of non-fn {other:?}").into()),
-                        };
-                        let (slot, gen) = match self.cell_alloc(Val::Int(0))? {
-                            Val::Ref { slot, gen } => (slot, gen),
-                            other => return Err(format!("cell of {other:?}").into()),
-                        };
-                        self.sources.borrow_mut().insert(slot, src);
-                        Ok(Val::Stream(Box::new(StreamVal::Step {
-                            slot,
-                            gen,
-                            step,
-                            done: false,
-                        })))
+                    // RFC-0075 M2c, re-hosted by RFC-0090 M3. The two halves of
+                    // one move: a stream leaves the program into a box and comes
+                    // back out of it. `movecheck` reads the first as a disposal
+                    // and the second as an acquisition, so the pair cannot lose
+                    // a stream between them without failing to compile.
+                    "boxStream" => match vals.remove(0) {
+                        Val::Stream(s) => {
+                            let a = self.next_box.get();
+                            self.next_box.set(a + 1);
+                            self.boxes.borrow_mut().insert(a, *s);
+                            Ok(Val::Int(a))
+                        }
+                        other => Err(format!("boxStream of non-Stream {other:?}").into()),
+                    },
+                    "unbox" => {
+                        let a = Self::stream_int(&vals[0])?;
+                        match self.boxes.borrow_mut().remove(&a) {
+                            Some(s) => Ok(Val::Stream(Box::new(s))),
+                            None => Err(Self::no_boxed_stream()),
+                        }
                     }
-                    // `pull(c)` — one element from the stream behind this cursor.
-                    // The generation check is the ordinary one, so a cursor that
-                    // outlived its stream traps here exactly as `get` would.
-                    "pull" => {
-                        let (slot, gen) = self.as_ref(&vals[0])?;
-                        self.cell_get(slot, gen, false)?;
+                    // `pullAt(a)` — one element from the stream in that box. The
+                    // box stays; only its contents advance.
+                    "pullAt" => {
+                        let a = Self::stream_int(&vals[0])?;
                         // Taken out for the duration of the step, which may run
                         // arbitrary Vyrn code — including, for a chain, another
-                        // `pull` on a different slot.
-                        let Some(mut src) = self.sources.borrow_mut().remove(&slot) else {
-                            return Err("no stream behind this cursor".into());
+                        // `pullAt` on a different box.
+                        let Some(mut src) = self.boxes.borrow_mut().remove(&a) else {
+                            return Err(Self::no_boxed_stream());
                         };
                         let got = self.stream_next(&mut src);
-                        self.sources.borrow_mut().insert(slot, src);
+                        self.boxes.borrow_mut().insert(a, src);
                         Ok(match got? {
                             Some(v) => Val::Option(Some(Box::new(v))),
                             None => Val::Option(None),
@@ -6162,6 +6161,19 @@ impl<'a> Interp<'a> {
         Ctrl::Err("reference used after release".into())
     }
 
+    /// `unbox`/`pullAt` on an address that names no boxed stream (RFC-0090 M3).
+    /// The compiled backends print this and exit 1; the wording is theirs.
+    fn stream_int(v: &Val) -> Result<i64, Ctrl> {
+        match v {
+            Val::Int(n) => Ok(*n),
+            other => Err(format!("a stream word that is {other:?}").into()),
+        }
+    }
+
+    fn no_boxed_stream() -> Ctrl {
+        Ctrl::Err("no stream in this box".into())
+    }
+
     /// One element from a stream, advancing it (RFC-0075 M2b). `None` ends the
     /// loop; a stepped stream that has ended is never stepped again.
     fn stream_next(&self, s: &mut StreamVal) -> Result<Option<Val>, Ctrl> {
@@ -6182,11 +6194,8 @@ impl<'a> Interp<'a> {
                 if *done {
                     return Ok(None);
                 }
-                let cursor = Val::Ref {
-                    slot: *slot,
-                    gen: *gen,
-                };
-                match self.call_fnval(step, &[cursor])? {
+                let cursor = [Val::Int(*slot), Val::Int(*gen), Val::Bool(false)];
+                match self.call_fnval(step, &cursor)? {
                     Val::Option(Some(v)) => Ok(Some(*v)),
                     Val::Option(None) => {
                         *done = true;
@@ -6198,26 +6207,28 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// A stream's release path (RFC-0075): a buffer has nothing the host does not
-    /// reclaim anyway, a producer owns a cursor cell out of a finite slab. One
-    /// function so `for … in`, `close` and the host's disconnect (RFC-0074 M3a)
-    /// run the same one rather than three that agree.
-    /// A wrapper (M2c) holds its source in that cell, so one release is a WALK:
-    /// a chain of three combinators over one producer is four streams and the
-    /// loop below visits each of them once. It is a loop rather than a recursion
-    /// because a chain is a list — the compiled backends run the same loop.
+    /// A stream's release path (RFC-0075, re-hosted by RFC-0090 M3): a buffer
+    /// has nothing the host does not reclaim anyway, a producer owns a cursor
+    /// slot in a slab that now lives in `std/stream`. One function so
+    /// `for … in`, `close` and the host's disconnect (RFC-0074 M3a) run the same
+    /// one rather than three that agree.
+    ///
+    /// A producer releases itself. The slab is Vyrn and a release is type-erased
+    /// here, so the step is asked to do it: it is called once with `closing`
+    /// true, gives its slot back, and answers `None`. A wrapper's step closes
+    /// its own source in the same call, which is why the walk M2c wrote as a
+    /// loop over a chain is now ordinary Vyrn recursion — and why `movecheck`
+    /// checks it.
     fn release_stream(&self, s: &StreamVal) -> Result<(), Ctrl> {
-        let mut cur = s.clone();
-        loop {
-            let StreamVal::Step { slot, gen, .. } = cur else {
-                return Ok(());
-            };
-            self.cell_release(slot, gen)?;
-            match self.sources.borrow_mut().remove(&slot) {
-                Some(src) => cur = src,
-                None => return Ok(()),
-            }
-        }
+        let StreamVal::Step {
+            slot, gen, step, ..
+        } = s
+        else {
+            return Ok(());
+        };
+        let closing = [Val::Int(*slot), Val::Int(*gen), Val::Bool(true)];
+        self.call_fnval(step, &closing)?;
+        Ok(())
     }
 
     /// `for x in <stream>` — the pull loop. The stream is a local here, so the
@@ -6266,9 +6277,6 @@ impl<'a> Interp<'a> {
     fn cell_alloc(&self, v: Val) -> Result<Val, Ctrl> {
         let mut cells = self.cells.borrow_mut();
         if let Some(slot) = self.free.borrow_mut().pop() {
-            // A recycled slot starts with nothing behind it, as the compiled
-            // backends' `src[slot] = 0` says (RFC-0075 M2c).
-            self.sources.borrow_mut().remove(&slot);
             cells[slot].val = v; // generation already bumped at release
             return Ok(Val::Ref {
                 slot,

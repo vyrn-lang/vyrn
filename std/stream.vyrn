@@ -1,13 +1,12 @@
 /// std/stream — the `Stream<T>` combinators (RFC-0075 M2), written in Vyrn
 /// itself, exactly as std/arrays is. Being ordinary Vyrn they get
-/// interpreter == native == wasm parity for free, they add no builtin and no
-/// census row, and — the part that matters here — they inherit M1's linearity
-/// instead of restating it. Every function below takes a `Stream` parameter,
-/// which carries the obligation into the callee, discharges it with `for … in`,
-/// and hands back a stream the caller now owes. An abandoned `map(...)` result
-/// therefore fails to compile for precisely the reason an abandoned
-/// `fromArray(...)` does; there is no combinator-shaped hole to plug because
-/// there is no combinator-shaped rule.
+/// interpreter == native == wasm parity for free, and — the part that matters
+/// here — they inherit M1's linearity instead of restating it. Every function
+/// below takes a `Stream` parameter, which carries the obligation into the
+/// callee, discharges it, and hands back a stream the caller now owes. An
+/// abandoned `map(...)` result therefore fails to compile for precisely the
+/// reason an abandoned `fromArray(...)` does; there is no combinator-shaped hole
+/// to plug because there is no combinator-shaped rule.
 ///
 /// **Five, and two refused.** M2b made `Stream<T>` a producer rather than a
 /// buffer, so `unfold` is here now: it is the reason the representation
@@ -16,29 +15,121 @@
 /// READY, and this RFC states outright that it adds no concurrency while
 /// RFC-0013 leaves the loop to the host. There is nothing to ask.
 ///
-/// **Lazy since M2c.** `map`, `filter` and `take` no longer drain their source
-/// into a buffer. Each is a wrapper: a producer whose cursor cell holds the
-/// stream it wraps (`fromWrap`), whose step reads that source one element at a
-/// time (`pull`), and whose `close` releases the source on the way past — one
-/// release per stream, in a walk down the chain. So `map(unfold(..), f)` is a
-/// feed rather than a hang, which is the first thing anyone does with a feed.
+/// **Lazy since M2c.** `map`, `filter` and `take` do not drain their source into
+/// a buffer. Each is a wrapper: a producer whose cursor holds the stream it
+/// wraps, whose step reads that source one element at a time (`pull`), and whose
+/// close releases the source on the way past — one release per stream, down the
+/// chain. So `map(unfold(..), f)` is a feed rather than a hang, which is the
+/// first thing anyone does with a feed.
+///
+/// **The slab is this module's, since RFC-0090 M3.** A cursor used to be a
+/// `Ref<Int64>` out of a slab the compiler carried, with a fourth parallel array
+/// holding "the stream behind this cursor". Both are gone. A cursor is a slot in
+/// the `Slots<CursorCell>` below, so the slab logic is Vyrn anyone can read, it
+/// grows instead of stopping at 65 536, and a cursor that outlived its stream
+/// traps as a dead handle rather than as a released cell.
+
+import { Slots, Handle, newSlots, insert, remove } from "std/slots"
+
+/// A producer's cursor: which slot of this module's slab, and the generation
+/// that was live when the stream took it. Two plain words, so a stream carries
+/// one exactly where it used to carry a `Ref`.
+export type Cursor = { slot: Int64, gen: Int64 }
+
+/// What one slot holds: the `Int64` a step reads and writes, and the address of
+/// the boxed stream a wrapper put behind it (`0` when there is none). Both are
+/// scalars, so the slab owns no heap and `remove` gives a slot back whole.
+type CursorCell = { pos: Int64, src: Int64 }
+
+/// Every live producer's state, in one container this module owns.
+let mut cells: Slots<CursorCell> = newSlots()
+
+fn handleOf(c: Cursor) -> Handle<CursorCell> {
+    return Handle { slot: c.slot, gen: c.gen, owner: cells.owner }
+}
+
+fn newCursor(pos: Int64, src: Int64) -> Cursor {
+    let h = insert(cells, CursorCell { pos: pos, src: src })
+    return Cursor { slot: h.slot, gen: h.gen }
+}
+
+/// Give a slot back and hand over the boxed source behind it (`0` if none).
+/// Called once per stream, from that stream's own closing call.
+fn takeCursor(c: Cursor) -> Int64 {
+    let h = handleOf(c)
+    let src = cells[h].src
+    remove(cells, h)
+    return src
+}
+
+/// Read the cursor. Traps if the stream that owns it has been closed.
+export fn cursorGet(c: Cursor) -> Int64 {
+    return cells[handleOf(c)].pos
+}
+
+/// Write the cursor.
+export fn cursorSet(c: Cursor, v: Int64) {
+    cells[handleOf(c)].pos = v
+}
+
+/// One element from the stream behind this cursor — the operation a wrapper's
+/// step is written in terms of. Its type comes from the annotation:
+/// `let x: Option<T> = pull(c)`.
+export fn pull<T>(c: Cursor) -> Option<T> {
+    let x: Option<T> = pullAt(cells[handleOf(c)].src)
+    return x
+}
 
 /// A stream from a step function and a starting cursor (RFC-0075 M2b).
 ///
-/// `step` is handed the stream's own cursor cell once per element: read it with
-/// `get`, write the next cursor with `set`, and answer `Some(v)` to yield or
-/// `None` to end. Nothing runs until a consumer asks, so a step that never
-/// answers `None` is an endless feed rather than a hang — `take(unfold(..), n)`
-/// over one allocates n.
+/// `step` is handed the stream's own cursor once per element: read it with
+/// `cursorGet`, write the next cursor with `cursorSet`, and answer `Some(v)` to
+/// yield or `None` to end. Nothing runs until a consumer asks, so a step that
+/// never answers `None` is an endless feed rather than a hang —
+/// `take(unfold(..), n)` over one allocates n.
 ///
 /// The cursor is the resume token RFC-0074's `.resumable()` wants: hand a
 /// reconnecting client's `Last-Event-ID` in as `seed` and replay is the ordinary
 /// path. It is an `Int64` because the step's SIGNATURE is what a stream
-/// dispatches through, and a seed type in that signature would be a seed type
-/// in `Stream<T>` — which is exactly what M2 could not hide. Producer state that
-/// is not one integer goes in a second cell the step closes over.
-export fn unfold<T>(seed: Int64, step: fn(Ref<Int64>) -> Option<T>) -> Stream<T> {
-    return fromStep(seed, step)
+/// dispatches through, and a seed type in that signature would be a seed type in
+/// `Stream<T>` — which is exactly what M2 could not hide. Producer state that is
+/// not one integer goes in a second cursor the step closes over.
+export fn unfold<T>(seed: Int64, step: fn(Cursor) -> Option<T>) -> Stream<T> {
+    let c = newCursor(seed, 0)
+    // The registered step is this adapter, not the caller's. It takes the two
+    // cursor words the stream carries and a flag that is true exactly once —
+    // when the stream is being closed. That is how a release reaches a slab the
+    // runtime cannot name: the stream asks its own step to give the slot back.
+    let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
+        let cur = Cursor { slot: slot, gen: gen }
+        if closing {
+            let none = takeCursor(cur)
+            return None
+        }
+        return step(cur)
+    }
+    return fromStep(c.slot, c.gen, run)
+}
+
+/// A producer that owns another stream: the source goes in a box whose address
+/// the cursor holds, `pull` reads it, and the closing call gives both back.
+///
+/// The source is closed HERE, in Vyrn, by an ordinary `close` that `movecheck`
+/// checks like any other. A chain of three combinators over one producer is four
+/// streams and four releases, one per step, each one statement long.
+fn wrap<T, U>(s: Stream<T>, step: fn(Cursor) -> Option<U>) -> Stream<U> {
+    let c = newCursor(0, boxStream(s))
+    let run: fn(Int64, Int64, Bool) -> Option<U> = |slot, gen, closing| {
+        let cur = Cursor { slot: slot, gen: gen }
+        if closing {
+            let addr = takeCursor(cur)
+            let src: Stream<T> = unbox(addr)
+            close(src)
+            return None
+        }
+        return step(cur)
+    }
+    return fromStep(c.slot, c.gen, run)
 }
 
 /// Apply `f` to every element. `s` is consumed; the result is a new obligation.
@@ -48,14 +139,14 @@ export fn unfold<T>(seed: Int64, step: fn(Ref<Int64>) -> Option<T>) -> Stream<T>
 /// asks the feed n times. Nothing is buffered on the way through — a mapped
 /// buffer stream allocates less than the eager version did, not more.
 export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
-    let step: fn(Ref<Int64>) -> Option<U> = |c| {
+    let step: fn(Cursor) -> Option<U> = |c| {
         let x: Option<T> = pull(c)
         if let Some(v) = x {
             return Some(f(v))
         }
         return None
     }
-    return fromWrap(s, step)
+    return wrap(s, step)
 }
 
 /// Keep only the elements for which `pred` holds.
@@ -67,7 +158,7 @@ export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
 /// nothing ever passes — which is the honest behaviour of a filter, not a bug
 /// laziness introduced.
 export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
-    let step: fn(Ref<Int64>) -> Option<T> = |c| {
+    let step: fn(Cursor) -> Option<T> = |c| {
         while true {
             let x: Option<T> = pull(c)
             if let Some(v) = x {
@@ -80,7 +171,7 @@ export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
         }
         return None
     }
-    return fromWrap(s, step)
+    return wrap(s, step)
 }
 
 /// The first `n` elements (fewer if the stream is shorter; none if `n <= 0`).
@@ -92,19 +183,19 @@ export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
 /// no longer the one combinator that escapes an endless feed; it is the one
 /// that ENDS one, which is a different job and the reason it still exists.
 ///
-/// The count lives in the wrapper's own cursor cell — `get`/`set` here are the
-/// ordinary cell operations, on the cell `fromWrap` allocated.
+/// The count lives in the wrapper's own cursor — `cursorGet`/`cursorSet` here
+/// are the ordinary cursor operations, on the slot `wrap` took.
 export fn take<T>(s: Stream<T>, n: Int64) -> Stream<T> {
-    let step: fn(Ref<Int64>) -> Option<T> = |c| {
-        let i = get(c)
+    let step: fn(Cursor) -> Option<T> = |c| {
+        let i = cursorGet(c)
         if i >= n {
             return None
         }
-        set(c, i + 1)
+        cursorSet(c, i + 1)
         let x: Option<T> = pull(c)
         return x
     }
-    return fromWrap(s, step)
+    return wrap(s, step)
 }
 
 /// Interleave two streams one element at a time, draining whichever outlasts
@@ -119,11 +210,11 @@ export fn take<T>(s: Stream<T>, n: Int64) -> Stream<T> {
 ///
 /// **Still eager, and therefore still a hang on an endless side** — the one
 /// combinator M2c did not make lazy, for a stated reason rather than an
-/// oversight: a wrapper owns ONE source, because a cursor cell has one stream
-/// behind it. Two sources want a second slot in that cell and a step that
-/// remembers whose turn it is, which is a second wrapper shape rather than a
-/// second use of this one. Wrap the endless side in `take` first; a merge that
-/// stops on its own needs both sides to.
+/// oversight: a wrapper owns ONE source, because a cursor holds one box. Two
+/// sources want a second address in that cell and a step that remembers whose
+/// turn it is, which is a second wrapper shape rather than a second use of this
+/// one. Wrap the endless side in `take` first; a merge that stops on its own
+/// needs both sides to.
 export fn merge<T>(a: Stream<T>, b: Stream<T>) -> Stream<T> {
     let mut xs: Array<T> = []
     for x in a {

@@ -2256,7 +2256,7 @@ mod streams {
         }
         match value {
             Expr::Call { name, .. }
-                if name == "fromArray" || name == "fromStep" || name == "fromWrap" =>
+                if name == "fromArray" || name == "fromStep" || name == "unbox" =>
             {
                 Some("Stream".to_string())
             }

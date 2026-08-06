@@ -119,21 +119,18 @@ done:
 /// reference used after `release` fails a cheap check instead of dangling. A
 /// released slot is reused with a bumped generation, invalidating old references.
 ///
-/// A fourth array arrived with RFC-0075 M2c: `src`, the stream a `fromWrap` put
-/// behind a cursor. It is null for every ordinary cell, which is what makes
-/// `pull` on one a trap rather than a read of whatever follows an 8-byte box,
-/// and non-null for a wrapper — where it points into that wrapper's own cell
-/// payload, so a wrapper costs one `malloc`, not two. `close` walks it.
+/// RFC-0090 M3 took one array back out: `src`, the stream a `fromWrap` put
+/// behind a cursor. A stream's cursor is not a cell any more — it is a slot in
+/// `std/stream`'s own `Slots` — so what remains here is Path B and nothing else,
+/// which is the state RFC-0090 M4 deletes.
 const CELL_RUNTIME: &str = "\
 @__vyrn_cell_gen = global [65536 x i64] zeroinitializer
 @__vyrn_cell_ptr_arr = global [65536 x ptr] zeroinitializer
-@__vyrn_cell_src_arr = global [65536 x ptr] zeroinitializer
 @__vyrn_cell_top = global i64 0
 @__vyrn_cell_free = global [65536 x i64] zeroinitializer
 @__vyrn_cell_freetop = global i64 0
 @.fmt.uaf = private unnamed_addr constant [37 x i8] c\"error: reference used after release\\0A\\00\"
 @.fmt.oom = private unnamed_addr constant [31 x i8] c\"error: out of reference cells\\0A\\00\"
-@.fmt.nos = private unnamed_addr constant [37 x i8] c\"error: no stream behind this cursor\\0A\\00\"
 
 define void @__vyrn_cell_trap() {
 entry:
@@ -171,31 +168,7 @@ done:
   %slot = phi i64 [ %rslot, %reuse ], [ %top, %ok ]
   %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_ptr_arr, i64 0, i64 %slot
   store ptr %p, ptr %pp
-  %sp0 = getelementptr [65536 x ptr], ptr @__vyrn_cell_src_arr, i64 0, i64 %slot
-  store ptr null, ptr %sp0
   ret i64 %slot
-}
-
-define ptr @__vyrn_cell_src(i64 %slot) {
-entry:
-  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_src_arr, i64 0, i64 %slot
-  %p = load ptr, ptr %pp
-  ret ptr %p
-}
-
-define void @__vyrn_cell_setsrc(i64 %slot, ptr %p) {
-entry:
-  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_src_arr, i64 0, i64 %slot
-  store ptr %p, ptr %pp
-  ret void
-}
-
-define void @__vyrn_cell_nostream() {
-entry:
-  %e = call ptr @__vyrn_stderr()
-  %r = call i32 @fputs(ptr @.fmt.nos, ptr %e)
-  call void @exit(i32 1)
-  unreachable
 }
 
 define i64 @__vyrn_cell_getgen(i64 %slot) {
@@ -239,49 +212,49 @@ entry:
   ret void
 }
 
-define void @__vyrn_stream_close(ptr %s) {
+";
+
+/// A boxed stream (RFC-0075 M2c, re-hosted by RFC-0090 M3). A lazy combinator
+/// owns the stream it wraps, and a `Stream<T>` cannot be a field of anything —
+/// M1 refuses it, because a field would erase the disposal obligation. So the
+/// source lives in one heap box and `std/stream` holds its ADDRESS in its own
+/// cursor slot: `boxStream` puts it there, `pullAt` asks it for an element, and
+/// `unbox` takes it back out so the wrapper's step can `close` it in Vyrn.
+///
+/// The box is `{ i64 magic, Stream }`. `unbox` clears the magic before it frees,
+/// so a second `unbox` of one address is the trap below rather than a stream
+/// read out of freed memory. That check is the whole reason the magic exists:
+/// an address is an ordinary `Int64` a program can spell.
+const STREAM_RUNTIME: &str = "\
+@.fmt.nob = private unnamed_addr constant [30 x i8] c\"error: no stream in this box\\0A\\00\"
+
+define void @__vyrn_stream_nobox() {
 entry:
-  %d0 = load ptr, ptr %s
-  %t0p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 2
-  %t0 = load i64, ptr %t0p
-  %c0p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 4
-  %c0 = load i64, ptr %c0p
-  %g0p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %s, i64 0, i32 5
-  %g0 = load i64, ptr %g0p
-  br label %loop
-loop:
-  %d = phi ptr [ %d0, %entry ], [ %d1, %walk ]
-  %tag = phi i64 [ %t0, %entry ], [ %t1, %walk ]
-  %slot = phi i64 [ %c0, %entry ], [ %c1, %walk ]
-  %gen = phi i64 [ %g0, %entry ], [ %g1, %walk ]
-  %isbuf = icmp slt i64 %tag, 0
-  br i1 %isbuf, label %buf, label %stp
-buf:
-  call void @free(ptr %d)
-  ret void
-stp:
-  call void @__vyrn_cell_check(i64 %slot, i64 %gen)
-  %cp = call ptr @__vyrn_cell_ptr(i64 %slot)
-  %src = call ptr @__vyrn_cell_src(i64 %slot)
-  call void @__vyrn_cell_release_slot(i64 %slot)
-  %wrapped = icmp ne ptr %src, null
-  br i1 %wrapped, label %walk, label %plain
-plain:
-  call void @free(ptr %cp)
-  ret void
-walk:
-  %d1 = load ptr, ptr %src
-  %t1p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %src, i64 0, i32 2
-  %t1 = load i64, ptr %t1p
-  %c1p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %src, i64 0, i32 4
-  %c1 = load i64, ptr %c1p
-  %g1p = getelementptr { ptr, i64, i64, i64, i64, i64 }, ptr %src, i64 0, i32 5
-  %g1 = load i64, ptr %g1p
-  call void @free(ptr %cp)
-  br label %loop
+  %e = call ptr @__vyrn_stderr()
+  %r = call i32 @fputs(ptr @.fmt.nob, ptr %e)
+  call void @exit(i32 1)
+  unreachable
+}
+
+define ptr @__vyrn_stream_box(i64 %a) {
+entry:
+  %z = icmp eq i64 %a, 0
+  br i1 %z, label %bad, label %chk
+chk:
+  %p = inttoptr i64 %a to ptr
+  %m = load i64, ptr %p
+  %ok = icmp eq i64 %m, 3735928559
+  br i1 %ok, label %good, label %bad
+bad:
+  call void @__vyrn_stream_nobox()
+  unreachable
+good:
+  %d = getelementptr i8, ptr %p, i64 8
+  ret ptr %d
 }
 
 ";
+
 
 /// The strict UTF-8 validator: Björn Höhrmann's DFA over the `@__vyrn_utf8d`
 /// table, which is emitted separately in `emit` and shared with the direct wasm
@@ -771,13 +744,18 @@ pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
 /// `vyrn_gen.read`'s modes, shared with the host that answers them so the two
 /// spellings of "2 means listDir" are one.
 /// A stream's step signature (RFC-0075 M2b), which is a function of the ELEMENT
-/// type and nothing else — the cursor is a `Ref<Int64>` precisely so that it is.
-/// Both the construction site and the loop that dispatches through it derive the
-/// signature from here, because a stored `fn` value is keyed by its signature and
-/// two spellings of one type would be two dispatchers.
+/// type and nothing else — the cursor is two plain `Int64`s precisely so that it
+/// is. Both the construction site and the loop that dispatches through it derive
+/// the signature from here, because a stored `fn` value is keyed by its signature
+/// and two spellings of one type would be two dispatchers.
+///
+/// The third parameter is the closing flag (RFC-0090 M3). A release is
+/// type-erased in the runtime and the cursor slab is `std/stream`'s, so a stream
+/// gives its slot back by asking its own step: `closing` is true exactly once per
+/// stream, and the step answers `None`.
 fn stream_step_sig(elem: &Type) -> Type {
     Type::Fn(
-        vec![Type::Ref(Box::new(Type::Int))],
+        vec![Type::Int, Type::Int, Type::Bool],
         Box::new(Type::Option(Box::new(elem.clone()))),
     )
 }
@@ -1082,6 +1060,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Backs `cell`/`get`/`set`/`release`: a stale reference is caught by a
     // generation check instead of dangling.
     out.push_str(CELL_RUNTIME);
+    out.push_str(STREAM_RUNTIME);
     out.push_str(STRING_RUNTIME);
     // The UTF-8 validator DFA table, then the validator. (The base64 alphabet
     // table went with the codecs -- RFC-0078 M4c; `std/codecs` builds it from a
@@ -1300,6 +1279,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // variant tags are module-global and dispatchers see every source.
     let mut fnval_registry: Vec<FnValVariant> = Vec::new();
     let mut fnval_dispatch: Vec<Type> = Vec::new();
+    let mut stream_closers: Vec<Type> = Vec::new();
 
     let enqueue = |emitted: &std::collections::HashSet<String>,
                    queue: &mut Vec<(String, Vec<Type>)>,
@@ -1347,6 +1327,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         gi.protocol_methods = protocol_methods.clone();
         gi.fnval_variants = std::mem::take(&mut fnval_registry);
         gi.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
+            gi.stream_closers = std::mem::take(&mut stream_closers);
         let gaccs = global_append_candidates(program);
         let mut decls = String::new();
         for g in &program.globals {
@@ -1407,6 +1388,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         drain_ho(&mut gi, &mut out, &mut ho_queue, &mut lambda_emitted);
         fnval_registry = std::mem::take(&mut gi.fnval_variants);
         fnval_dispatch = std::mem::take(&mut gi.fnval_dispatch);
+            stream_closers = std::mem::take(&mut gi.stream_closers);
     }
 
     // 1. Non-generic functions (main + others), collecting instantiations.
@@ -1445,6 +1427,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         gen.gappend = gappend.clone();
         gen.fnval_variants = std::mem::take(&mut fnval_registry);
         gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
+            gen.stream_closers = std::mem::take(&mut stream_closers);
         gen.function(f, &sym, &mut out)?;
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
@@ -1452,6 +1435,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
         fnval_registry = std::mem::take(&mut gen.fnval_variants);
         fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
+            stream_closers = std::mem::take(&mut gen.stream_closers);
     }
 
     // 2. Generic instantiations and higher-order specializations, transitively.
@@ -1477,6 +1461,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.gappend = gappend.clone();
             gen.fnval_variants = std::mem::take(&mut fnval_registry);
             gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
+            gen.stream_closers = std::mem::take(&mut stream_closers);
             gen.function(f, &sym, &mut out)?;
             out.push('\n');
             let insts = std::mem::take(&mut gen.instantiations);
@@ -1484,6 +1469,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
             fnval_registry = std::mem::take(&mut gen.fnval_variants);
             fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
+            stream_closers = std::mem::take(&mut gen.stream_closers);
             continue;
         }
         if let Some(inst) = ho_queue.pop() {
@@ -1501,6 +1487,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.gappend = gappend.clone();
             gen.fnval_variants = std::mem::take(&mut fnval_registry);
             gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
+            gen.stream_closers = std::mem::take(&mut stream_closers);
             gen.ho_function(&inst, &mut out)?;
             out.push('\n');
             let insts = std::mem::take(&mut gen.instantiations);
@@ -1508,6 +1495,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
             fnval_registry = std::mem::take(&mut gen.fnval_variants);
             fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
+            stream_closers = std::mem::take(&mut gen.stream_closers);
             continue;
         }
         break;
@@ -1533,6 +1521,22 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let sigs = fnval_dispatch.clone();
         for sig in &sigs {
             dgen.emit_fnval_dispatcher(sig, &mut out)?;
+        }
+    }
+
+    // RFC-0090 M3: one release per element type, emitted here for the reason the
+    // dispatchers are — a release CALLS a dispatcher, so it cannot be written
+    // before the signature set is closed.
+    if !stream_closers.is_empty() {
+        let mut cgen = Gen::new(
+            &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
+            &funcs, droppable_map, fresh_refs, owned_proto, &regex_globals, &program.impls,
+        );
+        cgen.protocol_methods = protocol_methods.clone();
+        cgen.globals = globals_map.clone();
+        let elems = stream_closers.clone();
+        for elem in &elems {
+            cgen.emit_stream_closer(elem, &mut out)?;
         }
     }
 
@@ -1703,6 +1707,9 @@ struct Gen<'a> {
     /// Signatures called through a stored value anywhere in the module — each
     /// gets one synthesized dispatcher `@__vyrn_fndispatch_<sig>` at the end.
     fnval_dispatch: Vec<Type>,
+    /// Every element type whose `Stream` is released anywhere (RFC-0090 M3),
+    /// threaded exactly as `fnval_dispatch` is and emitted beside it.
+    stream_closers: Vec<Type>,
     /// Local `String` accumulators of the function being emitted that may be
     /// appended to in place (from `append_candidates`, recomputed per body).
     append_ok: std::collections::HashSet<String>,
@@ -1831,6 +1838,7 @@ impl<'a> Gen<'a> {
             expect: Vec::new(),
             fnval_variants: Vec::new(),
             fnval_dispatch: Vec::new(),
+            stream_closers: Vec::new(),
             append_ok: std::collections::HashSet::new(),
             str_append: HashMap::new(),
             gappend: HashMap::new(),
@@ -3423,7 +3431,22 @@ impl<'a> Gen<'a> {
             }
             DropKind::CloseStream => {
                 // RFC-0075 M2b: one call, and the variant is settled inside it.
-                self.emit(format!("call void @__vyrn_stream_close(ptr {slot})"));
+                // `emit_drop` runs mid-block, immediately before an early `ret`,
+                // and M1's pin says the release is IN the block that `ret`
+                // terminates — so a branch here would split that block and make
+                // the pin's own claim untestable. Since RFC-0090 M3 the callee is
+                // one function per element type rather than one for the whole
+                // program, because releasing a producer means calling its step
+                // and a step is dispatched by element type. The site count did
+                // not move; only how many functions the sites name.
+                let elem = match self.slot_ty(slot).map(|t| self.resolve(&t)) {
+                    Some(Type::Stream(i)) => *i,
+                    // A drop this cannot name is a leak, never a wrong free —
+                    // the reason `Deep` and `Release` swallow theirs.
+                    _ => return,
+                };
+                let sym = self.stream_closer_sym(&elem);
+                self.emit(format!("call void @{sym}(ptr {slot})"));
             }
             DropKind::FreeArr => {
                 // Free the array's final backing buffer (field 0).
@@ -6593,6 +6616,81 @@ impl<'a> Gen<'a> {
         mangle_dispatch_sym(sig)
     }
 
+    /// Record that a `Stream<elem>` is released somewhere, and return the symbol
+    /// of the function that releases it (RFC-0090 M3).
+    ///
+    /// One per element type, synthesized beside the fn-value dispatchers for the
+    /// same reason they are: a producer gives its cursor slot back by CALLING its
+    /// own step, and a step is dispatched by element type. Registering the step's
+    /// signature here is what lets a program that only ever `close`s a stream —
+    /// never iterating one — still have a dispatcher to call.
+    fn stream_closer_sym(&mut self, elem: &Type) -> String {
+        let elem = self.resolve(elem);
+        if !self.stream_closers.iter().any(|t| *t == elem) {
+            self.stream_closers.push(elem.clone());
+        }
+        self.fnval_dispatcher_sym(&self.normalize_sig(&stream_step_sig(&elem)).clone());
+        format!("__vyrn_stream_close_{}", mangle_ty(&elem))
+    }
+
+    /// Emit one element type's release (RFC-0075 M2b, re-hosted by RFC-0090 M3).
+    ///
+    /// A buffer hands back the buffer it was given. A producer asks its own step
+    /// to release itself — `closing` is true, the step gives its cursor slot back
+    /// to `std/stream`'s slab and, if it is a wrapper, closes its source — and
+    /// then the step's own capture block is freed. The walk M2c wrote as a loop
+    /// over a chain is therefore ordinary Vyrn recursion now, which is what lets
+    /// `movecheck` check it: a wrapper that failed to close its source would not
+    /// compile.
+    fn emit_stream_closer(&mut self, elem: &Type, out: &mut String) -> Result<(), String> {
+        let sig = self.normalize_sig(&stream_step_sig(elem));
+        let disp = mangle_dispatch_sym(&sig);
+        let optll = self.llt(&Type::Option(Box::new(elem.clone())));
+        let sym = format!("__vyrn_stream_close_{}", mangle_ty(&self.resolve(elem)));
+        out.push_str(&format!("define void @{sym}(ptr %s) {{\n"));
+        out.push_str("entry:\n");
+        out.push_str(&format!(
+            "  %tp = getelementptr {STREAM_LL}, ptr %s, i64 0, i32 2\n"
+        ));
+        out.push_str("  %tag = load i64, ptr %tp\n");
+        out.push_str("  %isbuf = icmp slt i64 %tag, 0\n");
+        out.push_str("  br i1 %isbuf, label %buf, label %stp\n");
+        out.push_str("buf:\n");
+        out.push_str("  %d = load ptr, ptr %s\n");
+        out.push_str("  call void @free(ptr %d)\n");
+        out.push_str("  ret void\n");
+        out.push_str("stp:\n");
+        out.push_str(&format!(
+            "  %fp = getelementptr {STREAM_LL}, ptr %s, i64 0, i32 2\n"
+        ));
+        out.push_str("  %fv = load { i64, i64 }, ptr %fp\n");
+        out.push_str(&format!(
+            "  %cp = getelementptr {STREAM_LL}, ptr %s, i64 0, i32 4\n"
+        ));
+        out.push_str("  %cur = load i64, ptr %cp\n");
+        out.push_str(&format!(
+            "  %gp = getelementptr {STREAM_LL}, ptr %s, i64 0, i32 5\n"
+        ));
+        out.push_str("  %gen = load i64, ptr %gp\n");
+        out.push_str(&format!(
+            "  %r = call {optll} @{disp}({{ i64, i64 }} %fv, i64 %cur, i64 %gen, i1 1)\n"
+        ));
+        // The step's capture block. A stream owns the fn value it was built
+        // with — `fromStep` is where it was constructed — so this is the one
+        // place that can hand it back. An empty capture set is payload 0.
+        out.push_str("  %pay = extractvalue { i64, i64 } %fv, 1\n");
+        out.push_str("  %hascap = icmp ne i64 %pay, 0\n");
+        out.push_str("  br i1 %hascap, label %cap, label %done\n");
+        out.push_str("cap:\n");
+        out.push_str("  %cb = inttoptr i64 %pay to ptr\n");
+        out.push_str("  call void @free(ptr %cb)\n");
+        out.push_str("  br label %done\n");
+        out.push_str("done:\n");
+        out.push_str("  ret void\n");
+        out.push_str("}\n\n");
+        Ok(())
+    }
+
     /// Emit a call through a stored function value: args coerce into the
     /// signature's parameter types, then ONE direct call to the signature's
     /// dispatcher — which itself makes only direct calls (the RFC-0023 IR
@@ -8370,12 +8468,18 @@ impl<'a> Gen<'a> {
         }
         // RFC-0075 M2b: `close(s)` is the explicit half of the disposal
         // obligation. Which of the two producers a stream holds is a runtime tag,
-        // so the teardown is the runtime's branch on it.
+        // so the teardown is still the runtime's branch on it — one call here,
+        // whatever the stream turns out to be.
         if name == "close" {
-            let (av, _) = self.gen_expr(&args[0])?;
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let elem = match self.resolve(&aty) {
+                Type::Stream(i) => *i,
+                other => return Err(format!("close of non-Stream {other:?}")),
+            };
             let s = self.fresh_alloca(STREAM_LL);
             self.emit(format!("store {STREAM_LL} {av}, ptr {s}"));
-            self.emit(format!("call void @__vyrn_stream_close(ptr {s})"));
+            let sym = self.stream_closer_sym(&elem);
+            self.emit(format!("call void @{sym}(ptr {s})"));
             return Ok((String::new(), Type::Unit));
         }
         // `fromArray(xs)` hands the array's buffer to a stream: the three words
@@ -8394,24 +8498,18 @@ impl<'a> Gen<'a> {
             let sv = self.stream_header(&format!("ptr {data}"), &len, "-1", "0", "0", "0");
             return Ok((sv, Type::Stream(Box::new(inner))));
         }
-        // `fromStep(seed, step)` (RFC-0075 M2b) is the producer that is not a
-        // buffer: it allocates the cursor cell holding `seed` and parks the step
-        // in the header as an RFC-0037 function value, which is the whole trick —
-        // the step's own closed enum carries the site identity, so nothing about
-        // it has to show up in `Stream<T>`.
+        // `fromStep(slot, gen, step)` (RFC-0075 M2b, re-hosted by RFC-0090 M3)
+        // is the producer that is not a buffer. The cursor arrives from the
+        // caller — `std/stream` minted it out of its own `Slots` — and the step
+        // goes in the header as an RFC-0037 function value, which is the whole
+        // trick: the step's own closed enum carries the site identity, so nothing
+        // about it has to show up in `Stream<T>`.
         if name == "fromStep" {
-            let (seed, sty) = self.gen_expr(&args[0])?;
-            let (seed, _) = self.coerce(seed, &sty, &Type::Int)?;
-            let boxed = self.fresh_tmp();
-            self.emit(format!(
-                "{boxed} = call ptr @__vyrn_malloc(i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))"
-            ));
-            self.emit(format!("store i64 {seed}, ptr {boxed}"));
-            let slot = self.fresh_tmp();
-            self.emit(format!("{slot} = call i64 @__vyrn_cell_alloc(ptr {boxed})"));
-            let gen = self.fresh_tmp();
-            self.emit(format!("{gen} = call i64 @__vyrn_cell_getgen(i64 {slot})"));
-            let (fv, fty) = self.gen_expr(&args[1])?;
+            let (slot, sty) = self.gen_expr(&args[0])?;
+            let (slot, _) = self.coerce(slot, &sty, &Type::Int)?;
+            let (gen, gty) = self.gen_expr(&args[1])?;
+            let (gen, _) = self.coerce(gen, &gty, &Type::Int)?;
+            let (fv, fty) = self.gen_expr(&args[2])?;
             let sig = self.normalize_sig(&fty);
             let elem = match &sig {
                 Type::Fn(_, r) => match self.resolve(r) {
@@ -8433,81 +8531,64 @@ impl<'a> Gen<'a> {
             let sv = self.stream_header("ptr null", "0", &tag, &pay, &slot, &gen);
             return Ok((sv, Type::Stream(Box::new(elem))));
         }
-        // `fromWrap(src, step)` (RFC-0075 M2c) is `fromStep` with a source. The
-        // cell payload is `{ i64 cursor, Stream src }` in ONE malloc — the same
-        // box a plain producer's cursor lives in, with the wrapped stream behind
-        // it — so `get`/`set` inside the step are the ordinary cell operations
-        // (that is `take`'s counter) and `src[slot]` points at the second half.
-        // Non-null is what makes a cell a wrapper: `pull` reads it, `close`
-        // walks it, and a cell without one traps rather than reading past an
-        // 8-byte box.
-        if name == "fromWrap" {
-            let (src, _) = self.gen_expr(&args[0])?;
-            let payll = format!("{{ i64, {STREAM_LL} }}");
+        // `boxStream(s)` (RFC-0090 M3) moves a stream into one heap box and
+        // answers its address. A `Stream<T>` may not be a field of anything (M1
+        // refuses it, because a field erases the obligation), so a lazy
+        // combinator's source lives here and `std/stream` keeps the address in
+        // its cursor slot.
+        if name == "boxStream" {
+            let (av, _) = self.gen_expr(&args[0])?;
+            let boxll = format!("{{ i64, {STREAM_LL} }}");
             let boxed = self.fresh_tmp();
             self.emit(format!(
-                "{boxed} = call ptr @__vyrn_malloc(i64 ptrtoint (ptr getelementptr ({payll}, ptr null, i64 1) to i64))"
+                "{boxed} = call ptr @__vyrn_malloc(i64 ptrtoint (ptr getelementptr ({boxll}, ptr null, i64 1) to i64))"
             ));
-            self.emit(format!("store i64 0, ptr {boxed}"));
+            self.emit(format!("store i64 3735928559, ptr {boxed}"));
             let sp = self.fresh_tmp();
-            self.emit(format!(
-                "{sp} = getelementptr {payll}, ptr {boxed}, i64 0, i32 1"
-            ));
-            self.emit(format!("store {STREAM_LL} {src}, ptr {sp}"));
-            let slot = self.fresh_tmp();
-            self.emit(format!("{slot} = call i64 @__vyrn_cell_alloc(ptr {boxed})"));
-            // After the allocation, which clears whatever the recycled slot held.
-            self.emit(format!(
-                "call void @__vyrn_cell_setsrc(i64 {slot}, ptr {sp})"
-            ));
-            let gen = self.fresh_tmp();
-            self.emit(format!("{gen} = call i64 @__vyrn_cell_getgen(i64 {slot})"));
-            let (fv, fty) = self.gen_expr(&args[1])?;
-            let sig = self.normalize_sig(&fty);
-            let elem = match &sig {
-                Type::Fn(_, r) => match self.resolve(r) {
-                    Type::Option(i) => *i,
-                    other => return Err(format!("fromWrap step returns {other:?}")),
-                },
-                other => return Err(format!("fromWrap of non-fn {other:?}")),
+            self.emit(format!("{sp} = getelementptr i8, ptr {boxed}, i64 8"));
+            self.emit(format!("store {STREAM_LL} {av}, ptr {sp}"));
+            let a = self.fresh_tmp();
+            self.emit(format!("{a} = ptrtoint ptr {boxed} to i64"));
+            return Ok((a, Type::Int));
+        }
+        // `unbox(a)` takes the stream back out and frees the box. The magic word
+        // is cleared first, so unboxing one address twice is the trap rather
+        // than a second owner of one stream.
+        if name == "unbox" {
+            let elem = match self.expect.last().map(|t| self.resolve(t)) {
+                Some(Type::Stream(i)) => *i,
+                other => {
+                    return Err(format!("`unbox` needs a `Stream<T>` context, found {other:?}"))
+                }
             };
-            if sig != self.normalize_sig(&stream_step_sig(&elem)) {
-                return Err(format!("fromWrap step of type {sig}"));
-            }
-            let tag = self.fresh_tmp();
-            let pay = self.fresh_tmp();
-            self.emit(format!("{tag} = extractvalue {{ i64, i64 }} {fv}, 0"));
-            self.emit(format!("{pay} = extractvalue {{ i64, i64 }} {fv}, 1"));
-            let sv = self.stream_header("ptr null", "0", &tag, &pay, &slot, &gen);
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let (av, _) = self.coerce(av, &aty, &Type::Int)?;
+            let d = self.fresh_tmp();
+            self.emit(format!("{d} = call ptr @__vyrn_stream_box(i64 {av})"));
+            let sv = self.fresh_tmp();
+            self.emit(format!("{sv} = load {STREAM_LL}, ptr {d}"));
+            let base = self.fresh_tmp();
+            self.emit(format!("{base} = getelementptr i8, ptr {d}, i64 -8"));
+            self.emit(format!("store i64 0, ptr {base}"));
+            self.emit(format!("call void @free(ptr {base})"));
             return Ok((sv, Type::Stream(Box::new(elem))));
         }
-        // `pull(c)` (RFC-0075 M2c) — one element from the stream behind this
-        // cursor, which is the whole of what a wrapper's step can do that an
-        // ordinary producer's cannot. The element type is the annotation's: the
-        // cursor is a `Ref<Int64>` for every stream, so the call carries nothing
-        // to infer from (the checker says the same thing in its own words).
-        if name == "pull" {
+        // `pullAt(a)` (RFC-0075 M2c) — one element from the stream in that box,
+        // which is the whole of what a wrapper's step can do that an ordinary
+        // producer's cannot. The element type is the annotation's: an address is
+        // an `Int64` whatever it addresses, so the call carries nothing to infer
+        // from (the checker says the same thing in its own words).
+        if name == "pullAt" {
             let elem = match self.expect.last().map(|t| self.resolve(t)) {
                 Some(Type::Option(i)) => *i,
-                other => return Err(format!("`pull` needs an `Option<T>` context, found {other:?}")),
+                other => {
+                    return Err(format!("`pullAt` needs an `Option<T>` context, found {other:?}"))
+                }
             };
-            let (rv, _) = self.gen_expr(&args[0])?;
-            let slot = self.fresh_tmp();
-            let gen = self.fresh_tmp();
-            self.emit(format!("{slot} = extractvalue {{ i64, i64 }} {rv}, 0"));
-            self.emit(format!("{gen} = extractvalue {{ i64, i64 }} {rv}, 1"));
-            self.emit(format!("call void @__vyrn_cell_check(i64 {slot}, i64 {gen})"));
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let (av, _) = self.coerce(av, &aty, &Type::Int)?;
             let sp = self.fresh_tmp();
-            self.emit(format!("{sp} = call ptr @__vyrn_cell_src(i64 {slot})"));
-            let bare = self.fresh_tmp();
-            let bad_l = self.fresh_label("pnone");
-            let ok_l = self.fresh_label("pok");
-            self.emit(format!("{bare} = icmp eq ptr {sp}, null"));
-            self.emit_term(format!("br i1 {bare}, label %{bad_l}, label %{ok_l}"));
-            self.emit_label(&bad_l);
-            self.emit("call void @__vyrn_cell_nostream()".into());
-            self.emit_term("unreachable".into());
-            self.emit_label(&ok_l);
+            self.emit(format!("{sp} = call ptr @__vyrn_stream_box(i64 {av})"));
             let (has, stage) = self.emit_stream_next(&sp, &elem)?;
             let ell = self.llt(&elem);
             let optll = self.llt(&Type::Option(Box::new(elem.clone())));
