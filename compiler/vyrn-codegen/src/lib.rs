@@ -4137,11 +4137,20 @@ impl<'a> Gen<'a> {
                 // by the NAME, which resolving away would lose), then its
                 // structural form (which is where a generic substitution lands).
                 let rty = self.resolve(&ty);
-                let kind = self
+                // A type with no row releases nothing, and this is not an error:
+                // since Phase 8b the checker admits `drop v` where `v: T`, and
+                // the instance decides. `Slots<String>` frees a buffer here and
+                // `Slots<Person>` emits nothing, because a record is not on the
+                // list `own::release_kind` keeps. A concrete `drop` of a type
+                // that owns no heap was refused by the checker and never
+                // arrives.
+                let Some(kind) = self
                     .owned
                     .release_kind(&ty)
                     .or_else(|| self.owned.release_kind(&rty))
-                    .ok_or_else(|| format!("cannot drop non-heap value of type {rty:?}"))?;
+                else {
+                    return Ok(());
+                };
                 self.emit_drop(&slot, &kind);
                 Ok(())
             }

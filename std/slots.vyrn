@@ -213,30 +213,40 @@ impl<T> Iterate for Slots<T> {
     }
 }
 
-/// **What is NOT here, and why: nothing releases a slab's buffers.**
+/// A slab gives back what it took: every element, then the five buffers.
 ///
-/// A container of five `Array`s should say `impl Owned for Slots<T>` and give
-/// them back. It cannot, for three separate reasons, and all three belong to the
-/// memory model rather than to this module:
+/// **The elements are census U4, and a declared container is what opens it.**
+/// Nothing in the language releases an element of a built-in `Array<T>`, and
+/// nothing should: an array does not know whether it owns its elements or views
+/// somebody else's — `m.keys()` hands back a fresh buffer holding the map's own
+/// key pointers. This container knows. `insert` takes `consume T`, and the only
+/// other writer is a store, which releases what it replaced. So every slot from
+/// 0 to `vals.length` holds exactly one payload this slab owns, live or removed,
+/// and `drop v` gives each one back.
 ///
-///   1. `own::fate` refuses a declared release for a `mut` binding, because the
-///      interpreter releases the value the `let` captured and the two compiling
-///      backends release the slot's final value — the same program for a `free`,
-///      two programs for a `release` that can print. A slab is always `mut`:
-///      `insert` and `remove` take `modify self`.
-///   2. A generic impl's `release` flattens to a generic function, and the drop
-///      site calls the flattened name with no type arguments on it. The row is
-///      filtered out of the `Owned` table for that reason, so writing the impl
-///      here would be writing dead code.
-///   3. Even with both fixed, the elements inside `vals` are census U4: nothing
-///      in the language reaches an element of an `Array<T>` to release it, and a
-///      `T` this module never sees concretely cannot be told from an `Int64`
-///      that must not be released at all.
-///
-/// So a slab leaks its five buffers, exactly as any record holding an `Array`
-/// does today — Phase 5 of the memory model left a record's fields unreleased
-/// and said why. RFC-0090's "drop people, every node reclaimed" waits on that
-/// work, not on this file.
+/// `T` is concrete here, because a declared release monomorphizes with the rest
+/// of the module. `drop v` on a `Slots<String>` frees a buffer; on a
+/// `Slots<Int64>` it emits nothing at all.
+impl<T> Owned for Slots<T> {
+    fn release(self) {
+        let mut i = 0
+        while i < self.vals.length {
+            let v = self.vals[i]
+            drop v
+            i = i + 1
+        }
+        let vals = self.vals
+        drop vals
+        let gens = self.gens
+        drop gens
+        let free = self.free
+        drop free
+        let dense = self.dense
+        drop dense
+        let denseAt = self.denseAt
+        drop denseAt
+    }
+}
 
 /// A copy is a second container, not a second name for one.
 ///
