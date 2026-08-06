@@ -28,10 +28,6 @@ async function bootApp(mountEl) {
   const rpc = makeRpcTransport({ baseUrl: "" });
   const app = await mount(wasmBytes, mountEl, {
     extern: { vyrnRpcCall: rpc.vyrnRpcCall },
-    // `takeNav()` and `vyrnRenderPage()` return Strings; declare them so the
-    // export glue DECODES the wasm pointer into a JS string (RFC-0012 String ABI
-    // asymmetry — a raw export call otherwise hands back the pointer integer).
-    exportReturns: { takeNav: "string", vyrnRenderPage: "string", vyrnResolvePage: "string" },
   });
 
   // RFC-0069 §3: hand the universal-page renderer to vyrn-nav so a soft nav renders

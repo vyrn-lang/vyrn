@@ -242,12 +242,10 @@ export function patchPageView(view, json) {
 // ---------------------------------------------------------------------------
 export async function mount(wasmBytes, mountEl, opts = {}) {
   const { effects = {}, ...runHooks } = opts;
-  const result = await runVyrn(wasmBytes, {
-    ...runHooks,
-    // vyrnView / vyrnSubs / vyrnPatch return Strings; name them so the export
-    // glue decodes (RFC-0035 adds vyrnPatch — the op stream, when present).
-    exportReturns: { vyrnView: "string", vyrnSubs: "string", vyrnPatch: "string", ...(runHooks.exportReturns || {}) },
-  });
+  // vyrnView / vyrnSubs / vyrnPatch return Strings. This file used to say so,
+  // and so did every page; the module says so itself now, in its `vyrn:exports`
+  // section (RFC-0012 M3).
+  const result = await runVyrn(wasmBytes, runHooks);
   const exports = result.exports;
   if (typeof exports.vyrnView !== "function") {
     throw new Error(

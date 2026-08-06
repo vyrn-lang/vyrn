@@ -627,12 +627,13 @@ const bytes = await readFile(new URL("./shapes.wasm", import.meta.url));
 const names = process.argv.slice(3);
 const n = Number(process.argv[2]);
 
-// `returnedString` is the §9a row: the page names a String result so the wrapper
-// decodes it — and, since RFC-0089 M3b, releases it.
+// `returnedString` is the §9a row. Nothing here names it: the module's own
+// `vyrn:exports` section says the result is a String (RFC-0012 M3), so the
+// wrapper decodes it — and, since RFC-0089 M3b, releases it. This row is
+// therefore also the section's end-to-end test: without it the pointer comes
+// back as a number and the buffer leaks.
 async function after(name, calls) {
-  const { exports, memory } = await runVyrn(bytes, {
-    exportReturns: { returnedString: "string" },
-  });
+  const { exports, memory } = await runVyrn(bytes);
   for (let i = 0; i < calls; i++) exports[name]();
   return memory.buffer.byteLength;
 }

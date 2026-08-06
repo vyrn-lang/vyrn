@@ -24,15 +24,20 @@
 //       jsNow: () => Date.now() / 1000,                //   Float64 return
 //       jsAdd: (a, b) => a + b,                        //   Int64 -> BigInt args
 //     },
-//     exportReturns: { greet: "string" },              // optional (M2): name an
-//   });                                                //   i32 result's real type
+//     exportReturns: { greet: "string" },              // rarely needed — see below
+//   });
 //
 // After _start runs `main` once, `exports` holds a wrapper per `export extern
 // fn` (RFC-0012 M2): pass a JS string for a String param, get a decoded string
-// back for a String return. `exportReturns` disambiguates an `i32` result
-// (String / Bool / Int32 share the wasm type) — "string" or "bool", else number.
-// A String named "string" is DECODED AND FREED (RFC-0089 M3b): a return is
-// owned, so the buffer is this side's to release.
+// back for a String return. An `i32` result is ambiguous — String, Bool and
+// Int32 share the wasm type — so the module carries the answer in its
+// `vyrn:exports` custom section, which this file reads. A String is DECODED AND
+// FREED (RFC-0089 M3b): a return is owned, so the buffer is this side's to
+// release.
+//
+// `exportReturns` stays as a fallback for a module that carries no section
+// (one built before RFC-0012 M3, or one from another producer). The section
+// wins where both name the same export.
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
@@ -72,12 +77,24 @@ function readModule(bytes) {
   const imports = [];
   const funcSec = []; // type index of each DEFINED function, in order
   const rawExports = []; // { field, kind, index }
+  const returnTypes = {}; // export name -> "string" | "bool" (RFC-0012 M3)
   let importedFuncs = 0;
   while (i < b.length) {
     const id = b[i++];
     const len = uleb();
     const end = i + len;
-    if (id === 1) {
+    if (id === 0) {
+      // A custom section. `vyrn:exports` is the compiler's own record of what
+      // an ambiguous `i32` result really is, so nobody has to write it down by
+      // hand. Any other name is somebody else's and is skipped.
+      if (name() === "vyrn:exports") {
+        const c = uleb();
+        for (let e = 0; e < c; e++) {
+          const f = name();
+          returnTypes[f] = name();
+        }
+      }
+    } else if (id === 1) {
       const c = uleb();
       for (let t = 0; t < c; t++) {
         i++; // 0x60 func form
@@ -130,7 +147,7 @@ function readModule(bytes) {
     }
     return e;
   });
-  return { imports, exports };
+  return { imports, exports, returnTypes };
 }
 
 /** Thrown by proc_exit to unwind out of _start; carries the exit code. */
@@ -390,10 +407,12 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // lossy: String / Bool / Int32 all lower to `i32`, so an i32 slot is decided
   // at the call by the value passed — a JS string is allocated + copied, a
   // boolean becomes 0/1, a number stays an i32; an i64 slot takes a BigInt).
-  // A result is likewise ambiguous for `i32`; `hooks.exportReturns[name]` may
-  // name it `"string"` (NUL-decoded) or `"bool"`, else an i32 result is a
-  // number. `i64` results are BigInt, floats are numbers. See web/README.md.
-  const returnHints = hooks.exportReturns || {};
+  // A result is likewise ambiguous for `i32`. The module's `vyrn:exports`
+  // custom section names it `"string"` (NUL-decoded) or `"bool"`, else an i32
+  // result is a number; `hooks.exportReturns` is the fallback for a module that
+  // carries no section. `i64` results are BigInt, floats are numbers. See
+  // web/README.md.
+  const returnHints = { ...(hooks.exportReturns || {}), ...mod.returnTypes };
   const RESERVED = new Set(["memory", "_start", "__vyrn_malloc", "__vyrn_free"]);
   const wrappedExports = {};
   for (const ex of mod.exports) {

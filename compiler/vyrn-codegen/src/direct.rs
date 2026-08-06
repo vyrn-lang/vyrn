@@ -560,7 +560,60 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // because nothing knows what a program reaches until its bodies are walked.
     // This is where that is known.
     m.sweep();
+    export_returns(&mut m, &user);
     Ok(m.finish())
+}
+
+/// The `vyrn:exports` custom section (RFC-0012): every `export extern fn` whose
+/// result an `i32` cannot describe, and what it really is.
+///
+/// The wasm export ABI is lossy — `String`, `Bool` and `Int32` all lower to
+/// `i32` — so a host reading only the type section cannot tell a pointer from a
+/// number. Until now the page said which, by hand, in a `hooks.exportReturns`
+/// map per page. A name nobody listed came back as a number, and since RFC-0089
+/// M3b the same hint also decides the `free`, so a missed name leaked as well.
+///
+/// The compiler knows every export's return type. This writes it down.
+///
+/// Payload: a vector of pairs, each a wasm name (a length then its UTF-8 bytes)
+/// — `count`, then `name`, `kind` per entry, `kind` being `string` or `bool`.
+/// Every other result is unambiguous already and is left out, so a module with
+/// no such export carries no section.
+fn export_returns(m: &mut wasm::Module, user: &[&Function]) {
+    fn name(out: &mut Vec<u8>, s: &str) {
+        leb(out, s.len() as u32);
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn leb(out: &mut Vec<u8>, mut n: u32) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    let rows: Vec<(&str, &str)> = user
+        .iter()
+        .filter(|f| f.is_export_extern)
+        .filter_map(|f| match f.ret {
+            Type::Str => Some((f.name.as_str(), "string")),
+            Type::Bool => Some((f.name.as_str(), "bool")),
+            _ => None,
+        })
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let mut payload = Vec::new();
+    leb(&mut payload, rows.len() as u32);
+    for (n, kind) in rows {
+        name(&mut payload, n);
+        name(&mut payload, kind);
+    }
+    m.custom("vyrn:exports", payload);
 }
 
 // ---------------------------------------------------------------------------
