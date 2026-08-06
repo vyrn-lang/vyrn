@@ -5011,6 +5011,61 @@ mod tests {
         parse(lex(s).unwrap()).unwrap()
     }
 
+    // ---- RFC-0091 M2: `place` / `yield` ------------------------------------
+
+    #[test]
+    fn place_and_yield_stay_ordinary_identifiers_outside_a_projection() {
+        // Both words are contextual. A program that already used them keeps
+        // working, which is why neither is a lexer keyword.
+        let p = parse_src(
+            "fn place(yield: Int64) -> Int64 { let place = yield + 1\n return place }\n\
+             fn main() -> Int64 { return place(1) }",
+        );
+        assert!(p.functions.iter().any(|f| f.name == "place"));
+    }
+
+    #[test]
+    fn a_projection_carries_its_receiver_capability() {
+        let p = parse_src(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Index for Ring {\n\
+                 place at(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                 place atSet(modify self, i: Int64) -> Int64 { yield self.data[i] }\n\
+             }\n\
+             fn main() -> Int64 { return 0 }",
+        );
+        let ps = &p.impls[0].places;
+        assert_eq!(ps.len(), 2);
+        assert_eq!(ps[0].params[0].capability, Capability::Read);
+        assert_eq!(ps[1].params[0].capability, Capability::Modify);
+    }
+
+    #[test]
+    fn a_projection_refuses_return() {
+        let src = "type Ring = { data: Array<Int64> }\n\
+                   impl Index for Ring {\n\
+                       place at(read self, i: Int64) -> Int64 { return self.data[i] }\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter().any(|e| e.message.contains("yields, it does not return")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_projection_needs_a_return_type() {
+        let src = "type Ring = { data: Array<Int64> }\n\
+                   impl Index for Ring { place at(read self, i: Int64) { yield self.data[i] } }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter().any(|e| e.message.contains("needs a return type")),
+            "{errs:?}"
+        );
+    }
+
     #[test]
     fn if_let_parses_with_pattern_scrutinee_and_else() {
         let src = "fn main() -> Int64 { \

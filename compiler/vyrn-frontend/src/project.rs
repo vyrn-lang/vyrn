@@ -52,6 +52,34 @@ pub struct Projection {
     pub place: Expr,
 }
 
+impl Projection {
+    /// Is this inline the identity — an empty prologue yielding [`ELEM`] of the
+    /// very expressions the access site was written with?
+    ///
+    /// The seeded row always is, and an engine that sees `true` lowers the
+    /// ORIGINAL nodes rather than these substituted copies. That is what makes
+    /// "a builtin container costs nothing" a fact about the code rather than a
+    /// measurement: the identical path is taken, not merely reached.
+    ///
+    /// It also keeps the node ADDRESSES. This compiler keys two side tables by
+    /// them — the elided `get`/`set` generation checks and the lambda
+    /// monomorphization keys — because Phase 4a found a `(line, name)` key
+    /// cannot identify a statement. A clone has an address of its own, so an
+    /// inlined body loses whatever was recorded against the original. Both
+    /// misses are conservative today (one extra check, one duplicated
+    /// instance), so this is a cost, not a bug; a projection body carrying
+    /// either shape is worth measuring before it ships.
+    pub fn is_identity(&self, recv: &Expr, args: &[Expr]) -> bool {
+        self.prologue.is_empty()
+            && match &self.place {
+                Expr::Call { name, args: pa, .. } if name == ELEM && pa.len() == args.len() + 1 => {
+                    pa[0] == *recv && pa[1..] == *args
+                }
+                _ => false,
+            }
+    }
+}
+
 /// The seeded `impl Index for <builtin container>` — what a builtin container's
 /// `place at` would say if it could be written:
 ///
@@ -127,7 +155,12 @@ fn seeded_rows() -> Vec<Function> {
 }
 
 /// Does `ty` index through the seeded row rather than through a user `impl`?
-fn is_builtin_container(ty: &Type) -> bool {
+///
+/// `pub` because it is the early-out on the hottest path in the checker: every
+/// `a[i]` in the program asks whether its receiver projects, and for the
+/// overwhelming majority the answer is "it is an Array" — which must cost one
+/// pattern match, not a type resolution.
+pub fn is_builtin_container(ty: &Type) -> bool {
     matches!(
         ty,
         Type::Array(_)
@@ -164,12 +197,38 @@ pub fn lookup_by_key<'a>(
     key: &str,
     method: &str,
 ) -> Option<&'a Function> {
+    lookup_impl_by_key(impls, key, method).map(|(_, f)| f)
+}
+
+/// [`lookup_impl_by_key`], by type. The builtin containers short-circuit before
+/// the scan: every `a[i]` in the program reaches this, and a builtin container
+/// can never have a user `impl`, so the scan would always come back empty.
+pub fn lookup_impl<'a>(
+    impls: &'a [ImplBlock],
+    ty: &Type,
+    method: &str,
+) -> Option<(&'a ImplBlock, &'a Function)> {
+    if is_builtin_container(ty) {
+        return None;
+    }
+    lookup_impl_by_key(impls, &crate::types::type_key(ty)?, method)
+}
+
+/// The impl and the `place` member named `method` for type key `key`.
+pub fn lookup_impl_by_key<'a>(
+    impls: &'a [ImplBlock],
+    key: &str,
+    method: &str,
+) -> Option<(&'a ImplBlock, &'a Function)> {
     for imp in impls {
+        if imp.places.is_empty() {
+            continue;
+        }
         if crate::types::type_key(&imp.ty).as_deref() != Some(key) {
             continue;
         }
         if let Some(f) = imp.places.iter().find(|f| f.name == method) {
-            return Some(f);
+            return Some((imp, f));
         }
     }
     None
@@ -579,6 +638,16 @@ pub fn has_try(b: &Block) -> bool {
         }
     });
     found
+}
+
+/// Does this program declare any `place` member at all?
+///
+/// An engine that must WORK to name a receiver's type asks this first. Where
+/// the answer is no, every access site takes the seeded row and the work is
+/// wasted — and in the direct backend the type probe is `&mut self`, so the
+/// wasted work was also visible in the emitted bytes.
+pub fn any(impls: &[ImplBlock]) -> bool {
+    impls.iter().any(|i| !i.places.is_empty())
 }
 
 /// The `place` members of every impl in `p`, for the checker and the LSP.

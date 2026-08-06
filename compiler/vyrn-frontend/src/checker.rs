@@ -1074,6 +1074,15 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         let Some(Stmt::Return { value: Some(y), .. }) = f.body.stmts.last() else {
             unreachable!("checked just above")
         };
+        // `e?` propagates by RETURNING, and a projection has no frame to
+        // return from — inlined, it would exit the access site's function.
+        if crate::project::has_try(&f.body) {
+            push(format!(
+                "line {}: `place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.",
+                f.line, f.name
+            ));
+            continue;
+        }
         if !crate::project::is_place(y) {
             push(format!(
                 "line {}: `place {}` yields a value, not a place — write \
@@ -1092,15 +1101,6 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
                 f.line, f.name
             )),
             None => {}
-        }
-        // `e?` propagates by RETURNING, and a projection has no frame to
-        // return from — inlined, it would exit the access site's function.
-        if crate::project::has_try(&f.body) {
-            push(format!(
-                "line {}: `place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.",
-                f.line, f.name
-            ));
-            continue;
         }
         // The body itself, with `self` typed to the implementing type.
         let r = checker.function(f);
@@ -1409,23 +1409,20 @@ impl<'a> Checker<'a> {
         fn_ret: Option<&Type>,
         line: usize,
     ) -> Result<Option<Type>, String> {
+        // Every `a[i]` in the program reaches this. A builtin container leaves
+        // by the first line, and nothing below it runs.
+        if crate::project::is_builtin_container(recv) || self.impl_blocks.is_empty() {
+            return Ok(None);
+        }
         // The DECLARED type, not its base: an impl head names `Ring`, and
         // resolving to the record it aliases loses the name the impl is keyed
-        // by. A validated type still decays, so both keys are tried.
+        // by. A validated type still decays, so both are tried.
+        let found = crate::project::lookup_impl(self.impl_blocks, recv, method)
+            .or_else(|| crate::project::lookup_impl(self.impl_blocks, &self.base(recv), method));
+        let Some((imp, f)) = found else {
+            return Ok(None);
+        };
         let recv = recv.clone();
-        let Some(key) = crate::types::type_key(&recv)
-            .or_else(|| crate::types::type_key(&self.base(&recv)))
-        else {
-            return Ok(None);
-        };
-        let Some((imp, f)) = self.impl_blocks.iter().find_map(|i| {
-            if crate::types::type_key(&i.ty).as_deref() != Some(key.as_str()) {
-                return None;
-            }
-            i.places.iter().find(|p| p.name == method).map(|p| (i, p))
-        }) else {
-            return Ok(None);
-        };
         if args.len() - 1 != f.params.len() - 1 {
             return Err(format!(
                 "line {line}: `place {method}` expects {} argument(s) besides `self`, got {}",
@@ -9017,6 +9014,86 @@ mod tests {
 
     fn check_src(s: &str) -> Result<(), String> {
         check(&parse(lex(s).unwrap()).unwrap())
+    }
+
+    // ---- RFC-0091 M2: place projections ------------------------------------
+
+    /// The head of every projection test: a container with a buffer inside it.
+    const RING: &str = "type Ring = { data: Array<Int64> }\n";
+
+    #[test]
+    fn a_projection_types_an_index_of_a_user_container() {
+        assert!(check_src(&format!(
+            "{RING}\
+             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
+             {{ yield self.data[i] }} }}\n\
+             fn main() -> Int64 {{ let mut d: Array<Int64> = []\n d.push(7)\n \
+             let r = Ring {{ data: d }}\n return r[0] }}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn a_projection_must_yield_a_place_not_a_value() {
+        let e = check_src(&format!(
+            "{RING}\
+             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
+             {{ yield i + 1 }} }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("yields a value, not a place"), "{e}");
+    }
+
+    #[test]
+    fn a_projection_yields_once_and_last() {
+        let e = check_src(&format!(
+            "{RING}\
+             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 {{\n\
+                 if i < 0 {{ yield self.data[0] }}\n\
+                 yield self.data[i]\n\
+             }} }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("exactly one `yield <place>`"), "{e}");
+    }
+
+    #[test]
+    fn a_projection_may_not_yield_somebody_elses_place() {
+        let e = check_src(&format!(
+            "let mut spare: Array<Int64> = []\n\
+             {RING}\
+             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
+             {{ yield spare[i] }} }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("the access site does not own"), "{e}");
+    }
+
+    #[test]
+    fn a_projection_may_not_propagate_with_a_question_mark() {
+        let e = check_src(&format!(
+            "type Box = {{ v: Option<Array<Int64>> }}\n\
+             impl Index for Box {{ place at(read self, i: Int64) -> Int64 \
+             {{ yield self.v?[i] }} }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("uses `?`, which returns"), "{e}");
+    }
+
+    #[test]
+    fn a_projection_body_is_checked_like_a_function_body() {
+        let e = check_src(&format!(
+            "{RING}\
+             impl Index for Ring {{ place at(read self, i: Int64) -> String \
+             {{ yield self.data[i] }} }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("String"), "{e}");
     }
 
     // ---- RFC-0089 M1b: `x.copy()` ------------------------------------------

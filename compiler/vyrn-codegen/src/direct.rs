@@ -760,29 +760,26 @@ fn store_index(
     name: &str,
     index: &Expr,
     aty: &Type,
-) -> Result<Expr, String> {
+) -> Result<Option<Expr>, String> {
     let line = index.line();
     let Some(f) = vyrn_frontend::project::for_site(impls, Some(aty), "atSet") else {
-        return Ok(index.clone());
+        return Ok(None);
     };
     let recv = Expr::Var {
         name: name.to_string(),
         line,
     };
     let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
-    match &p.place {
-        Expr::Call { name: n, args, .. }
-            if n == vyrn_frontend::project::ELEM
-                && args.len() == 2
-                && matches!(&args[0], Expr::Var { name: bn, .. } if bn == name)
-                && p.prologue.is_empty() =>
-        {
-            Ok(args[1].clone())
-        }
-        _ => Err(format!(
-            "line {line}: `{name}[..] = v` goes through a `place atSet` that              yields somewhere other than this binding's own element, and              storing through an arbitrary place is not lowered yet (RFC-0091 M3)"
-        )),
+    // `None` keeps the ORIGINAL index node, which is what the seeded row's
+    // identity inline asks for — see `Projection::is_identity`.
+    if p.is_identity(&recv, std::slice::from_ref(index)) {
+        return Ok(None);
     }
+    Err(format!(
+        "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
+         somewhere other than this binding's own element, and storing through \
+         an arbitrary place is not lowered yet (RFC-0091 M3)"
+    ))
 }
 
 struct Cx {
@@ -2509,7 +2506,8 @@ impl Fn_<'_> {
                 // `a[i] = v` asks the receiver's type for `place atSet`, and
                 // the seeded row yields this binding's own element.
                 let rty = self.cx.resolve(&ty);
-                let index = &store_index(&self.cx.impls, name, index, &rty)?;
+                let projected = store_index(&self.cx.impls, name, index, &rty)?;
+                let index = projected.as_ref().unwrap_or(index);
                 place
                     .addr(b, 0)
                     .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
@@ -3804,8 +3802,9 @@ impl Fn_<'_> {
                     _ => Type::Float32,
                 },
                 "@anyTrue" | "@allTrue" => Type::Bool,
-                _ if (name == "at" || name == vyrn_frontend::project::ELEM
-                    || name == "@swapRemove") && args.len() == 2 => {
+                // `@slot` is `vyrn_frontend::project::ELEM`, spelled out because
+                // a match pattern cannot name it through the path.
+                "at" | "@slot" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
                         Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
@@ -7810,11 +7809,20 @@ impl Fn_<'_> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let recv = self.peek(&args[0], line).ok();
+        // Naming the receiver's type here costs a type probe, and the probe is
+        // `&mut self`. A program with no projection at all never needs it.
+        let recv = if vyrn_frontend::project::any(&self.cx.impls) {
+            self.peek(&args[0], line).ok()
+        } else {
+            None
+        };
         let Some(f) = vyrn_frontend::project::for_site(&self.cx.impls, recv.as_ref(), "at") else {
             return unsupported("indexing a receiver with no `place at`", line);
         };
         let p = vyrn_frontend::project::inline(f, &args[0], &args[1..], line)?;
+        if p.is_identity(&args[0], &args[1..]) {
+            return self.at(m, b, args, line);
+        }
         for s in &p.prologue {
             self.stmt(m, b, s)?;
         }

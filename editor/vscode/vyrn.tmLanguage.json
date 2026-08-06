@@ -118,7 +118,10 @@
       "patterns": [
         { "match": "\\bas\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
         { "match": "\\b(gen|extern)\\b(?=\\s+fn\\b)", "name": "keyword.control.vyrn" },
-        { "match": "(?<=:\\s)lazy\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" }
+        { "match": "(?<=:\\s)lazy\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
+        { "match": "\\bplace\\b(?=\\s+[a-z_][A-Za-z0-9_]*\\s*\\()", "name": "keyword.control.vyrn" },
+        { "match": "\\b(read|modify)\\b(?=\\s+self\\b)", "name": "keyword.control.vyrn" },
+        { "match": "^\\s*yield\\b(?=\\s)", "name": "keyword.control.vyrn" }
       ]
     },
     "keywords": {

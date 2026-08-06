@@ -3111,33 +3111,26 @@ impl<'a> Gen<'a> {
     /// else entirely (`self.data[j]`), and writing *there* needs an address-of
     /// for an arbitrary place, which no backend has. That is refused by name
     /// rather than mis-lowered; RFC-0091 M3 builds it.
-    fn store_index(&self, name: &str, index: &Expr, aty: &Type) -> Result<Expr, String> {
+    fn store_index(&self, name: &str, index: &Expr, aty: &Type) -> Result<Option<Expr>, String> {
         let line = index.line();
         let Some(f) = vyrn_frontend::project::for_site(self.impls, Some(aty), "atSet") else {
-            return Ok(index.clone());
+            return Ok(None);
         };
         let recv = Expr::Var {
             name: name.to_string(),
             line,
         };
         let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
-        match &p.place {
-            Expr::Call {
-                name: n, args, ..
-            } if n == vyrn_frontend::project::ELEM
-                && args.len() == 2
-                && matches!(&args[0], Expr::Var { name: b, .. } if b == name)
-                && p.prologue.is_empty() =>
-            {
-                Ok(args[1].clone())
-            }
-            _ => Err(format!(
-                "line {line}: `{name}[..] = v` goes through a `place atSet` that \
-                 yields somewhere other than this binding's own element, and \
-                 storing through an arbitrary place is not lowered yet \
-                 (RFC-0091 M3)"
-            )),
+        // `None` keeps the ORIGINAL index node, which is what the seeded row's
+        // identity inline asks for — see `Projection::is_identity`.
+        if p.is_identity(&recv, std::slice::from_ref(index)) {
+            return Ok(None);
         }
+        Err(format!(
+            "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
+             somewhere other than this binding's own element, and storing through \
+             an arbitrary place is not lowered yet (RFC-0091 M3)"
+        ))
     }
 
     /// The static type of an index receiver, where this emitter can name one
@@ -3683,7 +3676,8 @@ impl<'a> Gen<'a> {
                 // `a[i] = v` asks the receiver's type for `place atSet`. The
                 // seeded row yields `@slot(a, i)` — this binding's own element —
                 // and the lowering below is unchanged.
-                let index = &self.store_index(name, index, &self.resolve(&aty))?;
+                let projected = self.store_index(name, index, &self.resolve(&aty))?;
+                let index = projected.as_ref().unwrap_or(index);
                 let bad_l = self.fresh_label("set.oob");
                 let ok_l = self.fresh_label("set.ok");
                 match self.resolve(&aty) {
@@ -8110,6 +8104,11 @@ impl<'a> Gen<'a> {
                 return Err(format!("line {line}: no `place at` for this receiver"));
             };
             let p = vyrn_frontend::project::inline(f, &args[0], &args[1..], line)?;
+            // The identity inline lowers the ORIGINAL nodes; see
+            // `Projection::is_identity` for why the copies are not equivalent.
+            if p.is_identity(&args[0], &args[1..]) {
+                return self.gen_call(vyrn_frontend::project::ELEM, args);
+            }
             for s in &p.prologue {
                 self.gen_stmt(s)?;
             }
