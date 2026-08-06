@@ -3423,8 +3423,14 @@ impl Fn_<'_> {
                 .find(|(n, _)| *n == f.name)
                 .map(|(_, e)| e)
                 .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), line))?;
-            let t = self.peek(e, line)?;
-            actual.push(self.cx.sub(&t));
+            // The declared field type, under this body's substitution, is what
+            // the value is read against: an empty array literal has no element
+            // to be typed by, and `vals: []` for a field declared `Array<T>` is
+            // how an empty container is built.
+            self.expect.push(self.cx.sub(&f.ty));
+            let t = self.peek(e, line);
+            self.expect.pop();
+            actual.push(self.cx.sub(&t?));
         }
         Ok(crate::applied_type(
             Some(&decl),
@@ -3834,7 +3840,19 @@ impl Fn_<'_> {
                         // `m[k]` is an honest lookup, so it is an `Option` where
                         // an array index is the element (RFC-0028).
                         Type::Map(_, v) if name != "@swapRemove" => Type::Option(v),
-                        other => return unsupported(&format!("a branch indexing `{other}`"), line),
+                        // A user container answers with its `place at` — the
+                        // same row `a[i]` resolves through (RFC-0091 M3). The
+                        // DECLARED type keys it, because an impl head names the
+                        // alias and `resolve` above has already lost it.
+                        other => match self.user_elem(&a) {
+                            Some(t) => t,
+                            None => {
+                                return unsupported(
+                                    &format!("a branch indexing `{other}`"),
+                                    line,
+                                )
+                            }
+                        },
                     }
                 }
                 // RFC-0075. `Stream<T>` is `Array<T>`'s three words here as
@@ -5650,10 +5668,13 @@ impl Fn_<'_> {
                 return unsupported(&format!("the call `{name}` at this arity"), line);
             }
             let arg_tys = self.arg_types(&f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), args, line)?;
-            let (subst, solved) = crate::solve_type_args(
+            let want = self.expect.last().cloned();
+            let (subst, solved) = crate::solve_with_expected(
                 &f.type_params,
                 &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
                 &arg_tys,
+                &f.ret,
+                want.as_ref(),
             );
             let mut type_args = Vec::new();
             for (tp, got) in f.type_params.iter().zip(solved) {
@@ -7834,6 +7855,20 @@ impl Fn_<'_> {
         b.ins(&Instruction::I64Store(word8()));
         b.slot(off);
         Ok(Type::Array(Box::new(elem)))
+    }
+
+    /// The element type of a user container: what its `place at` yields, with
+    /// the impl head solved against this receiver (RFC-0091 M3).
+    ///
+    /// `peek` answers a type without emitting, and a projection's yielded place
+    /// is a body it would have to walk. The declared return type says the same
+    /// thing and says it in one substitution — `impl<T> Index for Slots<T>` with
+    /// a receiver of `Slots<Node>` yields a `Node`.
+    fn user_elem(&self, ty: &Type) -> Option<Type> {
+        let (imp, f) = vyrn_frontend::project::lookup_impl(&self.cx.impls, ty, "at")?;
+        let mut subst = HashMap::new();
+        crate::solve_param(&imp.ty, ty, &mut subst);
+        Some(self.cx.sub(&ftypes::substitute(&f.ret, &subst)))
     }
 
     /// `xs[i]` — bounds-checked, and a String's `s[i]` with it.

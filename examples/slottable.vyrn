@@ -1,164 +1,152 @@
-/// A generation-checked slot table — Vale's whole mechanism — written in
-/// ordinary Vyrn over `Array<T>` (RFC-0082).
+/// A generation-checked slot table — Vale's whole mechanism — now IMPORTED
+/// rather than written out (RFC-0090 M1).
 ///
-/// This example exists to be *unremarkable*. It is the demonstration RFC-0082
-/// used to withdraw RFC-0078's open question "does a checked language need a
-/// raw-memory view to write its own containers": no pointers, no `unsafe`, no
-/// capability, no new primitive — a record holding two arrays and four
-/// functions over them.
+/// This file used to be the container. It declared `Slot`, `Handle` and `Table`,
+/// and four functions over two arrays, to demonstrate RFC-0082's claim: a
+/// checked language does not need a raw-memory view to write its own
+/// containers. No pointers, no `unsafe`, no capability, no new primitive.
 ///
-/// The RFC could only write it with the move-out / mutate / move-back spelled
-/// out by hand (`let mut sl = t.slots` … `t.slots = sl`), because `t.slots[i] =
-/// s` was refused while `s[i] = v` on a plain variable worked. That is the wart
-/// M1 removed, so this file is the natural spelling — and the desugar it now
-/// gets is exactly the hand-written sequence, which is why it is still O(1) per
-/// write rather than a copy per write.
+/// The claim held, and `std/slots` is what it produced. So the demonstration is
+/// now the other half of the same point: the container a program reaches for is
+/// a library, and the file that used to BE it is a file that USES it. Every
+/// question the hand-written table answered is asked again below, of the
+/// library, and answered the same way.
 ///
-/// The `gen` field is what makes a stale handle safe: releasing a cell bumps the
-/// slot's generation, so a handle taken before the release no longer matches
-/// even after the slot is handed out again. That is the case the middle of
-/// `main` pins, and the one a plain index-into-an-array "handle" gets wrong.
+/// Two things the hand-written version could not do, and this one gets from the
+/// protocols of RFC-0091:
 ///
-/// One thing M1 did NOT fix, and it is visible here: the census's own vocabulary
-/// — `cell`, `get`, `release` — is reserved by the `Ref` builtins (RFC-0004), so
-/// this file says `newCell` / `fetch` / `recycle` instead. That is a naming
-/// collision, not a capability gap, but a container library written in Vyrn
-/// cannot spell its own operations the obvious way until it is resolved.
+///   * `t[h]` and `t[h] = v` — `impl Index`, so a handle indexes a container the
+///     way an `Int64` indexes an array, including `t[h].field = v` writing in
+///     place,
+///   * `for x in t` — `impl Iterate`, over the LIVE elements.
+///
+/// And one it could not have got right: a handle from another table used on this
+/// one type-checked, and its generation could match by coincidence. A container
+/// carries an identity and a handle carries a copy of it, so a foreign handle is
+/// dead rather than plausible.
+///
+/// The naming collision the old file recorded is still here and still not a
+/// capability gap: `cell`, `get` and `release` are reserved by the `Ref`
+/// builtins (RFC-0004), so the library's reading half is `fetch`. RFC-0090 M4
+/// deletes Path B and the three names come free.
 
-/// One slot: its generation, its payload, and whether it is currently handed out.
-type Slot = { gen: Int64, val: Int64, live: Bool }
-
-/// A handle is a slot index plus the generation that was live when it was
-/// issued. Copying one is free and does not extend the cell's lifetime.
-type Handle = { slot: Int64, gen: Int64 }
-
-/// The table: the slots themselves, and the indices of the dead ones.
-type Table = { slots: Array<Slot>, free: Array<Int64> }
-
-/// Hand out a cell holding `v`, reusing a released slot when there is one.
-fn newCell(t: modify Table, v: Int64) -> Handle {
-    if t.free.length > 0 {
-        let i = t.free[t.free.length - 1]
-        t.free.pop()
-        // The generation was already bumped by `recycle`; the reused slot keeps
-        // it, which is exactly what invalidates the handle that pointed here.
-        t.slots[i].val = v
-        t.slots[i].live = true
-        return Handle { slot: i, gen: t.slots[i].gen }
-    }
-    t.slots.push(Slot { gen: 1, val: v, live: true })
-    return Handle { slot: t.slots.length - 1, gen: 1 }
-}
-
-/// Read through a handle. `None` for out of range, released, or stale — the
-/// three ways a handle can fail, all of them checked, none of them a crash.
-fn fetch(t: Table, h: Handle) -> Option<Int64> {
-    if h.slot < 0 || h.slot >= t.slots.length {
-        return None
-    }
-    let s = t.slots[h.slot]
-    if !s.live || s.gen != h.gen {
-        return None
-    }
-    return Some(s.val)
-}
-
-/// Release a cell: bump the generation (invalidating every outstanding handle
-/// to it), mark it dead, and put the slot on the free list. Returns whether the
-/// handle was live — releasing twice through the same handle is a no-op, not a
-/// double free.
-fn recycle(t: modify Table, h: Handle) -> Bool {
-    if h.slot < 0 || h.slot >= t.slots.length {
-        return false
-    }
-    let s = t.slots[h.slot]
-    if !s.live || s.gen != h.gen {
-        return false
-    }
-    t.slots[h.slot].live = false
-    t.slots[h.slot].gen = s.gen + 1
-    t.free.push(h.slot)
-    return true
-}
+import { Slots, Handle, newSlots, insert, remove, fetch, count, capacity } from "std/slots"
 
 fn main() -> Int64 {
-    let mut t = Table { slots: [], free: [] }
+    let mut t: Slots<Int64> = newSlots()
 
-    let a = newCell(t, 42)
-    let b = newCell(t, 99)
-    print(fetch(t, a) ?? -1) // 42 — live
+    let fortyTwo = 42
+    let a = insert(t, fortyTwo)
+    let ninetyNine = 99
+    let b = insert(t, ninetyNine)
+    print(fetch(t, a) ?? 0 - 1) // 42 — live
 
-    let freed = recycle(t, a)
+    let freed = remove(t, a)
     print(freed) // true
-    print(fetch(t, a) ?? -1) // -1 — released
-    print(recycle(t, a)) // false — releasing a dead handle is a no-op
+    print(fetch(t, a) ?? 0 - 1) // -1 — released
+    print(remove(t, a)) // false — removing a dead handle is a no-op
 
-    // The next cell reuses `a`'s slot, so the *same* index is live again.
-    let c = newCell(t, 7)
+    // The next insert reuses `a`'s slot, so the *same* index is live again.
+    let seven = 7
+    let c = insert(t, seven)
     print(c.slot == a.slot) // true — reused, not appended
-    print(t.slots.length) // 2 — the free list did its job
-    print(fetch(t, c) ?? -1) // 7 — the new handle reads the new value
-    print(fetch(t, a) ?? -1) // -1 — the OLD handle, while that slot is live
+    print(capacity(t)) // 2 — the free list did its job
+    print(fetch(t, c) ?? 0 - 1) // 7 — the new handle reads the new value
+    print(fetch(t, a) ?? 0 - 1) // -1 — the OLD handle, while that slot is live
 
-    print(fetch(t, b) ?? -1) // 99 — untouched by any of it
-    print(fetch(t, Handle { slot: 7, gen: 1 }) ?? -1) // -1 — out of range
+    print(fetch(t, b) ?? 0 - 1) // 99 — untouched by any of it
+    // A handle nobody issued: out of range, and from no container at all.
+    let bogus: Handle<Int64> = Handle { slot: 7, gen: 1, owner: 0 }
+    print(fetch(t, bogus) ?? 0 - 1) // -1
 
     return 0
 }
 
 test "a stale handle stays dead across a reuse" {
-    let mut t = Table { slots: [], free: [] }
-    let a = newCell(t, 1)
-    assertEq(fetch(t, a) ?? -1, 1)
-    assert(recycle(t, a))
-    let b = newCell(t, 2)
+    let mut t: Slots<Int64> = newSlots()
+    let one = 1
+    let a = insert(t, one)
+    assertEq(fetch(t, a) ?? 0 - 1, 1)
+    assert(remove(t, a))
+    let two = 2
+    let b = insert(t, two)
     assertEq(b.slot, a.slot) // same slot
-    assertEq(fetch(t, b) ?? -1, 2)
-    assertEq(fetch(t, a) ?? -1, -1) // same slot, older generation
+    assertEq(fetch(t, b) ?? 0 - 1, 2)
+    assertEq(fetch(t, a) ?? 0 - 1, 0 - 1) // same slot, older generation
 }
 
-test "recycle is idempotent and does not corrupt the free list" {
-    let mut t = Table { slots: [], free: [] }
-    let a = newCell(t, 1)
-    assert(recycle(t, a))
-    assert(!recycle(t, a))
-    assertEq(t.free.length, 1) // one slot on the list, not two
+test "remove is idempotent and does not corrupt the free list" {
+    let mut t: Slots<Int64> = newSlots()
+    let one = 1
+    let a = insert(t, one)
+    assert(remove(t, a))
+    assert(!remove(t, a))
+    assertEq(count(t), 0)
+    let two = 2
+    let b = insert(t, two)
+    assertEq(b.slot, a.slot) // one slot on the list, not two
+    assertEq(capacity(t), 1)
+}
+
+/// A handle from one container is dead on another. The generation compare alone
+/// would pass here — both tables issue generation 1 for slot 0 — so this is the
+/// identity word and nothing else.
+test "a handle from another container is not plausible, it is dead" {
+    let mut a: Slots<Int64> = newSlots()
+    let mut b: Slots<Int64> = newSlots()
+    let one = 1
+    let two = 2
+    let ha = insert(a, one)
+    let hb = insert(b, two)
+    assertEq(ha.slot, hb.slot) // same slot number
+    assertEq(ha.gen, hb.gen) // same generation
+    assertEq(fetch(a, hb) ?? 0 - 1, 0 - 1) // and still dead
+    assertEq(fetch(b, ha) ?? 0 - 1, 0 - 1)
 }
 
 /// The write-through desugar on a record-field array is a MOVE, not a copy — the
-/// whole reason this file can be written naturally. A copy per write would be
-/// just as *correct* and would make every loop below quadratic, so behaviour
-/// cannot distinguish them; only the shape of the cost can. 4,096 cells through
-/// one slot is 4,096 slot writes over a table that never exceeds one slot, which
-/// a per-write copy of the `slots` array would still survive — so the second
-/// loop is the one that matters: 512 writes spread over a 512-slot table. Under
-/// a copying desugar that is ~131,000 element copies; under a move it is 512
+/// whole reason a container like this can be written in Vyrn at all. A copy per
+/// write would be just as *correct* and would make every loop below quadratic, so
+/// behaviour cannot distinguish them; only the shape of the cost can. 4,096
+/// values through one slot is 4,096 slot writes over a table that never exceeds
+/// one slot, which a per-write copy would still survive — so the second loop is
+/// the one that matters: 512 writes spread over a 512-slot table. Under a
+/// copying desugar that is ~131,000 element copies; under a move it is 512
 /// writes. Both finish here, which is the point: this test pins the RESULT so a
 /// regression to copying is caught by the parser test that pins the emitted
 /// statements (`index_assign_through_a_record_field_is_a_move`), while this one
 /// pins that the semantics those statements produce are right.
 test "many writes through the field, and the values all land" {
-    let mut t = Table { slots: [], free: [] }
+    let mut t: Slots<Int64> = newSlots()
     let mut i = 0
     while i < 4096 {
-        let h = newCell(t, i)
-        assertEq(fetch(t, h) ?? -1, i)
-        assert(recycle(t, h))
+        let v = i
+        let h = insert(t, v)
+        assertEq(fetch(t, h) ?? 0 - 1, i)
+        assert(remove(t, h))
         i = i + 1
     }
-    assertEq(t.slots.length, 1) // one slot, recycled 4,096 times
+    assertEq(capacity(t), 1) // one slot, recycled 4,096 times
 
-    let mut wide = Table { slots: [], free: [] }
-    let mut hs: Array<Handle> = []
+    let mut wide: Slots<Int64> = newSlots()
+    let mut hs: Array<Handle<Int64>> = []
     let mut j = 0
     while j < 512 {
-        hs.push(newCell(wide, j * 3))
+        let v = j * 3
+        hs.push(insert(wide, v))
         j = j + 1
     }
     let mut k = 0
     while k < 512 {
-        assertEq(fetch(wide, hs[k]) ?? -1, k * 3)
+        assertEq(fetch(wide, hs[k]) ?? 0 - 1, k * 3)
         k = k + 1
     }
-    assertEq(wide.slots.length, 512)
+    assertEq(capacity(wide), 512)
+
+    // `for x in wide` walks the live elements through `impl Iterate`.
+    let mut total = 0
+    for x in wide {
+        total = total + x
+    }
+    assertEq(total, 512 * 511 / 2 * 3)
 }

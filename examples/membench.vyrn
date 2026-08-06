@@ -20,6 +20,8 @@
 //   * `vyrn bench` does NOT run `main`. Module state a `main` would build is
 //     empty inside a bench block, so each block builds what it needs.
 
+import { Slots, newSlots, insert, remove } from "std/slots"
+
 /// 32 bytes of data-segment literal. Reading it allocates nothing, so a
 /// concatenation of two of these measures the concatenation.
 fn pad() -> String {
@@ -229,6 +231,33 @@ fn slabChurn(n: Int64) -> Int64 {
     return t
 }
 
+/// The same five operations again, through `std/slots` — RFC-0090 M1 as it
+/// actually shipped, rather than the hand-inlined arrays above.
+///
+/// The row above is the shape a slab WOULD have if a program wrote one inline.
+/// This one is the library: `insert`/`remove` are Vyrn function calls, `s[h]` is
+/// a `place at` projection inlined at the access site, and the container carries
+/// two more arrays than `slabChurn` does — a dense list of live slots and the
+/// map back from a slot to its place in it, which is what buys O(1) removal and
+/// `for x in s`.
+///
+/// So this is the number the gate cares about: what the corpus pays for the
+/// container it will actually import, against `cell` which it replaces.
+fn slotsChurn(n: Int64) -> Int64 {
+    let mut s: Slots<Int64> = newSlots()
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        let v = i
+        let h = insert(s, v)
+        s[h] = i + 1
+        t = t + s[h] + s[h]
+        remove(s, h)
+        i = i + 1
+    }
+    return t
+}
+
 /// `copy` of a long String (RFC-0089 M1b): a header read, one allocation and one
 /// `memcpy` per turn. The row it replaces is `s + ""`, which the corpus wrote for
 /// the same purpose — so the pair of numbers says what the named operation costs
@@ -366,6 +395,10 @@ bench "handle insert/set/get/get/remove, 1000 times" {
     blackBox(slabChurn(blackBox(1000)))
 }
 
+bench "std/slots insert/set/get/get/remove, 1000 times" {
+    blackBox(slotsChurn(blackBox(1000)))
+}
+
 fn main() -> Int64 {
     // Small, deterministic, and identical on all three engines — the benches
     // themselves are stripped from `run`/`build`.
@@ -375,6 +408,7 @@ fn main() -> Int64 {
     print(pushChurn(4))
     print(cellChurn(4))
     print(slabChurn(4))
+    print(slotsChurn(4))
     print(copyString(4, pad()))
     print(copyArray(4, [1, 2, 3]))
     return 0

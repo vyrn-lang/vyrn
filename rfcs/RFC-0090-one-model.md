@@ -106,9 +106,9 @@ an identity is data, and data is checked where you read it — same as every
 ## Milestones
 
 - **M0** — unchanged: the instrument (RFC-0088 M1 / RFC-0089 M0).
-- **M1** — `std/slots` in Vyrn over `Array`, alongside `Ref` (both exist;
-  corpus migrates example by example; benchmarks compare them under M0's
-  harness).
+- **M1** — `std/slots` in Vyrn over `Array`, alongside `Ref` — **LANDED
+  (Phase 8a).** See "M1 as landed" at the end of this RFC: the benchmark says
+  2.02x and the reclamation claim does not hold.
 - **M2** — RFC-0089 M2 (conventions) lands; the `Slots` port stops being
   blocked by escape-on-call.
 - **M3** — streams re-host their cursor on `std/slots`.
@@ -230,3 +230,160 @@ handles, both priced and rejected as annotation surface. So this is the floor
 for a language that refuses lifetime annotations: **memory is fully static;
 identity is data.** Anything past it buys no safety — only the deletion of a
 compare the source can already see.
+
+---
+
+## M1 as landed
+
+Shipped in Phase 8a. `std/slots` is `Slots<T>` and `Handle<T>` over `Array`,
+with `insert`, `remove`, `fetch`, `alive`, `count`, `capacity` and `handles`,
+plus `impl Index` for `s[h]` and `s[h] = v`, `impl Iterate` for `for x in s`,
+and `impl Copy`. `genref`, `freelist`, `linkedlist`, `tree`, `autorelease` and
+`slottable` all run on it, on three engines, and `cell`/`get`/`set`/`release`
+are untouched beside it.
+
+### The gate, measured
+
+`vyrn bench examples/membench.vyrn`, native, release build:
+
+| row | median |
+|---|---|
+| `cell` insert/set/get/get/remove, 1000 times | **18.29 µs** |
+| `std/slots` insert/set/get/get/remove, 1000 times | **9.06 µs** |
+| handles hand-inlined over two `Array<Int64>`, 1000 times | 0.64 µs |
+
+**2.02x in favour of the replacement**, against the 1.86x this RFC predicted.
+
+The prediction was made on the third row's shape, and that row's own comment
+already disowns it: the handle is made and used in one block, so the optimizer
+proves the four generation checks true and deletes them, while `cell` cannot
+fold checks that happen inside opaque runtime calls. The second row is the
+library as a program imports it — real calls, a projection inlined per access,
+an identity compare per access, and two arrays more than the hand-written
+version carries. It still wins by more than the estimate, for the reason this
+RFC gave: `cell` boxes every payload through `malloc` and returns it through
+`free`, and two flat arrays do neither.
+
+So the gate is clear on speed. It is not clear on reclamation — see below.
+
+### What this RFC got wrong
+
+**"`freelist.vyrn` builds a linked list by storing indices in a slab and running
+generation counters over it."** It does not, and never did. `freelist` used
+`cell`/`get`/`drop` directly. The file that reimplemented Path B on top of Path
+B is `slottable.vyrn`, which this RFC lists separately as a migration target.
+The observation the RFC rests on is true — the corpus was already writing the
+container by hand — but it is one file's evidence, not four.
+
+**`.get(h)` cannot be spelled.** `get` is reserved by Path B (RFC-0004), and so
+are `cell`, `set` and `release`. A protocol method named `get` does not help:
+`x.get(h)` resolves to the builtin before any dispatch and reports "`get` takes
+1 argument, got 2". `slottable.vyrn` recorded this collision two phases ago as a
+naming problem; it is a naming problem that survives into the module meant to
+replace the thing reserving the name. The reading half is `fetch` until M4.
+
+**The API cannot be subject-first.** RFC-0091 M1-as-landed records that an impl
+method's receiver is bare `self` and IS `read`. `insert` and `remove` mutate, so
+neither can be a method on any protocol, and `Slots` is free functions
+(`insert(s, v)`) rather than `s.insert(v)`. Both spellings in this RFC's own
+example — `people.insert(..)` and `people.remove(h)` — are unavailable. `s[h]`,
+`s[h] = v` and `for x in s` DO work, because those three are what a `place`
+member reaches.
+
+**`drop people` does not reclaim anything, and cannot yet.** Three reasons, all
+of them the memory model's rather than the container's:
+
+1. `own::fate` refuses a declared `release` for a `mut` binding, and a slab is
+   always `mut` because `insert` takes `modify self`. The reason is written
+   where the refusal is: the interpreter releases what the `let` captured and
+   the two compiling backends release the slot's final value — the same program
+   for a `free`, two programs for a `release` that can print.
+2. A generic `impl Owned` flattens its `release` to a generic function, and the
+   drop site emits that name with no type arguments on it — a symbol nothing
+   defines. Phase 8a filters generic impls out of the `Owned` table so the miss
+   is a missing release rather than a linker error at the end of a build.
+3. Census U4 is still open, so even a working release would not reach the
+   elements inside `vals`.
+
+Measured on the Node and `wasi-min.js` harness the memory suite uses: a
+`Slots<String>` built and left at block exit grows the heap every turn. A
+`Slots` is a record holding `Array`s, and Phase 5 left a record's fields
+unreleased on purpose.
+
+This is the one prediction here that the implementation contradicts, and **M4
+must not delete Path B until it is closed** — `cell`'s slab does reclaim.
+
+**`elementLeak` (U4) did not flip.** The memory suite's eleven rows are
+unchanged: eight steady, three leaking. A `Slots` releases no element by any
+mechanism, because no mechanism exists — and a generic `T` cannot be told from
+an `Int64` that must not be released at all.
+
+### What the migrated corpus proves now
+
+- **`slottable`** was the container; it now imports one. Every question the
+  hand-written table answered is asked of the library and answered the same way,
+  byte for byte. It gained a test the hand-written version could not pass: two
+  containers both issue slot 0 at generation 1, and a handle from one is dead on
+  the other.
+- **`freelist`** proved reuse by NOT trapping — Path B's slab was fixed at
+  65,536, so exhaustion was reachable and reaching it was the failure. A `Slots`
+  grows, so "it finished" proves nothing. It now PRINTS the table size after
+  100,000 inserts: five slots, the size of one list. A number held on three
+  engines, where the old file had an absent trap.
+- **`autorelease`** measured the ownership INFERENCE: a million cells through
+  65,536 slots, and the proof was again a trap that did not happen. Nothing
+  about a handle is inferred, so the file now prints the high-water mark: one
+  slot. The count came down to 100,000 because the interpreter runs Vyrn where
+  it used to run four builtins, and a million turns took 75 seconds against 0.8.
+- **`genref`, `linkedlist`, `tree`** are the same programs with the storage
+  named. `Handle<Node>` is fixed size, so a record still refers to its own type;
+  an `Option` still ends a list; the aliasing tour still aliases. `genref` gained
+  one printed line — `alive(nums, alias)` after the removal — because the old
+  file claimed every copy of a released `Ref` was stale and printed nothing to
+  show it.
+- **`examples/slots.vyrn`** is new: a heap payload, a write through a handle
+  into a field, iteration, a container copy, and the trap. It ends in the trap
+  on purpose, so the corpus holds all three engines to one wording and one exit
+  code.
+
+### What a real container found missing
+
+`Slots` is the first generic container in the corpus, and Phase 7's dogfood
+(`Window`, `Slice`, `Ring`) was concrete. Seven gaps, each fixed here:
+
+1. **The checker read a projection's return type literally at two of three
+   sites.** `c[k] = v` and `for x in c` took `place atSet` and `place nth` at
+   their word, so a projection declared `-> T` answered `T`. `place at` already
+   solved the impl head; the other two do now.
+2. **A store through a user container demanded an `Int64` key.** `Index`
+   declares `type Key` and `place atSet` names it, and nothing read it.
+3. **A record literal inferred its parameters from its field values alone.** An
+   empty array literal for a field declared `Array<T>` says nothing, and a
+   parameter no field mentions says nothing at all — which is exactly a handle's
+   branding parameter.
+4. **A generic call inferred its type arguments from its arguments alone**, in
+   the checker and in BOTH compiling backends, so `newSlots()` had nothing to
+   read.
+5. **The textual backend passed a `modify` argument to a generic function by
+   value while the definition took a pointer.** A native segfault in three lines
+   of Vyrn. No corpus function was ever both generic and `modify`.
+6. **A `place` body's string literals never reached the textual backend's
+   pool.** A projection is inlined rather than flattened into
+   `program.functions`, so the walk that pools literals never saw one — and
+   `panic("..")` inside `place at` is the whole point of a trapping index.
+7. **The direct backend could not name a user container's element type in a
+   branch**, so `match o { Some(h) => s[h].value .. }` refused to lower.
+
+Two more are recorded rather than fixed: a generic `impl Owned` has no
+monomorphized release (above), and `insert(s, i)` on a `Slots<Int64>` is refused
+because `consume T` is conservative for a `T` movecheck cannot resolve — the
+caller writes `let v = i` first.
+
+**RFC-0091's stated motivation for `Iterate` is not achievable as it landed.**
+It says "`Slots` skips dead slots by implementing it". A `place nth` cannot
+skip: it maps a dense position to a place, it has no cursor to advance and no
+branch to yield from, and the rules a projection obeys forbid both. `Slots`
+skips by keeping a dense array of live slots and a map back from a slot to its
+place in it, so the skipping happens before the projection runs. That is the
+standard slot-map layout, it is what makes `remove` O(1), and it costs the two
+arrays the benchmark above already pays for.

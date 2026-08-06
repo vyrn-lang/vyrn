@@ -122,6 +122,13 @@ impl Owned {
             .impls
             .iter()
             .filter(|i| i.protocol == crate::types::OWNED)
+            // A GENERIC impl head carries no row yet. Its `release` flattens to
+            // a generic function, and the drop site below calls the flattened
+            // name unmangled — which is a symbol nothing defines. Recording the
+            // row would turn a missing feature into a linker error at the end
+            // of a build. Monomorphizing a declared release is the work this
+            // waits on; `Slots<T>` is what wants it.
+            .filter(|i| i.type_params.is_empty())
             .filter_map(|i| crate::types::type_key(&i.ty))
             .map(|k| {
                 let m = crate::types::impl_method_name(

@@ -1,61 +1,85 @@
-// Generational references — `Ref<T>` for any T (RFC-0004 §4, Path B) — the
-// memory model's answer to the *aliasing* case single-ownership can't express.
+// Generational handles — `std/slots` (RFC-0090 M1) — the memory model's answer
+// to the *aliasing* case single ownership cannot express.
 //
-// A `Ref<T>` is a freely-copyable, fixed-size { slot, generation } handle to a
-// mutable heap cell (the payload is boxed, so the reference never grows).
-// Every access is generation-checked: a reference used after the cell is
-// dropped fails a cheap check instead of dangling — a stale alias is caught,
-// never a use-after-free. A record may even hold a `Ref` to *its own type*
-// without becoming infinite (see linkedlist.vyrn / tree.vyrn).
+// A `Handle<T>` is a freely-copyable value of three words: a slot, the
+// generation that was live when it was issued, and the identity of the
+// container that issued it. It owns no heap, so copying one costs nothing and
+// obliges nothing. `s[h]` checks the generation and yields the element's place,
+// so a handle used after its element is removed traps on a compare rather than
+// dangling — a stale alias is caught, never a use-after-free.
 //
-// An *aliased* cell needs an explicit `drop`; a cell that is never aliased is
-// auto-released by the ownership analysis (see autorelease.vyrn).
+// What the old `Ref<T>` did with a hidden slab of 65,536 cells shared by every
+// program in the process, this does with two arrays inside a container the
+// program names. The identity word is the part the hidden slab could not need:
+// there was only one of it, and there are as many `Slots` as a program makes.
+//
+// A record may still hold a handle to its own type without becoming infinite
+// (see linkedlist.vyrn / tree.vyrn) — a handle is fixed size, which was the
+// whole reason `Ref` existed.
 
-fn bump(r: Ref<Int64>) -> Int64 {
-    set(r, get(r) + 1) // mutate through a reference passed by value
-    return get(r)
+import { Slots, Handle, newSlots, insert, remove, fetch, alive } from "std/slots"
+
+fn bump(nums: modify Slots<Int64>, h: Handle<Int64>) -> Int64 {
+    nums[h] = nums[h] + 1 // mutate through a handle passed by value
+    return nums[h]
 }
 
-// References compose across function boundaries: this takes a Ref<String> and
-// returns a fresh Ref<Int64> (ownership of the new cell transfers to the caller).
-fn measure(s: Ref<String>) -> Ref<Int64> {
-    return cell(get(s).byteLength)
+// Handles compose across function boundaries: this reads a String out of one
+// container and puts its length in another, handing back a handle to that.
+fn measure(strs: Slots<String>, h: Handle<String>, nums: modify Slots<Int64>) -> Handle<Int64> {
+    let n = strs[h].byteLength
+    let v = Int64(n)
+    return insert(nums, v)
 }
 
 fn main() -> Int64 {
     // ---- aliased mutation, generation-checked -----------------------------
-    let counter = cell(0)
-    let alias = counter // a second reference to the same cell — allowed
-    set(alias, 40) // write through one alias…
-    let a = bump(counter) // …read/modify through another: 41
-    print(bump(alias)) // 42
-    drop counter // free once; every copy is now stale (checked)
+    let mut nums: Slots<Int64> = newSlots()
+    let zero = 0
+    let counter = insert(nums, zero)
+    let alias = counter // a second handle to the same element — a plain copy
+    nums[alias] = 40 // write through one alias…
+    let a = bump(nums, counter) // …read/modify through another: 41
+    print(bump(nums, alias)) // 42
+    remove(nums, counter) // remove once; every copy of the handle is now stale
+    print(alive(nums, alias)) // false — the generation moved on
 
-    // ---- Ref<String>: mutate a heap string through the reference -----------
-    let s = cell("hello")
-    set(s, get(s) + " world")
-    print(get(s)) // hello world
+    // ---- a slab of Strings: mutate a heap value through a handle -----------
+    let mut strs: Slots<String> = newSlots()
+    let hello = "hello"
+    let s = insert(strs, hello)
+    strs[s] = strs[s] + " world"
+    print(strs[s]) // hello world
 
-    // A block-local string stored into a longer-lived cell survives the block:
-    // `set` RETAINS its value, so ownership analysis must not auto-free it.
+    // A block-local string stored into a longer-lived slot survives the block:
+    // the store MOVES it into the container, and the container outlives the
+    // block. The value it replaces is released by the same store.
     if true {
         let tail = "!" + "!"
-        set(s, tail)
+        strs[s] = tail
     }
-    print(get(s)) // !!
+    print(strs[s]) // !!
 
-    // ---- Ref<Ref<Int64>>: a reference to a reference -----------------------
-    let rr = cell(cell(41))
-    let inner = get(rr)
-    set(inner, get(inner) + 1)
-    print(get(inner)) // 42
+    // ---- a slab of handles: identity stored inside a container -------------
+    // `Ref<Ref<Int64>>` was a cell holding a cell. A handle is an ordinary
+    // value, so this is a `Slots<Handle<Int64>>` and needs nothing special.
+    let mut refs: Slots<Handle<Int64>> = newSlots()
+    let fortyOne = 41
+    let inner = insert(nums, fortyOne)
+    // `insert` consumes its payload, so the handle stored here is a binding of
+    // its own. Copying one is free — it is three words that own nothing.
+    let stored = inner
+    let rr = insert(refs, stored)
+    let got = refs[rr]
+    nums[got] = nums[got] + 1
+    print(nums[got]) // 42
 
-    let n = measure(s) // Ref<Int64> holding 2
-    print(get(n)) // 2
+    let n = measure(strs, s, nums) // a handle to 2
+    print(fetch(nums, n) ?? 0 - 1) // 2
 
-    drop s
-    drop inner
-    drop rr
-    drop n
+    remove(strs, s)
+    remove(nums, inner)
+    remove(refs, rr)
+    remove(nums, n)
     return 0
 }

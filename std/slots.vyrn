@@ -1,0 +1,257 @@
+/// std/slots — a generational slab, written in Vyrn, over `Array` (RFC-0090 M1).
+///
+/// The corpus kept reaching for one thing and calling it four names: identity
+/// for a value that lives inside a collection you own. `freelist`, `genref`,
+/// `linkedlist` and `tree` asked Path B for it, and `slottable` wrote it out by
+/// hand. This module is that one thing, once.
+///
+/// A `Handle<T>` is a plain value: a slot, the generation that was live when it
+/// was issued, and the identity of the container that issued it. It owns no
+/// heap, so it copies freely, never moves, and never has to be released.
+///
+///     import { Slots, Handle, newSlots, insert, remove, fetch } from "std/slots"
+///
+///     let mut people: Slots<Person> = newSlots()
+///     let h = insert(people, Person { name: "ada" })
+///     people[h].name = "lovelace"       // traps on a dead handle, like a[i] on OOB
+///     match fetch(people, h) { Some(p) => .., None => .. }   // liveness as a value
+///     remove(people, h)                 // the slot's generation bumps
+///     // (the container itself is not reclaimed yet — see `impl Owned` below)
+///
+/// **Two spellings, and the difference is what a dead handle does.** `s[h]`
+/// joins the bounds-trap family: the handle must be alive, and the program stops
+/// if it is not. `fetch` returns `Option<T>`, so staleness is a value the caller
+/// handles. The old `Ref` could only ever trap.
+///
+/// **The identity word.** A `Handle<Person>` from one container used on another
+/// of the same element type type-checks, and the generation compare can pass by
+/// coincidence. Every container takes an identity when it is made and every
+/// handle carries a copy of it, so a foreign handle is dead rather than
+/// plausible. `copy` takes a fresh identity for the same reason — a structural
+/// copy would hand two containers one identity, which is the hole with the
+/// serial numbers filed off.
+///
+/// **What a removed element costs.** `remove` bumps the generation and returns
+/// the slot to the free list. It does NOT clear the payload: there is no value
+/// of type `T` to put there, and the language has no uninitialized place. The
+/// dead payload is released when the slot is reused (a store releases what the
+/// place held, RFC-0089 M3a) or when the container drops. So a `Slots<String>`
+/// holds a removed string until one of those two, and never past them.
+///
+/// **Iteration order is not insertion order.** `for x in s` walks the live
+/// elements, and `remove` fills the hole it makes with the last live element.
+/// That is what keeps `remove` O(1). Iterate handles if the order matters.
+///
+/// **What this module does not do.** It does not name `get`, `set` or `release`
+/// — Path B reserves all three (RFC-0004), which is why the reading half is
+/// `fetch`. RFC-0090 M4 deletes Path B and the names come free.
+
+/// A handle into a `Slots<T>`: which slot, which generation, and which
+/// container. `T` is carried for branding only — a handle stores no element, so
+/// `Handle<Person>` and `Handle<Order>` are different types over the same three
+/// words, and the compiler refuses the mixture the identity word only catches at
+/// run time.
+export type Handle<T> = { slot: Int64, gen: Int64, owner: Int64 }
+
+/// A generational slab.
+///
+/// `vals` and `gens` are parallel and indexed by slot. `free` holds the slots
+/// nobody is using. `dense` holds the live slots in iteration order and `denseAt`
+/// maps a slot back to its position in `dense`, which is what makes `remove`
+/// O(1) and `for x in s` a walk over live elements rather than over the table.
+export type Slots<T> = {
+    vals: Array<T>,
+    gens: Array<Int64>,
+    free: Array<Int64>,
+    dense: Array<Int64>,
+    denseAt: Array<Int64>,
+    owner: Int64,
+}
+
+/// The identity every container takes when it is made. Module state, so two
+/// containers in one program can never agree by accident.
+let mut issued = 0
+
+fn takeIdentity() -> Int64 {
+    issued = issued + 1
+    return issued
+}
+
+/// An empty slab. The element type comes from the context that names it:
+/// `let mut people: Slots<Person> = newSlots()`.
+export fn newSlots<T>() -> Slots<T> {
+    return Slots {
+        vals: [],
+        gens: [],
+        free: [],
+        dense: [],
+        denseAt: [],
+        owner: takeIdentity(),
+    }
+}
+
+/// Put `v` in the slab and hand back a handle to it. Reuses a released slot when
+/// there is one, and the store over that slot releases what it held.
+export fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T> {
+    if s.free.length > 0 {
+        let i = s.free[s.free.length - 1]
+        s.free.pop()
+        s.vals[i] = v
+        s.denseAt[i] = s.dense.length
+        s.dense.push(i)
+        return Handle { slot: i, gen: s.gens[i], owner: s.owner }
+    }
+    let i = s.vals.length
+    s.vals.push(v)
+    s.gens.push(1)
+    s.denseAt.push(s.dense.length)
+    s.dense.push(i)
+    return Handle { slot: i, gen: 1, owner: s.owner }
+}
+
+/// Whether `h` still names a live element of `s`. False for a handle from
+/// another container, an out-of-range slot, and a slot whose generation has
+/// moved on.
+export fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool {
+    if h.owner != s.owner || h.slot < 0 || h.slot >= s.gens.length {
+        return false
+    }
+    return s.gens[h.slot] == h.gen
+}
+
+/// Read through a handle. `None` when the handle is not alive — which is the
+/// answer RFC-0090 wanted and the old `Ref` could not give: a value the caller
+/// handles instead of a trap it cannot.
+///
+/// The element is COPIED out, because a return is owned (RFC-0089 rule 3). Read
+/// `s[h]` instead where the element should stay where it is.
+export fn fetch<T>(s: Slots<T>, h: Handle<T>) -> Option<T> {
+    if !alive(s, h) {
+        return None
+    }
+    return Some(s.vals[h.slot].copy())
+}
+
+/// Release the element `h` names: bump the slot's generation, so every
+/// outstanding handle to it is now dead, and return the slot to the free list.
+/// Answers whether the handle was alive — removing twice is a no-op, not a
+/// double free.
+export fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Bool {
+    if !alive(s, h) {
+        return false
+    }
+    // Fill this element's place in `dense` with the last live one, so the walk
+    // stays contiguous and the removal stays O(1).
+    let d = s.denseAt[h.slot]
+    let last = s.dense[s.dense.length - 1]
+    s.dense[d] = last
+    s.denseAt[last] = d
+    s.dense.pop()
+    s.gens[h.slot] = h.gen + 1
+    s.denseAt[h.slot] = 0 - 1
+    s.free.push(h.slot)
+    return true
+}
+
+/// How many elements are live.
+export fn count<T>(s: Slots<T>) -> Int64 {
+    return s.dense.length
+}
+
+/// How many slots the table holds, live and free together. This is what grows;
+/// `count` is what a program put in.
+export fn capacity<T>(s: Slots<T>) -> Int64 {
+    return s.vals.length
+}
+
+/// A handle to every live element, in iteration order. The way to walk a slab
+/// when the walk needs the identities and not only the values.
+export fn handles<T>(s: Slots<T>) -> Array<Handle<T>> {
+    let mut out: Array<Handle<T>> = []
+    for slot in s.dense {
+        out.push(Handle { slot: slot, gen: s.gens[slot], owner: s.owner })
+    }
+    return out
+}
+
+/// `s[h]` and `s[h] = v` — the trapping spellings.
+///
+/// The projection checks the generation and then yields the element's PLACE, so
+/// `s[h].field = v` writes where the element lives and nothing is copied. A dead
+/// handle stops the program, exactly as `a[i]` out of range does.
+impl<T> Index for Slots<T> {
+    place at(read self, h: Handle<T>) -> T {
+        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
+        || self.gens[h.slot] != h.gen
+        {
+            panic("slots: handle is not alive")
+        }
+        yield self.vals[h.slot]
+    }
+    place atSet(modify self, h: Handle<T>) -> T {
+        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
+        || self.gens[h.slot] != h.gen
+        {
+            panic("slots: handle is not alive")
+        }
+        yield self.vals[h.slot]
+    }
+}
+
+/// `for x in s` — the live elements, in `dense` order.
+///
+/// This is the answer a projection can give. `place nth` maps a dense position
+/// to a place and nothing else: it cannot skip, because it has no cursor to
+/// advance and no branch to yield from. `dense` is what makes the skipping
+/// happen before the projection runs.
+impl<T> Iterate for Slots<T> {
+    fn size(self) -> Int64 {
+        return self.dense.length
+    }
+    place nth(read self, i: Int64) -> T {
+        yield self.vals[self.dense[i]]
+    }
+}
+
+/// **What is NOT here, and why: nothing releases a slab's buffers.**
+///
+/// A container of five `Array`s should say `impl Owned for Slots<T>` and give
+/// them back. It cannot, for three separate reasons, and all three belong to the
+/// memory model rather than to this module:
+///
+///   1. `own::fate` refuses a declared release for a `mut` binding, because the
+///      interpreter releases the value the `let` captured and the two compiling
+///      backends release the slot's final value — the same program for a `free`,
+///      two programs for a `release` that can print. A slab is always `mut`:
+///      `insert` and `remove` take `modify self`.
+///   2. A generic impl's `release` flattens to a generic function, and the drop
+///      site calls the flattened name with no type arguments on it. The row is
+///      filtered out of the `Owned` table for that reason, so writing the impl
+///      here would be writing dead code.
+///   3. Even with both fixed, the elements inside `vals` are census U4: nothing
+///      in the language reaches an element of an `Array<T>` to release it, and a
+///      `T` this module never sees concretely cannot be told from an `Int64`
+///      that must not be released at all.
+///
+/// So a slab leaks its five buffers, exactly as any record holding an `Array`
+/// does today — Phase 5 of the memory model left a record's fields unreleased
+/// and said why. RFC-0090's "drop people, every node reclaimed" waits on that
+/// work, not on this file.
+
+/// A copy is a second container, not a second name for one.
+///
+/// A structural copy would duplicate the identity word, and then a handle from
+/// the original would read the copy and pass every check. This is the override
+/// point RFC-0091 M1 opened, used for the reason it was opened.
+impl<T> Copy for Slots<T> {
+    fn copy(self) -> Slots<T> {
+        return Slots {
+            vals: self.vals.copy(),
+            gens: self.gens.copy(),
+            free: self.free.copy(),
+            dense: self.dense.copy(),
+            denseAt: self.denseAt.copy(),
+            owner: takeIdentity(),
+        }
+    }
+}

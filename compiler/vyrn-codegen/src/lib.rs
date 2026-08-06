@@ -1169,6 +1169,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
     for f in &program.functions {
         collect_strings_block(&f.body, &mut literals, &type_map);
     }
+    // A `place` projection is never flattened into `program.functions` — it is
+    // inlined at each access site instead (RFC-0091 M2) — so its own literals
+    // reach the pool from here or not at all. `panic("..")` inside a projection
+    // is what wants them: an `Index` that refuses a dead key says so.
+    for imp in &program.impls {
+        for f in &imp.places {
+            collect_strings_block(&f.body, &mut literals, &type_map);
+        }
+    }
     // A string literal can also live in a type's refinement predicate
     // (`String where value == "root"`), which is lowered inline at every
     // construction site — collect those too (regex collection below does the
@@ -1200,6 +1209,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let mut regex_patterns: Vec<String> = Vec::new();
     for f in &program.functions {
         collect_regex_block(&f.body, &mut regex_patterns);
+    }
+    for imp in &program.impls {
+        for f in &imp.places {
+            collect_regex_block(&f.body, &mut regex_patterns);
+        }
     }
     // A `=~` can also live in a type's refinement predicate (`String where value
     // =~ "…"`), which is lowered at construction sites — collect those too.
@@ -9057,19 +9071,46 @@ impl<'a> Gen<'a> {
         if is_generic {
             let callee = callee.unwrap();
             // The concrete type of each argument (parameters substituted away).
+            //
+            // A `modify` parameter crosses as the ADDRESS of the caller's
+            // binding, exactly as it does in the ordinary call below. The
+            // definition emits `ptr %argN` for one whether or not the function
+            // is generic, so a generic call that handed over the value disagreed
+            // with the callee's own ABI and the program read a record out of a
+            // pointer-sized register. No corpus function was both generic and
+            // `modify`, so nothing caught it until `Slots<T>` was both.
             let mut arg_tys = Vec::new();
             let mut arg_vals = Vec::new();
-            for a in args {
+            let mut arg_ptrs: Vec<Option<String>> = Vec::new();
+            for (i, a) in args.iter().enumerate() {
+                if callee.params.get(i).map(|p| p.capability) == Some(Capability::Modify) {
+                    if let Expr::Var { name: vn, .. } = a {
+                        if let Some((slot, ty)) = self.lookup(vn) {
+                            arg_tys.push(vyrn_frontend::types::substitute(&ty, self.subst));
+                            arg_vals.push(String::new());
+                            arg_ptrs.push(Some(slot));
+                            continue;
+                        }
+                    }
+                    return Err(format!("`modify` argument to `{name}` must be a variable"));
+                }
                 let (v, vty) = self.gen_expr(a)?;
                 arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
                 arg_vals.push(v);
+                arg_ptrs.push(None);
             }
             // Bind each type parameter from the matching argument. An unsolved
             // one becomes `Unit` here — see `solve_type_args`.
-            let (call_subst, solved) = solve_type_args(
+            let want = self
+                .expect
+                .last()
+                .map(|t| vyrn_frontend::types::substitute(t, self.subst));
+            let (call_subst, solved) = solve_with_expected(
                 &callee.type_params,
                 &callee.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
                 &arg_tys,
+                &callee.ret,
+                want.as_ref(),
             );
             let type_args: Vec<Type> =
                 solved.into_iter().map(|t| t.unwrap_or(Type::Unit)).collect();
@@ -9077,7 +9118,17 @@ impl<'a> Gen<'a> {
 
             // Coerce args to their (substituted) parameter types.
             let mut arg_ops = Vec::new();
-            for ((p, v), aty) in callee.params.iter().zip(arg_vals).zip(&arg_tys) {
+            for (((p, v), aty), slot) in callee
+                .params
+                .iter()
+                .zip(arg_vals)
+                .zip(&arg_tys)
+                .zip(&arg_ptrs)
+            {
+                if let Some(slot) = slot {
+                    arg_ops.push(format!("ptr {slot}"));
+                    continue;
+                }
                 let pty = vyrn_frontend::types::substitute(&p.ty, &call_subst);
                 let (v, cty) = self.coerce(v, aty, &pty)?;
                 arg_ops.push(format!("{} {v}", self.llt(&cty)));
@@ -9235,10 +9286,16 @@ impl<'a> Gen<'a> {
                 arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
                 arg_vals.push(v);
             }
-            let (call_subst, solved) = solve_type_args(
+            let want = self
+                .expect
+                .last()
+                .map(|t| vyrn_frontend::types::substitute(t, self.subst));
+            let (call_subst, solved) = solve_with_expected(
                 &callee.type_params,
                 &callee.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
                 &arg_tys,
+                &callee.ret,
+                want.as_ref(),
             );
             let type_args: Vec<Type> =
                 solved.into_iter().map(|t| t.unwrap_or(Type::Unit)).collect();
@@ -10261,6 +10318,40 @@ pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Ty
 /// reports rather than decides. The LLVM emitter has always substituted `Unit`
 /// and let it lower to `void`; the direct backend refuses, because a `void` in a
 /// wasm signature is not a diagnostic, it is a different function.
+/// The type arguments of a generic call, with any parameter the arguments left
+/// open taken from the type the call site expects.
+///
+/// `fn newSlots<T>() -> Slots<T>` has nothing to read its `T` off: the empty
+/// container carries no element. The checker answers from the expected type, so
+/// this must answer the same way or the two disagree about which instance the
+/// program calls.
+pub(crate) fn solve_with_expected(
+    type_params: &[String],
+    params: &[Type],
+    arg_tys: &[Type],
+    ret: &Type,
+    expected: Option<&Type>,
+) -> (HashMap<String, Type>, Vec<Option<Type>>) {
+    let (mut subst, solved) = solve_type_args(type_params, params, arg_tys);
+    if !solved.iter().any(|t| t.is_none()) {
+        return (subst, solved);
+    }
+    let Some(want) = expected else {
+        return (subst, solved);
+    };
+    let (from_ret, ret_solved) =
+        solve_type_args(type_params, std::slice::from_ref(ret), std::slice::from_ref(want));
+    for (tp, t) in from_ret {
+        subst.entry(tp).or_insert(t);
+    }
+    let solved = solved
+        .into_iter()
+        .zip(ret_solved)
+        .map(|(a, b)| a.or(b))
+        .collect();
+    (subst, solved)
+}
+
 pub(crate) fn solve_type_args(
     type_params: &[String],
     declared: &[Type],
