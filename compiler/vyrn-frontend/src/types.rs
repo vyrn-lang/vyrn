@@ -206,13 +206,21 @@ pub fn copy_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
 /// Both halves are required. An impl carrying only one of them is not an
 /// iterable, and the checker says so where it is written.
 pub fn iterate_impl<'a>(impls: &'a [ImplBlock], ty: &Type) -> Option<(String, &'a Function)> {
-    let key = type_key(ty)?;
-    let imp = impls.iter().find(|i| {
-        i.protocol == ITERATE && type_key(&i.ty).as_deref() == Some(key.as_str())
-    })?;
+    iterate_impl_by_key(impls, &type_key(ty)?)
+}
+
+/// [`iterate_impl`], by type key. The interpreter reaches this one: it names a
+/// receiver by the stamp on its runtime value where no static type says.
+pub fn iterate_impl_by_key<'a>(
+    impls: &'a [ImplBlock],
+    key: &str,
+) -> Option<(String, &'a Function)> {
+    let imp = impls
+        .iter()
+        .find(|i| i.protocol == ITERATE && type_key(&i.ty).as_deref() == Some(key))?;
     let nth = imp.places.iter().find(|f| f.name == ITERATE_NTH)?;
     imp.methods.iter().find(|m| m.name == ITERATE_SIZE)?;
-    Some((impl_method_name(ITERATE, &key, ITERATE_SIZE), nth))
+    Some((impl_method_name(ITERATE, key, ITERATE_SIZE), nth))
 }
 
 /// Extract the `(min, max)` inclusive numeric bounds a validated type's `where`

@@ -2975,9 +2975,21 @@ impl<'a> Checker<'a> {
                     // Iterating a String yields each byte as an Int.
                     Type::Str => Type::Int,
                     other => {
-                        return Err(format!(
-                            "line {line}: `for` needs an Array or String to iterate, found {other}"
-                        ))
+                        // RFC-0091 M3: a user container declares how it is
+                        // iterated, and the element type is what its `place nth`
+                        // yields. The resolved shape cannot answer, so the
+                        // DECLARED type is what the row is keyed by — an impl
+                        // head names the alias, not the record it aliases.
+                        match crate::types::iterate_impl(self.impl_blocks, &ity) {
+                            Some((_, nth)) => nth.ret.clone(),
+                            None => {
+                                return Err(format!(
+                                    "line {line}: `for` needs an Array, a String, or a type that \
+                                     declares `impl Iterate` (a `size` method and a `place nth`), \
+                                     found {other}"
+                                ))
+                            }
+                        }
                     }
                 };
                 // Bind the loop variable (immutable, element-typed) in a scope

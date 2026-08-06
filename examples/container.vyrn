@@ -1,0 +1,117 @@
+/// The container protocols — `Copy` and `Iterate` (RFC-0091 M1 and M3).
+///
+/// A type declares what it is and the compiler looks it up. `x.copy()` asks the
+/// receiver's type how it is duplicated; `for x in xs` asks the container how it
+/// is iterated. Both are derived for the types the language builds in, and both
+/// are overridden by a type that knows better.
+///
+/// `Array` reaches the same two answers through the compiler's seeded rows, so
+/// the loop at the end of this file and the loops above it are one mechanism.
+
+/// A window over a buffer, iterated from its own zero.
+///
+/// `Iterate` owes two answers: how many elements, and where each one is. The
+/// second is a `place`, not a method — it yields the element rather than
+/// returning a copy of it, so the loop variable borrows what the window
+/// borrows.
+type Window = { data: Array<Int64>, start: Int64 }
+
+impl Iterate for Window {
+    fn size(self) -> Int64 {
+        return self.data.length - self.start
+    }
+    place nth(read self, i: Int64) -> Int64 {
+        yield self.data[self.start + i]
+    }
+}
+
+/// A pool that counts what it hands out.
+///
+/// `impl Owned` says how the pool is released. Until RFC-0091 M1 that was also
+/// a refusal to copy it: a structural copy would claim the same resources twice
+/// and run the release over both. `impl Copy` is the type answering the second
+/// question, and it takes the count with it rather than sharing the buffer.
+type Pool = { slots: Array<Int64>, taken: Int64 }
+
+impl Owned for Pool {
+    fn release(self) {
+        print("pool released")
+    }
+}
+
+impl Copy for Pool {
+    fn copy(self) -> Pool {
+        let mut out: Array<Int64> = []
+        for s in self.slots {
+            out.push(s)
+        }
+        return Pool { slots: out, taken: self.taken }
+    }
+}
+
+/// A list that refers to itself. A structural copy has no bottom to stop at, so
+/// M1b refused one and named a recursive function as the answer. This is where
+/// that function goes.
+type Chain = { next: Option<Chain>, tag: Int64 }
+
+impl Copy for Chain {
+    fn copy(self) -> Chain {
+        if let Some(rest) = self.next {
+            return Chain { next: Some(rest.copy()), tag: self.tag }
+        }
+        return Chain { next: None, tag: self.tag }
+    }
+}
+
+fn build(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        out.push(i * 10)
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    // A container of one's own, iterated by the same word a built-in is.
+    let w = Window { data: build(6), start: 2 }
+    let mut total = 0
+    for x in w {
+        total = total + x
+    }
+    print("window total: \{total}")
+
+    // `break` and `continue` behave as they do over an Array: the index names
+    // the element the turn is reading.
+    let mut seen = 0
+    for x in w {
+        if x == 30 {
+            continue
+        }
+        if x == 50 {
+            break
+        }
+        seen = seen + 1
+    }
+    print("window seen: \{seen}")
+
+    // The declared copy, over a type a structural copy is refused for.
+    let p = Pool { slots: build(3), taken: 2 }
+    let q = p.copy()
+    print("pool taken: \{q.taken} \{q.slots[1]}")
+
+    // The declared copy, over a type that refers to itself.
+    let c = Chain { next: Some(Chain { next: None, tag: 2 }), tag: 1 }
+    let d = c.copy()
+    print("chain tag: \{d.tag}")
+
+    // The built-in path, unchanged.
+    let a = build(4)
+    let mut last = 0
+    for x in a {
+        last = x
+    }
+    print("array last: \{last}")
+    return 0
+}

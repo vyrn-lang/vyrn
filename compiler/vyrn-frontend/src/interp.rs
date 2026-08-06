@@ -3282,8 +3282,22 @@ impl<'a> Interp<'a> {
                 Ok(Flow::Normal)
             }
             Stmt::ForIn {
-                var, iter, body, ..
+                var, iter, body, line, ..
             } => {
+                // RFC-0091 M3: a user container declares how it is iterated, and
+                // the loop is written in its own terms — `size` for how many, the
+                // `place nth` projection for where each element is. Asked before
+                // the iterable is evaluated, because naming a receiver twice is
+                // what the read path already refuses to do.
+                if let Some((size_fn, nth)) = self
+                    .index_receiver_key(iter, scope)
+                    .and_then(|k| crate::types::iterate_impl_by_key(self.impls, &k))
+                {
+                    let blk =
+                        crate::project::iterate_loop(&size_fn, nth, var, iter, body, *line)
+                            .map_err(Ctrl::Err)?;
+                    return self.block(&blk, scope);
+                }
                 // RFC-0075 M2b: a stream is pulled, not walked. The producer runs
                 // once per iteration and the loop OWNS the stream, so leaving by
                 // any route — falling off the end, `break`, `return` — releases it

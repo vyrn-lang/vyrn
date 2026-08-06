@@ -3922,7 +3922,20 @@ impl<'a> Gen<'a> {
                 self.emit_term(format!("br label %{}", ctx.continue_label));
                 Ok(())
             }
-            Stmt::ForIn { var, iter, body, .. } => {
+            Stmt::ForIn { var, iter, body, line, .. } => {
+                // RFC-0091 M3: a user container declares how it is iterated. The
+                // desugar is asked for before the iterable is emitted, because
+                // dispatch has to choose before anything is written — the same
+                // reason `static_ty` exists at all.
+                if let Some((size_fn, nth)) = self
+                    .static_ty(iter)
+                    .and_then(|t| vyrn_frontend::types::iterate_impl(self.impls, &t))
+                {
+                    let blk = vyrn_frontend::project::iterate_loop(
+                        &size_fn, nth, var, iter, body, *line,
+                    )?;
+                    return self.gen_block(&blk);
+                }
                 // Evaluate the iterable once and snapshot a base element pointer
                 // plus a length — matching the interpreter, which iterates a
                 // copied element vector. Both array kinds reduce to (base T*, len).

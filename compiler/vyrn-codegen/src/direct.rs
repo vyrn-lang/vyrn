@@ -2431,6 +2431,22 @@ impl Fn_<'_> {
                 b.ins(&Instruction::End);
             }
             Stmt::ForIn { var, iter, body, line, .. } => {
+                // RFC-0091 M3: a user container declares how it is iterated. The
+                // probe is `&mut self`, so a program that declares no `Iterate`
+                // row never reaches it — the same shape of guard `project_at`
+                // uses, narrowed to the one protocol this site can dispatch.
+                if self.cx.impls.iter().any(|i| i.protocol == ftypes::ITERATE) {
+                    if let Some((size_fn, nth)) = self
+                        .peek(iter, *line)
+                        .ok()
+                        .and_then(|t| ftypes::iterate_impl(&self.cx.impls, &t))
+                    {
+                        let blk = vyrn_frontend::project::iterate_loop(
+                            &size_fn, nth, var, iter, body, *line,
+                        )?;
+                        return self.block(m, b, &blk);
+                    }
+                }
                 // `block { loop { br_if 1 (i >= len); bind; block { body }; i++;
                 // br 0 } }`. The INNER block is what makes `continue` correct:
                 // branching to it leaves the body and lands on the increment, so

@@ -32,7 +32,7 @@
 //! whose `place at` yields `self.data[i]` inlines to the same `@slot` through
 //! one more level of the same machinery.
 
-use crate::ast::{Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type};
+use crate::ast::{BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type};
 use std::collections::HashMap;
 
 /// The element-place primitive: `@slot(container, index)`. Unspellable (no
@@ -332,6 +332,124 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     body.stmts.pop();
     prologue.extend(body.stmts);
     Ok(Projection { prologue, place })
+}
+
+/// What `for x in xs` becomes when `xs` is a user container (RFC-0091 M3).
+///
+/// A builtin container is walked by each backend's own element loop, which is
+/// three pointer bumps and a bounds test. A user container has no buffer the
+/// compiler can name, so the loop is written in terms of what the container
+/// declared: `size` for how many, and the `place nth` projection for where each
+/// element is. Both come from the same table `a[i]` reads, so there is no
+/// second list.
+///
+/// The result is ordinary AST, and each engine lowers it with the statements it
+/// already has. That is what keeps this one implementation instead of three:
+/// the loop is a `while`, the element is a `let` of the yielded place, and the
+/// prologue the projection needs runs inside the turn that reads it.
+///
+/// ```text
+/// let @i.n = size(xs)
+/// let mut @i.i = -1
+/// while @i.i + 1 < @i.n {
+///     @i.i = @i.i + 1
+///     <the projection's prologue>
+///     let x = <the place it yields>
+///     <the body>
+/// }
+/// ```
+///
+/// **The increment is the body's first statement, not its last.** A `continue`
+/// jumps to the condition; an increment at the end would be skipped and the
+/// loop would spin on one element. Testing `@i.i + 1` rather than `@i.i` is
+/// what pays for that — the index names the element the turn is reading, so a
+/// `break` out of the body leaves it where a reader expects.
+///
+/// The three bindings are unspellable (`@` does not lex), so a nested loop's
+/// pair shadows its outer pair and no source name can collide with either.
+pub fn iterate_loop(
+    size_fn: &str,
+    nth: &Function,
+    var: &str,
+    iter: &Expr,
+    body: &Block,
+    line: usize,
+) -> Result<Block, String> {
+    const IDX: &str = "@i.i";
+    const LEN: &str = "@i.n";
+    const RECV: &str = "@i.c";
+    let var_of = |n: &str| Expr::Var {
+        name: n.to_string(),
+        line,
+    };
+    let bump = |e: Expr| Expr::Binary {
+        op: BinOp::Add,
+        lhs: Box::new(e),
+        rhs: Box::new(Expr::Int(1)),
+        line,
+    };
+
+    let mut out = Vec::new();
+    // A container named by a place is read where it lives, which is what makes
+    // the loop variable a borrow of it. Anything else is a temporary and binds
+    // once: evaluating it per turn would run its side effects n+1 times.
+    let recv = if is_place(iter) {
+        iter.clone()
+    } else {
+        out.push(Stmt::Let {
+            name: RECV.to_string(),
+            mutable: false,
+            ty: None,
+            value: iter.clone(),
+            line,
+        });
+        var_of(RECV)
+    };
+    out.push(Stmt::Let {
+        name: LEN.to_string(),
+        mutable: false,
+        ty: None,
+        value: Expr::Call {
+            name: size_fn.to_string(),
+            args: vec![recv.clone()],
+            line,
+        },
+        line,
+    });
+    out.push(Stmt::Let {
+        name: IDX.to_string(),
+        mutable: true,
+        ty: None,
+        value: Expr::Int(-1),
+        line,
+    });
+
+    let mut inner = vec![Stmt::Assign {
+        name: IDX.to_string(),
+        value: bump(var_of(IDX)),
+        line,
+    }];
+    let p = inline(nth, &recv, &[var_of(IDX)], line)?;
+    inner.extend(p.prologue);
+    inner.push(Stmt::Let {
+        name: var.to_string(),
+        mutable: false,
+        ty: None,
+        value: p.place,
+        line,
+    });
+    inner.extend(body.stmts.iter().cloned());
+    out.push(Stmt::While {
+        cond: Expr::Binary {
+            op: BinOp::Lt,
+            lhs: Box::new(bump(var_of(IDX))),
+            rhs: Box::new(var_of(LEN)),
+            line,
+        },
+        body: Block { stmts: inner },
+        line,
+    });
+    Ok(Block { stmts: out })
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +850,88 @@ mod tests {
         };
         assert_eq!(name, ELEM);
         assert_eq!(args.len(), 2);
+    }
+
+    /// RFC-0091 M3. The increment is the loop body's FIRST statement, which is
+    /// what makes `continue` step the loop instead of spinning on one element,
+    /// and the condition tests `i + 1` to pay for it.
+    #[test]
+    fn an_iterate_loop_increments_before_it_reads() {
+        let p = parse(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Iterate for Ring {\n\
+                 fn size(self) -> Int64 { return self.data.length }\n\
+                 place nth(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+             }\n\
+             fn main() { print(1) }\n",
+        );
+        let (size, nth) =
+            crate::types::iterate_impl(&p.impls, &Type::Named("Ring".into())).unwrap();
+        assert_eq!(size, "Iterate__Ring__size");
+        let blk = iterate_loop(
+            &size,
+            nth,
+            "x",
+            &Expr::Var {
+                name: "r".into(),
+                line: 9,
+            },
+            &Block { stmts: Vec::new() },
+            9,
+        )
+        .unwrap();
+        // A place receiver binds no temporary: the loop reads the container
+        // where it lives, which is what makes the element a borrow of it.
+        assert_eq!(blk.stmts.len(), 3, "size, index, loop — and no receiver copy");
+        let Some(Stmt::While { body, .. }) = blk.stmts.last() else {
+            panic!("expected a while loop")
+        };
+        assert!(matches!(&body.stmts[0], Stmt::Assign { name, .. } if name == "@i.i"));
+        assert!(matches!(&body.stmts[1], Stmt::Let { name, .. } if name == "x"));
+    }
+
+    /// An iterable that is not a place is a temporary, and evaluating it once
+    /// per turn would run its side effects `size + 1` times.
+    #[test]
+    fn an_iterate_loop_binds_a_temporary_once() {
+        let p = parse(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Iterate for Ring {\n\
+                 fn size(self) -> Int64 { return self.data.length }\n\
+                 place nth(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+             }\n\
+             fn main() { print(1) }\n",
+        );
+        let (size, nth) =
+            crate::types::iterate_impl(&p.impls, &Type::Named("Ring".into())).unwrap();
+        let blk = iterate_loop(
+            &size,
+            nth,
+            "x",
+            &Expr::Call {
+                name: "makeRing".into(),
+                args: Vec::new(),
+                line: 9,
+            },
+            &Block { stmts: Vec::new() },
+            9,
+        )
+        .unwrap();
+        assert!(matches!(&blk.stmts[0], Stmt::Let { name, .. } if name == "@i.c"));
+    }
+
+    /// Both halves are required. An impl with a `size` and no `place nth` is not
+    /// an iterable, and neither is the reverse.
+    #[test]
+    fn iterate_needs_both_halves() {
+        let p = parse(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Iterate for Ring {\n\
+                 fn size(self) -> Int64 { return self.data.length }\n\
+             }\n\
+             fn main() { print(1) }\n",
+        );
+        assert!(crate::types::iterate_impl(&p.impls, &Type::Named("Ring".into())).is_none());
     }
 
     #[test]
