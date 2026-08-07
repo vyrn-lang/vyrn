@@ -18,6 +18,12 @@
   three are M1's and M2b's own pins, and client disconnect was closed by
   RFC-0074 M3a and then a second time by M3b's `ws` **against the same file,
   unchanged**. The normalized signal is *the write failing*.
+  **The obligation stopped being this type's in RFC-0086 M3.** `impl MustUse for
+  T` gives any type the rules below, out of the table `impl Owned` feeds;
+  `Stream` is one seeded row in it. Nothing about a stream changed — the
+  diagnostics are byte-identical — but the storage ban and `drop`'s silence stay
+  a stream's own, because both are about a cursor rather than about an
+  obligation. See "The obligation is no longer this type's".
   **The cursor moved in RFC-0090 M3.** It was a `Ref<Int64>` out of Path B's
   slab; it is a slot in `std/stream`'s own `Slots` now, so the compiler carries
   no slab logic for streams and Path B can be deleted. A step takes a `Cursor`
@@ -264,6 +270,40 @@ inherited.
   scope, which is what makes the obligation checkable.
 - It does not cover bidirectional WebSocket messaging. `ws` here projects a
   server-to-client stream; client-to-server messaging is a separate design.
+
+## The obligation is no longer this type's — RFC-0086 M3
+
+`Stream<T>` was the only linear type in the language, and the mechanism that
+proved its obligation was written against it by name. **It is a lookup now.** A
+type declares `impl MustUse for T` and gets every rule below: abandoned,
+disposed twice, and two branches that disagree are all refused; a must-use
+parameter carries the obligation into the callee; and the diagnostics name the
+type. `Stream` is one **seeded row** in that table, for the reason every seeded
+row exists — `vyrn run` on a bare file has no resolver, so the answer may not
+come from `std/`.
+
+Nothing about a stream changed. The diagnostics are byte-identical, the corpus
+is unchanged, and `examples/stream_abandoned.vyrn` and
+`examples/stream_combinator_abandoned.vyrn` produce exactly what they produced.
+What changed is that they are no longer the only ones:
+`examples/mustuse_abandoned.vyrn` is the same three rejections about a record
+called `Txn` that the compiler has never heard of.
+
+**Two things stay a stream's own, and both are representation rather than
+obligation.**
+
+- **Nothing may store a stream.** A stream is a cursor over a producer, and a
+  stored cursor is an aliased one — which is why `ensure_type_exists` refuses a
+  `Stream` in a field, an element, a type argument or module state. A declared
+  must-use type has no cursor and is stored freely. The price is stated in
+  RFC-0087 U7: a must-use value put into a container counts as discharged
+  there, and the obligation does not travel with the container.
+- **`drop s` reclaims nothing.** A stream's release is pushed by its own
+  lowering (M2b) and `own::release_kind` answers `None` for it on purpose, so
+  answering twice would close it twice. That is why the fix menu is per row —
+  a stream is closed with `close(s)`, a declared type is released with
+  `drop t` — and why one wording for both would have named a statement that
+  silently does nothing.
 
 ## Milestones
 
