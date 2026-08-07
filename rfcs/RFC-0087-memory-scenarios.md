@@ -421,8 +421,9 @@ The release is inline and per type, not the runtime function this section
 predicted — Phase 5 settled that (see RFC-0089 "M3a as landed"), and the
 `CloseStream` precedent did not survive contact.
 
-Two holes were found by writing the bug and reading the emitted code, and both
-are recorded at their sites in `movecheck.rs`:
+Three holes were found, and all three are recorded at their sites in
+`movecheck.rs`. The first two were found by writing the bug and reading the
+emitted code; the third was found by CI, twenty-four runs later:
 
 - **A binder handed to a lender.** `g = tagOf(j)` freed what the store had just
   kept, because a store of a CALL result records no move at all. A row whose
@@ -434,6 +435,27 @@ are recorded at their sites in `movecheck.rs`:
   **This is the shape Phase 5 recorded as the one nothing could see**, in its own
   words: "a struct literal is not one". The record is a lend and never a refusal,
   because refusing it would refuse `return Some(m)` over any loop element.
+- **A scrutinee that is a parameter.** The row was minted on `place_key == 0`,
+  and 0 answers two questions at once: an expression that names no place, and a
+  place with no `let` row. A parameter is the second — it binds node 0 — so
+  `if let Some(s) = v` over a plain `Option<String>` parameter released the
+  caller's value. `showOpt` in `examples/argsdemo.vyrn` is exactly that, and the
+  value was an `args()` element `opt` had lent it. The test is the one a `let`
+  already asks before it is given a row: `names_a_place`.
+
+  **Parity caught this and the local run did not**, for a reason worth keeping.
+  Freeing a String returns the block whose first sixteen bytes are its
+  `{ len, cap }` header. glibc writes the tcache link over exactly those bytes,
+  so the next read of that String saw a pointer as its length; the Windows
+  allocator leaves them alone, so every local run was clean and only the Linux
+  job ever failed. The corrupt length is also why the symptom moved: `indexOf`
+  scanned past the end and `substring` copied garbage, which reads as
+  "byte offset 0 is inside a multi-byte UTF-8 character" — offset 0 is always a
+  boundary, and the message came from `stringFromBytes` refusing the bytes, not
+  from the boundary check. An earlier run of the same example died as an OOM
+  instead, on the same corrupt length. **A use-after-free that only one
+  allocator shows is still deterministic**, and reading it as flakiness cost
+  twenty-four red runs.
 
 ---
 
@@ -1165,12 +1187,14 @@ Every phase corrected the brief that launched it. The load-bearing ones:
   and memcpy. `realloc` is how an `Array` and a `String` grow in place, and the
   thesis never named it.
 - **A release is only as safe as the lend record behind it.** Phase 10a released
-  an `if let` scrutinee and produced a live use-after-free twice before it held:
-  once because a store of a CALL result records no move, once because
-  `returned_borrow` reads a returned PLACE and `Some(m)` is not one. Both were
-  found by reading emitted code, not by parity — parity was byte-identical with
-  the second bug in it, and the direct backend caught it only because a generator
-  runs as compiled wasm and printed a mangled name.
+  an `if let` scrutinee and produced a live use-after-free three times before it
+  held: once because a store of a CALL result records no move, once because
+  `returned_borrow` reads a returned PLACE and `Some(m)` is not one, and once
+  because `place_key` answers 0 for a parameter as well as for a temporary. The
+  first two were found by reading emitted code, not by parity — parity was
+  byte-identical with the second bug in it. The third shipped, and CI's Linux
+  parity job found it the same day; see §14 for why the local Windows run could
+  not.
 
 ## The open tail
 
