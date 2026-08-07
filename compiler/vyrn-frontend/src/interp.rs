@@ -3970,7 +3970,7 @@ impl<'a> Interp<'a> {
                     // the site, which census U5 appends: `msg (file:line)`.
                     // `panic` without a site is the single-file `analyze` path,
                     // which never runs the loader that stamps one.
-                    "panic" | crate::ast::PANIC_AT => {
+                    "panic" | "@panicAt" => {
                         let msg = match &vals[0] {
                             Val::Str(s) => (**s).clone(),
                             other => format!("{other:?}"),
