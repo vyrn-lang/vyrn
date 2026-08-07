@@ -1,11 +1,13 @@
 # RFC-0087 — Every Memory Scenario, and What Handles It
 
-- **Status:** **Census, closed.** The arc it opened (RFC-0089, RFC-0090,
-  RFC-0091, nine phases) is finished, and "The census, closed" at the end of this
-  file is its final state: what closed, what did not, and what the arc found
-  instead. Part I is correctness — is memory reclaimed. Part II is usability —
-  can a person see the model. Part III is cost — what does it spend. The three
-  ranked tables were the proposed work; each now carries its outcome.
+- **Status:** **Census, closed; Phase 10 took the tail.** The arc it opened
+  (RFC-0089, RFC-0090, RFC-0091, ten phases) is finished, and "The census,
+  closed" at the end of this file is its final state: what closed, what did not,
+  and what the arc found instead. Phase 10 closed §14 and §16 and left U4, so
+  the memory suite reads eleven steady of twelve. Part I is correctness — is
+  memory reclaimed. Part II is usability — can a person see the model. Part III
+  is cost — what does it spend. The three ranked tables were the proposed work;
+  each now carries its outcome.
 - **Depends on:** RFC-0004 (the hybrid model), RFC-0011 (elements are a safe
   leak), RFC-0012 (the extern String ABI), RFC-0075 (linear streams),
   RFC-0077 M6 (the wasm allocator), RFC-0086 M1 (the compiler asks the type)
@@ -384,6 +386,34 @@ carries at run time, and `CloseStream` is the precedent: a variant-aware release
 a runtime function, so the drop **site** stays straight-line. `transfers` then
 answers `true` for a `Match` whose every arm transfers, which is decidable.
 
+**Closed in two halves.** Phase 5 gave `Option` and `Result` a `Deep` release, so
+`let o = pick(a, b)` reclaims. It did NOT close the row, because the recommended
+spelling binds nothing: `if let Some(s) = pick(a, b)` matches a value with no name.
+
+Phase 10a gave that statement the reclamation row a `let` gets, keyed by the
+statement's own node address, with the arm binders bound to it. Every `return`,
+store, capture and handover the move check already writes then lands on that row,
+and a row with nothing written is a value the arms did not hand on. The release
+runs on a drop frame of its own, so an arm that returns early releases it too.
+
+The release is inline and per type, not the runtime function this section
+predicted — Phase 5 settled that (see RFC-0089 "M3a as landed"), and the
+`CloseStream` precedent did not survive contact.
+
+Two holes were found by writing the bug and reading the emitted code, and both
+are recorded at their sites in `movecheck.rs`:
+
+- **A binder handed to a lender.** `g = tagOf(j)` freed what the store had just
+  kept, because a store of a CALL result records no move at all. A row whose
+  value was passed to a function in the `lending` set is `Lent` now.
+- **A borrow wrapped in a constructor.** `openRule(c)` is
+  `for m in c.members { return Some(m) }`, and `returned_borrow` reads a returned
+  PLACE — `Some(..)` is not one, so `openRule` was not a lender. `std/contract`
+  read freed members and the `components` generator emitted a mangled spelling.
+  **This is the shape Phase 5 recorded as the one nothing could see**, in its own
+  words: "a struct literal is not one". The record is a lend and never a refusal,
+  because refusing it would refuse `return Some(m)` over any loop element.
+
 ---
 
 ## 15. Builtins that allocate and are not on the list
@@ -417,6 +447,35 @@ made a lazy field a stored closure, so a record with a lazy field carries one.
 The leak is correct under RFC-0037: a defunctionalized closure can be stored and
 run later, and nothing tracks when the last holder drops it. It is the same
 question §14 asks about a variant payload, in a different aggregate.
+
+**Closed by Phase 10b.** A `fn` value owns its capture block, so rule 1 moves it
+and rule 4 releases it. The release is the three instructions the stream closer
+already emitted at one site: read the payload word, test it against 0, `free`.
+
+The copy rule 1 then demands is **derived over RFC-0037's defunctionalized
+enum** — one `@__vyrn_fnval_copy` per module, a switch from tag to block size,
+then one `malloc` and one `memcpy`. A copy SITE cannot measure that size, because
+the size is a property of the tag and the tag is chosen at run time; the
+defunctionalizer chose the tags and holds every one's capture types, so the
+answer lives there. RFC-0091 M1's `Copy` protocol was named as the mechanism and
+is not it: a `Copy` row is keyed by a type key and a `fn` type has none.
+
+Both are **shallow** — the block, not what the captures point at. Two lambdas
+over one String build two blocks holding one pointer, so a deep release would
+free it twice. A captured String therefore still leaks, and `Gone::Captured`
+already says why nothing else releases it either.
+
+The corpus price was 22 sites, against the "the corpus copies them" the code
+comment predicted: 16 take `consume`, 6 take `.copy()`. The 6 are the ones whose
+source is `self.feed` or `r.run`, where an impl receiver cannot be declared
+`consume` at all. `std/rpc`'s generated client takes `.copy()` for a different
+reason: a client reuses one named callback across calls, and `consume` refuses
+the second use. A named function's copy costs nothing — its payload is 0.
+
+Writing the corpus fix found that `consume` did not parse in front of a
+structural `fn` type: `parse_capability` required an identifier after the
+keyword, so `run: consume fn() -> T` stopped at the `fn`. The convention was
+unspellable for exactly the type this section is about.
 
 ---
 
@@ -462,14 +521,14 @@ names a test.
 | # | gap | consequence | outcome |
 |---|---|---|---|
 | 1 | **§9b** an export may retain its String param | use-after-free | **CLOSED**, Phase 4b-2 — rule 2 refuses the store for every function, not only an exported one |
-| 2 | **§14** a heap value inside `Option`/`Result`/`Validation` | unbounded leak **in the recommended style** | **HALF.** Phase 5 makes an `Option`/`Result` release its payload; `optionString` still leaks — see the open tail |
+| 2 | **§14** a heap value inside `Option`/`Result`/`Validation` | unbounded leak **in the recommended style** | **CLOSED.** Phase 5 makes an `Option`/`Result` release its payload; Phase 10a gives the `if let` STATEMENT the reclamation row, so the unbound scrutinee is released too. `optionString` is steady |
 | 3 | **§4** an overwrite never releases the old value | unbounded leak in the server shape | **CLOSED**, Phase 5 — both rows steady, and P1 with them |
 | 4 | **§13** one memory test, one shape | every gap here is invisible | **CLOSED**, Phase 1 — twelve rows, and every phase since flipped one or failed |
 | 5 | **§9a** a returned String leaks | unbounded, per call | **CLOSED**, Phase 6 — rule 3 makes a return owned, and RFC-0012 M3 makes the page know its type |
 | 6 | **§7** linearity is hardcoded to `Stream` | a user resource gets no obligation | **OPEN.** RFC-0086 M3, untouched by this arc. The `must-use` row exists (Phase 4b) and only the compiler may write it |
 | 7 | **§2a** six expression forms never transfer | leak | **CLOSED**, Phase 4c — the expression's form stopped deciding; the type decides |
 | 8 | **§15** `bytes` and friends are not producers | leak | **CLOSED**, Phase 4c — same deletion; `views` is the remaining hand-written list, and it is the opposite direction |
-| 9 | **§16** a closure capture block is never freed | leak per lambda evaluation | **OPEN.** `lambdaLoop` leaks — see the open tail |
+| 9 | **§16** a closure capture block is never freed | leak per lambda evaluation | **CLOSED.** Phase 10b: a `fn` value owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum. `lambdaLoop` is steady |
 | 10 | **§10** a spawn frame is never freed | bounded leak | **OPEN on native, absent on wasm.** The direct backend lowers `spawn f(a)` to `f(a)` and allocates no frame, so this harness cannot see it |
 | 11 | **§5** regions are hand-placed | the model's best tool is rarely reachable | **OPEN.** RFC-0004 Q3, still undesigned. The arena survived Path B's deletion as Path A's second half |
 | 12 | **§6** use-after-release traps at run time | not compile-time | **STRUCK.** Path B is deleted (RFC-0090 M4); there is no `release` to use after |
@@ -979,16 +1038,18 @@ Nine phases, RFC-0089 + RFC-0090 + RFC-0091. What the three tables above came to
 
 ## The score
 
-- **Correctness (12 rows):** 6 closed, 1 half, 1 struck, 4 open — and 2 of the 4
-  are undesigned design questions (§5 regions, §7 linearity as a declaration)
-  rather than defects.
+- **Correctness (12 rows):** 8 closed after Phase 10 (6 at Phase 9), 1 struck,
+  3 open — and 2 of the 3 are undesigned design questions (§5 regions, §7
+  linearity as a declaration) rather than defects. §14's half became whole and
+  §16 closed.
 - **Usability (10 rows, 9 after U3 left):** 4 closed, 1 closed in practice, 1
   covered, 1 half, 1 narrowed, 2 open.
 - **Performance (7 rows):** 4 closed, 2 struck, 1 open and correctly unmeasured.
 
-The memory suite is the ledger: **nine of twelve rows steady, three leaking**, and
-each of the three leaking rows asserts that it leaks, so the day one of them stops
-is a test failure and not a silence.
+The memory suite is the ledger: **eleven of twelve rows steady, one leaking**
+after Phase 10 (nine and three when Phase 9 closed the census). The one leaking
+row asserts that it leaks, so the day it stops is a test failure and not a
+silence.
 
 ## What the arc found that the census did not name
 
@@ -1023,29 +1084,39 @@ Every phase corrected the brief that launched it. The load-bearing ones:
 - **The runtime surface is four primitives, not three.** malloc, **realloc**, free
   and memcpy. `realloc` is how an `Array` and a `String` grow in place, and the
   thesis never named it.
+- **A release is only as safe as the lend record behind it.** Phase 10a released
+  an `if let` scrutinee and produced a live use-after-free twice before it held:
+  once because a store of a CALL result records no move, once because
+  `returned_borrow` reads a returned PLACE and `Some(m)` is not one. Both were
+  found by reading emitted code, not by parity — parity was byte-identical with
+  the second bug in it, and the direct backend caught it only because a generator
+  runs as compiled wasm and printed a mangled name.
 
 ## The open tail
 
-Three memory rows still leak. Each is blocked on work outside this arc, and each
-is named here so the next person starts from a list rather than a re-derivation.
+**Phase 10 closed two of the three.** `optionString` (§14) and `lambdaLoop` (§16)
+are steady; what each took is written in its own section above, and both are
+smaller than the tail predicted. One row is left, and it is a restriction rather
+than a defect.
 
-**`optionString` (§14) — needs arm-payload escape tracking.** An `Option` owns
-its payload since Phase 5 and a `Deep` release walks the live variant. This row
-still leaks because nothing in it binds the payload to a place that gets released:
-the String reaches a `match` arm, the arm binding is a projection out of the
-payload, and rule 3 records a returned projection as a lend rather than refusing
-it — which `check_return` decided in writing, because refusing it would demand
-`.copy()` from a self-referring type. Closing it means tracking where an arm
-payload escapes to, which is the same question Phase 5 recorded as the one gap
-that stopped deep drop for records, enums and fixed arrays.
+The two closed rows both corrected the entry that named them. §14 was recorded as
+needing "arm-payload escape tracking" and the same widening that stopped deep
+drop for records; what it actually needed was for the `if let` STATEMENT to carry
+the reclamation row, after which the escape tracking that already exists writes
+itself onto it. §16 was recorded as needing a copy derived over the
+defunctionalized enum, which is exactly what it needed — and the rule-1 price that
+comment predicted ("the corpus copies them") was 22 sites, most of them
+`consume`.
 
-**`lambdaLoop` (§16) — needs a copy derived over the defunctionalized enum.** A
-stored closure's capture block is never freed. RFC-0091 M1 made `Copy` a protocol
-and this row did not flip, and the reason the census gave was wrong: a `Copy` row
-is keyed by a type key, and a `fn` type has none. RFC-0037 lowers a stored closure
-to a closed enum with the captures in the payloads, so the copy has to be derived
-over THAT enum, inside RFC-0037's own lowering, not over the `fn` type the user
-wrote. An alias over a `fn` type is refused where it is written today.
+**What did NOT close, and is still the wider gap.** A record, a user enum and a
+fixed array still release nothing. Phase 10a closed one face of the projection
+lend — a borrow wrapped in a constructor or a struct literal is recorded now — but
+recording is not refusing, and `release_kind` cannot add a row for a record until
+a returned projection is either refused or tracked through a store and through a
+container. Phase 4b's reason for not refusing has been re-priced and is weaker
+than it was: RFC-0091 M1 gave a self-referring type `impl Copy`, so `.copy()` on a
+`Json` is writable now. What is not priced is the corpus cost of demanding it, and
+that measurement is the next phase's first job.
 
 **`elementLeak` (U4) — correctly stays.** A built-in `Array<T>` releases no
 element and must not. An array cannot say whether it owns its elements or views
