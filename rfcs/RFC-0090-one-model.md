@@ -71,7 +71,7 @@ behavior was a trap.
 |---|---|---|
 | memory safety | compile-time except `Ref` | **compile-time, no exception** |
 | use-after-free class | a runtime trap | **does not exist** — a dead handle is `None` |
-| U5 (trap has no location) | still open for `Ref` | gone — nothing to locate |
+| U5 (trap has no location) | still open for `Ref` | narrowed, not gone. The trap this row means is deleted; a dead handle reaches `panic` in `std/slots`, which had no location either. Closed after the arc — see RFC-0087's U5 |
 | the 65536 global slab | kept, hidden, process-wide | gone; capacity is your container's, reclaimed on drop |
 | generation checks (P5's 94%) | in the language runtime, unmeasured | in std Vyrn source — visible, benchmarkable, optimizable, skippable (`[h]` vs `.get`) |
 | the runtime surface | slab code in three engines | **zero** — every engine's memory runtime is: malloc, free, memcpy |

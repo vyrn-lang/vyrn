@@ -64,6 +64,28 @@ panic("scanner produced a range it computed itself")
 
 Type `Never`, unifies with any type, prints to stderr, exits 1.
 
+**And it says where it is written** (added after the RFC-0087 memory arc, which
+raised this as census U5):
+
+```text
+error: scanner produced a range it computed itself (std/scan.vyrn:222)
+```
+
+The loader rewrites `panic(msg)` into `@panicAt(msg, "file:line")` as it enters a
+module — the one pass that knows both halves, since the parser knows the line and
+not the file, and everything after the loader knows neither once a body has been
+cloned into an access site or a monomorphization. The site is then an ordinary
+string literal in the argument list, so the interpreter, the textual backend and
+the direct wasm backend read one fact rather than each deriving one. A second
+NAME rather than a second argument: `@` does not lex, so `panic` stays a
+one-argument builtin in the surface language.
+
+The file name is derived from the project's shape — the root by its base name,
+every other module by the specifier an import spells it with — never from the
+resolved key, which is absolute whenever the root was given as one. A wasm module
+has no filesystem at run time, so the only path it can carry is the one baked at
+compile time, and a baked absolute path would differ per build machine.
+
 ### 3. Handle-or-default is one token
 
 ```vyrn
@@ -434,3 +456,15 @@ divergent functions, and nothing here needs it.
 
 **The raw-memory view** — RFC-0078's open question **A**, and still open. It is
 the larger of the two and remains untouched.
+
+**Whether a `panic` in a library should name its CALLER.** The site a `panic`
+reports is where it is written, so `people[h]` on a dead handle says
+`std/slots.vyrn:189` rather than the user's line. The caller's line is reachable
+for a `place` projection and only for one: RFC-0091 M2 inlines a projection at
+its access site, and `project::inline` already receives that line. It was not
+taken because a rule that applies to projections and to nothing else makes one
+construct mean two things, decided by whether the callee happened to be a
+projection rather than an ordinary function. Naming both is a call chain, which
+is a backtrace, which is a larger design than this. What would settle it is a
+declaration on the callee — Rust spells it `#[track_caller]` — so that a library
+author states which of the two sites their refusal is about. Nothing is designed.
