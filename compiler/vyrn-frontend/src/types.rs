@@ -150,6 +150,30 @@ pub const OWNED: &str = "Owned";
 /// The one method [`OWNED`] declares.
 pub const OWNED_RELEASE: &str = "release";
 
+/// The protocol a type implements to say **a value of it must be disposed of
+/// by name** (RFC-0086 M3) — the linear obligation RFC-0075 built for `Stream`
+/// and never exposed.
+///
+/// It declares **no methods**, and that is the design rather than an omission.
+/// The obligation is a fact about the type, not a behaviour: `movecheck` proves
+/// that every path either hands the value on or releases it, and the release
+/// itself is already declared — by [`OWNED`], or by nothing where the type owns
+/// no heap. A method here would be a second `release`.
+///
+/// **It is not `consume`, and RFC-0087 U7 asked whether it should be.** They
+/// answer different questions. `consume` is a *calling convention*: who owns
+/// this argument after the call. `MustUse` is an *obligation on a type*: this
+/// value must be disposed of by name, wherever it goes. A `String` is
+/// consumable and carries no obligation; a `Stream` carries one however any
+/// particular function takes it. Merging them would make every `consume`
+/// parameter a linear value and every linear value a calling convention, and
+/// neither implication is true.
+///
+/// Known by name for the reason [`OWNED`] is: `vyrn run` on a bare file has no
+/// resolver, so a decision the compiler refuses programs over may not depend on
+/// a module lookup.
+pub const MUST_USE: &str = "MustUse";
+
 /// The protocol a type implements to say **how it is duplicated** (RFC-0091
 /// M1). `x.copy()` is structural for every type whose parts copy; a type with
 /// an invariant a structural copy would break declares this instead.
@@ -198,6 +222,25 @@ pub fn copy_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
                 && i.methods.iter().any(|m| m.name == COPY_COPY)
         })
         .then(|| impl_method_name(COPY, key, COPY_COPY))
+}
+
+/// The `impl Owned for T` method a value with this type key releases through
+/// (RFC-0086 M1), or `None` where nothing declared one.
+///
+/// [`crate::own::Owned`] keys the same rows by the same key and is where the
+/// automatic path reads them. This one exists for the interpreter, which
+/// dispatches an explicit `drop x` on a runtime value whose key is the name
+/// stamped on it — the same route [`copy_impl_by_key`] takes, for the same
+/// reason.
+pub fn owned_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
+    impls
+        .iter()
+        .any(|i| {
+            i.protocol == OWNED
+                && type_key(&i.ty).as_deref() == Some(key)
+                && i.methods.iter().any(|m| m.name == OWNED_RELEASE)
+        })
+        .then(|| impl_method_name(OWNED, key, OWNED_RELEASE))
 }
 
 /// The `impl Iterate for T` rows a receiver of type `ty` iterates through

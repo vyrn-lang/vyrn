@@ -85,6 +85,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
          must not launder through `map`",
         "`mapped` is a `Stream` and is never disposed",
     ),
+    (
+        "mustuse_abandoned.vyrn",
+        "a USER type's must-use obligation, abandoned (RFC-0086 M3) — the same three \
+         rejections `Stream` gets, reached through `impl MustUse for Txn` and naming \
+         the user's type",
+        "`a` is a `Txn` and is never disposed",
+    ),
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser

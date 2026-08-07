@@ -366,7 +366,7 @@ fn run(program: &Program, want: Want) -> Run {
     // may-analysis (consumed on either branch ⇒ consumed after), and "disposed
     // exactly once" is a must-analysis. Folding them would have made one of the
     // two wrong at every branch.
-    out.extend(streams::check(program, &decl));
+    out.extend(linear::check(program, &decl));
     // Close the lending set: a function that returns what a lender returned is
     // a lender too. It only grows and the function count bounds it, so the loop
     // stops. Two passes settle the whole corpus; the loop is here because
@@ -1785,7 +1785,7 @@ impl MoveCheck<'_> {
             }
             let Some((root, path)) = place_path(a) else { continue };
             for (j, b) in args.iter().enumerate() {
-                if i != j && streams::mentions(b, &root) {
+                if i != j && linear::mentions(b, &root) {
                     return Err(menu(
                         line,
                         format!(
@@ -2240,14 +2240,38 @@ pub fn mentions_place(e: &Expr, base: &str) -> bool {
     go(e, base)
 }
 
-mod streams {
+/// The **must-use** obligation: a value of a linear type is acquired once and
+/// disposed exactly once, and this is where that is proved (RFC-0086 M3).
+///
+/// It was `mod streams`, and the rename is the milestone. The rules below never
+/// mentioned a stream's representation — they are about a name, a block and the
+/// paths out of it — but three of them matched `Type::Stream` directly, so the
+/// one compile-time reclamation proof in the language served exactly one type.
+/// The matches are now a lookup in [`crate::own::Owned`], the same table
+/// `impl Owned for T` adds a row to, so a user's file handle, transaction or
+/// reply obligation joins the mechanism with no compiler change.
+///
+/// What the lookup answers is *whether*. [`crate::own::Linear`] answers *which
+/// row*, and the only thing that reads it is the wording of the fix menu: a
+/// stream is closed, a declared type is dropped, and offering either menu for
+/// the other names a disposal that reclaims nothing.
+mod linear {
     use std::collections::HashMap;
 
     use crate::ast::*;
     use crate::declared::Declared;
     use crate::diagnostics::Diagnostic;
+    use crate::own::Linear;
 
-    /// What a straight-line statement list does to one live stream binding.
+    /// One live must-use binding, as a diagnostic about it needs it: the type
+    /// spelled the way the program spelled it, and which row obliged it.
+    #[derive(Clone)]
+    struct Owed {
+        ty: String,
+        row: Linear,
+    }
+
+    /// What a straight-line statement list does to one live binding.
     #[derive(Clone, Copy, Default)]
     struct Scan {
         /// Disposed on every path that FALLS OUT of the list.
@@ -2265,27 +2289,35 @@ mod streams {
     }
 
     pub fn check(program: &Program, decl: &Declared) -> Vec<Diagnostic> {
-        // Functions whose return type is a stream, with the rendering the
-        // diagnostic quotes. `fromArray`/`fromStep` are the builtin producers and
-        // carry no element type here — this pass has no types — so a stream from
-        // one of them is spelled plainly `Stream`.
-        let producers: HashMap<&str, String> = program
+        // Functions whose return type carries the obligation, with the rendering
+        // the diagnostic quotes. `fromArray`/`fromStep` are the builtin stream
+        // producers and carry no element type here — this pass has no types — so
+        // a stream from one of them is spelled plainly `Stream`.
+        let producers: HashMap<&str, Owed> = program
             .functions
             .iter()
-            .filter(|f| decl.must_use(&f.ret))
-            .map(|f| (f.name.as_str(), rendered_ret(f)))
+            .filter_map(|f| Some((f.name.as_str(), owed(&f.ret, f.type_params.as_slice(), decl)?)))
             .collect();
         let mut out = Vec::new();
         for f in &program.functions {
-            // A `Stream` parameter carries the obligation into the callee: the
+            // A must-use parameter carries the obligation into the callee: the
             // caller discharged its own by moving it, and `fn sink(s: Stream<T>) {}`
             // must not be the hole that lets it evaporate.
-            let mut live: Vec<(String, String)> = Vec::new();
+            let mut live: Vec<(String, Owed)> = Vec::new();
             for p in &f.params {
-                if let Type::Stream(_) = p.ty {
+                // A **receiver** does not, and the obligation would be circular
+                // if it did: `impl Owned for Txn { fn release(self) }` IS the
+                // disposal, so a rule that made it discharge its own receiver
+                // before reading it would leave the declared release unwritable.
+                // `self` is a keyword, so a parameter carrying that name is an
+                // impl receiver and nothing else.
+                if p.name == "self" {
+                    continue;
+                }
+                if let Some(o) = owed(&p.ty, &[], decl) {
                     let s = scan(&f.body.stmts, &p.name, false);
-                    report(&mut out, &s, f.line, &p.name, &p.ty.to_string(), &f.module);
-                    live.push((p.name.clone(), p.ty.to_string()));
+                    report(&mut out, &s, f.line, &p.name, &o, &f.module);
+                    live.push((p.name.clone(), o));
                 }
             }
             block(&f.body, &mut live, &producers, &f.module, decl, &mut out);
@@ -2299,25 +2331,30 @@ mod streams {
         out
     }
 
-    /// How a producer's stream type is quoted at a CALL site.
+    /// The obligation `ty` carries, with the spelling a diagnostic quotes it by,
+    /// or `None` where it carries none.
     ///
-    /// A generic producer — every std/stream combinator is one — returns
+    /// `binders` are the type parameters in scope where `ty` was written. A
+    /// generic producer — every std/stream combinator is one — returns
     /// `Stream<U>`, and quoting that at `let m = map(feed(), double)` names a
     /// type parameter the program never wrote. This pass has no types, so it
-    /// cannot say `Stream<Int64>` either; it says `Stream`, which is what it
-    /// already said for `fromArray` and is an under-specification rather than a
-    /// wrong name. The match is on the rendered spelling because a signature's
-    /// type parameter is not reliably a `Type::Param` before the checker runs.
-    fn rendered_ret(f: &Function) -> String {
-        let r = f.ret.to_string();
+    /// cannot say `Stream<Int64>` either; it quotes the type CONSTRUCTOR, which
+    /// is what it already said for `fromArray` and is an under-specification
+    /// rather than a wrong name. The test is on the rendered spelling because a
+    /// signature's type parameter is not reliably a `Type::Param` before the
+    /// checker runs.
+    fn owed(ty: &Type, binders: &[String], decl: &Declared) -> Option<Owed> {
+        let row = decl.linear_kind(ty)?;
+        let r = ty.to_string();
         let mentions = |p: &String| {
             r.split(|c: char| !c.is_alphanumeric() && c != '_')
                 .any(|w| w == p.as_str())
         };
-        if f.type_params.iter().any(mentions) {
-            return "Stream".to_string();
-        }
-        r
+        let ty = match binders.iter().any(mentions) {
+            true => r.split('<').next().unwrap_or(&r).to_string(),
+            false => r,
+        };
+        Some(Owed { ty, row })
     }
 
     fn report(
@@ -2325,9 +2362,10 @@ mod streams {
         s: &Scan,
         line: usize,
         name: &str,
-        ty: &str,
+        o: &Owed,
         module: &Option<String>,
     ) {
+        let ty = &o.ty;
         let msg = if s.doubled {
             format!("`{name}` is a `{ty}` and is disposed more than once")
         } else if s.leaked || !(s.disposed || s.diverges) {
@@ -2336,21 +2374,31 @@ mod streams {
             return;
         };
         let mut d = Diagnostic::error(line, 0, "movecheck", msg);
-        d.note = Some(format!(
-            "a stream must be consumed with `for … in`, forwarded by returning it, \
-             or released with `close({name})` — on every path"
-        ));
+        // The two menus differ because the two disposals do. A stream's release
+        // is pushed by its own lowering, so `drop` on one reclaims nothing; a
+        // declared type has no `close` and is not iterable unless it says so.
+        d.note = Some(match o.row {
+            Linear::Stream => format!(
+                "a stream must be consumed with `for … in`, forwarded by returning it, \
+                 or released with `close({name})` — on every path"
+            ),
+            Linear::Declared => format!(
+                "`{ty}` declares `impl MustUse`, so a value of it must be handed on by \
+                 name — passed to a call, forwarded by returning it, or released with \
+                 `drop {name}` — on every path"
+            ),
+        });
         d.file = module.clone();
         out.push(d);
     }
 
-    /// Check one block: every stream binding declared in it must be disposed on
-    /// every path out of the REST of that block. `live` is the enclosing scopes'
-    /// stream names, needed only so `let t = s` is recognised as a move.
+    /// Check one block: every must-use binding declared in it must be disposed
+    /// on every path out of the REST of that block. `live` is the enclosing
+    /// scopes' obliged names, needed only so `let t = s` is recognised as a move.
     fn block(
         b: &Block,
-        live: &mut Vec<(String, String)>,
-        producers: &HashMap<&str, String>,
+        live: &mut Vec<(String, Owed)>,
+        producers: &HashMap<&str, Owed>,
         module: &Option<String>,
         decl: &Declared,
         out: &mut Vec<Diagnostic>,
@@ -2361,15 +2409,15 @@ mod streams {
                 name, ty, value, line, ..
             } = st
             {
-                if let Some(rendered) = stream_let(ty.as_ref(), value, live, producers, decl) {
+                if let Some(o) = owed_let(ty.as_ref(), value, live, producers, decl) {
                     // `false`: a `break` in the rest of THIS block leaves the block
-                    // that declared the stream, so it abandons it. Inside a loop
+                    // that declared the value, so it abandons it. Inside a loop
                     // nested below, a `break` only leaves that loop and control
                     // comes back here still owning it — which is what the flag
                     // distinguishes.
                     let s = scan(&b.stmts[i + 1..], name, false);
-                    report(out, &s, *line, name, &rendered, module);
-                    live.push((name.clone(), rendered));
+                    report(out, &s, *line, name, &o, module);
+                    live.push((name.clone(), o));
                 }
             }
             for sub in sub_blocks(st) {
@@ -2379,34 +2427,35 @@ mod streams {
         live.truncate(base);
     }
 
-    /// The rendered stream type this `let` binds, if it binds one.
-    fn stream_let(
+    /// The obligation this `let` binds, if it binds one.
+    fn owed_let(
         ty: Option<&Type>,
         value: &Expr,
-        live: &[(String, String)],
-        producers: &HashMap<&str, String>,
+        live: &[(String, Owed)],
+        producers: &HashMap<&str, Owed>,
         decl: &Declared,
-    ) -> Option<String> {
+    ) -> Option<Owed> {
         // The must-use row, not a `Stream` match: an alias of a must-use type
         // carries the obligation its base does.
-        if let Some(t) = ty {
-            if decl.must_use(t) {
-                return Some(t.to_string());
-            }
+        if let Some(o) = ty.and_then(|t| owed(t, &[], decl)) {
+            return Some(o);
         }
         match value {
             Expr::Call { name, .. }
                 if name == "fromArray" || name == "fromStep" || name == "unboxStream" =>
             {
-                Some("Stream".to_string())
+                Some(Owed {
+                    ty: "Stream".to_string(),
+                    row: Linear::Stream,
+                })
             }
             Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
-            // `let t = s` moves the stream; `t` inherits both the obligation and
+            // `let t = s` moves the value; `t` inherits both the obligation and
             // the rendering, and the mention of `s` discharges `s`'s.
             Expr::Var { name, .. } => live
                 .iter()
                 .find(|(l, _)| l == name)
-                .map(|(_, rendered)| rendered.clone()),
+                .map(|(_, o)| o.clone()),
             _ => None,
         }
     }
