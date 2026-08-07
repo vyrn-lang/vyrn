@@ -11823,15 +11823,21 @@ mod tests {
     #[test]
     fn a_captured_temporary_is_not_freed() {
         // A stored closure holds the buffer by value (RFC-0037) and can outlive
-        // this block, so nothing here may release it — census §16, Phase 5.
+        // this block, so nothing here may release the STRING — census §16.
+        //
+        // Since Phase 10b the closure's own capture block is released, which is
+        // the one free below: the block, not what a capture points at. Two
+        // lambdas over one `s` build two blocks holding one pointer, so the
+        // shallow release is what keeps that pointer from being freed twice —
+        // and it is why `s` still leaks and `Gone::Captured` still says so.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let f: fn(Int64) -> Int64 = |x| x + s.byteLength; \
                    return f(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
             free_calls(&ir),
-            RUNTIME_FREES,
-            "only the runtime frees should be present: {ir}"
+            RUNTIME_FREES + 1,
+            "the capture block and nothing else: {ir}"
         );
     }
 

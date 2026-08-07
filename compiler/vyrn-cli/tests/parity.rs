@@ -307,6 +307,11 @@ fn stored_fn_param_compiles_for_any_payload() {
     // (payload type, sample value, callback body reading the payload). Each stores
     // `cb` (a fn-param) into module-state Map<String, fn(Payload)>, then retrieves
     // and calls it — the exact shape the std/rpc v2 client emits.
+    //
+    // `cb: consume Sink` since Phase 10b: a stored `fn` value owns its capture
+    // block, so storing a borrowed one is rule 2's refusal like any other store.
+    // The generated client says `cb.copy()` instead, because a client reuses one
+    // named callback across calls and `consume` refuses the second use.
     let cases: &[(&str, &str, &str, &str)] = &[
         ("scalar", "Int64", "7", "print(\"got: \\{p}\")"),
         ("record", "User", "User { id: 1, name: \"ada\" }", "print(\"got: \\{p.id}/\\{p.name}\")"),
@@ -329,7 +334,7 @@ fn stored_fn_param_compiles_for_any_payload() {
             "type User = {{ id: Int64, name: String }}\n\
              type Sink = fn({payload_ty})\n\
              let mut pending: Map<String, Sink> = [:]\n\
-             fn on(k: String, cb: Sink) {{\n    pending[k] = cb\n}}\n\
+             fn on(k: String, cb: consume Sink) {{\n    pending[k] = cb\n}}\n\
              fn fire(k: String, p: {payload_ty}) {{\n    \
              match pending[k] {{ Some(cb) => cb(p), None => print(\"none\") }}\n}}\n\
              fn main() -> Int64 {{\n    on(\"a\", |p| {body})\n    \

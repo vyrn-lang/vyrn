@@ -494,7 +494,7 @@ fn clientProcFns(f: FnInfo) -> String {
         out = out + "export fn " + f.name + "(cb: " + cb + ") {\n"
         out = out + "    let id = vyrnRpcCall(\"" + f.name + "\", \"\")\n"
     }
-    out = out + "    rpcPending" + cap + "[id.toString()] = cb\n}\n"
+    out = out + "    rpcPending" + cap + "[id.toString()] = cb.copy()\n}\n"
     // The deliver helper: drop the pending callback, then invoke it (RFC-0037:
     // a fetched callback is bound to the `cb` param before it is called).
     out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: RpcReply<" + ret + ">) {\n"
@@ -1201,7 +1201,7 @@ fn rpcDirClientFns(f: FnInfo, qual: String, path: String) -> String {
         out = out + "export fn " + qual + "(cb: " + cb + ") {\n"
         out = out + "    let id = vyrnRpcCall(\"" + qual + "\", \"" + path + "\", \"\")\n"
     }
-    out = out + "    rpcPending" + cap + "[id.toString()] = cb\n}\n"
+    out = out + "    rpcPending" + cap + "[id.toString()] = cb.copy()\n}\n"
     out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: RpcReply<" + ret + ">) {\n"
     out = out + "    rpcPending" + cap + ".remove(key)\n"
     out = out + "    cb(res)\n}\n"
