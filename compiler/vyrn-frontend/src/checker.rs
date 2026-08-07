@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use crate::ast::*;
 use crate::consteval::{self, ConstVal};
 use crate::diagnostics::Diagnostic;
+use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
 use crate::types::FALLIBLE;
 
@@ -1816,6 +1817,20 @@ impl<'a> Checker<'a> {
             }
         });
         found
+    }
+
+    /// Is `ty` ITSELF a type parameter that nothing has settled?
+    ///
+    /// The narrow reading, for a slot a value can answer on its own: an array's
+    /// element type, a map's value type, an `Option`/`Result` payload. A
+    /// compound that merely mentions a parameter — `Array<T>` as an element
+    /// type, `fn(P) -> T` as a field type — is deliberately NOT answered here.
+    /// Both backends build a literal from the inside out, so a nested growable
+    /// or a stored `fn` has to be placed at a type that is known before its
+    /// elements are emitted. The annotation is the fix there, and admitting the
+    /// program would only move the refusal to a backend that cannot phrase it.
+    fn is_open_param(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Param(_)) && self.mentions_open_param(ty)
     }
 
     /// Whether `from` may flow into `to` at a **value boundary** (a `let`
@@ -3896,7 +3911,7 @@ impl<'a> Checker<'a> {
                 // handed to the first element either way. It is not the answer
                 // for the element type there — the first element is.
                 let elem_ty = match elem_expected {
-                    Some(t) if self.mentions_open_param(&t) => first.clone(),
+                    Some(t) if self.is_open_param(&t) => first.clone(),
                     other => other.unwrap_or(first.clone()),
                 };
                 // Every element (including the first) is a value boundary into
@@ -3962,7 +3977,7 @@ impl<'a> Checker<'a> {
                 // An unsolved parameter settles nothing, so the first value
                 // answers for it (see [`Checker::mentions_open_param`]).
                 let val_ty = match val_expected {
-                    Some(t) if self.mentions_open_param(&t) => first_val,
+                    Some(t) if self.is_open_param(&t) => first_val,
                     other => other.unwrap_or(first_val),
                 };
                 for (k, v) in entries {
@@ -6810,8 +6825,7 @@ impl<'a> Checker<'a> {
             // type is an unsolved parameter, so it is handed to the payload
             // either way. It is not the answer there — the payload is (see
             // [`Checker::mentions_open_param`]).
-            let inner_expected =
-                inner_expected.filter(|want| !self.mentions_open_param(want));
+            let inner_expected = inner_expected.filter(|want| !self.is_open_param(want));
             if matches!(aty, Type::Option(_) | Type::Result(..)) {
                 return Err(format!(
                     "line {line}: nested Option/Result is not supported in v0.1"
@@ -6868,7 +6882,7 @@ impl<'a> Checker<'a> {
             // the OTHER half has no value to answer it and stays open, which the
             // enclosing literal reports as the parameter it could not infer.
             let carried = if name == "Ok" { &mut t } else { &mut e };
-            if self.mentions_open_param(carried) {
+            if self.is_open_param(carried) {
                 *carried = aty.clone();
             }
             let want_ty = if name == "Ok" { &t } else { &e };
@@ -8133,21 +8147,6 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
         Expr::Lambda { params, .. } => format!("|{}| ..", params.join(", ")),
     }
-}
-
-/// Whether `ty` mentions a type parameter anywhere inside it.
-///
-/// A contract member's type parameters are implicit and open per member
-/// (RFC-0071), so a type that mentions one describes a *family* of types rather
-/// than one type — which is why a default cannot be compared against it.
-fn type_mentions_param(ty: &Type) -> bool {
-    let mut found = false;
-    walk_type(ty, &mut |t| {
-        if matches!(t, Type::Param(_)) {
-            found = true;
-        }
-    });
-    found
 }
 
 /// Does `ty` name `Self` anywhere?
@@ -12687,7 +12686,6 @@ mod tests {
             ("type G<T> = { xs: Array<T> }", "G { xs: [2, 1] }"),
             ("type G<T> = { xs: Array<T, 2> }", "G { xs: [2, 1] }"),
             ("type G<T> = { xs: SmallArray<T, 4> }", "G { xs: [2] }"),
-            ("type G<T> = { xs: Array<Array<T>> }", "G { xs: [[2]] }"),
             ("type G<T> = { o: Option<T> }", "G { o: Some(2) }"),
             ("type G<T> = { m: Map<String, T> }", "G { m: [\"k\": 2] }"),
             ("type G<T> = { r: Result<T, String> }", "G { r: Ok(2) }"),
@@ -12751,6 +12749,26 @@ mod tests {
         let ok = check_src(
             "type D<T> = { front: Array<T>, back: Array<T> }\n\
              fn main() -> Int64 { let d: D<Int64> = D { front: [], back: [] }\n return 0 }",
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    /// A parameter under a COMPOUND slot is not answered by the values. Both
+    /// backends build a literal from the inside out: the inner `[2]` would have
+    /// to reach its heap representation at a type this pass has not solved yet,
+    /// and the stored `fn` would register its RFC-0037 variant under an open
+    /// signature. So the refusal stays, and the annotation is the fix.
+    #[test]
+    fn a_parameter_under_a_compound_slot_is_still_refused() {
+        let e = check_src(
+            "type G<T> = { xs: Array<Array<T>> }\n\
+             fn main() -> Int64 { let g = G { xs: [[2]] }\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("array elements must share a type"), "{e}");
+        let ok = check_src(
+            "type G<T> = { xs: Array<Array<T>> }\n\
+             fn main() -> Int64 { let g: G<Int64> = G { xs: [[2]] }\n return 0 }",
         );
         assert!(ok.is_ok(), "{ok:?}");
     }

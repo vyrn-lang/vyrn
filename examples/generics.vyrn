@@ -27,6 +27,9 @@ type Pair<A, B> = { first: A, second: B }
 type Deque<T> = { front: Array<T>, back: Array<T> }
 type Bag<T> = { one: Option<T>, many: Map<String, T> }
 type Boxed<T> = { inner: Box<T> }
+type Fixed<T> = { xs: Array<T, 2> }
+type Small<T> = { xs: SmallArray<T, 4> }
+type Outcome<T> = { r: Result<T, String> }
 
 fn unbox<T>(b: Box<T>) -> T {
     return b.value
@@ -85,6 +88,14 @@ fn main() -> Int64 {
     // and the outer one takes its answer.
     let nested = Boxed { inner: Box { value: 40 } }
     print(nested.inner.value + 2) // 42
+    // The fixed and small-buffer array shapes, and a `Result` whose error half
+    // the field type already names.
+    let fixed = Fixed { xs: [3, 4] }
+    print(fixed.xs[1]) // 4
+    let small = Small { xs: [8] }
+    print(small.xs[0]) // 8
+    let outcome = Outcome { r: Ok(9) }
+    print(match outcome.r { Ok(v) => v, Err(m) => 0 }) // 9
 
     let a = Wrap(41) // Opt<Int64>, inferred from the payload
     let b: Opt<Int64> = Empty // a nullary variant takes its type from context

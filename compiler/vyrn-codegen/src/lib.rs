@@ -23,7 +23,6 @@ use std::fmt::Write;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
-use vyrn_frontend::types::mentions_param;
 use vyrn_frontend::types::INT32;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
@@ -4508,13 +4507,16 @@ impl<'a> Gen<'a> {
                 // One expected type, coerced element-wise, answers all three: the
                 // outer `ArrayN -> Array`/`SmallArray` step then has `fi == ti` and
                 // is the pure reshape its comment already claims to be.
-                // ...but an expectation whose element type is still an unsolved
-                // parameter names the SHAPE only. `Deque { front: [2, 1] }`
-                // reaches here with `Array<T>` expected and `T` open, and
-                // building at that type emits `[2 x void]` — invalid IR. The
-                // elements answer for the element type there, and the enclosing
-                // literal's `solve_param` reads `T` back off the result.
-                let elem_expect = elem_expect.filter(|t| !mentions_param(t));
+                // ...but an element type that IS an unsolved parameter names no
+                // type at all. `Deque { front: [2, 1] }` reaches here with
+                // `Array<T>` expected and `T` open, and building at that type
+                // emits `[2 x void]` — invalid IR. The elements answer for it,
+                // and the enclosing literal's `solve_param` reads `T` back off
+                // the result. Only a BARE parameter, matching the checker: an
+                // `Array<Array<T>>` field is refused there rather than built
+                // here, because the inner literal would have to reach its heap
+                // representation at a type this pass does not know yet.
+                let elem_expect = elem_expect.filter(|t| !matches!(t, Type::Param(_)));
                 let build = (|| -> Result<(String, Type), String> {
                     let (ety, first) = if let Some(ety) = elem_expect.clone() {
                         let (v0, v0t) = self.gen_expr(&elems[0])?;
@@ -4573,9 +4575,9 @@ impl<'a> Gen<'a> {
                 if let Some(t) = &val_expect {
                     self.expect.push(t.clone());
                 }
-                // An unsolved parameter names no value type (see the array
-                // literal above) — the first value answers.
-                let val_expect = val_expect.filter(|t| !mentions_param(t));
+                // A value type that IS an unsolved parameter names no type (see
+                // the array literal above) — the first value answers.
+                let val_expect = val_expect.filter(|t| !matches!(t, Type::Param(_)));
                 let build = (|| -> Result<Type, String> {
                     let (kv0, _) = self.gen_expr(&entries[0].0)?;
                     let (v0, vty0) = self.gen_expr(&entries[0].1)?;

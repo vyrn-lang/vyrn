@@ -41,7 +41,6 @@ use std::rc::Rc;
 use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types as ftypes;
-use vyrn_frontend::types::mentions_param;
 use vyrn_frontend::types::INT32;
 
 use crate::layout::{self, Layout};
@@ -7837,12 +7836,13 @@ impl Fn_<'_> {
             b.slot(off);
             return Ok(ty);
         }
-        // An expectation whose element type is still an unsolved parameter names
-        // the SHAPE only — `Deque { front: [2, 1] }` reaches here with
-        // `Array<T>` expected and `T` open, and there is no lowering for `T`.
-        // The elements answer for the element type there, and the enclosing
-        // literal's `solve_param` reads the parameter back off the result.
-        let elem = match elem_want.filter(|t| !mentions_param(t)) {
+        // An element type that IS an unsolved parameter names no type — `Deque {
+        // front: [2, 1] }` reaches here with `Array<T>` expected and `T` open,
+        // and there is no lowering for `T`. The elements answer for it, and the
+        // enclosing literal's `solve_param` reads the parameter back off the
+        // result. Only a BARE parameter, matching the checker and the textual
+        // backend: an `Array<Array<T>>` field is refused in the checker.
+        let elem = match elem_want.filter(|t| !matches!(t, Type::Param(_))) {
             Some(t) => t,
             None => self.peek(&elems[0], line)?,
         };
@@ -8942,7 +8942,7 @@ impl Fn_<'_> {
             }
             _ => return Ok(None),
         };
-        if !mentions_param(&payload) {
+        if !matches!(payload, Type::Param(_)) {
             return Ok(Some((ty, payload)));
         }
         let p = self.peek(arg, line)?;
@@ -9521,9 +9521,9 @@ impl Fn_<'_> {
             Some(Type::Map(_, v)) => Some(*v),
             _ => None,
         };
-        // An unsolved parameter names no value type (see `array_lit`) — the
-        // first value answers.
-        let val = match (want.filter(|t| !mentions_param(t)), entries.first()) {
+        // A value type that IS an unsolved parameter names no type (see
+        // `array_lit`) — the first value answers.
+        let val = match (want.filter(|t| !matches!(t, Type::Param(_))), entries.first()) {
             (Some(v), _) => v,
             (None, Some((_, ve))) => self.peek(ve, line)?,
             // An empty literal in no map position at all. `Map<String, Int64>` is
