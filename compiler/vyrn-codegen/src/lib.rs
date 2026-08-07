@@ -11286,6 +11286,108 @@ mod tests {
         }
     }
 
+    /// The four arms the census found no victim for, exercised directly.
+    ///
+    /// They are dead behind the checker today (see the test below), so nothing
+    /// else would notice them being wrong. This is what says they are right.
+    #[test]
+    fn the_filled_arms_bind_a_parameter_the_fall_through_walked_past() {
+        let t = || Type::Param("T".into());
+        let fld = |n: &str, ty: Type| Field { name: n.into(), ty };
+        let var = |n: &str, payload: Vec<Type>| EnumVariant { name: n.into(), payload };
+        let solved = |p: Type, a: Type| {
+            let mut s = HashMap::new();
+            solve_param(&p, &a, &mut s);
+            s.get("T").cloned()
+        };
+
+        // A record matches by field NAME, and a wider argument is still a match.
+        assert_eq!(
+            solved(
+                Type::Record(vec![fld("v", t())]),
+                Type::Record(vec![fld("other", Type::Bool), fld("v", Type::Str)]),
+            ),
+            Some(Type::Str),
+        );
+        // An enum matches by variant NAME, then payload-wise.
+        assert_eq!(
+            solved(
+                Type::Enum(vec![var("Empty", vec![]), var("W", vec![t()])]),
+                Type::Enum(vec![var("W", vec![Type::Int]), var("Empty", vec![])]),
+            ),
+            Some(Type::Int),
+        );
+        // `lazy T` in either spelling — RFC-0085 M4a says they are one type.
+        assert_eq!(
+            solved(Type::Lazy(Box::new(t())), Type::Lazy(Box::new(Type::Float))),
+            Some(Type::Float),
+        );
+        assert_eq!(
+            solved(Type::Lazy(Box::new(t())), Type::Fn(vec![], Box::new(Type::Float))),
+            Some(Type::Float),
+        );
+        assert_eq!(
+            solved(Type::Task(Box::new(t())), Type::Task(Box::new(Type::Bool))),
+            Some(Type::Bool),
+        );
+        // A different constructor still binds nothing — the rule's second half.
+        assert_eq!(solved(Type::Task(Box::new(t())), Type::Int), None);
+    }
+
+    /// **Why the arms above are dead, and why filling them changed no program.**
+    ///
+    /// RFC-0086 deferred this list because "filling in `Lazy`/`Record`/`Enum`/
+    /// `Task` turns some silent `Unit` into a real type and some refusal into a
+    /// compile". Neither happens, and the reason is that the CHECKER refuses all
+    /// four shapes before codegen is asked: `Checker::unify` has the same list,
+    /// and its fall-through is a diagnostic rather than a substitution. So
+    /// `solve_param` never faced one, the corpus census counts zero, and no
+    /// program's meaning moved.
+    ///
+    /// If any of these ever starts checking, this test fails and says so, and
+    /// the arms it unblocks are already written and already tested.
+    #[test]
+    fn the_checker_refuses_every_shape_the_fall_through_used_to_swallow() {
+        let cases: &[(&str, &str)] = &[
+            // A structural record parameter naming the type parameter.
+            (
+                "Record",
+                "type Box<T> = { value: T }\n\
+                 fn unwrap<T>(b: { value: T }) -> T { return b.value }\n\
+                 fn main() -> Int64 { let n = Box { value: 7 }\n return unwrap(n) }",
+            ),
+            // An enum variant whose payload is a record naming the parameter.
+            (
+                "Enum",
+                "type Cell = { v: Int64 }\n\
+                 type Wrap<T> = | Empty | W({ v: T })\n\
+                 fn main() -> Int64 { let c = Cell { v: 7 }\n let w = W(c)\n return 0 }",
+            ),
+            // A generic record with a `lazy` field.
+            (
+                "Lazy",
+                "type Holder<T> = { body: lazy T }\n\
+                 fn seven() -> Int64 { return 7 }\n\
+                 fn main() -> Int64 { let h: Holder<Int64> = Holder { body: || seven() }\n\
+                 return h.body }",
+            ),
+            // A `Task<T>` parameter.
+            (
+                "Task",
+                "fn slow(n: Int64) -> Int64 { return n * 2 }\n\
+                 fn await<T>(t: Task<T>) -> T { return t.join() }\n\
+                 fn main() -> Int64 { let t = spawn slow(21)\n return await(t) }",
+            ),
+        ];
+        for (what, src) in cases {
+            assert!(
+                check(src).is_err(),
+                "{what}: the checker accepted this, so `solve_param` now faces it — \
+                 see the arms above and RFC-0086's last open list"
+            );
+        }
+    }
+
     // ---- blackBox / benchmarking barrier (RFC-0055) ---------------------
 
     #[test]
