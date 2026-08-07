@@ -25,12 +25,11 @@
 /// carries an identity and a handle carries a copy of it, so a foreign handle is
 /// dead rather than plausible.
 ///
-/// The naming collision the old file recorded is still here and still not a
-/// capability gap: `cell`, `get` and `release` are reserved by the `Ref`
-/// builtins (RFC-0004), so the library's reading half is `fetch`. RFC-0090 M4
-/// deletes Path B and the three names come free.
+/// The naming collision the old file recorded is gone. `cell`, `get` and
+/// `release` were reserved by the `Ref` builtins (RFC-0004), so the library's
+/// reading half was `fetch`. RFC-0090 M4 deleted Path B and the reader is `get`.
 
-import { Slots, Handle, newSlots, insert, remove, fetch, count, capacity } from "std/slots"
+import { Slots, Handle, newSlots, insert, remove, get, count, capacity } from "std/slots"
 
 fn main() -> Int64 {
     let mut t: Slots<Int64> = newSlots()
@@ -39,11 +38,11 @@ fn main() -> Int64 {
     let a = insert(t, fortyTwo)
     let ninetyNine = 99
     let b = insert(t, ninetyNine)
-    print(fetch(t, a) ?? 0 - 1) // 42 — live
+    print(get(t, a) ?? 0 - 1) // 42 — live
 
     let freed = remove(t, a)
     print(freed) // true
-    print(fetch(t, a) ?? 0 - 1) // -1 — released
+    print(get(t, a) ?? 0 - 1) // -1 — released
     print(remove(t, a)) // false — removing a dead handle is a no-op
 
     // The next insert reuses `a`'s slot, so the *same* index is live again.
@@ -51,13 +50,13 @@ fn main() -> Int64 {
     let c = insert(t, seven)
     print(c.slot == a.slot) // true — reused, not appended
     print(capacity(t)) // 2 — the free list did its job
-    print(fetch(t, c) ?? 0 - 1) // 7 — the new handle reads the new value
-    print(fetch(t, a) ?? 0 - 1) // -1 — the OLD handle, while that slot is live
+    print(get(t, c) ?? 0 - 1) // 7 — the new handle reads the new value
+    print(get(t, a) ?? 0 - 1) // -1 — the OLD handle, while that slot is live
 
-    print(fetch(t, b) ?? 0 - 1) // 99 — untouched by any of it
+    print(get(t, b) ?? 0 - 1) // 99 — untouched by any of it
     // A handle nobody issued: out of range, and from no container at all.
     let bogus: Handle<Int64> = Handle { slot: 7, gen: 1, owner: 0 }
-    print(fetch(t, bogus) ?? 0 - 1) // -1
+    print(get(t, bogus) ?? 0 - 1) // -1
 
     return 0
 }
@@ -66,13 +65,13 @@ test "a stale handle stays dead across a reuse" {
     let mut t: Slots<Int64> = newSlots()
     let one = 1
     let a = insert(t, one)
-    assertEq(fetch(t, a) ?? 0 - 1, 1)
+    assertEq(get(t, a) ?? 0 - 1, 1)
     assert(remove(t, a))
     let two = 2
     let b = insert(t, two)
     assertEq(b.slot, a.slot) // same slot
-    assertEq(fetch(t, b) ?? 0 - 1, 2)
-    assertEq(fetch(t, a) ?? 0 - 1, 0 - 1) // same slot, older generation
+    assertEq(get(t, b) ?? 0 - 1, 2)
+    assertEq(get(t, a) ?? 0 - 1, 0 - 1) // same slot, older generation
 }
 
 test "remove is idempotent and does not corrupt the free list" {
@@ -100,8 +99,8 @@ test "a handle from another container is not plausible, it is dead" {
     let hb = insert(b, two)
     assertEq(ha.slot, hb.slot) // same slot number
     assertEq(ha.gen, hb.gen) // same generation
-    assertEq(fetch(a, hb) ?? 0 - 1, 0 - 1) // and still dead
-    assertEq(fetch(b, ha) ?? 0 - 1, 0 - 1)
+    assertEq(get(a, hb) ?? 0 - 1, 0 - 1) // and still dead
+    assertEq(get(b, ha) ?? 0 - 1, 0 - 1)
 }
 
 /// The write-through desugar on a record-field array is a MOVE, not a copy — the
@@ -122,7 +121,7 @@ test "many writes through the field, and the values all land" {
     while i < 4096 {
         let v = i
         let h = insert(t, v)
-        assertEq(fetch(t, h) ?? 0 - 1, i)
+        assertEq(get(t, h) ?? 0 - 1, i)
         assert(remove(t, h))
         i = i + 1
     }
@@ -138,7 +137,7 @@ test "many writes through the field, and the values all land" {
     }
     let mut k = 0
     while k < 512 {
-        assertEq(fetch(wide, hs[k]) ?? 0 - 1, k * 3)
+        assertEq(get(wide, hs[k]) ?? 0 - 1, k * 3)
         k = k + 1
     }
     assertEq(capacity(wide), 512)

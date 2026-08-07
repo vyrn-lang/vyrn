@@ -118,12 +118,12 @@ fn GET(r: Route) -> Route
 vocabulary is HTTP's, so `PUT` and `PATCH` are separate words rather than one
 `method("PUT")` taking a string nobody can complete or spell-check.
 
-UPPERCASE, against the house style, because `get` and `set` are RESERVED
-(the `cell`/`Ref` builtins dispatch before user functions, so a `fn get`
-would be silently unreachable and the checker rejects it outright). Given
-that `get` is unavailable, the wire spelling is the better fallback than a
-coined synonym: `GET` is what the method IS, and it keeps the five verbs
-spelled one way.
+UPPERCASE, against the house style. `get` was RESERVED when this was
+written — the `cell`/`Ref` builtins dispatched before user functions — and
+RFC-0090 M4 deleted those builtins, so the name is free now (`std/slots`
+took it). The spelling stays: `GET` is what the method IS, and the five
+verbs are one vocabulary spelled one way. `get` alone in lowercase would
+read as this module's reader rather than as a route's method.
 
 ## POST
 

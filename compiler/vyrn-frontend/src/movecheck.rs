@@ -210,12 +210,29 @@ fn let_id(s: &Stmt) -> usize {
 ///
 /// A builtin has no signature to carry a capability, so the ones that read a
 /// place rather than allocate are named here — the same gap `sinks` fills for
-/// the opposite direction (RFC-0087 §2b). `at` and `get` read an element out of
-/// a container or a cell; `bytes` is a view of a String's buffer, which is what
+/// the opposite direction (RFC-0087 §2b). `at` reads an element out of a
+/// container; `bytes` is a view of a String's buffer, which is what
 /// `std/codecs` and `std/text` are written on. A binding to one of these owns
 /// nothing, so nothing may release it.
+///
+/// `get` was here for Path B's cell read. RFC-0090 M4 deleted that builtin AND
+/// took `cell`/`get`/`set` out of [`crate::checker::RESERVED`] in the same
+/// stroke, which handed the names to users — and this list matches on the CALL,
+/// not on a builtin table. So `get` stayed, and any user function called `get`
+/// handed back a view that owns nothing. `std/slots`' own reader copies its
+/// element out. A `Slots<String>` read through it leaked, silently.
+///
+/// [`RESERVED_VIEWS`] and [`RESERVED_SINKS`] are checked against `RESERVED` by
+/// `every_view_and_sink_name_is_reserved`. Being reserved is what makes a name
+/// here mean the builtin and nothing else, and it is the invariant `get` lost
+/// without anybody noticing.
+const RESERVED_VIEWS: &[&str] = &["at", "bytes"];
+
+/// The builtins that take ownership of an argument, by name and position.
+const RESERVED_SINKS: &[(&str, usize)] = &[("push", 1)];
+
 fn views(name: &str) -> bool {
-    matches!(name, "at" | "get" | "bytes")
+    RESERVED_VIEWS.contains(&name)
 }
 
 /// Check every function for use-after-consume, returning **all** problems found
@@ -2631,9 +2648,11 @@ mod streams {
 /// else a builtin does with a heap argument is a read: `print` formats it,
 /// `@concat` copies out of it, `at` looks inside it.
 ///
-/// It was three until RFC-0090 M4 deleted `set` and `cell` with Path B.
+/// It was three until RFC-0090 M4 deleted `set` and `cell` with Path B. Unlike
+/// the view half, that deletion took the names out of here as well — which is
+/// why this list is the one that did not go stale.
 fn sinks(name: &str, i: usize) -> bool {
-    matches!((name, i), ("push", 1))
+    RESERVED_SINKS.contains(&(name, i))
 }
 
 /// Every name `e` reads, root names only, in no particular order.
@@ -2775,6 +2794,38 @@ mod tests {
     fn run(src: &str) -> Result<(), String> {
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
         super::check(&program)
+    }
+
+    /// `views` and `sinks` match on a CALL NAME. That only means "the builtin"
+    /// while no user function can carry the name, and `crate::checker::RESERVED`
+    /// is what stops one.
+    ///
+    /// RFC-0090 M4 deleted the `cell`/`get`/`set` builtins and took all three
+    /// out of `RESERVED`, handing the names to users. `sinks` gave `set` and
+    /// `cell` up with them. `views` kept `get`, so a user function called `get`
+    /// handed back a view that owns nothing — and `std/slots`' reader, which
+    /// copies its element out, was renamed to `get` two phases later. A
+    /// `Slots<String>` read through it leaked with no diagnostic.
+    ///
+    /// This is the check that was missing. It fails on the commit that drops a
+    /// name from `RESERVED` without dropping it here, which is where the leak
+    /// was introduced and the only place it is cheap to see.
+    #[test]
+    fn every_view_and_sink_name_is_reserved() {
+        for name in RESERVED_VIEWS {
+            assert!(
+                crate::checker::RESERVED.contains(name),
+                "`{name}` is a view builtin but not reserved, so a user function \
+                 of that name would be treated as a view and never released"
+            );
+        }
+        for (name, _) in RESERVED_SINKS {
+            assert!(
+                crate::checker::RESERVED.contains(name),
+                "`{name}` is a sink builtin but not reserved, so a user function \
+                 of that name would be treated as taking ownership"
+            );
+        }
     }
 
     #[test]

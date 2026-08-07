@@ -96,10 +96,35 @@ source in a box, keeps the address in its own cursor slot, reads the source
 with `pullAt`, and on the closing call gives the slot back, takes the source out
 of the box and CLOSES it — an ordinary `close` in ordinary Vyrn, which is why
 `movecheck` checks the chain's releases the way it checks every other one.
-One shared `wrap` would be the better spelling and does not compile: its step
-would be a lambda capturing a `fn` parameter that itself has captures, and
-the LLVM backend loses the inner captures at that second level. See
-RFC-0075 "As landed — M3".
+
+**They repeat because sharing costs, and NOT because it fails to compile.**
+M2c wrote three copies for the second reason. One `wrap(s, step)` takes a
+`fn` parameter that carries captures, its own step is a lambda that captures
+it, and the LLVM backend lost the inner captures at that second level:
+`take`'s `n` read 0 on native and correct on the interpreter. RFC-0087
+Phase 10b rebuilt that machinery — a `fn` value owns its capture block and
+`@__vyrn_fnval_copy` is derived over RFC-0037's defunctionalized enum — and a
+follow-through built the shared `wrap` to find out whether the divergence
+went with it.
+
+It did. The shared form compiled and the three engines agreed byte for byte
+over `take(unfold(..), n)`, `take(feed(..), 0)`, `take(map(unfold(..), f), n)`,
+`take(filter(unfold(..), p), n)`, `take(filter(map(unfold(..), f), p), 2)` in
+a loop of 30 open-and-close cycles, `take(map(filter(unfold(..), p), f), 3)`,
+and a three-layer chain drained whole. `take`'s counter was read, not merely
+non-zero. **The divergence is dead; do not cite it here again.**
+
+The shared form was dropped on its measurements, which are the reason to keep
+reading three copies. It adds one indirect call per element per wrapper
+layer: `map` over `unfold` under `take` went 4.54 µs -> 5.64 µs (+24%). That
+row was 4.02 µs before Phase 8c, 9.20 µs after it, and 4.54 µs once Phase 8d
+won it back — a whole phase of work to give a quarter of away. `take` over
+`unfold` alone went
+3.27 µs -> 2.91 µs, and open-and-close did not move. It also saved no lines —
+each caller had to bind its step to a NAMED, typed local, because a lambda
+literal carries no return annotation and `wrap`'s result parameter has
+nothing else to solve from. Worse on speed, no shorter, and one more rule to
+learn. See RFC-0075 "As landed — M3".
 
 ## filter
 

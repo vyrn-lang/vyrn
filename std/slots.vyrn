@@ -9,18 +9,18 @@
 /// was issued, and the identity of the container that issued it. It owns no
 /// heap, so it copies freely, never moves, and never has to be released.
 ///
-///     import { Slots, Handle, newSlots, insert, remove, fetch } from "std/slots"
+///     import { Slots, Handle, newSlots, insert, remove, get } from "std/slots"
 ///
 ///     let mut people: Slots<Person> = newSlots()
 ///     let h = insert(people, Person { name: "ada" })
 ///     people[h].name = "lovelace"       // traps on a dead handle, like a[i] on OOB
-///     match fetch(people, h) { Some(p) => .., None => .. }   // liveness as a value
+///     match get(people, h) { Some(p) => .., None => .. }     // liveness as a value
 ///     remove(people, h)                 // the slot's generation bumps
 ///     // (the container itself is not reclaimed yet — see `impl Owned` below)
 ///
 /// **Two spellings, and the difference is what a dead handle does.** `s[h]`
 /// joins the bounds-trap family: the handle must be alive, and the program stops
-/// if it is not. `fetch` returns `Option<T>`, so staleness is a value the caller
+/// if it is not. `get` returns `Option<T>`, so staleness is a value the caller
 /// handles. The old `Ref` could only ever trap.
 ///
 /// **The identity word.** A `Handle<Person>` from one container used on another
@@ -42,9 +42,11 @@
 /// elements, and `remove` fills the hole it makes with the last live element.
 /// That is what keeps `remove` O(1). Iterate handles if the order matters.
 ///
-/// **What this module does not do.** It does not name `get`, `set` or `release`
-/// — Path B reserves all three (RFC-0004), which is why the reading half is
-/// `fetch`. RFC-0090 M4 deletes Path B and the names come free.
+/// **The reading half is `get` again.** Path B reserved `get`, `set` and
+/// `release` (RFC-0004), so M1 spelled the reader `fetch` and said the name
+/// would come free when M4 deleted Path B. M4 landed in Phase 8e and this is
+/// that name coming back. There is still no `set`: `s[h] = v` and `s[h].f = v`
+/// write where the element lives, and a free `set` would only copy one in.
 
 /// A handle into a `Slots<T>`: which slot, which generation, and which
 /// container. `T` is carried for branding only — a handle stores no element, so
@@ -125,7 +127,7 @@ export fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool {
 ///
 /// The element is COPIED out, because a return is owned (RFC-0089 rule 3). Read
 /// `s[h]` instead where the element should stay where it is.
-export fn fetch<T>(s: Slots<T>, h: Handle<T>) -> Option<T> {
+export fn get<T>(s: Slots<T>, h: Handle<T>) -> Option<T> {
     if !alive(s, h) {
         return None
     }

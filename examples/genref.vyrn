@@ -17,7 +17,7 @@
 // (see linkedlist.vyrn / tree.vyrn) — a handle is fixed size, which was the
 // whole reason `Ref` existed.
 
-import { Slots, Handle, newSlots, insert, remove, fetch, alive } from "std/slots"
+import { Slots, Handle, newSlots, insert, remove, get, alive } from "std/slots"
 
 fn bump(nums: modify Slots<Int64>, h: Handle<Int64>) -> Int64 {
     nums[h] = nums[h] + 1 // mutate through a handle passed by value
@@ -75,7 +75,7 @@ fn main() -> Int64 {
     print(nums[got]) // 42
 
     let n = measure(strs, s, nums) // a handle to 2
-    print(fetch(nums, n) ?? 0 - 1) // 2
+    print(get(nums, n) ?? 0 - 1) // 2
 
     remove(strs, s)
     remove(nums, inner)
