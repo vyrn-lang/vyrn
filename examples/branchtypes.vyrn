@@ -1,0 +1,113 @@
+// The type an expression WILL have, read from a branch.
+//
+// A `match` or an `if` used as an expression needs its destination before
+// either arm runs, so the wasm backend predicts each arm's type before it
+// emits it (`direct.rs`, `peek`). The prediction was kept by hand and the
+// emitting path was kept by hand, and the two lists drifted: `m.length` on a
+// `Map` compiled everywhere EXCEPT in an arm, where it read as "a field of the
+// non-record type `Map<String, Int64>`".
+//
+// Every read below sits in an arm on purpose. Outside one they were always
+// legal, so this file is only about the arm.
+type Age = Int64 where value >= 0
+
+fn addOne(n: Int64) -> Int64 {
+    return n + 1
+}
+
+fn first(xs: Array<Int64>) -> Option<Int64> {
+    if xs.length > 0 {
+        return Some(xs[0])
+    }
+    return None
+}
+
+// `?` in an arm propagates the same way it does in a statement.
+fn head(xs: Array<Int64>) -> Option<Int64> {
+    let pick: Option<Int64> = Some(1)
+    return Some(match pick {
+            Some(n) => first(xs)?,
+            None => 0,
+        })
+}
+
+fn main() -> Int64 {
+    let pick: Option<Int64> = Some(1)
+
+    // `.length` on all four receivers that have one, plus `.byteLength`.
+    let text = "hello"
+    let arr: Array<Int64> = [1, 2, 3]
+    let map: Map<String, Int64> = ["a": 1, "b": 2]
+    let small: SmallArray<Int64, 4> = [7, 8]
+
+    let bytesLen = match pick {
+        Some(n) => text.byteLength,
+        None => 0,
+    }
+    let arrLen = match pick {
+        Some(n) => arr.length,
+        None => 0,
+    }
+    let mapLen = match pick {
+        Some(n) => map.length,
+        None => 0,
+    }
+    let smallLen = match pick {
+        Some(n) => small.length,
+        None => 0,
+    }
+    print("lengths \{bytesLen} \{arrLen} \{mapLen} \{smallLen}")
+
+    // A numeric conversion in an arm.
+    let narrow: Int32 = match pick {
+        Some(n) => Int32(n),
+        None => Int32(0),
+    }
+    print("narrow \{narrow}")
+
+    // `spawn` in an arm, and the `join` that reads it in another.
+    let task: Task<Int64> = match pick {
+        Some(n) => spawn addOne(n),
+        None => spawn addOne(0),
+    }
+    let joined = match pick {
+        Some(n) => task.join(),
+        None => 0 - 1,
+    }
+    print("joined \{joined}")
+
+    // `array()` is `[]`, so an arm types it from the position.
+    let empty: Array<Int64> = match pick {
+        Some(n) => array(),
+        None => array(),
+    }
+    print("empty \{empty.length}")
+
+    // A fallible construction in an arm.
+    let age: Option<Age> = match pick {
+        Some(n) => Age?(n),
+        None => Age?(0),
+    }
+    let shown = match age {
+        Some(a) => a,
+        None => 0 - 1,
+    }
+    print("age \{shown}")
+
+    // `?` reached through an arm, on both a full and an empty array.
+    let got = match head(arr) {
+        Some(n) => n,
+        None => 0 - 1,
+    }
+    let none = match head([]) {
+        Some(n) => n,
+        None => 0 - 1,
+    }
+    print("head \{got} \{none}")
+
+    drop arr
+    drop map
+    drop small
+    drop empty
+    return 0
+}

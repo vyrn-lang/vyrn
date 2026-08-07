@@ -3835,13 +3835,11 @@ impl Fn_<'_> {
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
                 let base = self.peek(expr, line)?;
-                match (field.as_str(), self.cx.resolve(&base)) {
-                    ("byteLength", Type::Str)
-                    | ("length", Type::Array(_))
-                    | ("length", Type::ArrayN(..)) => Type::Int,
+                match length_ty(field, &self.cx.resolve(&base)) {
+                    Some(t) => t,
                     // A read of a `lazy T` field is a `T` (RFC-0085 M4a) — it has
                     // been forced by the time anything asks what it is.
-                    _ => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
+                    None => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
                 }
             }
             Expr::StructLit { name, fields, .. } => self.applied_record(name, fields, line)?,
@@ -4040,6 +4038,22 @@ impl Fn_<'_> {
                 "close" => Type::Unit,
                 "@has" | "@remove" => Type::Bool,
                 "@keys" => Type::Array(Box::new(Type::Str)),
+                // `t.join()` (RFC-0025) reads the task's box, so its type is the
+                // task's payload — the same answer `call`'s `@join` arm hands
+                // back, including its defensive identity on a receiver the
+                // checker could not have admitted.
+                "@join" if args.len() == 1 => {
+                    let t = self.peek(&args[0], line)?;
+                    match self.cx.resolve(&t) {
+                        Type::Task(inner) => *inner,
+                        _ => t,
+                    }
+                }
+                // `array()` IS `[]` — one spelling, one lowering (`call`), and so
+                // one prediction: peek the literal rather than repeat its rule.
+                "array" if args.is_empty() => {
+                    self.peek(&Expr::ArrayLit { elems: Vec::new(), line }, line)?
+                }
                 "push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
                     t => match self.cx.resolve(&t) {
                         // A `SmallArray` push yields a `SmallArray`, inline state
@@ -4096,6 +4110,13 @@ impl Fn_<'_> {
                 }
                 _ if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()) => {
                     Type::Named(name.clone())
+                }
+                // A numeric conversion (`Int32(n)`, `Float32(x)`) in a branch.
+                // `ftypes::numeric_conv_target` is the frontend's own table, and
+                // reading it here is why `call` reads it too: the target IS the
+                // answer, and a second list of the widths could disagree.
+                _ if args.len() == 1 && ftypes::numeric_conv_target(name).is_some() => {
+                    ftypes::numeric_conv_target(name).expect("guarded above")
                 }
                 // A protocol method (RFC-0084 M2). The receiver's own type picks
                 // the impl, so this peeks the REWRITE — the mangled call `call`
@@ -4192,7 +4213,33 @@ impl Fn_<'_> {
                 Some(t) => t,
                 None => return unsupported("a lambda with no expected function type", *line),
             },
-            other => return unsupported(&format!("a branch yielding {}", expr_name(other)), line),
+            // `e?` in a branch (RFC-0005). The success half of the sum, which is
+            // what `try_` hands back. A `Fallible` receiver (RFC-0080 M3) is
+            // still a gap here: its success type is an ASSOCIATED type, and
+            // reading it needs the impl the emitting path resolves.
+            Expr::Try { expr, line } => {
+                let st = self.peek(expr, *line)?;
+                match self.sum_of(&st) {
+                    Some(Sum::Opt(t)) | Some(Sum::Res(t, _)) => t,
+                    _ => return unsupported(&format!("a branch yielding `?` on `{st}`"), *line),
+                }
+            }
+            // `Age?(n)` in a branch (RFC-0003) — an `Option` of the named type,
+            // the one type `try_construct` can produce.
+            Expr::TryConstruct { name, .. } => {
+                Type::Option(Box::new(Type::Named(name.clone())))
+            }
+            // `spawn f(a)` in a branch (RFC-0025) is `f(a)`'s type in a `Task`.
+            // Peeked through the call rather than off `sigs`, so a generic or
+            // higher-order callee is solved by the rows that already solve it.
+            Expr::Spawn { name, args, line } => Type::Task(Box::new(self.peek(
+                &Expr::Call { name: name.clone(), args: args.clone(), line: *line },
+                *line,
+            )?)),
+            // No catch-all, for the reason [`Fn_::expr`] has none: the arms above
+            // now cover `Expr`, so the `other => unsupported(..)` that used to
+            // sit here is dead. It was the audit's own measure — every variant
+            // it still caught was a legal program refused only in a branch.
         })
     }
 
@@ -6777,6 +6824,12 @@ impl Fn_<'_> {
         field: &str,
         line: usize,
     ) -> Result<Option<Type>, String> {
+        // [`length_ty`] decides, here and in `peek`. The two paths kept the list
+        // by hand and it drifted, so the emitting path now asks the same table
+        // the predicting one does.
+        if length_ty(field, &self.cx.resolve(base)).is_none() {
+            return Ok(None);
+        }
         match (field, self.cx.resolve(base)) {
             // One load off the String header, not a scan (RFC-0089 M1a).
             ("byteLength", Type::Str) => {
@@ -13387,6 +13440,28 @@ fn gen_list_dir_ty() -> Type {
     Type::Result(Box::new(Type::Array(Box::new(Type::Str))), Box::new(Type::Str))
 }
 
+/// The receivers that have a `.length` or a `.byteLength`, in ONE list.
+///
+/// Neither name is a field, so both paths that meet one have to know the list:
+/// [`Fn_::length_of`] emits the load, and [`Fn_::peek`] answers what the load
+/// will produce. Each held its own copy, and the copies drifted — `peek`'s
+/// omitted a `Map` and a `SmallArray`, so `match o { Some(m) => m.length, .. }`
+/// read as "a field of the non-record type `Map<String, Int64>`" while the
+/// same read outside a branch compiled. `base` is already resolved.
+///
+/// This is `io_builtin_ty`'s rule on a second table: one spelling, two readers.
+fn length_ty(field: &str, base: &Type) -> Option<Type> {
+    matches!(
+        (field, base),
+        ("byteLength", Type::Str)
+            | (
+                "length",
+                Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Map(..)
+            )
+    )
+    .then_some(Type::Int)
+}
+
 fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
     let str_err = |ok| Type::Result(Box::new(ok), Box::new(Type::Str));
     Some(match (name, argc) {
@@ -13598,5 +13673,80 @@ mod tests {
                        return match f(bytes(\"hi\")) { Ok(s) => s.byteLength, Err(e) => 0 - 1 } }";
         let p = vyrn_frontend::check(src).unwrap();
         assert!(compile(&p).is_ok());
+    }
+
+    /// `.length` in a BRANCH, on every receiver that has one.
+    ///
+    /// The emitting path ([`Fn_::length_of`]) and the predicting path
+    /// ([`Fn_::peek`]) each held their own copy of this list, and the copies
+    /// disagreed on a `Map` and a `SmallArray`: a legal `m.length` in an arm
+    /// read as "a field of the non-record type `Map<String, Int64>`". Both now
+    /// read [`length_ty`], so a receiver added to one is added to both.
+    #[test]
+    fn a_branch_reads_a_length_on_every_receiver_that_has_one() {
+        let each = [
+            ("a String", "String", "\"hi\"", "byteLength"),
+            ("an Array", "Array<Int64>", "[1, 2]", "length"),
+            ("a Map", "Map<String, Int64>", "[\"a\": 1]", "length"),
+            ("a SmallArray", "SmallArray<Int64, 4>", "[]", "length"),
+        ];
+        for (what, ty, lit, field) in each {
+            let src = format!(
+                "fn main() -> Int64 {{ \
+                     let v: {ty} = {lit} \
+                     let o: Option<Int64> = Some(1) \
+                     return match o {{ Some(n) => v.{field}, None => 0 }} }}"
+            );
+            let p = vyrn_frontend::check(&src).expect(what);
+            assert!(compile(&p).is_ok(), "{what}: {:?}", compile(&p).unwrap_err());
+        }
+    }
+
+    /// The rest of the `peek` audit RFC-0086's lesson asked for, once the
+    /// `.length` rows were found missing.
+    ///
+    /// `peek` is deliberately shallow, but shallow means "refuses what it
+    /// cannot see", not "has not been told about the emitting path". Each shape
+    /// below compiles OUTSIDE a branch and was refused INSIDE one, and each row
+    /// now reads what the emitting path reads rather than a second copy of it.
+    #[test]
+    fn a_branch_types_every_shape_the_emitting_path_lowers() {
+        let cases = [
+            // `Int32(n)` — the frontend's own conversion table, which `call`
+            // already reads.
+            (
+                "a numeric conversion",
+                "fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let x: Int32 = match o { Some(n) => Int32(n), None => Int32(0) } return 0 }",
+            ),
+            // `t.join()` — the task's payload.
+            (
+                "a join",
+                "fn work(n: Int64) -> Int64 { return n + 1 }                  fn main() -> Int64 { let t = spawn work(1) let o: Option<Int64> = Some(1)                      return match o { Some(n) => t.join(), None => 0 } }",
+            ),
+            // `array()` IS `[]`, so it is typed by the position like the literal.
+            (
+                "an empty array",
+                "fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let a: Array<Int64> = match o { Some(n) => array(), None => array() }                      return a.length }",
+            ),
+            // `?` in an arm — the sum's success half.
+            (
+                "a propagation",
+                "fn f(n: Int64) -> Option<Int64> { return Some(n) }                  fn g() -> Option<Int64> { let o: Option<Int64> = Some(1)                      return Some(match o { Some(n) => f(n)?, None => 0 }) }                  fn main() -> Int64 { return 0 }",
+            ),
+            // `Age?(n)` in an arm — an `Option` of the named type.
+            (
+                "a fallible construction",
+                "type Age = Int64 where value >= 0                  fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let r: Option<Age> = match o { Some(n) => Age?(n), None => Age?(0) }                      return 0 }",
+            ),
+            // `spawn f(a)` in an arm — the call's type, in a `Task`.
+            (
+                "a spawn",
+                "fn work(n: Int64) -> Int64 { return n + 1 }                  fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let t: Task<Int64> = match o { Some(n) => spawn work(n), None => spawn work(0) }                      return t.join() }",
+            ),
+        ];
+        for (what, src) in cases {
+            let p = vyrn_frontend::check(src).expect(what);
+            assert!(compile(&p).is_ok(), "{what}: {}", compile(&p).unwrap_err());
+        }
     }
 }
