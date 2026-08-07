@@ -8,6 +8,9 @@
   (M2's "As landed"). Milestones are gated on measurement the way
   RFC-0081's were: nothing is deleted until a number says it should be, and here
   a number said stop.
+  **RFC-0091 M4 resumed the port with both M2 blockers removed, and it stopped a
+  third time. This RFC has a boundary it never drew, and `SmallArray` is on the
+  far side of it — see "Where the thesis stops" below.**
 - **Depends on:** RFC-0078 (the census, and question **A**, which this
   reframes), RFC-0011 (`a[i] = v` element store, and the `a[i].field = v`
   desugar this extends), RFC-0028 (`Map<String, V>`), RFC-0056 (`SmallArray`),
@@ -748,6 +751,46 @@ What the gate added is the second half: they do not need one, *and they should
 not be written that way anyway*, because the interpreter charges ~18x for the
 privilege and the language cannot give a `std/` table the ambient, type-erased,
 generation-checked slab that `Ref<T>` actually is.
+
+## Where the thesis stops — RFC-0091 M4, and the boundary this RFC never drew
+
+M2 stopped for two reasons and a number. RFC-0089 M2 removed the first blocker
+(escape-on-call), RFC-0090 M1 removed the second by measuring `std/slots` 2.0x
+FASTER than the built-in slab it replaced, and RFC-0091 M4 then resumed the port
+on `SmallArray`. It stopped again, and this time the obstacle is neither of the
+two M2 named.
+
+**`SmallArray` cannot be written in Vyrn at all.** Three independent features are
+missing — const generic parameters, an uninitialized place, and a conditional
+`yield` in a projection. RFC-0091's "M4 as landed" holds the programs that prove
+each one. The gate was measured anyway on the closest container Vyrn can express,
+and it failed: 1.8x slower on a push and 7.9x slower on an indexed read, with the
+emitted wasm 13% larger.
+
+The correction this RFC has to take is in its own central argument, above:
+
+> every one of those operations is about addressing a pointer, and none of them
+> arises if the primitive is a bounds-checked growable buffer instead
+
+That is true, and it is true only of containers whose spare capacity is a heap
+buffer they own. **`SmallArray`'s spare capacity is inline, inside the value.**
+Its empty state emits `[N x T] undef`, which is `MaybeUninit` — the operation
+this RFC named as the reason a safe `Vec` is unbuildable from safe parts, and
+then set aside because `Array` owns `len` and `cap` together. `Array` does.
+`SmallArray` does not, and this RFC counted it among the sixteen census rows
+without checking that the argument reached it.
+
+So the thesis holds, with a line through it that was always there:
+
+- **A container over `Array<T>` is Vyrn.** `std/slots` is the proof, and it is
+  faster than what it replaced.
+- **A container with storage inside its own value is not**, and no protocol
+  closes that. It needs a place that holds no value, which is the one thing
+  RFC-0089's model exists to remove.
+
+`SmallArray` therefore stays a built-in for a stated reason, and the census row
+should say so rather than "not ported yet". `Array`, `Map` and the allocator were
+already staying for reasons of their own.
 
 ## What this does not decide
 

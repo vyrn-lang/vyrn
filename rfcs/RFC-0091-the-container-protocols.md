@@ -1,11 +1,14 @@
 # RFC-0091 — The Container Protocols
 
-- **Status:** **M1, M2 and M3 implemented** (Phases 7a and 7b); M4 not started.
-  The generalization layer over RFC-0089/0090: what makes a third-party
-  container indistinguishable from a built-in. `place`/`yield` members, `Copy`,
-  `Iterate` and `Index` all ship, and `std/slots` is the customer that proved
-  them. Read "M2 as landed", "M1 and M3 as landed" and "The generic-container
-  correction" — the last records two things this RFC says that are wrong.
+- **Status:** **M1, M2 and M3 implemented** (Phases 7a and 7b); **M4 stopped at
+  its own gate.** The generalization layer over RFC-0089/0090: what makes a
+  third-party container indistinguishable from a built-in. `place`/`yield`
+  members, `Copy`, `Iterate` and `Index` all ship, and `std/slots` is the
+  customer that proved them. Read "M2 as landed", "M1 and M3 as landed" and "The
+  generic-container correction" — the last records two things this RFC says that
+  are wrong. Then read "M4 as landed": `SmallArray` is not portable, the reason
+  is three separate missing features, and the numbers say the port would cost
+  more than it returns.
 - **Depends on:** RFC-0086 M1 (`Owned` — the pattern this repeats), RFC-0089
   (conventions), RFC-0090 (`Slots` is the first customer), RFC-0080
   (associated types), RFC-0084 (records dispatch), RFC-0082 (the thesis)
@@ -173,6 +176,7 @@ Recorded as open, gated on a concrete need (arena-backed containers may be it).
   them; `for x in slots` works.
 - **M4 — resume RFC-0082 M2**: port one built-in (`SmallArray` is the
   smallest) to std Vyrn behind the protocols, three-way parity as the gate.
+  **STOPPED. Nothing was ported and nothing was deleted.** See "M4 as landed".
 
 ---
 
@@ -609,3 +613,226 @@ And `remove` could not join it anyway — see the note above on `@remove`.
 
 So the free functions stay free, `impl Owned`'s receiver becomes `consume self`,
 and the feature's user in the corpus is `examples/modifyself.vyrn`.
+
+---
+
+## M4 as landed — the port is refused, and three separate features are why
+
+M4 asked for `SmallArray<T, N>` in std Vyrn behind the protocols, with three-way
+parity as the gate. **Nothing was ported and nothing was deleted.** The port
+never reached the gate: `SmallArray` cannot be written in Vyrn at all, for three
+reasons that do not depend on each other. The gate was then measured anyway, on
+the closest container Vyrn CAN express, and it failed too.
+
+This is the third time RFC-0082's port has been stopped, and the first time the
+obstacle is the language rather than a number. The number agrees.
+
+### Why `SmallArray` was the right thing to try, and the wrong thing to expect
+
+This RFC picked `SmallArray` because it is the smallest built-in. That is true by
+line count and false by shape. `Slots` is a record of six `Array` fields, which
+is the shape RFC-0082's whole argument covers: a bounds-checked growable buffer
+owns `len` and `cap` together, spare capacity is allocated and unreadable, and
+nothing has to name an address. `SmallArray` is not that. Its spare capacity is
+INLINE, inside the value, and the emitted IR says so in one word:
+
+```llvm
+{ i64 0, i64 4, ptr null, [4 x i64] undef }
+```
+
+`undef` is the whole difference. An empty `SmallArray<T, N>` holds `N` slots of
+`T` that hold nothing, and `len` is what says they must not be read. That is
+`MaybeUninit` — **the one operation RFC-0082 named as the reason a safe `Vec` is
+unbuildable from safe parts, and then declared irrelevant because `Array` owns
+its own spare capacity.** `Array` does. `SmallArray` does not, and RFC-0082
+listed it among the sixteen census rows without noticing that its own argument
+never reached it.
+
+So the finding is not "the protocols are short of a feature". It is that
+**RFC-0082's thesis has a boundary, `SmallArray` is on the far side of it, and
+nobody had drawn the line before.**
+
+### The three blockers, each with the program that proves it
+
+**1. Const generic parameters do not exist.** `N` is not a type parameter
+anywhere in this language. `Type::ConstInt` is a non-negative integer literal in
+type-argument position, only `SmallArray` and `Array<T, N>` consume one, and the
+checker rejects it in every other position by name. A type declaration cannot
+bind it:
+
+```vyrn
+type Small<T, N> = { len: Int64, inline: Array<T, N>, spill: Array<T> }
+//                                     ^ `Array<T, N>` needs a non-negative integer size
+```
+
+A function cannot bind it either, which is the sharper half: **not even the
+BUILT-IN is generic over its own capacity.**
+
+```vyrn
+fn sum<T, N>(xs: SmallArray<T, N>) -> Int64 { return xs.length }
+//               ^ `SmallArray<T, N>` needs a non-negative integer capacity
+```
+
+Every use in the corpus names a literal, and the compiler monomorphizes the
+layout at each one. A std module has no way to say `N` at all, so a ported
+`SmallArray` would be one module per capacity. The corpus uses five — 2, 3, 4, 8
+and 16.
+
+**2. There is no uninitialized place, by design.** A record field must hold a
+value when the record is made, and there is no value of a generic `T`. An empty
+inline buffer is unspellable:
+
+```vyrn
+fn newSmall4<T>() -> Small4<T> {
+    return Small4 { len: 0, inline: [], spill: [] }
+    //                      ^ `[]` is an array literal, but Array<T, 4> is not an array type
+}
+```
+
+`Array<T, 4>` in a generic record is fine when four values of `T` are in hand —
+`Box4 { inline: [a, b, c, d] }` compiles and runs. The container's empty state is
+what cannot be written. This is not an oversight to repair: "the language has no
+uninitialized place" is `std/slots`'s own words for why `remove` does not clear
+its payload, and it is what makes every place in an RFC-0089 program hold exactly
+one value.
+
+**3. A projection cannot choose between two places.** `SmallArray` reads from the
+inline slots or from the heap buffer, decided per access on `cap`. Written as
+`place at`, that is a conditional yield, which M2 refused:
+
+```vyrn
+impl Index for Small4 {
+    place at(read self, i: Int64) -> Int64 {
+        if i < 4 { yield self.inline[i] }
+        yield self.spill[i - 4]
+    }
+}
+// `place at` must end with exactly one `yield <place>` — a projection is
+// inlined at the access site, so it has one exit
+```
+
+**This one IS a gap in this RFC, and it is the sibling of the gap Phase 8a
+found.** 8a recorded that `Iterate` cannot skip, because a projection has no
+cursor and no branch. The same rule says `Index` cannot pick a buffer. A
+two-state container is the plainest thing a user would write that needs it — a
+pool with an inline first page, a rope, a hybrid map — so the rule's cost is
+larger than "no `SmallArray`".
+
+Closing it is not obviously wrong: the access site would become an `if` with the
+access duplicated in each arm, which is what the built-in already emits. **It
+would also not unblock this port** — see the third row of the measurement below,
+which is that duplicated access written by hand.
+
+### The measurement, on the container Vyrn can express
+
+`SmallArray<T, N>` is unwritable, so the gate was measured on `Small16`: the same
+two-state shape, `Int64` concrete, capacity 16 concrete, free functions instead
+of protocol members. The proxy is FAVOURABLE to Vyrn on two counts — it never
+copies the inline slots out on a spill, and it seeds the inline half with zeros
+once — so a bad number here is an upper bound on how good the port could be.
+
+`vyrn bench`, native, median:
+
+| bench | built-in | Vyrn | `Array<Int64>` |
+|---|---|---|---|
+| push 16 | 57 ns | **105 ns** (1.8x) | 67 ns |
+| indexed sum, 1024 reads | 111 ns | **882 ns** (7.9x) | 72 ns |
+| indexed sum, projection hand-inlined | 111 ns | **901 ns** (8.1x) | 72 ns |
+
+The third row is the one that decides it. It is blocker 3 removed by hand: the
+branch written at the access site, exactly what an inlined conditional yield
+would emit. It is not faster. **So the missing language feature is not what
+costs the 8x**, and building it would buy nothing here.
+
+`std/slots` came out 2.0x FASTER than the slab it replaced (RFC-0090 M1). This
+comes out 1.8x and 7.9x slower. That is the difference between a container over
+`Array` and a container over an inline buffer, and it is the same boundary
+blocker 2 names.
+
+### What costs the 8x, and it is worth its own work
+
+A fixed `Array<T, N>` is a value, not a header, so a dynamic index has to put it
+in memory first. The textual backend spills the whole array to a fresh alloca on
+EVERY read:
+
+```llvm
+%spill5 = alloca [16 x i64]
+store [16 x i64] %t2, ptr %spill5          ; 128 bytes, per element read
+%t6 = getelementptr [16 x i64], ptr %spill5, i64 0, i64 %t3
+```
+
+The growable `Array<T>` beside it does an `extractvalue` and a `getelementptr`
+and nothing else. Isolated, 1024 reads, native, median:
+
+| | |
+|---|---|
+| `Array<Int64, 16>`, local | 1.54 µs |
+| `Array<Int64, 16>`, record field | 1.53 µs |
+| `Array<Int64>`, local | 76 ns |
+
+**20x, and the inline half of any small-buffer container in Vyrn would stand on
+it.** The record field costs the same as the local, so this is the fixed array's
+representation and not the field access. Recorded here rather than fixed: the
+repair moves emitted IR for every program that indexes a fixed array, and it is
+not a container-protocol change.
+
+### Emitted size — the port makes the output bigger, not smaller
+
+RFC-0078's expectation is that deleting a built-in shrinks the compiler's output.
+Measured over an empty program's baseline, on the same program written both ways
+(fill to N, spill, index, store, sum, drop — identical output on all three
+engines):
+
+| | built-in | Vyrn | |
+|---|---|---|---|
+| IR lines | 250 | 276 | +10.4% |
+| IR bytes | 10,899 | 11,678 | +7.1% |
+| wasm bytes | 1,642 | 1,860 | +13.3% |
+
+And that is the CONCRETE case. A std module is generic in `T` and duplicated per
+`N`, so a program using two capacities pays two copies of the module before
+monomorphization over `T` begins.
+
+### Lines — the trade the thesis asks about
+
+About **720 lines of Rust** name `SmallArray`: three dedicated blocks (`sa_ll`,
+`sa_value_base_len`, `sa_slot_base` in the textual backend, about 90 lines;
+`sa_parts`, `sa_from_fixed`, `sa_push`, `sa_method` in the direct backend, about
+357; four tests, about 75) plus 194 scattered lines across 17 files that name the
+type in a shared arm. Most of the 194 do not go away — a `Type::SmallArray` arm
+beside `Type::Array` and `Type::Map` is one line of a match that stays.
+
+Against that, the Vyrn container is about 35 lines per capacity, so five
+capacities is about 175 lines of std Vyrn. The trade is real and the direction is
+the one RFC-0078 predicted. **It is also not available**, because the 175 lines
+do not compile and the ones that do run 8x slower and emit 13% more wasm.
+
+### What this settles for RFC-0082
+
+The thesis holds where its argument reaches, and its argument reaches exactly as
+far as `Array`. A container whose spare capacity is a heap buffer it owns is
+writable in Vyrn, is fast, and `std/slots` is the proof. A container whose spare
+capacity lives inside the value is not, and no protocol closes that: it needs an
+uninitialized place, which is the one thing RFC-0089's model exists to remove.
+
+**`SmallArray` stays a built-in, and this is the reason to write in the census
+rather than "not ported yet".**
+
+### What would have to be true to try again
+
+Three features, in this order, and the third is the only one this RFC owns.
+
+1. **Const generic parameters** — `N` bound by a declaration, substituted like
+   `T`, monomorphized per value, with the layout computed per instance. Parser,
+   checker, both backends and the interpreter.
+2. **An uninitialized place, or a `T` from nothing.** Either a place the checker
+   knows holds no value and a rule that no read reaches it, or a `Default`
+   protocol and a container that seeds `N` of them. The first re-opens what
+   RFC-0089 closed. The second changes what `SmallArray<T, N>` costs to make,
+   from nothing to `N` constructions.
+3. **A conditional yield**, which is this RFC's gap and is cheap next to the
+   other two — and which the hand-inlined measurement says would not pay for
+   itself here.
+
+Feature 3 is worth doing on its own merits, for the containers that are not
+`SmallArray`. Features 1 and 2 are a language, not a milestone.
