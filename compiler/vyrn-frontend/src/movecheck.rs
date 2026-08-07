@@ -84,6 +84,45 @@ pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
     run(program, Want::Sites).sites
 }
 
+/// One place RFC-0092's rule would reach: a **projection** — a field, an element
+/// or a pattern binder over a place — read out and put somewhere the frame does
+/// not end with.
+///
+/// M0 records these and refuses nothing. The count is the migration this RFC
+/// costs, and it is the gate on M1: over 300 and the store half does not ship.
+/// A site whose type owns no heap costs nothing, so [`ProjectionSite::owns_heap`]
+/// is what separates the bill from the noise.
+#[derive(Clone, Debug)]
+pub struct ProjectionSite {
+    /// `store` (the value put into a field, an element, a literal, module state
+    /// or a `push`) or `return`.
+    pub kind: &'static str,
+    /// The module the site is in, or `None` for the linked root.
+    pub module: Option<String>,
+    /// The function it is in.
+    pub func: String,
+    pub line: usize,
+    /// The projection as written: `d.title`, `at(xs, i)`.
+    pub path: String,
+    /// The destination in words, for a store; the return type, for a return.
+    pub into: String,
+    /// The type, or `?` where even a linked reading cannot name it.
+    pub ty: String,
+    /// Whether that type transitively owns heap. A scalar carries no obligation
+    /// and the rule does not reach it.
+    pub owns_heap: bool,
+}
+
+/// Every [`ProjectionSite`] in `program` (RFC-0092 M0).
+///
+/// The same walk [`check_accum`] runs, with recording on and nothing refused.
+/// Pass a **linked** program: a file read alone cannot name an imported type, so
+/// every cross-module result reads as `?` — the error Phase 4b's per-file
+/// measurement made, by 81 sites.
+pub fn projection_sites(program: &Program) -> Vec<ProjectionSite> {
+    run(program, Want::Projections).projections
+}
+
 /// Why a `let` binding does **not** hold its value at the end of its block.
 ///
 /// This is rule 1 read backwards. The pass already decides, at every store,
@@ -198,6 +237,8 @@ enum Want {
     Check,
     Sites,
     Lets,
+    /// RFC-0092 M0: record every projection the rule would refuse, refuse none.
+    Projections,
 }
 
 /// One run's outputs.
@@ -207,6 +248,7 @@ struct Run {
     lets: HashMap<usize, LetOwnership>,
     lending: HashSet<String>,
     retains: HashSet<(String, usize)>,
+    projections: Vec<ProjectionSite>,
 }
 
 /// The identity of a `let`: its node address, the key `own.rs` emits drops with.
@@ -338,11 +380,25 @@ fn run(program: &Program, want: Want) -> Run {
         retains: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         handed_on: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         param_ix: RefCell::new(HashMap::new()),
+        projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
     };
     let mut out = Vec::new();
+    let mut projections = Vec::new();
+    // A projection site is stamped with the module of the body it was found in,
+    // the same way an error is — the sink itself has no idea which file it is
+    // reading, and a linked program is most of somebody else's.
+    let drain = |into: &mut Vec<ProjectionSite>, mc: &MoveCheck, module: &Option<String>| {
+        if let Some(sink) = &mc.projections {
+            for mut p in sink.borrow_mut().drain(..) {
+                p.module.clone_from(module);
+                into.push(p);
+            }
+        }
+    };
     for f in &program.functions {
         mc.errors.borrow_mut().clear();
         mc.function(f);
+        drain(&mut projections, &mc, &f.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = Diagnostic::from_rendered(s, "movecheck");
             d.file = f.module.clone();
@@ -356,6 +412,7 @@ fn run(program: &Program, want: Want) -> Run {
     for t in &program.tests {
         mc.errors.borrow_mut().clear();
         mc.body(&[], &Type::Unit, &t.body);
+        drain(&mut projections, &mc, &t.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = Diagnostic::from_rendered(s, "movecheck");
             d.file = t.module.clone();
@@ -366,6 +423,7 @@ fn run(program: &Program, want: Want) -> Run {
     for b in &program.benches {
         mc.errors.borrow_mut().clear();
         mc.body(&[], &Type::Unit, &b.body);
+        drain(&mut projections, &mc, &b.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = Diagnostic::from_rendered(s, "movecheck");
             d.file = b.module.clone();
@@ -420,6 +478,7 @@ fn run(program: &Program, want: Want) -> Run {
         lets: mc.lets.map(RefCell::into_inner).unwrap_or_default(),
         lending,
         retains,
+        projections,
     }
 }
 
@@ -499,6 +558,10 @@ struct MoveCheck<'a> {
     handed_on: Option<RefCell<HashMap<(String, usize), Vec<(String, usize)>>>>,
     /// The index of each parameter of the function under check.
     param_ix: RefCell<HashMap<String, usize>>,
+    /// Where RFC-0092 M0's projection sites go, or `None` everywhere else. The
+    /// measurement is a mode, not a second walk: the two places that would refuse
+    /// are the two places that record.
+    projections: Option<RefCell<Vec<ProjectionSite>>>,
 }
 
 /// A binding that names a value somebody else owns (RFC-0089 rule 2).
@@ -923,9 +986,30 @@ impl MoveCheck<'_> {
         outlives: bool,
         consumed: &mut Consumed,
     ) -> Result<bool, String> {
+        // RFC-0092 M0. `xs[i]` stored inline, which nothing below sees: the bail
+        // on the next line is where it leaves. Counted whatever the container is,
+        // because a borrowed container's element is no more storable than an
+        // owned one's and neither is refused today.
+        if self.projections.is_some() && outlives {
+            if let Some((_, path)) = element_path(value) {
+                let ty = self.type_of(value);
+                self.note_projection("elem-store", &path, into(), ty, line);
+            }
+        }
         let Some((root, path)) = place_path(value) else {
             return Ok(false);
         };
+        // RFC-0092 M0. A projection of a place this frame owns, put somewhere
+        // that outlives the frame: exactly what `path != root` below waves
+        // through, and exactly what the rule would refuse. Recorded BEFORE the
+        // `owns_heap` guard, so a scalar field is counted and told apart rather
+        // than lost. `outlives` is false for a rebinding, which rule 2 does not
+        // refuse either; a root that is already a borrow is refused today.
+        if self.projections.is_some() && path != root && outlives && self.borrow_of(&root).is_none()
+        {
+            let ty = self.type_of(value);
+            self.note_projection("store", &path, into(), ty, line);
+        }
         // A scalar copies. An unnamed type is left alone — see the doc above.
         if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
             return Ok(false);
@@ -1111,6 +1195,7 @@ impl MoveCheck<'_> {
     /// widening this now would refuse programs with no way out. RFC-0091 M1's
     /// `Copy` protocol is what makes the wider rule sayable.
     fn check_return(&self, e: &Expr, line: usize) -> Result<(), String> {
+        self.note_returned_projection(e, line);
         if !self.decl.owns_heap(&self.ret.borrow()) {
             return Ok(());
         }
@@ -1293,6 +1378,21 @@ impl MoveCheck<'_> {
     /// The first borrow a returned expression yields, looking through the forms
     /// that yield one of their arms.
     fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {
+        self.returned_borrow_with(e, false)
+    }
+
+    /// The same walk under RFC-0092's leaf: a projection is a borrow of its root
+    /// **whatever the root is**, so `d.title` out of a locally built record is a
+    /// borrow too. `borrow_of` answers `None` for an owned local, and `?` then
+    /// drops the whole projection — the hole this RFC names.
+    ///
+    /// M0 reads it with `projections = true` to COUNT; nothing calls it that way
+    /// on the check path, so no program's verdict moves. M1 is this flag deleted.
+    fn returned_borrow_with(
+        &self,
+        e: &Expr,
+        projections: bool,
+    ) -> Option<(Borrow, String, String)> {
         match e {
             Expr::Match {
                 scrutinee, arms, ..
@@ -1304,7 +1404,7 @@ impl MoveCheck<'_> {
                     for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                     }
-                    let r = self.returned_borrow(&arm.body);
+                    let r = self.returned_borrow_with(&arm.body, projections);
                     self.exit();
                     if r.is_some() {
                         found = r;
@@ -1318,13 +1418,85 @@ impl MoveCheck<'_> {
                 else_branch,
                 ..
             } => self
-                .returned_borrow(then_branch)
-                .or_else(|| else_branch.as_ref().and_then(|b| self.returned_borrow(b))),
+                .returned_borrow_with(then_branch, projections)
+                .or_else(|| {
+                    else_branch
+                        .as_ref()
+                        .and_then(|b| self.returned_borrow_with(b, projections))
+                }),
             _ => {
-                let (root, path) = place_path(e)?;
-                Some((self.borrow_of(&root)?, root, path))
+                let Some((root, path)) = place_path(e) else {
+                    // An element read is a projection too, and today no reading
+                    // of a `return` sees one — M0 counts them apart.
+                    let (root, path) = projections.then(|| element_path(e)).flatten()?;
+                    return Some((Borrow::Projection, root, path));
+                };
+                match self.borrow_of(&root) {
+                    Some(b) => Some((b, root, path)),
+                    None if projections && path != root => Some((Borrow::Projection, root, path)),
+                    None => None,
+                }
             }
         }
+    }
+
+    /// RFC-0092 M0: record a returned projection the rule would refuse.
+    ///
+    /// Two shapes reach here and neither is refused today. A place named straight
+    /// at the `return` whose root the frame OWNS (`return d.title`) is invisible
+    /// to `check_return` — `borrow_of` answers `None` and `?` drops it. A
+    /// projection or a pattern binder yielded by a `match`/`if` arm is recorded
+    /// as a lend and waved through.
+    ///
+    /// A root that is already a borrow is refused today (rule 3, Phase 4b), so it
+    /// is not part of this bill.
+    fn note_returned_projection(&self, e: &Expr, line: usize) {
+        if self.projections.is_none() {
+            return;
+        }
+        if let Some((root, _)) = place_path(e) {
+            if self.borrow_of(&root).is_some() {
+                return;
+            }
+        }
+        let Some((b, _, path)) = self.returned_borrow_with(e, true) else {
+            return;
+        };
+        if b != Borrow::Projection {
+            return;
+        }
+        let ret = self.ret.borrow().clone();
+        let kind = if path.ends_with("[..]") {
+            "elem-return"
+        } else {
+            "return"
+        };
+        self.note_projection(kind, &path, ret.to_string(), Some(ret), line);
+    }
+
+    /// Push one [`ProjectionSite`]. The module is stamped by [`run`], which is
+    /// the only place that knows which body is being read.
+    fn note_projection(
+        &self,
+        kind: &'static str,
+        path: &str,
+        into: String,
+        ty: Option<Type>,
+        line: usize,
+    ) {
+        let Some(sink) = &self.projections else {
+            return;
+        };
+        sink.borrow_mut().push(ProjectionSite {
+            kind,
+            module: None,
+            func: self.cur_fn.borrow().clone(),
+            line,
+            path: path.to_string(),
+            into,
+            ty: ty.as_ref().map_or("?".to_string(), |t| t.to_string()),
+            owns_heap: ty.is_some_and(|t| self.decl.owns_heap(&t)),
+        });
     }
 
     /// The same question, looking THROUGH a constructor and a struct literal —
@@ -3013,6 +3185,24 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
 /// takes, the path is what the diagnostic quotes. Anything else (a call, a
 /// literal, an operator) is not a place and answers `None`: it has no earlier
 /// owner, so nothing about it can be a move.
+/// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `at(xs, i)`,
+/// which is a call, so [`place_path`] answers `None` for it.
+///
+/// RFC-0092 M0 counts these APART. The RFC says an element read is covered "by
+/// the same three lines as a field read", and that is true of `borrow_from`,
+/// which reads `at(..)` itself — but [`MoveCheck::store`] bails at `place_path`
+/// before it decides anything, so `out.push(xs[i])` reaches none of the three
+/// sites. Whether M1 widens `store` is a decision, and the number is here for it.
+fn element_path(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Call { name, args, .. } if name == "at" => {
+            let (root, path) = place_path(args.first()?)?;
+            Some((root, format!("{path}[..]")))
+        }
+        _ => None,
+    }
+}
+
 fn place_path(e: &Expr) -> Option<(String, String)> {
     match e {
         Expr::Var { name, .. } => Some((name.clone(), name.clone())),
@@ -4051,6 +4241,151 @@ mod tests {
             println!("    {r}");
         }
         assert!(rows.is_empty(), "{rows:#?}");
+    }
+
+    /// RFC-0092 M0 — the gate. How many sites the rule "a projection is a borrow
+    /// of its root, whatever the root is" would refuse over the whole corpus.
+    ///
+    /// It **links**. The two measurements above parse each file alone, which is
+    /// the reading Phase 4b got wrong by 81 sites: a file read on its own cannot
+    /// name an imported type, so `owns_heap` answers "unknown" and the site
+    /// disappears. Every `.vyrn` under `examples/` and `std/` is loaded as a
+    /// root, and a site is counted once per (file, line, path, kind) however many
+    /// roots reach the module it lives in.
+    ///
+    /// Three numbers, and the third is inside the first two: stores of a
+    /// projection, returns of a projection, and how many of each name a type that
+    /// owns no heap — the rule does not reach those and they cost nothing.
+    ///
+    /// Ignored by default: it reads the repository and links it. Run it with
+    /// `cargo test -p vyrn-frontend --lib rfc0092 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn rfc0092_projection_sites_over_the_corpus() {
+        // A debug build overflows the 2 MB test stack linking the larger roots —
+        // loading and checking are both recursive over the AST. The measurement
+        // runs on a thread big enough for the deepest one.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(rfc0092_count)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn rfc0092_count() {
+        struct Disk;
+        impl crate::loader::ModuleResolver for Disk {
+            fn read(&self, resolved: &str) -> Result<String, String> {
+                std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+            }
+            fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+                let mut names: Vec<String> = std::fs::read_dir(resolved)
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                Ok(names)
+            }
+        }
+        // Canonical, slash-separated, and the same spelling the loader resolves
+        // an import to. A root passed in as `<crate>/../../std/x.vyrn` and the
+        // same file reached through an import are two strings for one file, and
+        // the count would double every module every root reaches.
+        let slashed = |p: &std::path::Path| {
+            p.canonicalize()
+                .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+                .to_string_lossy()
+                .replace('\\', "/")
+                .replace("//?/", "")
+        };
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let std_root = slashed(&repo.join("std"));
+        let repo_prefix = format!("{}/", slashed(&repo));
+
+        let mut files = Vec::new();
+        crate::own::tests::sources("examples", &mut files);
+        crate::own::tests::sources("std", &mut files);
+        files.sort();
+
+        let mut seen: HashSet<(String, usize, String, &'static str)> = HashSet::new();
+        let mut rows: Vec<(String, ProjectionSite)> = Vec::new();
+        let (mut linked, mut unlinkable) = (0, Vec::new());
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let root_key = slashed(path);
+            let opts = crate::loader::LoadOptions {
+                std_root: Some(std_root.clone()),
+                ..Default::default()
+            };
+            let Ok(program) = crate::loader::load(&src, &root_key, &opts, &Disk) else {
+                unlinkable.push(root_key);
+                continue;
+            };
+            linked += 1;
+            for s in projection_sites(&program) {
+                let file = s.module.clone().unwrap_or_else(|| root_key.clone());
+                let key = (file.clone(), s.line, s.path.clone(), s.kind);
+                if seen.insert(key) {
+                    rows.push((file, s));
+                }
+            }
+        }
+        rows.sort_by(|a, b| (&a.0, a.1.line).cmp(&(&b.0, b.1.line)));
+
+        let count = |kind: &str, heap: bool| {
+            rows.iter()
+                .filter(|(_, s)| s.kind == kind && s.owns_heap == heap)
+                .count()
+        };
+        let unknown = |kind: &str| {
+            rows.iter()
+                .filter(|(_, s)| s.kind == kind && s.ty == "?")
+                .count()
+        };
+        let (stores, returns) = (count("store", true), count("return", true));
+        println!(
+            "corpus: {} files, {linked} linked ({} would not link)",
+            files.len(),
+            unlinkable.len()
+        );
+        for f in &unlinkable {
+            println!("    not linked: {f}");
+        }
+        println!("RFC-0092 projection sites the rule would refuse");
+        println!("  stores:  {stores}  (+{} scalar)", count("store", false));
+        println!("  returns: {returns}  (+{} scalar)", count("return", false));
+        println!("  total:   {}", stores + returns);
+        println!(
+            "  unnameable even linked, so counted as scalar: {} store, {} return",
+            unknown("store"),
+            unknown("return")
+        );
+        // An element read is a projection the RFC's three sites do not reach —
+        // see [`element_path`]. Reported beside the bill, not inside it.
+        println!(
+            "  element reads, outside the three sites: {} store (+{} scalar), {} return (+{} scalar)",
+            count("elem-store", true),
+            count("elem-store", false),
+            count("elem-return", true),
+            count("elem-return", false)
+        );
+        for (file, s) in &rows {
+            let name = file.strip_prefix(&repo_prefix).unwrap_or(file);
+            let cost = if s.owns_heap { "*" } else { " " };
+            println!(
+                "  {cost} {:<7} {name}:{} {}: `{}` -> {} [{}]",
+                s.kind, s.line, s.func, s.path, s.into, s.ty
+            );
+        }
+        assert!(
+            stores + returns <= 300,
+            "RFC-0092 M0 gate: {} sites is over 300 — ship the return path only",
+            stores + returns
+        );
     }
 
     #[test]

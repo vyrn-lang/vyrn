@@ -219,6 +219,16 @@ impl Owned {
         self.linear_kind(ty).is_some()
     }
 
+    /// Whether `ty` transitively owns heap, against this program's declarations.
+    ///
+    /// Not the same question as [`Owned::release_kind`] answering `Some`, and
+    /// the gap between the two is every row RFC-0092 M3 adds: a record owns two
+    /// Strings and has no release rule. [`Leak::NoRelease`] needs both answers to
+    /// word itself.
+    pub fn owns_heap(&self, ty: &Type) -> bool {
+        owns_heap(ty, &self.types)
+    }
+
     /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
     ///
     /// A **declared** row wins over the seed, so `impl Owned for T` is what `T`
@@ -458,8 +468,16 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
 /// literal was never allocated.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Leak {
-    /// The type releases nothing. Carries the type, or `unknown`.
-    NoRelease(String),
+    /// The type releases nothing. Carries the type, or `unknown`, and whether
+    /// that type owns heap.
+    ///
+    /// One `None` from `release_kind` mints two different facts, and calling
+    /// them one thing made the printer contradict itself: `vyrn why --memory`
+    /// said "the type `Doc` owns no heap" about a record holding two Strings,
+    /// one line under "the caller owns the result". A scalar has nothing to
+    /// reclaim and is not a leak; a type that owns heap and has no release row
+    /// is the leak this arc is closing (RFC-0092 M0).
+    NoRelease { ty: String, owns_heap: bool },
     /// The binding names storage somebody else owns (rule 2). Carries what it
     /// is, in words.
     Borrowed(&'static str),
@@ -477,7 +495,8 @@ impl Leak {
     /// The reason with its lines and names removed, so a corpus of them groups.
     pub fn kind(&self) -> &'static str {
         match self {
-            Leak::NoRelease(_) => "the type owns no heap",
+            Leak::NoRelease { owns_heap: false, .. } => "the type owns no heap",
+            Leak::NoRelease { owns_heap: true, .. } => "the type has no release rule",
             Leak::Borrowed(_) => "it names somebody else's value",
             Leak::Region => "inside a `region`",
             Leak::Captured { .. } => "captured by a lambda or a spawn",
@@ -490,7 +509,14 @@ impl Leak {
 impl std::fmt::Display for Leak {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Leak::NoRelease(ty) => write!(f, "the type {ty} owns no heap"),
+            Leak::NoRelease {
+                ty,
+                owns_heap: false,
+            } => write!(f, "the type {ty} owns no heap"),
+            Leak::NoRelease {
+                ty,
+                owns_heap: true,
+            } => write!(f, "nothing releases the type {ty} yet"),
             Leak::Borrowed(what) => write!(f, "it is {what}"),
             Leak::Region => write!(f, "it is inside a `region` — the arena owns it"),
             Leak::Captured { line } => {
@@ -826,10 +852,13 @@ impl Emit<'_> {
         let row = self.lets.get(&id(s));
         let bty = row.and_then(|r| r.ty.as_ref());
         let Some(kind) = bty.and_then(|t| self.proto.release_kind(t)) else {
-            return Fate::Leaked(Leak::NoRelease(match bty {
-                Some(t) => t.to_string(),
-                None => "unknown".into(),
-            }));
+            return Fate::Leaked(Leak::NoRelease {
+                ty: match bty {
+                    Some(t) => t.to_string(),
+                    None => "unknown".into(),
+                },
+                owns_heap: bty.is_some_and(|t| self.proto.owns_heap(t)),
+            });
         };
         // A string literal lives in the data segment. Nothing allocated it and
         // nothing reclaims it (census §1).
