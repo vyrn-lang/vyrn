@@ -11127,8 +11127,9 @@ mod tests {
 
     /// A storage-heavy module: stored lambdas (with and without captures) in
     /// lets/arrays/records/Option/module state, a named source, composition,
-    /// a stored value passed into a v1 `fn`-typed parameter, and calls through
-    /// every storage form.
+    /// a stored value passed into a v1 `fn`-typed parameter — as a binding, as a
+    /// record FIELD, as an array ELEMENT and as a call's RESULT — and calls
+    /// through every storage form.
     const STORED: &str = "type M = fn(Int64) -> Int64\n\
         type Ops = { plus: M, minus: M }\n\
         let mut chain: Array<M> = []\n\
@@ -11150,7 +11151,10 @@ mod tests {
             let q = match o { Some(f) => f(1), None => 0 }\n\
             let m = chain[0]\n\
             let ys = twice([1, 2], h)\n\
-            return h(1) + named(2) + p(3) + q + m(4) + ys[0] }";
+            let zs = twice([1, 2], ops.minus)\n\
+            let ws = twice([1, 2], chain[1])\n\
+            let vs = twice([1, 2], makeAdder(7))\n\
+            return h(1) + named(2) + p(3) + q + m(4) + ys[0] + zs[0] + ws[0] + vs[0] }";
 
     #[test]
     fn stored_fn_values_lower_with_no_indirect_calls() {

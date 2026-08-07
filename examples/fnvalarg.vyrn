@@ -1,0 +1,100 @@
+/// Passing a stored `fn` value FROM WHERE IT IS STORED (RFC-0037 × RFC-0023):
+/// a record field, an array element, a generic container's field, and a call's
+/// result all go straight into a `fn`-typed parameter. A stored value carries
+/// its own tag and the specialized instance dispatches on that tag, so the call
+/// site needs no static name — the `let` this used to demand was moving the same
+/// `{ tag, captures }` pair through a slot and nothing else.
+///
+/// The last case is the one with teeth. A `fn`-typed argument can now be an
+/// expression that PRINTS, and the direct wasm backend used to push its operand
+/// after every ordinary argument — so `apply(sideFn(), sideInt())` printed in
+/// the other order there. The specialization now takes its captures at the `fn`
+/// parameter's own place, and all three engines evaluate left to right.
+
+import { map } from "std/arrays"
+
+type IntFn = fn(Int64) -> Int64
+
+type Holder = { f: IntFn }
+
+type Nest = { inner: Holder }
+
+type Deferred<P, T> = { run: fn(P) -> T }
+
+fn addTen(x: Int64) -> Int64 {
+    return x + 10
+}
+
+fn apply(g: fn(Int64) -> Int64, v: Int64) -> Int64 {
+    return g(v)
+}
+
+/// `run` is the only place `P` occurs, so the call solves it from the FIELD's
+/// declared type — the RFC-0071 M2b rule, reached without a name to read.
+fn callWith<P, T>(run: fn(P) -> T, p: P) -> T {
+    return run(p)
+}
+
+fn defer<P, T>(run: consume fn(P) -> T) -> Deferred<P, T> {
+    return Deferred { run: run }
+}
+
+fn scale(by: Int64) -> fn(Int64) -> Int64 {
+    let g: fn(Int64) -> Int64 = |n| n * by
+    return g
+}
+
+fn label(n: Int64) -> String {
+    return "n=\{n}"
+}
+
+fn sideFn() -> fn(Int64) -> Int64 {
+    print("first")
+    return addTen
+}
+
+fn sideInt() -> Int64 {
+    print("second")
+    return 30
+}
+
+fn main() -> Int64 {
+    // A record field holding a named function.
+    let h: Holder = Holder { f: addTen }
+    print(apply(h.f, 30)) // 40
+
+    // A record field holding a lambda WITH a capture: the capture block belongs
+    // to the field, and passing it reads the pair without copying or freeing.
+    let cap: Holder = Holder { f: scale(5) }
+    print(apply(cap.f, 30)) // 150
+    print(apply(cap.f, 4)) // 20
+
+    // A field of a field.
+    let nest: Nest = Nest { inner: cap }
+    print(apply(nest.inner.f, 2)) // 10
+
+    // An array element.
+    let fns: Array<IntFn> = [addTen, scale(3)]
+    print(apply(fns[0], 30)) // 40
+    print(apply(fns[1], 30)) // 90
+
+    // A call's result, straight into the parameter.
+    print(apply(scale(7), 3)) // 21
+
+    // A generic container's field, where the parameter type is the only place
+    // the type parameter occurs.
+    let d = defer(label)
+    print(callWith(d.run, 12)) // n=12
+
+    // A generic higher-order call: the outbound parameter solves from the
+    // field's own return type.
+    let nums: Array<Int64> = [1, 2, 3]
+    let out = map(nums, h.f)
+    print(out[0]) // 11
+    print(out[2]) // 13
+
+    // Evaluation order: the `fn` argument runs before the ordinary one.
+    print(apply(sideFn(), sideInt())) // first, second, 40
+
+    return 0
+}
