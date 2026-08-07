@@ -362,6 +362,8 @@ carried the ownership fact — see the note under Phase 9.
   closed** — the replacement trap is `panic("slots: handle is not alive")` and
   `panic` lowers to `error: %s` with no line, which was checked by running the
   example after the first draft claimed otherwise. The gap is RFC-0079's now.
+  (It closed after the arc: the loader stamps the site, and the same run prints
+  `(std/slots.vyrn:189)`.)
   **The runtime surface is malloc, REALLOC, free and memcpy** — the plan's
   three-word version was one short. `realloc` is how an `Array` and a `String`
   grow in place, and `region`'s arena survives as RFC-0004 §4's Path A. What went
@@ -428,8 +430,15 @@ not.** Phase 8e replaced the message with `panic("slots: handle is not alive")`,
 which is better in one way — a library author owns the wording — and no better in
 the other: `panic` lowers to `error: %s` and carries no source position on any
 engine. 8e checked this by running `examples/slots.vyrn` after its own first draft
-claimed otherwise. U5 is **narrowed, not closed**, and it stays in the census as
+claimed otherwise. U5 was **narrowed, not closed**, and it stayed in the census as
 RFC-0079's gap.
+
+**It is closed now, after the arc.** The loader stamps every `panic` with the
+file and line it is written at, so `examples/slots.vyrn` ends in
+`error: slots: handle is not alive (std/slots.vyrn:189)` on all three engines.
+The site travels as a string literal in the AST, which is what makes the three
+engines agree and what lets a wasm module carry a path it cannot look up at run
+time. Corpus wasm +0.59%, corpus text IR +0.33%, a native hello-world unchanged.
 
 ## Phase 10 — the tail. Two rows, and both corrected the brief.
 

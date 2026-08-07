@@ -61,6 +61,12 @@ fn string_predicate_pins_hold() {
 /// and this says which offset and why. `?? panic` in a library is deterministic
 /// text, so parity still compares it byte for byte — `nullish_and_panic_say_the_
 /// same_bytes_on_all_three_engines` is the three-engine half of this.
+///
+/// The `(std/strings.vyrn:NN)` suffix is census U5: a `panic` names where it is
+/// WRITTEN, so this reports the library and not the `substring(..)` call above.
+/// The line numbers are part of the pin. Moving `substring` in `std/strings`
+/// fails this test, which is the point — a location that drifts silently is worth
+/// less than no location.
 #[test]
 fn substring_names_the_offset_it_refused() {
     let dir = std::env::temp_dir().join("vyrn-strpred");
@@ -71,35 +77,35 @@ fn substring_names_the_offset_it_refused() {
             "hello",
             "3",
             "2",
-            "error: substring: byte offset 2 is out of range for a String of 5 bytes",
+            "error: substring: byte offset 2 is out of range for a String of 5 bytes (std/strings.vyrn:91)",
         ),
         (
             "oob_end_past_len",
             "hello",
             "0",
             "6",
-            "error: substring: byte offset 6 is out of range for a String of 5 bytes",
+            "error: substring: byte offset 6 is out of range for a String of 5 bytes (std/strings.vyrn:91)",
         ),
         (
             "oob_negative_start",
             "hello",
             "-1",
             "2",
-            "error: substring: byte offset -1 is out of range for a String of 5 bytes",
+            "error: substring: byte offset -1 is out of range for a String of 5 bytes (std/strings.vyrn:91)",
         ),
         (
             "split_end_in_2byte",
             "héllo",
             "0",
             "2",
-            "error: substring: byte offset 2 is inside a multi-byte UTF-8 character",
+            "error: substring: byte offset 2 is inside a multi-byte UTF-8 character (std/strings.vyrn:94)",
         ),
         (
             "split_both_in_3byte",
             "日本語",
             "1",
             "2",
-            "error: substring: byte offset 1 is inside a multi-byte UTF-8 character",
+            "error: substring: byte offset 1 is inside a multi-byte UTF-8 character (std/strings.vyrn:94)",
         ),
     ] {
         let path = dir.join(format!("{name}.vyrn"));

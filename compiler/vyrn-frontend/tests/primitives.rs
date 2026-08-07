@@ -237,6 +237,11 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@f64x2Splat", View, "RFC-0083 M4: one value into both lanes"),
     // ---- Control: abort, and waiting -----------------------------------------
     ("panic", Control, "RFC-0079: the abort itself, and the only irreducible row here"),
+    // Census U5. Not a second abort: the same one, with the file and line the
+    // loader stamped on it. It is a second NAME so that no source can write it —
+    // `@` does not lex — which is what keeps `panic` a one-argument builtin in
+    // the surface language while the engines read two.
+    ("@panicAt", Control, "census U5: `panic` carrying the site it is written at"),
     ("assert", Control, "RFC-0015: traps the current test"),
     ("assertEq", Control, "RFC-0015: traps, rendering both sides"),
     ("@join", Control, "waits for a task (the interpreter's are eager, so identity)"),
@@ -535,7 +540,13 @@ fn the_census_is_the_code() {
     // drop the census has recorded — the only other row that ever left was
     // `afree`, alone. Nothing replaced them in the core: `std/slots` is a Vyrn
     // library, so the primitive count went down by four and stayed down.
-    assert_eq!(found.len(), 90, "the primitive core changed size");
+    // 90 -> 91 when census U5 gave `panic` a source location. The one row the
+    // count gains that is NOT a new capability: `@panicAt` aborts exactly as
+    // `panic` does and differs only in carrying the site the loader stamped. It
+    // is here because the surface `panic` must stay a one-argument builtin, and
+    // an unspellable second name is how a compiler-written argument arrives
+    // without becoming an undocumented one users can write.
+    assert_eq!(found.len(), 91, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

@@ -701,7 +701,10 @@ fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
 
 /// Apply `f` to every expression node in `b`, innermost-last: `f` sees a node
 /// after its children, so a substituted expression is never re-walked.
-fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
+///
+/// `pub(crate)` since census U5: the loader stamps every `panic` with its source
+/// site and needs the same complete walk this one already is.
+pub(crate) fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
     for s in &mut b.stmts {
         walk_stmt(s, f);
     }

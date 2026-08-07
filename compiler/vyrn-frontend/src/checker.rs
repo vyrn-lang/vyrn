@@ -5165,8 +5165,12 @@ impl<'a> Checker<'a> {
         // at the site that knows it — the compiler owns only the `error: `
         // prefix and the newline, so a panic line is indistinguishable from a
         // trap line and the channel stays uniform.
-        if name == "panic" {
-            if args.len() != 1 {
+        // The stamped form (census U5) is the same rule with the site appended:
+        // a string literal the loader wrote, never checked against anything a
+        // user could get wrong, because `@panicAt` does not lex.
+        if crate::ast::is_panic(name) {
+            let want = if name == "panic" { 1 } else { 2 };
+            if args.len() != want {
                 return Err(format!(
                     "line {line}: `panic` takes 1 String argument, got {}",
                     args.len()

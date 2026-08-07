@@ -934,7 +934,14 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // above already prints through `fprintf` for the traps that interpolate,
     // and `%s` is safe here — a Vyrn `String` cannot contain a NUL (RFC-0014).
     out.push_str(
-        "@.panic.fmt = private unnamed_addr constant [11 x i8] c\"error: %s\\0A\\00\"\n\n",
+        "@.panic.fmt = private unnamed_addr constant [11 x i8] c\"error: %s\\0A\\00\"\n",
+    );
+    // Census U5: the same frame with the site the loader stamped. A `panic`
+    // reports where it is WRITTEN — `std/slots.vyrn:189` — and the site travels
+    // as a pooled string literal, so a site costs one operand here and one
+    // string in `.rodata`, shared by every `panic` that spells the same place.
+    out.push_str(
+        "@.panic.at = private unnamed_addr constant [16 x i8] c\"error: %s (%s)\\0A\\00\"\n\n",
     );
     // RFC-0074 M3a. `serveStream` hands a producer to the HOST's accept loop, and
     // a compiled binary has no accept loop to hand it to — `vyrn serve` is the
@@ -979,10 +986,18 @@ pub fn emit(program: &Program) -> Result<String, String> {
          \x20 call void @exit(i32 1)\n\
          \x20 unreachable\n\
          }\n\n\
-         define internal void @__vyrn_panic(ptr %m) noreturn cold {\n\
+         define internal void @__vyrn_panic(ptr %m, ptr %at) noreturn cold {\n\
          entry:\n\
          \x20 %e = call ptr @__vyrn_stderr()\n\
+         \x20 %bare = icmp eq ptr %at, null\n\
+         \x20 br i1 %bare, label %nosite, label %sited\n\
+         sited:\n\
+         \x20 call i32 (ptr, ptr, ...) @fprintf(ptr %e, ptr @.panic.at, ptr %m, ptr %at)\n\
+         \x20 br label %out\n\
+         nosite:\n\
          \x20 call i32 (ptr, ptr, ...) @fprintf(ptr %e, ptr @.panic.fmt, ptr %m)\n\
+         \x20 br label %out\n\
+         out:\n\
          \x20 call void @exit(i32 1)\n\
          \x20 unreachable\n\
          }\n\n",
@@ -7431,9 +7446,18 @@ impl<'a> Gen<'a> {
         // lands in code no execution reaches. `poison` is that value: valid at
         // every LLVM type, which is what makes a panicking `match` arm need no
         // special case in the merge.
-        if name == "panic" {
+        if vyrn_frontend::ast::is_panic(name) {
             let (v, _) = self.gen_expr(&args[0])?;
-            self.emit(format!("call void @__vyrn_panic(ptr {v})"));
+            // Census U5: the site is a pooled string literal the loader stamped,
+            // so it costs one more operand on the call and nothing per site in
+            // code. `null` is a program that reached a backend without the
+            // loader — only this crate's own tests do — and the cold tail
+            // branches on it rather than a second tail existing.
+            let at = match args.get(1) {
+                Some(a) => self.gen_expr(a)?.0,
+                None => "null".to_string(),
+            };
+            self.emit(format!("call void @__vyrn_panic(ptr {v}, ptr {at})"));
             self.emit_term("unreachable".into());
             let dead = self.fresh_label("panic.dead");
             self.emit_label(&dead);

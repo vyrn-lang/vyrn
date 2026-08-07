@@ -1675,7 +1675,7 @@ impl MoveCheck<'_> {
             // types; `panic` is reserved, so no user function can be it.
             Stmt::Expr(e) => self
                 .expr(e, consumed, scope)
-                .map(|_| matches!(e, Expr::Call { name, .. } if name == "panic")),
+                .map(|_| matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name))),
             // A `region` is an ordinary nested block for move checking; it
             // diverges iff its body does (a `break` inside it exits the loop).
             Stmt::Region { body, .. } => Ok(self.block(body, consumed, scope)),
@@ -2536,7 +2536,7 @@ mod streams {
     fn diverges(stmts: &[Stmt]) -> bool {
         stmts.iter().any(|s| match s {
             Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
-            Stmt::Expr(Expr::Call { name, .. }) => name == "panic",
+            Stmt::Expr(Expr::Call { name, .. }) => crate::ast::is_panic(name),
             Stmt::If {
                 then_block,
                 else_block,

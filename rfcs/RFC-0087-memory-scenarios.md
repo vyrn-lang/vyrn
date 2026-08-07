@@ -214,10 +214,10 @@ six corpus programs that were written against `Ref<T>` — all still run, on
 
 **The old issue, and what happened to it.** A use-after-release was a run-time
 trap rather than a compile error, and RFC-0004 §5.2 accepted that price for
-aliasing with no annotations. A dead-handle use is still a run-time trap, and it
-still has no location — see U5 below, which is narrowed rather than closed. What
-did change is that a `Slots` also catches a handle used against the WRONG
-container, which one global slab could not.
+aliasing with no annotations. A dead-handle use is still a run-time trap. It
+names `std/slots.vyrn:189` since U5 closed. What did change is that a `Slots`
+also catches a handle used against the WRONG container, which one global slab
+could not.
 
 The compile-time answer for the aliased case is still region borrowing, and it is
 still not designed.
@@ -686,7 +686,7 @@ a bare `Array<String>`, `slotsContainer` steady on the same String in a `Slots`.
 
 ---
 
-## U5. The one runtime failure has no location — NARROWED, not closed
+## U5. The one runtime failure has no location — CLOSED
 
 The message was `error: reference used after release`: no line, no binding name,
 no origin, emitted from hand-written IR that no source position reached. RFC-0006
@@ -709,6 +709,36 @@ the one this census opened with, and it belongs to RFC-0079 rather than here.
 claimed `panic` carried a location because it is a language construct at a source
 site. Running `examples/slots.vyrn` printed `error: slots: handle is not alive`
 and nothing else. A claim about a diagnostic is worth running.
+
+### Closed after the arc
+
+`examples/slots.vyrn` now ends in
+`error: slots: handle is not alive (std/slots.vyrn:189)`, on the interpreter, on
+the native binary and on wasm, byte for byte.
+
+**The loader stamps the site.** `panic(msg)` becomes `@panicAt(msg,
+"file:line")` as a module is entered. That pass is the only one that knows both
+halves: the parser knows the line and not the file, and every stage after the
+loader knows neither, because a `place` projection is cloned into its access site
+and a generic is cloned per instantiation. The site then travels as an ordinary
+string literal in the argument list, which is why the three engines agree — they
+read one fact rather than each deriving one — and why wasm can carry a location
+at all, having no filesystem at run time.
+
+**The site is where the `panic` is WRITTEN, including in a library.** A dead
+handle reports `std/slots.vyrn:189` and not the `people[h]` that reached it. The
+caller's line is reachable: `project::inline` receives the access-site line, and
+a projection is inlined into the caller. It is not taken because it would be
+uniform for projections and for nothing else — an ordinary library function is
+not inlined and has no access site to name — and one construct would then mean
+two things depending on how its callee happened to be written. RFC-0079 records
+this as the open question it now is.
+
+**Measured, because Phase 8d made trap-site size a stated property.** Corpus
+wasm +0.59%, corpus text IR +0.33%, a native hello-world unchanged. The wasm site
+costs nothing in code: the site is fused into the constant the shared `trap`
+already receives, so `"\n"` becomes `" (std/slots.vyrn:189)\n"` and the three
+calls stay three calls.
 
 ---
 
@@ -818,7 +848,7 @@ rule, and the type is in the module.
 | 2 | **U2** no way to copy | the only fix for a use-after-free is a trick that leaks | **CLOSED.** `x.copy()` (RFC-0089 M1b), a protocol since RFC-0091 M1, named by every refusal, and applied by `vyrn fix` (Phase 9) |
 | 3 | **U10** the extern boundary cannot be declared | the one place the answer is required | **CLOSED.** Ownership by rule (RFC-0089 M3b), type by the `vyrn:exports` section (RFC-0012 M3) |
 | 4 | **U8** a declared container cannot be read | `impl Owned` is shipped and not yet usable | **CLOSED in practice.** Phase 4c deleted the escape walker that removed a read receiver from `droppable`, and `std/slots` is a declared container the corpus reads on every call |
-| 5 | **U5** the failure message has no location | the worst moment to say the least | **NARROWED, not closed.** RFC-0090 M4 replaced the message with `panic("slots: handle is not alive")`, which a library author owns — but `panic` lowers to `error: %s` with no line on any engine. RFC-0079's gap now |
+| 5 | **U5** the failure message has no location | the worst moment to say the least | **CLOSED.** `error: slots: handle is not alive (std/slots.vyrn:189)` on all three engines. The loader stamps `panic(msg)` into `@panicAt(msg, "file:line")`, so the site travels as data in the AST |
 | 6 | **U4** an element is unreclaimable | the largest silent restriction | **HALF, and the other half is correct.** A DECLARED container reaches its elements (Phase 8b); a built-in `Array<T>` cannot say whether it owns them, and `m.keys()` is the view a per-element release would free twice |
 | 7 | **U7** `consume` and linearity are two things | the surface implies one | **OPEN.** RFC-0086 M3. The arc did not touch it, and the decision it asks for is still undecided |
 | 8 | **U6** the arena excludes its own case | the model's best tool is unreachable | **OPEN.** RFC-0004 Q3, undesigned. Path B went; Path A's arena stayed |
@@ -828,11 +858,12 @@ rule, and the type is in the module.
 four names it was about are deleted (RFC-0090 M4) and the replacement is
 subject-first by construction. Ten gaps, nine now.
 
-**U5 did NOT leave with it.** The plan said U3 and U5 both went with Path B in
-Phase 8e. U3 did. U5 is narrowed: the message it names is gone, and the missing
-line is still missing, one level down. Phase 8e checked by running
-`examples/slots.vyrn` after a first draft claimed otherwise, and the output was
-`error: slots: handle is not alive` and nothing else.
+**U5 did NOT leave with it, and then it did.** The plan said U3 and U5 both went
+with Path B in Phase 8e. U3 did. U5 was narrowed: the message it named was gone,
+and the missing line was still missing, one level down. Phase 8e checked by
+running `examples/slots.vyrn` after a first draft claimed otherwise, and the
+output was `error: slots: handle is not alive` and nothing else. It closed after
+the arc, on its own, in the entry below.
 
 **U1 and U2 change how the language feels.** U1 costs a printer over data that
 already exists. U2 costs one builtin. Neither needs a new analysis, and between
@@ -1126,11 +1157,11 @@ key pointers, which a per-element release would free twice. The answer moved fro
 has nothing to declare it with" — and `slotsContainer` is the row that proves the
 declaration works. This is a restriction, recorded, not a defect to chase.
 
-Beside the three rows, four design questions are open and undesigned: **§5/U6**
+Beside the three rows, three design questions are open and undesigned: **§5/U6**
 inferred regions (RFC-0004 Q3), **§7/U7** linearity as a declaration (RFC-0086
 M3, and the undecided question of whether `consume` and `impl Owned` should be one
-declaration), **§10** the native spawn frame, and **U5** — `panic` has no source
-location on any engine, which is RFC-0079's.
+declaration), and **§10** the native spawn frame. **U5** was the fourth and is
+closed: `panic` names the file and line it is written at, on all three engines.
 
 ### §10, measured
 
