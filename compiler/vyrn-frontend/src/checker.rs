@@ -4080,14 +4080,30 @@ impl<'a> Checker<'a> {
                 subst.retain(|_, arg| !self.mentions_open_param(arg));
             }
         }
-        for (fname, value) in fields {
-            let field = rfields
-                .iter()
-                .find(|f| &f.name == fname)
-                .ok_or_else(|| format!("line {line}: record `{name}` has no field `{fname}`"))?;
+        // Names first, in the order they were written, so those two messages
+        // still report the field the reader's eye reaches first.
+        for (fname, _) in fields {
+            if !rfields.iter().any(|f| &f.name == fname) {
+                return Err(format!("line {line}: record `{name}` has no field `{fname}`"));
+            }
             if !provided.insert(fname.clone()) {
                 return Err(format!("line {line}: field `{fname}` set twice"));
             }
+        }
+        // The solve runs in DECLARED order, not the order the literal wrote its
+        // fields. Both backends emit a literal's fields in declared order (see
+        // `Codegen::gen_struct_lit` and `Fn_::applied_record`) and solve each
+        // parameter from the value as they go, so a checker that walked the
+        // LITERAL's order answered a different question than the one the
+        // backends ask. Field order then decided twice, in opposite directions:
+        // `G { tag: "x", width: widthOf }` for `type G<T> = { width: fn(T) ->
+        // Int64, tag: T }` checked and then emitted `width` at the still-open
+        // `fn(T) -> Int64` — invalid IR — while its mirror was refused for a
+        // program both backends can build. One order, and the two agree.
+        for field in &rfields {
+            let Some((_, value)) = fields.iter().find(|(fname, _)| fname == &field.name) else {
+                continue; // reported below as a missing field
+            };
             let fty = crate::types::substitute(&field.ty, &subst);
             let vty = self.expr(value, scope, Some(&fty), fn_ret)?;
             self.unify(&field.ty, &vty, &mut subst, line)?;
@@ -12751,6 +12767,56 @@ mod tests {
                 "{head}fn main() -> Int64 {{ let d = {lit}\n return 0 }}"
             ));
             assert!(r.is_ok(), "{lit}: {r:?}");
+        }
+    }
+
+    /// The same rule for a `fn`-typed field, which is the carrier that broke it.
+    /// A stored `fn` needs a solved signature, so `width` reads whatever `tag`
+    /// settled — and it has to read the same thing whichever order the literal
+    /// wrote the two. The mirror used to be refused.
+    #[test]
+    fn a_fn_field_reads_the_same_solve_in_either_literal_order() {
+        let head = "type G<T> = { tag: T, width: fn(T) -> Int64 }\n\
+                    fn widthOf(s: String) -> Int64 { return 1 }\n";
+        for lit in [
+            "G { tag: \"x\", width: widthOf }",
+            "G { width: widthOf, tag: \"x\" }",
+        ] {
+            let r = check_src(&format!(
+                "{head}fn main() -> Int64 {{ let g = {lit}\n return 0 }}"
+            ));
+            assert!(r.is_ok(), "{lit}: {r:?}");
+        }
+    }
+
+    /// DECLARED order is the order that decides, because it is the order both
+    /// backends emit a literal's fields in. With the `fn` field declared FIRST
+    /// nothing has solved `T` when the value must be placed, so both literal
+    /// orders are refused — and the refusal is the point: the first of them used
+    /// to check and then emit `alloca { { i64, i64 }, void }`.
+    #[test]
+    fn a_fn_field_declared_before_its_solver_is_refused_in_either_order() {
+        let head = "type G<T> = { width: fn(T) -> Int64, tag: T }\n\
+                    fn widthOf(s: String) -> Int64 { return 1 }\n";
+        for lit in [
+            "G { tag: \"x\", width: widthOf }",
+            "G { width: widthOf, tag: \"x\" }",
+        ] {
+            let e = check_src(&format!(
+                "{head}fn main() -> Int64 {{ let g = {lit}\n return 0 }}"
+            ))
+            .unwrap_err();
+            assert!(e.contains("nothing has solved `T` here"), "{lit}: {e}");
+        }
+        // The annotation IS the fix, and it works in either order.
+        for lit in [
+            "G { tag: \"x\", width: widthOf }",
+            "G { width: widthOf, tag: \"x\" }",
+        ] {
+            let ok = check_src(&format!(
+                "{head}fn main() -> Int64 {{ let g: G<String> = {lit}\n return 0 }}"
+            ));
+            assert!(ok.is_ok(), "{lit}: {ok:?}");
         }
     }
 

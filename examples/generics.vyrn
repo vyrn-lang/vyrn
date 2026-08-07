@@ -31,6 +31,16 @@ type Fixed<T> = { xs: Array<T, 2> }
 type Small<T> = { xs: SmallArray<T, 4> }
 type Outcome<T> = { r: Result<T, String> }
 
+// A stored `fn` needs a solved signature before the value can be placed, so
+// `tag` is what settles `T` for `width`. The order the LITERAL writes the two
+// does not decide that; the order the record DECLARES them does, because both
+// backends emit a literal's fields in declared order.
+type Tagged<T> = { tag: T, width: fn(T) -> Int64 }
+
+fn widthOf(s: String) -> Int64 {
+    return 7
+}
+
 fn unbox<T>(b: Box<T>) -> T {
     return b.value
 }
@@ -100,6 +110,13 @@ fn main() -> Int64 {
     print(small.xs[0]) // 8
     let outcome = Outcome { r: Ok(9) }
     print(match outcome.r { Ok(v) => v, Err(m) => 0 }) // 9
+    // The `fn`-typed field, written both ways round. The second spelling was
+    // refused until the solve stopped following the literal's own order.
+    let t1 = Tagged { tag: "ab", width: widthOf }
+    let t2 = Tagged { width: widthOf, tag: "cde" }
+    let w1 = t1.width
+    let w2 = t2.width
+    print(w1(t1.tag) + w2(t2.tag)) // 14
 
     let a = Wrap(41) // Opt<Int64>, inferred from the payload
     let b: Opt<Int64> = Empty // a nullary variant takes its type from context
