@@ -3226,8 +3226,8 @@ fn main() -> Int64 {
     assert_eq!(rows[0].1, "n=7\nrégion\n", "the live arm ran, and the region printed");
     assert_eq!(
         rows[0].2,
-        "error: wrøng tag «bäd» — nothing to label\n",
-        "the caller's text, framed by the compiler"
+        "error: wrøng tag «bäd» — nothing to label (bytes.vyrn:5)\n",
+        "the caller's text, framed by the compiler, with the site the loader stamped"
     );
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
 
@@ -3253,7 +3253,11 @@ fn main() -> Int64 {
     );
     all_agree(&rows, "region");
     assert_eq!(rows[0].1, "hëld\n", "the region's own String survived to be printed");
-    assert_eq!(rows[0].2, "error: inside two regions, 1 deep\n", "the message, in full");
+    assert_eq!(
+        rows[0].2,
+        "error: inside two regions, 1 deep (region.vyrn:9)\n",
+        "the message, in full"
+    );
     assert_eq!(rows[0].3, Some(1));
 
     // Every shape `Never` has to flow through, with the panic NOT taken — so what
@@ -3319,6 +3323,72 @@ fn main() -> Int64 {
     );
     assert_eq!(rows[0].2, "", "nothing panicked");
     assert_eq!(rows[0].3, Some(0), "exit 0");
+}
+
+/// A `panic` in a LIBRARY reports the library, on all three engines (census U5).
+///
+/// This is the decision the census entry rested on, so it is pinned rather than
+/// described. `c[9]` is written in `site.vyrn`; the refusal is written in
+/// `bank.vyrn`, inside a `place at` projection — which RFC-0091 M2 inlines INTO
+/// the access site, so at the moment each engine emits the trap the caller's
+/// line is the one in hand. The location says `bank.vyrn:10` anyway.
+///
+/// The reason is uniformity. A `panic` inside an ordinary library function is
+/// not inlined and has no access site to name, so a caller-line rule would apply
+/// to projections and to nothing else: one construct, two meanings, decided by
+/// whether the callee happened to be a projection. The caller's line is
+/// reachable — `project::inline` already receives it — and is not taken.
+///
+/// The file name is derived from the project's shape, never from the resolved
+/// key: `bank.vyrn`, not the absolute path this harness builds under. That is
+/// what lets a wasm module carry a location at all — it has no filesystem at run
+/// time, so the only path it can have is the one baked at compile time, and a
+/// baked absolute path would differ per build machine.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_panic_in_a_library_names_the_library() {
+    let dir = std::env::temp_dir().join("vyrn-parity-panicsite");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("bank.vyrn"),
+        r#"export type Cage = { xs: Array<Int64> }
+
+export fn newCage() -> Cage {
+    return Cage { xs: [1, 2] }
+}
+
+impl Index for Cage {
+    place at(read self, k: Int64) -> Int64 {
+        if k < 0 || k >= self.xs.length {
+            panic("cage: no such key")
+        }
+        yield self.xs[k]
+    }
+}
+"#,
+    )
+    .unwrap();
+    let rows = three_engines(
+        "panicsite",
+        "site",
+        r#"import { Cage, newCage } from "./bank"
+
+fn main() -> Int64 {
+    let c = newCage()
+    print(c[1])
+    print(c[9])
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "panicsite");
+    assert_eq!(rows[0].1, "2\n", "the live access answered before the dead one refused");
+    assert_eq!(
+        rows[0].2,
+        "error: cage: no such key (bank.vyrn:10)\n",
+        "the projection's own file and line, not the access site's"
+    );
+    assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
 }
 
 /// `??` on both sums, on all three engines (RFC-0079 M2).
@@ -3390,8 +3460,8 @@ fn main() -> Int64 {
     assert!(!rows[0].1.contains("bad «"), "an error payload reached stdout");
     assert_eq!(
         rows[0].2,
-        "error: no number in «tvä»\n",
-        "the only text on stderr is the reason the caller wrote"
+        "error: no number in «tvä» (both.vyrn:24)\n",
+        "the only text on stderr is the reason the caller wrote, and where they wrote it"
     );
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
 }
