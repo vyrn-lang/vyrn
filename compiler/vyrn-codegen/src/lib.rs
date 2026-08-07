@@ -8946,6 +8946,12 @@ impl<'a> Gen<'a> {
         // load its result from the frame's leading slot. Idempotent — a task
         // may be joined more than once (the shim only waits the first time and
         // the frame is never freed), exactly like the eager value semantics.
+        //
+        // The load below is why the frame cannot be freed here: `join` answers
+        // with the frame's ADDRESS and the result is read after the call, so a
+        // free at the first join would leave the second one reading freed
+        // memory. `toolchain::RUNTIME_SHIM` carries the rest of that reasoning
+        // and RFC-0087 §10 the measurement.
         if name == "@join" {
             let (v, ty) = self.gen_expr(&args[0])?;
             let inner = match self.resolve(&ty) {

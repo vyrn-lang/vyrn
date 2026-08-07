@@ -397,7 +397,20 @@ long long __vyrn_random_seed(void) {
 
    Ownership: task records and frames are never freed — a task may be joined
    more than once (join is idempotent), and the count is bounded by the number
-   of spawns (the "unproven ownership leaks, which is always safe" rule). */
+   of spawns (the "unproven ownership leaks, which is always safe" rule).
+
+   Read that as a decision, not an omission (RFC-0087 §10). __vyrn_join hands
+   the frame POINTER back and the caller loads the result off it, so a free at
+   the first join gives the second join a dangling read — and `t.join()` twice
+   is a legal program on all three engines. Copying the result into the record
+   at completion would let the frame go, but the record cannot go with it: any
+   surviving Task value may still be joined, so the growth stays linear and only
+   the constant moves. Measured at 81 bytes per spawn, plus one event handle.
+
+   What closes it is knowing that no further join can happen — ownership of the
+   Task value, which is RFC-0091's declared release pointed at a task. Then the
+   frame, the record and the event object all go at one site. Until then this
+   leak is deliberate: a use-after-free on a joined task is the worse answer. */
 #if defined(__wasi__)
 typedef struct VTask { void* frame; } VTask;
 void* __vyrn_spawn(void (*thunk)(void*), void* frame) {

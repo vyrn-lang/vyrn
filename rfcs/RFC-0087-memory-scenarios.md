@@ -529,7 +529,7 @@ names a test.
 | 7 | **§2a** six expression forms never transfer | leak | **CLOSED**, Phase 4c — the expression's form stopped deciding; the type decides |
 | 8 | **§15** `bytes` and friends are not producers | leak | **CLOSED**, Phase 4c — same deletion; `views` is the remaining hand-written list, and it is the opposite direction |
 | 9 | **§16** a closure capture block is never freed | leak per lambda evaluation | **CLOSED.** Phase 10b: a `fn` value owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum. `lambdaLoop` is steady |
-| 10 | **§10** a spawn frame is never freed | bounded leak | **OPEN on native, absent on wasm.** The direct backend lowers `spawn f(a)` to `f(a)` and allocates no frame, so this harness cannot see it |
+| 10 | **§10** a spawn frame is never freed | bounded leak | **OPEN on native, absent on wasm.** The direct backend lowers `spawn f(a)` to `f(a)` and allocates no frame, so this harness cannot see it. Measured and diagnosed below |
 | 11 | **§5** regions are hand-placed | the model's best tool is rarely reachable | **OPEN.** RFC-0004 Q3, still undesigned. The arena survived Path B's deletion as Path A's second half |
 | 12 | **§6** use-after-release traps at run time | not compile-time | **STRUCK.** Path B is deleted (RFC-0090 M4); there is no `release` to use after |
 
@@ -1131,6 +1131,38 @@ inferred regions (RFC-0004 Q3), **§7/U7** linearity as a declaration (RFC-0086
 M3, and the undecided question of whether `consume` and `impl Owned` should be one
 declaration), **§10** the native spawn frame, and **U5** — `panic` has no source
 location on any engine, which is RFC-0079's.
+
+### §10, measured
+
+A loop of `let t = spawn work(i)` then `t.join()`, native, peak working set:
+1000 spawns 4392 KiB, 50000 spawns 8332 KiB, 200000 spawns 20120 KiB. That is
+**81 bytes per spawn**, linear, and the Windows handle count rises by one per
+spawn as well (19946 handles at 20000 spawns): the task record holds an event
+object that is created per task and closed never.
+
+The frame is about 32 of those 81 bytes. It cannot be freed at the first join.
+`__vyrn_join` hands the frame POINTER back and the caller loads the result off
+it, and `t.join()` twice is a legal program on all three engines — verified,
+both joins answer 42. A flag and a free at the first join gives the second join
+a dangling read.
+
+Two shapes were considered and neither closes the row:
+
+* **Copy the result into the task record at completion, then free the frame.**
+  Sound, and idempotent forever, but it needs the result's size at the shim's
+  ABI and it reclaims 32 of 81 bytes. The record itself still cannot be freed,
+  so the growth stays linear — a smaller constant, an unchanged order, and a
+  runtime the reader has to hold two lifetimes for.
+* **Free at the last join.** This is the one that works, and it is the design
+  change: it needs to know that no further join can happen, which is ownership
+  of the `Task<T>` value. Today `drop t` on a task is refused — "`drop` needs a
+  heap value ... but `t` is `Task<Int64>`" — so the mechanism RFC-0091 built for
+  a declared container has not been pointed at a task.
+
+So §10 stays open, and it is one question rather than two: give `Task<T>` a
+declared release and the frame, the record and the event handle all go with it.
+A documented bounded leak is the right state until then, because the failure
+mode of guessing is a use-after-free on a joined task.
 
 ## What the model is now, in one paragraph
 
