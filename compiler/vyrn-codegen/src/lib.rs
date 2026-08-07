@@ -23,6 +23,7 @@ use std::fmt::Write;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
+use vyrn_frontend::types::mentions_param;
 use vyrn_frontend::types::INT32;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
@@ -4507,6 +4508,13 @@ impl<'a> Gen<'a> {
                 // One expected type, coerced element-wise, answers all three: the
                 // outer `ArrayN -> Array`/`SmallArray` step then has `fi == ti` and
                 // is the pure reshape its comment already claims to be.
+                // ...but an expectation whose element type is still an unsolved
+                // parameter names the SHAPE only. `Deque { front: [2, 1] }`
+                // reaches here with `Array<T>` expected and `T` open, and
+                // building at that type emits `[2 x void]` — invalid IR. The
+                // elements answer for the element type there, and the enclosing
+                // literal's `solve_param` reads `T` back off the result.
+                let elem_expect = elem_expect.filter(|t| !mentions_param(t));
                 let build = (|| -> Result<(String, Type), String> {
                     let (ety, first) = if let Some(ety) = elem_expect.clone() {
                         let (v0, v0t) = self.gen_expr(&elems[0])?;
@@ -4565,6 +4573,9 @@ impl<'a> Gen<'a> {
                 if let Some(t) = &val_expect {
                     self.expect.push(t.clone());
                 }
+                // An unsolved parameter names no value type (see the array
+                // literal above) — the first value answers.
+                let val_expect = val_expect.filter(|t| !mentions_param(t));
                 let build = (|| -> Result<Type, String> {
                     let (kv0, _) = self.gen_expr(&entries[0].0)?;
                     let (v0, vty0) = self.gen_expr(&entries[0].1)?;
@@ -4676,7 +4687,9 @@ impl<'a> Gen<'a> {
             let r = self.gen_expr(value_expr);
             self.expect.pop();
             let (v, vty) = r?;
-            solve_param(&decl_f.ty, &vty, &mut solved);
+            if settles_type_args(value_expr) {
+                solve_param(&decl_f.ty, &vty, &mut solved);
+            }
             vals.push((v, vty));
         }
 
@@ -10552,21 +10565,26 @@ pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Ty
         }
         // Generic collection/reference element inference (RFC-0023): bind the
         // element type parameter from the concrete argument.
-        Type::Array(p) => {
-            if let Type::Array(a) = aty {
-                solve_param(p, a, subst);
-            }
-        }
+        // A LITERAL is a fixed `[N x T]` here whatever slot it is headed for —
+        // the growable and small-buffer shapes are reached by the reshape in
+        // `coerce`, after this solve names the element. So a growable or
+        // small-buffer parameter binds from a fixed actual too: without it
+        // `Deque { front: [2, 1] }` solved nothing, and the reshape then
+        // compared `Int64` against the unsolved `T` (whose `llt` is `void`),
+        // declined, and handed a `[2 x i64]` to a `{ptr,len,cap}` field.
+        Type::Array(p) => match aty {
+            Type::Array(a) | Type::ArrayN(a, _) => solve_param(p, a, subst),
+            _ => {}
+        },
         Type::ArrayN(p, _) => {
             if let Type::ArrayN(a, _) = aty {
                 solve_param(p, a, subst);
             }
         }
-        Type::SmallArray(p, _) => {
-            if let Type::SmallArray(a, _) = aty {
-                solve_param(p, a, subst);
-            }
-        }
+        Type::SmallArray(p, _) => match aty {
+            Type::SmallArray(a, _) | Type::ArrayN(a, _) => solve_param(p, a, subst),
+            _ => {}
+        },
         // A `Stream<T>` (RFC-0075) binds its element exactly as an `Array<T>`
         // does — it is the same three words. M2's combinators are the first
         // signatures with a type parameter inside a stream, and without this the
@@ -10783,6 +10801,23 @@ pub(crate) fn applied_type(
 /// Shared with the direct wasm backend, for [`applied_type`]'s reason — two
 /// backends seeding one construction differently would build two different
 /// types for one literal.
+/// Whether a field's value can settle a type parameter at all.
+///
+/// An empty `[]`/`[:]` reports a PLACEHOLDER element type — the representation
+/// is type-independent, so the element type is picked rather than known. Letting
+/// it settle the record's parameter binds the placeholder: `Deque { back: ["z"],
+/// front: [] }` solved `T = Int64` from the empty `front` (emitted first, in
+/// DECLARED order) and then stored a String pointer into an `i64` element. It
+/// settles nothing; a later field, or the site's expectation, answers. The
+/// checker reaches the same conclusion by a different road — there `[]` reports
+/// `Array<T>`, and a parameter bound to itself is dropped.
+///
+/// Shared with the direct wasm backend for [`expected_type_args`]'s reason.
+pub(crate) fn settles_type_args(e: &Expr) -> bool {
+    !matches!(e, Expr::ArrayLit { elems, .. } if elems.is_empty())
+        && !matches!(e, Expr::MapLit { entries, .. } if entries.is_empty())
+}
+
 pub(crate) fn expected_type_args(
     expected: Option<&Type>,
     name: &str,

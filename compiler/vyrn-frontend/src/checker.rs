@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use crate::ast::*;
 use crate::consteval::{self, ConstVal};
 use crate::diagnostics::Diagnostic;
+use crate::types::walk_type;
 use crate::types::FALLIBLE;
 
 /// Type-check the program, returning **all** problems found across functions
@@ -1783,6 +1784,38 @@ impl<'a> Checker<'a> {
             });
         }
         false
+    }
+
+    /// Does `ty` mention a type parameter that nothing has settled?
+    ///
+    /// A [`Type::Param`] in an *expectation* is information only when it is
+    /// **rigid** — a parameter of the function being checked, which stands for
+    /// the one type the caller picked. A parameter of a generic record whose
+    /// literal has not solved it yet stands for nothing: `Deque { front: [2, 1]
+    /// }` hands `Array<T>` down to the array literal with `T` still open, and
+    /// reading `T` as the element type reports the value against a type no
+    /// value has (`expected T, found Int64`). The value is the answer there,
+    /// not the error.
+    ///
+    /// This is the checker's half of the rule `expected_type_args` states for
+    /// the backends: the expectation is authority only for what it SETTLES.
+    ///
+    /// Rigidity is read off the current function's own type parameters. A
+    /// record parameter that shadows one by name (`type Pair<T>` inside `fn
+    /// f<T>`) reads as rigid — the two are the same type wherever the shadowing
+    /// literal type-checks, so the reading costs nothing.
+    fn mentions_open_param(&self, ty: &Type) -> bool {
+        let cur = self.cur_fn.borrow();
+        let rigid = self.generics.get(cur.as_str());
+        let mut found = false;
+        walk_type(ty, &mut |t| {
+            if let Type::Param(n) = t {
+                if !rigid.is_some_and(|ps| ps.contains(n)) {
+                    found = true;
+                }
+            }
+        });
+        found
     }
 
     /// Whether `from` may flow into `to` at a **value boundary** (a `let`
@@ -3858,12 +3891,20 @@ impl<'a> Checker<'a> {
                     _ => (None, false),
                 };
                 let first = self.expr(&elems[0], scope, elem_expected.as_ref(), fn_ret)?;
-                let elem_ty = elem_expected.unwrap_or(first.clone());
+                // The expectation still names the SHAPE (growable, fixed, small)
+                // even when its element type is an unsolved parameter, so it is
+                // handed to the first element either way. It is not the answer
+                // for the element type there — the first element is.
+                let elem_ty = match elem_expected {
+                    Some(t) if self.mentions_open_param(&t) => first.clone(),
+                    other => other.unwrap_or(first.clone()),
+                };
                 // Every element (including the first) is a value boundary into
                 // the element type — auto-validated when it is predicated.
                 if !self.coercible(&first, &elem_ty) {
                     return Err(format!(
-                        "line {line}: array elements must share a type: expected {elem_ty},                          found {first}"
+                        "line {line}: array elements must share a type: expected {elem_ty}, \
+                         found {first}"
                     ));
                 }
                 self.prove_coercion(&elems[0], &elem_ty, *line)?;
@@ -3918,7 +3959,12 @@ impl<'a> Checker<'a> {
                 // when present — a validated string type stays honest).
                 let key_ty = key_ty.unwrap_or(Type::Str);
                 let first_val = self.expr(&entries[0].1, scope, val_expected.as_ref(), fn_ret)?;
-                let val_ty = val_expected.unwrap_or(first_val);
+                // An unsolved parameter settles nothing, so the first value
+                // answers for it (see [`Checker::mentions_open_param`]).
+                let val_ty = match val_expected {
+                    Some(t) if self.mentions_open_param(&t) => first_val,
+                    other => other.unwrap_or(first_val),
+                };
                 for (k, v) in entries {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
                     if crate::types::resolve(&self.base(&kt), self.types) != Type::Str {
@@ -3993,6 +4039,13 @@ impl<'a> Checker<'a> {
                         .collect(),
                 );
                 let _ = self.unify(&mine, want, &mut subst, line);
+                // Only the arguments the expectation SETTLES. An enclosing
+                // literal that has not solved its own parameter yet hands this
+                // one `Pair<T>` with `T` open, and binding `T = T` makes the
+                // parameter look solved — every later field then reported "type
+                // parameter `T` is both T and Int64" instead of solving from the
+                // value. Same rule as `expected_type_args` in the backends.
+                subst.retain(|_, arg| !self.mentions_open_param(arg));
             }
         }
         for (fname, value) in fields {
@@ -4006,6 +4059,11 @@ impl<'a> Checker<'a> {
             let fty = crate::types::substitute(&field.ty, &subst);
             let vty = self.expr(value, scope, Some(&fty), fn_ret)?;
             self.unify(&field.ty, &vty, &mut subst, line)?;
+            // A value that only echoed the open parameter back — `[]` against
+            // `Array<T>` yields `Array<T>` — settled nothing either, and letting
+            // it bind would make the field ORDER decide whether the literal
+            // checks. A later field with something to say still answers.
+            subst.retain(|_, arg| !self.mentions_open_param(arg));
             self.prove_coercion(value, &fty, line)?;
             self.prove_string_interpolation(value, &fty, scope, fn_ret, line)?;
         }
@@ -4046,10 +4104,22 @@ impl<'a> Checker<'a> {
         if decl.type_params.is_empty() {
             return Ok(Type::Named(name.to_string()));
         }
+        // Nothing said what `tp` is: no annotation named it and no field value
+        // carries it (`Deque { front: [], back: [] }` — two empty arrays say
+        // only that they are arrays). The annotation is the fix, so the message
+        // names it and shows the shape.
         for tp in &decl.type_params {
             if !subst.contains_key(tp) {
+                let shape: Vec<String> = decl
+                    .type_params
+                    .iter()
+                    .map(|p| if p == tp { "..".to_string() } else { p.clone() })
+                    .collect();
                 return Err(format!(
-                    "line {line}: cannot infer type parameter `{tp}` of `{name}`"
+                    "line {line}: cannot infer type parameter `{tp}` of `{name}`; no field \
+                     value determines it, so annotate the binding (e.g. `let x: {name}<{}> = \
+                     {name} {{ .. }}`)",
+                    shape.join(", ")
                 ));
             }
         }
@@ -6736,6 +6806,12 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             let aty = self.expr(&args[0], scope, inner_expected.as_ref(), fn_ret)?;
+            // The expectation still names the payload's SHAPE when its element
+            // type is an unsolved parameter, so it is handed to the payload
+            // either way. It is not the answer there — the payload is (see
+            // [`Checker::mentions_open_param`]).
+            let inner_expected =
+                inner_expected.filter(|want| !self.mentions_open_param(want));
             if matches!(aty, Type::Option(_) | Type::Result(..)) {
                 return Err(format!(
                     "line {line}: nested Option/Result is not supported in v0.1"
@@ -6778,7 +6854,7 @@ impl<'a> Checker<'a> {
                     "line {line}: nested Option/Result is not supported in v0.1"
                 ));
             }
-            let (t, e) = match &expected_res {
+            let (mut t, mut e) = match &expected_res {
                 Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
                 _ => {
                     return Err(format!(
@@ -6787,6 +6863,14 @@ impl<'a> Checker<'a> {
                     ))
                 }
             };
+            // The half this constructor carries answers for itself when the
+            // expectation left it open (see [`Checker::mentions_open_param`]);
+            // the OTHER half has no value to answer it and stays open, which the
+            // enclosing literal reports as the parameter it could not infer.
+            let carried = if name == "Ok" { &mut t } else { &mut e };
+            if self.mentions_open_param(carried) {
+                *carried = aty.clone();
+            }
             let want_ty = if name == "Ok" { &t } else { &e };
             self.prove_coercion(&args[0], want_ty, line)?;
             if !self.coercible(&aty, want_ty) {
@@ -8084,49 +8168,6 @@ fn type_mentions_self(ty: &Type) -> bool {
 }
 
 /// Apply `f` to `ty` and to every type nested inside it.
-fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
-    f(ty);
-    match ty {
-        Type::Option(a)
-        | Type::Array(a)
-        | Type::Task(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => walk_type(a, f),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
-            walk_type(a, f);
-            walk_type(b, f);
-        }
-        Type::App(_, args) => {
-            for a in args {
-                walk_type(a, f);
-            }
-        }
-        Type::Record(fields) => {
-            for fl in fields {
-                walk_type(&fl.ty, f);
-            }
-        }
-        Type::Enum(variants) => {
-            for v in variants {
-                for p in &v.payload {
-                    walk_type(p, f);
-                }
-            }
-        }
-        Type::Fn(params, ret) => {
-            for p in params {
-                walk_type(p, f);
-            }
-            walk_type(ret, f);
-        }
-        _ => {}
-    }
-}
-
 /// Whether a type contains a directly nested `Option`/`Result` (the v0.1
 /// prohibition), anywhere inside it.
 fn has_nested_wrap(ty: &Type) -> bool {
@@ -12631,6 +12672,101 @@ mod tests {
                type Output = T\n\
                fn valueOr(self, f: T) -> T { return match self { Some(v) => v, None => f } } }\n\
              fn main() -> Int64 { let n: Option<Int64> = Some(7)  return n.valueOr(0) }",
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    // ---- a generic record literal with no annotation -----------------------
+
+    /// The field values settle the type parameter, through every carrier that
+    /// reads its own type off the expectation. Each of these reported "expected
+    /// T, found Int64" — the value measured against a parameter no value has.
+    #[test]
+    fn an_unannotated_generic_literal_solves_from_its_fields() {
+        for (decl, lit) in [
+            ("type G<T> = { xs: Array<T> }", "G { xs: [2, 1] }"),
+            ("type G<T> = { xs: Array<T, 2> }", "G { xs: [2, 1] }"),
+            ("type G<T> = { xs: SmallArray<T, 4> }", "G { xs: [2] }"),
+            ("type G<T> = { xs: Array<Array<T>> }", "G { xs: [[2]] }"),
+            ("type G<T> = { o: Option<T> }", "G { o: Some(2) }"),
+            ("type G<T> = { m: Map<String, T> }", "G { m: [\"k\": 2] }"),
+            ("type G<T> = { r: Result<T, String> }", "G { r: Ok(2) }"),
+            ("type P<T> = { v: T }\ntype G<T> = { p: P<T> }", "G { p: P { v: 2 } }"),
+        ] {
+            let r = check_src(&format!(
+                "{decl}\nfn main() -> Int64 {{ let g = {lit}\n return 0 }}"
+            ));
+            assert!(r.is_ok(), "{lit}: {r:?}");
+        }
+    }
+
+    /// Field ORDER must not decide. `back: []` says only that it is an array, so
+    /// it has to settle nothing and leave the parameter for `front` to answer —
+    /// a binding of `T = T` would make it look settled and refuse the literal.
+    #[test]
+    fn an_empty_field_leaves_the_parameter_for_a_later_one() {
+        let head = "type D<T> = { front: Array<T>, back: Array<T> }\n";
+        for lit in ["D { front: [2, 1], back: [] }", "D { back: [], front: [2, 1] }"] {
+            let r = check_src(&format!(
+                "{head}fn main() -> Int64 {{ let d = {lit}\n return 0 }}"
+            ));
+            assert!(r.is_ok(), "{lit}: {r:?}");
+        }
+    }
+
+    /// Fields that disagree are a mismatch, not a wrong solve: the first field
+    /// settles the parameter and the second is measured against the answer.
+    #[test]
+    fn disagreeing_fields_report_the_mismatch() {
+        let e = check_src(
+            "type D<T> = { front: Array<T>, back: Array<T> }\n\
+             fn main() -> Int64 { let d = D { front: [1], back: [\"x\"] }\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("array elements must share a type: expected Int64, found String"),
+            "{e}"
+        );
+        let e = check_src(
+            "type P<T> = { a: T, b: T }\n\
+             fn main() -> Int64 { let p = P { a: 1, b: \"x\" }\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("type parameter `T` is both Int64 and String"), "{e}");
+    }
+
+    /// Fields that say nothing stay an error, and the error names the fix. This
+    /// program used to CHECK, yielding a `D<T>` with an open parameter in a
+    /// concrete program.
+    #[test]
+    fn a_literal_that_settles_nothing_names_the_annotation() {
+        let e = check_src(
+            "type D<T> = { front: Array<T>, back: Array<T> }\n\
+             fn main() -> Int64 { let d = D { front: [], back: [] }\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("cannot infer type parameter `T` of `D`"), "{e}");
+        assert!(e.contains("let x: D<..> = D { .. }"), "{e}");
+        // The annotation IS the fix, so it has to work.
+        let ok = check_src(
+            "type D<T> = { front: Array<T>, back: Array<T> }\n\
+             fn main() -> Int64 { let d: D<Int64> = D { front: [], back: [] }\n return 0 }",
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    /// The rule reads openness against the CURRENT function's parameters, so a
+    /// rigid one still answers: `T` in `emptyG` is a type the caller picked, and
+    /// the expectation is the only thing that knows it.
+    #[test]
+    fn a_rigid_parameter_still_answers_for_the_fields() {
+        let ok = check_src(
+            "type G<T> = { xs: Array<T> }\n\
+             type H<T> = { tag: Int64 }\n\
+             fn emptyG<T>() -> G<T> { return G { xs: [] } }\n\
+             fn brand<T>() -> H<T> { return H { tag: 1 } }\n\
+             fn main() -> Int64 { let g: G<String> = emptyG()\n \
+             let h: H<String> = brand()\n return 0 }",
         );
         assert!(ok.is_ok(), "{ok:?}");
     }
