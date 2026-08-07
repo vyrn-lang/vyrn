@@ -456,6 +456,11 @@ is that a container that swallowed one ever discharges it. Closing that needs
 the obligation to travel through a place, which is the same mechanism census U4
 and RFC-0091's projections need, and it is not a `Type::Stream` match to delete.
 
+**RFC-0092 designs it, and reports that this row has no mechanism of its own.**
+It is U4 plus a recursion in `Owned::linear_kind`: once a container releases its
+elements, discharging them is that release. This row therefore closes last of the
+three or not at all.
+
 ### The menu, and why it is not one string
 
 The fix note differs by row, and the reason is that the two disposals differ:

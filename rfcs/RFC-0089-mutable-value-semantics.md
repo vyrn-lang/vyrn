@@ -470,6 +470,11 @@ neither built nor designed. So the mechanism the rows wait on is narrower than
 "place projections": it is the **conditional** form, and it is still open. The
 `Copy` protocol (RFC-0091 M1) is untouched by 7a and remains the other half.
 
+**RFC-0092 says the rows wait on neither.** It re-prices "refuse it" — `Copy`
+shipped, so `.copy()` on a `Json` is writable — and finds that the refusal is
+three lines in `movecheck`, because a projection bound through a `let` is already
+refused and the same projection written inline is not.
+
 Two smaller findings, recorded where they were found:
 
 - **`drop` of a projection is a double free the moment its place is released.**
