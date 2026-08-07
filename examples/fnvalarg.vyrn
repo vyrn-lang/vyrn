@@ -27,9 +27,9 @@ type Nest = { inner: Holder }
 
 type Deferred<P, T> = { run: fn(P) -> T }
 
-type Many<P, T> = { runs: Array < fn(P) -> T > }
+type Many<P, T> = { runs: Array<fn(P) -> T> }
 
-type Maybe<P, T> = { run: Option < fn(P) -> T > }
+type Maybe<P, T> = { run: Option<fn(P) -> T> }
 
 type Outer<P, T> = { inner: Deferred<P, T> }
 
@@ -85,8 +85,9 @@ fn main() -> Int64 {
     let nest: Nest = Nest { inner: cap }
     print(apply(nest.inner.f, 2)) // 10
 
-    // An array element.
-    let fns: Array<IntFn> = [addTen, scale(3)]
+    // An array element. The element type is written inline, without an alias:
+    // `Array<fn(Int64) -> Int64>` is the direct spelling.
+    let fns: Array<fn(Int64) -> Int64> = [addTen, scale(3)]
     print(apply(fns[0], 30)) // 40
     print(apply(fns[1], 30)) // 90
 
