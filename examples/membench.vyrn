@@ -123,6 +123,58 @@ fn elemRead(n: Int64, xs: Array<Int64>) -> Int64 {
     return t
 }
 
+/// `a[i]` on a fixed `Array<T, N>`, whose storage is the binding itself.
+///
+/// A `[N x T]` is a value, and a value has no address to index. Reading one
+/// element used to copy all N to a fresh stack slot to get an address: 128
+/// bytes per read at N = 16, and **1.55 µs** here against the 312 ns of the
+/// growable row below. The binding is already in memory, so the read is now one
+/// offset and one load, and the row is **191 ns** — under the growable array,
+/// which pays a header load the fixed one does not.
+///
+/// A fixed array reached through a record field paid the same copy and is the
+/// same read now, so both are timed: the cost was the representation, and the
+/// two rows are the evidence that the fix is the representation's and not one
+/// receiver's.
+fn fixedRead(n: Int64) -> Int64 {
+    let a: Array<Int64, 16> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + a[i % a.length]
+        i = i + 1
+    }
+    return t
+}
+
+type Cells = {
+    at: Array<Int64, 16>,
+}
+
+/// The same read one field deep. See [`fixedRead`].
+fn fixedFieldRead(n: Int64) -> Int64 {
+    let c = Cells { at: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + c.at[i % 16]
+        i = i + 1
+    }
+    return t
+}
+
+/// The growable twin of [`fixedRead`], with the same constant modulus so the
+/// two rows differ by the representation and nothing else.
+fn heapRead(n: Int64, xs: Array<Int64>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = t + xs[i % 16]
+        i = i + 1
+    }
+    return t
+}
+
 /// `for x in xs` over a builtin array (RFC-0091 M3).
 ///
 /// A user container's loop is a desugar onto `size` and `place nth`. A builtin
@@ -444,6 +496,18 @@ bench "array push churn, 1000 pushes" {
 
 bench "array element read, 10000 reads" {
     blackBox(elemRead(blackBox(10000), blackBox(oneToN(blackBox(64)))))
+}
+
+bench "fixed array element read, 1024 reads" {
+    blackBox(fixedRead(blackBox(1024)))
+}
+
+bench "fixed array field read, 1024 reads" {
+    blackBox(fixedFieldRead(blackBox(1024)))
+}
+
+bench "growable array element read, 1024 reads" {
+    blackBox(heapRead(blackBox(1024), blackBox(oneToN(blackBox(16)))))
 }
 
 bench "array element store, 10000 stores" {

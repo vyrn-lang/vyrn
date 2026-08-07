@@ -2459,6 +2459,56 @@ impl<'a> Gen<'a> {
         (base, len, cap, data)
     }
 
+    /// The storage a fixed-array receiver already has, if it has any.
+    ///
+    /// A `[N x T]` is an LLVM value aggregate, and `getelementptr` cannot index
+    /// one by a dynamic index — the array has to be in memory first. A fresh
+    /// slot puts it there and copies all N elements to do it, on EVERY read: at
+    /// N = 16 that is 128 bytes per element read, and it measured 20x an
+    /// `Array<Int64>` read. A binding is already in memory, so its own slot
+    /// serves the same `getelementptr` for nothing.
+    ///
+    /// Only a receiver with an address answers. A call result or a literal has
+    /// none, and the caller spills it — that copy is the value form's real cost
+    /// and is paid once, not per read.
+    fn fixed_place(&mut self, recv: &Expr, aggty: &str) -> Option<String> {
+        // The address is only usable if it holds THIS array. Ask before
+        // emitting anything, so a receiver that does not match costs no IR.
+        let ty = self.static_ty(recv)?;
+        if self.llt(&ty) != aggty {
+            return None;
+        }
+        Some(self.place_of(recv)?.0)
+    }
+
+    /// The address of a place expression, and its static type. A binding
+    /// answers with its slot (a module-state global is already a pointer, so it
+    /// answers with itself); a record field answers with a `getelementptr` into
+    /// its owner's place. Everything else has no address.
+    fn place_of(&mut self, e: &Expr) -> Option<(String, Type)> {
+        match e {
+            Expr::Var { name, .. } => self.lookup(name),
+            Expr::Field { expr, field, .. } => {
+                let (base, bty) = self.place_of(expr)?;
+                let fields = self.record_fields(&bty)?;
+                let idx = fields.iter().position(|f| &f.name == field)?;
+                let fty = fields[idx].ty.clone();
+                // A `lazy` field is a stored closure that reading CALLS
+                // (RFC-0085 M4a). Its address is not its value.
+                if vyrn_frontend::types::deferred(&fty).is_some() {
+                    return None;
+                }
+                let bll = self.llt(&bty);
+                let p = self.fresh_tmp();
+                self.emit(format!(
+                    "{p} = getelementptr {bll}, ptr {base}, i64 0, i32 {idx}"
+                ));
+                Some((p, fty))
+            }
+            _ => None,
+        }
+    }
+
     // ---- RFC-0089 M1b: `x.copy()` -----------------------------------------
 
     /// Whether a value of `ty` transitively owns heap — the one predicate
@@ -8359,8 +8409,7 @@ impl<'a> Gen<'a> {
                     return Ok((v, elem));
                 }
                 Type::ArrayN(inner, n) => {
-                    // Fixed array: store the value aggregate to the stack, then
-                    // index it. Bounds are the constant N.
+                    // Fixed array: index it in memory. Bounds are the constant N.
                     let elem = *inner;
                     let ell = self.llt(&elem);
                     let aggty = format!("[{n} x {ell}]");
@@ -8369,8 +8418,19 @@ impl<'a> Gen<'a> {
                     self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
                     emit_trap(self, "@.trap.aoob");
                     self.emit_label(&ok_l);
-                    let slot = self.fresh_alloca(&aggty);
-                    self.emit(format!("store {aggty} {av}, ptr {slot}"));
+                    // Read through the receiver's own storage when it has some.
+                    // `getelementptr` cannot index an SSA aggregate by a dynamic
+                    // index, so the value form has to reach memory first, and a
+                    // fresh slot means copying all N elements per read. The
+                    // binding's slot is already that memory.
+                    let slot = match self.fixed_place(&args[0], &aggty) {
+                        Some(p) => p,
+                        None => {
+                            let s = self.fresh_alloca(&aggty);
+                            self.emit(format!("store {aggty} {av}, ptr {s}"));
+                            s
+                        }
+                    };
                     let ep = self.fresh_tmp();
                     let v = self.fresh_tmp();
                     self.emit(format!("{ep} = getelementptr {aggty}, ptr {slot}, i64 0, i64 {iv}"));
@@ -12872,6 +12932,35 @@ mod tests {
                    fn main() -> Int64 { let n: Narrow = \"a\" return want(n) }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(!ir.contains("@.trap.verr.Wide, ptr"), "contained finite var needs no check: {ir}");
+    }
+
+    /// A read of `Array<T, N>` indexes the storage the receiver already has.
+    /// It used to copy all N elements to a fresh slot first, because
+    /// `getelementptr` cannot index an SSA aggregate by a dynamic index — 128
+    /// bytes per read at N = 16, and 8x the whole loop. A receiver with no
+    /// address keeps the copy, which is the value form's own cost.
+    #[test]
+    fn a_fixed_array_read_indexes_the_receivers_own_storage() {
+        let src = "type Cells = { at: Array<Int64, 4> } \
+                   fn mk() -> Array<Int64, 4> { return [1, 2, 3, 4] } \
+                   fn local(i: Int64) -> Int64 { let a: Array<Int64, 4> = [1, 2, 3, 4] return a[i] } \
+                   fn field(i: Int64) -> Int64 { let c = Cells { at: [1, 2, 3, 4] } return c.at[i] } \
+                   fn call(i: Int64) -> Int64 { return mk()[i] } \
+                   fn main() -> Int64 { return local(0) + field(1) + call(2) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let stores = ir.matches("store [4 x i64] ").count();
+        // Two: the literal that initializes `a`, and the one spill `call` still
+        // needs. `field`'s literal is stored as part of the record and `mk`
+        // returns its value, so neither is one of these.
+        assert_eq!(stores, 2, "no aggregate store may be per-read: {ir}");
+        assert!(
+            ir.contains("getelementptr [4 x i64], ptr %a.addr"),
+            "a binding is indexed through its own slot: {ir}"
+        );
+        assert!(
+            ir.contains("getelementptr [4 x i64], ptr %spill"),
+            "a receiver with no address is still spilled once: {ir}"
+        );
     }
 
     // ---- SmallArray<T, N> (RFC-0056) --------------------------------------
