@@ -727,6 +727,12 @@ release would free twice. So the answer moved from "no mechanism exists" to
 declare it with". The memory suite holds both halves — `elementLeak` leaking on
 a bare `Array<String>`, `slotsContainer` steady on the same String in a `Slots`.
 
+**RFC-0092 corrects that second sentence.** A built-in row is SEEDED, not
+declared, so what `Array<T>` lacks is not a declaration site but the proof that
+its elements are owned. Three builtins break that proof and `m.keys()` is one of
+them. A declaration stays the mechanism for a container with a liveness rule of
+its own, which is what `Slots` has and `Array` does not.
+
 ---
 
 ## U5. The one runtime failure has no location — CLOSED
@@ -1221,6 +1227,11 @@ container. Phase 4b's reason for not refusing has been re-priced and is weaker
 than it was: RFC-0091 M1 gave a self-referring type `impl Copy`, so `.copy()` on a
 `Json` is writable now. What is not priced is the corpus cost of demanding it, and
 that measurement is the next phase's first job.
+
+**RFC-0092 designs that refusal and makes the measurement its gate.** It reads
+this row, U4 and RFC-0086 M3's storage hole as one chain, and it reports that the
+compiler already refuses a projection stored through a `let` and admits the same
+projection stored inline.
 
 **`elementLeak` (U4) — correctly stays.** A built-in `Array<T>` releases no
 element and must not. An array cannot say whether it owns its elements or views
