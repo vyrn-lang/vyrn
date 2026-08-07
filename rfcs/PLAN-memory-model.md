@@ -38,6 +38,26 @@ where marked parallel.
    inline bodies get command-substituted).
 9. Push via `git -c url.https://github.com/.insteadOf=git@github.com: push`.
 10. Live verification tasks carry a time budget; diagnose, do not wait.
+11. **A red CI run is a diagnosis, not noise.** This plan says to merge on local
+    verification and not block on CI. That is still right, but it is not a
+    licence to ignore the result. Read every failure. If the same job fails
+    twice on different commits, stop and find out why before merging a third.
+12. **Local green on Windows proves nothing about a memory change.** Freeing a
+    String returns the block whose first sixteen bytes are its `{len, cap}`
+    header; glibc writes its tcache link over exactly those bytes and the
+    Windows allocator does not. So a use-after-free on a String header is
+    invisible on the machine this project is developed on and deterministic on
+    the machine CI runs on. For any change that alters when something is
+    released, the Linux job is the gate, and "flaky on one platform" is a
+    diagnosis to disprove rather than accept.
+
+**Both rules came from one bug.** Phase 10a gave an `if let` scrutinee a
+reclamation row when `place_key` answered 0, and `place_key` answers 0 for two
+different questions — an expression that names no place, and a place with no
+`let` row. A parameter is the second, so `showOpt(name, v)` released a value its
+caller owned. It ran red for **24 consecutive CI runs**, read as flakiness the
+whole time, while every local suite passed. PR #102 fixed it in one line.
+RFC-0087 §14 carries the technical half.
 
 ## Read-first list per agent
 
