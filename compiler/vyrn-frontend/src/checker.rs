@@ -1819,6 +1819,23 @@ impl<'a> Checker<'a> {
         found
     }
 
+    /// The parameters [`Self::mentions_open_param`] finds, by name, in the order
+    /// they occur and without repeats. For the one diagnostic that has to NAME
+    /// them (see [`Self::stored_fn_named`]); every other reader wants the bool.
+    fn open_params(&self, ty: &Type) -> Vec<String> {
+        let cur = self.cur_fn.borrow();
+        let rigid = self.generics.get(cur.as_str());
+        let mut out: Vec<String> = Vec::new();
+        walk_type(ty, &mut |t| {
+            if let Type::Param(n) = t {
+                if !rigid.is_some_and(|ps| ps.contains(n)) && !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+        });
+        out
+    }
+
     /// Is `ty` ITSELF a type parameter that nothing has settled?
     ///
     /// The narrow reading, for a slot a value can answer on its own: an array's
@@ -7541,6 +7558,31 @@ impl<'a> Checker<'a> {
             unreachable!()
         };
         self.storable_named_fn(name, line)?;
+        // The expectation is a signature to check against only once its type
+        // parameters are solved. An unannotated generic record literal reaches
+        // here with them open: `G { width: widthOf }` for `type G<T> = { width:
+        // fn(T) -> Int64 }` hands this `fn(T) -> Int64`, because a stored `fn`
+        // is one of the two slots the field VALUES deliberately do not answer
+        // (see [`Self::is_open_param`]). Every comparison below then measures
+        // `widthOf` against `T` — a type nothing has — and reports it: "`widthOf`
+        // expects a String argument, but `fn(T) -> Int64` will pass it T". `T`
+        // there names an unsolved parameter, and no reader can act on it. Say
+        // what is true instead, and name the fix.
+        //
+        // A RIGID parameter is not this case. It stands for the one type the
+        // caller picked, so the comparisons below read correctly against it and
+        // keep their messages — which is why the test is
+        // [`Self::open_params`] and not "mentions a parameter".
+        let open = self.open_params(&sig);
+        if let Some(first) = open.first() {
+            let names: Vec<String> = open.iter().map(|p| format!("`{p}`")).collect();
+            return Err(format!(
+                "line {line}: `{name}` cannot be stored as `{exp}`: nothing has solved {} \
+                 here, so there is no signature to check `{name}` against. Annotate the \
+                 binding with a type that names `{first}`",
+                names.join(" or ")
+            ));
+        }
         let (sptys, sret) = &self.sigs[name];
         if sptys.len() != ptys.len() {
             return Err(format!(
@@ -12785,6 +12827,68 @@ mod tests {
              fn brand<T>() -> H<T> { return H { tag: 1 } }\n\
              fn main() -> Int64 { let g: G<String> = emptyG()\n \
              let h: H<String> = brand()\n return 0 }",
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    /// A stored `fn` field is one of the two slots the field values do NOT
+    /// answer, so an unannotated literal reaches the RFC-0037 check with the
+    /// parameter open. The old message measured the function against that
+    /// parameter — "`widthOf` expects a String argument, but `fn(T) -> Int64`
+    /// will pass it T" — and `T` there names nothing a reader can act on.
+    #[test]
+    fn an_unsolved_parameter_in_a_stored_fn_type_names_the_annotation() {
+        const G: &str = "type G<T> = { width: fn(T) -> Int64 }\n\
+                         fn widthOf(s: String) -> Int64 { return 1 }\n";
+        let e = check_src(&format!(
+            "{G}fn main() -> Int64 {{ let g = G {{ width: widthOf }}\n return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("nothing has solved `T` here"), "{e}");
+        assert!(e.contains("Annotate the binding"), "{e}");
+        assert!(!e.contains("will pass it T"), "{e}");
+        // The annotation IS the fix, so it has to work.
+        let ok = check_src(&format!(
+            "{G}fn main() -> Int64 {{ let g: G<String> = G {{ width: widthOf }}\n return 0 }}"
+        ));
+        assert!(ok.is_ok(), "{ok:?}");
+        // A field that solves the parameter before this one reaches it also
+        // works — the guard fires on the OPEN parameter, never on a solved one.
+        let ok = check_src(
+            "type G<T> = { tag: T, width: fn(T) -> Int64 }\n\
+             fn widthOf(s: String) -> Int64 { return 1 }\n\
+             fn main() -> Int64 { let g = G { tag: \"x\", width: widthOf }\n return 0 }",
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    /// A RIGID parameter keeps the old message. It stands for the one type the
+    /// caller picked, so "expects a String argument, but `fn(T) -> Int64` will
+    /// pass it T" reads correctly: `make` promises every `T`, and `widthOf`
+    /// takes only `String`.
+    #[test]
+    fn a_rigid_parameter_in_a_stored_fn_type_keeps_the_type_message() {
+        let e = check_src(
+            "type G<T> = { width: fn(T) -> Int64 }\n\
+             fn widthOf(s: String) -> Int64 { return 1 }\n\
+             fn make<T>() -> G<T> { return G { width: widthOf } }\n\
+             fn main() -> Int64 { let g: G<String> = make()\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("`widthOf` expects a String argument"), "{e}");
+    }
+
+    /// A generic call's `fn`-typed argument arrives with its return parameter
+    /// open BY DESIGN, and it must keep compiling. It never reaches the guard —
+    /// a call argument is checked by `check_fn_arg`, which solves the parameter
+    /// from the value; only a STORED position routes through `stored_fn_named`.
+    #[test]
+    fn a_generic_higher_order_call_still_compiles() {
+        let ok = check_src(
+            "fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> { return [] }\n\
+             fn twice(n: Int64) -> Int64 { return n * 2 }\n\
+             fn main() -> Int64 { let xs: Array<Int64> = [1, 2]\n \
+             let a = map(xs, |x| x * 2)\n let b = map(xs, twice)\n return 0 }",
         );
         assert!(ok.is_ok(), "{ok:?}");
     }
