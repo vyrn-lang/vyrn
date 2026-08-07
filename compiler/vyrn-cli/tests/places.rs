@@ -23,13 +23,24 @@ fn body_of(src: &str, name: &str) -> String {
     let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let file = dir.join(format!("{name}-{nth}.vyrn"));
     std::fs::write(&file, src).unwrap();
-    let out = vyrn().arg("emit-ir").arg(&file).output().expect("vyrn emit-ir");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-ir")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-ir");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let ir = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     let start = ir
         .find(&format!("@vyrn_{name}("))
         .unwrap_or_else(|| panic!("no `vyrn_{name}` in the emitted IR:\n{ir}"));
-    let start = ir[..start].rfind("\ndefine ").expect("no `define` before it") + 1;
+    let start = ir[..start]
+        .rfind("\ndefine ")
+        .expect("no `define` before it")
+        + 1;
     ir[start..start + ir[start..].find("\n}\n").expect("unterminated body")].to_string()
 }
 
@@ -149,7 +160,11 @@ fn best_of_3(dir: &std::path::Path, name: &str, src: &str, expect: &str) -> std:
         .map(|_| {
             let t = std::time::Instant::now();
             let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expect);
             t.elapsed()
         })
@@ -444,8 +459,8 @@ fn a_trapping_test_does_not_leave_a_hole_in_module_state() {
     )
     .unwrap();
     let out = vyrn().arg("test").arg(&file).output().expect("vyrn test");
-    let all = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let all =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(
         all.contains("still sees an array\" ... ok"),
         "the field must survive the trapped test as an array:\n{all}"

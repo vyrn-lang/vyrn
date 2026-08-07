@@ -184,7 +184,10 @@ fn native_target_for(root: &str) -> Result<NativeTarget, String> {
     // set. A misspelled target must not fall back to the default: the user
     // would ship a binary built for something other than what they wrote.
     NativeTarget::parse(&v).ok_or_else(|| {
-        format!("unknown `nativeTarget` `{v}` in {}/vyrn.json (expected one of: {NATIVE_TARGETS})", m.dir)
+        format!(
+            "unknown `nativeTarget` `{v}` in {}/vyrn.json (expected one of: {NATIVE_TARGETS})",
+            m.dir
+        )
     })
 }
 
@@ -225,7 +228,9 @@ fn native_target_for(root: &str) -> Result<NativeTarget, String> {
 ///   `rintf`, which live in libm on Unix and in the UCRT — linked by default —
 ///   on Windows. A Windows-only check structurally cannot see this missing.
 fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
-    cmd.arg("-O2").arg("-ffp-contract=off").arg("-Wno-override-module");
+    cmd.arg("-O2")
+        .arg("-ffp-contract=off")
+        .arg("-Wno-override-module");
     if let Some(march) = target.march() {
         cmd.arg(format!("-march={march}"));
     }
@@ -327,7 +332,10 @@ fn real_main() -> ExitCode {
     }
     if cmd == "routes" {
         let json = args[2..].iter().any(|a| a == "--json");
-        let file = args.get(2).filter(|a| !a.starts_with('-')).map(|s| s.as_str());
+        let file = args
+            .get(2)
+            .filter(|a| !a.starts_with('-'))
+            .map(|s| s.as_str());
         return routes_cmd(file, json);
     }
 
@@ -615,8 +623,10 @@ fn manifest_main() -> Option<String> {
 
 /// LoadOptions for a root file: std root + the nearest manifest's aliases.
 fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
-    let mut opts =
-        vyrn_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
+    let mut opts = vyrn_frontend::loader::LoadOptions {
+        std_root: std_root(),
+        ..Default::default()
+    };
     let start = Path::new(root)
         .parent()
         .map(|p| p.to_path_buf())
@@ -640,9 +650,8 @@ fn scaffold(name: &str) -> ExitCode {
     let manifest = format!(
         "{{\n    \"name\": \"{name}\",\n    \"main\": \"src/main.vyrn\",\n    \"dependencies\": {{}}\n}}\n"
     );
-    let main_vyrn = format!(
-        "fn main() -> Int64 {{\n    print(\"hello from {name}\")\n    return 0\n}}\n"
-    );
+    let main_vyrn =
+        format!("fn main() -> Int64 {{\n    print(\"hello from {name}\")\n    return 0\n}}\n");
     let files: &[(&str, &str)] = &[
         ("vyrn.json", &manifest),
         ("src/main.vyrn", &main_vyrn),
@@ -716,7 +725,10 @@ fn why_cmd(args: &[String]) -> ExitCode {
         return why_audience(&file);
     }
     let path = match Path::new(&file).canonicalize() {
-        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Ok(p) => p
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/"),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
             return ExitCode::from(2);
@@ -760,11 +772,17 @@ fn why_cmd(args: &[String]) -> ExitCode {
         }
         return ExitCode::FAILURE;
     };
-    let manifest = app_dir.join("vyrn.json").to_string_lossy().replace('\\', "/");
+    let manifest = app_dir
+        .join("vyrn.json")
+        .to_string_lossy()
+        .replace('\\', "/");
     let Some(view) =
         vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &FsResolver)
     else {
-        eprintln!("error: cannot resolve contract `{}:{}`", role.module, role.contract);
+        eprintln!(
+            "error: cannot resolve contract `{}:{}`",
+            role.module, role.contract
+        );
         return ExitCode::FAILURE;
     };
 
@@ -791,11 +809,20 @@ fn why_cmd(args: &[String]) -> ExitCode {
             // has no other way to declare a view, so "absent, optional" was a
             // claim about every `.vyx` in the corpus.
             Synthesized => {
-                format!("ok        {}: the `<template>` compiles to it — {}", e.name, e.want)
+                format!(
+                    "ok        {}: the `<template>` compiles to it — {}",
+                    e.name, e.want
+                )
             }
             Satisfied { shape } => {
                 let of = view.member(&e.name).map(|m| m.shapes.len()).unwrap_or(1);
-                format!("ok        {}: shape {} of {} — {}", e.name, shape + 1, of, e.want)
+                format!(
+                    "ok        {}: shape {} of {} — {}",
+                    e.name,
+                    shape + 1,
+                    of,
+                    e.want
+                )
             }
             Defaulted => format!("default   {}: absent, optional — {}", e.name, e.want),
             Missing => {
@@ -806,18 +833,29 @@ fn why_cmd(args: &[String]) -> ExitCode {
                 objections += 1;
                 format!("MISMATCH  {}: wanted {}, found `{found}`", e.name, e.want)
             }
-            Unknown { did_you_mean: Some(near) } => {
+            Unknown {
+                did_you_mean: Some(near),
+            } => {
                 objections += 1;
-                format!("UNKNOWN   {}: not named by the contract — did you mean `{near}`?", e.name)
+                format!(
+                    "UNKNOWN   {}: not named by the contract — did you mean `{near}`?",
+                    e.name
+                )
             }
             Unknown { did_you_mean: None } => {
                 objections += 1;
-                format!("UNKNOWN   {}: not named by the contract (it is closed)", e.name)
+                format!(
+                    "UNKNOWN   {}: not named by the contract (it is closed)",
+                    e.name
+                )
             }
             OpenMatched => format!("ok        {}: matches the open rule — {}", e.name, e.want),
             OpenMismatched { found } => {
                 objections += 1;
-                format!("MISMATCH  {}: the open rule wants {}, found `{found}`", e.name, e.want)
+                format!(
+                    "MISMATCH  {}: the open rule wants {}, found `{found}`",
+                    e.name, e.want
+                )
             }
         };
         println!("  {line}");
@@ -827,7 +865,9 @@ fn why_cmd(args: &[String]) -> ExitCode {
         // consumes the module runs the same check at load time and FAILS on it
         // — which is why a `.vyrn` page listing its router entry point here
         // (`page`/`respond`, which `Page` does not name) still builds today.
-        println!("  — {objections} objection(s); the generator that consumes this module is the gate");
+        println!(
+            "  — {objections} objection(s); the generator that consumes this module is the gate"
+        );
     }
     ExitCode::SUCCESS
 }
@@ -917,12 +957,19 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     let mut rows: Vec<(String, String, String, String)> = Vec::new();
     for (_, src) in &mods {
         for line in src.lines() {
-            let Some(rest) = line.strip_prefix("//@route ") else { continue };
+            let Some(rest) = line.strip_prefix("//@route ") else {
+                continue;
+            };
             let f: Vec<&str> = rest.split_whitespace().collect();
             if f.len() < 4 {
                 continue;
             }
-            let row = (f[0].to_string(), f[1].to_string(), f[2].to_string(), f[3].to_string());
+            let row = (
+                f[0].to_string(),
+                f[1].to_string(),
+                f[2].to_string(),
+                f[3].to_string(),
+            );
             if !rows.contains(&row) {
                 rows.push(row);
             }
@@ -962,10 +1009,28 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     // By path then method: a projection puts two methods on one path, so path
     // alone no longer orders the table.
     rows.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
-    let w0 = rows.iter().map(|r| r.0.len()).max().unwrap_or(6).max("method".len());
-    let w1 = rows.iter().map(|r| r.1.len()).max().unwrap_or(4).max("path".len());
-    let w2 = rows.iter().map(|r| r.2.len()).max().unwrap_or(9).max("procedure".len());
-    println!("{:w0$}  {:w1$}  {:w2$}  source", "method", "path", "procedure");
+    let w0 = rows
+        .iter()
+        .map(|r| r.0.len())
+        .max()
+        .unwrap_or(6)
+        .max("method".len());
+    let w1 = rows
+        .iter()
+        .map(|r| r.1.len())
+        .max()
+        .unwrap_or(4)
+        .max("path".len());
+    let w2 = rows
+        .iter()
+        .map(|r| r.2.len())
+        .max()
+        .unwrap_or(9)
+        .max("procedure".len());
+    println!(
+        "{:w0$}  {:w1$}  {:w2$}  source",
+        "method", "path", "procedure"
+    );
     for (method, path, proc, src) in &rows {
         println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
@@ -984,14 +1049,22 @@ fn routes_json(
     directives: Vec<(String, String, String, String)>,
 ) -> ExitCode {
     /// `(method, path, procedure, source, origin)`.
-    type Row = (String, String, String, String, Option<vyrn_frontend::symbolmap::MappedSymbol>);
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        Option<vyrn_frontend::symbolmap::MappedSymbol>,
+    );
     let mut rows: Vec<Row> = directives
         .into_iter()
         .map(|(method, path, proc, src)| (method, path, proc, src, None))
         .collect();
     for (_, src) in mods {
         for m in vyrn_frontend::symbolmap::read(src) {
-            let Some(path) = m.derived("path") else { continue };
+            let Some(path) = m.derived("path") else {
+                continue;
+            };
             let method = m.derived("method").unwrap_or("POST").to_string();
             let source = m.derived("source").unwrap_or("convention").to_string();
             match rows.iter_mut().find(|r| r.0 == method && r.1 == path) {
@@ -1072,7 +1145,10 @@ fn json_str(s: &str) -> String {
 /// It reports; it does not gate. Exit 0 whenever it could answer.
 fn why_memory(file: &str) -> ExitCode {
     let path = match Path::new(file).canonicalize() {
-        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Ok(p) => p
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/"),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
             return ExitCode::from(2);
@@ -1111,9 +1187,16 @@ fn why_memory(file: &str) -> ExitCode {
 
     // Only the file asked about. A linked program carries every import's
     // functions, and they are another file's answer.
-    for f in program.functions.iter().filter(|f| f.module.is_none() && !f.is_extern) {
-        let params: Vec<String> =
-            f.params.iter().map(|p| format!("{}: {}", p.name, p.ty)).collect();
+    for f in program
+        .functions
+        .iter()
+        .filter(|f| f.module.is_none() && !f.is_extern)
+    {
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, p.ty))
+            .collect();
         println!();
         println!("  fn {}({}) -> {}", f.name, params.join(", "), f.ret);
         match own.owned_fns.get(&f.name) {
@@ -1178,7 +1261,10 @@ fn why_memory(file: &str) -> ExitCode {
 /// could answer, 2 only when the file cannot be read.
 fn why_audience(file: &str) -> ExitCode {
     let path = match Path::new(file).canonicalize() {
-        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Ok(p) => p
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/"),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
             return ExitCode::from(2);
@@ -1220,10 +1306,7 @@ fn why_audience(file: &str) -> ExitCode {
     } else {
         println!("  imported by:");
         for chain in &chains {
-            let pretty: Vec<String> = chain
-                .iter()
-                .map(|p| rel_to(p, &app_slash))
-                .collect();
+            let pretty: Vec<String> = chain.iter().map(|p| rel_to(p, &app_slash)).collect();
             println!("    {}", pretty.join(" -> "));
         }
     }
@@ -1255,7 +1338,9 @@ fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
         } else {
             source.clone()
         };
-        let Ok(tokens) = vyrn_frontend::lexer::lex(&body) else { continue };
+        let Ok(tokens) = vyrn_frontend::lexer::lex(&body) else {
+            continue;
+        };
         let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
         for imp in &program.imports {
             use vyrn_frontend::ast::{Expr, ImportSource};
@@ -1269,7 +1354,10 @@ fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
             let Ok(resolved) = vyrn_frontend::loader::resolve_spec(&spec, path, &opts) else {
                 continue;
             };
-            let stripped = resolved.strip_suffix(".vyrn").unwrap_or(&resolved).to_string();
+            let stripped = resolved
+                .strip_suffix(".vyrn")
+                .unwrap_or(&resolved)
+                .to_string();
             if Path::new(&stripped).is_dir() {
                 // A generator pointed at a directory reaches every source in it.
                 for (kid, _) in &files {
@@ -1291,7 +1379,9 @@ fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
 /// Build output and vendored trees are not the project.
 fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.filter_map(|e| e.ok()) {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
@@ -1300,7 +1390,10 @@ fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
                     continue;
                 }
                 walk(&p, out);
-            } else if matches!(p.extension().and_then(|x| x.to_str()), Some("vyrn") | Some("vyx")) {
+            } else if matches!(
+                p.extension().and_then(|x| x.to_str()),
+                Some("vyrn") | Some("vyx")
+            ) {
                 if let Ok(text) = std::fs::read_to_string(&p) {
                     let key = p.to_string_lossy().replace('\\', "/");
                     let key = key.trim_start_matches("//?/").to_string();
@@ -1449,7 +1542,11 @@ fn deps() -> ExitCode {
 /// other files but exits non-zero.
 fn fmt_cmd(rest: &[String]) -> ExitCode {
     let check = rest.iter().any(|a| a == "--check");
-    let files: Vec<String> = rest.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+    let files: Vec<String> = rest
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .cloned()
+        .collect();
 
     // Resolve the set of files to format.
     let targets: Vec<String> = if files.is_empty() {
@@ -1491,8 +1588,11 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
         let normalized = source.replace("\r\n", "\n");
         match vyrn_frontend::fmt(&normalized) {
             Ok(formatted) => {
-                let formatted =
-                    if uses_crlf { formatted.replace('\n', "\r\n") } else { formatted };
+                let formatted = if uses_crlf {
+                    formatted.replace('\n', "\r\n")
+                } else {
+                    formatted
+                };
                 if formatted != source {
                     if check {
                         would_change.push(path.clone());
@@ -1523,7 +1623,10 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if written > 0 {
-        println!("formatted {written} file{}", if written == 1 { "" } else { "s" });
+        println!(
+            "formatted {written} file{}",
+            if written == 1 { "" } else { "s" }
+        );
     } else if !had_error {
         println!("already formatted");
     }
@@ -1619,10 +1722,7 @@ fn doc_cmd(rest: &[String]) -> ExitCode {
     let target = rest
         .iter()
         .enumerate()
-        .filter(|(i, a)| {
-            !a.starts_with('-')
-                && !(*i > 0 && rest[*i - 1] == "-o")
-        })
+        .filter(|(i, a)| !a.starts_with('-') && !(*i > 0 && rest[*i - 1] == "-o"))
         .map(|(_, a)| a.clone())
         .next();
 
@@ -1657,10 +1757,7 @@ fn doc_cmd(rest: &[String]) -> ExitCode {
 /// - **no argument** with a `vyrn.json` main → the project's local-import closure
 ///   (`--std` adds reached std modules);
 /// - **no argument** with `--std` → the whole std library.
-fn discover_doc_modules(
-    target: Option<&str>,
-    with_std: bool,
-) -> Result<Vec<DocModule>, ExitCode> {
+fn discover_doc_modules(target: Option<&str>, with_std: bool) -> Result<Vec<DocModule>, ExitCode> {
     match target {
         Some(t) if Path::new(t).is_dir() => scan_doc_dir(t, ""),
         Some(t) => closure_doc_modules(t, with_std),
@@ -1676,7 +1773,9 @@ fn discover_doc_modules(
                     }
                 }
             } else {
-                eprintln!("error: no input file or directory, and no vyrn.json with a `main` found");
+                eprintln!(
+                    "error: no input file or directory, and no vyrn.json with a `main` found"
+                );
                 eprintln!("{USAGE}");
                 Err(ExitCode::from(2))
             }
@@ -1700,7 +1799,10 @@ fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
                 return Err(ExitCode::FAILURE);
             }
         };
-        out.push(DocModule { name: format!("{prefix}{rel}"), source });
+        out.push(DocModule {
+            name: format!("{prefix}{rel}"),
+            source,
+        });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
@@ -1750,18 +1852,18 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
                 .unwrap_or_default()
         });
 
-    let graph =
-        match vyrn_frontend::loader::module_graph_with_sources(&source, &root_key, &opts, &resolver)
-        {
-            Ok(g) => g,
-            Err(diags) => {
-                for d in &diags {
-                    let file = d.file.as_deref().unwrap_or(&root_key);
-                    eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                }
-                return Err(ExitCode::FAILURE);
+    let graph = match vyrn_frontend::loader::module_graph_with_sources(
+        &source, &root_key, &opts, &resolver,
+    ) {
+        Ok(g) => g,
+        Err(diags) => {
+            for d in &diags {
+                let file = d.file.as_deref().unwrap_or(&root_key);
+                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
             }
-        };
+            return Err(ExitCode::FAILURE);
+        }
+    };
     let _ = save_lock(&resolver);
 
     let mut seen = std::collections::HashSet::new();
@@ -1812,7 +1914,10 @@ fn rel_name(path: &str, base: &str) -> String {
         path.strip_prefix(&format!("{}/", base.trim_end_matches('/')))
             .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(&path))
     };
-    stripped.strip_suffix(".vyrn").unwrap_or(stripped).to_string()
+    stripped
+        .strip_suffix(".vyrn")
+        .unwrap_or(stripped)
+        .to_string()
 }
 
 /// Render `index.md`: a title and a sorted list of modules, each linking to its
@@ -1893,7 +1998,11 @@ fn write_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
             let _ = std::fs::remove_file(Path::new(out_dir).join(&existing));
         }
     }
-    println!("wrote {} file{} to {out_dir}", files.len(), if files.len() == 1 { "" } else { "s" });
+    println!(
+        "wrote {} file{} to {out_dir}",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" }
+    );
     ExitCode::SUCCESS
 }
 
@@ -2150,11 +2259,7 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
     for r in &refused {
         println!("not fixed: {r}");
     }
-    println!(
-        "{} fix(es) applied, {} left",
-        applied.len(),
-        refused.len()
-    );
+    println!("{} fix(es) applied, {} left", applied.len(), refused.len());
     // Reports; does not gate. A file with nothing to fix and a file this refuses
     // to touch both exit 0 — `vyrn check` is the gate.
     ExitCode::SUCCESS
@@ -2177,8 +2282,12 @@ fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics
 /// than a second table that would have to be kept in step with it.
 fn copy_path(message: &str) -> Option<String> {
     for line in message.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("fix: `") else { continue };
-        let Some((quoted, _)) = rest.split_once('`') else { continue };
+        let Some(rest) = line.trim_start().strip_prefix("fix: `") else {
+            continue;
+        };
+        let Some((quoted, _)) = rest.split_once('`') else {
+            continue;
+        };
         if let Some(p) = quoted.strip_suffix(".copy()") {
             if !p.is_empty() {
                 return Some(p.to_string());
@@ -2198,16 +2307,25 @@ fn copy_path(message: &str) -> Option<String> {
 fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let l = lines.get(line.saturating_sub(1)).ok_or_else(|| format!("no line {line}"))?;
+    let l = lines
+        .get(line.saturating_sub(1))
+        .ok_or_else(|| format!("no line {line}"))?;
     let mut hits: Vec<usize> = Vec::new();
     let mut from = 0usize;
     while let Some(i) = l[from..].find(path) {
         let at = from + i;
         let end = at + path.len();
-        let before_ok = at == 0 || !l[..at].chars().next_back().is_some_and(|c| is_word(c) || c == '.');
+        let before_ok = at == 0
+            || !l[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| is_word(c) || c == '.');
         // A following `.` or `(` means the occurrence is a receiver or a callee,
         // not the value the diagnostic is about.
-        let after_ok = !l[end..].chars().next().is_some_and(|c| is_word(c) || c == '.' || c == '(');
+        let after_ok = !l[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| is_word(c) || c == '.' || c == '(');
         if before_ok && after_ok {
             hits.push(at);
         }
@@ -2229,7 +2347,9 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
             Ok(out)
         }
         0 => Err(format!("`{path}` is not on the line as written")),
-        n => Err(format!("`{path}` appears {n} times on the line — which one is not said")),
+        n => Err(format!(
+            "`{path}` appears {n} times on the line — which one is not said"
+        )),
     }
 }
 
@@ -2451,8 +2571,8 @@ fn vendor(check: bool) -> ExitCode {
         let cached = cache.join(sha);
         match std::fs::read(&cached) {
             Ok(bytes) if remote::sha256_hex(&bytes) == *sha => {
-                if let Err(e) = std::fs::create_dir_all(&vend)
-                    .and_then(|_| std::fs::write(&vendored, &bytes))
+                if let Err(e) =
+                    std::fs::create_dir_all(&vend).and_then(|_| std::fs::write(&vendored, &bytes))
                 {
                     eprintln!("error: cannot vendor `{spec}`: {e}");
                     return ExitCode::FAILURE;
@@ -2468,11 +2588,17 @@ fn vendor(check: bool) -> ExitCode {
         }
     }
     if missing > 0 {
-        eprintln!("{missing} entr{} not vendored", if missing == 1 { "y" } else { "ies" });
+        eprintln!(
+            "{missing} entr{} not vendored",
+            if missing == 1 { "y" } else { "ies" }
+        );
         return ExitCode::FAILURE;
     }
-    println!("vendor is complete ({} entr{})", lock.entries.len(),
-        if lock.entries.len() == 1 { "y" } else { "ies" });
+    println!(
+        "vendor is complete ({} entr{})",
+        lock.entries.len(),
+        if lock.entries.len() == 1 { "y" } else { "ies" }
+    );
     ExitCode::SUCCESS
 }
 
@@ -2496,8 +2622,10 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
             if items.is_empty() {
                 return "[]".into();
             }
-            let inner: Vec<String> =
-                items.iter().map(|v| format!("{pad}{}", json_pretty(v, depth + 1))).collect();
+            let inner: Vec<String> = items
+                .iter()
+                .map(|v| format!("{pad}{}", json_pretty(v, depth + 1)))
+                .collect();
             format!("[\n{}\n{close}]", inner.join(",\n"))
         }
         Json::Obj(fields) => {
@@ -2848,7 +2976,10 @@ fn bench_native(
             is_gen: false,
             is_mut: false,
         });
-        let body_ref = Expr::Var { name: format!("__vyrn_bench_body_{slot}"), line: 0 };
+        let body_ref = Expr::Var {
+            name: format!("__vyrn_bench_body_{slot}"),
+            line: 0,
+        };
         if json {
             measure_calls.push(Expr::Call {
                 name: "benchMeasure".to_string(),
@@ -2873,7 +3004,10 @@ fn bench_native(
             args: vec![Expr::Call {
                 name: "benchJson".to_string(),
                 args: vec![
-                    Expr::ArrayLit { elems: measure_calls, line: 0 },
+                    Expr::ArrayLit {
+                        elems: measure_calls,
+                        line: 0,
+                    },
                     Expr::Str("native".to_string()),
                     Expr::Str("O2".to_string()),
                 ],
@@ -2941,7 +3075,10 @@ fn bench_native(
             return (ExitCode::FAILURE, None);
         }
     };
-    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("bench");
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bench");
     let dir = std::env::temp_dir().join(format!(
         "vyrn-bench-{}-{}",
         std::process::id(),
@@ -3011,7 +3148,10 @@ fn bench_native(
                 )
             }
             Err(e) => {
-                eprintln!("error: failed to run bench binary ({}): {e}", out_path.display());
+                eprintln!(
+                    "error: failed to run bench binary ({}): {e}",
+                    out_path.display()
+                );
                 let _ = std::fs::remove_dir_all(&dir);
                 return (ExitCode::FAILURE, None);
             }
@@ -3020,7 +3160,10 @@ fn bench_native(
         match Command::new(&out_path).status() {
             Ok(s) => ((s.code().unwrap_or(1) & 0xff) as u8, None),
             Err(e) => {
-                eprintln!("error: failed to run bench binary ({}): {e}", out_path.display());
+                eprintln!(
+                    "error: failed to run bench binary ({}): {e}",
+                    out_path.display()
+                );
                 let _ = std::fs::remove_dir_all(&dir);
                 return (ExitCode::FAILURE, None);
             }
@@ -3271,9 +3414,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             && f.ret == Type::Named("Response".to_string())
     });
     if !has_handle {
-        eprintln!(
-            "error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}"
-        );
+        eprintln!("error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}");
         return ExitCode::FAILURE;
     }
 
@@ -3312,7 +3453,9 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             move || {
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-                eprintln!("serving {file_label} on http://localhost:{actual_port} with {n} workers");
+                eprintln!(
+                    "serving {file_label} on http://localhost:{actual_port} with {n} workers"
+                );
                 for stream in listener.incoming() {
                     match stream {
                         Ok(s) => {
@@ -3370,9 +3513,12 @@ fn refuse_workers_if_stateful(program: &vyrn_frontend::ast::Program) -> Option<E
     // RFC-0037: calls through stored function values dispatch over the
     // signature's collected sources — the checker's collection feeds the walk.
     let stored = vyrn_frontend::checker::stored_fn_effects(program);
-    let (chain, global) =
-        vyrn_frontend::checker::module_state_use(program, "handle", &stored)?;
-    let path = chain.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(" -> ");
+    let (chain, global) = vyrn_frontend::checker::module_state_use(program, "handle", &stored)?;
+    let path = chain
+        .iter()
+        .map(|f| format!("`{f}`"))
+        .collect::<Vec<_>>()
+        .join(" -> ");
     eprintln!(
         "error: `--workers` needs a module-state-free `handle`: {path} reads or writes \
          module state `{global}` (shared by definition) — run without `--workers` for \
@@ -3471,7 +3617,12 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
     eprintln!("dev: building client {client_rel} -> wasm");
     let build_code = build(
         &client_path,
-        &["--target".to_string(), "wasm".to_string(), "-o".to_string(), wasm_out.to_string_lossy().into_owned()],
+        &[
+            "--target".to_string(),
+            "wasm".to_string(),
+            "-o".to_string(),
+            wasm_out.to_string_lossy().into_owned(),
+        ],
     );
     if !wasm_out.is_file() {
         return build_code;
@@ -3498,7 +3649,9 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
             && f.ret == Type::Named("Response".to_string())
     });
     if !has_handle {
-        eprintln!("error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`");
+        eprintln!(
+            "error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`"
+        );
         return ExitCode::FAILURE;
     }
 
@@ -3510,7 +3663,11 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         }
     };
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-    let assets = DevAssets { public_dir, web_dir, wasm: wasm_out };
+    let assets = DevAssets {
+        public_dir,
+        web_dir,
+        wasm: wasm_out,
+    };
 
     let banner = move |assets: &DevAssets| {
         use std::io::Write;
@@ -3518,7 +3675,9 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
         eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
         eprintln!("dev:   /client.wasm   -> built from {client_rel}");
-        eprintln!("dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)");
+        eprintln!(
+            "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
+        );
         eprintln!("dev:   /              -> {}/", assets.public_dir.display());
     };
 
@@ -3612,7 +3771,11 @@ fn dev_static_path(path: &str, assets: &DevAssets) -> Option<PathBuf> {
         return None;
     }
     // Public dir: `/` → index.html, else the path under public/.
-    let rel = if raw == "/" { "index.html" } else { raw.trim_start_matches('/') };
+    let rel = if raw == "/" {
+        "index.html"
+    } else {
+        raw.trim_start_matches('/')
+    };
     let p = assets.public_dir.join(rel);
     p.is_file().then_some(p)
 }
@@ -3646,7 +3809,12 @@ fn dev_serve_one(
         Ok(r) => r,
         Err(ParseError::Chunked { method, path }) => {
             eprintln!("{method} {path} -> 501");
-            write_response(stream, 501, "text/plain", b"chunked transfer-encoding not supported");
+            write_response(
+                stream,
+                501,
+                "text/plain",
+                b"chunked transfer-encoding not supported",
+            );
             return;
         }
         Err(ParseError::Bad) => {
@@ -3756,7 +3924,12 @@ fn serve_one(
         }
         Err(ParseError::Chunked { method, path }) => {
             eprintln!("{method} {path} -> 501");
-            write_response(stream, 501, "text/plain", b"chunked transfer-encoding not supported");
+            write_response(
+                stream,
+                501,
+                "text/plain",
+                b"chunked transfer-encoding not supported",
+            );
         }
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
@@ -3802,8 +3975,16 @@ fn parse_request(
     // Request line: METHOD SP TARGET SP HTTP/x.y
     let request_line = lines.next().ok_or(ParseError::Bad)?;
     let mut parts = request_line.split(' ');
-    let method = parts.next().filter(|s| !s.is_empty()).ok_or(ParseError::Bad)?.to_string();
-    let target = parts.next().filter(|s| !s.is_empty()).ok_or(ParseError::Bad)?.to_string();
+    let method = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or(ParseError::Bad)?
+        .to_string();
+    let target = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or(ParseError::Bad)?
+        .to_string();
     let version = parts.next().unwrap_or("");
     if !version.starts_with("HTTP/") || parts.next().is_some() {
         return Err(ParseError::Bad);
@@ -3838,7 +4019,10 @@ fn parse_request(
         }
     }
     if chunked {
-        return Err(ParseError::Chunked { method, path: target });
+        return Err(ParseError::Chunked {
+            method,
+            path: target,
+        });
     }
 
     // Body: exactly `content_length` bytes (some already buffered after the
@@ -3859,7 +4043,12 @@ fn parse_request(
     // decoding would silently corrupt it).
     let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
 
-    Ok(vyrn_frontend::interp::ServeRequest { method, path: target, headers, body })
+    Ok(vyrn_frontend::interp::ServeRequest {
+        method,
+        path: target,
+        headers,
+        body,
+    })
 }
 
 /// A minimal status-code → reason-phrase table. Unknown codes get an empty
@@ -4037,7 +4226,11 @@ fn pump_socket(
     // No `Connection: close` and no `Content-Length`: the connection is the
     // point, and what follows the header block is frames rather than a body.
     let handshake = format!("HTTP/1.1 101 Switching Protocols\r\n{extra}\r\n");
-    if stream.write_all(handshake.as_bytes()).and_then(|_| stream.flush()).is_err() {
+    if stream
+        .write_all(handshake.as_bytes())
+        .and_then(|_| stream.flush())
+        .is_err()
+    {
         let _ = call_handle(ServeCall::Close);
         return;
     }
@@ -4311,7 +4504,10 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)
-    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("a");
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("a");
     let out_path = out.unwrap_or_else(|| {
         if wasm {
             format!("{stem}.wasm")
@@ -4501,17 +4697,13 @@ mod tests {
 
     #[test]
     fn placeholder_baseline_is_detected() {
-        let flagged = vyrn_frontend::schema::parse_json(
-            r#"{"placeholder":true,"benches":[]}"#,
-        )
-        .unwrap();
+        let flagged =
+            vyrn_frontend::schema::parse_json(r#"{"placeholder":true,"benches":[]}"#).unwrap();
         assert!(baseline_is_placeholder(&flagged));
         let empty = vyrn_frontend::schema::parse_json(r#"{"benches":[]}"#).unwrap();
         assert!(baseline_is_placeholder(&empty));
-        let real = vyrn_frontend::schema::parse_json(
-            r#"{"benches":[{"name":"a","minNs":10}]}"#,
-        )
-        .unwrap();
+        let real =
+            vyrn_frontend::schema::parse_json(r#"{"benches":[{"name":"a","minNs":10}]}"#).unwrap();
         assert!(!baseline_is_placeholder(&real));
     }
 
@@ -4545,7 +4737,12 @@ mod tests {
             assert_eq!(DEFAULT_NATIVE_TARGET.march(), None);
             // Every value, not just the default — an explicit v3 in a manifest
             // shared with an x86 CI must not break the build on this host.
-            for t in [NativeTarget::V1, NativeTarget::V3, NativeTarget::V4, NativeTarget::Native] {
+            for t in [
+                NativeTarget::V1,
+                NativeTarget::V3,
+                NativeTarget::V4,
+                NativeTarget::Native,
+            ] {
                 assert_eq!(t.march(), None);
             }
         }
@@ -4565,12 +4762,23 @@ mod tests {
     /// there is no `-march` there to hang a condition on.
     #[test]
     fn every_native_build_disables_fp_contraction() {
-        for t in [NativeTarget::V1, NativeTarget::V2, NativeTarget::V3, NativeTarget::V4, NativeTarget::Native] {
+        for t in [
+            NativeTarget::V1,
+            NativeTarget::V2,
+            NativeTarget::V3,
+            NativeTarget::V4,
+            NativeTarget::Native,
+        ] {
             let mut cmd = Command::new("clang");
             add_native_clang_flags(&mut cmd, t);
-            let args: Vec<String> =
-                cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-            assert!(args.iter().any(|a| a == "-ffp-contract=off"), "{t:?} lost the parity flag");
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                args.iter().any(|a| a == "-ffp-contract=off"),
+                "{t:?} lost the parity flag"
+            );
             assert!(args.iter().any(|a| a == "-O2"), "{t:?} lost -O2");
         }
     }

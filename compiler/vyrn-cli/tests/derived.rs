@@ -16,7 +16,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_dir(rel: &str) -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap();
     let s = p.to_string_lossy().replace('\\', "/");
     PathBuf::from(s.strip_prefix("//?/").unwrap_or(&s).to_string())
 }
@@ -152,9 +156,17 @@ fn every_export_is_mounted_at_its_derived_path() {
     let dir = scratch("mount");
     project(&dir);
     write(&dir, "server.vyrn", DRIVER);
-    let out = vyrn().arg("run").arg(dir.join("server.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "200 {\"items\":[{\"id\":1,\"body\":\"hello\"}]}");
     // Two modules exporting `recent` coexist, distinguished by `{module}`.
@@ -175,8 +187,16 @@ fn routes_prints_the_resolved_table_with_its_source() {
     let dir = scratch("table");
     project(&dir);
     write(&dir, "server.vyrn", DRIVER);
-    let out = vyrn().arg("routes").arg(dir.join("server.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("routes")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("method"), "{text}");
     for (path, proc) in [
@@ -185,7 +205,10 @@ fn routes_prints_the_resolved_table_with_its_source() {
         ("/_/pastes/byId", "pastes/byId"),
         ("/_/orders/refund/run", "orders/refund/run"),
     ] {
-        let row = text.lines().find(|l| l.contains(path)).unwrap_or_else(|| panic!("{path}:\n{text}"));
+        let row = text
+            .lines()
+            .find(|l| l.contains(path))
+            .unwrap_or_else(|| panic!("{path}:\n{text}"));
         assert!(row.contains(proc), "{row}");
         assert!(row.ends_with("convention"), "{row}");
     }
@@ -203,13 +226,25 @@ fn routes_prints_the_resolved_table_with_its_source() {
 #[test]
 fn routes_shows_the_hand_written_projection_beside_the_derived_surface() {
     let bin = repo_dir("examples/bin");
-    let out = vyrn().arg("routes").arg("server.vyrn").current_dir(&bin).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("routes")
+        .arg("server.vyrn")
+        .current_dir(&bin)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     // Column widths follow the widest row, so compare on words rather than on
     // the padding.
-    let rows: Vec<String> =
-        text.lines().skip(1).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    let rows: Vec<String> = text
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
     for want in [
         // The derived surface, unchanged — its rows still come from `//@route`.
         "POST /_/pastes/byId pastes/byId convention",
@@ -254,37 +289,73 @@ fn routes_json_carries_the_declaration_each_path_came_from() {
     let dir = scratch("json");
     project(&dir);
     write(&dir, "server.vyrn", DRIVER);
-    let out = vyrn().arg("routes").arg(dir.join("server.vyrn")).arg("--json").output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("routes")
+        .arg(dir.join("server.vyrn"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
-    let doc = vyrn_frontend::schema::parse_json(&text).unwrap_or_else(|e| panic!("{e}:
-{text}"));
-    let vyrn_frontend::schema::Json::Arr(rows) = doc else { panic!("an array:
-{text}") };
+    let doc = vyrn_frontend::schema::parse_json(&text).unwrap_or_else(|e| {
+        panic!(
+            "{e}:
+{text}"
+        )
+    });
+    let vyrn_frontend::schema::Json::Arr(rows) = doc else {
+        panic!(
+            "an array:
+{text}"
+        )
+    };
     let row = rows
         .iter()
         .find(|r| r.get("path").and_then(|v| v.as_str()) == Some("/_/pastes/byId"))
         .unwrap_or_else(|| panic!("{text}"));
     assert_eq!(row.get("method").and_then(|v| v.as_str()), Some("POST"));
-    assert_eq!(row.get("source").and_then(|v| v.as_str()), Some("convention"));
+    assert_eq!(
+        row.get("source").and_then(|v| v.as_str()),
+        Some("convention")
+    );
     let origin = row.get("origin").unwrap_or_else(|| panic!("{text}"));
     assert_eq!(origin.get("name").and_then(|v| v.as_str()), Some("byId"));
     assert!(
-        origin.get("file").and_then(|v| v.as_str()).is_some_and(|f| f.ends_with("pastes.vyrn")),
+        origin
+            .get("file")
+            .and_then(|v| v.as_str())
+            .is_some_and(|f| f.ends_with("pastes.vyrn")),
         "{text}"
     );
     // A line and a column the text table has nowhere to put — the whole reason
     // the JSON reads the map rather than re-formatting the directives.
-    assert!(matches!(origin.get("line"), Some(vyrn_frontend::schema::Json::Num(n)) if *n > 0.0), "{text}");
-    assert!(matches!(origin.get("col"), Some(vyrn_frontend::schema::Json::Num(n)) if *n > 0.0), "{text}");
+    assert!(
+        matches!(origin.get("line"), Some(vyrn_frontend::schema::Json::Num(n)) if *n > 0.0),
+        "{text}"
+    );
+    assert!(
+        matches!(origin.get("col"), Some(vyrn_frontend::schema::Json::Num(n)) if *n > 0.0),
+        "{text}"
+    );
     // Both channels list the same paths: the JSON is a union, and today the
     // directives and the maps come from one generator over one route list.
-    let table = vyrn().arg("routes").arg(dir.join("server.vyrn")).output().unwrap();
+    let table = vyrn()
+        .arg("routes")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
     let table = String::from_utf8_lossy(&table.stdout);
     for r in &rows {
         let p = r.get("path").and_then(|v| v.as_str()).unwrap();
-        assert!(table.contains(p), "`{p}` is in the JSON but not the table:
-{table}");
+        assert!(
+            table.contains(p),
+            "`{p}` is in the JSON but not the table:
+{table}"
+        );
     }
 }
 
@@ -292,19 +363,50 @@ fn routes_json_carries_the_declaration_each_path_came_from() {
 fn a_pinned_path_wins_and_routes_says_it_is_an_override() {
     let dir = scratch("pin");
     project(&dir);
-    write(&dir, "server/api/rpc.json", "{ \"pin\": { \"pastes/recent\": \"/pastes/latest\" } }\n");
-    write(&dir, "server.vyrn", DRIVER.replace("/_/pastes/recent", "/pastes/latest").as_str());
-    let out = vyrn().arg("run").arg(dir.join("server.vyrn")).output().unwrap();
+    write(
+        &dir,
+        "server/api/rpc.json",
+        "{ \"pin\": { \"pastes/recent\": \"/pastes/latest\" } }\n",
+    );
+    write(
+        &dir,
+        "server.vyrn",
+        DRIVER
+            .replace("/_/pastes/recent", "/pastes/latest")
+            .as_str(),
+    );
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(text.lines().next().unwrap(), "200 {\"items\":[{\"id\":1,\"body\":\"hello\"}]}");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        text.lines().next().unwrap(),
+        "200 {\"items\":[{\"id\":1,\"body\":\"hello\"}]}"
+    );
 
-    let out = vyrn().arg("routes").arg(dir.join("server.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("routes")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
     let table = String::from_utf8_lossy(&out.stdout);
-    let row = table.lines().find(|l| l.contains("/pastes/latest")).expect(&table);
+    let row = table
+        .lines()
+        .find(|l| l.contains("/pastes/latest"))
+        .expect(&table);
     assert!(row.ends_with("override"), "{row}");
     // Everything the pin did not touch keeps the convention.
-    let row = table.lines().find(|l| l.contains("/_/notes/recent")).expect(&table);
+    let row = table
+        .lines()
+        .find(|l| l.contains("/_/notes/recent"))
+        .expect(&table);
     assert!(row.ends_with("convention"), "{row}");
 }
 
@@ -314,10 +416,22 @@ fn a_directory_scope_template_reaches_every_module_under_it() {
     project(&dir);
     // Drop the colliding module so `{name}` alone is well-defined here.
     std::fs::remove_file(dir.join("server/api/notes.vyrn")).unwrap();
-    write(&dir, "server/api/rpc.json", "{ \"rpc\": { \"prefix\": \"/internal\", \"path\": \"{name}\" } }\n");
+    write(
+        &dir,
+        "server/api/rpc.json",
+        "{ \"rpc\": { \"prefix\": \"/internal\", \"path\": \"{name}\" } }\n",
+    );
     write(&dir, "server.vyrn", DRIVER);
-    let out = vyrn().arg("routes").arg(dir.join("server.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("routes")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let table = String::from_utf8_lossy(&out.stdout);
     assert!(table.contains("/internal/recent"), "{table}");
     assert!(table.contains("/internal/run"), "{table}");
@@ -330,21 +444,36 @@ fn two_procedures_deriving_one_path_fail_the_build_naming_both() {
     // `{name}` alone collapses `pastes/recent` and `notes/recent`.
     write(&dir, "server/api/rpc.json", "{ \"path\": \"{name}\" }\n");
     write(&dir, "server.vyrn", DRIVER);
-    let out = vyrn().arg("check").arg(dir.join("server.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "last-wins is never silent");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("two_procedures_derive_the_same_path"), "{err}");
     assert!(err.contains("notes_recent"), "the first declaration: {err}");
-    assert!(err.contains("pastes_recent"), "the second declaration: {err}");
+    assert!(
+        err.contains("pastes_recent"),
+        "the second declaration: {err}"
+    );
 }
 
 #[test]
 fn a_pin_onto_an_occupied_path_is_the_same_error() {
     let dir = scratch("pinclash");
     project(&dir);
-    write(&dir, "server/api/rpc.json", "{ \"pin\": { \"pastes/byId\": \"/_/notes/recent\" } }\n");
+    write(
+        &dir,
+        "server/api/rpc.json",
+        "{ \"pin\": { \"pastes/byId\": \"/_/notes/recent\" } }\n",
+    );
     write(&dir, "server.vyrn", DRIVER);
-    let out = vyrn().arg("check").arg(dir.join("server.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("two_procedures_derive_the_same_path"), "{err}");
@@ -377,8 +506,16 @@ fn the_generated_client_is_ordinary_typechecked_code() {
     let dir = scratch("client");
     project(&dir);
     write(&dir, "client/boot.vyrn", BOOT);
-    let out = vyrn().arg("check").arg(dir.join("client/boot.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("client/boot.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -386,16 +523,33 @@ fn client_is_server_blind() {
     let dir = scratch("blind");
     project(&dir);
     write(&dir, "client/boot.vyrn", BOOT);
-    let out = vyrn().arg("emit-gen").arg(dir.join("client/boot.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("client/boot.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     // Not one import of anything under the api directory — the generated client
     // reads INTERFACES and re-emits types, so there is no edge to follow.
-    for line in text.lines().filter(|l| l.trim_start().starts_with("import ")) {
-        assert!(!line.contains("server/api"), "the client imported an api module: {line}");
+    for line in text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("import "))
+    {
+        assert!(
+            !line.contains("server/api"),
+            "the client imported an api module: {line}"
+        );
     }
     // And no trace of a procedure BODY: the string literals only the server has.
-    assert!(!text.contains("no such paste"), "a procedure body reached the client bundle");
+    assert!(
+        !text.contains("no such paste"),
+        "a procedure body reached the client bundle"
+    );
     // What it does carry is the wire types and one stub per procedure.
     assert!(text.contains("export type PasteList"), "{text}");
     assert!(text.contains("export fn pastesRecent"), "{text}");
@@ -416,7 +570,11 @@ fn mounting_the_server_surface_from_a_client_module_is_an_audience_error() {
          import { rpcHandle } from rpc(\"../server/api\")\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("client/boot.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("client/boot.vyrn"))
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("client/boot.vyrn` is client-only"), "{err}");
@@ -448,8 +606,16 @@ fn client_in_process_dispatches_directly() {
          \x20   return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("server.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "in-process: 1");
 }
 
@@ -457,10 +623,25 @@ fn client_in_process_dispatches_directly() {
 fn a_module_vyrn_is_configuration_not_wire_surface() {
     let dir = scratch("modvyrn");
     project(&dir);
-    write(&dir, "server/api/module.vyrn", "export fn notAProcedure() -> Int64 {\n    return 1\n}\n");
+    write(
+        &dir,
+        "server/api/module.vyrn",
+        "export fn notAProcedure() -> Int64 {\n    return 1\n}\n",
+    );
     write(&dir, "server.vyrn", DRIVER);
-    let out = vyrn().arg("routes").arg(dir.join("server.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("routes")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let table = String::from_utf8_lossy(&out.stdout);
-    assert!(!table.contains("notAProcedure"), "a config module must not be mounted:\n{table}");
+    assert!(
+        !table.contains("notAProcedure"),
+        "a config module must not be mounted:\n{table}"
+    );
 }

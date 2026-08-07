@@ -41,7 +41,12 @@ fn check_runs_each_body_once_with_exact_output() {
          }\n",
     )
     .unwrap();
-    let out = vyrn().arg("bench").arg(&file).arg("--check").output().unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .arg("--check")
+        .output()
+        .unwrap();
     // A trapping bench -> exit 1, but the run CONTINUES to the next bench.
     assert_eq!(out.status.code(), Some(1));
     let stdout = norm(&out.stdout);
@@ -62,7 +67,12 @@ fn check_all_ok_exits_zero() {
         "bench \"a\" { blackBox(1) }\nbench \"b\" { blackBox(2) }\n",
     )
     .unwrap();
-    let out = vyrn().arg("bench").arg(&file).arg("--check").output().unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .arg("--check")
+        .output()
+        .unwrap();
     assert!(out.status.success());
     assert_eq!(
         norm(&out.stdout),
@@ -81,7 +91,12 @@ fn check_name_filter_selects_a_subset() {
          bench \"alphabet\" { blackBox(3) }\n",
     )
     .unwrap();
-    let out = vyrn().arg("bench").arg(&file).args(["--check", "--name", "alpha"]).output().unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .args(["--check", "--name", "alpha"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     assert_eq!(
         norm(&out.stdout),
@@ -94,7 +109,12 @@ fn no_benches_prints_no_benches_and_exits_zero() {
     let dir = scratch("check-none");
     let file = dir.join("b.vyrn");
     std::fs::write(&file, "fn main() -> Int64 { return 0 }\n").unwrap();
-    let out = vyrn().arg("bench").arg(&file).arg("--check").output().unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .arg("--check")
+        .output()
+        .unwrap();
     assert!(out.status.success());
     assert_eq!(norm(&out.stdout), "no benches\n");
 }
@@ -113,7 +133,10 @@ fn blackbox_outside_a_bench_or_test_is_a_checker_error() {
     let out = vyrn().arg("check").arg(&file).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = norm(&out.stderr);
-    assert!(err.contains("`blackBox` is only available inside a `bench` or `test` block"), "got:\n{err}");
+    assert!(
+        err.contains("`blackBox` is only available inside a `bench` or `test` block"),
+        "got:\n{err}"
+    );
 }
 
 #[test]
@@ -149,10 +172,19 @@ fn bench_bodies_are_stripped_from_emitted_ir() {
     let out = vyrn().arg("emit-ir").arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let ir = norm(&out.stdout);
-    assert!(!ir.contains("SECRET_IN_BENCH_BODY"), "bench string leaked into IR");
-    assert!(!ir.contains("UNIQUE_BENCH_MARKER"), "bench name leaked into IR");
+    assert!(
+        !ir.contains("SECRET_IN_BENCH_BODY"),
+        "bench string leaked into IR"
+    );
+    assert!(
+        !ir.contains("UNIQUE_BENCH_MARKER"),
+        "bench name leaked into IR"
+    );
     // And no optimizer barrier leaks into an ordinary compile.
-    assert!(!ir.contains("asm sideeffect"), "blackBox barrier leaked into a non-bench compile");
+    assert!(
+        !ir.contains("asm sideeffect"),
+        "blackBox barrier leaked into a non-bench compile"
+    );
 }
 
 #[test]
@@ -169,9 +201,17 @@ fn a_file_may_have_both_benches_and_a_main() {
     let run = vyrn().arg("run").arg(&file).output().unwrap();
     assert!(run.status.success());
     assert_eq!(norm(&run.stdout).trim(), "99");
-    let bench = vyrn().arg("bench").arg(&file).arg("--check").output().unwrap();
+    let bench = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .arg("--check")
+        .output()
+        .unwrap();
     assert!(bench.status.success());
-    assert_eq!(norm(&bench.stdout), "bench \"b\" ... ok\n\n1 ok, 0 failed\n");
+    assert_eq!(
+        norm(&bench.stdout),
+        "bench \"b\" ... ok\n\n1 ok, 0 failed\n"
+    );
 }
 
 // ---- native timing smoke (needs clang) --------------------------------------
@@ -214,9 +254,15 @@ fn native_bench_reports_the_expected_shape() {
             l.contains(" ns") || l.contains(" µs") || l.contains(" ms") || l.contains(" s "),
             "no time unit suffix: {l}"
         );
-        assert!(l.contains(" samples × ") && l.contains(" iters)"), "no sample/iter counts: {l}");
+        assert!(
+            l.contains(" samples × ") && l.contains(" iters)"),
+            "no sample/iter counts: {l}"
+        );
     }
-    assert!(stdout.contains("\n2 benches\n"), "missing footer:\n{stdout}");
+    assert!(
+        stdout.contains("\n2 benches\n"),
+        "missing footer:\n{stdout}"
+    );
 }
 
 /// The first line of `text` that starts with `needle` (a tiny shape helper so the
@@ -229,7 +275,10 @@ fn regex_like<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
 
 /// The repo's `examples/` directory, relative to this crate.
 fn examples_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("examples")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
 }
 
 #[test]
@@ -282,11 +331,18 @@ fn json_report_parses_and_is_stable_ordered() {
          fn main() -> Int64 { return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("bench").arg(&file).arg("--json").output().unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .arg("--json")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "stderr:\n{}", norm(&out.stderr));
     let stdout = norm(&out.stdout);
     let doc = vyrn_frontend::schema::parse_json(stdout.trim()).expect("report is valid JSON");
-    assert!(matches!(doc.get("backend"), Some(vyrn_frontend::schema::Json::Str(s)) if s == "native"));
+    assert!(
+        matches!(doc.get("backend"), Some(vyrn_frontend::schema::Json::Str(s)) if s == "native")
+    );
     assert!(matches!(doc.get("opt"), Some(vyrn_frontend::schema::Json::Str(s)) if s == "O2"));
     let benches = match doc.get("benches") {
         Some(vyrn_frontend::schema::Json::Arr(a)) => a,
@@ -305,7 +361,9 @@ fn json_report_parses_and_is_stable_ordered() {
     for b in benches {
         for key in ["minNs", "medianNs", "meanNs", "samples", "iters"] {
             match b.get(key) {
-                Some(vyrn_frontend::schema::Json::Num(n)) => assert_eq!(n.fract(), 0.0, "{key} not integer"),
+                Some(vyrn_frontend::schema::Json::Num(n)) => {
+                    assert_eq!(n.fract(), 0.0, "{key} not integer")
+                }
                 _ => panic!("bench entry missing {key}"),
             }
         }
@@ -325,10 +383,19 @@ fn compare_against_a_placeholder_baseline_is_all_new_exit_zero() {
     .unwrap();
     let baseline = dir.join("baseline.json");
     std::fs::write(&baseline, "{\"placeholder\":true,\"benches\":[]}\n").unwrap();
-    let out = vyrn().arg("bench").arg(&file).args(["--compare"]).arg(&baseline).output().unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .args(["--compare"])
+        .arg(&baseline)
+        .output()
+        .unwrap();
     assert!(out.status.success(), "stderr:\n{}", norm(&out.stderr));
     let stdout = norm(&out.stdout);
-    assert!(stdout.contains("bench \"a\" ... new"), "expected `new`, got:\n{stdout}");
+    assert!(
+        stdout.contains("bench \"a\" ... new"),
+        "expected `new`, got:\n{stdout}"
+    );
     assert!(stdout.contains("no regressions"), "got:\n{stdout}");
 }
 
@@ -353,10 +420,19 @@ fn compare_flags_a_regression_against_a_tiny_baseline() {
         "{\"backend\":\"native\",\"opt\":\"O2\",\"benches\":[{\"name\":\"a\",\"minNs\":1,\"medianNs\":1,\"meanNs\":1,\"samples\":1,\"iters\":1}]}\n",
     )
     .unwrap();
-    let out = vyrn().arg("bench").arg(&file).args(["--compare"]).arg(&baseline).output().unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .args(["--compare"])
+        .arg(&baseline)
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1), "stderr:\n{}", norm(&out.stderr));
     let stdout = norm(&out.stdout);
-    assert!(stdout.contains("bench \"a\" ... REGRESSED x"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("bench \"a\" ... REGRESSED x"),
+        "got:\n{stdout}"
+    );
     assert!(stdout.contains("1 regressed"), "got:\n{stdout}");
 }
 
@@ -366,8 +442,17 @@ fn check_rejects_json_and_compare_flags() {
     // (timing). No clang needed — the guard fires before any compile.
     let dir = scratch("mutex");
     let file = dir.join("b.vyrn");
-    std::fs::write(&file, "bench \"a\" { blackBox(1) }\nfn main() -> Int64 { return 0 }\n").unwrap();
-    let out = vyrn().arg("bench").arg(&file).args(["--check", "--json"]).output().unwrap();
+    std::fs::write(
+        &file,
+        "bench \"a\" { blackBox(1) }\nfn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .args(["--check", "--json"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(norm(&out.stderr).contains("--check cannot be combined with --json or --compare"));
 }

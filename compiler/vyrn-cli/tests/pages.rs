@@ -18,7 +18,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_file(rel: &str) -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -55,25 +59,54 @@ const APP: &str = "import { pages } from \"std/ui\"\n\
 #[test]
 fn emit_gen_shows_the_synthesized_router() {
     let demo = repo_file("examples/pagesdemo.vyrn");
-    let out = vyrn().arg("emit-gen").arg(&demo).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(&demo)
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
 
     // Page modules are bound under per-route namespaces (RFC-0027): same-named
     // exports across pages coexist with no aliasing and no co-naming dummies.
-    assert!(src.contains("import * as p0 from \"./pages/index\""), "namespace page import:\n{src}");
-    assert!(src.contains("p0.page()"), "namespaced static page call:\n{src}");
-    assert!(src.contains(".Params { "), "namespaced Params construction:\n{src}");
+    assert!(
+        src.contains("import * as p0 from \"./pages/index\""),
+        "namespace page import:\n{src}"
+    );
+    assert!(
+        src.contains("p0.page()"),
+        "namespaced static page call:\n{src}"
+    );
+    assert!(
+        src.contains(".Params { "),
+        "namespaced Params construction:\n{src}"
+    );
     // RFC-0071: a `.vyrn` page's data is its declared `data` member, run through
     // the runner its return TYPE named — `p<idx>.load(p)` is gone with the name
     // match it came from.
-    assert!(src.contains("runParamQuery("), "the declared query's runner:\n{src}");
+    assert!(
+        src.contains("runParamQuery("),
+        "the declared query's runner:\n{src}"
+    );
     assert!(src.contains(".data()"), "namespaced data call:\n{src}");
-    assert!(!src.contains(".load(p)"), "no name-matched loader call:\n{src}");
-    assert!(src.contains(".page(p, d)"), "namespaced loader page call:\n{src}");
+    assert!(
+        !src.contains(".load(p)"),
+        "no name-matched loader call:\n{src}"
+    );
+    assert!(
+        src.contains(".page(p, d)"),
+        "namespaced loader page call:\n{src}"
+    );
     // The obsolete co-naming dummies are gone.
     assert!(!src.contains("fn page() -> Int64"), "no page dummy:\n{src}");
-    assert!(!src.contains("type Params = Int64"), "no Params dummy:\n{src}");
+    assert!(
+        !src.contains("type Params = Int64"),
+        "no Params dummy:\n{src}"
+    );
 
     // RoutePath — the regex-validated string of the whole route language, with an
     // Int64 param as its integer-spelling regex.
@@ -84,17 +117,35 @@ fn emit_gen_shows_the_synthesized_router() {
     );
 
     // Typed-URL helpers: one per dynamic route, one per static route.
-    assert!(src.contains("export fn hrefUsers(id: Int64) -> RoutePath"), "dynamic helper:\n{src}");
-    assert!(src.contains("export fn hrefItems(id: Int64) -> RoutePath"), "dynamic helper:\n{src}");
-    assert!(src.contains("export fn itemsPath() -> RoutePath"), "static helper:\n{src}");
-    assert!(src.contains("export fn rootPath() -> RoutePath"), "root helper:\n{src}");
+    assert!(
+        src.contains("export fn hrefUsers(id: Int64) -> RoutePath"),
+        "dynamic helper:\n{src}"
+    );
+    assert!(
+        src.contains("export fn hrefItems(id: Int64) -> RoutePath"),
+        "dynamic helper:\n{src}"
+    );
+    assert!(
+        src.contains("export fn itemsPath() -> RoutePath"),
+        "static helper:\n{src}"
+    );
+    assert!(
+        src.contains("export fn rootPath() -> RoutePath"),
+        "root helper:\n{src}"
+    );
 
     // The dynamic segment is validated against the declared type before user code.
-    assert!(src.contains("fromJson(UiRouteInt, segs["), "dynamic segment parse:\n{src}");
+    assert!(
+        src.contains("fromJson(UiRouteInt, segs["),
+        "dynamic segment parse:\n{src}"
+    );
     // The loader's Invalid arm renders a 422 error page.
     assert!(src.contains("status: 422"), "error-page status:\n{src}");
     // The exported entry point.
-    assert!(src.contains("export fn route(req: Request) -> Response"), "route entry:\n{src}");
+    assert!(
+        src.contains("export fn route(req: Request) -> Response"),
+        "route entry:\n{src}"
+    );
 
     // RFC-0074: the tree is mountable, and enumerated. One `//@route` per page on
     // the same channel `std/rpc` uses — so `vyrn routes` prints a page without
@@ -144,11 +195,19 @@ fn a_page_shadowed_by_an_earlier_group_is_a_startup_error() {
          \x20   return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     assert!(!out.status.success(), "a shadowed page must trap");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(err.contains("is unreachable"), "{err}");
-    assert!(err.contains("GET /users/{id}"), "the shadowed page is named:\n{err}");
+    assert!(
+        err.contains("GET /users/{id}"),
+        "the shadowed page is named:\n{err}"
+    );
 }
 
 // ---- generation failures each name the offending file ----------------------
@@ -164,10 +223,21 @@ fn params_segment_mismatch_fails_naming_the_file() {
          export fn page(p: Params) -> Html { return el(\"main\", [], []) }\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a Params/segment mismatch must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("PAGES_PARAM_MISMATCH"), "mismatch diagnostic:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a Params/segment mismatch must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("PAGES_PARAM_MISMATCH"),
+        "mismatch diagnostic:\n{err}"
+    );
     assert!(err.contains("users"), "diagnostic names the file:\n{err}");
 }
 
@@ -195,12 +265,26 @@ fn page_type_error_remaps_to_the_page_module() {
          export fn page(d: String) -> Html {\n    return el(\"main\", [], [])\n}\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("check");
-    assert!(!out.status.success(), "a wrong view parameter type must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("check");
+    assert!(
+        !out.status.success(),
+        "a wrong view parameter type must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     // Reported against the page module (region-level, line 1), not the router.
-    assert!(err.contains("pages/index.vyrn:1:1:"), "remapped to the page file:\n{err}");
-    assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
+    assert!(
+        err.contains("pages/index.vyrn:1:1:"),
+        "remapped to the page file:\n{err}"
+    );
+    assert!(
+        err.contains("note: in generated code"),
+        "keeps the generated note:\n{err}"
+    );
 }
 
 #[test]
@@ -214,10 +298,21 @@ fn unsupported_param_type_fails_naming_the_file() {
          export fn page(p: Params) -> Html { return el(\"main\", [], []) }\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "an unsupported param type must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("PAGES_UNSUPPORTED_PARAM_TYPE"), "unsupported-type diagnostic:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "an unsupported param type must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("PAGES_UNSUPPORTED_PARAM_TYPE"),
+        "unsupported-type diagnostic:\n{err}"
+    );
     assert!(err.contains("tag"), "diagnostic names the file:\n{err}");
 }
 
@@ -255,13 +350,27 @@ fn string_segment_and_respond_route_end_to_end() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "String-segment + respond app must run:\n{combined}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "String-segment + respond app must run:\n{combined}"
+    );
     // The String segment binds "deadbeef" and renders an HTML document (200).
-    assert!(combined.contains("P:200:"), "String segment page renders 200:\n{combined}");
+    assert!(
+        combined.contains("P:200:"),
+        "String segment page renders 200:\n{combined}"
+    );
     // The respond page owns the content type and body verbatim.
-    assert!(combined.contains("R:200:text/plain; charset=utf-8:raw:cafe"), "respond raw bytes:\n{combined}");
+    assert!(
+        combined.contains("R:200:text/plain; charset=utf-8:raw:cafe"),
+        "respond raw bytes:\n{combined}"
+    );
 }
 
 /// A `.vyx` page (RFC-0039 §4) routes through `pagesThemed`: its `params {}`
@@ -310,12 +419,26 @@ fn vyx_page_with_loader_routes_through_pages_themed() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), ".vyx pages app must run:\n{combined}");
-    assert!(combined.contains("home:200"), "static .vyx page:\n{combined}");
-    assert!(combined.contains("book:200:true:true"), "loader .vyx page binds segment + Data:\n{combined}");
-    assert!(combined.contains("badid:404"), "non-integer Int64 segment 404s:\n{combined}");
+    assert!(
+        combined.contains("home:200"),
+        "static .vyx page:\n{combined}"
+    );
+    assert!(
+        combined.contains("book:200:true:true"),
+        "loader .vyx page binds segment + Data:\n{combined}"
+    );
+    assert!(
+        combined.contains("badid:404"),
+        "non-integer Int64 segment 404s:\n{combined}"
+    );
 }
 
 #[test]
@@ -335,12 +458,23 @@ fn route_collision_fails_naming_both_files() {
          export fn page(p: Params) -> Html { return el(\"main\", [], []) }\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     assert!(!out.status.success(), "a route collision must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("PAGES_ROUTE_COLLISION"), "collision diagnostic:\n{err}");
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("PAGES_ROUTE_COLLISION"),
+        "collision diagnostic:\n{err}"
+    );
     // Names both offending files.
-    assert!(err.contains("id") && err.contains("slug"), "diagnostic names both files:\n{err}");
+    assert!(
+        err.contains("id") && err.contains("slug"),
+        "diagnostic names both files:\n{err}"
+    );
 }
 
 // ---- imported Params/Data (RFC-0031: the reachable type closure) -----------
@@ -384,21 +518,38 @@ fn imported_params_type_works_via_the_closure() {
              return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "imported-Params page must load and run:\n{combined}");
-    assert!(combined.contains("200"), "the dynamic route renders (200):\n{combined}");
+    assert!(
+        out.status.success(),
+        "imported-Params page must load and run:\n{combined}"
+    );
+    assert!(
+        combined.contains("200"),
+        "the dynamic route renders (200):\n{combined}"
+    );
 
     // The synthesized router reaches the foreign `Params` through an aliased
     // import from its declaring module, not through the page namespace.
-    let eg = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let eg = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
     let src = String::from_utf8_lossy(&eg.stdout);
     assert!(
         src.contains("import { Params as uiParams0 } from \"./shared\""),
         "foreign Params import:\n{src}"
     );
-    assert!(src.contains("uiParams0 { "), "foreign Params construction:\n{src}");
+    assert!(
+        src.contains("uiParams0 { "),
+        "foreign Params construction:\n{src}"
+    );
 }
 
 // ---- RFC-0041: layouts, head, error pages ----------------------------------
@@ -412,14 +563,20 @@ fn imported_params_type_works_via_the_closure() {
 #[test]
 fn layout_head_and_error_pages_route_end_to_end() {
     let dir = scratch("layout");
-    write(&dir.join("theme.json"), "{ \"safelist\": [\"shell\", \"home\", \"book\", \"err\", \"solo\"] }\n");
+    write(
+        &dir.join("theme.json"),
+        "{ \"safelist\": [\"shell\", \"home\", \"book\", \"err\", \"solo\"] }\n",
+    );
     // The layout: the shell (with a <slot/>) plus a head block (stylesheet + boot).
     write(
         &dir.join("pages/layout.vyx"),
         "<script>\nhead {\n    stylesheet \"/style.css\"\n    module \"/nav.js\"\n}\n</script>\n\
          <template>\n<div class=\"shell\"><nav>bin</nav><main><slot/></main></div>\n</template>\n",
     );
-    write(&dir.join("pages/index.vyx"), "<template>\n<h1 class=\"home\">Home</h1>\n</template>\n");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<template>\n<h1 class=\"home\">Home</h1>\n</template>\n",
+    );
     // A Result loader: Ok renders with a dynamic head title, Err → the error page.
     write(
         &dir.join("pages/p/[id].vyx"),
@@ -478,32 +635,72 @@ fn layout_head_and_error_pages_route_end_to_end() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "layout/error app must run:\n{combined}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "layout/error app must run:\n{combined}"
+    );
     // Home: wrapped in the layout, the layout head stylesheet threaded.
-    assert!(combined.contains("home:200:true:true"), "layout wrap + head:\n{combined}");
+    assert!(
+        combined.contains("home:200:true:true"),
+        "layout wrap + head:\n{combined}"
+    );
     // Result Ok: dynamic <title> from the page head block, still under the layout.
-    assert!(combined.contains("good:200:true:true"), "dynamic head title under layout:\n{combined}");
+    assert!(
+        combined.contains("good:200:true:true"),
+        "dynamic head title under layout:\n{combined}"
+    );
     // Result Err: the themed error page at the carried 404, wrapped in the layout.
-    assert!(combined.contains("bad:404:true:true:true"), "Result error page:\n{combined}");
+    assert!(
+        combined.contains("bad:404:true:true:true"),
+        "Result error page:\n{combined}"
+    );
     // Validation Invalid: folded into a 422 error page.
-    assert!(combined.contains("val:422:true:true"), "Validation 422 error page:\n{combined}");
+    assert!(
+        combined.contains("val:422:true:true"),
+        "Validation 422 error page:\n{combined}"
+    );
     // layout="none": no shell.
-    assert!(combined.contains("solo:200:false:true"), "layout opt-out:\n{combined}");
+    assert!(
+        combined.contains("solo:200:false:true"),
+        "layout opt-out:\n{combined}"
+    );
 }
 
 /// A `layout.vyx` without a `<slot/>` is a named generation diagnostic.
 #[test]
 fn a_layout_without_a_slot_is_a_diagnostic() {
     let dir = scratch("noslot");
-    write(&dir.join("pages/layout.vyx"), "<template>\n<div>no slot</div>\n</template>\n");
-    write(&dir.join("pages/index.vyx"), "<template>\n<h1>home</h1>\n</template>\n");
+    write(
+        &dir.join("pages/layout.vyx"),
+        "<template>\n<div>no slot</div>\n</template>\n",
+    );
+    write(
+        &dir.join("pages/index.vyx"),
+        "<template>\n<h1>home</h1>\n</template>\n",
+    );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a slot-less layout must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("VYX_LAYOUT_NO_SLOT"), "no-slot diagnostic:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a slot-less layout must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("VYX_LAYOUT_NO_SLOT"),
+        "no-slot diagnostic:\n{err}"
+    );
 }
 
 // ---- RFC-0071: the `Page` contract's declaration forms ---------------------
@@ -538,12 +735,23 @@ fn the_page_contract_members_route_end_to_end() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "contract-form app must run:\n{combined}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "contract-form app must run:\n{combined}"
+    );
     // The declared `head()` supplies both the title and the stylesheet, and the
     // declared `data()` reaches the view as the `data` prop.
-    assert!(combined.contains("new:200:true:true:true"), "declaration forms:\n{combined}");
+    assert!(
+        combined.contains("new:200:true:true:true"),
+        "declaration forms:\n{combined}"
+    );
 }
 
 /// THE acceptance criterion (RFC-0071): a misspelled member is an ERROR, where it
@@ -567,11 +775,25 @@ fn a_misspelled_page_export_is_an_error() {
          <template>\n<h1>home</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a misspelled member must fail the load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("PAGES_CONTRACT"), "contract diagnostic:\n{err}");
-    assert!(err.contains("contract_unknown"), "unknown-export class:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a misspelled member must fail the load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("PAGES_CONTRACT"),
+        "contract diagnostic:\n{err}"
+    );
+    assert!(
+        err.contains("contract_unknown"),
+        "unknown-export class:\n{err}"
+    );
     assert!(err.contains("laod"), "names the offending export:\n{err}");
 }
 
@@ -590,9 +812,17 @@ fn a_near_miss_page_export_names_the_member_it_meant() {
          <template>\n<h1>home</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a near-miss member must fail the load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a near-miss member must fail the load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(err.contains("didYouMean"), "did-you-mean class:\n{err}");
     assert!(err.contains("dta"), "names the offending export:\n{err}");
 }
@@ -610,9 +840,17 @@ fn a_private_page_helper_is_outside_the_contract() {
          <template>\n<h1>{{ shown() }}</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "a private helper must not trip the contract:\n{combined}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a private helper must not trip the contract:\n{combined}"
+    );
 }
 
 // ---- the demo runs green ---------------------------------------------------
@@ -624,7 +862,10 @@ fn demo_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "demo tests failed:\n{combined}");
-    assert!(combined.contains("5 passed, 0 failed"), "expected 5 green tests:\n{combined}");
+    assert!(
+        combined.contains("5 passed, 0 failed"),
+        "expected 5 green tests:\n{combined}"
+    );
 }
 
 // ===========================================================================
@@ -650,14 +891,24 @@ fn head_can_take_the_pages_loaded_data() {
          <template>\n<h1>{{ data }}</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
     let src = String::from_utf8_lossy(&out.stdout).to_string();
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(out.status.success(), "must generate:\n{err}");
     // The wrapper's own signature is the router's, unchanged; what varies is
     // what it FORWARDS to the accessor.
-    assert!(src.contains("return headHtml(uiPgHead(d))"), "head is handed the data:\n{src}");
-    assert!(src.contains("return headTitleOf(uiPgHead(d))"), "and so is headTitle:\n{src}");
+    assert!(
+        src.contains("return headHtml(uiPgHead(d))"),
+        "head is handed the data:\n{src}"
+    );
+    assert!(
+        src.contains("return headTitleOf(uiPgHead(d))"),
+        "and so is headTitle:\n{src}"
+    );
 }
 
 /// A page whose `head` takes BOTH the params and the data — the fourth shape.
@@ -676,10 +927,21 @@ fn head_can_take_params_and_data_together() {
          <template>\n<h1>{{ data }}</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
     let src = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(src.contains("return headHtml(uiPgHead(p, d))"), "both are forwarded:\n{src}");
+    assert!(
+        out.status.success(),
+        "must generate:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        src.contains("return headHtml(uiPgHead(p, d))"),
+        "both are forwarded:\n{src}"
+    );
 }
 
 /// A `head` asking for what the page cannot give is an error, not an empty head.
@@ -695,10 +957,20 @@ fn a_head_asking_for_data_a_dataless_page_lacks_is_reported() {
          <template>\n<h1>x</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     let err = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(!out.status.success(), "a head with nothing to read must be refused");
-    assert!(err.contains("VYX_HEAD_SIGNATURE"), "naming the offense:\n{err}");
+    assert!(
+        !out.status.success(),
+        "a head with nothing to read must be refused"
+    );
+    assert!(
+        err.contains("VYX_HEAD_SIGNATURE"),
+        "naming the offense:\n{err}"
+    );
 }
 
 /// Laziness is read off the RETURN TYPE, not out of `data`'s body — the last
@@ -718,12 +990,26 @@ fn laziness_comes_from_the_declared_type() {
          <template>\n<h1>{{ shown(data) }}</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
     let src = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(src.contains("runLazy(uiPgData())"), "the lazy runner:\n{src}");
+    assert!(
+        out.status.success(),
+        "must generate:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        src.contains("runLazy(uiPgData())"),
+        "the lazy runner:\n{src}"
+    );
     // A lazy page's view is over `PageData<T>` and the server renders `Ready(d)`.
-    assert!(src.contains("Ready(d)"), "the view is wrapped for SSR:\n{src}");
+    assert!(
+        src.contains("Ready(d)"),
+        "the view is wrapped for SSR:\n{src}"
+    );
 }
 
 /// The same shape declared `Query` is NOT lazy: nothing is read from the body,
@@ -741,12 +1027,26 @@ fn a_query_return_is_not_lazy_however_its_body_is_written() {
          <template>\n<h1>{{ data }}</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
     let src = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(src.contains("runQuery(uiPgData())"), "the blocking runner:\n{src}");
+    assert!(
+        out.status.success(),
+        "must generate:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        src.contains("runQuery(uiPgData())"),
+        "the blocking runner:\n{src}"
+    );
     assert!(!src.contains("runLazy"), "and not the lazy one:\n{src}");
-    assert!(!src.contains("PageData<"), "the view is over the raw type:\n{src}");
+    assert!(
+        !src.contains("PageData<"),
+        "the view is over the raw type:\n{src}"
+    );
 }
 
 /// A `data` whose deferred call takes the page's own `Params` routes exactly as
@@ -765,15 +1065,29 @@ fn a_param_query_routes_like_a_params_loader() {
          <template>\n<h1>{{ data }}</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
     let src = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "must generate:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         src.contains("export fn load(p: Params) -> Int64"),
         "the wrapper takes the params:\n{src}"
     );
-    assert!(src.contains("runParamQuery(uiPgData(), p)"), "and hands them over:\n{src}");
-    assert!(src.contains(".load(p)"), "so the router calls it exactly as before:\n{src}");
+    assert!(
+        src.contains("runParamQuery(uiPgData(), p)"),
+        "and hands them over:\n{src}"
+    );
+    assert!(
+        src.contains(".load(p)"),
+        "so the router calls it exactly as before:\n{src}"
+    );
 }
 
 /// `data` returning something that is not one of the four query types is named,
@@ -789,10 +1103,17 @@ fn a_data_returning_a_non_query_is_reported() {
          <template>\n<h1>x</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "must be refused");
-    assert!(err.contains("VYX_DATA_RETURN"), "naming the offense:\n{err}");
+    assert!(
+        err.contains("VYX_DATA_RETURN"),
+        "naming the offense:\n{err}"
+    );
 }
 
 // ---- the old page forms are gone (RFC-0071 M2c) ---------------------------
@@ -814,9 +1135,17 @@ fn a_head_block_in_a_page_is_no_longer_a_form() {
          <template>\n<h1>hi</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(!out.status.success(), "a page head block must be refused:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "a page head block must be refused:\n{err}"
+    );
 }
 
 /// A layout's `head { … }` still works — the half of the scanner that has a
@@ -831,7 +1160,10 @@ fn a_layout_head_block_still_works() {
          </script>\n\
          <template>\n<div><slot /></div>\n</template>\n",
     );
-    write(&dir.join("pages/index.vyx"), "<template>\n<h1>home</h1>\n</template>\n");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<template>\n<h1>home</h1>\n</template>\n",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { pages } from \"std/ui\"\n\
@@ -842,10 +1174,21 @@ fn a_layout_head_block_still_works() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "layout head must still build:\n{combined}");
-    assert!(combined.contains("lay:200:true:true"), "layout head threads through:\n{combined}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "layout head must still build:\n{combined}"
+    );
+    assert!(
+        combined.contains("lay:200:true:true"),
+        "layout head threads through:\n{combined}"
+    );
 }
 
 /// `export fn load` in a `.vyx` page is now an unknown export against a CLOSED
@@ -862,10 +1205,18 @@ fn an_exported_load_in_a_vyx_page_is_an_unknown_export() {
          <template>\n<h1>hi</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "must be refused:\n{err}");
-    assert!(err.contains("PAGES_CONTRACT"), "as a contract issue naming `load`:\n{err}");
+    assert!(
+        err.contains("PAGES_CONTRACT"),
+        "as a contract issue naming `load`:\n{err}"
+    );
     assert!(err.contains("load"), "naming the export:\n{err}");
 }
 
@@ -885,7 +1236,11 @@ fn a_page_on_the_declaration_forms_is_silent() {
          <template>\n<h1>{{ data }}</h1>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
     assert!(out.status.success(), "must build:\n{err}");
     assert!(!err.contains("warning:"), "nothing to say:\n{err}");

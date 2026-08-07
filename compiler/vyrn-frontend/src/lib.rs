@@ -14,8 +14,8 @@ pub mod ast;
 pub mod audience;
 pub mod checker;
 pub mod codec;
-pub mod contracts;
 pub mod consteval;
+pub mod contracts;
 pub mod declared;
 pub mod diagnostics;
 pub mod finite;
@@ -45,10 +45,9 @@ pub mod types;
 pub use symbols::{
     analyze, analyze_linked, at_module_scope, class_completions, class_token_hover, classify_at,
     completions, import_spec_at, inlay_hints, member_completions, module_doc, references,
-    references_to, resolve, semantic_tokens,
-    string_literal_completions, Analysis, Completion, DocExport, InlayHint, LocalBinding, LocalKind,
-    MemoryNote, ModuleDoc, RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind,
-    TokenInfo,
+    references_to, resolve, semantic_tokens, string_literal_completions, Analysis, Completion,
+    DocExport, InlayHint, LocalBinding, LocalKind, MemoryNote, ModuleDoc, RefRange, Resolution,
+    SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
 };
 
 // RFC-0071 M4: role → contract resolution and the editor queries over a
@@ -153,8 +152,7 @@ pub fn load(
 /// are ordinary Vyrn: move-checked below with everything else, and lowered by every
 /// backend as source it cannot tell apart from the user's.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
-    let (mut diags, json_types, json_dec_types) =
-        checker::check_accum_with_json_types(program);
+    let (mut diags, json_types, json_dec_types) = checker::check_accum_with_json_types(program);
     if diags.is_empty() {
         let types = types::decl_map(program);
         match jsonenc::encoders(&json_types, &types) {

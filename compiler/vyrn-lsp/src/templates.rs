@@ -144,8 +144,7 @@ fn classify_in_tag(chars: &[char], lt: usize, offset: usize, line: usize) -> Vyx
             None => {
                 if c == '"' || c == '\'' {
                     in_quote = Some(c);
-                    quoted_attr = last_word
-                        .map(|(s, e)| chars[s..e].iter().collect::<String>());
+                    quoted_attr = last_word.map(|(s, e)| chars[s..e].iter().collect::<String>());
                     word_start = j + 1;
                 } else if c.is_whitespace() || c == '=' || c == '/' {
                     if word_start < j {
@@ -205,7 +204,8 @@ fn class_token(chars: &[char], value_start: usize, offset: usize) -> (String, us
         lo -= 1;
     }
     let mut hi = offset;
-    while hi < chars.len() && !is_class_boundary(chars[hi]) && chars[hi] != '"' && chars[hi] != '\'' {
+    while hi < chars.len() && !is_class_boundary(chars[hi]) && chars[hi] != '"' && chars[hi] != '\''
+    {
         hi += 1;
     }
     (chars[lo..hi].iter().collect(), lo)
@@ -298,9 +298,22 @@ pub const DIRECTIVES: &[(&str, &str)] = &[
 
 /// Global HTML attributes offered on any element.
 pub const GLOBAL_ATTRS: &[&str] = &[
-    "id", "class", "style", "title", "hidden", "tabindex", "role", "lang", "dir",
-    "draggable", "contenteditable", "spellcheck", "accesskey", "aria-label",
-    "aria-hidden", "data-",
+    "id",
+    "class",
+    "style",
+    "title",
+    "hidden",
+    "tabindex",
+    "role",
+    "lang",
+    "dir",
+    "draggable",
+    "contenteditable",
+    "spellcheck",
+    "accesskey",
+    "aria-label",
+    "aria-hidden",
+    "data-",
 ];
 
 /// Per-element attribute refinements (element tag → extra attributes).
@@ -308,10 +321,29 @@ pub fn element_attrs(tag: &str) -> &'static [&'static str] {
     match tag {
         "a" => &["href", "target", "rel", "download"],
         "input" => &[
-            "type", "value", "name", "placeholder", "checked", "disabled",
-            "readonly", "required", "min", "max", "step", "pattern", "autocomplete",
+            "type",
+            "value",
+            "name",
+            "placeholder",
+            "checked",
+            "disabled",
+            "readonly",
+            "required",
+            "min",
+            "max",
+            "step",
+            "pattern",
+            "autocomplete",
         ],
-        "textarea" => &["value", "placeholder", "rows", "cols", "disabled", "readonly", "required"],
+        "textarea" => &[
+            "value",
+            "placeholder",
+            "rows",
+            "cols",
+            "disabled",
+            "readonly",
+            "required",
+        ],
         "select" => &["value", "name", "disabled", "required", "multiple"],
         "option" => &["value", "selected", "disabled"],
         "button" => &["type", "disabled", "name", "value"],
@@ -331,11 +363,37 @@ pub fn element_attrs(tag: &str) -> &'static [&'static str] {
 
 /// DOM events the runtime dispatches, offered after `@`.
 pub const EVENTS: &[&str] = &[
-    "click", "dblclick", "input", "change", "submit", "reset", "focus", "blur",
-    "keydown", "keyup", "keypress", "mousedown", "mouseup", "mousemove",
-    "mouseover", "mouseout", "mouseenter", "mouseleave", "contextmenu", "wheel",
-    "scroll", "drag", "dragstart", "dragend", "dragover", "drop", "touchstart",
-    "touchmove", "touchend", "pointerdown", "pointerup",
+    "click",
+    "dblclick",
+    "input",
+    "change",
+    "submit",
+    "reset",
+    "focus",
+    "blur",
+    "keydown",
+    "keyup",
+    "keypress",
+    "mousedown",
+    "mouseup",
+    "mousemove",
+    "mouseover",
+    "mouseout",
+    "mouseenter",
+    "mouseleave",
+    "contextmenu",
+    "wheel",
+    "scroll",
+    "drag",
+    "dragstart",
+    "dragend",
+    "dragover",
+    "drop",
+    "touchstart",
+    "touchmove",
+    "touchend",
+    "pointerdown",
+    "pointerup",
 ];
 
 // --------------------------------------------------------------------------

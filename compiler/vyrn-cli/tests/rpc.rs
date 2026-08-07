@@ -23,7 +23,11 @@ use std::time::{Duration, Instant};
 
 fn repo_file(rel: &str) -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -61,7 +65,10 @@ fn drain<R: Read + Send + 'static>(mut r: R) -> Arc<Mutex<String>> {
         loop {
             match r.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => a.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n])),
+                Ok(n) => a
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&buf[..n])),
             }
         }
     });
@@ -75,7 +82,10 @@ fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) {
             return;
         }
         if start.elapsed() > timeout {
-            panic!("timed out waiting for {needle:?}; got:\n{}", acc.lock().unwrap());
+            panic!(
+                "timed out waiting for {needle:?}; got:\n{}",
+                acc.lock().unwrap()
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -96,7 +106,11 @@ fn start_server() -> Serve {
         .expect("spawn vyrn serve");
     let _ = drain(child.stdout.take().unwrap());
     let stderr = drain(child.stderr.take().unwrap());
-    let s = Serve { child, port, stderr };
+    let s = Serve {
+        child,
+        port,
+        stderr,
+    };
     wait_for(&s.stderr, "serving", Duration::from_secs(20));
     s
 }
@@ -110,7 +124,10 @@ fn request(port: u16, raw: &str) -> (String, String) {
     let mut resp = String::new();
     stream.read_to_string(&mut resp).expect("read");
     let (head, body) = resp.split_once("\r\n\r\n").unwrap_or((resp.as_str(), ""));
-    (head.lines().next().unwrap_or("").to_string(), body.to_string())
+    (
+        head.lines().next().unwrap_or("").to_string(),
+        body.to_string(),
+    )
 }
 
 fn post(port: u16, path: &str, body: &str) -> (String, String) {
@@ -123,7 +140,10 @@ fn post(port: u16, path: &str, body: &str) -> (String, String) {
     )
 }
 fn get(port: u16, path: &str) -> (String, String) {
-    request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    request(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 #[test]
@@ -184,7 +204,10 @@ fn rpc_schema_registry_reflects_result_oneof() {
     let s = start_server();
     let (_status, body) = get(s.port, "/_/$schema");
     // users/del's response schema is the RFC-0024 Ok/Err oneOf.
-    assert!(body.contains("\"name\":\"users/del\""), "users/del in registry:\n{body}");
+    assert!(
+        body.contains("\"name\":\"users/del\""),
+        "users/del in registry:\n{body}"
+    );
     assert!(
         body.contains("\"properties\":{\"Ok\":{\"type\":\"boolean\"}}"),
         "Ok arm reflected:\n{body}"
@@ -214,7 +237,10 @@ fn rpc_non_rpc_path_falls_through_to_pages() {
     let s = start_server();
     let (status, body) = get(s.port, "/");
     assert_eq!(status, "HTTP/1.1 200 OK");
-    assert!(body.contains("vyrn fullstack"), "page fallback body:\n{body}");
+    assert!(
+        body.contains("vyrn fullstack"),
+        "page fallback body:\n{body}"
+    );
 }
 
 #[test]
@@ -222,16 +248,34 @@ fn rpc_schema_registry_lists_every_procedure() {
     let s = start_server();
     let (status, body) = get(s.port, "/_/$schema");
     assert_eq!(status, "HTTP/1.1 200 OK");
-    assert!(body.starts_with("{\"procedures\":["), "registry shape:\n{body}");
-    assert!(body.contains("\"name\":\"users/byId\""), "users/byId in registry");
-    assert!(body.contains("\"name\":\"users/create\""), "users/create in registry");
+    assert!(
+        body.starts_with("{\"procedures\":["),
+        "registry shape:\n{body}"
+    );
+    assert!(
+        body.contains("\"name\":\"users/byId\""),
+        "users/byId in registry"
+    );
+    assert!(
+        body.contains("\"name\":\"users/create\""),
+        "users/create in registry"
+    );
     // Every entry is keyed by its wire PATH as well as its name, because under a
     // derived scheme the path is what a caller has.
-    assert!(body.contains("\"path\":\"/_/users/byId\""), "the derived path in the registry");
+    assert!(
+        body.contains("\"path\":\"/_/users/byId\""),
+        "the derived path in the registry"
+    );
     // users/byId's request carries the id property; users/create's request carries
     // a `$ref` to the validated Age (its `where` becomes a JSON Schema bound).
-    assert!(body.contains("\"required\":[\"id\"]"), "users/byId request schema");
-    assert!(body.contains("\"maximum\":130"), "Age bound reflected into the schema");
+    assert!(
+        body.contains("\"required\":[\"id\"]"),
+        "users/byId request schema"
+    );
+    assert!(
+        body.contains("\"maximum\":130"),
+        "Age bound reflected into the schema"
+    );
 }
 
 // ---- emit-gen: the client's synthesized surface ----------------------------
@@ -239,8 +283,16 @@ fn rpc_schema_registry_lists_every_procedure() {
 #[test]
 fn emit_gen_client_shows_stubs_and_dispatchers() {
     let client = repo_file("examples/fullstack/client/boot.vyrn");
-    let out = vyrn().arg("emit-gen").arg(&client).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(&client)
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
     // The single shared transport, declared once.
     assert!(
@@ -253,9 +305,18 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
         src.contains("export type RpcIssue = { key: String, path: String, message: String }"),
         "RpcIssue type:\n{src}"
     );
-    assert!(src.contains("export type RpcReply<T> ="), "RpcReply type:\n{src}");
-    assert!(src.contains("| Rejected(Array<RpcIssue>)"), "RpcReply Rejected arm:\n{src}");
-    assert!(src.contains("export fn rpcIssuesFrom(from: Array<Issue>) -> Array<RpcIssue>"), "issue mapper:\n{src}");
+    assert!(
+        src.contains("export type RpcReply<T> ="),
+        "RpcReply type:\n{src}"
+    );
+    assert!(
+        src.contains("| Rejected(Array<RpcIssue>)"),
+        "RpcReply Rejected arm:\n{src}"
+    );
+    assert!(
+        src.contains("export fn rpcIssuesFrom(from: Array<Issue>) -> Array<RpcIssue>"),
+        "issue mapper:\n{src}"
+    );
     // Each stub takes (req, cb: fn(RpcReply<Ret>)) and records the callback under
     // the call id (RFC-0040 §2); the completion dispatcher routes the reply to it.
     assert!(
@@ -267,7 +328,9 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
         "users/byId pending map:\n{src}"
     );
     assert!(
-        src.contains("export extern fn vyrnRpcDoneUsersById(id: Int64, status: Int64, body: String)"),
+        src.contains(
+            "export extern fn vyrnRpcDoneUsersById(id: Int64, status: Int64, body: String)"
+        ),
         "users/byId dispatcher:\n{src}"
     );
     assert!(
@@ -277,16 +340,25 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
     // 2xx decodes to `Done`; 422 parses issues to `Rejected`; a decode/transport
     // fault is `Failed` — the locked transport wording rides the `Failed` arm.
     assert!(src.contains("Valid(v) => Done(v),"), "2xx -> Done:\n{src}");
-    assert!(src.contains("Valid(bag) => Rejected(bag.issues),"), "422 -> Rejected:\n{src}");
+    assert!(
+        src.contains("Valid(bag) => Rejected(bag.issues),"),
+        "422 -> Rejected:\n{src}"
+    );
     assert!(
         src.contains("Failed(\"procedure `usersById` is unreachable\")"),
         "unreachable wording on the Failed arm:\n{src}"
     );
     // No `on<Proc>` convention survives (clean break).
     assert!(!src.contains("onUsersById"), "no on<Proc> emission:\n{src}");
-    assert!(src.contains("export extern fn vyrnRpcDoneUsersCreate("), "users/create dispatcher");
+    assert!(
+        src.contains("export extern fn vyrnRpcDoneUsersCreate("),
+        "users/create dispatcher"
+    );
     // The contract types are re-emitted verbatim (not imported).
-    assert!(src.contains("export type User = { id: Int64, name: Username, age: Age }"), "{src}");
+    assert!(
+        src.contains("export type User = { id: Int64, name: Username, age: Age }"),
+        "{src}"
+    );
 }
 
 // ---- the in-process flavor under `vyrn test` -------------------------------
@@ -294,9 +366,16 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
 #[test]
 fn in_process_flavor_runs_green_under_vyrn_test() {
     let example = repo_file("examples/rpc.vyrn");
-    let out = vyrn().arg("test").arg(&example).output().expect("vyrn test");
+    let out = vyrn()
+        .arg("test")
+        .arg(&example)
+        .output()
+        .expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "in-process tests failed:\n{combined}");
-    assert!(combined.contains("3 passed, 0 failed"), "expected 3 green tests:\n{combined}");
+    assert!(
+        combined.contains("3 passed, 0 failed"),
+        "expected 3 green tests:\n{combined}"
+    );
 }

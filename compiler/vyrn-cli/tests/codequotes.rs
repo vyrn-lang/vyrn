@@ -72,8 +72,14 @@ fn emit_gen_emits_escaped_and_spliced_source() {
     );
     let src = String::from_utf8_lossy(&out.stdout);
     // The fragment splice built a derived name; the String splice became a literal.
-    assert!(src.contains("export fn greetBob(who: String)"), "fragment splice:\n{src}");
-    assert!(src.contains("return \"hi, \" + who"), "string→literal splice:\n{src}");
+    assert!(
+        src.contains("export fn greetBob(who: String)"),
+        "fragment splice:\n{src}"
+    );
+    assert!(
+        src.contains("return \"hi, \" + who"),
+        "string→literal splice:\n{src}"
+    );
 }
 
 #[test]
@@ -95,7 +101,10 @@ fn injection_attempt_becomes_an_inert_string_literal() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("; dropTables(); "), "payload printed as data:\n{stdout}");
+    assert!(
+        stdout.contains("; dropTables(); "),
+        "payload printed as data:\n{stdout}"
+    );
 }
 
 #[test]
@@ -115,8 +124,14 @@ fn broken_skeleton_reports_in_the_generators_file() {
     let out = vyrn().arg("check").arg(&app_path).output().unwrap();
     assert!(!out.status.success(), "expected a skeleton error");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("gen.vyrn"), "reported in the generator's file:\n{err}");
-    assert!(err.contains("skeleton does not parse"), "skeleton message:\n{err}");
+    assert!(
+        err.contains("gen.vyrn"),
+        "reported in the generator's file:\n{err}"
+    );
+    assert!(
+        err.contains("skeleton does not parse"),
+        "skeleton message:\n{err}"
+    );
 }
 
 #[test]
@@ -133,7 +148,10 @@ fn bad_identifier_splice_names_the_generator() {
     assert!(!out.status.success(), "expected an identifier-splice error");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("mkMod"), "names the generator:\n{err}");
-    assert!(err.contains("\"a b\""), "quotes the offending value:\n{err}");
+    assert!(
+        err.contains("\"a b\""),
+        "quotes the offending value:\n{err}"
+    );
 }
 
 #[test]
@@ -163,10 +181,19 @@ fn rawat_origin_maps_a_check_error_back_to_the_source() {
         .arg(dir.join("app.vyrn"))
         .output()
         .unwrap();
-    assert!(!out.status.success(), "expected a check error inside the raw text");
+    assert!(
+        !out.status.success(),
+        "expected a check error inside the raw text"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("input.txt:1:5"), "remapped to the origin:\n{err}");
-    assert!(err.contains("generated code"), "keeps the generated location as a note:\n{err}");
+    assert!(
+        err.contains("input.txt:1:5"),
+        "remapped to the origin:\n{err}"
+    );
+    assert!(
+        err.contains("generated code"),
+        "keeps the generated location as a note:\n{err}"
+    );
 }
 
 #[test]
@@ -185,7 +212,11 @@ fn i18n_translation_with_quotes_and_backslashes_bakes_losslessly() {
                import { tQuoteMsg } from i18n(\"./locales\")\n\
                fn main() -> Int64 { print(tQuoteMsg()) return 0 }\n";
     write(&dir.join("app.vyrn"), app);
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "run failed:\n{}",
@@ -194,7 +225,10 @@ fn i18n_translation_with_quotes_and_backslashes_bakes_losslessly() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     // The decoded JSON value: say "hi" \ ok  — printed intact through the baked
     // Vyrn string literal.
-    assert!(stdout.contains(r#"say "hi" \ ok"#), "lossless bake:\n{stdout}");
+    assert!(
+        stdout.contains(r#"say "hi" \ ok"#),
+        "lossless bake:\n{stdout}"
+    );
 }
 
 #[test]
@@ -209,7 +243,10 @@ fn scan_example_runs_with_string_and_comment_awareness() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ident: hello"), "{stdout}");
     // The comma inside the quoted string was not treated as a delimiter.
-    assert!(stdout.contains("first: \"a, b\""), "string-aware `until`:\n{stdout}");
+    assert!(
+        stdout.contains("first: \"a, b\""),
+        "string-aware `until`:\n{stdout}"
+    );
     // RFC-0054 M4a: `/* */` block-comment awareness (needed by std/tw's CSS). A
     // `}` hiding inside a CSS block comment is not a structural brace, and a `;`
     // inside one is not a stop.
@@ -229,6 +266,12 @@ fn std_scan_unit_tests_run_green() {
     let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "std/scan unit tests failed:\n{combined}");
-    assert!(combined.contains("7 passed, 0 failed"), "expected 7 green tests:\n{combined}");
+    assert!(
+        out.status.success(),
+        "std/scan unit tests failed:\n{combined}"
+    );
+    assert!(
+        combined.contains("7 passed, 0 failed"),
+        "expected 7 green tests:\n{combined}"
+    );
 }

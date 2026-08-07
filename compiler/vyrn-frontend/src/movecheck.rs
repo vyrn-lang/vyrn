@@ -161,10 +161,15 @@ pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
         // through `std/html`. So this asks per position, instead of assuming
         // every call may retain — the assumption this phase deleted, and the one
         // that left `let s = a + b; takes(s)` leaking.
-        if let Some((to, _, line)) =
-            row.passed.iter().find(|(c, i, _)| r.retains.contains(&(c.clone(), *i)))
+        if let Some((to, _, line)) = row
+            .passed
+            .iter()
+            .find(|(c, i, _)| r.retains.contains(&(c.clone(), *i)))
         {
-            row.gone = Some(Gone::Lent { line: *line, to: to.clone() });
+            row.gone = Some(Gone::Lent {
+                line: *line,
+                to: to.clone(),
+            });
             continue;
         }
         // Handed to a LENDER. A lender returns a projection of what it was given
@@ -177,7 +182,10 @@ pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
         // nothing else here could see it. The rule is wider than the row that
         // needed it, and wider is the safe direction: it can only stop a release.
         if let Some((to, _, line)) = row.passed.iter().find(|(c, _, _)| r.lending.contains(c)) {
-            row.gone = Some(Gone::Lent { line: *line, to: to.clone() });
+            row.gone = Some(Gone::Lent {
+                line: *line,
+                to: to.clone(),
+            });
         }
     }
     lets
@@ -311,7 +319,11 @@ fn run(program: &Program, want: Want) -> Run {
         // Module state is nobody's borrow: it owns what it holds for the whole
         // module, which is why nothing may `consume` it either.
         borrows: RefCell::new(Scopes::new(
-            program.globals.iter().map(|g| (g.name.clone(), None)).collect(),
+            program
+                .globals
+                .iter()
+                .map(|g| (g.name.clone(), None))
+                .collect(),
         )),
         ret: RefCell::new(Type::Unit),
         lambda_base: RefCell::new(Vec::new()),
@@ -590,7 +602,11 @@ type Consumed = HashMap<String, Consumption>;
 impl Consumption {
     /// A `consume` capability took it — the wording this pass has always used.
     fn by_capability(line: usize, by: String) -> Self {
-        Consumption { line, by, fixes: Vec::new() }
+        Consumption {
+            line,
+            by,
+            fixes: Vec::new(),
+        }
     }
 }
 
@@ -605,8 +621,11 @@ impl MoveCheck<'_> {
     /// node addresses are the reclamation key (Phase 4c).
     fn body(&self, params: &[Param], ret: &Type, body: &Block) {
         let f_params = params;
-        *self.param_ix.borrow_mut() =
-            f_params.iter().enumerate().map(|(i, p)| (p.name.clone(), i)).collect();
+        *self.param_ix.borrow_mut() = f_params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name.clone(), i))
+            .collect();
         let mut consumed: Consumed = HashMap::new();
         let mut scope: Vec<HashSet<String>> =
             vec![f_params.iter().map(|p| p.name.clone()).collect()];
@@ -682,7 +701,9 @@ impl MoveCheck<'_> {
     /// records that. Without it Phase 5 released `answer` on the way out and the
     /// caller read freed memory — `examples/rest.vyrn`, in one parity run.
     fn place_key(&self, e: &Expr) -> usize {
-        let Some((root, _)) = place_path(e) else { return 0 };
+        let Some((root, _)) = place_path(e) else {
+            return 0;
+        };
         self.nodes.borrow().get(&root).copied().unwrap_or(0)
     }
 
@@ -756,8 +777,8 @@ impl MoveCheck<'_> {
                 // Module state lives for the whole module and is never dropped,
                 // so naming it takes nothing (RFC-0013). Frame 0 IS the globals
                 // frame, which is also what tells a global from a local shadow.
-                let global = self.globals.contains(name)
-                    && self.vars.borrow().frame_of(name) == Some(0);
+                let global =
+                    self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0);
                 global.then_some("module state, which nothing may take")
             }
             Expr::Call { name, .. } if views(name) => Some("a view into its argument"),
@@ -765,7 +786,11 @@ impl MoveCheck<'_> {
             // `let ty = if k < n { types[k] } else { "Int64" }` binds an element
             // of `types` on one path. One arm is enough — nothing here can say
             // which path runs.
-            Expr::IfExpr { then_branch, else_branch, .. } => self
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => self
                 .names_a_place(then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|b| self.names_a_place(b))),
             Expr::Match { arms, .. } => arms.iter().find_map(|a| self.names_a_place(&a.body)),
@@ -830,9 +855,7 @@ impl MoveCheck<'_> {
             Expr::Field { expr, field, .. } => {
                 let base = self.type_of(expr)?;
                 match crate::types::resolve(&base, self.decl.decls()) {
-                    Type::Record(fs) => {
-                        fs.iter().find(|f| &f.name == field).map(|f| f.ty.clone())
-                    }
+                    Type::Record(fs) => fs.iter().find(|f| &f.name == field).map(|f| f.ty.clone()),
                     _ => None,
                 }
             }
@@ -847,7 +870,9 @@ impl MoveCheck<'_> {
             // that, which is why this reading is here and not in `Declared`:
             // resolving `m` past `Some(m)` to an outer String read `m + 1` as a
             // concatenation and the backend freed the integer.
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 let arm = arms.first()?;
                 let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                 self.enter();
@@ -898,7 +923,9 @@ impl MoveCheck<'_> {
         outlives: bool,
         consumed: &mut Consumed,
     ) -> Result<bool, String> {
-        let Some((root, path)) = place_path(value) else { return Ok(false) };
+        let Some((root, path)) = place_path(value) else {
+            return Ok(false);
+        };
         // A scalar copies. An unnamed type is left alone — see the doc above.
         if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
             return Ok(false);
@@ -912,7 +939,11 @@ impl MoveCheck<'_> {
             // anywhere that outlives the call.
             return Err(menu(
                 line,
-                format!("`{path}` may not be stored into {} — it is {}", into(), b.what(&path)),
+                format!(
+                    "`{path}` may not be stored into {} — it is {}",
+                    into(),
+                    b.what(&path)
+                ),
                 self.fixes_here(&b, &root, &path),
             ));
         }
@@ -972,10 +1003,18 @@ impl MoveCheck<'_> {
     /// take `o` apart, so `v` is a projection of it and rule 2 applies. A
     /// scrutinee that is a fresh value has no other owner, so its payload is
     /// owned.
-    fn payload_binding(&self, scrutinee: &Expr, p: &Pattern) -> (Vec<Option<Type>>, Option<Borrow>) {
+    fn payload_binding(
+        &self,
+        scrutinee: &Expr,
+        p: &Pattern,
+    ) -> (Vec<Option<Type>>, Option<Borrow>) {
         let n = pattern_bindings(p).len();
         let ty = self.type_of(scrutinee);
-        let tys: Vec<Option<Type>> = match (ty.as_ref().map(|t| crate::types::resolve(t, self.decl.decls())), p) {
+        let tys: Vec<Option<Type>> = match (
+            ty.as_ref()
+                .map(|t| crate::types::resolve(t, self.decl.decls())),
+            p,
+        ) {
             (Some(Type::Option(t)), Pattern::Some(_)) => vec![Some(*t)],
             (Some(Type::Result(t, _)), Pattern::Ok(_) | Pattern::Success(_)) => vec![Some(*t)],
             (Some(Type::Result(_, e)), Pattern::Err(_) | Pattern::Failure(_)) => vec![Some(*e)],
@@ -1102,7 +1141,9 @@ impl MoveCheck<'_> {
                         "`{path}` may not be returned — it is module state, which nothing \
                          may take, and a return is owned"
                     ),
-                    vec![format!("`{path}.copy()` — the caller releases what it is handed")],
+                    vec![format!(
+                        "`{path}.copy()` — the caller releases what it is handed"
+                    )],
                 ));
             }
             return Ok(());
@@ -1117,7 +1158,9 @@ impl MoveCheck<'_> {
         if found.is_some() || self.lends_through_a_wrapper(e) {
             self.lends();
         }
-        let Some((b, root, path)) = found else { return Ok(()) };
+        let Some((b, root, path)) = found else {
+            return Ok(());
+        };
         // Only a borrowed PARAMETER is refused here. It is a lifetime error with
         // a named fix, and it is the class Phase 4b missed: 4b read `return p`
         // as a statement, and these return a parameter from inside a `match`
@@ -1140,14 +1183,19 @@ impl MoveCheck<'_> {
                          and the JS caller releases what it is handed",
                         b.what(&path)
                     ),
-                    vec![format!("`{path}.copy()` — an `export extern fn` owns its result")],
+                    vec![format!(
+                        "`{path}.copy()` — an `export extern fn` owns its result"
+                    )],
                 ));
             }
             return Ok(());
         }
         Err(menu(
             line,
-            format!("`{path}` may not be returned — it is {}, and a return is owned", b.what(&path)),
+            format!(
+                "`{path}` may not be returned — it is {}, and a return is owned",
+                b.what(&path)
+            ),
             b.fixes(&root, &path),
         ))
     }
@@ -1159,7 +1207,9 @@ impl MoveCheck<'_> {
     /// given, and a PARAMETER passed here makes this function keep it in turn.
     fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize) {
         let Some(sink) = &self.lets else { return };
-        let Some((root, _)) = place_path(arg) else { return };
+        let Some((root, _)) = place_path(arg) else {
+            return;
+        };
         if let Some(&ix) = self.param_ix.borrow().get(&root) {
             if let Some(edges) = &self.handed_on {
                 edges
@@ -1192,7 +1242,11 @@ impl MoveCheck<'_> {
         }
         let mut arms: Vec<&Expr> = Vec::new();
         match e {
-            Expr::IfExpr { then_branch, else_branch, .. } => {
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 arms.push(then_branch);
                 if let Some(b) = else_branch {
                     arms.push(b);
@@ -1214,8 +1268,13 @@ impl MoveCheck<'_> {
     /// Record that a borrowed PARAMETER was put somewhere that outlives the call.
     fn note_retention(&self, e: &Expr) {
         let Some(sink) = &self.retains else { return };
-        let Some((root, _)) = place_path(e) else { return };
-        if !matches!(self.borrow_of(&root), Some(Borrow::Read(_)) | Some(Borrow::Modify(_))) {
+        let Some((root, _)) = place_path(e) else {
+            return;
+        };
+        if !matches!(
+            self.borrow_of(&root),
+            Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
+        ) {
             return;
         }
         if let Some(&ix) = self.param_ix.borrow().get(&root) {
@@ -1235,7 +1294,9 @@ impl MoveCheck<'_> {
     /// that yield one of their arms.
     fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {
         match e {
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 let mut found = None;
                 for arm in arms {
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
@@ -1252,7 +1313,11 @@ impl MoveCheck<'_> {
                 }
                 found
             }
-            Expr::IfExpr { then_branch, else_branch, .. } => self
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => self
                 .returned_borrow(then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|b| self.returned_borrow(b))),
             _ => {
@@ -1282,14 +1347,22 @@ impl MoveCheck<'_> {
             Expr::Call { name, args, .. } if self.decl.constructs(name) => {
                 args.iter().any(|a| self.returned_borrow(a).is_some())
             }
-            Expr::StructLit { fields, .. } => {
-                fields.iter().any(|(_, v)| self.returned_borrow(v).is_some())
-            }
-            Expr::IfExpr { then_branch, else_branch, .. } => {
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|(_, v)| self.returned_borrow(v).is_some()),
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.lends_through_a_wrapper(then_branch)
-                    || else_branch.as_ref().is_some_and(|b| self.lends_through_a_wrapper(b))
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|b| self.lends_through_a_wrapper(b))
             }
-            Expr::Match { scrutinee, arms, .. } => arms.iter().any(|arm| {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => arms.iter().any(|arm| {
                 let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                 self.enter();
                 for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
@@ -1409,7 +1482,13 @@ impl MoveCheck<'_> {
                 };
                 // A projection is a borrow rather than a move, so only a whole
                 // place moves here — `store` decides which.
-                let moved = self.store(value, &|| format!("the binding `{name}`"), *line, false, consumed)?;
+                let moved = self.store(
+                    value,
+                    &|| format!("the binding `{name}`"),
+                    *line,
+                    false,
+                    consumed,
+                )?;
                 // Phase 4c: the row this binding is reclaimed by. Written BEFORE
                 // the binding enters scope, so `let s = s + "x"` records the new
                 // `s` and the move of the old one lands on the old row.
@@ -1450,11 +1529,18 @@ impl MoveCheck<'_> {
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
                 // so 4b treats a store into it differently from a local's.
                 let global = self.globals.contains(name) && !Self::in_scope(scope, name);
-                self.site(if global { "assign-global" } else { "assign" }, *line, value, None);
-                let into = || if global {
-                    format!("module state `{name}`")
-                } else {
-                    format!("`{name}`")
+                self.site(
+                    if global { "assign-global" } else { "assign" },
+                    *line,
+                    value,
+                    None,
+                );
+                let into = || {
+                    if global {
+                        format!("module state `{name}`")
+                    } else {
+                        format!("`{name}`")
+                    }
                 };
                 let _ = self.store(value, &into, *line, global, consumed)?;
                 consumed.remove(name); // reassignment revives it
@@ -1468,7 +1554,13 @@ impl MoveCheck<'_> {
             } => {
                 self.site("field", *line, value, None);
                 self.expr(value, consumed, scope)?;
-                let _ = self.store(value, &|| format!("the field `{name}.{field}`"), *line, true, consumed)?;
+                let _ = self.store(
+                    value,
+                    &|| format!("the field `{name}.{field}`"),
+                    *line,
+                    true,
+                    consumed,
+                )?;
                 Ok(false)
             }
             // `a[i] = v` — the stored value is consumed like a `push` argument
@@ -1685,8 +1777,7 @@ impl MoveCheck<'_> {
                 // the rule 1 error `expr` already reports.
                 if *consuming {
                     if let Some((root, _)) = place_path(iter) {
-                        let fixes =
-                            vec![format!("`{root}.copy()` if both sides need a value")];
+                        let fixes = vec![format!("`{root}.copy()` if both sides need a value")];
                         self.took(
                             &root,
                             Gone::Moved {
@@ -1696,7 +1787,11 @@ impl MoveCheck<'_> {
                         );
                         consumed.insert(
                             root,
-                            Consumption { line: *line, by: "the `for .. in consume` loop".into(), fixes },
+                            Consumption {
+                                line: *line,
+                                by: "the `for .. in consume` loop".into(),
+                                fixes,
+                            },
                         );
                     }
                 }
@@ -1779,15 +1874,28 @@ impl MoveCheck<'_> {
         if self.lets.is_none() {
             return;
         }
-        let Some(&inside) = self.lambda_base.borrow().last() else { return };
+        let Some(&inside) = self.lambda_base.borrow().last() else {
+            return;
+        };
         // A lambda written straight at a call site cannot outlive the call, so it
         // borrows and this block keeps the value — the same condition
         // `check_capture` applies to rule 2. A STORED one is a value under
         // RFC-0037 and can outlive the frame.
-        if !self.lambda_escapes.borrow().last().copied().unwrap_or(false) {
+        if !self
+            .lambda_escapes
+            .borrow()
+            .last()
+            .copied()
+            .unwrap_or(false)
+        {
             return;
         }
-        if self.vars.borrow().frame_of(name).is_some_and(|f| f < inside) {
+        if self
+            .vars
+            .borrow()
+            .frame_of(name)
+            .is_some_and(|f| f < inside)
+        {
             self.took(name, Gone::Captured { line });
         }
     }
@@ -1798,12 +1906,16 @@ impl MoveCheck<'_> {
     /// `modify` parameter and to any other parameter of the same call gives the
     /// callee two names for one value, and the callee was told it had one.
     fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), String> {
-        let Some(caps) = self.caps.get(callee) else { return Ok(()) };
+        let Some(caps) = self.caps.get(callee) else {
+            return Ok(());
+        };
         for (i, a) in args.iter().enumerate() {
             if caps.get(i) != Some(&Capability::Modify) {
                 continue;
             }
-            let Some((root, path)) = place_path(a) else { continue };
+            let Some((root, path)) = place_path(a) else {
+                continue;
+            };
             for (j, b) in args.iter().enumerate() {
                 if i != j && linear::mentions(b, &root) {
                     return Err(menu(
@@ -1830,14 +1942,29 @@ impl MoveCheck<'_> {
     /// rule leaves it alone. A lambda that is stored is a value under RFC-0037's
     /// defunctionalization, and a borrow inside one has no lifetime to stand on.
     fn check_capture(&self, name: &str, line: usize) -> Result<(), String> {
-        let Some(&inside) = self.lambda_base.borrow().last() else { return Ok(()) };
-        if !self.lambda_escapes.borrow().last().copied().unwrap_or(false) {
+        let Some(&inside) = self.lambda_base.borrow().last() else {
+            return Ok(());
+        };
+        if !self
+            .lambda_escapes
+            .borrow()
+            .last()
+            .copied()
+            .unwrap_or(false)
+        {
             return Ok(());
         }
-        if !self.vars.borrow().frame_of(name).is_some_and(|f| f < inside) {
+        if !self
+            .vars
+            .borrow()
+            .frame_of(name)
+            .is_some_and(|f| f < inside)
+        {
             return Ok(());
         }
-        let Some(b) = self.borrow_of(name) else { return Ok(()) };
+        let Some(b) = self.borrow_of(name) else {
+            return Ok(());
+        };
         Err(menu(
             line,
             format!(
@@ -1928,7 +2055,13 @@ impl MoveCheck<'_> {
                 for (f, v) in fields {
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
-                    let _ = self.store(v, &|| format!("the field `{name}.{f}`"), *line, true, consumed)?;
+                    let _ = self.store(
+                        v,
+                        &|| format!("the field `{name}.{f}`"),
+                        *line,
+                        true,
+                        consumed,
+                    )?;
                 }
                 Ok(())
             }
@@ -2022,12 +2155,17 @@ impl MoveCheck<'_> {
                             }
                             self.took(
                                 v,
-                                Gone::Moved { line: *line, by: format!("`{name}(..)`") },
+                                Gone::Moved {
+                                    line: *line,
+                                    by: format!("`{name}(..)`"),
+                                },
                             );
-                            consumed.entry(v.clone()).or_insert(Consumption::by_capability(
-                                *line,
-                                format!("`{name}(..)`"),
-                            ));
+                            consumed
+                                .entry(v.clone())
+                                .or_insert(Consumption::by_capability(
+                                    *line,
+                                    format!("`{name}(..)`"),
+                                ));
                         }
                     } else if self.decl.constructs(name) {
                         self.note_retention(arg);
@@ -2043,7 +2181,10 @@ impl MoveCheck<'_> {
                             if root == path {
                                 self.took(
                                     &root,
-                                    Gone::Moved { line: *line, by: format!("`{name}(..)`") },
+                                    Gone::Moved {
+                                        line: *line,
+                                        by: format!("`{name}(..)`"),
+                                    },
                                 );
                             }
                         }
@@ -2052,13 +2193,8 @@ impl MoveCheck<'_> {
                         // `consume` parameter that has no signature to say so
                         // (RFC-0087 §2b). Rule 1 governs it exactly as it governs
                         // `xs = [.., v]`, which is what it means.
-                        let _ = self.store(
-                            arg,
-                            &|| format!("`{name}(..)`"),
-                            *line,
-                            true,
-                            consumed,
-                        )?;
+                        let _ =
+                            self.store(arg, &|| format!("`{name}(..)`"), *line, true, consumed)?;
                     }
                 }
                 Ok(())
@@ -2067,7 +2203,13 @@ impl MoveCheck<'_> {
                 for e in elems {
                     self.site("literal", *line, e, None);
                     self.expr(e, consumed, scope)?;
-                    let _ = self.store(e, &|| "the array literal".to_string(), *line, true, consumed)?;
+                    let _ = self.store(
+                        e,
+                        &|| "the array literal".to_string(),
+                        *line,
+                        true,
+                        consumed,
+                    )?;
                 }
                 Ok(())
             }
@@ -2076,8 +2218,10 @@ impl MoveCheck<'_> {
                     self.expr(k, consumed, scope)?;
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
-                    let _ = self.store(k, &|| "the map literal".to_string(), *line, true, consumed)?;
-                    let _ = self.store(v, &|| "the map literal".to_string(), *line, true, consumed)?;
+                    let _ =
+                        self.store(k, &|| "the map literal".to_string(), *line, true, consumed)?;
+                    let _ =
+                        self.store(v, &|| "the map literal".to_string(), *line, true, consumed)?;
                 }
                 Ok(())
             }
@@ -2129,10 +2273,12 @@ impl MoveCheck<'_> {
                             if !Self::in_scope(scope, v) {
                                 self.reject_consume_global(v, name, true, *vl)?;
                             }
-                            consumed.entry(v.clone()).or_insert(Consumption::by_capability(
-                                *line,
-                                format!("`spawn {name}(..)`"),
-                            ));
+                            consumed
+                                .entry(v.clone())
+                                .or_insert(Consumption::by_capability(
+                                    *line,
+                                    format!("`spawn {name}(..)`"),
+                                ));
                         }
                     }
                 }
@@ -2233,13 +2379,11 @@ pub fn mentions_place(e: &Expr, base: &str) -> bool {
             | Expr::Spawn { args, .. }
             | Expr::TryConstruct { args, .. }
             | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| go(a, base)),
-            Expr::MapLit { entries, .. } => {
-                entries.iter().any(|(k, v)| go(k, base) || go(v, base))
-            }
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| go(k, base) || go(v, base)),
             Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| go(v, base)),
-            Expr::Match { scrutinee, arms, .. } => {
-                go(scrutinee, base) || arms.iter().any(|a| go(&a.body, base))
-            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => go(scrutinee, base) || arms.iter().any(|a| go(&a.body, base)),
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -2316,7 +2460,12 @@ mod linear {
         let producers: HashMap<&str, Owed> = program
             .functions
             .iter()
-            .filter_map(|f| Some((f.name.as_str(), owed(&f.ret, f.type_params.as_slice(), decl)?)))
+            .filter_map(|f| {
+                Some((
+                    f.name.as_str(),
+                    owed(&f.ret, f.type_params.as_slice(), decl)?,
+                ))
+            })
             .collect();
         let mut out = Vec::new();
         for f in &program.functions {
@@ -2343,10 +2492,24 @@ mod linear {
             block(&f.body, &mut live, &producers, &f.module, decl, &mut out);
         }
         for t in &program.tests {
-            block(&t.body, &mut Vec::new(), &producers, &t.module, decl, &mut out);
+            block(
+                &t.body,
+                &mut Vec::new(),
+                &producers,
+                &t.module,
+                decl,
+                &mut out,
+            );
         }
         for b in &program.benches {
-            block(&b.body, &mut Vec::new(), &producers, &b.module, decl, &mut out);
+            block(
+                &b.body,
+                &mut Vec::new(),
+                &producers,
+                &b.module,
+                decl,
+                &mut out,
+            );
         }
         out
     }
@@ -2426,7 +2589,11 @@ mod linear {
         let base = live.len();
         for (i, st) in b.stmts.iter().enumerate() {
             if let Stmt::Let {
-                name, ty, value, line, ..
+                name,
+                ty,
+                value,
+                line,
+                ..
             } = st
             {
                 if let Some(o) = owed_let(ty.as_ref(), value, live, producers, decl) {
@@ -2472,10 +2639,7 @@ mod linear {
             Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
             // `let t = s` moves the value; `t` inherits both the obligation and
             // the rendering, and the mention of `s` discharges `s`'s.
-            Expr::Var { name, .. } => live
-                .iter()
-                .find(|(l, _)| l == name)
-                .map(|(_, o)| o.clone()),
+            Expr::Var { name, .. } => live.iter().find(|(l, _)| l == name).map(|(_, o)| o.clone()),
             _ => None,
         }
     }
@@ -2655,9 +2819,9 @@ mod linear {
                 v.extend(else_block.as_ref());
                 v
             }
-            Stmt::While { body, .. }
-            | Stmt::ForIn { body, .. }
-            | Stmt::Region { body, .. } => vec![body],
+            Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
+                vec![body]
+            }
             _ => Vec::new(),
         }
     }
@@ -2774,13 +2938,20 @@ fn reads(e: &Expr) -> Vec<String> {
                     go(v, out);
                 }
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 go(scrutinee, out);
                 for a in arms {
                     go(&a.body, out);
                 }
             }
-            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 go(cond, out);
                 go(then_branch, out);
                 if let Some(eb) = else_branch {
@@ -2804,13 +2975,20 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
         out.push(name.clone());
     }
     match e {
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             calls_in(scrutinee, out);
             for a in arms {
                 calls_in(&a.body, out);
             }
         }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             calls_in(cond, out);
             calls_in(then_branch, out);
             if let Some(b) = else_branch {
@@ -3075,7 +3253,7 @@ mod tests {
         // not an error, so the common rename costs nothing.
         assert!(run("fn main() -> Int64 { let s = \"a\" + \"b\" let t = s \
                      return t.byteLength }")
-            .is_ok());
+        .is_ok());
         // And a scalar never moves at all.
         assert!(run("fn main() -> Int64 { let a = 1 let b = a return a + b }").is_ok());
     }
@@ -3102,15 +3280,18 @@ mod tests {
         let src = "fn id(s: String) -> String { return s } fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
         assert!(e.contains("`s` may not be returned"), "{e}");
-        assert!(e.contains("fix: declare the parameter `s: consume ..`"), "{e}");
+        assert!(
+            e.contains("fix: declare the parameter `s: consume ..`"),
+            "{e}"
+        );
         assert!(e.contains("fix: `s.copy()`"), "{e}");
         // Both named fixes work.
         assert!(run("fn id(s: consume String) -> String { return s } \
                      fn main() -> Int64 { return 0 }")
-            .is_ok());
+        .is_ok());
         assert!(run("fn id(s: String) -> String { return s.copy() } \
                      fn main() -> Int64 { return 0 }")
-            .is_ok());
+        .is_ok());
     }
 
     /// Phase 10a. `openRule(c)` is `for m in c.members { return Some(m) }` — a
@@ -3155,7 +3336,9 @@ mod tests {
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
         assert!(super::check(&program).is_ok());
         assert!(
-            super::ownership(&program).values().all(|r| r.gone.is_some()),
+            super::ownership(&program)
+                .values()
+                .all(|r| r.gone.is_some()),
             "a parameter is the caller's, so the `if let` over one may not be reclaimed"
         );
         // A genuine temporary still gets one — the row Phase 10a is for.
@@ -3164,7 +3347,9 @@ mod tests {
                    return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(tmp).unwrap()).unwrap();
         assert!(
-            super::ownership(&program).values().any(|r| r.gone.is_none()),
+            super::ownership(&program)
+                .values()
+                .any(|r| r.gone.is_none()),
             "an `if let` over a call result owns what it matched"
         );
     }
@@ -3172,8 +3357,10 @@ mod tests {
     #[test]
     fn a_returned_scalar_parameter_is_not_a_borrow() {
         // The surface only exists where heap is owned (RFC-0089 "What it costs").
-        assert!(run("fn id(n: Int64) -> Int64 { return n } fn main() -> Int64 { return id(1) }")
-            .is_ok());
+        assert!(
+            run("fn id(n: Int64) -> Int64 { return n } fn main() -> Int64 { return id(1) }")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3183,10 +3370,15 @@ mod tests {
         let src = "fn first(xs: Array<String>) -> String { for x in xs { return x } return \"\" } \
                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("`x` may not be returned") && e.contains("a loop variable"), "{e}");
-        assert!(run("fn first(xs: Array<String>) -> String { for x in xs { return x.copy() } \
-                     return \"\" } fn main() -> Int64 { return 0 }")
-            .is_ok());
+        assert!(
+            e.contains("`x` may not be returned") && e.contains("a loop variable"),
+            "{e}"
+        );
+        assert!(run(
+            "fn first(xs: Array<String>) -> String { for x in xs { return x.copy() } \
+                     return \"\" } fn main() -> Int64 { return 0 }"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -3202,7 +3394,7 @@ mod tests {
         assert!(run("type R = { a: String, b: String } \
                      fn use2(r: R) -> Int64 { let x = r.a let y = r.b \
                      return x.byteLength + y.byteLength } fn main() -> Int64 { return 0 }")
-            .is_ok());
+        .is_ok());
     }
 
     /// RFC-0089 rule 3, Phase 6. Module state is nobody's borrow, and that is
@@ -3216,21 +3408,29 @@ mod tests {
                    fn get() -> String { return title } \
                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("`title` may not be returned") && e.contains("module state"), "{e}");
+        assert!(
+            e.contains("`title` may not be returned") && e.contains("module state"),
+            "{e}"
+        );
         assert!(e.contains("fix: `title.copy()`"), "{e}");
         // A field of module state is the same buffer through one more hop.
         let src = "type R = { s: String } let mut r = R { s: \"x\" } \
                    fn get() -> String { return r.s } \
                    fn main() -> Int64 { return 0 }";
-        assert!(run(src).unwrap_err().contains("`r.s` may not be returned"), "field");
+        assert!(
+            run(src).unwrap_err().contains("`r.s` may not be returned"),
+            "field"
+        );
         // The named fix compiles.
-        assert!(run("let mut title = \"x\" fn get() -> String { return title.copy() } \
-                     fn main() -> Int64 { return 0 }")
-            .is_ok());
+        assert!(run(
+            "let mut title = \"x\" fn get() -> String { return title.copy() } \
+                     fn main() -> Int64 { return 0 }"
+        )
+        .is_ok());
         // A type nobody releases is not a use-after-free, so it is not refused.
         assert!(run("type R = { s: String } let mut r = R { s: \"x\" } \
                      fn get() -> R { return r } fn main() -> Int64 { return 0 }")
-            .is_ok());
+        .is_ok());
     }
 
     /// Rule 3 admits a lend where the caller is Vyrn — `ownership` reads the
@@ -3245,14 +3445,21 @@ mod tests {
                     fn main() -> Int64 { return 0 }";
         // An ordinary function may lend: the caller is Vyrn and knows not to free.
         assert!(run(&format!("{enum_and_state} fn text() -> String {{ {body}")).is_ok());
-        let e = run(&format!("{enum_and_state} export extern fn text() -> String {{ {body}"))
-            .unwrap_err();
-        assert!(e.contains("may not be returned from an exported function"), "{e}");
+        let e = run(&format!(
+            "{enum_and_state} export extern fn text() -> String {{ {body}"
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("may not be returned from an exported function"),
+            "{e}"
+        );
         assert!(e.contains("fix: `s.copy()`"), "{e}");
         let fixed = "return match tag { Word(s) => s.copy(), Num(n) => \"num\", } } \
                      fn main() -> Int64 { return 0 }";
-        assert!(run(&format!("{enum_and_state} export extern fn text() -> String {{ {fixed}"))
-            .is_ok());
+        assert!(run(&format!(
+            "{enum_and_state} export extern fn text() -> String {{ {fixed}"
+        ))
+        .is_ok());
     }
 
     /// Phase 6's other half of the menu: inside an `export extern fn` the
@@ -3264,11 +3471,14 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
         assert!(e.contains("fix: `arg.copy()`"), "{e}");
-        assert!(!e.contains("consume"), "an export may not consume a String: {e}");
+        assert!(
+            !e.contains("consume"),
+            "an export may not consume a String: {e}"
+        );
         assert!(run("let mut kept = \"x\" \
                      export extern fn set(arg: String) { kept = arg.copy() } \
                      fn main() -> Int64 { return 0 }")
-            .is_ok());
+        .is_ok());
     }
 
     #[test]
@@ -3276,7 +3486,10 @@ mod tests {
         let src = "type R = { s: String }                    fn keep(x: String) -> R { return R { s: x } }                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
         assert!(e.contains("may not be stored into the field `R.s`"), "{e}");
-        assert!(e.contains("fix: declare the parameter `x: consume ..`"), "{e}");
+        assert!(
+            e.contains("fix: declare the parameter `x: consume ..`"),
+            "{e}"
+        );
         // Both named fixes work.
         assert!(run("type R = { s: String } fn keep(x: consume String) -> R { return R { s: x } }                      fn main() -> Int64 { return 0 }")
             .is_ok());
@@ -3290,7 +3503,10 @@ mod tests {
         // copy: the loop takes the container.
         let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("fix: `for x in consume xs` if the loop should take"), "{e}");
+        assert!(
+            e.contains("fix: `for x in consume xs` if the loop should take"),
+            "{e}"
+        );
         // Taking the container needs the function to own it, and the diagnostic
         // says so before it says `copy`.
         assert!(e.contains("fix: `x.copy()`"), "{e}");
@@ -3305,7 +3521,10 @@ mod tests {
         // And the container is dead afterwards — rule 1's own error.
         let src = "fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]                    let mut out: Array<String> = []                    for x in consume xs { out.push(x) } return xs.length }                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("`xs` was moved here into the `for .. in consume` loop"), "{e}");
+        assert!(
+            e.contains("`xs` was moved here into the `for .. in consume` loop"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -3313,7 +3532,10 @@ mod tests {
         // A borrow is not the loop's to give away, and the two-step fix says so.
         let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in consume xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("`xs` may not be consumed — it is a `read` parameter"), "{e}");
+        assert!(
+            e.contains("`xs` may not be consumed — it is a `read` parameter"),
+            "{e}"
+        );
         assert!(run("fn go(xs: consume Array<String>) -> Int64 { let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
             .is_ok());
         // A field is a hole in the record it comes out of (rule 4).
@@ -3353,7 +3575,10 @@ mod tests {
         let src = "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 { return a.length } \
                    fn main() -> Int64 { let mut xs: Array<Int64> = [] return f(xs, xs) }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("as `modify` and read again in the same call"), "{e}");
+        assert!(
+            e.contains("as `modify` and read again in the same call"),
+            "{e}"
+        );
         assert!(e.contains("fix: `xs.copy()`"), "{e}");
     }
 
@@ -3371,7 +3596,10 @@ mod tests {
                    { self.n = self.n + other.n } } \
                    fn main() -> Int64 { let mut t = T { n: 1 } t.merge(t) return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("as `modify` and read again in the same call"), "{e}");
+        assert!(
+            e.contains("as `modify` and read again in the same call"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -3392,14 +3620,19 @@ mod tests {
     fn an_escaping_closure_may_not_capture_a_borrow() {
         // A lambda written at a call site does not outlive the call, so it
         // borrows freely; one that is stored is a value and may not.
-        assert!(run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
+        assert!(
+            run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
                      fn go(s: String) -> Int64 { return apply(|n| n + s.byteLength) } \
                      fn main() -> Int64 { return 0 }")
-            .is_ok());
+            .is_ok()
+        );
         let src = "fn go(s: String) -> Int64 { let f = |n| n + s.byteLength return f(1) } \
                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("may not be captured by a closure that outlives this call"), "{e}");
+        assert!(
+            e.contains("may not be captured by a closure that outlives this call"),
+            "{e}"
+        );
     }
 
     // ---- RFC-0075: the disposal obligation -------------------------------
@@ -3416,7 +3649,10 @@ mod tests {
     fn an_abandoned_stream_does_not_build() {
         // The milestone's whole claim: the `#6193` shape is a compile error.
         let e = stream("let events = feed() return 0").unwrap_err();
-        assert!(e.contains("`events` is a `Stream<Int64>` and is never disposed"), "{e}");
+        assert!(
+            e.contains("`events` is a `Stream<Int64>` and is never disposed"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -3458,7 +3694,10 @@ mod tests {
              let a = boxStream(s) let t: Stream<Int64> = unboxStream(a) return 0 }}"
         );
         let e = run(&src).unwrap_err();
-        assert!(e.contains("`t` is a `Stream<Int64>` and is never disposed"), "{e}");
+        assert!(
+            e.contains("`t` is a `Stream<Int64>` and is never disposed"),
+            "{e}"
+        );
         let src = format!(
             "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
              let a = boxStream(s) let t: Stream<Int64> = unboxStream(a) close(t) return 0 }}"
@@ -3535,7 +3774,10 @@ mod tests {
              fn main() -> Int64 {{ return sink(feed()) }}"
         ))
         .unwrap_err();
-        assert!(e.contains("`s` is a `Stream<Int64>` and is never disposed"), "{e}");
+        assert!(
+            e.contains("`s` is a `Stream<Int64>` and is never disposed"),
+            "{e}"
+        );
     }
 
     // ---- RFC-0075 M2: the obligation through a combinator ----------------
@@ -3558,7 +3800,10 @@ mod tests {
             "{FEED}{TWICE} fn main() -> Int64 {{ let m = twice(feed()) return 0 }}"
         ))
         .unwrap_err();
-        assert!(e.contains("`m` is a `Stream<Int64>` and is never disposed"), "{e}");
+        assert!(
+            e.contains("`m` is a `Stream<Int64>` and is never disposed"),
+            "{e}"
+        );
 
         // A combinator that drops its argument on the floor does not build.
         let e = run(&format!(
@@ -3566,7 +3811,10 @@ mod tests {
              fn main() -> Int64 {{ close(sink(feed())) return 0 }}"
         ))
         .unwrap_err();
-        assert!(e.contains("`s` is a `Stream<Int64>` and is never disposed"), "{e}");
+        assert!(
+            e.contains("`s` is a `Stream<Int64>` and is never disposed"),
+            "{e}"
+        );
 
         // Consumed and then closed is still the double free.
         let e = run(&format!(
@@ -3590,9 +3838,11 @@ mod tests {
         // `Stream<U>` at a call site names a type parameter the program never
         // wrote. This pass has no types, so it under-specifies instead — the
         // same `Stream` it has always used for `fromArray`.
-        let e = run("fn mk<T>(xs: Array<T>) -> Stream<T> { return fromArray(xs) } \
-                     fn main() -> Int64 { let s = mk([1, 2]) return 0 }")
-            .unwrap_err();
+        let e = run(
+            "fn mk<T>(xs: Array<T>) -> Stream<T> { return fromArray(xs) } \
+                     fn main() -> Int64 { let s = mk([1, 2]) return 0 }",
+        )
+        .unwrap_err();
         assert!(e.contains("`s` is a `Stream` and is never disposed"), "{e}");
     }
 
@@ -3695,8 +3945,12 @@ mod tests {
         let mut unknown_places = 0;
 
         for path in &files {
-            let Ok(src) = std::fs::read_to_string(path) else { continue };
-            let Ok(tokens) = crate::lexer::lex(&src) else { continue };
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(tokens) = crate::lexer::lex(&src) else {
+                continue;
+            };
             let (program, errs) = crate::parser::parse_accum(tokens);
             if !errs.is_empty() {
                 continue;
@@ -3771,8 +4025,12 @@ mod tests {
         let mut rows: Vec<String> = Vec::new();
         let mut parsed = 0;
         for path in &files {
-            let Ok(src) = std::fs::read_to_string(path) else { continue };
-            let Ok(tokens) = crate::lexer::lex(&src) else { continue };
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(tokens) = crate::lexer::lex(&src) else {
+                continue;
+            };
             let (program, errs) = crate::parser::parse_accum(tokens);
             if !errs.is_empty() {
                 continue;
@@ -3780,7 +4038,11 @@ mod tests {
             parsed += 1;
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             for d in borrow_store_sites(&program) {
-                rows.push(format!("{name}:{} {}", d.line, d.message.lines().next().unwrap_or("")));
+                rows.push(format!(
+                    "{name}:{} {}",
+                    d.line,
+                    d.message.lines().next().unwrap_or("")
+                ));
             }
         }
         println!("corpus: {} files ({parsed} parsed)", files.len());
@@ -3790,7 +4052,6 @@ mod tests {
         }
         assert!(rows.is_empty(), "{rows:#?}");
     }
-
 
     #[test]
     fn rejects_consume_in_loop() {

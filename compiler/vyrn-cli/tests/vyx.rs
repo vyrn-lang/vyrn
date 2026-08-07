@@ -20,7 +20,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -53,8 +57,13 @@ const APP: &str = "import { components } from \"std/vyx\"\n\
      fn main() -> Int64 { return 0 }\n";
 
 fn run_app(dir: &Path) -> (bool, String) {
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     (out.status.success(), combined)
 }
 
@@ -63,30 +72,62 @@ fn run_app(dir: &Path) -> (bool, String) {
 #[test]
 fn emit_gen_shows_the_synthesized_component_module() {
     let demo = repo_file("examples/vyxdemo.vyrn");
-    let out = vyrn().arg("emit-gen").arg(&demo).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(&demo)
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
 
     // One exported pure view function per component, props as parameters.
-    assert!(src.contains("export fn row(item: Item) -> Html"), "row signature:\n{src}");
-    assert!(src.contains("export fn listing(items: Array<Item>) -> Html"), "listing signature:\n{src}");
+    assert!(
+        src.contains("export fn row(item: Item) -> Html"),
+        "row signature:\n{src}"
+    );
+    assert!(
+        src.contains("export fn listing(items: Array<Item>) -> Html"),
+        "listing signature:\n{src}"
+    );
     // The `{children}`-using component carries the trailing children parameter.
-    assert!(src.contains("export fn panel(title: String, children: consume Array<Html>) -> Html"), "panel signature:\n{src}");
+    assert!(
+        src.contains("export fn panel(title: String, children: consume Array<Html>) -> Html"),
+        "panel signature:\n{src}"
+    );
 
     // A relative script import is rebased so it resolves from the synthesized module.
-    assert!(src.contains("from \"./vyxcomp/./models\""), "rebased import:\n{src}");
+    assert!(
+        src.contains("from \"./vyxcomp/./models\""),
+        "rebased import:\n{src}"
+    );
 
     // The keyed {#for} lowers to a loop + keyed pushes; the sibling <Row/> resolves
     // to an internal call.
     assert!(src.contains("for it in items {"), "for loop:\n{src}");
-    assert!(src.contains("keyed((it.id).toString()"), "keyed push:\n{src}");
+    assert!(
+        src.contains("keyed((it.id).toString()"),
+        "keyed push:\n{src}"
+    );
     assert!(src.contains("row(it)"), "internal component call:\n{src}");
 
     // The event ABI, a class attr, the {children} splice, and the {@raw} passthrough.
-    assert!(src.contains("On(\"click\", \"removeRow\", (item.id).toString())"), "event lowering:\n{src}");
-    assert!(src.contains("On(\"input\", \"setQty\""), "input event:\n{src}");
+    assert!(
+        src.contains("On(\"click\", \"removeRow\", (item.id).toString())"),
+        "event lowering:\n{src}"
+    );
+    assert!(
+        src.contains("On(\"input\", \"setQty\""),
+        "input event:\n{src}"
+    );
     assert!(src.contains("Cls(\"row\")"), "class -> Cls:\n{src}");
-    assert!(src.contains("for vyxCh in consume children {"), "children splice:\n{src}");
+    assert!(
+        src.contains("for vyxCh in consume children {"),
+        "children splice:\n{src}"
+    );
     assert!(src.contains("Raw("), "{{@raw}} -> Raw:\n{src}");
 }
 
@@ -95,12 +136,21 @@ fn emit_gen_shows_the_synthesized_component_module() {
 #[test]
 fn unclosed_element_fails_naming_the_file_and_line() {
     let dir = scratch("unclosed");
-    write(&dir.join("comp/Widget.vyx"), "<template>\n<li>oops\n</template>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<li>oops\n</template>\n",
+    );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "an unclosed element must fail to load");
-    assert!(err.contains("VYX_UNCLOSED_ELEMENT"), "unclosed diagnostic:\n{err}");
-    assert!(err.contains("Widget_vyx"), "diagnostic names the file:\n{err}");
+    assert!(
+        err.contains("VYX_UNCLOSED_ELEMENT"),
+        "unclosed diagnostic:\n{err}"
+    );
+    assert!(
+        err.contains("Widget_vyx"),
+        "diagnostic names the file:\n{err}"
+    );
     assert!(err.contains("line_"), "diagnostic carries a line:\n{err}");
 }
 
@@ -114,18 +164,30 @@ fn missing_for_key_fails_naming_the_file() {
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a keyless {{#for}} must fail to load");
-    assert!(err.contains("VYX_MISSING_FOR_KEY"), "missing-key diagnostic:\n{err}");
-    assert!(err.contains("Widget_vyx"), "diagnostic names the file:\n{err}");
+    assert!(
+        err.contains("VYX_MISSING_FOR_KEY"),
+        "missing-key diagnostic:\n{err}"
+    );
+    assert!(
+        err.contains("Widget_vyx"),
+        "diagnostic names the file:\n{err}"
+    );
 }
 
 #[test]
 fn unknown_component_fails_naming_the_tag() {
     let dir = scratch("unknowncomp");
-    write(&dir.join("comp/Widget.vyx"), "<template>\n<ul><Missing :x=\"1\"/></ul>\n</template>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<ul><Missing :x=\"1\"/></ul>\n</template>\n",
+    );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "an unknown component tag must fail to load");
-    assert!(err.contains("VYX_UNKNOWN_COMPONENT"), "unknown-component diagnostic:\n{err}");
+    assert!(
+        err.contains("VYX_UNKNOWN_COMPONENT"),
+        "unknown-component diagnostic:\n{err}"
+    );
     assert!(err.contains("Missing"), "diagnostic names the tag:\n{err}");
 }
 
@@ -139,17 +201,26 @@ fn non_scalar_event_arg_fails() {
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a multi-argument event handler must fail to load");
-    assert!(err.contains("VYX_NON_SCALAR_EVENT_ARG"), "non-scalar diagnostic:\n{err}");
+    assert!(
+        err.contains("VYX_NON_SCALAR_EVENT_ARG"),
+        "non-scalar diagnostic:\n{err}"
+    );
 }
 
 #[test]
 fn multiple_roots_fail() {
     let dir = scratch("roots");
-    write(&dir.join("comp/Widget.vyx"), "<template>\n<li>a</li>\n<li>b</li>\n</template>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<li>a</li>\n<li>b</li>\n</template>\n",
+    );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a template with multiple roots must fail to load");
-    assert!(err.contains("VYX_MULTIPLE_ROOTS"), "multiple-roots diagnostic:\n{err}");
+    assert!(
+        err.contains("VYX_MULTIPLE_ROOTS"),
+        "multiple-roots diagnostic:\n{err}"
+    );
 }
 
 #[test]
@@ -163,7 +234,10 @@ fn malformed_props_fails() {
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a malformed props block must fail to load");
-    assert!(err.contains("VYX_BAD_PROPS"), "bad-props diagnostic:\n{err}");
+    assert!(
+        err.contains("VYX_BAD_PROPS"),
+        "bad-props diagnostic:\n{err}"
+    );
 }
 
 #[test]
@@ -177,9 +251,18 @@ fn props_before_import_fails_naming_the_file_and_line() {
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a props block before an import must fail to load");
-    assert!(err.contains("VYX_IMPORTS_FIRST"), "imports-first diagnostic:\n{err}");
-    assert!(err.contains("Widget_vyx"), "diagnostic names the file:\n{err}");
-    assert!(err.contains("line_3"), "diagnostic carries the import's line:\n{err}");
+    assert!(
+        err.contains("VYX_IMPORTS_FIRST"),
+        "imports-first diagnostic:\n{err}"
+    );
+    assert!(
+        err.contains("Widget_vyx"),
+        "diagnostic names the file:\n{err}"
+    );
+    assert!(
+        err.contains("line_3"),
+        "diagnostic carries the import's line:\n{err}"
+    );
 }
 
 #[test]
@@ -199,11 +282,17 @@ fn imports_before_props_loads_and_runs() {
 #[test]
 fn missing_template_section_fails() {
     let dir = scratch("notemplate");
-    write(&dir.join("comp/Widget.vyx"), "<script>props { x: Int64 }</script>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>props { x: Int64 }</script>\n",
+    );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a .vyx with no <template> must fail to load");
-    assert!(err.contains("VYX_NO_TEMPLATE"), "no-template diagnostic:\n{err}");
+    assert!(
+        err.contains("VYX_NO_TEMPLATE"),
+        "no-template diagnostic:\n{err}"
+    );
 }
 
 // ---- RFC-0033: origin remapping into the `.vyx` buffer ---------------------
@@ -228,9 +317,15 @@ fn type_error_in_template_expression_remaps_to_the_vyx() {
     assert!(err.contains("Widget.vyx:6:8:"), "remapped location:\n{err}");
     assert!(err.contains("titel"), "carries the checker message:\n{err}");
     // The generated location survives as a note (the `emit-gen` breadcrumb).
-    assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
+    assert!(
+        err.contains("note: in generated code"),
+        "keeps the generated note:\n{err}"
+    );
     // It must NOT be reported against the raw synthesized banner alone.
-    assert!(!err.contains("generated by components(\"./comp\") at app.vyrn:6:"), "not the banner:\n{err}");
+    assert!(
+        !err.contains("generated by components(\"./comp\") at app.vyrn:6:"),
+        "not the banner:\n{err}"
+    );
 }
 
 /// A malformed `//@origin` directive never LOSES the diagnostic: it surfaces at
@@ -253,13 +348,23 @@ fn malformed_origin_directive_never_loses_the_diagnostic() {
          import { f } from bad(\"x\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "the type error must fail the load");
     // The diagnostic is not dropped and notes the malformed directive.
-    assert!(err.contains("note: malformed `//@origin` directive"), "malformed note:\n{err}");
+    assert!(
+        err.contains("note: malformed `//@origin` directive"),
+        "malformed note:\n{err}"
+    );
     // It stays at the generated location (the banner), never silently vanishing.
-    assert!(err.contains("generated by bad"), "kept at generated location:\n{err}");
+    assert!(
+        err.contains("generated by bad"),
+        "kept at generated location:\n{err}"
+    );
 }
 
 // ---- RFC-0053: lex/parse/load errors in generated code remap too ----------
@@ -280,10 +385,22 @@ fn lex_error_in_template_expression_remaps_to_the_vyx() {
     );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
-    assert!(!ok, "a stray backslash in a template expression must fail the load");
-    assert!(err.contains("Widget.vyx:2:8:"), "remapped to the .vyx position:\n{err}");
-    assert!(err.contains("unexpected character"), "carries the lexer message:\n{err}");
-    assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
+    assert!(
+        !ok,
+        "a stray backslash in a template expression must fail the load"
+    );
+    assert!(
+        err.contains("Widget.vyx:2:8:"),
+        "remapped to the .vyx position:\n{err}"
+    );
+    assert!(
+        err.contains("unexpected character"),
+        "carries the lexer message:\n{err}"
+    );
+    assert!(
+        err.contains("note: in generated code"),
+        "keeps the generated note:\n{err}"
+    );
     // The dead-end form — a bare banner key with no file the user can open.
     assert!(
         !err.starts_with("generated by components"),
@@ -302,9 +419,18 @@ fn parse_error_in_template_expression_remaps_to_the_vyx() {
     );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
-    assert!(!ok, "a syntactically broken template expression must fail the load");
-    assert!(err.contains("Widget.vyx:2:8:"), "remapped to the .vyx position:\n{err}");
-    assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
+    assert!(
+        !ok,
+        "a syntactically broken template expression must fail the load"
+    );
+    assert!(
+        err.contains("Widget.vyx:2:8:"),
+        "remapped to the .vyx position:\n{err}"
+    );
+    assert!(
+        err.contains("note: in generated code"),
+        "keeps the generated note:\n{err}"
+    );
 }
 
 /// The never-lose guarantee (RFC-0053, unchanged from RFC-0033): a lex error in
@@ -329,13 +455,26 @@ fn ungoverned_generated_glue_keeps_its_generated_location() {
          import { f } from glue(\"x\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "the lex error must fail the load");
-    assert!(err.contains("unexpected character"), "the diagnostic survives:\n{err}");
+    assert!(
+        err.contains("unexpected character"),
+        "the diagnostic survives:\n{err}"
+    );
     // Line 1 precedes every directive ⇒ ungoverned ⇒ stays at the banner.
-    assert!(err.contains("generated by glue"), "kept at the generated location:\n{err}");
-    assert!(!err.contains("a.vyx"), "not attributed to an unrelated origin:\n{err}");
+    assert!(
+        err.contains("generated by glue"),
+        "kept at the generated location:\n{err}"
+    );
+    assert!(
+        !err.contains("a.vyx"),
+        "not attributed to an unrelated origin:\n{err}"
+    );
 }
 
 // ---- RFC-0036: componentsThemed — compile-checked classes against a theme --
@@ -361,16 +500,25 @@ fn themed_typo_class_remaps_to_the_vyx_column() {
     let dir = scratch("themed_typo");
     // `<li class="flx">` on line 2; `<li class="` is 11 chars, so `flx` starts at
     // column 12. `flx` is neither a derived utility nor safelisted ⇒ a `Tw` error.
-    write(&dir.join("comp/Widget.vyx"), "<template>\n<li class=\"flx\">x</li>\n</template>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<li class=\"flx\">x</li>\n</template>\n",
+    );
     write(&dir.join("theme.json"), THEME_JSON);
     write(&dir.join("app.vyrn"), THEMED_APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a typo'd utility class must fail the load");
     // The diagnostic lands column-exactly on the class string inside the `.vyx`.
-    assert!(err.contains("Widget.vyx:2:12:"), "remapped to the class column:\n{err}");
+    assert!(
+        err.contains("Widget.vyx:2:12:"),
+        "remapped to the class column:\n{err}"
+    );
     assert!(err.contains("flx"), "carries the offending class:\n{err}");
     // The generated location survives as an `emit-gen` breadcrumb note.
-    assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
+    assert!(
+        err.contains("note: in generated code"),
+        "keeps the generated note:\n{err}"
+    );
 }
 
 /// A themed build accepts a mix of a safelisted bespoke name and derived utilities
@@ -389,7 +537,10 @@ fn themed_safelist_and_utilities_check_and_run() {
     write(&dir.join("theme.json"), THEME_JSON);
     write(&dir.join("app.vyrn"), THEMED_APP);
     let (ok, err) = run_app(&dir);
-    assert!(ok, "a safelisted + utility class mix must load and run:\n{err}");
+    assert!(
+        ok,
+        "a safelisted + utility class mix must load and run:\n{err}"
+    );
 }
 
 /// The themed emission is byte-identical at runtime to the bare one: `vyxTheme.cls`
@@ -398,15 +549,35 @@ fn themed_safelist_and_utilities_check_and_run() {
 #[test]
 fn themed_emit_gen_routes_class_through_vyx_theme() {
     let dir = scratch("themed_emit");
-    write(&dir.join("comp/Widget.vyx"), "<template>\n<li class=\"card\">x</li>\n</template>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<li class=\"card\">x</li>\n</template>\n",
+    );
     write(&dir.join("theme.json"), THEME_JSON);
     write(&dir.join("app.vyrn"), THEMED_APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
-    assert!(src.contains("import * as vyxTheme from tw(\"./theme.json\")"), "themed import:\n{src}");
-    assert!(src.contains("vyxTheme.cls(\"card\")"), "class routed through vyxTheme.cls:\n{src}");
-    assert!(src.contains("//@origin"), "carries origin directives:\n{src}");
+    assert!(
+        src.contains("import * as vyxTheme from tw(\"./theme.json\")"),
+        "themed import:\n{src}"
+    );
+    assert!(
+        src.contains("vyxTheme.cls(\"card\")"),
+        "class routed through vyxTheme.cls:\n{src}"
+    );
+    assert!(
+        src.contains("//@origin"),
+        "carries origin directives:\n{src}"
+    );
 }
 
 // ---- the demo runs green ---------------------------------------------------
@@ -418,7 +589,10 @@ fn demo_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "demo tests failed:\n{combined}");
-    assert!(combined.contains("1 passed, 0 failed"), "expected 1 green test:\n{combined}");
+    assert!(
+        combined.contains("1 passed, 0 failed"),
+        "expected 1 green test:\n{combined}"
+    );
 }
 
 // ---- std/vyx's own unit suite runs in CI -----------------------------------
@@ -434,8 +608,14 @@ fn std_vyx_unit_tests_run_green() {
     let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "std/vyx unit tests failed:\n{combined}");
-    assert!(combined.contains("40 passed, 0 failed"), "expected 40 green tests:\n{combined}");
+    assert!(
+        out.status.success(),
+        "std/vyx unit tests failed:\n{combined}"
+    );
+    assert!(
+        combined.contains("40 passed, 0 failed"),
+        "expected 40 green tests:\n{combined}"
+    );
 }
 
 // ---- RFC-0054 M4b: the six audit reproducers, end-to-end through the binary --
@@ -454,10 +634,21 @@ fn audit_comment_mentioning_props_is_ignored() {
         "<script>\n// the props for this widget's template are below\nprops { title: String }\n</script>\n<template><li>{{ title }}</li></template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
-    assert!(src.contains("export fn widget(title: String) -> Html"), "one prop only:\n{src}");
+    assert!(
+        src.contains("export fn widget(title: String) -> Html"),
+        "one prop only:\n{src}"
+    );
 }
 
 /// A helper identifier named `props` (`let props = …`) is not a props block —
@@ -470,11 +661,25 @@ fn audit_helper_named_props_is_not_a_block() {
         "<script>\nfn f() -> Int64 {\nlet props = 5\nreturn props\n}\n</script>\n<template><li>{{ f() }}</li></template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
-    assert!(src.contains("export fn widget() -> Html"), "no phantom props:\n{src}");
-    assert!(src.contains("let props = 5"), "helper passes through:\n{src}");
+    assert!(
+        src.contains("export fn widget() -> Html"),
+        "no phantom props:\n{src}"
+    );
+    assert!(
+        src.contains("let props = 5"),
+        "helper passes through:\n{src}"
+    );
 }
 
 /// A `</script>` inside a helper string does not truncate the section — the
@@ -487,12 +692,26 @@ fn audit_close_script_in_string_does_not_truncate() {
         "<script>\nfn tag() -> String { return \"</script>\" }\nprops { n: Int64 }\n</script>\n<template><li>{{ n }}{{ tag() }}</li></template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
     // The `props` AFTER the string was reached (section not truncated at the string).
-    assert!(src.contains("export fn widget(n: Int64) -> Html"), "section not truncated:\n{src}");
-    assert!(src.contains("fn tag() -> String"), "helper survived:\n{src}");
+    assert!(
+        src.contains("export fn widget(n: Int64) -> Html"),
+        "section not truncated:\n{src}"
+    );
+    assert!(
+        src.contains("fn tag() -> String"),
+        "helper survived:\n{src}"
+    );
 }
 
 /// A literal `{ a }` in template TEXT stays literal (it is not a `{{ … }}`
@@ -500,10 +719,21 @@ fn audit_close_script_in_string_does_not_truncate() {
 #[test]
 fn audit_literal_brace_in_text_stays_literal() {
     let dir = scratch("audit_brace");
-    write(&dir.join("comp/Widget.vyx"), "<template><li>a { b } c</li></template>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template><li>a { b } c</li></template>\n",
+    );
     write(&dir.join("app.vyrn"), APP);
-    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
     assert!(src.contains("a { b } c"), "braces stay literal:\n{src}");
 }
@@ -512,7 +742,10 @@ fn audit_literal_brace_in_text_stays_literal() {
 #[test]
 fn audit_html_comment_in_template_is_stripped() {
     let dir = scratch("audit_htmlcomment");
-    write(&dir.join("comp/Widget.vyx"), "<template><ul><!-- note --><li>x</li></ul></template>\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template><ul><!-- note --><li>x</li></ul></template>\n",
+    );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(ok, "an HTML comment must not break the template:\n{err}");

@@ -59,8 +59,7 @@ fn loud(n: Int64) -> Int64 {
 
 /// Run `PRELUDE` plus a `main` printing each expression, and return stdout.
 fn prints(name: &str, exprs: &[&str]) -> String {
-    let body: String =
-        exprs.iter().map(|e| format!("    print({e})\n")).collect();
+    let body: String = exprs.iter().map(|e| format!("    print({e})\n")).collect();
     let src = format!("{PRELUDE}\nfn main() -> Int64 {{\n{body}    return 0\n}}\n");
     let path = write(name, &src);
     let out = vyrn().arg("run").arg(&path).output().expect("vyrn run");
@@ -80,12 +79,18 @@ fn rejects(name: &str, main: &str, needle: &str) {
     let out = vyrn().arg("check").arg(&path).output().expect("vyrn check");
     let all = norm(&out.stdout) + &norm(&out.stderr);
     assert!(!out.status.success(), "{name} was accepted:\n{all}");
-    assert!(all.contains(needle), "{name}: expected {needle:?}, got:\n{all}");
+    assert!(
+        all.contains(needle),
+        "{name}: expected {needle:?}, got:\n{all}"
+    );
 }
 
 #[test]
 fn nullish_unwraps_an_option() {
-    assert_eq!(prints("opt", &["half(10) ?? -1", "half(7) ?? -1"]), "5\n-1\n");
+    assert_eq!(
+        prints("opt", &["half(10) ?? -1", "half(7) ?? -1"]),
+        "5\n-1\n"
+    );
 }
 
 /// The `Result` path takes the same two arms — and the error payload never
@@ -94,7 +99,10 @@ fn nullish_unwraps_an_option() {
 fn nullish_unwraps_a_result_and_discards_the_error() {
     let out = prints("res", &["toNum(\"one\") ?? -1", "toNum(\"two\") ?? -1"]);
     assert_eq!(out, "1\n-1\n");
-    assert!(!out.contains("bad:"), "the error payload leaked into stdout: {out}");
+    assert!(
+        !out.contains("bad:"),
+        "the error payload leaked into stdout: {out}"
+    );
 }
 
 /// `a ?? b ?? c` is `a ?? (b ?? c)`. That it compiles at all is the proof: `??`
@@ -103,7 +111,10 @@ fn nullish_unwraps_a_result_and_discards_the_error() {
 #[test]
 fn nullish_chains_right_associatively() {
     assert_eq!(
-        prints("chain", &["half(7) ?? half(4) ?? -1", "half(7) ?? half(3) ?? -1"]),
+        prints(
+            "chain",
+            &["half(7) ?? half(4) ?? -1", "half(7) ?? half(3) ?? -1"]
+        ),
         "2\n-1\n"
     );
 }
@@ -115,7 +126,13 @@ fn nullish_chains_right_associatively() {
 #[test]
 fn nullish_binds_tighter_than_the_logical_operators() {
     assert_eq!(
-        prints("logic", &["flag(true) ?? true && false", "flag(false) ?? false || true"]),
+        prints(
+            "logic",
+            &[
+                "flag(true) ?? true && false",
+                "flag(false) ?? false || true"
+            ]
+        ),
         "false\ntrue\n"
     );
 }
@@ -130,7 +147,10 @@ fn nullish_binds_tighter_than_comparison_and_looser_than_arithmetic() {
     //   (flag(false) ?? true) == false  ->  false == false  ->  true
     //    flag(false) ?? (true == false) ->  Some(false)     ->  false
     // `??` first shipped tied with `==`, which took the second reading silently.
-    assert_eq!(prints("cmp_bool", &["flag(false) ?? true == false"]), "true\n");
+    assert_eq!(
+        prints("cmp_bool", &["flag(false) ?? true == false"]),
+        "true\n"
+    );
 
     // The same shape on an `Int64` option, which is the spelling a reader
     // actually writes: default it, *then* compare.
@@ -172,17 +192,23 @@ fn double_question_is_one_token_even_unspaced() {
 #[test]
 fn the_desugar_frees_exactly_what_the_handwritten_match_frees() {
     let frees = |name: &str, expr: &str| -> usize {
-        let src = format!(
-            "{PRELUDE}\nfn main() -> Int64 {{\n    let n = {expr}\n    return n\n}}\n"
-        );
+        let src =
+            format!("{PRELUDE}\nfn main() -> Int64 {{\n    let n = {expr}\n    return n\n}}\n");
         let path = write(name, &src);
-        let out = vyrn().arg("emit-ir").arg(&path).output().expect("vyrn emit-ir");
+        let out = vyrn()
+            .arg("emit-ir")
+            .arg(&path)
+            .output()
+            .expect("vyrn emit-ir");
         assert!(out.status.success(), "{name}: {}", norm(&out.stderr));
         norm(&out.stdout).matches("call void @free(ptr").count()
     };
     assert_eq!(
         frees("free_sugar", "toNum(\"two\") ?? -1"),
-        frees("free_match", "match toNum(\"two\") { Ok(v) => v, Err(e) => -1 }"),
+        frees(
+            "free_match",
+            "match toNum(\"two\") { Ok(v) => v, Err(e) => -1 }"
+        ),
         "`??` must reclaim exactly what the `match` it desugars to reclaims"
     );
 }

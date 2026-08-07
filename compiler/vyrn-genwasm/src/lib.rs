@@ -262,10 +262,7 @@ fn serve(
 /// `exported` because the loader only ever resolves a generator import to an
 /// exported `gen fn`, so anything else could not be asked for.
 fn dispatchable(f: &Function) -> bool {
-    f.is_gen
-        && f.exported
-        && f.ret == Type::Str
-        && f.params.iter().all(|par| par.ty == Type::Str)
+    f.is_gen && f.exported && f.ret == Type::Str && f.params.iter().all(|par| par.ty == Type::Str)
 }
 
 /// The program actually compiled: the generator's module with `is_gen` cleared,
@@ -291,9 +288,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     }
     let mut p = program.clone();
     // `args()[i]` — the parser's own desugar for indexing.
-    let argv = |i: usize| {
-        call("at", vec![call("args", vec![]), Expr::Int(i as i64)])
-    };
+    let argv = |i: usize| call("at", vec![call("args", vec![]), Expr::Int(i as i64)]);
     let mut body = vec![Stmt::Let {
         name: "g".into(),
         mutable: false,
@@ -313,9 +308,15 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                 stmts: vec![
                     Stmt::Expr(call(
                         "print",
-                        vec![call(&f.name, (0..f.params.len()).map(|i| argv(i + 1)).collect())],
+                        vec![call(
+                            &f.name,
+                            (0..f.params.len()).map(|i| argv(i + 1)).collect(),
+                        )],
                     )),
-                    Stmt::Return { value: Some(Expr::Int(0)), line: 0 },
+                    Stmt::Return {
+                        value: Some(Expr::Int(0)),
+                        line: 0,
+                    },
                 ],
             },
             else_block: None,
@@ -327,7 +328,10 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     // is a silently wrong program, so read past the end of `args()` instead and
     // let the bounds check trap.
     body.push(Stmt::Expr(call("print", vec![argv(1_000_000_000)])));
-    body.push(Stmt::Return { value: Some(Expr::Int(0)), line: 0 });
+    body.push(Stmt::Return {
+        value: Some(Expr::Int(0)),
+        line: 0,
+    });
 
     // Every `gen fn`, not just the dispatched ones: a generator calls its
     // helpers, and in this repo those helpers are themselves `gen fn` (the
@@ -383,11 +387,18 @@ fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function
 }
 
 fn call(name: &str, args: Vec<Expr>) -> Expr {
-    Expr::Call { name: name.to_string(), args, line: 0 }
+    Expr::Call {
+        name: name.to_string(),
+        args,
+        line: 0,
+    }
 }
 
 fn var(name: &str) -> Expr {
-    Expr::Var { name: name.to_string(), line: 0 }
+    Expr::Var {
+        name: name.to_string(),
+        line: 0,
+    }
 }
 
 /// Append an entry point per reachable structured builtin, plus the decoders
@@ -408,19 +419,23 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
         ty: Type::Str,
     };
     // `fn <entry>(arg) -> T { @reflect(kind, arg); return <decode T>() }`.
-    let mut entry = |name: String, params: Vec<Param>, ret: Type, kind: i64, arg: Expr, d: &mut Decoders| {
-        let body = d.decode(&ret)?;
-        entries.push(func(
-            &name,
-            params,
-            ret,
-            vec![
-                Stmt::Expr(call(vyrn_codegen::GEN_REFLECT, vec![Expr::Int(kind), arg])),
-                Stmt::Return { value: Some(body), line: 0 },
-            ],
-        ));
-        Some(())
-    };
+    let mut entry =
+        |name: String, params: Vec<Param>, ret: Type, kind: i64, arg: Expr, d: &mut Decoders| {
+            let body = d.decode(&ret)?;
+            entries.push(func(
+                &name,
+                params,
+                ret,
+                vec![
+                    Stmt::Expr(call(vyrn_codegen::GEN_REFLECT, vec![Expr::Int(kind), arg])),
+                    Stmt::Return {
+                        value: Some(body),
+                        line: 0,
+                    },
+                ],
+            ));
+            Some(())
+        };
 
     if reaches("moduleInterface") {
         entry(
@@ -450,7 +465,12 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
     // are a handful in a module closure, and finding the call sites would mean a
     // second walk of the whole AST to learn what codegen already knows.
     if reaches("contractOf") {
-        for name in p.contracts.iter().map(|c| c.name.clone()).collect::<Vec<_>>() {
+        for name in p
+            .contracts
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>()
+        {
             entry(
                 format!("{}{name}", vyrn_codegen::GEN_ENTRY_CONTRACT_OF),
                 Vec::new(),
@@ -476,7 +496,11 @@ struct Decoders {
 impl Decoders {
     fn new(p: &Program) -> Self {
         Decoders {
-            types: p.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect(),
+            types: p
+                .type_decls
+                .iter()
+                .map(|t| (t.name.clone(), t.clone()))
+                .collect(),
             fns: Vec::new(),
             made: std::collections::HashSet::new(),
         }
@@ -524,7 +548,10 @@ impl Decoders {
                         name: "xs".into(),
                         mutable: true,
                         ty: Some(ty.clone()),
-                        value: Expr::ArrayLit { elems: Vec::new(), line: 0 },
+                        value: Expr::ArrayLit {
+                            elems: Vec::new(),
+                            line: 0,
+                        },
                         line: 0,
                     },
                     Stmt::Let {
@@ -565,7 +592,10 @@ impl Decoders {
                         },
                         line: 0,
                     },
-                    Stmt::Return { value: Some(var("xs")), line: 0 },
+                    Stmt::Return {
+                        value: Some(var("xs")),
+                        line: 0,
+                    },
                 ]
             }
             // One tag atom, then the payload only when it is there.
@@ -588,7 +618,10 @@ impl Decoders {
                         else_block: None,
                         line: 0,
                     },
-                    Stmt::Return { value: Some(var("None")), line: 0 },
+                    Stmt::Return {
+                        value: Some(var("None")),
+                        line: 0,
+                    },
                 ]
             }
             // Fields in the DECLARATION's order, which is the order the host
@@ -920,7 +953,11 @@ fn splice_value(
         // `Val::Int` renders as the signed decimal, which is what a signed
         // integer of any width becomes after codegen's `sext`.
         vyrn_codegen::TAG_INT => Val::Int(bits),
-        vyrn_codegen::TAG_UINT => Val::IntN { v: bits, signed: false, bits: 64 },
+        vyrn_codegen::TAG_UINT => Val::IntN {
+            v: bits,
+            signed: false,
+            bits: 64,
+        },
         vyrn_codegen::TAG_F64 => Val::Float(f64::from_bits(bits as u64)),
         vyrn_codegen::TAG_F32 => Val::Float32(f32::from_bits(bits as u32)),
         other => return Err(wasmtime::Error::msg(format!("bad splice tag {other}"))),
@@ -1061,7 +1098,9 @@ fn load_artifact(key: &str) -> Option<wasmtime::Module> {
 /// Store an artifact for the next session. Best-effort: a full disk or a
 /// read-only home costs a recompile, nothing more.
 fn store_artifact(key: &str, module: &wasmtime::Module) {
-    let Ok(bytes) = module.serialize() else { return };
+    let Ok(bytes) = module.serialize() else {
+        return;
+    };
     let dir = artifact_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -1132,7 +1171,8 @@ fn wasm_engine() -> &'static wasmtime::Engine {
     })
 }
 
-fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, wasmtime::Module>> {
+fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, wasmtime::Module>>
+{
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, wasmtime::Module>>,
     > = std::sync::OnceLock::new();
@@ -1207,7 +1247,11 @@ fn run_hosted(
     // The declarations `contractOf` and `lex` reflect over. Cloned across because
     // the store's data must be `'static`, and cheap beside the `program.clone()`
     // the wrapper already pays.
-    let types = program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+    let types = program
+        .type_decls
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect();
     let contracts = program.contracts.clone();
     let guest = std::thread::Builder::new()
         // Cranelift-compiled code runs on this stack; a deeply recursive
@@ -1329,11 +1373,21 @@ fn run_wasm(
         .func_wrap(
             "vyrn_gen",
             "rawAt",
-            |mut caller: Caller<'_, Streams>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
+            |mut caller: Caller<'_, Streams>,
+             s: i32,
+             path: i32,
+             line: i64,
+             col: i64|
+             -> Result<i64> {
                 let (data, streams) = guest_mem(&mut caller)?;
                 let text = cstr(data, s)?;
                 let path = cstr(data, path)?;
-                Ok(streams.intern(vec![CodePiece::Origin { path, line, col, text }]))
+                Ok(streams.intern(vec![CodePiece::Origin {
+                    path,
+                    line,
+                    col,
+                    text,
+                }]))
             },
         )
         .map_err(|e| EngineError::Failed(e.to_string()))?;
@@ -1341,7 +1395,12 @@ fn run_wasm(
         .func_wrap(
             "vyrn_gen",
             "splice",
-            |mut caller: Caller<'_, Streams>, tag: i32, bits: i64, p: i32, ctx: i64| -> Result<i64> {
+            |mut caller: Caller<'_, Streams>,
+             tag: i32,
+             bits: i64,
+             p: i32,
+             ctx: i64|
+             -> Result<i64> {
                 let (data, streams) = guest_mem(&mut caller)?;
                 let val = splice_value(tag, bits, p, data, streams)?;
                 // A splice violation — an identifier that is not one, a value of
@@ -1537,7 +1596,9 @@ fn run_wasm(
         .func_wrap(wasi, "fd_close", |_: i32| ERRNO_SUCCESS)
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     linker
-        .func_wrap(wasi, "fd_seek", |_: i32, _: i64, _: i32, _: i32| ERRNO_SPIPE)
+        .func_wrap(wasi, "fd_seek", |_: i32, _: i64, _: i32, _: i32| {
+            ERRNO_SPIPE
+        })
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     // args_sizes_get / args_get — how the generator's arguments reach it. The
     // artifact is argument-independent precisely because these are real.
@@ -1659,7 +1720,9 @@ fn run_wasm(
         // through: the guest never got to print anything, and the interpreter's
         // step budget says exactly this.
         Err(e) if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) => {
-            return Err(EngineError::Failed("generator exceeded its step budget".into()))
+            return Err(EngineError::Failed(
+                "generator exceeded its step budget".into(),
+            ))
         }
         Ok(()) => {}
         Err(e) => match e.downcast_ref::<Exit>() {

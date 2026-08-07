@@ -88,11 +88,13 @@ use vyrn_frontend::hash::sha256_hex;
 
 /// The transcript's SHA-256 (post-swap). Mutation-checked — see the note at the
 /// bottom of this file for which mutations were tried and what each broke.
-const CORPUS_DIGEST: &str =
-    "d94e2486f1539d5f9aced50faa71800d5a9ea6e20439c27bbb5c79d2bfcae852";
+const CORPUS_DIGEST: &str = "d94e2486f1539d5f9aced50faa71800d5a9ea6e20439c27bbb5c79d2bfcae852";
 
 fn repo_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -204,15 +206,69 @@ const TARGETS: &[Target] = &[
         show: "toJson(x)",
         inputs: NUM_INPUTS,
     },
-    Target { tag: "i8", decls: "type T8 = { v: Int8 }", ty: "T8", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "u8", decls: "type TU8 = { v: UInt8 }", ty: "TU8", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "i16", decls: "type T16 = { v: Int16 }", ty: "T16", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "u16", decls: "type TU16 = { v: UInt16 }", ty: "TU16", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "i32", decls: "type T32 = { v: Int32 }", ty: "T32", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "u32", decls: "type TU32 = { v: UInt32 }", ty: "TU32", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "u64", decls: "type TU64 = { v: UInt64 }", ty: "TU64", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "f64", decls: "type TF = { v: Float64 }", ty: "TF", show: "toJson(x)", inputs: NUM_INPUTS },
-    Target { tag: "f32", decls: "type TF32 = { v: Float32 }", ty: "TF32", show: "toJson(x)", inputs: NUM_INPUTS },
+    Target {
+        tag: "i8",
+        decls: "type T8 = { v: Int8 }",
+        ty: "T8",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "u8",
+        decls: "type TU8 = { v: UInt8 }",
+        ty: "TU8",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "i16",
+        decls: "type T16 = { v: Int16 }",
+        ty: "T16",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "u16",
+        decls: "type TU16 = { v: UInt16 }",
+        ty: "TU16",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "i32",
+        decls: "type T32 = { v: Int32 }",
+        ty: "T32",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "u32",
+        decls: "type TU32 = { v: UInt32 }",
+        ty: "TU32",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "u64",
+        decls: "type TU64 = { v: UInt64 }",
+        ty: "TU64",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "f64",
+        decls: "type TF = { v: Float64 }",
+        ty: "TF",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
+    Target {
+        tag: "f32",
+        decls: "type TF32 = { v: Float32 }",
+        ty: "TF32",
+        show: "toJson(x)",
+        inputs: NUM_INPUTS,
+    },
     Target {
         tag: "age",
         decls: "type Age = Int64 where value > 0 && value < 200 \n type TA = { v: Age }",
@@ -475,7 +531,10 @@ fn transcript() -> (String, PathBuf) {
         .expect("run the corpus");
     let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "the corpus did not run:\n{stderr}\n{stdout}");
+    assert!(
+        out.status.success(),
+        "the corpus did not run:\n{stderr}\n{stdout}"
+    );
     std::fs::write(dir.join("transcript.txt"), &stdout).unwrap();
     (stdout, dir)
 }
@@ -491,7 +550,11 @@ fn the_decode_corpus_answers_exactly_this() {
     // decoder moved"; these say where.
     let row = |tag: &str, input: &str| -> String {
         let t = TARGETS.iter().find(|t| t.tag == tag).expect("target");
-        let i = t.inputs.iter().position(|s| *s == input).unwrap_or_else(|| panic!("input not in the {tag} corpus: {input:?}"));
+        let i = t
+            .inputs
+            .iter()
+            .position(|s| *s == input)
+            .unwrap_or_else(|| panic!("input not in the {tag} corpus: {input:?}"));
         let prefix = format!("{tag}{i} ");
         stdout
             .lines()
@@ -501,25 +564,49 @@ fn the_decode_corpus_answers_exactly_this() {
     };
 
     // Exact integers, never through a Float64.
-    assert_eq!(row("i64", "{\"v\":9007199254740993}"), "ok {\"v\":9007199254740993}");
-    assert_eq!(row("u64", "{\"v\":18446744073709551615}"), "ok {\"v\":18446744073709551615}");
+    assert_eq!(
+        row("i64", "{\"v\":9007199254740993}"),
+        "ok {\"v\":9007199254740993}"
+    );
+    assert_eq!(
+        row("u64", "{\"v\":18446744073709551615}"),
+        "ok {\"v\":18446744073709551615}"
+    );
     // A sized integer one past its bound is a type issue, not a wrap.
     assert_eq!(row("i8", "{\"v\":127}"), "ok {\"v\":127}");
-    assert_eq!(row("i8", "{\"v\":128}"), "json.type@v: expected integer, found number");
-    assert_eq!(row("u8", "{\"v\":-1}"), "json.type@v: expected integer, found number");
+    assert_eq!(
+        row("i8", "{\"v\":128}"),
+        "json.type@v: expected integer, found number"
+    );
+    assert_eq!(
+        row("u8", "{\"v\":-1}"),
+        "json.type@v: expected integer, found number"
+    );
     // Integer syntax is required for an integer target and accepted by a float one.
-    assert_eq!(row("i64", "{\"v\":1.0}"), "json.type@v: expected integer, found number");
+    assert_eq!(
+        row("i64", "{\"v\":1.0}"),
+        "json.type@v: expected integer, found number"
+    );
     assert_eq!(row("f64", "{\"v\":1}"), "ok {\"v\":1.000000}");
     assert_eq!(row("f64", "{\"v\":-0.5}"), "ok {\"v\":-0.500000}");
     // A base-type failure suppresses the predicate: one issue, not two.
-    assert_eq!(row("age", "{\"v\":0}"), "validate@v: validation failed for `Age`");
-    assert_eq!(row("age", "{\"v\":\"1\"}"), "json.type@v: expected integer, found string");
+    assert_eq!(
+        row("age", "{\"v\":0}"),
+        "validate@v: validation failed for `Age`"
+    );
+    assert_eq!(
+        row("age", "{\"v\":\"1\"}"),
+        "json.type@v: expected integer, found string"
+    );
 
     // The ORDER pin, which is the row only a pre-swap capture can assert: three
     // failures across two array elements, element-then-declaration rather than
     // discovery order (`kids[1]`'s missing `name` before its out-of-range `age`).
     assert_eq!(
-        row("nest", "{\"sur\":\"a\",\"kids\":[{\"name\":\"k\",\"age\":0},{\"age\":300}]}"),
+        row(
+            "nest",
+            "{\"sur\":\"a\",\"kids\":[{\"name\":\"k\",\"age\":0},{\"age\":300}]}"
+        ),
         "validate@kids[0].age: validation failed for `Age` \
          | json.missing@kids[1].name: missing required field `name` \
          | validate@kids[1].age: validation failed for `Age`"
@@ -541,21 +628,42 @@ fn the_decode_corpus_answers_exactly_this() {
         "json.missing@sur: missing required field `sur` \
          | json.missing@kids: missing required field `kids`"
     );
-    assert_eq!(row("nest", "{\"sur\":\"a\",\"kids\":[],\"extra\":[1,2]}"), "ok {\"sur\":\"a\",\"kids\":[]}");
+    assert_eq!(
+        row("nest", "{\"sur\":\"a\",\"kids\":[],\"extra\":[1,2]}"),
+        "ok {\"sur\":\"a\",\"kids\":[]}"
+    );
     // A failing `Option` field records its issue and leaves the field `None`.
-    assert_eq!(row("nest", "{\"sur\":\"a\",\"kids\":[],\"note\":7}"), "json.type@note: expected string, found number");
+    assert_eq!(
+        row("nest", "{\"sur\":\"a\",\"kids\":[],\"note\":7}"),
+        "json.type@note: expected string, found number"
+    );
 
     // Exactly one wire form per enum value (RFC-0024).
     assert_eq!(row("shape", "\"Dot\""), "ok \"Dot\"");
-    assert_eq!(row("shape", "\"Circle\""), "json.type@: expected one of `Dot`, `Circle`, `Rect`, found string");
-    assert_eq!(row("shape", "{\"Dot\":null}"), "json.type@: expected one of `Dot`, `Circle`, `Rect`, found object");
-    assert_eq!(row("shape", "{\"Circle\":3,\"Rect\":[1,2]}"), "json.type@: expected one of `Dot`, `Circle`, `Rect`, found object");
+    assert_eq!(
+        row("shape", "\"Circle\""),
+        "json.type@: expected one of `Dot`, `Circle`, `Rect`, found string"
+    );
+    assert_eq!(
+        row("shape", "{\"Dot\":null}"),
+        "json.type@: expected one of `Dot`, `Circle`, `Rect`, found object"
+    );
+    assert_eq!(
+        row("shape", "{\"Circle\":3,\"Rect\":[1,2]}"),
+        "json.type@: expected one of `Dot`, `Circle`, `Rect`, found object"
+    );
     assert_eq!(row("shape", "{\"Rect\":[2,5]}"), "ok {\"Rect\":[2,5]}");
     // A short tuple payload decodes its missing member against `null`.
-    assert_eq!(row("shape", "{\"Rect\":[2]}"), "json.type@Rect[1]: expected integer, found null");
+    assert_eq!(
+        row("shape", "{\"Rect\":[2]}"),
+        "json.type@Rect[1]: expected integer, found null"
+    );
 
     // The three rows RFC-0078's strictness ruling moved, each spelled out.
-    assert_eq!(row("str", "{\"v\":\"\\uD83D\\uDE00\"}"), "ok {\"v\":\"\u{1f600}\"}");
+    assert_eq!(
+        row("str", "{\"v\":\"\\uD83D\\uDE00\"}"),
+        "ok {\"v\":\"\u{1f600}\"}"
+    );
     assert_eq!(
         row("str", "{\"v\":\"a\",\"v\":\"b\"}"),
         "json.parse@: line 1, col 13: duplicate object key: v"
@@ -586,17 +694,24 @@ fn the_decode_corpus_answers_exactly_this() {
     // A self-referential type is a call rather than an inlined walk, so depth is
     // not a compile-time bound.
     assert_eq!(
-        row("deep", "{\"n\":1,\"kids\":[{\"n\":2,\"kids\":[{\"n\":3,\"kids\":[]}]}]}"),
+        row(
+            "deep",
+            "{\"n\":1,\"kids\":[{\"n\":2,\"kids\":[{\"n\":3,\"kids\":[]}]}]}"
+        ),
         "ok {\"n\":1,\"kids\":[{\"n\":2,\"kids\":[{\"n\":3,\"kids\":[]}]}]}"
     );
     assert_eq!(
-        row("deep", "{\"n\":1,\"kids\":[{\"n\":2,\"kids\":[{\"n\":\"x\",\"kids\":[]}]}]}"),
+        row(
+            "deep",
+            "{\"n\":1,\"kids\":[{\"n\":2,\"kids\":[{\"n\":\"x\",\"kids\":[]}]}]}"
+        ),
         "json.type@kids[0].kids[0].n: expected integer, found string"
     );
 
     let digest = sha256_hex(stdout.as_bytes());
     assert_eq!(
-        digest, CORPUS_DIGEST,
+        digest,
+        CORPUS_DIGEST,
         "`fromJson`'s answers moved over {n} checks. The transcript is at {}. If the \
          change is deliberate, diff it against the previous one and repin.",
         dir.join("transcript.txt").display()

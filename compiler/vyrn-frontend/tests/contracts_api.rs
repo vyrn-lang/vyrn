@@ -9,8 +9,8 @@
 
 use vyrn_frontend::contracts::{
     contract_completions, contract_fixes, contract_member_hover, contract_status, discovered_roles,
-    edit_distance, load_contract, role_for, roles_from_manifest, synthesized_members,
-    MemberStatus, RoleScope,
+    edit_distance, load_contract, role_for, roles_from_manifest, synthesized_members, MemberStatus,
+    RoleScope,
 };
 use vyrn_frontend::loader::{LoadOptions, ModuleResolver};
 
@@ -48,8 +48,14 @@ fn opts() -> LoadOptions {
 
 /// `std/ui:Page`, resolved the way the LSP resolves it.
 fn page() -> vyrn_frontend::contracts::ContractView {
-    load_contract("std/ui", "Page", &repo("examples/bin/server.vyrn"), &opts(), &Disk)
-        .expect("std/ui declares contract Page")
+    load_contract(
+        "std/ui",
+        "Page",
+        &repo("examples/bin/server.vyrn"),
+        &opts(),
+        &Disk,
+    )
+    .expect("std/ui declares contract Page")
 }
 
 // ---------------------------------------------------------------------------
@@ -63,7 +69,11 @@ fn resolves_the_real_page_contract() {
     let v = page();
     assert_eq!(v.name, "Page");
     assert_eq!(v.module, "std/ui");
-    assert!(v.file.ends_with("std/ui.vyrn"), "declaring file: {}", v.file);
+    assert!(
+        v.file.ends_with("std/ui.vyrn"),
+        "declaring file: {}",
+        v.file
+    );
     let names: Vec<&str> = v.members.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(
         names,
@@ -79,11 +89,19 @@ fn resolves_the_real_page_contract() {
     let spellings: Vec<&str> = head.shapes.iter().map(|s| s.spelling.as_str()).collect();
     assert_eq!(
         spellings,
-        vec!["fn() -> Head", "fn(T) -> Head", "fn(P) -> Head", "fn(P, T) -> Head"]
+        vec![
+            "fn() -> Head",
+            "fn(T) -> Head",
+            "fn(P) -> Head",
+            "fn(P, T) -> Head"
+        ]
     );
     assert!(head.optional, "head has a default (`= noHead()`)");
     assert!(
-        head.doc.as_deref().unwrap_or("").contains("head takes what the view takes"),
+        head.doc
+            .as_deref()
+            .unwrap_or("")
+            .contains("head takes what the view takes"),
         "the member's own /// doc: {:?}",
         head.doc
     );
@@ -249,21 +267,26 @@ fn a_role_may_declare_its_own_exceptions() {
 /// module the generator was imported from.
 #[test]
 fn roles_fall_back_to_the_generator_call_site() {
-    let roots: Vec<(String, String)> = ["examples/bin/server.vyrn", "examples/bin/client/boot.vyrn"]
-        .iter()
-        .map(|p| {
-            let path = repo(p);
-            let src = std::fs::read_to_string(&path).unwrap();
-            (path, src)
-        })
-        .collect();
+    let roots: Vec<(String, String)> =
+        ["examples/bin/server.vyrn", "examples/bin/client/boot.vyrn"]
+            .iter()
+            .map(|p| {
+                let path = repo(p);
+                let src = std::fs::read_to_string(&path).unwrap();
+                (path, src)
+            })
+            .collect();
     let roles = discovered_roles(&roots, &opts(), &Disk);
     assert!(
-        roles.iter().any(|r| r.contract == "Page" && r.module == "std/ui"),
+        roles
+            .iter()
+            .any(|r| r.contract == "Page" && r.module == "std/ui"),
         "the pages generator's contract: {roles:?}"
     );
     assert!(
-        roles.iter().any(|r| r.contract == "Component" && r.module == "std/vyx"),
+        roles
+            .iter()
+            .any(|r| r.contract == "Component" && r.module == "std/vyx"),
         "the components generator's contract: {roles:?}"
     );
     let page = roles.iter().find(|r| r.contract == "Page").unwrap();
@@ -291,14 +314,20 @@ fn completion_offers_every_shape_with_a_full_declaration() {
     let v = page();
     let items = contract_completions(&v, &[]);
     assert_eq!(items.len(), 16, "four members, four shapes each");
-    let head0 = items.iter().find(|i| i.snippet.starts_with("export fn head()")).unwrap();
+    let head0 = items
+        .iter()
+        .find(|i| i.snippet.starts_with("export fn head()"))
+        .unwrap();
     assert_eq!(head0.label, "head");
     assert_eq!(
-        head0.snippet,
-        "export fn head() -> Head {\n    return $0\n}",
+        head0.snippet, "export fn head() -> Head {\n    return $0\n}",
         "the zero-argument shape is complete as-is"
     );
-    assert!(head0.detail.contains("contract `Page` (std/ui)"), "{}", head0.detail);
+    assert!(
+        head0.detail.contains("contract `Page` (std/ui)"),
+        "{}",
+        head0.detail
+    );
     assert!(head0.doc.is_some(), "the member's /// doc rides along");
 
     // A shape with parameters makes both the name and the type a tabstop: the
@@ -307,14 +336,20 @@ fn completion_offers_every_shape_with_a_full_declaration() {
         .iter()
         .find(|i| i.snippet.starts_with("export fn head(${1:"))
         .expect("a one-parameter shape");
-    assert_eq!(head2.snippet, "export fn head(${1:t}: ${2:T}) -> Head {\n    return $0\n}");
+    assert_eq!(
+        head2.snippet,
+        "export fn head(${1:t}: ${2:T}) -> Head {\n    return $0\n}"
+    );
 
     let data_lazy = items
         .iter()
         .find(|i| i.snippet.contains("-> Lazy<T>"))
         .expect("the lazy shape");
     assert_eq!(data_lazy.label, "data");
-    assert_eq!(data_lazy.snippet, "export fn data() -> Lazy<T> {\n    return $0\n}");
+    assert_eq!(
+        data_lazy.snippet,
+        "export fn data() -> Lazy<T> {\n    return $0\n}"
+    );
 }
 
 /// A member the page already exports is not offered again.
@@ -322,7 +357,12 @@ fn completion_offers_every_shape_with_a_full_declaration() {
 fn completion_drops_what_the_page_already_wrote() {
     let v = page();
     let items = contract_completions(&v, &["data".to_string(), "page".to_string()]);
-    assert!(items.iter().all(|i| i.label == "head" || i.label == "respond"), "data and page are written");
+    assert!(
+        items
+            .iter()
+            .all(|i| i.label == "head" || i.label == "respond"),
+        "data and page are written"
+    );
     assert_eq!(items.len(), 8);
 }
 
@@ -345,7 +385,11 @@ fn required_members_sort_first() {
     let v = load_contract("./c", "Both", &root, &opts(), &Disk).expect("the contract");
     let items = contract_completions(&v, &[]);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-    assert_eq!(labels, vec!["b", "a"], "required first, declaration order within");
+    assert_eq!(
+        labels,
+        vec!["b", "a"],
+        "required first, declaration order within"
+    );
     assert!(items[0].required);
     assert!(!items[1].required);
     assert!(items[0].sort < items[1].sort, "sortText carries the order");
@@ -363,8 +407,14 @@ fn hover_names_the_shape_the_doc_and_the_contract() {
     assert!(h.contains("fn head: fn() -> Head"), "the shape:\n{h}");
     assert!(h.contains("fn head: fn(P, T) -> Head"), "every shape:\n{h}");
     assert!(h.contains("Document head contributions"), "the doc:\n{h}");
-    assert!(h.contains("member of contract `Page` (std/ui)"), "the contract:\n{h}");
-    assert!(contract_member_hover(&v, "helper").is_none(), "a helper is not a member");
+    assert!(
+        h.contains("member of contract `Page` (std/ui)"),
+        "the contract:\n{h}"
+    );
+    assert!(
+        contract_member_hover(&v, "helper").is_none(),
+        "a helper is not a member"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +481,9 @@ fn edit_distance_matches_the_vyrn_one() {
         ("Haed", "Head"),
         ("component", "contract"),
     ];
-    let mut body = String::from("import { editDistance } from \"std/strings\"\nfn main() -> Int64 {\n    let mut bad = 0\n");
+    let mut body = String::from(
+        "import { editDistance } from \"std/strings\"\nfn main() -> Int64 {\n    let mut bad = 0\n",
+    );
     for (a, b) in PAIRS {
         body.push_str(&format!(
             "    if editDistance(\"{a}\", \"{b}\") != {} {{\n        bad = bad + 1\n    }}\n",
@@ -527,7 +579,11 @@ fn a_templateless_vyx_synthesizes_nothing() {
     let v = page();
     assert!(synthesized_members(&v, "/app/routes/half.vyx", "<script>\n</script>\n").is_empty());
     assert_eq!(
-        synthesized_members(&v, "/app/routes/half.vyx", "<template>\n<p></p>\n</template>\n"),
+        synthesized_members(
+            &v,
+            "/app/routes/half.vyx",
+            "<template>\n<p></p>\n</template>\n"
+        ),
         vec!["page".to_string()],
         "a template with no script at all is still a view"
     );
@@ -548,8 +604,16 @@ fn a_templateless_vyx_synthesizes_nothing() {
 fn status_covers_every_class() {
     let v = page();
     let st = contract_status(&v, "", &[]);
-    assert_eq!(st[0].status, MemberStatus::Defaulted, "head defaults to noHead()");
-    assert_eq!(st[1].status, MemberStatus::Defaulted, "data defaults to noQuery()");
+    assert_eq!(
+        st[0].status,
+        MemberStatus::Defaulted,
+        "head defaults to noHead()"
+    );
+    assert_eq!(
+        st[1].status,
+        MemberStatus::Defaulted,
+        "data defaults to noQuery()"
+    );
 
     let st = contract_status(&v, "export fn head() -> Int64 {\n    return 1\n}\n", &[]);
     assert_eq!(

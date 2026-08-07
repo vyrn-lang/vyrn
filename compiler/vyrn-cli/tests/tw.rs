@@ -18,7 +18,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_file(rel: &str) -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -56,12 +60,24 @@ const GOOD_THEME: &str = r##"{
 #[test]
 fn emit_gen_shows_the_synthesized_theme_module() {
     let demo = repo_file("examples/twdemo.vyrn");
-    let out = vyrn().arg("emit-gen").arg(&demo).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(&demo)
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
 
     // The bridge imports std/html for `Attr`/`Cls`.
-    assert!(src.contains("import { Attr } from \"std/html\""), "html import:\n{}", &src[..src.len().min(400)]);
+    assert!(
+        src.contains("import { Attr } from \"std/html\""),
+        "html import:\n{}",
+        &src[..src.len().min(400)]
+    );
 
     // TwClass — the finite single-class type, factoring the bounded prefixes over
     // the base-class alternation.
@@ -70,8 +86,14 @@ fn emit_gen_shows_the_synthesized_theme_module() {
         "TwClass finite type header not found"
     );
     // Tw — a space-separated sequence of single classes (`class( class)*`).
-    assert!(src.contains("export type Tw = String where value =~ \"("), "Tw type");
-    assert!(src.contains(")( ("), "Tw sequence loop (space-separated repetition)");
+    assert!(
+        src.contains("export type Tw = String where value =~ \"("),
+        "Tw type"
+    );
+    assert!(
+        src.contains(")( ("),
+        "Tw sequence loop (space-separated repetition)"
+    );
 
     // A few vocabulary members, in the RFC-locked family order.
     assert!(src.contains("bg-brand-500|"), "colour class");
@@ -83,8 +105,14 @@ fn emit_gen_shows_the_synthesized_theme_module() {
     assert!(src.contains("export fn cls(c: Tw) -> Attr"), "cls bridge");
     assert!(src.contains("export fn css() -> String"), "css()");
     // css() is a baked constant carrying real rules (escaped `\:` in the literal).
-    assert!(src.contains(".bg-brand-500 {background-color:#4f46e5}"), "base rule baked");
-    assert!(src.contains("@media (min-width:768px) {"), "media block baked");
+    assert!(
+        src.contains(".bg-brand-500 {background-color:#4f46e5}"),
+        "base rule baked"
+    );
+    assert!(
+        src.contains("@media (min-width:768px) {"),
+        "media block baked"
+    );
 }
 
 // ---- the compile-error demonstration (a typo'd class literal) --------------
@@ -103,12 +131,26 @@ fn a_typoed_class_literal_fails_check() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("check");
-    assert!(!out.status.success(), "a typo'd class literal must fail `vyrn check`");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("check");
+    assert!(
+        !out.status.success(),
+        "a typo'd class literal must fail `vyrn check`"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     // The validated-type diagnostic names the offending literal and the `Tw` type.
-    assert!(err.contains("does not satisfy `Tw`"), "expected the Tw validation diagnostic, got:\n{err}");
-    assert!(err.contains("bg-brnd-500"), "diagnostic should quote the bad literal:\n{err}");
+    assert!(
+        err.contains("does not satisfy `Tw`"),
+        "expected the Tw validation diagnostic, got:\n{err}"
+    );
+    assert!(
+        err.contains("bg-brnd-500"),
+        "diagnostic should quote the bad literal:\n{err}"
+    );
 }
 
 // ---- a good literal checks clean --------------------------------------------
@@ -127,7 +169,11 @@ fn a_valid_class_literal_checks_clean() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("check");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("check");
     assert!(
         out.status.success(),
         "a valid multi-token literal (incl. an md:hover: variant) must check clean:\n{}",
@@ -140,17 +186,31 @@ fn a_valid_class_literal_checks_clean() {
 #[test]
 fn an_unknown_theme_key_fails_generation() {
     let dir = scratch("unknownkey");
-    write(&dir.join("theme.json"), "{ \"shadows\": { \"lg\": \"0 1px 2px\" } }");
+    write(
+        &dir.join("theme.json"),
+        "{ \"shadows\": { \"lg\": \"0 1px 2px\" } }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { tw } from \"std/tw\"\n\
          import * as theme from tw(\"./theme.json\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "an unknown theme key must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("TW_UNKNOWN_KEY__shadows"), "unknown-key diagnostic:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "an unknown theme key must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("TW_UNKNOWN_KEY__shadows"),
+        "unknown-key diagnostic:\n{err}"
+    );
 }
 
 #[test]
@@ -163,27 +223,49 @@ fn a_non_string_leaf_fails_generation() {
          import * as theme from tw(\"./theme.json\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
     assert!(!out.status.success(), "a non-string leaf must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("TW_PARSE_ERROR__"), "parse-error diagnostic:\n{err}");
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("TW_PARSE_ERROR__"),
+        "parse-error diagnostic:\n{err}"
+    );
 }
 
 #[test]
 fn an_unsafe_class_name_fails_generation() {
     let dir = scratch("unsafe");
     // An uppercase colour name yields `bg-Brand-500`, not `[a-z][a-z0-9-]*`.
-    write(&dir.join("theme.json"), "{ \"colors\": { \"Brand\": { \"500\": \"#abc\" } } }");
+    write(
+        &dir.join("theme.json"),
+        "{ \"colors\": { \"Brand\": { \"500\": \"#abc\" } } }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { tw } from \"std/tw\"\n\
          import * as theme from tw(\"./theme.json\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "an unsafe class name must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("TW_UNSAFE_NAME__"), "unsafe-name diagnostic:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "an unsafe class name must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("TW_UNSAFE_NAME__"),
+        "unsafe-name diagnostic:\n{err}"
+    );
 }
 
 // ---- the demo runs green ---------------------------------------------------
@@ -195,7 +277,10 @@ fn demo_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "demo tests failed:\n{combined}");
-    assert!(combined.contains("3 passed, 0 failed"), "expected 3 green tests:\n{combined}");
+    assert!(
+        combined.contains("3 passed, 0 failed"),
+        "expected 3 green tests:\n{combined}"
+    );
 }
 
 // ---- std/tw's own unit tests run green -------------------------------------
@@ -206,8 +291,14 @@ fn std_tw_unit_tests_run_green() {
     let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "std/tw unit tests failed:\n{combined}");
-    assert!(combined.contains("18 passed, 0 failed"), "expected 18 green tests:\n{combined}");
+    assert!(
+        out.status.success(),
+        "std/tw unit tests failed:\n{combined}"
+    );
+    assert!(
+        combined.contains("18 passed, 0 failed"),
+        "expected 18 green tests:\n{combined}"
+    );
 }
 
 // ---- soundness: a breakpoint key cannot forge the token grammar ------------
@@ -231,10 +322,21 @@ fn a_forging_breakpoint_key_fails_generation() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("check");
-    assert!(!out.status.success(), "a forging breakpoint key must fail generation (was: `evbg-white` compiled)");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("TW_UNSAFE_BREAKPOINT__ev_xhack"), "breakpoint diagnostic naming the key:\n{err}");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("check");
+    assert!(
+        !out.status.success(),
+        "a forging breakpoint key must fail generation (was: `evbg-white` compiled)"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("TW_UNSAFE_BREAKPOINT__ev_xhack"),
+        "breakpoint diagnostic naming the key:\n{err}"
+    );
 }
 
 // ---- soundness: a CSS-injecting leaf value cannot reach the stylesheet ------
@@ -254,8 +356,19 @@ fn a_css_injecting_value_fails_generation() {
          import * as theme from tw(\"./theme.json\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a CSS-injecting leaf value must fail generation");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("TW_UNSAFE_VALUE__colors_evil"), "value diagnostic naming the key:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a CSS-injecting leaf value must fail generation"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("TW_UNSAFE_VALUE__colors_evil"),
+        "value diagnostic naming the key:\n{err}"
+    );
 }

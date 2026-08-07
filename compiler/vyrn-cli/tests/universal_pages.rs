@@ -26,7 +26,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 fn repo_file(rel: &str) -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap();
     // `std::fs::canonicalize` on Windows returns a `\\?\`-VERBATIM path. Feeding
     // that to `vyrn serve` wedges the pages generator's relative-import path
     // resolution (the home page hangs mid-render — a plain absolute path serves
@@ -67,7 +71,10 @@ fn drain_into<R: Read + Send + 'static>(mut r: R, acc: Arc<Mutex<String>>) {
         loop {
             match r.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => acc.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n])),
+                Ok(n) => acc
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&buf[..n])),
             }
         }
     });
@@ -136,7 +143,12 @@ fn spawn_bin_server() -> Result<u16, String> {
     let out = Arc::new(Mutex::new(String::new()));
     drain_into(child.stdout.take().unwrap(), out.clone());
     drain_into(child.stderr.take().unwrap(), out.clone());
-    let s = Serve { child, port, stderr: out, _dir: dir };
+    let s = Serve {
+        child,
+        port,
+        stderr: out,
+        _dir: dir,
+    };
     // Cold, cache-disabled generation of the WHOLE bin app in a debug build is
     // minutes, not seconds — the old 60s wait panicked mid-generation and the
     // per-test retries ground for an hour. 600s is the honest ceiling.
@@ -162,7 +174,10 @@ fn request(port: u16, raw: &str) -> (String, String, String) {
 }
 
 fn get(port: u16, path: &str) -> (String, String, String) {
-    request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    request(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 /// A GET stating what representation it wants (RFC-0072 M4) — the whole wire
@@ -230,15 +245,23 @@ fn create_paste(port: u16, title: &str, body: &str, lang: &str) -> String {
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn every_document_accept_is_byte_identical() {
     let port = bin_port();
-    const BROWSER: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+    const BROWSER: &str =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
     for path in ["/about", "/", "/p/nope404"] {
         let bare = get(port, path);
         for accept in ["text/html", BROWSER, "*/*", "text/html,application/json"] {
             let stated = get_accept(port, path, accept);
-            assert_eq!(bare.0, stated.0, "{path} status moved under Accept: {accept}");
+            assert_eq!(
+                bare.0, stated.0,
+                "{path} status moved under Accept: {accept}"
+            );
             assert_eq!(bare.2, stated.2, "{path} body moved under Accept: {accept}");
             assert_eq!(content_type(&stated.1), "text/html", "{path} @ {accept}");
-            assert_eq!(header(&stated.1, "vary"), "", "a document must not Vary: {path} @ {accept}");
+            assert_eq!(
+                header(&stated.1, "vary"),
+                "",
+                "a document must not Vary: {path} @ {accept}"
+            );
         }
     }
 }
@@ -251,7 +274,10 @@ fn document_about_is_html() {
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "text/html");
     // The full themed page (shell + body), not a JSON payload.
-    assert!(body.contains("<!doctype html>") || body.contains("<html"), "expected an HTML document, got:\n{body}");
+    assert!(
+        body.contains("<!doctype html>") || body.contains("<html"),
+        "expected an HTML document, got:\n{body}"
+    );
     assert!(body.contains("About"));
 }
 
@@ -275,8 +301,14 @@ fn unmarked_lazy_home_is_byte_identical_and_never_renders_the_skeleton() {
         "home shell changed:\n{body}"
     );
     // The lazy skeleton must not leak into SSR: no spinner, no loading label.
-    assert!(!body.contains("spinner"), "lazy skeleton leaked into SSR:\n{body}");
-    assert!(!body.contains("Loading recent pastes"), "lazy loading label leaked into SSR:\n{body}");
+    assert!(
+        !body.contains("spinner"),
+        "lazy skeleton leaked into SSR:\n{body}"
+    );
+    assert!(
+        !body.contains("Loading recent pastes"),
+        "lazy loading label leaked into SSR:\n{body}"
+    );
 }
 
 #[test]
@@ -298,7 +330,10 @@ fn marked_about_is_the_exact_static_payload() {
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
     // A static page: empty props, empty params, the url-pattern title/id.
-    assert_eq!(body, "{\"page\":\"/about\",\"title\":\"/about\",\"props\":null,\"params\":null}");
+    assert_eq!(
+        body,
+        "{\"page\":\"/about\",\"title\":\"/about\",\"props\":null,\"params\":null}"
+    );
 }
 
 #[test]
@@ -309,7 +344,10 @@ fn marked_home_payload_carries_the_loaded_list() {
     let (status, headers, body) = get_data(port, "/");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
-    assert!(body.starts_with("{\"page\":\"/\",\"title\":"), "unexpected payload:\n{body}");
+    assert!(
+        body.starts_with("{\"page\":\"/\",\"title\":"),
+        "unexpected payload:\n{body}"
+    );
     // props is the load() result — the paste array, carrying the seeded paste.
     assert!(body.contains("\"props\":["));
     assert!(body.contains(&format!("\"id\":\"{id}\"")));
@@ -324,9 +362,15 @@ fn marked_paste_props_round_trip_through_the_wire_codec() {
     let (status, headers, body) = get_data(port, &format!("/p/{id}"));
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
-    assert!(body.starts_with("{\"page\":\"/p/:id\","), "unexpected payload:\n{body}");
+    assert!(
+        body.starts_with("{\"page\":\"/p/:id\","),
+        "unexpected payload:\n{body}"
+    );
     // The rendered title travels in the payload (the paste title, via head{}).
-    assert!(body.contains("\"title\":\"deep title\""), "payload:\n{body}");
+    assert!(
+        body.contains("\"title\":\"deep title\""),
+        "payload:\n{body}"
+    );
     // props is the loaded Paste; params carries the matched route id.
     assert!(body.contains(&format!("\"props\":{{\"id\":\"{id}\"")));
     assert!(body.contains("\"body\":\"the body text\""));
@@ -342,7 +386,10 @@ fn marked_missing_paste_is_the_error_payload() {
     // renders the themed error page); the document channel still 404s.
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
-    assert!(body.starts_with("{\"page\":\"@error\",\"status\":404,"), "unexpected payload:\n{body}");
+    assert!(
+        body.starts_with("{\"page\":\"@error\",\"status\":404,"),
+        "unexpected payload:\n{body}"
+    );
     assert!(body.contains("\"props\":{\"status\":404,"));
 }
 
@@ -355,6 +402,10 @@ fn marked_non_client_route_falls_back_to_its_real_response() {
     // request must NOT be answered as JSON, so the client hard-navs to it.
     let (status, headers, body) = get_data(port, &format!("/raw/{id}"));
     assert_eq!(status, "HTTP/1.1 200 OK");
-    assert!(!content_type(&headers).contains("application/json"), "raw route must not be JSON: {}", content_type(&headers));
+    assert!(
+        !content_type(&headers).contains("application/json"),
+        "raw route must not be JSON: {}",
+        content_type(&headers)
+    );
     assert!(body.contains("raw body content"));
 }

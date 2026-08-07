@@ -572,11 +572,13 @@ impl From<&str> for Ctrl {
 /// growth a program names, and RFC-0081 records that boundary rather than
 /// implying a stronger one.
 fn reserve_str(s: &mut String, more: usize) -> Result<(), Ctrl> {
-    s.try_reserve(more).map_err(|_| Ctrl::Err("out of memory".into()))
+    s.try_reserve(more)
+        .map_err(|_| Ctrl::Err("out of memory".into()))
 }
 
 fn reserve_vec<T>(v: &mut Vec<T>, more: usize) -> Result<(), Ctrl> {
-    v.try_reserve(more).map_err(|_| Ctrl::Err("out of memory".into()))
+    v.try_reserve(more)
+        .map_err(|_| Ctrl::Err("out of memory".into()))
 }
 
 /// `a + b` for strings, allocated once and fallibly.
@@ -725,7 +727,13 @@ fn fmaximum64(a: f64, b: f64) -> f64 {
 /// with a `trunc i64 to i32`. Doing anything else here would make `I32x4(1, 2,
 /// 3, 4)` a different value in the interpreter than in the other two engines.
 fn i32_lane(v: Val) -> Result<i32, Ctrl> {
-    match convert_val(v, &Type::IntN { bits: 32, signed: true }) {
+    match convert_val(
+        v,
+        &Type::IntN {
+            bits: 32,
+            signed: true,
+        },
+    ) {
         Val::IntN { v, .. } => Ok(v as i32),
         other => Err(format!("I32x4 lane: {other:?}").into()),
     }
@@ -1066,10 +1074,7 @@ pub fn mounted_routes(program: &Program) -> Result<Vec<MountedRoute>, String> {
     })
 }
 
-fn mounted_routes_inner(
-    program: &Program,
-    calls: &[&[Expr]],
-) -> Result<Vec<MountedRoute>, String> {
+fn mounted_routes_inner(program: &Program, calls: &[&[Expr]]) -> Result<Vec<MountedRoute>, String> {
     let interp = new_interp(program, &[])?;
     if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
         return Err(s);
@@ -1097,15 +1102,17 @@ fn collect_mounted(v: &Val, out: &mut Vec<MountedRoute>) {
                 collect_mounted(x, out);
             }
         }
-        Val::Record(fields, Some(name))
-            if matches!(&**name, "Route" | "Live" | "Socket") =>
-        {
-            let Some(Val::Str(derived)) = fields.get("derived") else { return };
+        Val::Record(fields, Some(name)) if matches!(&**name, "Route" | "Live" | "Socket") => {
+            let Some(Val::Str(derived)) = fields.get("derived") else {
+                return;
+            };
             // `method path [procedure] [policy..]`, written by the constructor
             // and appended to by each combinator. A `Route`'s third word is the
             // procedure the generator seeded it with; a `Live`/`Socket` has none.
             let mut words = derived.split_whitespace();
-            let (Some(method), Some(path)) = (words.next(), words.next()) else { return };
+            let (Some(method), Some(path)) = (words.next(), words.next()) else {
+                return;
+            };
             let procedure = match &**name {
                 "Route" => words.next().unwrap_or("-"),
                 _ => "-",
@@ -1139,14 +1146,24 @@ fn mount_calls_block<'a>(b: &'a Block, out: &mut Vec<&'a [Expr]>) {
                     mount_calls_expr(e, out);
                 }
             }
-            Stmt::If { cond, then_block, else_block, .. } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 mount_calls_expr(cond, out);
                 mount_calls_block(then_block, out);
                 if let Some(e) = else_block {
                     mount_calls_block(e, out);
                 }
             }
-            Stmt::IfLet { scrutinee, then_block, else_block, .. } => {
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
                 mount_calls_expr(scrutinee, out);
                 mount_calls_block(then_block, out);
                 if let Some(e) = else_block {
@@ -1191,13 +1208,20 @@ fn mount_calls_expr<'a>(e: &'a Expr, out: &mut Vec<&'a [Expr]>) {
             mount_calls_expr(lhs, out);
             mount_calls_expr(rhs, out);
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             mount_calls_expr(scrutinee, out);
             for a in arms {
                 mount_calls_expr(&a.body, out);
             }
         }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             mount_calls_expr(cond, out);
             mount_calls_expr(then_branch, out);
             if let Some(b) = else_branch {
@@ -1362,9 +1386,9 @@ fn serve_call(interp: &Interp<'_>, call: ServeCall) -> Result<ServeAnswer, Strin
                     match v {
                         None => Ok(ServeAnswer::Frame(None)),
                         Some(Val::Str(f)) => Ok(ServeAnswer::Frame(Some((*f).clone()))),
-                        Some(other) => {
-                            Err(format!("a served stream yielded {other:?}, expected a String"))
-                        }
+                        Some(other) => Err(format!(
+                            "a served stream yielded {other:?}, expected a String"
+                        )),
                     }
                 }
                 // A trapping producer releases before the trap surfaces, exactly
@@ -1612,7 +1636,11 @@ pub struct GenInputs<'a> {
 /// Public, and a free function, because the wasm generation engine (RFC-0076)
 /// mediates its host imports with exactly this rule. Two implementations of a
 /// sandbox boundary is one too many.
-pub fn gen_scoped_path(importer_dir: &str, allowed: &[String], arg: &str) -> Result<String, String> {
+pub fn gen_scoped_path(
+    importer_dir: &str,
+    allowed: &[String],
+    arg: &str,
+) -> Result<String, String> {
     let joined = if importer_dir.is_empty() {
         arg.to_string()
     } else {
@@ -1730,10 +1758,14 @@ pub fn gen_module_interface_lit(
 /// Returning `None` means "not served" — not an error. Every generator the wasm
 /// path cannot yet handle falls through to the interpreter, which stays the
 /// reference the alternative is checked against.
-pub type GenEngine =
-    dyn Fn(&Program, &str, &[crate::consteval::ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, String>>
-        + Send
-        + Sync;
+pub type GenEngine = dyn Fn(
+        &Program,
+        &str,
+        &[crate::consteval::ConstVal],
+        &GenInputs<'_>,
+    ) -> Option<Result<GenOutput, String>>
+    + Send
+    + Sync;
 
 static GEN_ENGINE: std::sync::OnceLock<Box<GenEngine>> = std::sync::OnceLock::new();
 
@@ -2088,10 +2120,15 @@ impl<'a> Interp<'a> {
                 if content.as_bytes().contains(&0) {
                     return Ok(Val::Result(
                         false,
-                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` contains a NUL byte")))),
+                        Box::new(Val::Str(std::rc::Rc::new(format!(
+                            "`{path}` contains a NUL byte"
+                        )))),
                     ));
                 }
-                Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(content)))))
+                Ok(Val::Result(
+                    true,
+                    Box::new(Val::Str(std::rc::Rc::new(content))),
+                ))
             }
             Err(_) => Ok(Val::Result(
                 false,
@@ -2115,7 +2152,12 @@ impl<'a> Interp<'a> {
                     .push((format!("{resolved}/"), names.join("\n").into_bytes()));
                 Ok(Val::Result(
                     true,
-                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(|n| Val::Str(std::rc::Rc::new(n))).collect()))),
+                    Box::new(Val::Array(std::rc::Rc::new(
+                        names
+                            .into_iter()
+                            .map(|n| Val::Str(std::rc::Rc::new(n)))
+                            .collect(),
+                    ))),
                 ))
             }
             Err(_) => Ok(Val::Result(
@@ -2260,12 +2302,7 @@ impl<'a> Interp<'a> {
     /// parameter's expected `fn(param_tys) -> ret` type. A lambda literal captures
     /// its environment here; a bare name is a pass-through of an existing function
     /// value or a reference to a named top-level function.
-    fn eval_fn_arg(
-        &self,
-        arg: &Expr,
-        scope: &mut Vec<Frame>,
-        fnty: &Type,
-    ) -> Result<Val, Ctrl> {
+    fn eval_fn_arg(&self, arg: &Expr, scope: &mut Vec<Frame>, fnty: &Type) -> Result<Val, Ctrl> {
         let (ptys, ret) = match fnty {
             Type::Fn(ps, r) => (ps.clone(), (**r).clone()),
             _ => (Vec::new(), Type::Unit),
@@ -2433,7 +2470,11 @@ impl<'a> Interp<'a> {
         for stmt in &block.stmts {
             if let Stmt::Let { name, .. } = stmt {
                 for d in drops.iter_mut().filter(|d| d.0 == name && d.1.is_none()) {
-                    d.1 = scope.last().unwrap().get(name.as_str()).map(|s| s.v.clone());
+                    d.1 = scope
+                        .last()
+                        .unwrap()
+                        .get(name.as_str())
+                        .map(|s| s.v.clone());
                 }
             }
             let flow = self.stmt(stmt, scope);
@@ -2723,7 +2764,10 @@ impl<'a> Interp<'a> {
                 // this cannot handle falls through to the general path having
                 // evaluated nothing. Safe for a local: no callee can reach it, so
                 // evaluating the item cannot change what was just inspected.
-                if let Expr::Call { name: fname, args, .. } = value {
+                if let Expr::Call {
+                    name: fname, args, ..
+                } = value
+                {
                     if fname == "push"
                         && args.len() == 2
                         && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
@@ -2787,7 +2831,13 @@ impl<'a> Interp<'a> {
                 if let Expr::Binary { op: BinOp::Add, .. } = value {
                     let mut spine: Vec<&Expr> = Vec::new();
                     let mut cur = value;
-                    while let Expr::Binary { op: BinOp::Add, lhs, rhs, .. } = cur {
+                    while let Expr::Binary {
+                        op: BinOp::Add,
+                        lhs,
+                        rhs,
+                        ..
+                    } = cur
+                    {
                         spine.push(rhs);
                         cur = lhs;
                     }
@@ -2895,7 +2945,10 @@ impl<'a> Interp<'a> {
                 // unknown — there is then nothing to check against.
                 let fty = self.field_ty(name, field, scope);
                 let mut pushed = None;
-                if let Expr::Call { name: fname, args, .. } = value {
+                if let Expr::Call {
+                    name: fname, args, ..
+                } = value
+                {
                     if fname == "push"
                         && args.len() == 2
                         && matches!(&args[0], Expr::Field { expr, field: f, .. }
@@ -2916,19 +2969,18 @@ impl<'a> Interp<'a> {
                                 _ => None,
                             },
                         };
-                        let snap = elem_ty.and_then(|e| {
-                            scope
-                                .iter()
-                                .rev()
-                                .find_map(|fr| fr.get(name))
-                                .and_then(|s| match &s.v {
-                                    Val::Record(map, _) => match map.get(field) {
-                                        Some(Val::Array(elems)) => Some((elems.clone(), e)),
+                        let snap =
+                            elem_ty.and_then(|e| {
+                                scope.iter().rev().find_map(|fr| fr.get(name)).and_then(
+                                    |s| match &s.v {
+                                        Val::Record(map, _) => match map.get(field) {
+                                            Some(Val::Array(elems)) => Some((elems.clone(), e)),
+                                            _ => None,
+                                        },
                                         _ => None,
                                     },
-                                    _ => None,
-                                })
-                        });
+                                )
+                            });
                         if let Some((arr, elem_ty)) = snap {
                             pushed = Some(self.append_snapshot(
                                 arr,
@@ -2937,7 +2989,9 @@ impl<'a> Interp<'a> {
                                 scope,
                                 |scope| {
                                     for fr in scope.iter_mut().rev() {
-                                        let Some(slot) = fr.get_mut(name) else { continue };
+                                        let Some(slot) = fr.get_mut(name) else {
+                                            continue;
+                                        };
                                         if let Val::Record(map, _) = &mut slot.v {
                                             if let Some(cur) = map.get_mut(field) {
                                                 *cur = Val::Unit;
@@ -3007,7 +3061,10 @@ impl<'a> Interp<'a> {
             // automatic validation), then is written through the shared buffer;
             // an out-of-bounds index traps with the read path's wording.
             Stmt::IndexSet {
-                name, index, value, line,
+                name,
+                index,
+                value,
+                line,
             } => {
                 // RFC-0091 M3: a user container declares where its element is,
                 // and `place atSet` is the writing half. Asked before the index
@@ -3117,11 +3174,20 @@ impl<'a> Interp<'a> {
                 // variable or a literal, which is what a loop writes. Anything
                 // else keeps the copy and stays quadratic, like a global does.
                 let mut pushed = None;
-                if let (Expr::Call { name: fname, args, .. }, true) =
-                    (value, matches!(index, Expr::Var { .. } | Expr::Int(_)))
+                if let (
+                    Expr::Call {
+                        name: fname, args, ..
+                    },
+                    true,
+                ) = (value, matches!(index, Expr::Var { .. } | Expr::Int(_)))
                 {
                     if fname == "push" && args.len() == 2 {
-                        if let Expr::Call { name: at, args: iargs, .. } = &args[0] {
+                        if let Expr::Call {
+                            name: at,
+                            args: iargs,
+                            ..
+                        } = &args[0]
+                        {
                             if at == "at"
                                 && iargs.len() == 2
                                 && matches!(&iargs[0], Expr::Var { name: n, .. } if n == name)
@@ -3148,21 +3214,22 @@ impl<'a> Interp<'a> {
                                 // index, a global — falls through to the general
                                 // path having evaluated nothing, and traps with
                                 // `at`'s own wording.
-                                let snap = item_ty.and_then(|e| {
-                                    scope.iter().rev().find_map(|fr| fr.get(name)).and_then(|s| {
-                                        match &s.v {
-                                            Val::Array(rows) if idx >= 0 => {
-                                                match rows.get(idx as usize) {
-                                                    Some(Val::Array(elems)) => {
-                                                        Some((elems.clone(), e))
+                                let snap =
+                                    item_ty.and_then(|e| {
+                                        scope.iter().rev().find_map(|fr| fr.get(name)).and_then(
+                                            |s| match &s.v {
+                                                Val::Array(rows) if idx >= 0 => {
+                                                    match rows.get(idx as usize) {
+                                                        Some(Val::Array(elems)) => {
+                                                            Some((elems.clone(), e))
+                                                        }
+                                                        _ => None,
                                                     }
-                                                    _ => None,
                                                 }
-                                            }
-                                            _ => None,
-                                        }
-                                    })
-                                });
+                                                _ => None,
+                                            },
+                                        )
+                                    });
                                 if let Some((arr, item_ty)) = snap {
                                     pushed = Some(self.append_snapshot(
                                         arr,
@@ -3171,7 +3238,9 @@ impl<'a> Interp<'a> {
                                         scope,
                                         |scope| {
                                             for fr in scope.iter_mut().rev() {
-                                                let Some(slot) = fr.get_mut(name) else { continue };
+                                                let Some(slot) = fr.get_mut(name) else {
+                                                    continue;
+                                                };
                                                 if let Val::Array(rows) = &mut slot.v {
                                                     std::rc::Rc::make_mut(rows)[idx as usize] =
                                                         Val::Unit;
@@ -3285,7 +3354,11 @@ impl<'a> Interp<'a> {
                 Ok(Flow::Normal)
             }
             Stmt::ForIn {
-                var, iter, body, line, ..
+                var,
+                iter,
+                body,
+                line,
+                ..
             } => {
                 // RFC-0091 M3: a user container declares how it is iterated, and
                 // the loop is written in its own terms — `size` for how many, the
@@ -3296,9 +3369,8 @@ impl<'a> Interp<'a> {
                     .index_receiver_key(iter, scope)
                     .and_then(|k| crate::types::iterate_impl_by_key(self.impls, &k))
                 {
-                    let blk =
-                        crate::project::iterate_loop(&size_fn, nth, var, iter, body, *line)
-                            .map_err(Ctrl::Err)?;
+                    let blk = crate::project::iterate_loop(&size_fn, nth, var, iter, body, *line)
+                        .map_err(Ctrl::Err)?;
                     return self.block(&blk, scope);
                 }
                 // RFC-0075 M2b: a stream is pulled, not walked. The producer runs
@@ -3309,7 +3381,12 @@ impl<'a> Interp<'a> {
                     Val::Stream(s) => return self.for_stream(*s, var, body, scope),
                     Val::Array(items) => items,
                     // Iterating a String yields each byte as an Int.
-                    Val::Str(s) => s.as_bytes().iter().map(|b| Val::Int(*b as i64)).collect::<Vec<_>>().into(),
+                    Val::Str(s) => s
+                        .as_bytes()
+                        .iter()
+                        .map(|b| Val::Int(*b as i64))
+                        .collect::<Vec<_>>()
+                        .into(),
                     other => return Err(format!("`for` expected an array, found {other:?}").into()),
                 };
                 for item in items.iter() {
@@ -3598,26 +3675,33 @@ impl<'a> Interp<'a> {
             // Restricted to a local receiver so nothing evaluated for the index
             // can reach it — the same reason the in-place append above is safe.
             Expr::Call { name, args, .. }
-                if name == "at"
-                    && args.len() == 2
-                    && matches!(&args[0], Expr::Var { .. })
-                    && {
-                        let Expr::Var { name: v, .. } = &args[0] else { unreachable!() };
-                        scope
-                            .iter()
-                            .rev()
-                            .find_map(|f| f.get(v))
-                            .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Str(_)))
-                    } =>
+                if name == "at" && args.len() == 2 && matches!(&args[0], Expr::Var { .. }) && {
+                    let Expr::Var { name: v, .. } = &args[0] else {
+                        unreachable!()
+                    };
+                    scope
+                        .iter()
+                        .rev()
+                        .find_map(|f| f.get(v))
+                        .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Str(_)))
+                } =>
             {
-                let Expr::Var { name: v, .. } = &args[0] else { unreachable!() };
+                let Expr::Var { name: v, .. } = &args[0] else {
+                    unreachable!()
+                };
                 let idx = self.expr(&args[1], scope)?;
                 let i = match &idx {
                     Val::Int(i) => *i,
                     Val::IntN { v, .. } => *v,
-                    other => return Err(format!("index must be an integer, found {other:?}").into()),
+                    other => {
+                        return Err(format!("index must be an integer, found {other:?}").into())
+                    }
                 };
-                let slot = scope.iter().rev().find_map(|f| f.get(v)).expect("guarded above");
+                let slot = scope
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.get(v))
+                    .expect("guarded above");
                 match &slot.v {
                     Val::Array(elems) => elems
                         .get(i as usize)
@@ -3626,7 +3710,11 @@ impl<'a> Interp<'a> {
                     Val::Str(st) => st
                         .as_bytes()
                         .get(i as usize)
-                        .map(|b| Val::IntN { v: *b as i64, bits: 8, signed: false })
+                        .map(|b| Val::IntN {
+                            v: *b as i64,
+                            bits: 8,
+                            signed: false,
+                        })
                         .ok_or_else(|| Ctrl::from(format!("string index {i} out of bounds"))),
                     _ => unreachable!("guarded above"),
                 }
@@ -3862,7 +3950,11 @@ impl<'a> Interp<'a> {
                         Val::F32x4(v) => v.iter().map(|l| Val::Float32(*l)).collect(),
                         Val::I32x4(v) => v
                             .iter()
-                            .map(|l| Val::IntN { v: i64::from(*l), bits: 32, signed: true })
+                            .map(|l| Val::IntN {
+                                v: i64::from(*l),
+                                bits: 32,
+                                signed: true,
+                            })
                             .collect(),
                         Val::F64x2(v) => v.iter().map(|l| Val::Float(*l)).collect(),
                         other => return Err(format!(".store: {other:?}").into()),
@@ -3882,12 +3974,18 @@ impl<'a> Interp<'a> {
                         Ok(Val::Unit)
                     };
                     for frame in scope.iter_mut().rev() {
-                        if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(&recv) {
+                        if let Some(Slot {
+                            v: Val::Array(items),
+                            ..
+                        }) = frame.get_mut(&recv)
+                        {
                             return put(items);
                         }
                     }
-                    if let Some(Slot { v: Val::Array(items), .. }) =
-                        self.globals.borrow_mut().get_mut(&recv)
+                    if let Some(Slot {
+                        v: Val::Array(items),
+                        ..
+                    }) = self.globals.borrow_mut().get_mut(&recv)
                     {
                         return put(items);
                     }
@@ -3910,7 +4008,8 @@ impl<'a> Interp<'a> {
                         }
                     };
                     let remove_from = |pairs: &mut Vec<(String, Val)>| -> bool {
-                        if let Some(i) = pairs.iter().position(|(k, _)| k.as_str() == key.as_str()) {
+                        if let Some(i) = pairs.iter().position(|(k, _)| k.as_str() == key.as_str())
+                        {
                             pairs.remove(i);
                             true
                         } else {
@@ -4220,13 +4319,8 @@ impl<'a> Interp<'a> {
                     // `f32x4.nearest` and LLVM's `llvm.roundeven` are both
                     // roundTiesToEven, measured before the choice was made rather
                     // than after.
-                    "@f32x4Min"
-                    | "@f32x4Max"
-                    | "@f32x4Sqrt"
-                    | "@f32x4Ceil"
-                    | "@f32x4Floor"
-                    | "@f32x4Trunc"
-                    | "@f32x4Nearest" => {
+                    "@f32x4Min" | "@f32x4Max" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
+                    | "@f32x4Trunc" | "@f32x4Nearest" => {
                         let a = match &vals[0] {
                             Val::F32x4(v) => *v,
                             other => return Err(format!("F32x4 op: {other:?}").into()),
@@ -4254,9 +4348,7 @@ impl<'a> Interp<'a> {
                                 // these literals, and the outer head above is too
                                 // long for it to parse across the wrap.
                                 "@f32x4Sqrt" => a[k].sqrt(),
-                                other => {
-                                    return Err(format!("vector op: {other}").into())
-                                }
+                                other => return Err(format!("vector op: {other}").into()),
                             };
                         }
                         Ok(Val::F32x4(out))
@@ -4285,9 +4377,7 @@ impl<'a> Interp<'a> {
                                 // Spelled out for the census scan's sake, exactly
                                 // as the narrow width's `sqrt` is.
                                 "@f64x2Sqrt" => a[k].sqrt(),
-                                other => {
-                                    return Err(format!("vector op: {other}").into())
-                                }
+                                other => return Err(format!("vector op: {other}").into()),
                             };
                         }
                         Ok(Val::F64x2(out))
@@ -4408,7 +4498,8 @@ impl<'a> Interp<'a> {
                                     bits: 8,
                                     signed: false,
                                 })
-                                .collect::<Vec<_>>().into(),
+                                .collect::<Vec<_>>()
+                                .into(),
                         )),
                         _ => Err("bytes of non-String".into()),
                     },
@@ -4419,7 +4510,11 @@ impl<'a> Interp<'a> {
                     // wording (never Rust `io::Error` text) — kept byte-identical
                     // to the codegen's format strings so all three backends agree.
                     "args" => Ok(Val::Array(
-                        self.args.iter().map(|s| Val::Str(std::rc::Rc::new(s.clone()))).collect::<Vec<_>>().into(),
+                        self.args
+                            .iter()
+                            .map(|s| Val::Str(std::rc::Rc::new(s.clone())))
+                            .collect::<Vec<_>>()
+                            .into(),
                     )),
                     "readLine" => {
                         use std::io::BufRead;
@@ -4474,20 +4569,29 @@ impl<'a> Interp<'a> {
                                 if bytes.contains(&0) {
                                     return Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` contains a NUL byte")))),
+                                        Box::new(Val::Str(std::rc::Rc::new(format!(
+                                            "`{path}` contains a NUL byte"
+                                        )))),
                                     ));
                                 }
                                 match String::from_utf8(bytes) {
-                                    Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s))))),
+                                    Ok(s) => Ok(Val::Result(
+                                        true,
+                                        Box::new(Val::Str(std::rc::Rc::new(s))),
+                                    )),
                                     Err(_) => Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` is not valid UTF-8")))),
+                                        Box::new(Val::Str(std::rc::Rc::new(format!(
+                                            "`{path}` is not valid UTF-8"
+                                        )))),
                                     )),
                                 }
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!(
+                                    "cannot read `{path}`"
+                                )))),
                             )),
                         }
                     }
@@ -4510,12 +4614,19 @@ impl<'a> Interp<'a> {
                                 names.sort();
                                 Ok(Val::Result(
                                     true,
-                                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(|n| Val::Str(std::rc::Rc::new(n))).collect()))),
+                                    Box::new(Val::Array(std::rc::Rc::new(
+                                        names
+                                            .into_iter()
+                                            .map(|n| Val::Str(std::rc::Rc::new(n)))
+                                            .collect(),
+                                    ))),
                                 ))
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!(
+                                    "cannot list `{path}`"
+                                )))),
                             )),
                         }
                     }
@@ -4550,7 +4661,9 @@ impl<'a> Interp<'a> {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot write `{path}`")))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!(
+                                    "cannot write `{path}`"
+                                )))),
                             )),
                         }
                     }
@@ -4580,7 +4693,10 @@ impl<'a> Interp<'a> {
                                 } else {
                                     format!("cannot write `{to}`")
                                 };
-                                Ok(Val::Result(false, Box::new(Val::Str(std::rc::Rc::new(msg)))))
+                                Ok(Val::Result(
+                                    false,
+                                    Box::new(Val::Str(std::rc::Rc::new(msg))),
+                                ))
                             }
                         }
                     }
@@ -4604,7 +4720,9 @@ impl<'a> Interp<'a> {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot write `{path}`")))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!(
+                                    "cannot write `{path}`"
+                                )))),
                             )),
                         }
                     }
@@ -4627,12 +4745,15 @@ impl<'a> Interp<'a> {
                                             bits: 8,
                                             signed: false,
                                         })
-                                        .collect::<Vec<_>>().into(),
+                                        .collect::<Vec<_>>()
+                                        .into(),
                                 )),
                             )),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!(
+                                    "cannot read `{path}`"
+                                )))),
                             )),
                         }
                     }
@@ -4655,14 +4776,20 @@ impl<'a> Interp<'a> {
                             if bytes.contains(&0) {
                                 return Ok(Val::Result(
                                     false,
-                                    Box::new(Val::Str(std::rc::Rc::new("bytes contain a NUL byte".to_string()))),
+                                    Box::new(Val::Str(std::rc::Rc::new(
+                                        "bytes contain a NUL byte".to_string(),
+                                    ))),
                                 ));
                             }
                             match String::from_utf8(bytes) {
-                                Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s))))),
+                                Ok(s) => {
+                                    Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s)))))
+                                }
                                 Err(_) => Ok(Val::Result(
                                     false,
-                                    Box::new(Val::Str(std::rc::Rc::new("bytes are not valid UTF-8".to_string()))),
+                                    Box::new(Val::Str(std::rc::Rc::new(
+                                        "bytes are not valid UTF-8".to_string(),
+                                    ))),
                                 )),
                             }
                         }
@@ -4717,7 +4844,10 @@ impl<'a> Interp<'a> {
                                 Val::Int(i) => *i,
                                 Val::IntN { v, .. } => *v,
                                 other => {
-                                    return Err(format!("offset must be an integer, found {other:?}").into())
+                                    return Err(format!(
+                                        "offset must be an integer, found {other:?}"
+                                    )
+                                    .into())
                                 }
                             }
                             .max(0) as usize;
@@ -4805,16 +4935,20 @@ impl<'a> Interp<'a> {
                     },
                     // `m.has(k)` (RFC-0028) — membership test.
                     "@has" => match (&vals[0], &vals[1]) {
-                        (Val::Map(pairs), Val::Str(k)) => {
-                            Ok(Val::Bool(pairs.iter().any(|(pk, _)| pk.as_str() == k.as_str())))
-                        }
+                        (Val::Map(pairs), Val::Str(k)) => Ok(Val::Bool(
+                            pairs.iter().any(|(pk, _)| pk.as_str() == k.as_str()),
+                        )),
                         _ => Err("`has` needs a Map and a String key".into()),
                     },
                     // `m.keys()` (RFC-0028) — a fresh snapshot Array<String> in
                     // insertion order (safe to mutate the map while iterating it).
                     "@keys" => match &vals[0] {
                         Val::Map(pairs) => Ok(Val::Array(
-                            pairs.iter().map(|(k, _)| Val::Str(std::rc::Rc::new(k.clone()))).collect::<Vec<_>>().into(),
+                            pairs
+                                .iter()
+                                .map(|(k, _)| Val::Str(std::rc::Rc::new(k.clone())))
+                                .collect::<Vec<_>>()
+                                .into(),
                         )),
                         other => Err(format!("`keys` needs a Map, found {other:?}").into()),
                     },
@@ -5063,9 +5197,13 @@ impl<'a> Interp<'a> {
                         let key = self.val_type_key(&other).ok_or_else(|| {
                             Ctrl::Err(format!("`?` on a value with no impl target {other:?}"))
                         })?;
-                        let ask = |m: &str| crate::types::impl_method_name(crate::types::FALLIBLE, &key, m);
-                        if !matches!(self.call(&ask("isSuccess"), &[other.clone()])?, Val::Bool(true))
-                        {
+                        let ask = |m: &str| {
+                            crate::types::impl_method_name(crate::types::FALLIBLE, &key, m)
+                        };
+                        if !matches!(
+                            self.call(&ask("isSuccess"), &[other.clone()])?,
+                            Val::Bool(true)
+                        ) {
                             return Err(Ctrl::Return(other));
                         }
                         self.call(&ask("success"), &[other])
@@ -5135,19 +5273,25 @@ impl<'a> Interp<'a> {
             // ask how long it is costs as much as the scan itself. The guard
             // matches only when it will succeed, so nothing needs a fallback.
             Expr::Field { expr, field, .. }
-                if field == "length"
-                    && matches!(&**expr, Expr::Var { .. })
-                    && {
-                        let Expr::Var { name: v, .. } = &**expr else { unreachable!() };
-                        scope
-                            .iter()
-                            .rev()
-                            .find_map(|f| f.get(v))
-                            .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_)))
-                    } =>
+                if field == "length" && matches!(&**expr, Expr::Var { .. }) && {
+                    let Expr::Var { name: v, .. } = &**expr else {
+                        unreachable!()
+                    };
+                    scope
+                        .iter()
+                        .rev()
+                        .find_map(|f| f.get(v))
+                        .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_)))
+                } =>
             {
-                let Expr::Var { name: v, .. } = &**expr else { unreachable!() };
-                let slot = scope.iter().rev().find_map(|f| f.get(v)).expect("guarded above");
+                let Expr::Var { name: v, .. } = &**expr else {
+                    unreachable!()
+                };
+                let slot = scope
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.get(v))
+                    .expect("guarded above");
                 Ok(match &slot.v {
                     Val::Array(items) => Val::Int(items.len() as i64),
                     Val::Map(pairs) => Val::Int(pairs.len() as i64),
@@ -5261,12 +5405,7 @@ impl<'a> Interp<'a> {
     }
 
     /// Evaluate a `match` over an Option or Result, binding the payload.
-    fn eval_match(
-        &self,
-        sv: Val,
-        arms: &[MatchArm],
-        scope: &mut Vec<Frame>,
-    ) -> Result<Val, Ctrl> {
+    fn eval_match(&self, sv: Val, arms: &[MatchArm], scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {
         for arm in arms {
             let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
@@ -5296,9 +5435,7 @@ impl<'a> Interp<'a> {
             (Pattern::Success(b), Val::Option(Some(v)) | Val::Result(true, v)) => {
                 Some(vec![(b.clone(), (**v).clone())])
             }
-            (Pattern::Failure(b), Val::Result(false, v)) => {
-                Some(vec![(b.clone(), (**v).clone())])
-            }
+            (Pattern::Failure(b), Val::Result(false, v)) => Some(vec![(b.clone(), (**v).clone())]),
             (Pattern::Failure(_), Val::Option(None)) => Some(vec![]),
             (Pattern::Variant(n, binds), Val::Enum(vn, payload)) if n == vn => {
                 Some(binds.iter().cloned().zip(payload.iter().cloned()).collect())
@@ -5959,9 +6096,10 @@ impl<'a> Interp<'a> {
             (Type::Map(_, val), Val::Map(pairs)) => {
                 pairs.iter().all(|(_, x)| self.coercion_is_noop(val, x, d))
             }
-            (Type::Record(fields), Val::Record(map, _)) => fields
-                .iter()
-                .all(|f| map.get(&f.name).is_none_or(|x| self.coercion_is_noop(&f.ty, x, d))),
+            (Type::Record(fields), Val::Record(map, _)) => fields.iter().all(|f| {
+                map.get(&f.name)
+                    .is_none_or(|x| self.coercion_is_noop(&f.ty, x, d))
+            }),
             _ => false,
         }
     }
@@ -6240,7 +6378,6 @@ impl<'a> Interp<'a> {
         release(&s)?;
         Ok(Flow::Normal)
     }
-
 }
 
 #[cfg(test)]
@@ -6303,9 +6440,12 @@ mod tests {
             std_root: Some("std".into()),
             ..Default::default()
         };
-        let program = crate::load(src, "main.vyrn", &opts, &files)
-            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("
-"))?;
+        let program = crate::load(src, "main.vyrn", &opts, &files).map_err(|ds| {
+            ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
+                "
+",
+            )
+        })?;
         crate::interp::run(&program)
     }
 
@@ -7204,8 +7344,14 @@ mod tests {
         assert_eq!(toks.len(), 1);
         match &toks[0] {
             Val::Record(r, _) => {
-                assert_eq!(r.get("kind"), Some(&Val::Str(std::rc::Rc::new("string".to_string()))));
-                assert_eq!(r.get("text"), Some(&Val::Str(std::rc::Rc::new("</script>".to_string()))));
+                assert_eq!(
+                    r.get("kind"),
+                    Some(&Val::Str(std::rc::Rc::new("string".to_string())))
+                );
+                assert_eq!(
+                    r.get("text"),
+                    Some(&Val::Str(std::rc::Rc::new("</script>".to_string())))
+                );
             }
             other => panic!("expected a record token, got {other:?}"),
         }
@@ -7366,8 +7512,7 @@ mod tests {
         assert_eq!(run("fn main() -> Int64 { return '\\xff' }").unwrap(), 255);
         // It coerces against a byte from `bytes(..)` (both `UInt8`).
         assert_eq!(
-            run("fn main() -> Int64 { if bytes(\"{\")[0] == '{' { return 1 } return 0 }")
-                .unwrap(),
+            run("fn main() -> Int64 { if bytes(\"{\")[0] == '{' { return 1 } return 0 }").unwrap(),
             1
         );
     }

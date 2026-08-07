@@ -734,7 +734,9 @@ mod tests {
     use crate::ast::Field;
 
     fn gen(ty: &Type) -> Vec<Function> {
-        decoders(&[ty.clone()], &HashMap::new()).expect("decoders").0
+        decoders(&[ty.clone()], &HashMap::new())
+            .expect("decoders")
+            .0
     }
 
     /// Every decoder answers in the 0-or-1 array convention, and every entry point
@@ -746,16 +748,28 @@ mod tests {
     fn every_decoder_answers_in_the_zero_or_one_array() {
         for ty in [
             Type::Int,
-            Type::IntN { bits: 8, signed: true },
-            Type::IntN { bits: 64, signed: false },
+            Type::IntN {
+                bits: 8,
+                signed: true,
+            },
+            Type::IntN {
+                bits: 64,
+                signed: false,
+            },
             Type::Str,
             Type::Bool,
             Type::Float,
             Type::Array(Box::new(Type::Int)),
             Type::Option(Box::new(Type::Str)),
             Type::Record(vec![
-                Field { name: "n".into(), ty: Type::Int },
-                Field { name: "s".into(), ty: Type::Option(Box::new(Type::Str)) },
+                Field {
+                    name: "n".into(),
+                    ty: Type::Int,
+                },
+                Field {
+                    name: "s".into(),
+                    ty: Type::Option(Box::new(Type::Str)),
+                },
             ]),
             Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
             Type::Result(Box::new(Type::Int), Box::new(Type::Str)),

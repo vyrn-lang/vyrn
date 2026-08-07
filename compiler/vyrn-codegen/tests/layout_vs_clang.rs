@@ -153,7 +153,9 @@ fn clang_agrees_with_the_layout_engine_on_wasm32() {
             }),
         find_wasmtime(),
     ) else {
-        eprintln!("NOTE: no clang / wasi sysroot / wasmtime — layout is unverified on this machine");
+        eprintln!(
+            "NOTE: no clang / wasi sysroot / wasmtime — layout is unverified on this machine"
+        );
         return;
     };
 
@@ -205,11 +207,19 @@ fn clang_agrees_with_the_layout_engine_on_wasm32() {
     // The shim's `VMap` rides along with the transcribed shapes: it is checked
     // against what `llt` gives a `Map<String, V>`, which is the agreement that
     // is not this crate's to choose.
-    let cases = SHAPES.iter().copied().chain(std::iter::once(("VMap", "{ ptr, ptr, i64, i64 }")));
+    let cases = SHAPES
+        .iter()
+        .copied()
+        .chain(std::iter::once(("VMap", "{ ptr, ptr, i64, i64 }")));
     for (name, ll) in cases {
         let l = of_ll(ll).unwrap_or_else(|e| panic!("{name}: {e}"));
         let mut want = vec![("size".to_string(), l.size), ("align".to_string(), l.align)];
-        want.extend(l.fields.iter().enumerate().map(|(f, off)| (format!("f{f}"), *off)));
+        want.extend(
+            l.fields
+                .iter()
+                .enumerate()
+                .map(|(f, off)| (format!("f{f}"), *off)),
+        );
         for (what, mine) in want {
             let got = *clang_says
                 .get(format!("{name}|{what}").as_str())
@@ -221,8 +231,15 @@ fn clang_agrees_with_the_layout_engine_on_wasm32() {
         }
     }
 
-    assert!(disagreements.is_empty(), "layout disagrees with clang:\n{}", disagreements.join("\n"));
-    eprintln!("layout: {checked} numbers over {} shapes agree with clang", SHAPES.len() + 1);
+    assert!(
+        disagreements.is_empty(),
+        "layout disagrees with clang:\n{}",
+        disagreements.join("\n")
+    );
+    eprintln!(
+        "layout: {checked} numbers over {} shapes agree with clang",
+        SHAPES.len() + 1
+    );
 }
 
 /// The transcription itself, since a wrong C spelling would make the comparison
@@ -231,7 +248,10 @@ fn clang_agrees_with_the_layout_engine_on_wasm32() {
 fn c_transcription_is_declarator_shaped() {
     assert_eq!(c_decl("i64", "x"), "long long x");
     assert_eq!(c_decl("[2 x ptr]", "x"), "void* x[2]");
-    assert_eq!(c_decl("{ i8, i64 }", "x"), "struct { signed char f0; long long f1; } x");
+    assert_eq!(
+        c_decl("{ i8, i64 }", "x"),
+        "struct { signed char f0; long long f1; } x"
+    );
     assert_eq!(c_decl("[2 x [3 x i8]]", "x"), "signed char x[2][3]");
     assert_eq!(split_members("i8, { i8, i64 }, i32").len(), 3);
     assert_eq!(split_members("  ").len(), 0);

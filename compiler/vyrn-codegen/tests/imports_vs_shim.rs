@@ -21,7 +21,6 @@ use std::collections::BTreeMap;
 use vyrn_codegen::toolchain::RUNTIME_SHIM;
 use vyrn_codegen::wasm::{Sig, ValType};
 
-
 /// The libc entry points the emitter calls directly. wasi-libc is the ground
 /// truth here rather than the shim, so it is written down — but written down as
 /// C and mapped through the same function the shim's definitions go through, so
@@ -88,7 +87,9 @@ fn c_param_type(p: &str) -> String {
     }
     let words: Vec<&str> = p.split_whitespace().collect();
     let named = words.len() > 1
-        && words[words.len() - 1].chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        && words[words.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
     words[..words.len() - usize::from(named)].join(" ")
 }
 
@@ -101,11 +102,19 @@ fn shim_definitions() -> BTreeMap<String, Sig> {
     let mut out = BTreeMap::new();
     for line in RUNTIME_SHIM.lines() {
         let t = line.trim();
-        if t.starts_with("static") || t.starts_with("extern") || t.starts_with('*') || t.starts_with("/*") {
+        if t.starts_with("static")
+            || t.starts_with("extern")
+            || t.starts_with('*')
+            || t.starts_with("/*")
+        {
             continue;
         }
-        let Some(at) = t.find("__vyrn_") else { continue };
-        let Some(open) = t[at..].find('(').map(|i| i + at) else { continue };
+        let Some(at) = t.find("__vyrn_") else {
+            continue;
+        };
+        let Some(open) = t[at..].find('(').map(|i| i + at) else {
+            continue;
+        };
         let name = &t[at..open];
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             continue;
@@ -167,7 +176,10 @@ fn every_import_matches_the_signature_its_definition_has() {
     let libc: BTreeMap<String, Sig> = LIBC
         .iter()
         .map(|(n, ret, args)| {
-            (n.to_string(), (args.iter().map(|a| c_abi(a)).collect(), c_abi(ret)))
+            (
+                n.to_string(),
+                (args.iter().map(|a| c_abi(a)).collect(), c_abi(ret)),
+            )
         })
         .collect();
 
@@ -198,7 +210,9 @@ fn every_import_matches_the_signature_its_definition_has() {
         "import signatures disagree with their definitions:\n{}",
         bad.join("\n")
     );
-    eprintln!("imports: {checked} signatures agree with their definitions, {variadic} variadic (M3)");
+    eprintln!(
+        "imports: {checked} signatures agree with their definitions, {variadic} variadic (M3)"
+    );
 }
 
 /// The one mismatch M0 found — and the milestone that removed it.
@@ -218,7 +232,14 @@ fn the_i1_that_is_really_an_i32() {
     let narrow: Vec<&str> = ir
         .lines()
         .filter(|l| l.starts_with("declare ") && !l.contains("@llvm."))
-        .filter(|l| ["i1", "i8", "i16"].iter().any(|n| l.contains(&format!("({n},")) || l.contains(&format!("({n})")) || l.contains(&format!(" {n},")) || l.contains(&format!(" {n})"))))
+        .filter(|l| {
+            ["i1", "i8", "i16"].iter().any(|n| {
+                l.contains(&format!("({n},"))
+                    || l.contains(&format!("({n})"))
+                    || l.contains(&format!(" {n},"))
+                    || l.contains(&format!(" {n})"))
+            })
+        })
         .collect();
     assert!(
         narrow.is_empty(),
@@ -237,7 +258,10 @@ fn no_import_takes_or_returns_an_aggregate() {
     let ir = vyrn_codegen::emit(&program).unwrap();
     for line in ir.lines().filter(|l| l.starts_with("declare ")) {
         assert!(
-            !line.contains('{') && !line.contains('[') && !line.contains("byval") && !line.contains("sret"),
+            !line.contains('{')
+                && !line.contains('[')
+                && !line.contains("byval")
+                && !line.contains("sret"),
             "an aggregate crosses the C boundary:\n{line}"
         );
     }

@@ -794,22 +794,22 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
         if c == '"' {
             let start_col = col; // column of the opening quote
             let start_line = line; // a multi-line string is anchored at its start
-            // A `"""…"""` triple-quoted string (RFC-0054): inside it a single `"`
-            // and `""` are ordinary characters, so emitted Vyrn code carrying
-            // string literals needs no `\"` escaping. `\{` interpolation and every
-            // other escape work exactly as in a plain string; only the terminator
-            // differs (`"""` instead of `"`).
+                                   // A `"""…"""` triple-quoted string (RFC-0054): inside it a single `"`
+                                   // and `""` are ordinary characters, so emitted Vyrn code carrying
+                                   // string literals needs no `\"` escaping. `\{` interpolation and every
+                                   // other escape work exactly as in a plain string; only the terminator
+                                   // differs (`"""` instead of `"`).
             let triple = i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"';
             i += if triple { 3 } else { 1 }; // opening quote(s)
-            // A Vyrn `String` is NUL-terminated in the native representation, so a
-            // String holding a NUL is not an awkward value — it is an
-            // unrepresentable one, truncated the moment it crosses to C. RFC-0014
-            // already refuses to MAKE one at runtime (`stringFromBytes` returns
-            // `bytes contain a NUL byte`), but the lexer used to hand one out for
-            // free: RFC-0078 M4b(3) found a raw NUL byte in a string literal
-            // accepted, which is why `bytes`/`stringFromBytes` was not a round
-            // trip. Rejecting it here closes the class at its only two entrances —
-            // a raw NUL byte in the source, and `\u{0}` (there is no `\0` escape).
+                                             // A Vyrn `String` is NUL-terminated in the native representation, so a
+                                             // String holding a NUL is not an awkward value — it is an
+                                             // unrepresentable one, truncated the moment it crosses to C. RFC-0014
+                                             // already refuses to MAKE one at runtime (`stringFromBytes` returns
+                                             // `bytes contain a NUL byte`), but the lexer used to hand one out for
+                                             // free: RFC-0078 M4b(3) found a raw NUL byte in a string literal
+                                             // accepted, which is why `bytes`/`stringFromBytes` was not a round
+                                             // trip. Rejecting it here closes the class at its only two entrances —
+                                             // a raw NUL byte in the source, and `\u{0}` (there is no `\0` escape).
             let nul = |line: usize| {
                 Diagnostic::error(
                     line,
@@ -1341,7 +1341,10 @@ mod tests {
     #[test]
     fn byte_literal_error_cases_have_pinned_wording() {
         // Empty.
-        assert!(lex("''").unwrap_err().message.contains("empty byte literal"));
+        assert!(lex("''")
+            .unwrap_err()
+            .message
+            .contains("empty byte literal"));
         // Two bytes → single-quoted strings are not a thing.
         let e = lex("'ab'").unwrap_err();
         assert!(
@@ -1352,21 +1355,31 @@ mod tests {
         // A multi-byte (non-ASCII) character.
         let e = lex("'é'").unwrap_err();
         assert!(
-            e.message
-                .contains("byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly"),
+            e.message.contains(
+                "byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly"
+            ),
             "{}",
             e.message
         );
         // Unterminated.
-        assert!(lex("'a").unwrap_err().message.contains("unterminated byte literal"));
-        assert!(lex("'").unwrap_err().message.contains("unterminated byte literal"));
+        assert!(lex("'a")
+            .unwrap_err()
+            .message
+            .contains("unterminated byte literal"));
+        assert!(lex("'")
+            .unwrap_err()
+            .message
+            .contains("unterminated byte literal"));
         // Unknown escape (`\u` is gone — this is a byte literal, not a char type).
         assert!(lex("'\\u{41}'")
             .unwrap_err()
             .message
             .contains("unknown byte escape"));
         // A bad `\x`.
-        assert!(lex("'\\xzz'").unwrap_err().message.contains("two hex digits"));
+        assert!(lex("'\\xzz'")
+            .unwrap_err()
+            .message
+            .contains("two hex digits"));
     }
 
     #[test]
@@ -1392,9 +1405,9 @@ mod tests {
         // A raw NUL byte in the source — the door RFC-0078 M4b(3) found open, and
         // the reason `bytes`/`stringFromBytes` was not a round trip.
         for src in [
-            "\"a\0b\"",                 // plain string
-            "\"\"\"a\0b\"\"\"",         // triple-quoted (RFC-0054)
-            "\"a\0b \\{x}\"",           // template literal part
+            "\"a\0b\"",                   // plain string
+            "\"\"\"a\0b\"\"\"",           // triple-quoted (RFC-0054)
+            "\"a\0b \\{x}\"",             // template literal part
             "vyrn\"\"\"let s = \0\"\"\"", // inside a code quote
         ] {
             let e = lex(src).unwrap_err();
@@ -1408,7 +1421,10 @@ mod tests {
         assert_eq!(lex_with_trivia("\"a\0b\"").unwrap_err().message, MSG);
         // Every other control character and escape is still fine: this closes one
         // unrepresentable value, not the low range.
-        assert_eq!(lex("\"a\\u{1}b\"").unwrap()[0].tok, Tok::Str("a\u{1}b".into()));
+        assert_eq!(
+            lex("\"a\\u{1}b\"").unwrap()[0].tok,
+            Tok::Str("a\u{1}b".into())
+        );
         assert_eq!(lex("\"a\\nb\"").unwrap()[0].tok, Tok::Str("a\nb".into()));
         // A NUL *byte literal* is untouched — a byte is not a String, and
         // `decodeUtf8(['h', '\x00', 'i'])` in `std/text` depends on it.

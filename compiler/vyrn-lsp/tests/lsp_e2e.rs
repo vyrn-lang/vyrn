@@ -67,7 +67,10 @@ fn read_frame(stdout: &mut impl Read) -> Option<serde_json::Value> {
 fn summarize(json: &serde_json::Value) -> String {
     let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = json.get("id").map(|i| i.to_string()).unwrap_or_default();
-    let uri = json.pointer("/params/uri").and_then(|u| u.as_str()).unwrap_or("");
+    let uri = json
+        .pointer("/params/uri")
+        .and_then(|u| u.as_str())
+        .unwrap_or("");
     format!("  id={id} method={method} uri={uri}")
 }
 
@@ -122,7 +125,10 @@ impl LspClient {
     /// Panics after `READ_TIMEOUT_SECS` with a dump of every message received
     /// so far — a missing message must fail with evidence, never hang.
     fn read(&mut self) -> Option<Message> {
-        match self.rx.recv_timeout(std::time::Duration::from_secs(READ_TIMEOUT_SECS)) {
+        match self
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
+        {
             Ok(json) => Some(Message { json }),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -195,12 +201,23 @@ fn open_enum() -> LspClient {
         "params": { "capabilities": {}, "processId": null }
     }));
     let init_resp = client.read_response(&init_id);
-    let caps =
-        init_resp.get("result").and_then(|r| r.get("capabilities")).expect("capabilities present");
+    let caps = init_resp
+        .get("result")
+        .and_then(|r| r.get("capabilities"))
+        .expect("capabilities present");
     assert!(caps.get("hoverProvider").is_some(), "hover advertised");
-    assert!(caps.get("definitionProvider").is_some(), "definition advertised");
-    assert!(caps.get("completionProvider").is_some(), "completion advertised");
-    assert!(caps.get("documentSymbolProvider").is_some(), "document symbols advertised");
+    assert!(
+        caps.get("definitionProvider").is_some(),
+        "definition advertised"
+    );
+    assert!(
+        caps.get("completionProvider").is_some(),
+        "completion advertised"
+    );
+    assert!(
+        caps.get("documentSymbolProvider").is_some(),
+        "document symbols advertised"
+    );
 
     // initialized notification (the client sends this after initialize).
     client.send(&serde_json::json!({
@@ -228,7 +245,9 @@ fn open_enum() -> LspClient {
 /// are unavailable here, so the test supplies its own counter).
 struct Ids(u64);
 impl Ids {
-    fn new() -> Self { Ids(1) }
+    fn new() -> Self {
+        Ids(1)
+    }
     fn next(&mut self) -> serde_json::Value {
         self.0 += 1;
         serde_json::json!(self.0)
@@ -263,7 +282,10 @@ fn hover_definition_completion_on_enum_vyrn() {
         value.contains("variant of Shape") && value.contains("Circle"),
         "hover detail: {value}"
     );
-    assert!(value.contains("Circle(Int64)"), "hover carries the payload: {value}");
+    assert!(
+        value.contains("Circle(Int64)"),
+        "hover carries the payload: {value}"
+    );
 
     // --- go-to-definition over `area` at the call site --------------------
     // Line 19 1-based, "area" cols 13-16 1-based → LSP line 18, char 12.
@@ -289,8 +311,14 @@ fn hover_definition_completion_on_enum_vyrn() {
         .pointer("/range/start/character")
         .and_then(|v| v.as_i64())
         .expect("range.start.character");
-    assert_eq!(start_line, 9, "definition lands on the fn area declaration line");
-    assert_eq!(start_char, 3, "definition lands on the name column, not the line start");
+    assert_eq!(
+        start_line, 9,
+        "definition lands on the fn area declaration line"
+    );
+    assert_eq!(
+        start_char, 3,
+        "definition lands on the name column, not the line start"
+    );
     assert_eq!(loc.get("uri").and_then(|u| u.as_str()), Some(enum_uri()));
 
     // --- completion -------------------------------------------------------
@@ -309,14 +337,22 @@ fn hover_definition_completion_on_enum_vyrn() {
         .get("result")
         .and_then(|r| r.as_array())
         .expect("completion result is a list");
-    let labels: Vec<&str> =
-        items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+        .collect();
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
-        assert!(labels.contains(&expected), "completion missing {expected}: {labels:?}");
+        assert!(
+            labels.contains(&expected),
+            "completion missing {expected}: {labels:?}"
+        );
     }
     // The injected built-in `Value` family must not leak into completions.
     for injected in ["Value", "IntVal", "StrVal", "BoolVal"] {
-        assert!(!labels.contains(&injected), "injected {injected} leaked: {labels:?}");
+        assert!(
+            !labels.contains(&injected),
+            "injected {injected} leaked: {labels:?}"
+        );
     }
 
     // --- shutdown ---------------------------------------------------------
@@ -364,14 +400,26 @@ fn document_symbol_lists_top_level_declarations() {
     // LSP SymbolKind numbers: Method=6, Function=12, EnumMember=22, Struct=23.
     let mut by_name: std::collections::HashMap<&str, (i64, i64)> = std::collections::HashMap::new();
     for it in items {
-        let name = it.get("name").and_then(|n| n.as_str()).expect("symbol name");
-        let line = it.pointer("/range/start/line").and_then(|l| l.as_i64()).expect("range line");
-        let kind = it.get("kind").and_then(|k| k.as_i64()).expect("symbol kind");
+        let name = it
+            .get("name")
+            .and_then(|n| n.as_str())
+            .expect("symbol name");
+        let line = it
+            .pointer("/range/start/line")
+            .and_then(|l| l.as_i64())
+            .expect("range line");
+        let kind = it
+            .get("kind")
+            .and_then(|k| k.as_i64())
+            .expect("symbol kind");
         by_name.insert(name, (line, kind));
     }
 
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
-        assert!(by_name.contains_key(expected), "documentSymbol missing {expected}: {by_name:?}");
+        assert!(
+            by_name.contains_key(expected),
+            "documentSymbol missing {expected}: {by_name:?}"
+        );
     }
     // Declaration lines (0-based): `type Shape` on file line 4 → 3; variants on
     // 5/6/7 → 4/5/6; `fn area` on 10 → 9; `fn main` on 18 → 17.
@@ -421,8 +469,14 @@ fn hover_off_identifier_returns_null_result() {
 
     // The response must carry an explicit `result` key, and it must be null —
     // not absent, and not an error.
-    assert!(resp.get("error").is_none(), "no error for an off-identifier hover: {resp}");
-    assert!(resp.get("result").is_some(), "`result` key must be present (not skipped): {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "no error for an off-identifier hover: {resp}"
+    );
+    assert!(
+        resp.get("result").is_some(),
+        "`result` key must be present (not skipped): {resp}"
+    );
     assert!(
         resp.get("result").unwrap().is_null(),
         "off-identifier hover result must be null, not {:?}",
@@ -441,9 +495,18 @@ fn hover_off_identifier_returns_null_result() {
         }
     }));
     let dresp = client.read_response(&def_id);
-    assert!(dresp.get("error").is_none(), "no error for off-identifier definition: {dresp}");
-    assert!(dresp.get("result").is_some(), "`result` key must be present: {dresp}");
-    assert!(dresp.get("result").unwrap().is_null(), "off-identifier def result must be null");
+    assert!(
+        dresp.get("error").is_none(),
+        "no error for off-identifier definition: {dresp}"
+    );
+    assert!(
+        dresp.get("result").is_some(),
+        "`result` key must be present: {dresp}"
+    );
+    assert!(
+        dresp.get("result").unwrap().is_null(),
+        "off-identifier def result must be null"
+    );
 }
 
 /// A non-exhaustive `match` diagnostic must squiggle the `match` **keyword**
@@ -497,7 +560,11 @@ fn main() -> Int64 { return 0; }
     assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
     let d = &diags[0];
     assert!(
-        d.get("message").unwrap().as_str().unwrap().contains("missing variant `B`"),
+        d.get("message")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("missing variant `B`"),
         "match error: {d}"
     );
 
@@ -510,9 +577,19 @@ fn main() -> Int64 { return 0; }
     // The `match` keyword: LSP line 2, chars 12-17 (start 12, end 17).
     assert_eq!(start_line, 2, "diagnostic on the match line: {d}");
     assert_eq!(end_line, 2, "single-line range: {d}");
-    assert_eq!(start_char, 12, "squiggle starts at the `match` keyword (char 12): {d}");
-    assert_eq!(end_char, 17, "squiggle ends just past `match` (char 17): {d}");
-    assert_eq!(end_char - start_char, 5, "squiggle covers exactly `match` (5 chars): {d}");
+    assert_eq!(
+        start_char, 12,
+        "squiggle starts at the `match` keyword (char 12): {d}"
+    );
+    assert_eq!(
+        end_char, 17,
+        "squiggle ends just past `match` (char 17): {d}"
+    );
+    assert_eq!(
+        end_char - start_char,
+        5,
+        "squiggle covers exactly `match` (5 chars): {d}"
+    );
 }
 
 /// `textDocument/completion` at a `.foo` member-access position returns the
@@ -562,14 +639,25 @@ fn main() -> Int64 {
         .get("result")
         .and_then(|r| r.as_array())
         .expect("member-completion result is a list");
-    let labels: Vec<&str> =
-        items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+        .collect();
     for expected in ["push", "at", "alen", "pop", "length"] {
-        assert!(labels.contains(&expected), "array member {expected} missing: {labels:?}");
+        assert!(
+            labels.contains(&expected),
+            "array member {expected} missing: {labels:?}"
+        );
     }
-    assert!(!labels.contains(&"afree"), "`afree` was removed: {labels:?}");
+    assert!(
+        !labels.contains(&"afree"),
+        "`afree` was removed: {labels:?}"
+    );
     // In a `.foo` context the top-level symbols must NOT be offered.
-    assert!(!labels.contains(&"main"), "top-level `main` leaked into member completion: {labels:?}");
+    assert!(
+        !labels.contains(&"main"),
+        "top-level `main` leaked into member completion: {labels:?}"
+    );
 }
 
 /// A `modify self` method is offered after a dot and hovers with the receiver's
@@ -608,7 +696,10 @@ fn main() -> Int64 {
     // Right after the dot in `t.record(2)`.
     let (line, ch) = pos_after(src, "    t.");
     let labels = completion_labels(&mut client, uri, line, ch);
-    assert!(labels.contains(&"record".to_string()), "method missing: {labels:?}");
+    assert!(
+        labels.contains(&"record".to_string()),
+        "method missing: {labels:?}"
+    );
 
     // Hover over the protocol's own declaration of it.
     let (hline, hch) = pos_after(src, "    fn r");
@@ -663,12 +754,23 @@ fn main() -> Int64 {
         .get("result")
         .and_then(|r| r.as_array())
         .expect("string-literal completion result is a list");
-    let labels: Vec<&str> =
-        items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
-    assert!(labels.contains(&"nav.home.label"), "missing key: {labels:?}");
-    assert!(labels.contains(&"nav.about.label"), "missing key: {labels:?}");
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+        .collect();
+    assert!(
+        labels.contains(&"nav.home.label"),
+        "missing key: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"nav.about.label"),
+        "missing key: {labels:?}"
+    );
     // The top-level symbols must not leak into the string-literal context.
-    assert!(!labels.contains(&"main"), "top-level `main` leaked: {labels:?}");
+    assert!(
+        !labels.contains(&"main"),
+        "top-level `main` leaked: {labels:?}"
+    );
 }
 
 /// Multi-file awareness (RFC-0010): a document importing from a sibling file
@@ -685,7 +787,8 @@ fn imports_resolve_across_files() {
     )
     .unwrap();
     let root_path = dir.join("main.vyrn");
-    let root_text = "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
+    let root_text =
+        "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
     std::fs::write(&root_path, root_text).unwrap();
     let uri = format!("file:///{}", root_path.to_string_lossy().replace('\\', "/"));
 
@@ -706,7 +809,10 @@ fn imports_resolve_across_files() {
     }));
     let notif = client.read_notification("textDocument/publishDiagnostics");
     let diags = notif["params"]["diagnostics"].as_array().unwrap();
-    assert!(diags.is_empty(), "import resolved via loader, expected no diagnostics: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "import resolved via loader, expected no diagnostics: {diags:?}"
+    );
 
     // Cross-file go-to-definition: `double` at the call site (0-based line 3,
     // `    return double(21)`, char 12 is inside the name) → a Location in
@@ -722,8 +828,14 @@ fn imports_resolve_across_files() {
     let resp = client.read_response(&def_id);
     let loc = &resp["result"];
     let target = loc["uri"].as_str().expect("definition returns a Location");
-    assert!(target.ends_with("lib.vyrn"), "definition jumps into the imported file: {target}");
-    assert_eq!(loc["range"]["start"]["line"], 0, "lands on `export fn double`");
+    assert!(
+        target.ends_with("lib.vyrn"),
+        "definition jumps into the imported file: {target}"
+    );
+    assert_eq!(
+        loc["range"]["start"]["line"], 0,
+        "lands on `export fn double`"
+    );
 
     // Cross-file hover: the same position shows the imported signature.
     let hover_id = serde_json::json!(3);
@@ -735,8 +847,13 @@ fn imports_resolve_across_files() {
         }
     }));
     let resp = client.read_response(&hover_id);
-    let hover = resp["result"]["contents"]["value"].as_str().expect("hover has content");
-    assert!(hover.contains("double"), "hover shows the imported signature: {hover}");
+    let hover = resp["result"]["contents"]["value"]
+        .as_str()
+        .expect("hover has content");
+    assert!(
+        hover.contains("double"),
+        "hover shows the imported signature: {hover}"
+    );
 
     // Edit the import to a nonexistent module → a load diagnostic appears.
     let bad_text = root_text.replace("./lib", "./gone");
@@ -749,7 +866,10 @@ fn imports_resolve_across_files() {
     }));
     let notif = client.read_notification("textDocument/publishDiagnostics");
     let diags = notif["params"]["diagnostics"].as_array().unwrap();
-    assert!(!diags.is_empty(), "unresolvable import must produce a diagnostic");
+    assert!(
+        !diags.is_empty(),
+        "unresolvable import must produce a diagnostic"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -795,12 +915,17 @@ fn document_formatting_returns_canonical_edit() {
         }
     }));
     let resp = client.read_response(&fmt_id);
-    let edits = resp.get("result").and_then(|r| r.as_array()).expect("formatting returns edits");
+    let edits = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .expect("formatting returns edits");
     assert_eq!(edits.len(), 1, "one whole-document edit: {resp}");
-    let new_text = edits[0].get("newText").and_then(|t| t.as_str()).expect("newText");
+    let new_text = edits[0]
+        .get("newText")
+        .and_then(|t| t.as_str())
+        .expect("newText");
     assert_eq!(
-        new_text,
-        "fn main() -> Int64 {\n    let x = 1 + 2 * 3\n    return x\n}\n",
+        new_text, "fn main() -> Int64 {\n    let x = 1 + 2 * 3\n    return x\n}\n",
         "formatting yields the canonical form"
     );
 
@@ -819,9 +944,18 @@ fn document_formatting_returns_canonical_edit() {
         "params": { "textDocument": { "uri": bad_uri }, "options": { "tabSize": 4, "insertSpaces": true } }
     }));
     let bad_resp = client.read_response(&bad_id);
-    assert!(bad_resp.get("error").is_none(), "no error for an unlexable buffer: {bad_resp}");
-    assert!(bad_resp.get("result").is_some(), "`result` key present (not skipped): {bad_resp}");
-    assert!(bad_resp["result"].is_null(), "unlexable buffer formats to null (no edit)");
+    assert!(
+        bad_resp.get("error").is_none(),
+        "no error for an unlexable buffer: {bad_resp}"
+    );
+    assert!(
+        bad_resp.get("result").is_some(),
+        "`result` key present (not skipped): {bad_resp}"
+    );
+    assert!(
+        bad_resp["result"].is_null(),
+        "unlexable buffer formats to null (no edit)"
+    );
 }
 
 // ===========================================================================
@@ -836,7 +970,11 @@ static RFC33_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// A `file://` URI for `path` (drive-letter absolute → `file:///C:/…`).
 fn file_uri(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
-    if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
+    }
 }
 
 /// The one-line app that imports a view function generated over `./comp`.
@@ -899,8 +1037,14 @@ fn did_open(client: &mut LspClient, uri: &str, lang: &str, text: &str) {
 fn read_diags_for(client: &mut LspClient, needle: &str) -> serde_json::Value {
     loop {
         let msg = client.read().expect("server closed before publishing");
-        if msg.json.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics") {
-            let uri = msg.json.pointer("/params/uri").and_then(|u| u.as_str()).unwrap_or("");
+        if msg.json.get("method").and_then(|m| m.as_str())
+            == Some("textDocument/publishDiagnostics")
+        {
+            let uri = msg
+                .json
+                .pointer("/params/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
             if uri.contains(needle) {
                 return msg.json;
             }
@@ -914,18 +1058,38 @@ fn read_diags_for(client: &mut LspClient, needle: &str) -> serde_json::Value {
 fn rfc33_vyx_type_error_publishes_into_the_vyx_buffer() {
     let dir = rfc33_scratch("diag", RFC33_VYX);
     let mut client = rfc33_client();
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        RFC33_APP,
+    );
 
     let note = read_diags_for(&mut client, "Widget.vyx");
-    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
-    assert!(!diags.is_empty(), "the .vyx buffer carries the remapped error: {note}");
+    let diags = note
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("diags array");
+    assert!(
+        !diags.is_empty(),
+        "the .vyx buffer carries the remapped error: {note}"
+    );
     let d0 = &diags[0];
     let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
     assert!(msg.contains("titel"), "carries the checker message: {msg}");
     // `.vyx` line 6 (0-based 5), column 8 (0-based 7) — where `item` starts
     // inside `{{ item.titel }}` (RFC-0039 v2).
-    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(5), "line: {note}");
-    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(7), "col: {note}");
+    assert_eq!(
+        d0.pointer("/range/start/line").and_then(|l| l.as_i64()),
+        Some(5),
+        "line: {note}"
+    );
+    assert_eq!(
+        d0.pointer("/range/start/character")
+            .and_then(|c| c.as_i64()),
+        Some(7),
+        "col: {note}"
+    );
 }
 
 /// A `.vyx` whose DYNAMIC attribute expression mistypes `title` as `titel`. The
@@ -950,16 +1114,36 @@ const RFC33_VYX_ATTR_BAD: &str = "<script>\n\
 fn rfc54_m4b_vyx_dyn_attr_check_error_maps_column_exact() {
     let dir = rfc33_scratch("attr", RFC33_VYX_ATTR_BAD);
     let mut client = rfc33_client();
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        RFC33_APP,
+    );
 
     let note = read_nonempty_diags_for(&mut client, "Widget.vyx");
-    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    let diags = note
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("diags array");
     let d0 = &diags[0];
     let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
     assert!(msg.contains("titel"), "carries the checker message: {msg}");
-    assert!(msg.contains("in generated code"), "keeps the generated breadcrumb: {msg}");
-    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(5), "line: {note}");
-    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(10), "col: {note}");
+    assert!(
+        msg.contains("in generated code"),
+        "keeps the generated breadcrumb: {msg}"
+    );
+    assert_eq!(
+        d0.pointer("/range/start/line").and_then(|l| l.as_i64()),
+        Some(5),
+        "line: {note}"
+    );
+    assert_eq!(
+        d0.pointer("/range/start/character")
+            .and_then(|c| c.as_i64()),
+        Some(10),
+        "col: {note}"
+    );
 }
 
 // ---- RFC-0053: lex errors in generated code reach the `.vyx` buffer -------
@@ -999,17 +1183,40 @@ fn read_nonempty_diags_for(client: &mut LspClient, needle: &str) -> serde_json::
 fn rfc53_vyx_lex_error_publishes_into_the_vyx_buffer() {
     let dir = rfc33_scratch("lex", RFC53_VYX_BAD);
     let mut client = rfc33_client();
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        RFC33_APP,
+    );
 
     let note = read_nonempty_diags_for(&mut client, "Widget.vyx");
-    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    let diags = note
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("diags array");
     let d0 = &diags[0];
     let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
-    assert!(msg.contains("unexpected character"), "carries the lexer message: {msg}");
-    assert!(msg.contains("in generated code"), "keeps the generated breadcrumb: {msg}");
+    assert!(
+        msg.contains("unexpected character"),
+        "carries the lexer message: {msg}"
+    );
+    assert!(
+        msg.contains("in generated code"),
+        "keeps the generated breadcrumb: {msg}"
+    );
     // Line 6 (0-based 5), column 8 (0-based 7) — the start of the expression.
-    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(5), "line: {note}");
-    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(7), "col: {note}");
+    assert_eq!(
+        d0.pointer("/range/start/line").and_then(|l| l.as_i64()),
+        Some(5),
+        "line: {note}"
+    );
+    assert_eq!(
+        d0.pointer("/range/start/character")
+            .and_then(|c| c.as_i64()),
+        Some(7),
+        "col: {note}"
+    );
 }
 
 /// RFC-0053 §2: an UNSAVED `.vyx` edit re-generates. The fixture on disk is
@@ -1023,7 +1230,12 @@ fn rfc53_unsaved_vyx_edit_regenerates_and_squiggles() {
     let vyx_path = dir.join("comp/Widget.vyx");
     let vyx_uri = file_uri(&vyx_path);
     let mut client = rfc33_client();
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        RFC33_APP,
+    );
     // The clean analysis wires up `.vyx` ownership.
     let _ = read_diags_for(&mut client, "Widget.vyx");
     did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
@@ -1038,9 +1250,18 @@ fn rfc53_unsaved_vyx_edit_regenerates_and_squiggles() {
     }));
 
     let note = read_nonempty_diags_for(&mut client, "Widget.vyx");
-    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
-    let msg = diags[0].get("message").and_then(|m| m.as_str()).unwrap_or("");
-    assert!(msg.contains("unexpected character"), "the unsaved edit re-generated: {msg}");
+    let diags = note
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("diags array");
+    let msg = diags[0]
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("unexpected character"),
+        "the unsaved edit re-generated: {msg}"
+    );
     // The file on disk was never written — the diagnostic tracks the buffer.
     let on_disk = std::fs::read_to_string(&vyx_path).unwrap();
     assert_eq!(on_disk, RFC33_VYX_OK, "the test must never touch disk");
@@ -1066,7 +1287,9 @@ fn rfc33_hover_in_vyx_template_resolves_the_prop() {
         "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 7 } }
     }));
     let resp = client.read_response(&hover_id);
-    let value = resp.pointer("/result/contents/value").and_then(|v| v.as_str())
+    let value = resp
+        .pointer("/result/contents/value")
+        .and_then(|v| v.as_str())
         .expect("hover contents: no result");
     assert!(value.contains("Row"), "hover names the prop type: {value}");
 }
@@ -1090,9 +1313,18 @@ fn rfc33_completion_in_vyx_template_offers_record_fields() {
         "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 12 } }
     }));
     let resp = client.read_response(&comp_id);
-    let items = resp.get("result").and_then(|r| r.as_array()).expect("completion list");
-    let labels: Vec<&str> = items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
-    assert!(labels.contains(&"title"), "offers the record field `title`: {labels:?}");
+    let items = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .expect("completion list");
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+        .collect();
+    assert!(
+        labels.contains(&"title"),
+        "offers the record field `title`: {labels:?}"
+    );
 }
 
 // ===========================================================================
@@ -1102,8 +1334,10 @@ fn rfc33_completion_in_vyx_template_offers_record_fields() {
 
 /// 0-based (line, char) just past the first occurrence of `needle` in `text`.
 fn pos_after(text: &str, needle: &str) -> (u32, u32) {
-    let idx =
-        text.find(needle).unwrap_or_else(|| panic!("needle {needle:?} not found")) + needle.len();
+    let idx = text
+        .find(needle)
+        .unwrap_or_else(|| panic!("needle {needle:?} not found"))
+        + needle.len();
     let pre = &text[..idx];
     let line = pre.matches('\n').count() as u32;
     let col = (pre.len() - pre.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
@@ -1112,7 +1346,8 @@ fn pos_after(text: &str, needle: &str) -> (u32, u32) {
 
 /// A tiny theme: two brand shades, two spacings, an `md` breakpoint (so `md:`
 /// variants exist), and a `book-card` safelist entry.
-const RFC42_THEME: &str = "{ \"colors\": { \"brand\": { \"500\": \"#4f46e5\", \"600\": \"#4338ca\" } },\n\
+const RFC42_THEME: &str =
+    "{ \"colors\": { \"brand\": { \"500\": \"#4f46e5\", \"600\": \"#4338ca\" } },\n\
   \"spacing\": { \"2\": \"0.5rem\", \"4\": \"1rem\" },\n\
   \"breakpoints\": { \"md\": \"768px\" },\n\
   \"safelist\": [\"book-card\"] }";
@@ -1163,7 +1398,11 @@ fn completion_labels(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> V
         "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
     }));
     let resp = client.read_response(&id);
-    let items = resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    let items = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
     items
         .iter()
         .filter_map(|i| i.get("label").and_then(|l| l.as_str()).map(String::from))
@@ -1177,7 +1416,9 @@ fn hover_value(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> Option<
         "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
     }));
     let resp = client.read_response(&id);
-    resp.pointer("/result/contents/value").and_then(|v| v.as_str()).map(String::from)
+    resp.pointer("/result/contents/value")
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// The target URI of a `textDocument/definition` (a scalar `Location`), or
@@ -1189,7 +1430,9 @@ fn definition_target(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> O
         "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
     }));
     let resp = client.read_response(&id);
-    resp.pointer("/result/uri").and_then(|u| u.as_str()).map(String::from)
+    resp.pointer("/result/uri")
+        .and_then(|u| u.as_str())
+        .map(String::from)
 }
 
 /// Phase A: a `class="…"` token inside a themed `.vyx` offers the `Tw` alphabet
@@ -1201,15 +1444,27 @@ fn rfc42_class_token_completion_offers_tw_alphabet() {
     // `class="flex p-4"` — cursor right after the `p` of `p-4`.
     let (l, c) = pos_after(RFC42_VYX, "flex p");
     let labels = completion_labels(&mut client, &uri, l, c);
-    assert!(labels.contains(&"p-4".to_string()), "utility p-4 offered: {labels:?}");
-    assert!(labels.contains(&"px-2".to_string()), "utility px-2 offered: {labels:?}");
+    assert!(
+        labels.contains(&"p-4".to_string()),
+        "utility p-4 offered: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"px-2".to_string()),
+        "utility px-2 offered: {labels:?}"
+    );
     // Top-level symbols must NOT leak into a class value.
-    assert!(!labels.contains(&"widget".to_string()), "no top-level leak: {labels:?}");
+    assert!(
+        !labels.contains(&"widget".to_string()),
+        "no top-level leak: {labels:?}"
+    );
 
     // Safelisted name: `class="book-card"` — cursor after `book`.
     let (l, c) = pos_after(RFC42_VYX, "\"book");
     let labels = completion_labels(&mut client, &uri, l, c);
-    assert!(labels.contains(&"book-card".to_string()), "safelisted offered: {labels:?}");
+    assert!(
+        labels.contains(&"book-card".to_string()),
+        "safelisted offered: {labels:?}"
+    );
 
     // Variant: cursor after `md:h` in `md:hover:bg-brand-600`.
     let (l, c) = pos_after(RFC42_VYX, "md:h");
@@ -1228,7 +1483,10 @@ fn rfc42_hover_on_class_shows_css_or_safelisted() {
     // Hover inside `bg-brand-500`.
     let (l, c) = pos_after(RFC42_VYX, "bg-brand-5");
     let v = hover_value(&mut client, &uri, l, c).expect("hover on utility class");
-    assert!(v.contains("background-color:#4f46e5"), "utility CSS rule: {v}");
+    assert!(
+        v.contains("background-color:#4f46e5"),
+        "utility CSS rule: {v}"
+    );
 
     // Hover inside the safelisted `book-card`.
     let (l, c) = pos_after(RFC42_VYX, "book-car");
@@ -1244,8 +1502,14 @@ fn rfc42_transkey_completion_inside_mustache() {
     // `{{ t("home") }}` — cursor just inside the opening quote (after `t("`).
     let (l, c) = pos_after(RFC42_VYX, "t(\"");
     let labels = completion_labels(&mut client, &uri, l, c);
-    assert!(labels.contains(&"home".to_string()), "TransKey home: {labels:?}");
-    assert!(labels.contains(&"about".to_string()), "TransKey about: {labels:?}");
+    assert!(
+        labels.contains(&"home".to_string()),
+        "TransKey home: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"about".to_string()),
+        "TransKey about: {labels:?}"
+    );
 }
 
 // --- Phase B/C: structural completion on the raw `.vyx` (no owner needed) ----
@@ -1257,8 +1521,7 @@ const RFC42_STRUCT_PANEL: &str = "<template>\n\
     <button @cl></button>\n\
     </template>\n";
 
-const RFC42_STRUCT_CARD: &str =
-    "<script>\nprops { title: String, url: String }\n</script>\n\
+const RFC42_STRUCT_CARD: &str = "<script>\nprops { title: String, url: String }\n</script>\n\
     <template>\n<div>{{ title }}</div>\n</template>\n";
 
 fn rfc42_struct_dir() -> std::path::PathBuf {
@@ -1280,7 +1543,10 @@ fn rfc42_component_tag_completion() {
     did_open(&mut client, &uri, "vyx", RFC42_STRUCT_PANEL);
     let (l, c) = pos_after(RFC42_STRUCT_PANEL, "<Book");
     let labels = completion_labels(&mut client, &uri, l, c);
-    assert!(labels.contains(&"BookCard".to_string()), "sibling component offered: {labels:?}");
+    assert!(
+        labels.contains(&"BookCard".to_string()),
+        "sibling component offered: {labels:?}"
+    );
 }
 
 /// Phase C: an attribute position inside a component tag offers its props.
@@ -1293,8 +1559,14 @@ fn rfc42_component_prop_completion() {
     // `<BookCard t` — cursor after the `t`.
     let (l, c) = pos_after(RFC42_STRUCT_PANEL, "<BookCard t");
     let labels = completion_labels(&mut client, &uri, l, c);
-    assert!(labels.contains(&"title".to_string()), "prop title offered: {labels:?}");
-    assert!(labels.contains(&":url".to_string()), "dynamic-bound prop offered: {labels:?}");
+    assert!(
+        labels.contains(&"title".to_string()),
+        "prop title offered: {labels:?}"
+    );
+    assert!(
+        labels.contains(&":url".to_string()),
+        "dynamic-bound prop offered: {labels:?}"
+    );
 }
 
 /// Phase B: an attribute-name position on an element offers HTML attributes and
@@ -1309,13 +1581,22 @@ fn rfc42_attribute_and_event_completion() {
     // `<a v-i` — attribute name position.
     let (l, c) = pos_after(RFC42_STRUCT_PANEL, "<a v-i");
     let labels = completion_labels(&mut client, &uri, l, c);
-    assert!(labels.contains(&"v-if".to_string()), "directive v-if: {labels:?}");
-    assert!(labels.contains(&"href".to_string()), "element attr href on <a>: {labels:?}");
+    assert!(
+        labels.contains(&"v-if".to_string()),
+        "directive v-if: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"href".to_string()),
+        "element attr href on <a>: {labels:?}"
+    );
 
     // `<button @cl` — event name position.
     let (l, c) = pos_after(RFC42_STRUCT_PANEL, "@cl");
     let labels = completion_labels(&mut client, &uri, l, c);
-    assert!(labels.contains(&"@click".to_string()), "event @click: {labels:?}");
+    assert!(
+        labels.contains(&"@click".to_string()),
+        "event @click: {labels:?}"
+    );
 }
 
 // ===========================================================================
@@ -1324,8 +1605,16 @@ fn rfc42_attribute_and_event_completion() {
 
 /// The token-type legend order the server registers (see `semantic_tokens_legend`).
 const SEM_TYPES: &[&str] = &[
-    "namespace", "type", "enumMember", "parameter", "variable", "property",
-    "function", "method", "macro", "keyword",
+    "namespace",
+    "type",
+    "enumMember",
+    "parameter",
+    "variable",
+    "property",
+    "function",
+    "method",
+    "macro",
+    "keyword",
 ];
 
 /// One decoded semantic token: absolute 0-based (line, char), length, type name,
@@ -1379,14 +1668,21 @@ fn semantic_tokens_full(client: &mut LspClient, uri: &str) -> Vec<SemTok> {
 
 /// The 0-based (line, char) of the first occurrence of `name` on 1-based `line`.
 fn at(src: &str, line: usize, name: &str) -> (u32, u32) {
-    let text = src.lines().nth(line - 1).unwrap_or_else(|| panic!("no line {line}"));
-    let col = text.find(name).unwrap_or_else(|| panic!("`{name}` not on line {line}: {text:?}"));
+    let text = src
+        .lines()
+        .nth(line - 1)
+        .unwrap_or_else(|| panic!("no line {line}"));
+    let col = text
+        .find(name)
+        .unwrap_or_else(|| panic!("`{name}` not on line {line}: {text:?}"));
     ((line - 1) as u32, col as u32)
 }
 
 /// The type name of the token starting exactly at (line, ch), if classified.
 fn kind_at(toks: &[SemTok], line: u32, ch: u32) -> Option<&str> {
-    toks.iter().find(|t| t.line == line && t.ch == ch).map(|t| t.ty.as_str())
+    toks.iter()
+        .find(|t| t.line == line && t.ch == ch)
+        .map(|t| t.ty.as_str())
 }
 
 /// RFC-0047 §1: `semanticTokens/full` classifies each identifier by KIND — the
@@ -1433,27 +1729,59 @@ fn main() -> Int64 {\n\
 
     // THE headline: import specifiers get their real kind.
     let (l, c) = at(main_src, 1, "greet");
-    assert_eq!(kind_at(&toks, l, c), Some("function"), "import specifier `greet` → function");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("function"),
+        "import specifier `greet` → function"
+    );
     let (l, c) = at(main_src, 1, "Color");
-    assert_eq!(kind_at(&toks, l, c), Some("type"), "import specifier `Color` → type");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("type"),
+        "import specifier `Color` → type"
+    );
 
     // Declarations and uses.
     let (l, c) = at(main_src, 5, "dist");
-    assert_eq!(kind_at(&toks, l, c), Some("function"), "`dist` decl → function");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("function"),
+        "`dist` decl → function"
+    );
     let (l, c) = at(main_src, 5, "p"); // the parameter `p`
-    assert_eq!(kind_at(&toks, l, c), Some("parameter"), "param `p` → parameter");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("parameter"),
+        "param `p` → parameter"
+    );
     let (l, c) = at(main_src, 5, "Point"); // annotation
-    assert_eq!(kind_at(&toks, l, c), Some("type"), "`Point` annotation → type");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("type"),
+        "`Point` annotation → type"
+    );
 
     // A record-field member access → property (the `x` in `p.x`).
     let (l, c) = at(main_src, 6, "p.x");
-    assert_eq!(kind_at(&toks, l, c + 2), Some("property"), "`p.x` field → property");
+    assert_eq!(
+        kind_at(&toks, l, c + 2),
+        Some("property"),
+        "`p.x` field → property"
+    );
 
     // A `let` binding → variable; the call target is a function.
     let (l, c) = at(main_src, 14, "msg");
-    assert_eq!(kind_at(&toks, l, c), Some("variable"), "`let msg` → variable");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("variable"),
+        "`let msg` → variable"
+    );
     let (l, c) = at(main_src, 14, "greet");
-    assert_eq!(kind_at(&toks, l, c), Some("function"), "call `greet` → function");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("function"),
+        "call `greet` → function"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1483,7 +1811,10 @@ fn hover_on_import_specifier_shows_signature() {
     // `greet` inside the import list: line 1, char at "greet".
     let (l, c) = at(main_src, 1, "greet");
     let v = hover_value(&mut client, &uri, l, c).expect("hover at import specifier");
-    assert!(v.contains("greet"), "import-site hover shows the signature: {v}");
+    assert!(
+        v.contains("greet"),
+        "import-site hover shows the signature: {v}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1502,9 +1833,17 @@ fn semantic_tokens_in_vyx_template() {
 
     let toks = semantic_tokens_full(&mut client, &vyx_uri);
     // `<li>{{ item.title }}` on `.vyx` line 6 (0-based 5): `item` at char 7.
-    assert_eq!(kind_at(&toks, 5, 7), Some("parameter"), "template `item` (prop) → parameter: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, 5, 7),
+        Some("parameter"),
+        "template `item` (prop) → parameter: {toks:?}"
+    );
     // `.title` — the `title` member at char 12.
-    assert_eq!(kind_at(&toks, 5, 12), Some("property"), "template `title` field → property: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, 5, 12),
+        Some("property"),
+        "template `title` field → property: {toks:?}"
+    );
 }
 
 // ===========================================================================
@@ -1554,17 +1893,36 @@ fn rfc48_vyx_script_import_hover_and_classification() {
     let (hl, hc) = at(RFC48_VYX, 2, "format");
     let v = hover_value(&mut client, &vyx_uri, hl, hc)
         .expect("hover on `.vyx` script import specifier `format`");
-    assert!(v.contains("format"), "import-specifier hover shows the signature: {v}");
+    assert!(
+        v.contains("format"),
+        "import-specifier hover shows the signature: {v}"
+    );
 
     let toks = semantic_tokens_full(&mut client, &vyx_uri);
     let (fl, fc) = at(RFC48_VYX, 2, "format");
-    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "import `format` → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, fl, fc),
+        Some("function"),
+        "import `format` → function: {toks:?}"
+    );
     let (ml, mc) = at(RFC48_VYX, 2, "fromMillis");
-    assert_eq!(kind_at(&toks, ml, mc), Some("function"), "import `fromMillis` → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, ml, mc),
+        Some("function"),
+        "import `fromMillis` → function: {toks:?}"
+    );
     let (cl, cc) = at(RFC48_VYX, 3, "clk");
-    assert_eq!(kind_at(&toks, cl, cc), Some("namespace"), "`import * as clk` → namespace: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, cl, cc),
+        Some("namespace"),
+        "`import * as clk` → namespace: {toks:?}"
+    );
     let (sl, sc) = at(RFC48_VYX, 4, "shown");
-    assert_eq!(kind_at(&toks, sl, sc), Some("function"), "helper `shown` def → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, sl, sc),
+        Some("function"),
+        "helper `shown` def → function: {toks:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1714,14 +2072,24 @@ fn rfc48_page_semantic_tokens_and_class_completion() {
     // Semantic tokens now exist on the page route file, and an import specifier
     // classifies by kind.
     let toks = semantic_tokens_full(&mut client, &index_uri);
-    assert!(!toks.is_empty(), "the page route file now has semantic tokens (was 0)");
+    assert!(
+        !toks.is_empty(),
+        "the page route file now has semantic tokens (was 0)"
+    );
     let (fl, fc) = at(RFC48_INDEX, 2, "format");
-    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "page import `format` → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, fl, fc),
+        Some("function"),
+        "page import `format` → function: {toks:?}"
+    );
 
     // Tw class completion fires in the page template (RFC-0042 reachable in pages).
     let (l, c) = pos_after(RFC48_INDEX, "flex p");
     let labels = completion_labels(&mut client, &index_uri, l, c);
-    assert!(labels.contains(&"p-4".to_string()), "Tw class completion on the page: {labels:?}");
+    assert!(
+        labels.contains(&"p-4".to_string()),
+        "Tw class completion on the page: {labels:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1753,28 +2121,64 @@ fn rfc48_live_transcript_pagesthemed() {
     println!("\n===== RFC-0048 LIVE TRANSCRIPT (pagesThemed route: routes/index.vyx) =====");
 
     // Script import-specifier + namespace hovers.
-    for (label, line, name) in [("format", 2u32, "format"), ("fromMillis", 2, "fromMillis"), ("clk (ns)", 3, "clk")] {
+    for (label, line, name) in [
+        ("format", 2u32, "format"),
+        ("fromMillis", 2, "fromMillis"),
+        ("clk (ns)", 3, "clk"),
+    ] {
         let (l, c) = at(RFC48_INDEX, line as usize, name);
         let h = hover_value(&mut client, &index_uri, l, c).unwrap_or("<none>".into());
-        println!("  hover {label:>11} @{}:{} -> {}", l + 1, c + 1, h.replace('\n', " ⏎ "));
+        println!(
+            "  hover {label:>11} @{}:{} -> {}",
+            l + 1,
+            c + 1,
+            h.replace('\n', " ⏎ ")
+        );
     }
 
     // Semantic tokens (0 → non-empty) + kinds.
     let toks = semantic_tokens_full(&mut client, &index_uri);
-    println!("  semanticTokens/full: {} tokens (pre-RFC-0048: 0)", toks.len());
-    for (label, line, name) in [("format", 2u32, "format"), ("fromMillis", 2, "fromMillis"), ("clk", 3, "clk"), ("shown(def)", 4, "shown")] {
+    println!(
+        "  semanticTokens/full: {} tokens (pre-RFC-0048: 0)",
+        toks.len()
+    );
+    for (label, line, name) in [
+        ("format", 2u32, "format"),
+        ("fromMillis", 2, "fromMillis"),
+        ("clk", 3, "clk"),
+        ("shown(def)", 4, "shown"),
+    ] {
         let (l, c) = at(RFC48_INDEX, line as usize, name);
-        println!("  token {label:>11} @{}:{} -> {:?}", l + 1, c + 1, kind_at(&toks, l, c));
+        println!(
+            "  token {label:>11} @{}:{} -> {:?}",
+            l + 1,
+            c + 1,
+            kind_at(&toks, l, c)
+        );
     }
 
     // Tw class completion + CSS hover in the page template.
     let (cl, cc) = pos_after(RFC48_INDEX, "mr-");
     let labels = completion_labels(&mut client, &index_uri, cl, cc);
-    let mr: Vec<&String> = labels.iter().filter(|s| s.starts_with("mr-")).take(4).collect();
-    println!("  class-completion @{}:{} (in \"mr-2 hover:bg-brand-600\") -> {:?}", cl + 1, cc + 1, mr);
+    let mr: Vec<&String> = labels
+        .iter()
+        .filter(|s| s.starts_with("mr-"))
+        .take(4)
+        .collect();
+    println!(
+        "  class-completion @{}:{} (in \"mr-2 hover:bg-brand-600\") -> {:?}",
+        cl + 1,
+        cc + 1,
+        mr
+    );
     let (hl, hc) = pos_after(RFC48_INDEX, "hover:bg-brand-6");
     let css = hover_value(&mut client, &index_uri, hl, hc).unwrap_or("<none>".into());
-    println!("  class-hover @{}:{} (hover:bg-brand-600) -> {}", hl + 1, hc + 1, css.replace('\n', " ⏎ "));
+    println!(
+        "  class-hover @{}:{} (hover:bg-brand-600) -> {}",
+        hl + 1,
+        hc + 1,
+        css.replace('\n', " ⏎ ")
+    );
     println!("=========================================================================\n");
 
     // Headline assertions (guard against regression).
@@ -1783,8 +2187,14 @@ fn rfc48_live_transcript_pagesthemed() {
     assert_eq!(kind_at(&toks, l, c), Some("function"), "format -> function");
     let (l, c) = at(RFC48_INDEX, 3, "clk");
     assert_eq!(kind_at(&toks, l, c), Some("namespace"), "clk -> namespace");
-    assert!(mr.iter().any(|s| *s == "mr-2"), "mr-2 offered in page class completion");
-    assert!(css.contains("margin") || css.contains("brand") || css.contains("#43"), "CSS hover on variant class: {css}");
+    assert!(
+        mr.iter().any(|s| *s == "mr-2"),
+        "mr-2 offered in page class completion"
+    );
+    assert!(
+        css.contains("margin") || css.contains("brand") || css.contains("#43"),
+        "CSS hover on variant class: {css}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1822,27 +2232,47 @@ fn rfc49_open_only_page_vyx_is_fully_analyzed() {
     let (hl, hc) = at(RFC48_INDEX, 2, "format");
     let v = hover_value(&mut client, &index_uri, hl, hc)
         .expect("hover works on a standalone-opened page .vyx (owner discovered)");
-    assert!(v.contains("format"), "hover shows the imported signature: {v}");
+    assert!(
+        v.contains("format"),
+        "hover shows the imported signature: {v}"
+    );
 
     // Semantic tokens non-empty and functions classify as `function` (not the
     // TextMate `variable` fallback the user reported).
     let toks = semantic_tokens_full(&mut client, &index_uri);
-    assert!(!toks.is_empty(), "standalone page .vyx has semantic tokens (was 0)");
+    assert!(
+        !toks.is_empty(),
+        "standalone page .vyx has semantic tokens (was 0)"
+    );
     let (fl, fc) = at(RFC48_INDEX, 2, "format");
-    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "`format` → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, fl, fc),
+        Some("function"),
+        "`format` → function: {toks:?}"
+    );
     let (ml, mc) = at(RFC48_INDEX, 2, "fromMillis");
-    assert_eq!(kind_at(&toks, ml, mc), Some("function"), "`fromMillis` → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, ml, mc),
+        Some("function"),
+        "`fromMillis` → function: {toks:?}"
+    );
 
     // Go-to-definition on a `format` call → the imported std/time source.
     let (dl, dc) = at(RFC48_INDEX, 4, "format");
     let target = definition_target(&mut client, &index_uri, dl, dc)
         .expect("definition jumps from a standalone page .vyx");
-    assert!(target.contains("time"), "definition lands in std/time: {target}");
+    assert!(
+        target.contains("time"),
+        "definition lands in std/time: {target}"
+    );
 
     // Tw class completion in the template.
     let (cl, cc) = pos_after(RFC48_INDEX, "flex p");
     let labels = completion_labels(&mut client, &index_uri, cl, cc);
-    assert!(labels.contains(&"p-4".to_string()), "class completion on a standalone page: {labels:?}");
+    assert!(
+        labels.contains(&"p-4".to_string()),
+        "class completion on a standalone page: {labels:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1883,23 +2313,43 @@ fn rfc49_open_only_component_vyx_is_fully_analyzed() {
     let (hl, hc) = at(RFC49_WIDGET, 2, "format");
     let v = hover_value(&mut client, &widget_uri, hl, hc)
         .expect("hover works on a standalone-opened component .vyx (owner discovered)");
-    assert!(v.contains("format"), "hover shows the imported signature: {v}");
+    assert!(
+        v.contains("format"),
+        "hover shows the imported signature: {v}"
+    );
 
     let toks = semantic_tokens_full(&mut client, &widget_uri);
-    assert!(!toks.is_empty(), "standalone component .vyx has semantic tokens (was 0)");
+    assert!(
+        !toks.is_empty(),
+        "standalone component .vyx has semantic tokens (was 0)"
+    );
     let (fl, fc) = at(RFC49_WIDGET, 2, "format");
-    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "`format` → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, fl, fc),
+        Some("function"),
+        "`format` → function: {toks:?}"
+    );
     let (sl, sc) = at(RFC49_WIDGET, 4, "shown");
-    assert_eq!(kind_at(&toks, sl, sc), Some("function"), "helper `shown` def → function: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, sl, sc),
+        Some("function"),
+        "helper `shown` def → function: {toks:?}"
+    );
 
     let (dl, dc) = at(RFC49_WIDGET, 4, "format");
     let target = definition_target(&mut client, &widget_uri, dl, dc)
         .expect("definition jumps from a standalone component .vyx");
-    assert!(target.contains("time"), "definition lands in std/time: {target}");
+    assert!(
+        target.contains("time"),
+        "definition lands in std/time: {target}"
+    );
 
     let (cl, cc) = pos_after(RFC49_WIDGET, "flex p");
     let labels = completion_labels(&mut client, &widget_uri, cl, cc);
-    assert!(labels.contains(&"p-4".to_string()), "class completion on a standalone component: {labels:?}");
+    assert!(
+        labels.contains(&"p-4".to_string()),
+        "class completion on a standalone component: {labels:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1930,7 +2380,10 @@ fn rfc49_live_transcript_examples_bin() {
         .and_then(|p| p.parent())
         .expect("repo root");
     let bin = repo.join("examples").join("bin");
-    assert!(bin.join("vyrn.json").is_file(), "examples/bin exists at {bin:?}");
+    assert!(
+        bin.join("vyrn.json").is_file(),
+        "examples/bin exists at {bin:?}"
+    );
     let index_path = bin.join("routes/index.vyx");
     let form_path = bin.join("widgets/CreateForm.vyx");
     let index_src = std::fs::read_to_string(&index_path).expect("routes/index.vyx");
@@ -1966,8 +2419,16 @@ fn rfc49_live_transcript_examples_bin() {
     println!("  hover pasteTally(def) @18 -> {}", hp.replace('\n', " ⏎ "));
 
     let itoks = semantic_tokens_full(&mut client, &index_uri);
-    println!("  semanticTokens/full: {} tokens (pre-RFC-0049: 0 — owner-less)", itoks.len());
-    for (label, line, name) in [("format", 7usize, "format"), ("fromMillis", 7, "fromMillis"), ("pasteTally", 18, "pasteTally"), ("recent", 14, "recent")] {
+    println!(
+        "  semanticTokens/full: {} tokens (pre-RFC-0049: 0 — owner-less)",
+        itoks.len()
+    );
+    for (label, line, name) in [
+        ("format", 7usize, "format"),
+        ("fromMillis", 7, "fromMillis"),
+        ("pasteTally", 18, "pasteTally"),
+        ("recent", 14, "recent"),
+    ] {
         let (l, c) = at(&index_src, line, name);
         println!("  token {label:>11} @{line} -> {:?}", kind_at(&itoks, l, c));
     }
@@ -1978,13 +2439,23 @@ fn rfc49_live_transcript_examples_bin() {
 
     let (icl, icc) = pos_after(&index_src, "class=\"");
     let ilabels = completion_labels(&mut client, &index_uri, icl, icc);
-    let ip: Vec<&String> = ilabels.iter().filter(|s| s.starts_with("p-")).take(4).collect();
-    println!("  class-completion at class=\"| -> {:?} (of {} labels)", ip, ilabels.len());
+    let ip: Vec<&String> = ilabels
+        .iter()
+        .filter(|s| s.starts_with("p-"))
+        .take(4)
+        .collect();
+    println!(
+        "  class-completion at class=\"| -> {:?} (of {} labels)",
+        ip,
+        ilabels.len()
+    );
     println!("  HOVER LATENCY: cold {cold_ms} ms, warm {warm_ms} ms (§2 synth cache)");
 
     // ---- COMPONENT: open ONLY widgets/CreateForm.vyx (client.vyrn not opened) --
     did_open(&mut client, &form_uri, "vyx", &form_src);
-    println!("[COMPONENT] widgets/CreateForm.vyx (owner client.vyrn via componentsThemed; NOT opened)");
+    println!(
+        "[COMPONENT] widgets/CreateForm.vyx (owner client.vyrn via componentsThemed; NOT opened)"
+    );
     let (cl, cc) = at(&form_src, 3, "tBinCreate");
     let hc0 = hover_value(&mut client, &form_uri, cl, cc).unwrap_or("<none>".into());
     println!("  hover tBinCreate @3 -> {}", hc0.replace('\n', " ⏎ "));
@@ -1997,26 +2468,70 @@ fn rfc49_live_transcript_examples_bin() {
     println!("  token tBinCreate @3 -> {:?}", kind_at(&ftoks, tl, tc));
     let (fcl, fcc) = pos_after(&form_src, "class=\"");
     let flabels = completion_labels(&mut client, &form_uri, fcl, fcc);
-    let fp: Vec<&String> = flabels.iter().filter(|s| s.starts_with("p-")).take(4).collect();
-    println!("  class-completion at class=\"| -> {:?} (of {} labels)", fp, flabels.len());
+    let fp: Vec<&String> = flabels
+        .iter()
+        .filter(|s| s.starts_with("p-"))
+        .take(4)
+        .collect();
+    println!(
+        "  class-completion at class=\"| -> {:?} (of {} labels)",
+        fp,
+        flabels.len()
+    );
     println!("=========================================================================\n");
 
     // ---- Headline assertions (guard the user's exact scenario) ----------------
-    assert!(hf.contains("format"), "page: hover on format resolves: {hf}");
-    assert!(!itoks.is_empty(), "page: standalone .vyx has semantic tokens");
+    assert!(
+        hf.contains("format"),
+        "page: hover on format resolves: {hf}"
+    );
+    assert!(
+        !itoks.is_empty(),
+        "page: standalone .vyx has semantic tokens"
+    );
     let (l, c) = at(&index_src, 7, "format");
-    assert_eq!(kind_at(&itoks, l, c), Some("function"), "page: format → function (not variable)");
+    assert_eq!(
+        kind_at(&itoks, l, c),
+        Some("function"),
+        "page: format → function (not variable)"
+    );
     let (l, c) = at(&index_src, 18, "pasteTally");
-    assert_eq!(kind_at(&itoks, l, c), Some("function"), "page: pasteTally def → function");
-    assert!(idef.contains("time"), "page: definition on format → std/time: {idef}");
-    assert!(ilabels.iter().any(|s| s.starts_with("p-")), "page: Tw class completion fires");
+    assert_eq!(
+        kind_at(&itoks, l, c),
+        Some("function"),
+        "page: pasteTally def → function"
+    );
+    assert!(
+        idef.contains("time"),
+        "page: definition on format → std/time: {idef}"
+    );
+    assert!(
+        ilabels.iter().any(|s| s.starts_with("p-")),
+        "page: Tw class completion fires"
+    );
 
-    assert!(hc0.contains("tBinCreate"), "component: hover on tBinCreate resolves: {hc0}");
-    assert!(!ftoks.is_empty(), "component: standalone .vyx has semantic tokens");
-    assert_eq!(kind_at(&ftoks, tl, tc), Some("function"), "component: tBinCreate → function");
-    assert!(flabels.iter().any(|s| s.starts_with("p-")), "component: Tw class completion fires");
+    assert!(
+        hc0.contains("tBinCreate"),
+        "component: hover on tBinCreate resolves: {hc0}"
+    );
+    assert!(
+        !ftoks.is_empty(),
+        "component: standalone .vyx has semantic tokens"
+    );
+    assert_eq!(
+        kind_at(&ftoks, tl, tc),
+        Some("function"),
+        "component: tBinCreate → function"
+    );
+    assert!(
+        flabels.iter().any(|s| s.starts_with("p-")),
+        "component: Tw class completion fires"
+    );
     // Warm hover must not be dramatically slower than cold — the cache holds.
-    assert!(warm_ms <= cold_ms + 50, "warm hover ({warm_ms}ms) ≤ cold ({cold_ms}ms)+slack");
+    assert!(
+        warm_ms <= cold_ms + 50,
+        "warm hover ({warm_ms}ms) ≤ cold ({cold_ms}ms)+slack"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2050,8 +2565,15 @@ fn document_highlight(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> 
         .expect("documentHighlight must return an array (never null)")
         .iter()
         .map(|h| Highlight {
-            line: h.pointer("/range/start/line").and_then(|v| v.as_u64()).unwrap() as u32 + 1,
-            ch: h.pointer("/range/start/character").and_then(|v| v.as_u64()).unwrap() as u32,
+            line: h
+                .pointer("/range/start/line")
+                .and_then(|v| v.as_u64())
+                .unwrap() as u32
+                + 1,
+            ch: h
+                .pointer("/range/start/character")
+                .and_then(|v| v.as_u64())
+                .unwrap() as u32,
             kind: h.get("kind").and_then(|k| k.as_u64()).unwrap_or(0),
         })
         .collect()
@@ -2102,7 +2624,8 @@ fn rfc0050_document_highlight_is_scope_aware() {
     }));
     let caps = client.read_response(&init_id);
     assert!(
-        caps.pointer("/result/capabilities/documentHighlightProvider").is_some(),
+        caps.pointer("/result/capabilities/documentHighlightProvider")
+            .is_some(),
         "documentHighlight capability advertised"
     );
     client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
@@ -2120,18 +2643,33 @@ fn rfc0050_document_highlight_is_scope_aware() {
     // The declaration occurrence is a Write; the uses are Reads.
     let decl = hls.iter().find(|h| h.line == 2).unwrap();
     assert_eq!(decl.kind, 3, "declaration is Write: {decl:?}");
-    assert!(hls.iter().filter(|h| h.line != 2).all(|h| h.kind == 2), "uses are Read: {hls:?}");
+    assert!(
+        hls.iter().filter(|h| h.line != 2).all(|h| h.kind == 2),
+        "uses are Read: {hls:?}"
+    );
 
     // Never the comment word (line 11) nor the out-of-scope binding in `other`
     // (lines 12/13) — the whole point of resolving instead of word-matching.
-    assert!(!lines.contains(&11), "comment `count` NOT highlighted: {hls:?}");
-    assert!(!lines.contains(&12), "other()'s `count` decl NOT highlighted: {hls:?}");
-    assert!(!lines.contains(&13), "other()'s `count` use NOT highlighted: {hls:?}");
+    assert!(
+        !lines.contains(&11),
+        "comment `count` NOT highlighted: {hls:?}"
+    );
+    assert!(
+        !lines.contains(&12),
+        "other()'s `count` decl NOT highlighted: {hls:?}"
+    );
+    assert!(
+        !lines.contains(&13),
+        "other()'s `count` use NOT highlighted: {hls:?}"
+    );
 
     // An unresolved cursor (a keyword) returns an EMPTY list, not null — so VS
     // Code does not fall back to word-match.
     let hls2 = document_highlight(&mut client, &uri, 0, 0); // the `f` of `fn`
-    assert!(hls2.is_empty(), "unresolved cursor yields empty (not word-match): {hls2:?}");
+    assert!(
+        hls2.is_empty(),
+        "unresolved cursor yields empty (not word-match): {hls2:?}"
+    );
 
     let _ = client.child.kill();
 }
@@ -2150,7 +2688,11 @@ fn rfc0050_definition_on_import_path() {
     // names into its flat namespace — the same defect that made one `fn at`
     // produce 53 diagnostics pointing into `std/num.vyrn`. The name is
     // incidental to what this test checks, so it is a legal one now.
-    std::fs::write(dir.join("store.vyrn"), "export fn stored() -> Int64 { return 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("store.vyrn"),
+        "export fn stored() -> Int64 { return 1 }\n",
+    )
+    .unwrap();
     let app = "\
 import { stored } from \"./store\"
 import { now } from \"std/time\"
@@ -2166,18 +2708,27 @@ fn main() -> Int64 { return stored() + now() }
     // Cursor inside `"./store"` (line 1, 0-based) → store.vyrn.
     let (l, c) = at(app, 1, "./store");
     let store = definition_target(&mut client, &uri, l, c).expect("definition on ./store");
-    assert!(store.ends_with("/store.vyrn"), "./store → sibling store.vyrn: {store}");
+    assert!(
+        store.ends_with("/store.vyrn"),
+        "./store → sibling store.vyrn: {store}"
+    );
 
     // Cursor inside `"std/time"` (line 2) → the std time module.
     let (l, c) = at(app, 2, "std/time");
     let stdt = definition_target(&mut client, &uri, l, c).expect("definition on std/time");
-    assert!(stdt.replace('\\', "/").ends_with("std/time.vyrn"), "std/time → std file: {stdt}");
+    assert!(
+        stdt.replace('\\', "/").ends_with("std/time.vyrn"),
+        "std/time → std file: {stdt}"
+    );
 
     // A cursor NOT on an import string (the `stored` call) still does identifier
     // go-to-definition — the import-path path is additive, not a hijack.
     let (l, c) = at(app, 3, "stored");
     let g = definition_target(&mut client, &uri, l, c).expect("definition on stored() call");
-    assert!(g.ends_with("/store.vyrn"), "stored() → its imported decl in store.vyrn: {g}");
+    assert!(
+        g.ends_with("/store.vyrn"),
+        "stored() → its imported decl in store.vyrn: {g}"
+    );
 
     let _ = client.child.kill();
 }
@@ -2192,7 +2743,11 @@ fn rfc0050_namespace_binding_classifies_as_namespace() {
     let dir = std::env::temp_dir().join(format!("vyrn-lsp-ns-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("lib.vyrn"), "export fn ping() -> Int64 { return 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export fn ping() -> Int64 { return 1 }\n",
+    )
+    .unwrap();
     let app = "\
 import * as store from \"./lib\"
 fn main() -> Int64 { return store.ping() }
@@ -2207,10 +2762,18 @@ fn main() -> Int64 { return store.ping() }
 
     // The binding `store` in `import * as store` (line 1) → namespace.
     let (l, c) = at(app, 1, "store");
-    assert_eq!(kind_at(&toks, l, c), Some("namespace"), "import binding → namespace: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("namespace"),
+        "import binding → namespace: {toks:?}"
+    );
     // The `store` qualifier in `store.ping()` (line 2) → namespace.
     let (l, c) = at(app, 2, "store");
-    assert_eq!(kind_at(&toks, l, c), Some("namespace"), "ns qualifier → namespace: {toks:?}");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("namespace"),
+        "ns qualifier → namespace: {toks:?}"
+    );
 
     let _ = client.child.kill();
 }
@@ -2249,13 +2812,22 @@ fn main() -> Int64 { return bump(1) }
     // Imported: hover `bump` at its use site.
     let (l, c) = at(app, 3, "bump(1)");
     let h = hover_value(&mut client, &uri, l, c).expect("hover on imported fn");
-    assert!(h.starts_with("fn bump(n: Int64) -> Int64"), "signature first: {h}");
-    assert!(h.contains("Adds one. A parity citizen: pure."), "imported doc rendered: {h}");
+    assert!(
+        h.starts_with("fn bump(n: Int64) -> Int64"),
+        "signature first: {h}"
+    );
+    assert!(
+        h.contains("Adds one. A parity citizen: pure."),
+        "imported doc rendered: {h}"
+    );
 
     // Own document: hover `main` at its declaration.
     let (l, c) = at(app, 3, "main");
     let h = hover_value(&mut client, &uri, l, c).expect("hover on own fn");
-    assert!(h.contains("The entry point, documented."), "own-module doc rendered: {h}");
+    assert!(
+        h.contains("The entry point, documented."),
+        "own-module doc rendered: {h}"
+    );
 
     let _ = client.child.kill();
 }
@@ -2289,8 +2861,14 @@ fn main() -> Int64 { let s = t.appTagline() return 0 }
 
     let (l, c) = at(app, 3, "appTagline");
     let h = hover_value(&mut client, &uri, l, c).expect("hover on generated ns member");
-    assert!(h.contains("fn appTagline() -> String"), "member signature: {h}");
-    assert!(h.contains("Paste text, get a short link."), "translation as doc: {h}");
+    assert!(
+        h.contains("fn appTagline() -> String"),
+        "member signature: {h}"
+    );
+    assert!(
+        h.contains("Paste text, get a short link."),
+        "translation as doc: {h}"
+    );
     assert!(h.contains("via namespace `t`"), "notes the namespace: {h}");
 
     let _ = client.child.kill();
@@ -2316,7 +2894,10 @@ fn rfc51_member_and_structure_hover_in_vyx_template() {
 
     let h = hover_value(&mut client, &vyx_uri, 5, 7).expect("receiver hover");
     assert!(h.contains("item: Row"), "the value's type: {h}");
-    assert!(h.contains("type Row = { title: String }"), "the record's shape: {h}");
+    assert!(
+        h.contains("type Row = { title: String }"),
+        "the record's shape: {h}"
+    );
 
     let _ = client.child.kill();
 }
@@ -2331,13 +2912,22 @@ fn rfc51_class_hover_and_completion_agree_on_the_token_under_the_cursor() {
     // `class="bg-brand-500 md:hover:bg-brand-600"` — the first token.
     let (l, c) = pos_after(RFC42_VYX, "bg-brand-5");
     let h = hover_value(&mut client, &uri, l, c).expect("hover on the first class");
-    assert!(h.contains("`bg-brand-500`"), "the token under the cursor: {h}");
-    assert!(!h.contains("md:hover:"), "not the LAST token on the line: {h}");
+    assert!(
+        h.contains("`bg-brand-500`"),
+        "the token under the cursor: {h}"
+    );
+    assert!(
+        !h.contains("md:hover:"),
+        "not the LAST token on the line: {h}"
+    );
 
     // The second token, on the same attribute.
     let (l2, c2) = pos_after(RFC42_VYX, "md:hover:bg-brand-6");
     let h2 = hover_value(&mut client, &uri, l2, c2).expect("hover on the second class");
-    assert!(h2.contains("`md:hover:bg-brand-600`"), "the variant token: {h2}");
+    assert!(
+        h2.contains("`md:hover:bg-brand-600`"),
+        "the variant token: {h2}"
+    );
 
     // Completion at the same cursor replaces the whole token, from its start.
     let id = serde_json::json!("rfc51-cls");
@@ -2346,7 +2936,11 @@ fn rfc51_class_hover_and_completion_agree_on_the_token_under_the_cursor() {
         "params": { "textDocument": { "uri": uri }, "position": { "line": l2, "character": c2 } }
     }));
     let resp = client.read_response(&id);
-    let items = resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    let items = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
     let item = items
         .iter()
         .find(|i| i.get("label").and_then(|s| s.as_str()) == Some("md:hover:bg-brand-600"))
@@ -2355,10 +2949,16 @@ fn rfc51_class_hover_and_completion_agree_on_the_token_under_the_cursor() {
         .pointer("/textEdit/range/start/character")
         .and_then(|v| v.as_u64())
         .expect("a replace range");
-    let end = item.pointer("/textEdit/range/end/character").and_then(|v| v.as_u64()).unwrap();
+    let end = item
+        .pointer("/textEdit/range/end/character")
+        .and_then(|v| v.as_u64())
+        .unwrap();
     // The token starts right after the space that ends `bg-brand-500`.
     let tok_start = (c2 as u64) - ("md:hover:bg-brand-6".len() as u64);
-    assert_eq!(start, tok_start, "completion replaces from the token start: {item}");
+    assert_eq!(
+        start, tok_start,
+        "completion replaces from the token start: {item}"
+    );
     assert_eq!(end, c2 as u64, "…up to the cursor: {item}");
 
     let _ = client.child.kill();
@@ -2437,16 +3037,34 @@ fn rfc52_safelisted_hover_shows_the_apps_own_css() {
     let (mut client, uri) = rfc52_open();
     let (l, c) = pos_after(RFC52_VYX, "book-car");
     let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
-    assert!(v.contains("safelisted (app-styled)"), "keeps the safelisted line: {v}");
-    assert!(v.contains("li.list .book-card"), "descendant rule shown: {v}");
+    assert!(
+        v.contains("safelisted (app-styled)"),
+        "keeps the safelisted line: {v}"
+    );
+    assert!(
+        v.contains("li.list .book-card"),
+        "descendant rule shown: {v}"
+    );
     assert!(v.contains("padding: 2px"), "rule body verbatim: {v}");
     assert!(v.contains(".book-card:hover"), "the :hover rule too: {v}");
-    assert!(v.contains("public/app.css:3"), "declared sheet + 1-based line: {v}");
+    assert!(
+        v.contains("public/app.css:3"),
+        "declared sheet + 1-based line: {v}"
+    );
     // Whole-token matching: neither the longer class nor the plural one match.
-    assert!(!v.contains("book-card-x"), "`.book-card-x` must not match: {v}");
-    assert!(!v.contains("book-cards"), "`.book-cards` must not match: {v}");
+    assert!(
+        !v.contains("book-card-x"),
+        "`.book-card-x` must not match: {v}"
+    );
+    assert!(
+        !v.contains("book-cards"),
+        "`.book-cards` must not match: {v}"
+    );
     // Discovery order: the declared sheet wins; the undeclared decoy is unused.
-    assert!(!v.contains("DECOYRULE"), "undeclared stylesheet not consulted: {v}");
+    assert!(
+        !v.contains("DECOYRULE"),
+        "undeclared stylesheet not consulted: {v}"
+    );
     let _ = client.child.kill();
 }
 
@@ -2456,7 +3074,10 @@ fn rfc52_safelisted_without_a_rule_is_unchanged() {
     let (mut client, uri) = rfc52_open();
     let (l, c) = pos_after(RFC52_VYX, "no-sty");
     let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
-    assert_eq!(v, "**`no-style`** — safelisted (app-styled)", "unchanged: {v}");
+    assert_eq!(
+        v, "**`no-style`** — safelisted (app-styled)",
+        "unchanged: {v}"
+    );
     let _ = client.child.kill();
 }
 
@@ -2509,12 +3130,23 @@ fn rfc54_broken_skeleton_publishes_in_the_generator_file() {
     let mut client = rfc33_client();
     did_open(&mut client, &uri, "vyrn", gen);
     let note = read_nonempty_diags_for(&mut client, "gen.vyrn");
-    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags");
-    let msg = diags[0].get("message").and_then(|m| m.as_str()).unwrap_or("");
-    assert!(msg.contains("skeleton does not parse"), "skeleton message: {msg}");
+    let diags = note
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("diags");
+    let msg = diags[0]
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("skeleton does not parse"),
+        "skeleton message: {msg}"
+    );
     // The literal opens on line 2 (`vyrn"""`); its content starts on line 3
     // (`type Query {`), 1-based → LSP line 2 (0-based).
-    let line = diags[0].pointer("/range/start/line").and_then(|l| l.as_i64());
+    let line = diags[0]
+        .pointer("/range/start/line")
+        .and_then(|l| l.as_i64());
     assert_eq!(line, Some(2), "reported at the literal's line: {note}");
     let _ = client.child.kill();
 }
@@ -2546,9 +3178,14 @@ fn rfc54_semantic_tokens_do_not_crash_on_a_code_quote() {
     }));
     let resp = client.read_response(&req_id);
     // A valid (non-error) response with a data array — proves no panic on the tag.
-    assert!(resp.get("error").is_none(), "semantic tokens errored: {resp}");
     assert!(
-        resp.pointer("/result/data").and_then(|d| d.as_array()).is_some(),
+        resp.get("error").is_none(),
+        "semantic tokens errored: {resp}"
+    );
+    assert!(
+        resp.pointer("/result/data")
+            .and_then(|d| d.as_array())
+            .is_some(),
         "semantic tokens returned data: {resp}"
     );
     let _ = client.child.kill();
@@ -2569,7 +3206,9 @@ fn query_is_dev_entry(client: &mut LspClient, uri: &str, id: u64) -> bool {
     }));
     let resp = client.read_response(&req_id);
     assert!(resp.get("error").is_none(), "isDevEntry errored: {resp}");
-    resp.get("result").and_then(|r| r.as_bool()).expect("isDevEntry result is a bool")
+    resp.get("result")
+        .and_then(|r| r.as_bool())
+        .expect("isDevEntry result is a bool")
 }
 
 #[test]
@@ -2583,7 +3222,10 @@ fn is_dev_entry_positive_and_negative() {
         fn handle(req: Request) -> Response { return rpcHandle(req) }\n";
     let server_uri = "file:///n%3A/lang/scratch/server.vyrn";
     did_open(&mut client, server_uri, "vyrn", server_src);
-    assert!(query_is_dev_entry(&mut client, server_uri, 900), "a serve-calling root is a dev entry");
+    assert!(
+        query_is_dev_entry(&mut client, server_uri, 900),
+        "a serve-calling root is a dev entry"
+    );
 
     // An rpc CLIENT: imports std/rpc but calls rpcClient(, not a server — excluded.
     let client_src = "import { rpcClient } from \"std/rpc\"\n\
@@ -2591,13 +3233,19 @@ fn is_dev_entry_positive_and_negative() {
         fn main() -> Int64 { return 0 }\n";
     let client_uri = "file:///n%3A/lang/scratch/client.vyrn";
     did_open(&mut client, client_uri, "vyrn", client_src);
-    assert!(!query_is_dev_entry(&mut client, client_uri, 901), "an rpc client is NOT a dev entry");
+    assert!(
+        !query_is_dev_entry(&mut client, client_uri, 901),
+        "an rpc client is NOT a dev entry"
+    );
 
     // A plain library / CLI module: no std/rpc at all.
     let lib_src = "fn main() -> Int64 { print(\"hi\") return 0 }\n";
     let lib_uri = "file:///n%3A/lang/scratch/lib.vyrn";
     did_open(&mut client, lib_uri, "vyrn", lib_src);
-    assert!(!query_is_dev_entry(&mut client, lib_uri, 902), "a plain module is NOT a dev entry");
+    assert!(
+        !query_is_dev_entry(&mut client, lib_uri, 902),
+        "a plain module is NOT a dev entry"
+    );
 
     // --- the exact files the RFC names, resolved from DISK (the handler's
     //     no-buffer fallback; no heavy didOpen analysis needed). ----------------
@@ -2657,19 +3305,38 @@ fn rfc71_a_generator_warning_publishes_into_the_input_buffer() {
     std::fs::write(dir.join("app.vyrn"), WARN_APP).unwrap();
 
     let mut client = rfc33_client();
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", WARN_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        WARN_APP,
+    );
 
     let note = read_diags_for(&mut client, "legacy.vyrn");
-    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    let diags = note
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("diags array");
     assert_eq!(diags.len(), 1, "one deprecation: {note}");
     let d0 = &diags[0];
     // 2 == DiagnosticSeverity.Warning. An ERROR here would mean the editor is
     // telling the author their working project is broken.
-    assert_eq!(d0.get("severity").and_then(|s| s.as_i64()), Some(2), "warning severity: {note}");
+    assert_eq!(
+        d0.get("severity").and_then(|s| s.as_i64()),
+        Some(2),
+        "warning severity: {note}"
+    );
     let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
-    assert!(msg.contains("`fn old` is deprecated"), "carries the notice: {msg}");
+    assert!(
+        msg.contains("`fn old` is deprecated"),
+        "carries the notice: {msg}"
+    );
     // `legacy.vyrn` line 2 (0-based 1), column 1 (0-based 0).
-    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(1), "line: {note}");
+    assert_eq!(
+        d0.pointer("/range/start/line").and_then(|l| l.as_i64()),
+        Some(1),
+        "line: {note}"
+    );
 
     let _ = client.child.kill();
 }
@@ -2754,7 +3421,10 @@ fn completion_items(
         }
     }));
     let resp = client.read_response(&id);
-    resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default()
+    resp.get("result")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn code_actions(
@@ -2780,7 +3450,10 @@ fn code_actions(
         }
     }));
     let resp = client.read_response(&id);
-    resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default()
+    resp.get("result")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The capability has to be advertised or VS Code never asks.
@@ -2810,14 +3483,21 @@ fn m4_completion_offers_contract_members_in_a_vyx_page() {
     let dir = m4_scratch("comp");
     let mut client = rfc33_client();
     let page_uri = file_uri(&dir.join("routes/index.vyx"));
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &page_uri, "vyx", M4_PAGE);
 
     // 0-based line 5: the blank line after head's body, inside <script> — module
     // scope.
     let items = completion_items(&mut client, &page_uri, 5, 0);
-    let snippets: Vec<&str> =
-        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    let snippets: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("insertText").and_then(|t| t.as_str()))
+        .collect();
     assert!(
         snippets.contains(&"export fn data() -> Query<T> {\n    return $0\n}"),
         "the blocking data shape inserts its whole declaration: {snippets:?}"
@@ -2853,17 +3533,33 @@ fn m4_completion_offers_contract_members_in_a_vyx_page() {
         .expect("a `data` item");
     // 2 == InsertTextFormat.Snippet. Without it VS Code inserts the tabstops as
     // literal text.
-    assert_eq!(data.get("insertTextFormat").and_then(|f| f.as_i64()), Some(2));
+    assert_eq!(
+        data.get("insertTextFormat").and_then(|f| f.as_i64()),
+        Some(2)
+    );
     let detail = data.get("detail").and_then(|d| d.as_str()).unwrap_or("");
-    assert!(detail.contains("contract `Page` (std/ui)"), "detail names the contract: {detail}");
-    let doc = data.pointer("/documentation/value").and_then(|d| d.as_str()).unwrap_or("");
-    assert!(doc.contains("data, resolved before render"), "the /// doc rides along: {doc:?}");
+    assert!(
+        detail.contains("contract `Page` (std/ui)"),
+        "detail names the contract: {detail}"
+    );
+    let doc = data
+        .pointer("/documentation/value")
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
+    assert!(
+        doc.contains("data, resolved before render"),
+        "the /// doc rides along: {doc:?}"
+    );
 
     // Contract members sort above the document's own symbols.
     let ordinary = items
         .iter()
         .find(|i| i.get("insertText").is_none())
-        .and_then(|i| i.get("sortText").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        .and_then(|i| {
+            i.get("sortText")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
     if let Some(o) = ordinary {
         let s = data.get("sortText").and_then(|s| s.as_str()).unwrap_or("z");
         assert!(s < o.as_str(), "contract members sort first: {s} vs {o}");
@@ -2878,14 +3574,24 @@ fn m4_completion_offers_nothing_in_a_layout() {
     let dir = m4_scratch("layout");
     let mut client = rfc33_client();
     let layout_uri = file_uri(&dir.join("routes/layout.vyx"));
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &layout_uri, "vyx", M4_LAYOUT);
 
     // 0-based line 4: the blank line after the head block, inside <script>.
     let items = completion_items(&mut client, &layout_uri, 4, 0);
-    let labels: Vec<&str> =
-        items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
-    assert!(!labels.contains(&"data"), "a layout is not a page: {labels:?}");
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+        .collect();
+    assert!(
+        !labels.contains(&"data"),
+        "a layout is not a page: {labels:?}"
+    );
     assert!(
         items.iter().all(|i| i.get("insertText").is_none()),
         "no contract snippets in a layout: {items:?}"
@@ -2900,7 +3606,12 @@ fn m4_completion_does_not_fire_inside_a_body() {
     let dir = m4_scratch("body");
     let mut client = rfc33_client();
     let page_uri = file_uri(&dir.join("routes/index.vyx"));
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &page_uri, "vyx", M4_PAGE);
 
     // 0-based line 3 = `    return noHead()` — inside head's body.
@@ -2919,14 +3630,25 @@ fn m4_hover_names_the_contract() {
     let dir = m4_scratch("hover");
     let mut client = rfc33_client();
     let page_uri = file_uri(&dir.join("routes/index.vyx"));
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &page_uri, "vyx", M4_PAGE);
 
     // 0-based line 2 = `export fn head() -> Head {`; `head` starts at char 10.
     let h = hover_value(&mut client, &page_uri, 2, 11).expect("hover on `head`");
-    assert!(h.contains("member of contract `Page` (std/ui)"), "names the contract:\n{h}");
+    assert!(
+        h.contains("member of contract `Page` (std/ui)"),
+        "names the contract:\n{h}"
+    );
     assert!(h.contains("fn() -> Head"), "names the type:\n{h}");
-    assert!(h.contains("head takes what the view takes"), "carries the /// doc:\n{h}");
+    assert!(
+        h.contains("head takes what the view takes"),
+        "carries the /// doc:\n{h}"
+    );
     let _ = client.child.kill();
 }
 
@@ -2937,7 +3659,12 @@ fn m4_definition_jumps_into_the_contract() {
     let dir = m4_scratch("def");
     let mut client = rfc33_client();
     let page_uri = file_uri(&dir.join("routes/index.vyx"));
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &page_uri, "vyx", M4_PAGE);
 
     let mut ids = Ids::new();
@@ -2954,15 +3681,26 @@ fn m4_definition_jumps_into_the_contract() {
     let resp = client.read_response(&id);
     let loc = resp.get("result").expect("a definition");
     let target = loc.get("uri").and_then(|u| u.as_str()).unwrap_or("");
-    assert!(target.ends_with("std/ui.vyrn"), "jumps into std/ui: {target}");
+    assert!(
+        target.ends_with("std/ui.vyrn"),
+        "jumps into std/ui: {target}"
+    );
 
     // The range must cover the literal member name in the real std/ui source.
-    let line = loc.pointer("/range/start/line").and_then(|l| l.as_i64()).unwrap() as usize;
-    let start = loc.pointer("/range/start/character").and_then(|c| c.as_i64()).unwrap() as usize;
-    let end = loc.pointer("/range/end/character").and_then(|c| c.as_i64()).unwrap() as usize;
-    let std_ui =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std/ui.vyrn"))
-            .expect("std/ui.vyrn");
+    let line = loc
+        .pointer("/range/start/line")
+        .and_then(|l| l.as_i64())
+        .unwrap() as usize;
+    let start = loc
+        .pointer("/range/start/character")
+        .and_then(|c| c.as_i64())
+        .unwrap() as usize;
+    let end = loc
+        .pointer("/range/end/character")
+        .and_then(|c| c.as_i64())
+        .unwrap() as usize;
+    let std_ui = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std/ui.vyrn"))
+        .expect("std/ui.vyrn");
     let text = std_ui.lines().nth(line).expect("the declaration line");
     let name: String = text.chars().skip(start).take(end - start).collect();
     assert_eq!(name, "head", "lands on the member name, on {text:?}");
@@ -2976,7 +3714,12 @@ fn m4_code_action_renames_a_near_miss() {
     let dir = m4_scratch("fix");
     let mut client = rfc33_client();
     let typo_uri = file_uri(&dir.join("routes/typo.vyrn"));
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &typo_uri, "vyrn", M4_TYPO_PAGE);
 
     // 0-based line 2 = `export fn dta() -> Query<Int64> {`; `dta` at chars 10-13.
@@ -2995,10 +3738,28 @@ fn m4_code_action_renames_a_near_miss() {
         .and_then(|e| e.as_array())
         .expect("an edit for this document");
     assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].get("newText").and_then(|t| t.as_str()), Some("data"));
-    assert_eq!(edits[0].pointer("/range/start/line").and_then(|l| l.as_i64()), Some(2));
-    assert_eq!(edits[0].pointer("/range/start/character").and_then(|c| c.as_i64()), Some(10));
-    assert_eq!(edits[0].pointer("/range/end/character").and_then(|c| c.as_i64()), Some(13));
+    assert_eq!(
+        edits[0].get("newText").and_then(|t| t.as_str()),
+        Some("data")
+    );
+    assert_eq!(
+        edits[0]
+            .pointer("/range/start/line")
+            .and_then(|l| l.as_i64()),
+        Some(2)
+    );
+    assert_eq!(
+        edits[0]
+            .pointer("/range/start/character")
+            .and_then(|c| c.as_i64()),
+        Some(10)
+    );
+    assert_eq!(
+        edits[0]
+            .pointer("/range/end/character")
+            .and_then(|c| c.as_i64()),
+        Some(13)
+    );
 
     // Away from the offending name, nothing is offered.
     assert!(code_actions(&mut client, &typo_uri, 5, 0, 0).is_empty());
@@ -3012,13 +3773,20 @@ fn m4_a_vyrn_page_completes_without_misfiring() {
     let dir = m4_scratch("vyrnpage");
     let mut client = rfc33_client();
     let typo_uri = file_uri(&dir.join("routes/typo.vyrn"));
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &typo_uri, "vyrn", M4_TYPO_PAGE);
 
     // 0-based line 1: the blank line after the import — module scope.
     let items = completion_items(&mut client, &typo_uri, 1, 0);
-    let snippets: Vec<&str> =
-        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    let snippets: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("insertText").and_then(|t| t.as_str()))
+        .collect();
     assert!(
         snippets.iter().any(|s| s.starts_with("export fn head()")),
         "head is offered in a .vyrn page too: {snippets:?}"
@@ -3029,7 +3797,10 @@ fn m4_a_vyrn_page_completes_without_misfiring() {
     );
     // Hovering the misspelled export must NOT claim it is a contract member.
     let h = hover_value(&mut client, &typo_uri, 2, 11).unwrap_or_default();
-    assert!(!h.contains("member of contract"), "`dta` is not a member: {h}");
+    assert!(
+        !h.contains("member of contract"),
+        "`dta` is not a member: {h}"
+    );
     let _ = client.child.kill();
 }
 
@@ -3043,7 +3814,12 @@ fn m4_a_module_outside_every_role_is_untouched() {
     std::fs::write(&store, src).unwrap();
     let mut client = rfc33_client();
     let uri = file_uri(&store);
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &uri, "vyrn", src);
 
     let items = completion_items(&mut client, &uri, 3, 0);
@@ -3073,11 +3849,18 @@ fn m4_manifest_roles_override_discovery() {
 
     let mut client = rfc33_client();
     let uri = file_uri(&screen);
-    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        M4_APP,
+    );
     did_open(&mut client, &uri, "vyrn", src);
     let items = completion_items(&mut client, &uri, 1, 0);
-    let snippets: Vec<&str> =
-        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    let snippets: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("insertText").and_then(|t| t.as_str()))
+        .collect();
     assert!(
         snippets.iter().any(|s| s.starts_with("export fn data()")),
         "the declared role governs `screens/`: {snippets:?}"
@@ -3094,7 +3877,6 @@ fn m4_manifest_roles_override_discovery() {
     );
     let _ = client.child.kill();
 }
-
 
 /// RFC-0071's headline claim, and the reason none of `Page`, `Component`,
 /// `head` or `data` appears anywhere in the server: **a user-authored generator
@@ -3131,7 +3913,11 @@ fn m4_a_user_authored_contract_gets_the_same_editor_support() {
     // A screen that wrote `titel` — one transposition from `title`.
     let screen = "export fn titel() -> String {\n    return \"home\"\n}\n\n";
 
-    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"u\", \"main\": \"app.vyrn\" }\n").unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"u\", \"main\": \"app.vyrn\" }\n",
+    )
+    .unwrap();
     std::fs::write(dir.join("gen.vyrn"), gen).unwrap();
     std::fs::write(dir.join("app.vyrn"), app).unwrap();
     std::fs::write(dir.join("screens/home.vyrn"), screen).unwrap();
@@ -3143,8 +3929,10 @@ fn m4_a_user_authored_contract_gets_the_same_editor_support() {
 
     // Completion: both members, required first, each a full declaration.
     let items = completion_items(&mut client, &uri, 3, 0);
-    let snippets: Vec<&str> =
-        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    let snippets: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("insertText").and_then(|t| t.as_str()))
+        .collect();
     assert!(
         snippets.contains(&"export fn budget() -> Int64 {\n    return $0\n}"),
         "the required member: {snippets:?}"
@@ -3176,7 +3964,10 @@ fn m4_a_user_authored_contract_gets_the_same_editor_support() {
     // of.
     let actions = code_actions(&mut client, &uri, 0, 10, 15);
     assert_eq!(actions.len(), 1, "one quick-fix: {actions:?}");
-    let title_text = actions[0].get("title").and_then(|t| t.as_str()).unwrap_or("");
+    let title_text = actions[0]
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
     assert!(
         title_text.contains("Rename `titel` to `title`"),
         "the user's own did-you-mean: {title_text}"
@@ -3193,8 +3984,14 @@ fn m4_a_user_authored_contract_gets_the_same_editor_support() {
         }
     }));
     let h = hover_value(&mut client, &uri, 0, 11).expect("hover on `title`");
-    assert!(h.contains("member of contract `Screen` (./gen)"), "names the user's contract:\n{h}");
-    assert!(h.contains("The screen's title bar."), "carries the user's /// doc:\n{h}");
+    assert!(
+        h.contains("member of contract `Screen` (./gen)"),
+        "names the user's contract:\n{h}"
+    );
+    assert!(
+        h.contains("The screen's title bar."),
+        "carries the user's /// doc:\n{h}"
+    );
 
     let mut ids = Ids::new();
     let id = ids.next();
@@ -3210,15 +4007,21 @@ fn m4_a_user_authored_contract_gets_the_same_editor_support() {
     let resp = client.read_response(&id);
     let loc = resp.get("result").expect("a definition");
     assert!(
-        loc.get("uri").and_then(|u| u.as_str()).unwrap_or("").ends_with("gen.vyrn"),
+        loc.get("uri")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .ends_with("gen.vyrn"),
         "jumps into the user's own module: {loc}"
     );
     // `fn title()` is on line 4 (1-based) of gen.vyrn → 0-based 3.
-    assert_eq!(loc.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(3), "{loc}");
+    assert_eq!(
+        loc.pointer("/range/start/line").and_then(|l| l.as_i64()),
+        Some(3),
+        "{loc}"
+    );
 
     let _ = client.child.kill();
 }
-
 
 /// The repo's OWN page, opened the way an editor opens it — no fixture, no
 /// scratch directory, the real `examples/bin` with the real `vyrn.json` that has
@@ -3246,8 +4049,10 @@ fn m4_the_repos_own_page_gets_contract_completion() {
     // The blank line just before `fn isLoading` — module scope in the real page.
     let (line, _) = pos_after(&page_src, "fn isLoading");
     let items = completion_items(&mut client, &uri, line - 1, 0);
-    let snippets: Vec<&str> =
-        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    let snippets: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("insertText").and_then(|t| t.as_str()))
+        .collect();
     // `index.vyx` already exports `head` AND `data`, so neither is offered
     // again — the contract has nothing left to add, which is itself the right
     // answer and proves the resolution ran.
@@ -3262,7 +4067,6 @@ fn m4_the_repos_own_page_gets_contract_completion() {
     assert!(h.contains("member of contract `Page` (std/ui)"), "{h}");
     let _ = client.child.kill();
 }
-
 
 /// RFC-0072 M1: the audience rule reaches the EDITOR.
 ///
@@ -3314,7 +4118,10 @@ fn a_widening_import_squiggles_in_the_editor() {
         .find(|m| m.contains("cannot import"))
         .unwrap_or_else(|| panic!("expected an audience diagnostic, got {diags:?}"));
     assert!(msg.contains("app/view.vyrn` is universal"), "{msg}");
-    assert!(msg.contains("`server/store.vyrn`, which is server-only"), "{msg}");
+    assert!(
+        msg.contains("`server/store.vyrn`, which is server-only"),
+        "{msg}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3352,12 +4159,18 @@ fn hover_shows_a_protocol_methods_doc_comment() {
     // The signature inside the protocol body.
     let (l, c) = pos_after(PROTOCOL_DOC_SRC, "fn cacheFor");
     let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the signature");
-    assert!(hover.contains("max-age=N"), "signature hover carries the doc: {hover}");
+    assert!(
+        hover.contains("max-age=N"),
+        "signature hover carries the doc: {hover}"
+    );
 
     // The call site, which resolves through the impl.
     let (l, c) = pos_after(PROTOCOL_DOC_SRC, "r.cacheFor");
     let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the call");
-    assert!(hover.contains("max-age=N"), "call-site hover carries the doc: {hover}");
+    assert!(
+        hover.contains("max-age=N"),
+        "call-site hover carries the doc: {hover}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3405,8 +4218,12 @@ fn m3_scratch() -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("server/api")).unwrap();
     std::fs::create_dir_all(dir.join("shared")).unwrap();
-    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"m3\", \"client\": \"boot.vyrn\" }
-").unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"m3\", \"client\": \"boot.vyrn\" }
+",
+    )
+    .unwrap();
     std::fs::write(dir.join("shared/wire.vyrn"), M3_WIRE).unwrap();
     std::fs::write(dir.join("server/api/notes.vyrn"), M3_API).unwrap();
     std::fs::write(dir.join("boot.vyrn"), M3_BOOT).unwrap();
@@ -3425,9 +4242,15 @@ fn a_generated_stub_borrows_its_declarations_doc_and_shows_its_derived_route() {
     // The stub's own signature — what you actually call, callback and all.
     assert!(hover.contains("fn notesById(req: NoteReq"), "{hover}");
     // The DECLARATION's doc, which the stub does not carry.
-    assert!(hover.contains("Fetch one note by id"), "the origin's doc is borrowed: {hover}");
+    assert!(
+        hover.contains("Fetch one note by id"),
+        "the origin's doc is borrowed: {hover}"
+    );
     // The derived wire fact, and where the declaration is written.
-    assert!(hover.contains("`POST /_/notes/byId` · convention"), "{hover}");
+    assert!(
+        hover.contains("`POST /_/notes/byId` · convention"),
+        "{hover}"
+    );
     assert!(hover.contains("generated from `byId` in"), "{hover}");
     assert!(hover.contains("server/api/notes.vyrn:4"), "{hover}");
 
@@ -3449,14 +4272,32 @@ fn go_to_definition_on_a_generated_stub_lands_on_the_declaration() {
         "params": { "textDocument": { "uri": uri }, "position": { "line": l, "character": c - 1 } }
     }));
     let resp = client.read_response(&id);
-    let loc = resp.get("result").cloned().unwrap_or(serde_json::Value::Null);
-    let target = loc.pointer("/uri").and_then(|u| u.as_str()).unwrap_or_default();
-    assert!(target.ends_with("server/api/notes.vyrn"), "lands on the api module: {loc}");
+    let loc = resp
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let target = loc
+        .pointer("/uri")
+        .and_then(|u| u.as_str())
+        .unwrap_or_default();
+    assert!(
+        target.ends_with("server/api/notes.vyrn"),
+        "lands on the api module: {loc}"
+    );
     // `export fn byId` is line 4 (1-based) → 0-based 3, and `byId` starts at
     // column 11 (1-based) → 0-based 10. The map is the only thing that knows
     // the column; the AST carries a line and nothing else.
-    assert_eq!(loc.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(3), "{loc}");
-    assert_eq!(loc.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(10), "{loc}");
+    assert_eq!(
+        loc.pointer("/range/start/line").and_then(|l| l.as_i64()),
+        Some(3),
+        "{loc}"
+    );
+    assert_eq!(
+        loc.pointer("/range/start/character")
+            .and_then(|c| c.as_i64()),
+        Some(10),
+        "{loc}"
+    );
 
     // A re-emitted TYPE has lost its file in the generated source; the map is
     // the only place that still says it came from `shared/wire.vyrn`.
@@ -3466,8 +4307,14 @@ fn go_to_definition_on_a_generated_stub_lands_on_the_declaration() {
         "params": { "textDocument": { "uri": uri }, "position": { "line": tl, "character": tc - 3 } }
     }));
     let resp = client.read_response(&serde_json::json!("m3ty"));
-    let t = resp.pointer("/result/uri").and_then(|u| u.as_str()).unwrap_or_default();
-    assert!(t.ends_with("shared/wire.vyrn"), "a re-emitted type jumps home: {resp}");
+    let t = resp
+        .pointer("/result/uri")
+        .and_then(|u| u.as_str())
+        .unwrap_or_default();
+    assert!(
+        t.ends_with("shared/wire.vyrn"),
+        "a re-emitted type jumps home: {resp}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = client.child.kill();
@@ -3486,7 +4333,10 @@ fn a_procedure_declaration_hovers_with_the_route_it_is_mounted_at() {
     let hover = hover_value(&mut client, &api_uri, l, c - 1).expect("hover on the declaration");
     assert!(hover.contains("fn byId(req: NoteReq) -> Note"), "{hover}");
     assert!(hover.contains("Fetch one note by id"), "{hover}");
-    assert!(hover.contains("`POST /_/notes/byId` · convention"), "the derived route: {hover}");
+    assert!(
+        hover.contains("`POST /_/notes/byId` · convention"),
+        "the derived route: {hover}"
+    );
 
     // The lens the extension renders reads the same facts.
     client.send(&serde_json::json!({
@@ -3495,21 +4345,30 @@ fn a_procedure_declaration_hovers_with_the_route_it_is_mounted_at() {
     }));
     let resp = client.read_response(&serde_json::json!("m3lens"));
     let lenses = resp["result"].as_array().cloned().unwrap_or_default();
-    assert_eq!(lenses.len(), 1, "one lens per DECLARATION, not per generated symbol: {lenses:?}");
+    assert_eq!(
+        lenses.len(),
+        1,
+        "one lens per DECLARATION, not per generated symbol: {lenses:?}"
+    );
     assert_eq!(lenses[0]["line"].as_i64(), Some(3), "{lenses:?}");
-    assert_eq!(lenses[0]["title"].as_str(), Some("POST /_/notes/byId · convention"));
+    assert_eq!(
+        lenses[0]["title"].as_str(),
+        Some("POST /_/notes/byId · convention")
+    );
 
     // A module nothing mounts gets no lenses and no note — and is not an error.
     let wire_uri = file_uri(&dir.join("shared/wire.vyrn"));
     did_open(&mut client, &wire_uri, "vyrn", M3_WIRE);
     let (wl, wc) = pos_after(M3_WIRE, "export type Note ");
     let h = hover_value(&mut client, &wire_uri, wl, wc - 6).unwrap_or_default();
-    assert!(!h.contains("POST"), "a wire type is mounted at nothing: {h}");
+    assert!(
+        !h.contains("POST"),
+        "a wire type is mounted at nothing: {h}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = client.child.kill();
 }
-
 
 // ===========================================================================
 // RFC-0073 M4 — rename across the generated boundary.
@@ -3556,8 +4415,12 @@ fn rename_at(
                 .map(|e| {
                     format!(
                         "{}:{}={}",
-                        e.pointer("/range/start/line").and_then(|v| v.as_i64()).unwrap_or(-1),
-                        e.pointer("/range/start/character").and_then(|v| v.as_i64()).unwrap_or(-1),
+                        e.pointer("/range/start/line")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(-1),
+                        e.pointer("/range/start/character")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(-1),
                         e.get("newText").and_then(|v| v.as_str()).unwrap_or("")
                     )
                 })
@@ -3594,10 +4457,20 @@ fn renaming_a_procedure_follows_the_symbol_map_into_the_generated_call_site() {
         "params": { "textDocument": { "uri": api_uri }, "position": { "line": l, "character": c - 1 } }
     }));
     let prep = client.read_response(&id);
-    assert_eq!(prep.pointer("/result/placeholder").and_then(|p| p.as_str()), Some("byId"), "{prep}");
-    assert_eq!(prep.pointer("/result/range/start/line").and_then(|v| v.as_i64()), Some(3), "{prep}");
     assert_eq!(
-        prep.pointer("/result/range/start/character").and_then(|v| v.as_i64()),
+        prep.pointer("/result/placeholder").and_then(|p| p.as_str()),
+        Some("byId"),
+        "{prep}"
+    );
+    assert_eq!(
+        prep.pointer("/result/range/start/line")
+            .and_then(|v| v.as_i64()),
+        Some(3),
+        "{prep}"
+    );
+    assert_eq!(
+        prep.pointer("/result/range/start/character")
+            .and_then(|v| v.as_i64()),
         Some(10),
         "{prep}"
     );
@@ -3633,7 +4506,10 @@ fn renaming_a_wire_type_follows_both_the_direct_import_and_the_re_emitted_copy()
     // The api module imports it DIRECTLY — an ordinary cross-file reference,
     // found because that module's import resolves to this file. `NoteReq` is a
     // different token and does not move.
-    assert_eq!(edits_for(&changes, "server/api/notes.vyrn"), ["0:9=Memo", "3:32=Memo", "4:11=Memo"]);
+    assert_eq!(
+        edits_for(&changes, "server/api/notes.vyrn"),
+        ["0:9=Memo", "3:32=Memo", "4:11=Memo"]
+    );
     // The client never imports it: `client()` re-emits the declaration, and the
     // map is the only record that the copy came from here.
     assert_eq!(edits_for(&changes, "boot.vyrn"), ["3:30=Memo"]);
@@ -3666,18 +4542,22 @@ fn rename_refuses_what_it_cannot_carry_through_rather_than_doing_half_of_it() {
     // A cursor on an IMPORTED name: renameable, but not from here.
     let (il, ic) = pos_after(M3_API, "    return Note");
     let (_, err) = rename_at(&mut client, &api_uri, il, ic - 1, "x");
-    assert!(err.unwrap_or_default().contains("not declared in this file"));
+    assert!(err
+        .unwrap_or_default()
+        .contains("not declared in this file"));
 
     // A GENERATED name at its call site: the thing to rename is the declaration
     // it stands for, and the message says so instead of silently doing nothing.
     let (gl, gc) = pos_after(M3_BOOT, "api.notesById");
     let (_, err) = rename_at(&mut client, &boot_uri, gl, gc - 1, "x");
-    assert!(err.is_some(), "a generated symbol is not renameable in place");
+    assert!(
+        err.is_some(),
+        "a generated symbol is not renameable in place"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = client.child.kill();
 }
-
 
 /// The RFC's acceptance line, against the corpus rather than a fixture: renaming
 /// a procedure in `examples/bin` updates every call site across `app/`,
@@ -3705,14 +4585,21 @@ fn renaming_a_procedure_in_the_corpus_reaches_every_generated_call_site() {
     // The declaration.
     assert_eq!(edits_for(&changes, "server/api/pastes.vyrn"), ["27:14=add"]);
     // The browser client, through `client()`'s stub — the one the RFC is about.
-    let boot: Vec<&str> =
-        edits_for(&changes, "client/boot.vyrn").iter().map(|s| s.as_str()).collect();
+    let boot: Vec<&str> = edits_for(&changes, "client/boot.vyrn")
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     assert_eq!(boot.len(), 1, "{boot:?}");
-    assert!(boot[0].ends_with("=pastesAdd"), "the derived stub name moves too: {boot:?}");
+    assert!(
+        boot[0].ends_with("=pastesAdd"),
+        "the derived stub name moves too: {boot:?}"
+    );
     // The REST projection, through `http()`'s same-named re-export: the import
     // list AND the `POST(create("/"))` that names it.
-    let http: Vec<&str> =
-        edits_for(&changes, "pastes.http.vyrn").iter().map(|s| s.as_str()).collect();
+    let http: Vec<&str> = edits_for(&changes, "pastes.http.vyrn")
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     assert_eq!(http.len(), 2, "{http:?}");
     assert!(http.iter().all(|e| e.ends_with("=add")), "{http:?}");
     // Sources only: the generated modules are build artifacts.
@@ -3736,19 +4623,23 @@ fn renaming_a_procedure_in_the_corpus_reaches_a_pages_script_body() {
     let (changes, err) = rename_at(&mut client, &uri, l, c - 1, "latest");
     assert!(err.is_none(), "{err:?}");
 
-    let page: Vec<&str> =
-        edits_for(&changes, "app/routes/index.vyx").iter().map(|s| s.as_str()).collect();
+    let page: Vec<&str> = edits_for(&changes, "app/routes/index.vyx")
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     // The import and the one call. `recentRows` is a different token and the
     // four prose mentions of "recent" in the comments are not tokens at all.
     assert_eq!(page.len(), 2, "{page:?}");
     assert!(page.iter().all(|e| e.ends_with("=latest")), "{page:?}");
     // The `.vyx` line numbers are the FILE's, not the script body's: the import
     // is on file line 15 (0-based 14).
-    assert!(page[0].starts_with("14:"), "script-body lines map back to the file: {page:?}");
+    assert!(
+        page[0].starts_with("14:"),
+        "script-body lines map back to the file: {page:?}"
+    );
 
     let _ = client.child.kill();
 }
-
 
 // ===========================================================================
 // RFC-0091 M1/M3 — the container protocols in the editor.
@@ -3806,12 +4697,18 @@ fn a_user_container_checks_and_hovers_in_the_editor() {
     // The loop variable takes what `place nth` yields.
     let (l, c) = pos_after(CONTAINER_SRC, "for x");
     let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the loop variable");
-    assert!(hover.contains("Int64"), "the loop variable hovers as its element type: {hover}");
+    assert!(
+        hover.contains("Int64"),
+        "the loop variable hovers as its element type: {hover}"
+    );
 
     // The declared `copy` gives the binding the receiver's type.
     let (l, c) = pos_after(CONTAINER_SRC, "let q");
     let hover = hover_value(&mut client, &uri, l, c - 1).expect("hover on the copy");
-    assert!(hover.contains("Ring"), "a declared copy hovers as its type: {hover}");
+    assert!(
+        hover.contains("Ring"),
+        "a declared copy hovers as its type: {hover}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3834,7 +4731,10 @@ fn the_memory_model_reaches_hover_tokens_and_inlay_hints() {
     }));
     let init = client.read_response(&init_id);
     let caps = init.pointer("/result/capabilities").expect("capabilities");
-    assert!(caps.get("inlayHintProvider").is_some(), "inlay hints advertised: {caps}");
+    assert!(
+        caps.get("inlayHintProvider").is_some(),
+        "inlay hints advertised: {caps}"
+    );
     // The legend the modifier bit is an index into. `modification` must be bit 3.
     let mods = caps
         .pointer("/semanticTokensProvider/legend/tokenModifiers")
@@ -3862,7 +4762,10 @@ fn main() -> Int64 {
         }
     }));
     let notif = client.read_notification("textDocument/publishDiagnostics");
-    let diags = notif.pointer("/params/diagnostics").and_then(|d| d.as_array()).unwrap();
+    let diags = notif
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .unwrap();
     assert!(diags.is_empty(), "clean source: {diags:?}");
 
     let mut ids = Ids::new();
@@ -3879,7 +4782,10 @@ fn main() -> Int64 {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    assert!(text.contains("memory: moved at line 4 into `take(..)`"), "hover: {text}");
+    assert!(
+        text.contains("memory: moved at line 4 into `take(..)`"),
+        "hover: {text}"
+    );
 
     // 2. Hover on `b`, which lives to block exit — the other answer.
     let id = ids.next();
@@ -3893,7 +4799,10 @@ fn main() -> Int64 {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    assert!(text.contains("memory: reclaimed at block exit"), "hover: {text}");
+    assert!(
+        text.contains("memory: reclaimed at block exit"),
+        "hover: {text}"
+    );
 
     // 3. The move gets an inlay hint at the end of `a` inside `take(a)`.
     let id = ids.next();
@@ -3908,7 +4817,10 @@ fn main() -> Int64 {
         }
     }));
     let hints = client.read_response(&id);
-    let list = hints.get("result").and_then(|r| r.as_array()).expect("hints: {hints}");
+    let list = hints
+        .get("result")
+        .and_then(|r| r.as_array())
+        .expect("hints: {hints}");
     assert_eq!(list.len(), 1, "one move, one hint: {list:?}");
     assert_eq!(list[0].pointer("/position/line").unwrap().as_i64(), Some(3));
     assert_eq!(list[0].get("label").unwrap().as_str(), Some("→ take(..)"));
@@ -3979,12 +4891,18 @@ fn main() -> Int64 {
     did_open(&mut client, &uri, "vyrn", app);
     let notif = client.read_notification("textDocument/publishDiagnostics");
     let diags = notif["params"]["diagnostics"].as_array().unwrap();
-    assert!(diags.is_empty(), "method-form `remove` on a container: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "method-form `remove` on a container: {diags:?}"
+    );
 
     // `b.remove(0)` resolves to the container's declaration, in its own file.
     let (l, c) = at(app, 5, "b.remove");
     let target = definition_target(&mut client, &uri, l, c + 2).expect("definition on b.remove");
-    assert!(target.ends_with("/bag.vyrn"), "b.remove → bag.vyrn: {target}");
+    assert!(
+        target.ends_with("/bag.vyrn"),
+        "b.remove → bag.vyrn: {target}"
+    );
 
     // A module that does NOT claim the name keeps the builtin: `m.remove(k)`
     // checks, and completion after `m.` still offers it.
@@ -4004,7 +4922,10 @@ fn main() -> Int64 {
     assert!(diags.is_empty(), "builtin `remove` on a Map: {diags:?}");
     let (l, c) = at(maps, 3, "m.remove");
     let labels = completion_labels(&mut client, &maps_uri, l, c + 2);
-    assert!(labels.contains(&"remove".to_string()), "map completes `remove`: {labels:?}");
+    assert!(
+        labels.contains(&"remove".to_string()),
+        "map completes `remove`: {labels:?}"
+    );
 
     // The trade-off, pinned: scope answers, not the receiver's type, so one
     // module cannot mean both. It is refused at the call and says which type it
@@ -4027,7 +4948,10 @@ fn main() -> Int64 {
         .first()
         .and_then(|d| d["message"].as_str())
         .unwrap_or("");
-    assert!(msg.contains("expects Bag"), "the clash names the type it wanted: {diags:?}");
+    assert!(
+        msg.contains("expects Bag"),
+        "the clash names the type it wanted: {diags:?}"
+    );
 
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&dir);

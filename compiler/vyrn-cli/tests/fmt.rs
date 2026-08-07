@@ -22,17 +22,32 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// A canonically-formatted program (matches `vyrn fmt` output) with LF endings.
-const CANON_LF: &str = "fn main() -> Int64 {\n    let x = if true { 1 } else { 2 }\n    return x\n}\n";
+const CANON_LF: &str =
+    "fn main() -> Int64 {\n    let x = if true { 1 } else { 2 }\n    return x\n}\n";
 
 #[test]
 fn check_passes_on_an_already_formatted_lf_file() {
     let dir = scratch("canon-lf");
     let file = dir.join("a.vyrn");
     std::fs::write(&file, CANON_LF).unwrap();
-    let out = vyrn().arg("fmt").arg("--check").arg(&file).output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // No files listed as "would change".
-    assert!(out.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.stdout.is_empty(),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     // Untouched.
     assert_eq!(std::fs::read_to_string(&file).unwrap(), CANON_LF);
 }
@@ -43,7 +58,12 @@ fn check_flags_a_misformatted_file_without_writing() {
     let file = dir.join("bad.vyrn");
     let messy = "fn  main()->Int64{\nlet   x=1\nreturn x\n}\n";
     std::fs::write(&file, messy).unwrap();
-    let out = vyrn().arg("fmt").arg("--check").arg(&file).output().unwrap();
+    let out = vyrn()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .unwrap();
     // Exit nonzero and the path is listed.
     assert_eq!(out.status.code(), Some(1));
     let listed = String::from_utf8_lossy(&out.stdout);
@@ -60,7 +80,12 @@ fn check_does_not_flag_an_already_formatted_crlf_file() {
     let file = dir.join("crlf.vyrn");
     let canon_crlf = CANON_LF.replace('\n', "\r\n");
     std::fs::write(&file, &canon_crlf).unwrap();
-    let out = vyrn().arg("fmt").arg("--check").arg(&file).output().unwrap();
+    let out = vyrn()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -80,12 +105,28 @@ fn write_preserves_crlf_endings() {
     let messy_crlf = "fn  main()->Int64{\r\nlet   x=1\r\nreturn x\r\n}\r\n";
     std::fs::write(&file, messy_crlf).unwrap();
     let out = vyrn().arg("fmt").arg(&file).output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let after = std::fs::read_to_string(&file).unwrap();
     // Every line ends CRLF, none bare-LF.
-    assert!(after.contains("\r\n"), "expected CRLF endings, got: {after:?}");
-    assert!(!after.replace("\r\n", "").contains('\n'), "found a bare LF: {after:?}");
+    assert!(
+        after.contains("\r\n"),
+        "expected CRLF endings, got: {after:?}"
+    );
+    assert!(
+        !after.replace("\r\n", "").contains('\n'),
+        "found a bare LF: {after:?}"
+    );
     // And it is now canonical: a second --check passes.
-    let recheck = vyrn().arg("fmt").arg("--check").arg(&file).output().unwrap();
+    let recheck = vyrn()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .unwrap();
     assert_eq!(recheck.status.code(), Some(0), "not idempotent under CRLF");
 }

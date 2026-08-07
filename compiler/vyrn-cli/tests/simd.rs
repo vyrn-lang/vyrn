@@ -25,13 +25,24 @@ fn body_of(src: &str, name: &str) -> String {
     let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let file = dir.join(format!("{name}-{nth}.vyrn"));
     std::fs::write(&file, src).unwrap();
-    let out = vyrn().arg("emit-ir").arg(&file).output().expect("vyrn emit-ir");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-ir")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-ir");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let ir = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     let start = ir
         .find(&format!("@vyrn_{name}("))
         .unwrap_or_else(|| panic!("no `vyrn_{name}` in the emitted IR:\n{ir}"));
-    let start = ir[..start].rfind("\ndefine ").expect("no `define` before it") + 1;
+    let start = ir[..start]
+        .rfind("\ndefine ")
+        .expect("no `define` before it")
+        + 1;
     ir[start..start + ir[start..].find("\n}\n").expect("unterminated body")].to_string()
 }
 
@@ -144,7 +155,10 @@ fn min_and_max_lower_to_the_nan_propagating_intrinsic() {
     );
     assert!(body.contains("@llvm.minimum.v4f32"), "not minnum:\n{body}");
     assert!(body.contains("@llvm.maximum.v4f32"), "not maxnum:\n{body}");
-    assert!(!body.contains("minnum"), "minNum is the wrong rule:\n{body}");
+    assert!(
+        !body.contains("minnum"),
+        "minNum is the wrong rule:\n{body}"
+    );
 }
 
 /// `nearest` is roundTiesToEven, and `llvm.round` is a DIFFERENT function —
@@ -171,7 +185,10 @@ fn nearest_lowers_to_ties_to_even_and_not_to_ties_away() {
     assert!(body.contains("@llvm.ceil.v4f32"), "not ceil:\n{body}");
     assert!(body.contains("@llvm.floor.v4f32"), "not floor:\n{body}");
     assert!(body.contains("@llvm.trunc.v4f32"), "not trunc:\n{body}");
-    assert!(body.contains("@llvm.rint.v4f32"), "not ties-to-even:\n{body}");
+    assert!(
+        body.contains("@llvm.rint.v4f32"),
+        "not ties-to-even:\n{body}"
+    );
     assert!(
         !body.contains("llvm.round.v4f32"),
         "`llvm.round` is ties-AWAY and answers 3 for 2.5:\n{body}"
@@ -202,12 +219,18 @@ fn integer_lane_compare_is_signed_and_the_add_does_not_promise_no_overflow() {
          }\n",
         "both",
     );
-    assert!(body.contains("icmp slt <4 x i32>"), "not a signed compare:\n{body}");
+    assert!(
+        body.contains("icmp slt <4 x i32>"),
+        "not a signed compare:\n{body}"
+    );
     assert!(
         !body.contains("icmp ult <4 x i32>"),
         "`ult` is the `U32x4` comparison and answers false for `Int32.min < 1`:\n{body}"
     );
-    assert!(body.contains("add <4 x i32>"), "no vector add at all:\n{body}");
+    assert!(
+        body.contains("add <4 x i32>"),
+        "no vector add at all:\n{body}"
+    );
     assert!(
         !body.contains("nsw <4 x i32>") && !body.contains("nuw <4 x i32>"),
         "integer vector arithmetic WRAPS; a no-overflow flag makes it UB:\n{body}"
@@ -252,8 +275,14 @@ fn the_wide_load_spans_two_elements_and_is_still_checked_once() {
     );
     assert!(body.contains("@llvm.minimum.v2f64"), "not minnum:\n{body}");
     assert!(body.contains("@llvm.maximum.v2f64"), "not maxnum:\n{body}");
-    assert!(body.contains("@llvm.sqrt.v2f64"), "not a vector sqrt:\n{body}");
-    assert!(!body.contains("minnum"), "minNum is the wrong rule:\n{body}");
+    assert!(
+        body.contains("@llvm.sqrt.v2f64"),
+        "not a vector sqrt:\n{body}"
+    );
+    assert!(
+        !body.contains("minnum"),
+        "minNum is the wrong rule:\n{body}"
+    );
     assert_eq!(
         body.matches("getelementptr double, ptr").count(),
         1,
@@ -281,8 +310,14 @@ fn the_mask_reductions_are_one_reduce_and_not_four_lane_reads() {
          }\n",
         "both",
     );
-    assert!(body.contains("@llvm.vector.reduce.or.v4i1"), "not a reduce:\n{body}");
-    assert!(body.contains("@llvm.vector.reduce.and.v4i1"), "not a reduce:\n{body}");
+    assert!(
+        body.contains("@llvm.vector.reduce.or.v4i1"),
+        "not a reduce:\n{body}"
+    );
+    assert!(
+        body.contains("@llvm.vector.reduce.and.v4i1"),
+        "not a reduce:\n{body}"
+    );
     assert!(
         !body.contains("extractelement"),
         "a reduction read lanes one at a time:\n{body}"

@@ -36,7 +36,11 @@ use std::process::Command;
 use vyrn_frontend::hash::sha256_hex;
 
 fn repo_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -50,7 +54,10 @@ fn unit_tests_green(rel: &str, expected: &str) {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");
-    assert!(combined.contains(expected), "expected `{expected}`:\n{combined}");
+    assert!(
+        combined.contains(expected),
+        "expected `{expected}`:\n{combined}"
+    );
 }
 
 #[test]
@@ -73,7 +80,10 @@ fn byte_array(bytes: &[u8]) -> String {
 }
 
 fn utf8_of(cp: u32) -> Vec<u8> {
-    char::from_u32(cp).expect("a scalar value").to_string().into_bytes()
+    char::from_u32(cp)
+        .expect("a scalar value")
+        .to_string()
+        .into_bytes()
 }
 
 /// Run a generated program and return its stdout lines.
@@ -88,7 +98,10 @@ fn run_lines(dir: &str, src: &str) -> Vec<String> {
         "generated program failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim_end().to_string()).collect()
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .collect()
 }
 
 /// The comparator, in Vyrn: for one byte buffer, `decodeUtf8`'s answer against
@@ -141,8 +154,7 @@ fn row(b: Array<UInt8>) -> String {
 /// which is the statement M4c needs and the one a `charsV == chars` comparison can
 /// no longer make. `std/text`'s `decodeUtf8` therefore decodes all 5,972 buffers
 /// byte for byte as the deleted implementations did.
-const CODEPOINT_DIGEST: &str =
-    "013ef87f67f7fa2b21ac9da8ae22c0261b3f4fb48e0d8fa7af7042ca32428b59";
+const CODEPOINT_DIGEST: &str = "013ef87f67f7fa2b21ac9da8ae22c0261b3f4fb48e0d8fa7af7042ca32428b59";
 
 /// The `chars` builtin over the codepoint space, pinned (RFC-0078 M4b(2), M4c).
 ///
@@ -161,7 +173,9 @@ fn the_chars_builtin_decodes_the_codepoint_space_exactly_as_it_did() {
     cps.extend((0x800..0x10000).step_by(53));
     cps.extend((0x10000..0x110000).step_by(521));
     // The boundaries, spelled out so a step size can never skip one.
-    cps.extend([0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xfffd, 0xffff, 0x10000, 0x10ffff]);
+    cps.extend([
+        0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xfffd, 0xffff, 0x10000, 0x10ffff,
+    ]);
     cps.retain(|c| !(0xD800..=0xDFFF).contains(c));
     cps.sort_unstable();
     cps.dedup();
@@ -185,12 +199,17 @@ fn row(b: Array<UInt8>) -> String {
     }
 }
 "#;
-    let calls: String =
-        buffers.iter().map(|b| format!("    print(row({}))\n", byte_array(b))).collect();
+    let calls: String = buffers
+        .iter()
+        .map(|b| format!("    print(row({}))\n", byte_array(b)))
+        .collect();
     let src = format!("{harness}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
     let lines = run_lines("vyrn-m4c-codepoints", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
-    assert!(!lines.iter().any(|l| l == "reject"), "a valid buffer was refused");
+    assert!(
+        !lines.iter().any(|l| l == "reject"),
+        "a valid buffer was refused"
+    );
 
     // Spot pins, so a digest mismatch has a readable neighbour. Keyed by the
     // buffer's bytes rather than by index.
@@ -268,7 +287,12 @@ fn decodeutf8_refuses_exactly_what_stringfrombytes_refuses() {
             buffers.push(vec![0xc0 | (cp >> 6) as u8, 0x80 | (cp & 0x3f) as u8]);
         }
         buffers.push(vec![0xe0, 0x80 | (cp >> 6) as u8, 0x80 | (cp & 0x3f) as u8]);
-        buffers.push(vec![0xf0, 0x80, 0x80 | (cp >> 6) as u8, 0x80 | (cp & 0x3f) as u8]);
+        buffers.push(vec![
+            0xf0,
+            0x80,
+            0x80 | (cp >> 6) as u8,
+            0x80 | (cp & 0x3f) as u8,
+        ]);
     }
     // Proper prefixes of valid sequences: truncation at every cut.
     for cp in [0xe9u32, 0x20ac, 0x1f600, 0x10ffff] {
@@ -290,8 +314,10 @@ fn decodeutf8_refuses_exactly_what_stringfrombytes_refuses() {
     // No NUL anywhere: `stringFromBytes` refuses it before it looks at UTF-8.
     buffers.retain(|b| !b.contains(&0));
 
-    let calls: String =
-        buffers.iter().map(|b| format!("    print(row({}))\n", byte_array(b))).collect();
+    let calls: String = buffers
+        .iter()
+        .map(|b| format!("    print(row({}))\n", byte_array(b)))
+        .collect();
     let src = format!("{DECODE_HARNESS}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
     let lines = run_lines("vyrn-m4b-malformed", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
@@ -301,7 +327,13 @@ fn decodeutf8_refuses_exactly_what_stringfrombytes_refuses() {
         .filter(|(l, _)| *l != "ok")
         .map(|(l, b)| format!("{b:02x?}: {l}"))
         .collect();
-    assert!(bad.is_empty(), "{} of {} disagree:\n{}", bad.len(), buffers.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} of {} disagree:\n{}",
+        bad.len(),
+        buffers.len(),
+        bad.join("\n")
+    );
 }
 
 /// `lineAtV`/`colAtV` against `lineAt`/`colAt`, at every offset of every buffer
@@ -325,7 +357,7 @@ fn line_and_column_match_the_builtins_at_every_offset() {
         "no newline at all",
         "ends with one\n",
         "\nstarts with one",
-        "a\r\nb\r\nc",           // CRLF: one break, and the CR holds a column
+        "a\r\nb\r\nc",          // CRLF: one break, and the CR holds a column
         "\r\n\r\n",             // nothing but CRLF
         "héllo\nwörld\n😀 end", // multi-byte, so a byte column is not a char column
         "é\né\né",              // a multi-byte codepoint spanning a column boundary
@@ -363,7 +395,13 @@ fn row(b: Array<UInt8>, off: Int64) -> String {
         .filter(|(l, _)| !l.starts_with("ok"))
         .map(|(l, (i, off))| format!("{:?} @ {off}: {l}", texts[*i]))
         .collect();
-    assert!(bad.is_empty(), "{} of {} disagree:\n{}", bad.len(), rows.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} of {} disagree:\n{}",
+        bad.len(),
+        rows.len(),
+        bad.join("\n")
+    );
 
     // The column counts BYTES, not codepoints, and that is a measurement off the
     // builtin rather than a choice: `é` is two bytes, so the `\n` after `é` on
@@ -375,7 +413,10 @@ fn row(b: Array<UInt8>, off: Int64) -> String {
         .find(|(_, (i, off))| texts[*i] == "é\né\né" && *off == 2)
         .map(|(l, _)| l.clone())
         .expect("the offset after the first é");
-    assert_eq!(three, "ok 1:3", "a column is a byte offset, not a character index");
+    assert_eq!(
+        three, "ok 1:3",
+        "a column is a byte offset, not a character index"
+    );
 }
 
 /// `charCount` — the census's one `Unjustified` builtin — against `chars`, over the
@@ -403,7 +444,9 @@ fn charcount_agrees_with_chars_over_the_codepoint_corpus() {
     let mut cps: Vec<u32> = (0x20..0x800).step_by(3).collect();
     cps.extend((0x800..0x10000).step_by(97));
     cps.extend((0x10000..0x110000).step_by(521));
-    cps.extend([0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xfffd, 0xffff, 0x10000, 0x10ffff]);
+    cps.extend([
+        0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xfffd, 0xffff, 0x10000, 0x10ffff,
+    ]);
     cps.retain(|c| !(0xD800..=0xDFFF).contains(c));
     cps.sort_unstable();
     cps.dedup();
@@ -435,13 +478,22 @@ fn row(b: Array<UInt8>) -> String {
     }
 }
 "#;
-    let calls: String =
-        buffers.iter().map(|b| format!("    print(row({}))\n", byte_array(b))).collect();
+    let calls: String = buffers
+        .iter()
+        .map(|b| format!("    print(row({}))\n", byte_array(b)))
+        .collect();
     let src = format!("{harness}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
     let lines = run_lines("vyrn-charcount-oracle", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
-    assert!(!lines.iter().any(|l| l.starts_with("MISMATCH")), "{:?}", lines.iter().find(|l| l.starts_with("MISMATCH")));
-    assert!(!lines.iter().any(|l| l == "reject"), "a valid buffer was refused");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("MISMATCH")),
+        "{:?}",
+        lines.iter().find(|l| l.starts_with("MISMATCH"))
+    );
+    assert!(
+        !lines.iter().any(|l| l == "reject"),
+        "a valid buffer was refused"
+    );
     // Not vacuous: the corpus has to contain buffers where the two answers COULD
     // differ, i.e. where the byte count exceeds the scalar count.
     let multibyte = lines
@@ -454,7 +506,10 @@ fn row(b: Array<UInt8>) -> String {
         })
         .filter(|(n, b)| b > n)
         .count();
-    assert!(multibyte > 100, "only {multibyte} buffers had more bytes than scalars");
+    assert!(
+        multibyte > 100,
+        "only {multibyte} buffers had more bytes than scalars"
+    );
 
     // The `examples/bytecount.vyrn` rows, spelled out. Captured on all three engines
     // before `charCount` was routed and unchanged after.
@@ -466,5 +521,9 @@ fn row(b: Array<UInt8>) -> String {
          print(show(\"\"))\n    print(show(\"hello\"))\n    print(show(\"héllo\"))\n    \
          print(show(\"☕\"))\n    print(show(\"😀\"))\n    return 0\n}\n",
     );
-    assert_eq!(rows, ["0/0", "5/5", "6/5", "3/1", "4/1"], "bytecount.vyrn's pinned rows");
+    assert_eq!(
+        rows,
+        ["0/0", "5/5", "6/5", "3/1", "4/1"],
+        "bytecount.vyrn's pinned rows"
+    );
 }

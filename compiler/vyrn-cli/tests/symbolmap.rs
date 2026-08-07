@@ -59,7 +59,9 @@ struct Origin {
 }
 
 fn after<'a>(hay: &'a str, key: &str) -> &'a str {
-    hay.split_once(key).unwrap_or_else(|| panic!("no {key} in {hay}")).1
+    hay.split_once(key)
+        .unwrap_or_else(|| panic!("no {key} in {hay}"))
+        .1
 }
 
 /// Pull every origin out of a compact symbol-map document. Deliberately a
@@ -76,15 +78,35 @@ fn origins(json: &str) -> Vec<Origin> {
         if !rest.starts_with(",\"origin\":{") {
             continue; // the origin's own `{"name": ..}` is not a symbol entry
         }
-        let file = after(rest, "\"file\":\"").split('"').next().unwrap().to_string();
-        let line: usize = after(rest, "\"line\":").split(',').next().unwrap().parse().unwrap();
-        let col: usize = after(rest, "\"col\":").split(',').next().unwrap().parse().unwrap();
+        let file = after(rest, "\"file\":\"")
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string();
+        let line: usize = after(rest, "\"line\":")
+            .split(',')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let col: usize = after(rest, "\"col\":")
+            .split(',')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         let name = after(after(rest, "\"col\":"), "\"name\":\"")
             .split('"')
             .next()
             .unwrap()
             .to_string();
-        out.push(Origin { symbol: symbol.to_string(), file, line, col, name });
+        out.push(Origin {
+            symbol: symbol.to_string(),
+            file,
+            line,
+            col,
+            name,
+        });
     }
     out
 }
@@ -97,7 +119,11 @@ fn assert_points_at(project: &Path, o: &Origin) {
         .lines()
         .nth(o.line - 1)
         .unwrap_or_else(|| panic!("{}:{} is past the end of the file", o.file, o.line));
-    let at: String = line.chars().skip(o.col - 1).take(o.name.chars().count()).collect();
+    let at: String = line
+        .chars()
+        .skip(o.col - 1)
+        .take(o.name.chars().count())
+        .collect();
     assert_eq!(
         at, o.name,
         "symbol `{}`: {}:{}:{} does not point at `{}` — the line reads `{line}`",
@@ -147,16 +173,28 @@ fn every_origin_in_the_fullstack_corpus_points_at_its_declaration() {
 fn the_server_and_client_maps_agree_on_where_a_procedure_lives() {
     let project = repo_dir("examples/bin");
     let of = |root: &str| -> Vec<Origin> {
-        maps(&project, root).iter().flat_map(|m| origins(m)).collect()
+        maps(&project, root)
+            .iter()
+            .flat_map(|m| origins(m))
+            .collect()
     };
     let server = of("server.vyrn");
     let client = of("client/boot.vyrn");
     // `rpcHandlePastesCreate` and `pastesCreate` are the two generated symbols
     // for one declaration, and both must name it at the same place — the whole
     // reason a rename can cross the boundary later.
-    let s = server.iter().find(|o| o.symbol == "rpcHandlePastesCreate").expect("server create");
-    let c = client.iter().find(|o| o.symbol == "pastesCreate").expect("client create");
-    assert_eq!((&s.file, s.line, s.col, &s.name), (&c.file, c.line, c.col, &c.name));
+    let s = server
+        .iter()
+        .find(|o| o.symbol == "rpcHandlePastesCreate")
+        .expect("server create");
+    let c = client
+        .iter()
+        .find(|o| o.symbol == "pastesCreate")
+        .expect("client create");
+    assert_eq!(
+        (&s.file, s.line, s.col, &s.name),
+        (&c.file, c.line, c.col, &c.name)
+    );
 }
 
 // ---- the map moves with the declaration ------------------------------------
@@ -204,7 +242,11 @@ fn renaming_a_procedure_moves_its_origin() {
     let api = dir.join("server/api/pastes.vyrn");
     let src = std::fs::read_to_string(&api).unwrap();
     assert!(src.contains("export mut fn create("));
-    std::fs::write(&api, src.replace("export mut fn create(", "export mut fn publish(")).unwrap();
+    std::fs::write(
+        &api,
+        src.replace("export mut fn create(", "export mut fn publish("),
+    )
+    .unwrap();
 
     let after = create_origin(&dir);
     assert_eq!(after.name, "publish");
@@ -224,7 +266,11 @@ fn a_line_inserted_above_a_procedure_moves_its_line() {
     std::fs::write(&api, format!("\n\n{src}")).unwrap();
 
     let after = create_origin(&dir);
-    assert_eq!(after.line, before.line + 2, "the map did not follow the edit");
+    assert_eq!(
+        after.line,
+        before.line + 2,
+        "the map did not follow the edit"
+    );
     assert_eq!(after.col, before.col);
     assert_points_at(&dir, &after);
     let _ = std::fs::remove_dir_all(&dir);

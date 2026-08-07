@@ -65,8 +65,7 @@ fn all_passing_exits_zero() {
     assert!(out.status.success());
     let stdout = norm(&out.stdout);
     assert_eq!(
-        stdout,
-        "test \"a\" ... ok\ntest \"b\" ... ok\n\n2 passed, 0 failed\n",
+        stdout, "test \"a\" ... ok\ntest \"b\" ... ok\n\n2 passed, 0 failed\n",
         "got:\n{stdout}"
     );
 }
@@ -82,12 +81,16 @@ fn name_filter_selects_a_subset() {
          test \"alphabet\" { assert(true) }\n",
     )
     .unwrap();
-    let out = vyrn().arg("test").arg(&file).args(["--name", "alpha"]).output().unwrap();
+    let out = vyrn()
+        .arg("test")
+        .arg(&file)
+        .args(["--name", "alpha"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = norm(&out.stdout);
     assert_eq!(
-        stdout,
-        "test \"alpha\" ... ok\ntest \"alphabet\" ... ok\n\n2 passed, 0 failed\n",
+        stdout, "test \"alpha\" ... ok\ntest \"alphabet\" ... ok\n\n2 passed, 0 failed\n",
         "got:\n{stdout}"
     );
 }
@@ -118,7 +121,10 @@ fn a_file_may_have_both_tests_and_a_main() {
     assert_eq!(norm(&run.stdout).trim(), "99");
     let test = vyrn().arg("test").arg(&file).output().unwrap();
     assert!(test.status.success());
-    assert_eq!(norm(&test.stdout), "test \"t\" ... ok\n\n1 passed, 0 failed\n");
+    assert_eq!(
+        norm(&test.stdout),
+        "test \"t\" ... ok\n\n1 passed, 0 failed\n"
+    );
 }
 
 #[test]
@@ -135,6 +141,12 @@ fn test_bodies_are_stripped_from_emitted_ir() {
     let out = vyrn().arg("emit-ir").arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let ir = norm(&out.stdout);
-    assert!(!ir.contains("SECRET_IN_TEST_BODY"), "test string leaked into IR");
-    assert!(!ir.contains("UNIQUE_TEST_MARKER"), "test name leaked into IR");
+    assert!(
+        !ir.contains("SECRET_IN_TEST_BODY"),
+        "test string leaked into IR"
+    );
+    assert!(
+        !ir.contains("UNIQUE_TEST_MARKER"),
+        "test name leaked into IR"
+    );
 }

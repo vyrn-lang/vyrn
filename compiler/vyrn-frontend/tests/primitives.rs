@@ -414,7 +414,9 @@ fn interp_builtin_names() -> BTreeSet<String> {
         let head = head.split(" if ").next().unwrap();
         let parts: Vec<&str> = head.split('|').map(str::trim).collect();
         assert!(
-            parts.iter().all(|p| p.len() >= 3 && p.starts_with('"') && p.ends_with('"')),
+            parts
+                .iter()
+                .all(|p| p.len() >= 3 && p.starts_with('"') && p.ends_with('"')),
             "the census scan cannot read this arm head: {t:?}"
         );
         for p in parts {
@@ -617,7 +619,10 @@ fn the_refusals_keep_their_reasons() {
         .filter(|(_, w, _)| *w == Unjustified)
         .map(|(n, ..)| *n)
         .collect();
-    assert!(unjustified.is_empty(), "{unjustified:?} is in the interpreter with no reason given");
+    assert!(
+        unjustified.is_empty(),
+        "{unjustified:?} is in the interpreter with no reason given"
+    );
 }
 
 /// `Measured` claims a number was taken. This checks one was written down.
@@ -642,9 +647,11 @@ fn the_refusals_keep_their_reasons() {
 #[test]
 fn a_measured_refusal_cites_its_measurement() {
     for (name, why, reason) in CENSUS.iter().filter(|(_, w, _)| *w == Measured) {
-        let cites_a_number = reason.as_bytes().windows(2).any(|w| {
-            w[0].is_ascii_digit() && (w[1] == b'x' || w[1] == b'n' || w[1] == b'm')
-        }) || reason.contains(" ns")
+        let cites_a_number = reason
+            .as_bytes()
+            .windows(2)
+            .any(|w| w[0].is_ascii_digit() && (w[1] == b'x' || w[1] == b'n' || w[1] == b'm'))
+            || reason.contains(" ns")
             || reason.contains(" ms");
         assert!(
             cites_a_number,

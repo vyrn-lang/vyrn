@@ -68,18 +68,29 @@ pub struct Target {
 /// name. A use of the name inside a body resolves to the same declaration, but
 /// renaming from a use would have to re-derive which declaration it is in every
 /// candidate file, and the cursor is one keypress from the declaration anyway.
-pub fn target_at(analysis: &Analysis, file: &str, line: usize, col: usize) -> Result<Target, String> {
+pub fn target_at(
+    analysis: &Analysis,
+    file: &str,
+    line: usize,
+    col: usize,
+) -> Result<Target, String> {
     // A FOREIGN symbol resolves here too — an imported name, or a generated stub
     // whose "file" is the generating module's banner. Renaming one in place is
     // exactly the mistake this milestone exists to make unnecessary, so it is
     // named rather than silently declined.
-    if let Some(foreign) = analysis.tokens.iter().find(|t| t.line == line && col >= t.col && col < t.end_col)
+    if let Some(foreign) = analysis
+        .tokens
+        .iter()
+        .find(|t| t.line == line && col >= t.col && col < t.end_col)
     {
         if analysis
             .symbols
             .iter()
             .any(|s| s.name == foreign.text && s.file.is_some())
-            && !analysis.symbols.iter().any(|s| s.name == foreign.text && s.file.is_none())
+            && !analysis
+                .symbols
+                .iter()
+                .any(|s| s.name == foreign.text && s.file.is_none())
         {
             return Err(format!(
                 "`{}` is not declared in this file — rename the declaration it stands for, and \
@@ -91,7 +102,9 @@ pub fn target_at(analysis: &Analysis, file: &str, line: usize, col: usize) -> Re
     let decl = analysis
         .symbols
         .iter()
-        .find(|s| s.file.is_none() && s.line == line && s.col > 0 && col >= s.col && col <= s.end_col)
+        .find(|s| {
+            s.file.is_none() && s.line == line && s.col > 0 && col >= s.col && col <= s.end_col
+        })
         .ok_or_else(|| {
             "there is no declaration here to rename — put the cursor on a top-level \
              declaration's own name"
@@ -233,7 +246,12 @@ fn wanted(target: &Target, new: &str, maps: &[MappedSymbol]) -> Result<Vec<Wante
                 target.name, m.name
             )
         })?;
-        out.push(Wanted { old: m.name.clone(), new: derived, direct: false, generated: true });
+        out.push(Wanted {
+            old: m.name.clone(),
+            new: derived,
+            direct: false,
+            generated: true,
+        });
     }
     Ok(out)
 }
@@ -288,7 +306,10 @@ pub fn workspace_edit(
     // some body is excluded exactly where the editor already excludes it from a
     // highlight.
     let refs = references(decl_analysis, target.line, target.col);
-    let edits: Vec<TextEdit> = refs.iter().map(|r| edit_at(r.line, r.col, r.end_col, new, 0)).collect();
+    let edits: Vec<TextEdit> = refs
+        .iter()
+        .map(|r| edit_at(r.line, r.col, r.end_col, new, 0))
+        .collect();
     if !edits.is_empty() {
         changes.insert(decl_uri.clone(), edits);
     }
@@ -297,7 +318,9 @@ pub fn workspace_edit(
         if cand.uri == *decl_uri {
             continue;
         }
-        let Ok(tokens) = vyrn_frontend::lexer::lex(&cand.body) else { continue };
+        let Ok(tokens) = vyrn_frontend::lexer::lex(&cand.body) else {
+            continue;
+        };
         let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
         // Which of the wanted names can occur here at all, and under which
         // qualifiers. A module that imports neither the declaration nor a
@@ -306,11 +329,17 @@ pub fn workspace_edit(
         let mut gen_ns: Vec<String> = Vec::new();
         let mut imports_decl = false;
         let mut imports_gen = false;
-        let importer = cand.uri.to_file_path().ok().map(|p| p.to_string_lossy().replace('\\', "/"));
+        let importer = cand
+            .uri
+            .to_file_path()
+            .ok()
+            .map(|p| p.to_string_lossy().replace('\\', "/"));
         for imp in &program.imports {
             match &imp.source {
                 ImportSource::Path(spec) => {
-                    let Some(importer) = importer.as_deref() else { continue };
+                    let Some(importer) = importer.as_deref() else {
+                        continue;
+                    };
                     let Ok(resolved) = vyrn_frontend::loader::resolve_spec(spec, importer, opts)
                     else {
                         continue;
@@ -360,7 +389,10 @@ pub fn workspace_edit(
             changes.entry(cand.uri).or_default().extend(edits);
         }
     }
-    Ok(WorkspaceEdit { changes: Some(changes), ..Default::default() })
+    Ok(WorkspaceEdit {
+        changes: Some(changes),
+        ..Default::default()
+    })
 }
 
 /// One replacement, from a frontend 1-based span plus the body's line offset
@@ -369,8 +401,14 @@ fn edit_at(line: usize, col: usize, end_col: usize, new: &str, line_offset: usiz
     let l = (line + line_offset - 1) as u32;
     TextEdit {
         range: Range {
-            start: Position { line: l, character: (col - 1) as u32 },
-            end: Position { line: l, character: (end_col - 1) as u32 },
+            start: Position {
+                line: l,
+                character: (col - 1) as u32,
+            },
+            end: Position {
+                line: l,
+                character: (end_col - 1) as u32,
+            },
         },
         new_text: new.to_string(),
     }
@@ -388,7 +426,9 @@ fn candidates(
     overlays: &HashMap<String, String>,
 ) -> Result<Vec<Candidate>, String> {
     let decl = std::path::Path::new(decl_file);
-    let Some(dir) = decl.parent() else { return Ok(Vec::new()) };
+    let Some(dir) = decl.parent() else {
+        return Ok(Vec::new());
+    };
     let root = crate::app_root_for(dir);
     let mut files = Vec::new();
     crate::collect_sources(&root, 0, MAX_RENAME_FILES, &["vyrn", "vyx"], &mut files);
@@ -410,13 +450,23 @@ fn candidates(
             Some(t) => t,
             None => continue,
         };
-        let Ok(uri) = Url::from_file_path(&path) else { continue };
+        let Ok(uri) = Url::from_file_path(&path) else {
+            continue;
+        };
         if slash.ends_with(".vyx") {
             if let Some((body, line_offset)) = vyx_script(&text) {
-                out.push(Candidate { uri, body, line_offset });
+                out.push(Candidate {
+                    uri,
+                    body,
+                    line_offset,
+                });
             }
         } else {
-            out.push(Candidate { uri, body: text, line_offset: 0 });
+            out.push(Candidate {
+                uri,
+                body: text,
+                line_offset: 0,
+            });
         }
     }
     Ok(out)
@@ -429,15 +479,27 @@ mod tests {
     #[test]
     fn a_generated_name_keeps_its_prefix_and_swaps_the_declaration_it_stands_for() {
         // The three shapes std/rpc and std/http emit.
-        assert_eq!(derive_generated("pastesCreate", "create", "add").as_deref(), Some("pastesAdd"));
+        assert_eq!(
+            derive_generated("pastesCreate", "create", "add").as_deref(),
+            Some("pastesAdd")
+        );
         assert_eq!(
             derive_generated("rpcHandlePastesCreate", "create", "add").as_deref(),
             Some("rpcHandlePastesAdd")
         );
-        assert_eq!(derive_generated("PathCreate", "create", "add").as_deref(), Some("PathAdd"));
+        assert_eq!(
+            derive_generated("PathCreate", "create", "add").as_deref(),
+            Some("PathAdd")
+        );
         // A same-named stub (`http()`, `rpcInProcess`) and a re-emitted type.
-        assert_eq!(derive_generated("create", "create", "add").as_deref(), Some("add"));
-        assert_eq!(derive_generated("PasteList", "PasteList", "Pastes").as_deref(), Some("Pastes"));
+        assert_eq!(
+            derive_generated("create", "create", "add").as_deref(),
+            Some("add")
+        );
+        assert_eq!(
+            derive_generated("PasteList", "PasteList", "Pastes").as_deref(),
+            Some("Pastes")
+        );
     }
 
     #[test]
@@ -460,11 +522,15 @@ mod tests {
 
     #[test]
     fn a_vyx_script_body_maps_back_by_line_addition() {
-        let vyx = "<script>\nimport { recent } from \"./api\"\n</script>\n<template>\n</template>\n";
+        let vyx =
+            "<script>\nimport { recent } from \"./api\"\n</script>\n<template>\n</template>\n";
         let (body, off) = vyx_script(vyx).expect("a script section");
         assert_eq!(off, 0, "the body starts on the `<script>` line itself");
         // Body line 2 is the import; in the file it is also line 2.
-        assert_eq!(body.lines().nth(1), Some("import { recent } from \"./api\""));
+        assert_eq!(
+            body.lines().nth(1),
+            Some("import { recent } from \"./api\"")
+        );
     }
 
     /// The property the whole milestone rests on: a declaration's references in
@@ -479,7 +545,11 @@ fn use() -> Int64 {\n    let s = \"recent\"\n    return recent()\n}\n";
         let a = analyze(src);
         let refs = references_to(&a, "recent", &[]);
         let lines: Vec<usize> = refs.iter().map(|r| r.line).collect();
-        assert_eq!(lines, vec![1, 8], "the import binding and the call, nothing else: {refs:?}");
+        assert_eq!(
+            lines,
+            vec![1, 8],
+            "the import binding and the call, nothing else: {refs:?}"
+        );
     }
 
     /// A namespace-qualified reference is found only under the qualifier that

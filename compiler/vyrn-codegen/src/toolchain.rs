@@ -640,10 +640,18 @@ pub fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
 /// tests can see — nothing here needs wasmtime to BUILD, only to check its own
 /// output, so a machine without it skips loudly rather than failing.
 pub fn find_wasmtime_from(start: &Path) -> Option<PathBuf> {
-    if let Some(p) = std::env::var("VYRN_WASMTIME").map(PathBuf::from).ok().filter(|p| p.exists()) {
+    if let Some(p) = std::env::var("VYRN_WASMTIME")
+        .map(PathBuf::from)
+        .ok()
+        .filter(|p| p.exists())
+    {
         return Some(p);
     }
-    let exe = if cfg!(windows) { "wasmtime.exe" } else { "wasmtime" };
+    let exe = if cfg!(windows) {
+        "wasmtime.exe"
+    } else {
+        "wasmtime"
+    };
     for dir in start.ancestors() {
         let tools = dir.join("tools");
         if !tools.is_dir() {
@@ -820,8 +828,7 @@ mod tests {
     /// to the sysroot, and both absent on a layout without the convention.
     #[test]
     fn wasi_toolchain_discovery_walks_the_tools_convention() {
-        let root = std::env::temp_dir()
-            .join(format!("vyrn_tools_probe_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vyrn_tools_probe_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let sysroot = root.join("tools/wasi-sysroot-25.0");
         let builtins_dir = root.join("tools/libclang_rt.builtins-wasm32-wasi-25.0");

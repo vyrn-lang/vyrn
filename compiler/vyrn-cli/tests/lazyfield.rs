@@ -226,7 +226,11 @@ fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
     const READER: &str = "define i64 @vyrn_main() {";
     let split = |p: &PathBuf| -> (String, String) {
         let out = vyrn().arg("emit-ir").arg(p).output().unwrap();
-        assert!(out.status.success(), "emit-ir failed: {}", norm(&out.stderr));
+        assert!(
+            out.status.success(),
+            "emit-ir failed: {}",
+            norm(&out.stderr)
+        );
         let text = norm(&out.stdout);
         let start = text.find(READER).expect("the user's main");
         let end = text[start..].find("\n}\n").expect("its end") + start + 3;

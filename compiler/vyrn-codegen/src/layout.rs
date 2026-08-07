@@ -104,7 +104,10 @@ pub const SHAPES: &[(&str, &str)] = &[
 /// generated, so a rejection means this crate contradicts itself and the caller
 /// wants to say which shape it choked on.
 pub fn of_ll(ll: &str) -> Result<Layout, String> {
-    let mut p = P { s: ll.as_bytes(), i: 0 };
+    let mut p = P {
+        s: ll.as_bytes(),
+        i: 0,
+    };
     let l = p.ty()?;
     p.ws();
     if p.i != p.s.len() {
@@ -165,7 +168,11 @@ impl P<'_> {
             }
         }
         // Tail padding, so `[N x S]` keeps every element aligned.
-        Ok(Layout { size: round_up(size, align), align, fields })
+        Ok(Layout {
+            size: round_up(size, align),
+            align,
+            fields,
+        })
     }
 
     fn array(&mut self) -> Result<Layout, String> {
@@ -190,12 +197,20 @@ impl P<'_> {
         }
         // `elem.size` is already rounded to `elem.align` (every shape here is),
         // so it IS the stride.
-        Ok(Layout { size: n * elem.size, align: elem.align, fields: Vec::new() })
+        Ok(Layout {
+            size: n * elem.size,
+            align: elem.align,
+            fields: Vec::new(),
+        })
     }
 
     fn scalar(&mut self) -> Result<Layout, String> {
         let start = self.i;
-        while self.s.get(self.i).is_some_and(|c| c.is_ascii_alphanumeric()) {
+        while self
+            .s
+            .get(self.i)
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
             self.i += 1;
         }
         let word = std::str::from_utf8(&self.s[start..self.i]).unwrap_or("");
@@ -217,7 +232,11 @@ impl P<'_> {
             "i64" => (8, 8),
             _ => return Err(format!("unknown scalar type {word:?} at byte {start}")),
         };
-        Ok(Layout { size, align, fields: Vec::new() })
+        Ok(Layout {
+            size,
+            align,
+            fields: Vec::new(),
+        })
     }
 }
 
@@ -241,7 +260,10 @@ mod tests {
         assert_eq!((a.size, a.align, &a.fields[..]), (24, 8, &[0, 8, 16][..]));
         // `Map<String, V>` — the ONE aggregate the shim also declares, as `VMap`.
         let m = of_ll("{ ptr, ptr, i64, i64 }").unwrap();
-        assert_eq!((m.size, m.align, &m.fields[..]), (24, 8, &[0, 4, 8, 16][..]));
+        assert_eq!(
+            (m.size, m.align, &m.fields[..]),
+            (24, 8, &[0, 4, 8, 16][..])
+        );
         // Option/Result: the `i1` is a byte, then 7 bytes of hole.
         let o = of_ll("{ i1, i64, i64 }").unwrap();
         assert_eq!((o.size, o.align, &o.fields[..]), (24, 8, &[0, 8, 16][..]));
@@ -256,9 +278,15 @@ mod tests {
     #[test]
     fn tail_padding_rounds_a_struct_up_to_its_own_alignment() {
         let s = of_ll("{ i64, i64, ptr, [3 x i8] }").unwrap();
-        assert_eq!((s.size, s.align, &s.fields[..]), (24, 8, &[0, 8, 16, 20][..]));
+        assert_eq!(
+            (s.size, s.align, &s.fields[..]),
+            (24, 8, &[0, 8, 16, 20][..])
+        );
         let w = of_ll("{ i64, i64, ptr, [4 x i64] }").unwrap();
-        assert_eq!((w.size, w.align, &w.fields[..]), (56, 8, &[0, 8, 16, 24][..]));
+        assert_eq!(
+            (w.size, w.align, &w.fields[..]),
+            (56, 8, &[0, 8, 16, 24][..])
+        );
     }
 
     #[test]
@@ -266,7 +294,12 @@ mod tests {
         for (name, ll) in SHAPES {
             let l = of_ll(ll).unwrap_or_else(|e| panic!("{name} ({ll}): {e}"));
             assert!(l.align.is_power_of_two(), "{name}: align {}", l.align);
-            assert_eq!(l.size % l.align, 0, "{name}: size {} not a multiple of align", l.size);
+            assert_eq!(
+                l.size % l.align,
+                0,
+                "{name}: size {} not a multiple of align",
+                l.size
+            );
         }
     }
 

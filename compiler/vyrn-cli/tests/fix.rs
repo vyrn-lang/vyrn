@@ -28,7 +28,12 @@ fn fix(name: &str, src: &str) -> (String, String) {
     let file = dir.join("a.vyrn");
     std::fs::write(&file, src).unwrap();
     let out = vyrn().arg("fix").arg(&file).output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         std::fs::read_to_string(&file).unwrap(),
@@ -41,7 +46,13 @@ fn checks(name: &str, src: &str) -> bool {
     let dir = scratch(name);
     let file = dir.join("b.vyrn");
     std::fs::write(&file, src).unwrap();
-    vyrn().arg("check").arg(&file).output().unwrap().status.success()
+    vyrn()
+        .arg("check")
+        .arg(&file)
+        .output()
+        .unwrap()
+        .status
+        .success()
 }
 
 #[test]
@@ -77,7 +88,10 @@ fn it_copies_a_loop_variable_rather_than_consuming_the_container() {
                fn main() -> Int64 { return 0 }\n";
     let (_, after) = fix("loop", src);
     assert!(after.contains("out.push(x.copy())"), "{after}");
-    assert!(!after.contains("consume"), "the container must not be taken:\n{after}");
+    assert!(
+        !after.contains("consume"),
+        "the container must not be taken:\n{after}"
+    );
     assert!(checks("loop-after", &after), "{after}");
 }
 

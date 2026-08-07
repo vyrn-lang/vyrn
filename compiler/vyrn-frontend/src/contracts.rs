@@ -127,7 +127,8 @@ pub fn roles_from_manifest(json_text: &str) -> Vec<Role> {
                 DEFAULT_ROLE_EXCEPT.iter().map(|s| s.to_string()).collect(),
             ),
             Json::Obj(fields) => {
-                let Some(Json::Str(spec)) = fields.iter().find(|(k, _)| k == "contract").map(|(_, v)| v)
+                let Some(Json::Str(spec)) =
+                    fields.iter().find(|(k, _)| k == "contract").map(|(_, v)| v)
                 else {
                     continue;
                 };
@@ -187,7 +188,9 @@ pub fn discovered_roles(
 ) -> Vec<Role> {
     let mut out: Vec<Role> = Vec::new();
     for (path, source) in roots {
-        let Ok(tokens) = crate::lexer::lex(source) else { continue };
+        let Ok(tokens) = crate::lexer::lex(source) else {
+            continue;
+        };
         let (program, _) = crate::parser::parse_accum(tokens);
         for imp in &program.imports {
             let ImportSource::Generator { name, args, .. } = &imp.source else {
@@ -295,7 +298,8 @@ fn read_module(
 pub fn is_projection(path: &str) -> bool {
     let file = path.replace('\\', "/");
     let file = file.rsplit('/').next().unwrap_or_default();
-    file.rsplit_once('.').is_some_and(|(stem, _)| stem.contains('.'))
+    file.rsplit_once('.')
+        .is_some_and(|(stem, _)| stem.contains('.'))
 }
 
 /// The role governing `path`, if any. `path` is a slash-separated module path
@@ -760,7 +764,11 @@ pub fn contract_member_hover(view: &ContractView, name: &str) -> Option<String> 
     out.push_str(&format!(
         "member of {}{}",
         view.site(),
-        if m.optional { " — optional" } else { " — required" }
+        if m.optional {
+            " — optional"
+        } else {
+            " — required"
+        }
     ));
     Some(out)
 }
@@ -867,7 +875,9 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
     for i in 1..=n {
         for j in 1..=m {
             let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            let mut best = (d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1)
+                .min(d[i - 1][j - 1] + cost);
             if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
                 best = best.min(d[i - 2][j - 2] + 1);
             }
@@ -1091,11 +1101,23 @@ fn split_args(spelling: &str) -> Vec<String> {
             '>' => {
                 depth -= 1;
                 if depth == 0 {
-                    out.push(chars[start..j].iter().collect::<String>().trim().to_string());
+                    out.push(
+                        chars[start..j]
+                            .iter()
+                            .collect::<String>()
+                            .trim()
+                            .to_string(),
+                    );
                 }
             }
             ',' if depth == 1 => {
-                out.push(chars[start..j].iter().collect::<String>().trim().to_string());
+                out.push(
+                    chars[start..j]
+                        .iter()
+                        .collect::<String>()
+                        .trim()
+                        .to_string(),
+                );
                 start = j + 1;
             }
             _ => {}

@@ -16,7 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 /// Every example that imports through a generator call — `import ... from
@@ -29,8 +33,10 @@ fn repo_file(rel: &str) -> PathBuf {
 /// tree grows faster than anyone remembers to edit a constant.
 fn generator_examples() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let mut entries: Vec<PathBuf> =
-            std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect();
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
@@ -46,11 +52,14 @@ fn generator_examples() -> Vec<PathBuf> {
 }
 
 fn imports_from_a_generator(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
     text.lines().any(|l| {
         let l = l.trim_start();
         l.starts_with("import ")
-            && l.split_once(" from ").is_some_and(|(_, src)| !src.starts_with('"'))
+            && l.split_once(" from ")
+                .is_some_and(|(_, src)| !src.starts_with('"'))
     })
 }
 
@@ -104,7 +113,10 @@ fn code_quote_generators_emit_the_same_source_under_both_engines() {
         let f = repo_file(demo);
         let interp = emit_gen(&f, false);
         let wasm = emit_gen(&f, true);
-        assert!(interp.status.success() && wasm.status.success(), "{demo} failed to generate");
+        assert!(
+            interp.status.success() && wasm.status.success(),
+            "{demo} failed to generate"
+        );
         assert_eq!(
             String::from_utf8_lossy(&interp.stdout),
             String::from_utf8_lossy(&wasm.stdout),
@@ -120,11 +132,18 @@ fn code_quote_generators_emit_the_same_source_under_both_engines() {
 /// over `Array<Token>`, `ModuleInterface` and `ContractInfo` in one process.
 #[test]
 fn structured_result_generators_emit_the_same_source_under_both_engines() {
-    for demo in ["examples/vyxdemo.vyrn", "examples/rpc.vyrn", "examples/shelf/server.vyrn"] {
+    for demo in [
+        "examples/vyxdemo.vyrn",
+        "examples/rpc.vyrn",
+        "examples/shelf/server.vyrn",
+    ] {
         let f = repo_file(demo);
         let interp = emit_gen(&f, false);
         let wasm = emit_gen(&f, true);
-        assert!(interp.status.success() && wasm.status.success(), "{demo} failed to generate");
+        assert!(
+            interp.status.success() && wasm.status.success(),
+            "{demo} failed to generate"
+        );
         assert_eq!(
             String::from_utf8_lossy(&interp.stdout),
             String::from_utf8_lossy(&wasm.stdout),
@@ -191,7 +210,13 @@ fn the_reflected_type_closure_is_recorded_identically_by_both_engines() {
         if !wasm {
             c.env("VYRN_NO_WASM_GEN", "1");
         }
-        assert!(c.arg("emit-gen").arg(&main).output().unwrap().status.success());
+        assert!(c
+            .arg("emit-gen")
+            .arg(&main)
+            .output()
+            .unwrap()
+            .status
+            .success());
         let dir = dirs_gen_cache();
         let mut entries: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -202,24 +227,39 @@ fn the_reflected_type_closure_is_recorded_identically_by_both_engines() {
     };
     let before_interp = cached(false);
     let before_wasm = cached(true);
-    assert_eq!(before_interp, before_wasm, "the engines recorded different generator inputs");
-    assert!(before_wasm.contains("wire.vyrn"), "the closure file is not a cache input: {before_wasm}");
+    assert_eq!(
+        before_interp, before_wasm,
+        "the engines recorded different generator inputs"
+    );
+    assert!(
+        before_wasm.contains("wire.vyrn"),
+        "the closure file is not a cache input: {before_wasm}"
+    );
 
-    std::fs::write(dir.join("wire.vyrn"), "export type Wire = { n: Int64, extra: String }\n")
-        .unwrap();
+    std::fs::write(
+        dir.join("wire.vyrn"),
+        "export type Wire = { n: Int64, extra: String }\n",
+    )
+    .unwrap();
     let after_wasm = cached(true);
     assert_ne!(
         before_wasm, after_wasm,
         "editing a file in the reflected type closure was a stale cache hit"
     );
-    assert_eq!(after_wasm, cached(false), "the engines diverged after the closure edit");
+    assert_eq!(
+        after_wasm,
+        cached(false),
+        "the engines diverged after the closure edit"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The on-disk generator cache, so the test above can read the recorded inputs
 /// back. Mirrors the loader's own location.
 fn dirs_gen_cache() -> PathBuf {
-    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap();
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap();
     PathBuf::from(home).join(".vyrn").join("cache").join("gen")
 }
 
@@ -248,7 +288,11 @@ fn reflection_outside_a_generator_is_still_the_same_error() {
             want.len()
         ));
         std::fs::write(&f, src).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_vyrn")).arg("build").arg(&f).output().unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .arg("build")
+            .arg(&f)
+            .output()
+            .unwrap();
         assert!(!out.status.success(), "{src} compiled");
         assert!(
             String::from_utf8_lossy(&out.stderr).contains(want),
@@ -287,7 +331,10 @@ fn a_splice_with_no_rule_traps_identically() {
     let main = dir.join("main.vyrn");
     let interp = emit_gen(&main, false);
     let wasm = emit_gen(&main, true);
-    assert!(!interp.status.success(), "the invalid identifier should have failed");
+    assert!(
+        !interp.status.success(),
+        "the invalid identifier should have failed"
+    );
     assert_eq!(
         String::from_utf8_lossy(&interp.stderr),
         String::from_utf8_lossy(&wasm.stderr),
@@ -307,9 +354,16 @@ fn a_splice_with_no_rule_traps_identically() {
 #[test]
 fn a_code_quote_outside_a_generator_is_still_the_same_error() {
     let f = std::env::temp_dir().join(format!("vyrn_m3a_{}.vyrn", std::process::id()));
-    std::fs::write(&f, "fn f() -> String {\n    return render(vyrn\"fn x() -> Int64 { return 1 }\")\n}\n")
+    std::fs::write(
+        &f,
+        "fn f() -> String {\n    return render(vyrn\"fn x() -> Int64 { return 1 }\")\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(&f)
+        .output()
         .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_vyrn")).arg("build").arg(&f).output().unwrap();
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stderr)
@@ -349,7 +403,10 @@ fn a_read_outside_the_declared_inputs_traps_identically() {
     let main = dir.join("main.vyrn");
     let interp = emit_gen(&main, false);
     let wasm = emit_gen(&main, true);
-    assert!(!interp.status.success(), "the escaping read should have failed");
+    assert!(
+        !interp.status.success(),
+        "the escaping read should have failed"
+    );
     assert_eq!(
         String::from_utf8_lossy(&interp.stderr),
         String::from_utf8_lossy(&wasm.stderr),
@@ -500,7 +557,11 @@ fn editing_a_generator_recompiles_its_artifact() {
     std::fs::create_dir_all(&dir).unwrap();
     // The number the generator emits comes from a module the generator IMPORTS,
     // so only a fingerprint over the whole closure notices the edit.
-    std::fs::write(dir.join("part.vyrn"), "export fn v() -> Int64 { return 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("part.vyrn"),
+        "export fn v() -> Int64 { return 1 }\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("gen.vyrn"),
         "import { v } from \"./part\"\n\
@@ -524,7 +585,11 @@ fn editing_a_generator_recompiles_its_artifact() {
     assert!(before.status.success());
     assert!(String::from_utf8_lossy(&before.stdout).contains("return 1"));
 
-    std::fs::write(dir.join("part.vyrn"), "export fn v() -> Int64 { return 2 }\n").unwrap();
+    std::fs::write(
+        dir.join("part.vyrn"),
+        "export fn v() -> Int64 { return 2 }\n",
+    )
+    .unwrap();
     let after = emit_gen(&main, true);
     assert!(after.status.success());
     assert!(
@@ -573,12 +638,19 @@ fn every_generator_example_emits_the_same_source_under_both_engines() {
     );
 
     let corpus = generator_examples();
-    assert!(corpus.len() >= 10, "generator corpus looks wrong: {corpus:?}");
+    assert!(
+        corpus.len() >= 10,
+        "generator corpus looks wrong: {corpus:?}"
+    );
 
     let mut failures: Vec<String> = Vec::new();
     let root = repo_file("examples");
     for path in &corpus {
-        let name = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        let name = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
         let wasm = emit_gen_traced(path, true, true);
         let interp = emit_gen(path, false);
         let w_err = String::from_utf8_lossy(&wasm.stderr).to_string();
@@ -591,9 +663,13 @@ fn every_generator_example_emits_the_same_source_under_both_engines() {
                 wasm.status.code()
             ));
         } else if interp.stdout != wasm.stdout {
-            failures.push(format!("{name}: the emitted source diverged between engines"));
+            failures.push(format!(
+                "{name}: the emitted source diverged between engines"
+            ));
         } else if !interp.status.success() {
-            failures.push(format!("{name}: generation failed under both engines:\n{w_err}"));
+            failures.push(format!(
+                "{name}: generation failed under both engines:\n{w_err}"
+            ));
         } else if ran == 0 {
             failures.push(format!(
                 "{name}: the engine never ran, so the columns are both the interpreter\n{w_err}"

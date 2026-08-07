@@ -24,7 +24,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_dir(rel: &str) -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap();
     let s = p.to_string_lossy().replace('\\', "/");
     PathBuf::from(s.strip_prefix("//?/").unwrap_or(&s).to_string())
 }
@@ -118,7 +122,11 @@ fn project_using(tag: &str, imports: &str, routes: &str) -> PathBuf {
 }
 
 fn run(dir: &Path, file: &str) -> (bool, String) {
-    let out = vyrn().arg("run").arg(dir.join(file)).output().expect("vyrn run");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join(file))
+        .output()
+        .expect("vyrn run");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     (out.status.success(), combined)
@@ -129,23 +137,43 @@ fn run(dir: &Path, file: &str) -> (bool, String) {
 #[test]
 fn a_placeholder_that_is_not_a_field_is_a_checker_error() {
     let dir = project("typo", "[GET(byId(\"/{ID}\"))]");
-    let out = vyrn().arg("check").arg(dir.join("notes.http.vyrn")).output().expect("vyrn check");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("notes.http.vyrn"))
+        .output()
+        .expect("vyrn check");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a bad placeholder must fail the check:\n{combined}");
+    assert!(
+        !out.status.success(),
+        "a bad placeholder must fail the check:\n{combined}"
+    );
     // The message quotes the pattern that was written and the predicate, whose
     // alternatives ARE the input type's fields — `{id}`, and nothing else.
-    assert!(combined.contains("\"/{ID}\" does not satisfy `PathById`"), "{combined}");
-    assert!(combined.contains("\\\\{id\\\\}"), "the legal placeholder is in the message:\n{combined}");
+    assert!(
+        combined.contains("\"/{ID}\" does not satisfy `PathById`"),
+        "{combined}"
+    );
+    assert!(
+        combined.contains("\\\\{id\\\\}"),
+        "the legal placeholder is in the message:\n{combined}"
+    );
 }
 
 #[test]
 fn the_placeholder_a_field_does_name_is_accepted() {
     let dir = project("ok", "[GET(recent(\"/\")), GET(byId(\"/{id}\"))]");
-    let out = vyrn().arg("check").arg(dir.join("notes.http.vyrn")).output().expect("vyrn check");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("notes.http.vyrn"))
+        .output()
+        .expect("vyrn check");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "the good projection must check:\n{combined}");
+    assert!(
+        out.status.success(),
+        "the good projection must check:\n{combined}"
+    );
 }
 
 // ---- mounting --------------------------------------------------------------
@@ -187,7 +215,10 @@ fn mount_resolves_groups_in_order_and_the_first_match_wins() {
     // stem-derived base; nothing claims the rest.
     assert_eq!(lines[0], "200 surface", "{out}");
     assert_eq!(lines[1], "200 {\"id\":7,\"body\":\"note7\"}", "{out}");
-    assert_eq!(lines[2], "200 {\"items\":[{\"id\":1,\"body\":\"first\"}]}", "{out}");
+    assert_eq!(
+        lines[2], "200 {\"items\":[{\"id\":1,\"body\":\"first\"}]}",
+        "{out}"
+    );
     assert_eq!(lines[3], "none", "{out}");
 }
 
@@ -197,12 +228,22 @@ fn a_route_shadowed_by_an_earlier_group_is_a_startup_error() {
     // every route in the second group is dead. Silence here is the failure mode
     // this check exists for.
     let dir = project("shadow", "[GET(recent(\"/\"))]");
-    write(&dir, "root.vyrn", &ROOT.replace("surface(\"/_\", under)", "surface(\"/notes\", under)"));
+    write(
+        &dir,
+        "root.vyrn",
+        &ROOT.replace("surface(\"/_\", under)", "surface(\"/notes\", under)"),
+    );
     let (ok, out) = run(&dir, "root.vyrn");
     assert!(!ok, "a shadowed route must trap:\n{out}");
     assert!(out.contains("is unreachable"), "{out}");
-    assert!(out.contains("GET /notes (group 1"), "the shadowed route is named:\n{out}");
-    assert!(out.contains("* /notes (group 0)"), "the route that shadows it is named:\n{out}");
+    assert!(
+        out.contains("GET /notes (group 1"),
+        "the shadowed route is named:\n{out}"
+    );
+    assert!(
+        out.contains("* /notes (group 0)"),
+        "the route that shadows it is named:\n{out}"
+    );
 }
 
 #[test]
@@ -219,9 +260,16 @@ fn a_route_with_no_method_is_a_startup_error() {
 #[test]
 fn the_base_path_comes_from_the_stem_and_the_codec_is_the_rpc_one() {
     let dir = project("gen", "[GET(byId(\"/{id}\"))]");
-    let out =
-        vyrn().arg("emit-gen").arg(dir.join("notes.http.vyrn")).output().expect("vyrn emit-gen");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("notes.http.vyrn"))
+        .output()
+        .expect("vyrn emit-gen");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
     // The stem is the base: nothing in the tree wrote `/notes`.
     assert!(src.contains("httpRoute(\"/notes\" + path"), "{src}");
@@ -253,14 +301,28 @@ fn rest_and_rpc_answer_the_same_procedure_with_the_same_bytes() {
         .expect("vyrn run");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "examples/rest.vyrn must run:\n{combined}");
     assert!(
-        combined.contains("GET /users/7 -> 200 application/json {\"id\":7,\"name\":\"user7\",\"age\":30}"),
+        out.status.success(),
+        "examples/rest.vyrn must run:\n{combined}"
+    );
+    assert!(
+        combined.contains(
+            "GET /users/7 -> 200 application/json {\"id\":7,\"name\":\"user7\",\"age\":30}"
+        ),
         "an Int64 path id binds as a number:\n{combined}"
     );
-    assert!(combined.contains("REST body == RPC body: true"), "{combined}");
-    assert!(combined.contains("REST type == RPC type: true"), "{combined}");
-    assert!(combined.contains("REST status == RPC status: true"), "{combined}");
+    assert!(
+        combined.contains("REST body == RPC body: true"),
+        "{combined}"
+    );
+    assert!(
+        combined.contains("REST type == RPC type: true"),
+        "{combined}"
+    );
+    assert!(
+        combined.contains("REST status == RPC status: true"),
+        "{combined}"
+    );
 }
 
 #[test]
@@ -270,12 +332,26 @@ fn a_projection_beside_the_procedures_is_not_mounted_as_one() {
     // `routes()` would be on the wire (and `Array<Route>` is not serializable, so
     // generation would fail outright).
     let example = repo_dir("examples/rest.vyrn");
-    let out = vyrn().arg("emit-gen").arg(&example).output().expect("vyrn emit-gen");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(&example)
+        .output()
+        .expect("vyrn emit-gen");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
-    assert!(src.contains("//@route POST /_/users/byId"), "the derived surface is intact:\n{src}");
+    assert!(
+        src.contains("//@route POST /_/users/byId"),
+        "the derived surface is intact:\n{src}"
+    );
     // No procedure namespace for it, and no route to its `routes()` export.
-    assert!(!src.contains("from \"./users.http\""), "not scanned as a procedure module:\n{src}");
+    assert!(
+        !src.contains("from \"./users.http\""),
+        "not scanned as a procedure module:\n{src}"
+    );
     assert!(!src.contains("users.http/routes"), "{src}");
 }
 
@@ -291,28 +367,51 @@ fn a_projection_beside_the_procedures_is_not_mounted_as_one() {
 #[test]
 fn two_generated_maps_in_one_program_do_not_collide_and_both_read_back() {
     let example = repo_dir("examples/rest.vyrn");
-    let out = vyrn().arg("emit-gen").arg(&example).arg("--maps").output().expect("vyrn emit-gen");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(&example)
+        .arg("--maps")
+        .output()
+        .expect("vyrn emit-gen");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     let docs: Vec<&str> = text.lines().filter(|l| l.starts_with('{')).collect();
     let http = docs
         .iter()
         .find(|d| d.contains("\"module\":\"http("))
-        .unwrap_or_else(|| panic!("a projection map:
-{text}"));
+        .unwrap_or_else(|| {
+            panic!(
+                "a projection map:
+{text}"
+            )
+        });
     // The projection re-exports each procedure under the DECLARATION's own name,
     // which is exactly why the map is the only record that the two are one thing.
     assert!(http.contains("\"name\":\"byId\""), "{http}");
     assert!(http.contains("users.vyrn"), "{http}");
-    assert!(docs.iter().any(|d| d.contains("\"module\":\"rpc(")), "an rpc map too:
-{text}");
+    assert!(
+        docs.iter().any(|d| d.contains("\"module\":\"rpc(")),
+        "an rpc map too:
+{text}"
+    );
 
     // And the generated sources carry two DIFFERENT map declarations.
-    let src = vyrn().arg("emit-gen").arg(&example).output().expect("vyrn emit-gen");
+    let src = vyrn()
+        .arg("emit-gen")
+        .arg(&example)
+        .output()
+        .expect("vyrn emit-gen");
     let src = String::from_utf8_lossy(&src.stdout);
     assert!(src.contains("export fn symbolMapHttpUsers()"), "{src}");
-    assert!(!src.contains("export fn symbolMap()"), "the fixed name is gone:
-{src}");
+    assert!(
+        !src.contains("export fn symbolMap()"),
+        "the fixed name is gone:
+{src}"
+    );
 }
 
 // ---- M2: cache, validators, conditionals -----------------------------------
@@ -389,11 +488,20 @@ fn the_policy_reaches_the_response_and_a_conditional_gets_a_bodyless_304() {
     // The declared policy, on the answer.
     let plain = line(&out, "plain");
     assert_eq!(plain[1], "200", "{out}");
-    assert_eq!(plain[4], "max-age=60", "bare max-age, neither public nor private:\n{out}");
-    assert!(plain[3].starts_with('"') && plain[3].ends_with('"'), "a quoted strong ETag:\n{out}");
+    assert_eq!(
+        plain[4], "max-age=60",
+        "bare max-age, neither public nor private:\n{out}"
+    );
+    assert!(
+        plain[3].starts_with('"') && plain[3].ends_with('"'),
+        "a quoted strong ETag:\n{out}"
+    );
     // `at` lives inside the `Ok` payload; reading it is what makes the validator
     // work on a fallible procedure at all.
-    assert_eq!(plain[5], "Wed, 29 Jul 2026 13:43:30 GMT", "IMF-fixdate:\n{out}");
+    assert_eq!(
+        plain[5], "Wed, 29 Jul 2026 13:43:30 GMT",
+        "IMF-fixdate:\n{out}"
+    );
 
     // The acceptance criterion: 304, no body, and no media type for the body it
     // does not have — with the validators the client will send back next time.
@@ -402,7 +510,10 @@ fn the_policy_reaches_the_response_and_a_conditional_gets_a_bodyless_304() {
         assert_eq!(f[1], "304", "{label}:\n{out}");
         assert_eq!(f[2], "", "a 304 declares no Content-Type ({label}):\n{out}");
         assert_eq!(f[7], "", "a 304 carries no body ({label}):\n{out}");
-        assert_eq!(f[3], plain[3], "the 304 keeps its validator ({label}):\n{out}");
+        assert_eq!(
+            f[3], plain[3],
+            "the 304 keeps its validator ({label}):\n{out}"
+        );
         assert_eq!(f[4], "max-age=60", "and its freshness ({label}):\n{out}");
     }
 
@@ -451,7 +562,11 @@ fn an_etag_is_the_same_in_a_second_process() {
     assert!(ok2, "{second}");
     let a = line(&first, "plain")[3].to_string();
     assert!(!a.is_empty(), "{first}");
-    assert_eq!(a, line(&second, "plain")[3], "same content, second process, same tag");
+    assert_eq!(
+        a,
+        line(&second, "plain")[3],
+        "same content, second process, same tag"
+    );
 }
 
 #[test]
@@ -479,7 +594,10 @@ fn the_derived_line_carries_the_policy() {
     );
     let (ok, out) = run(&dir, "root.vyrn");
     assert!(!ok, "the shadowed route must trap:\n{out}");
-    assert!(out.contains("max-age=60 etag"), "the policy is in the route line:\n{out}");
+    assert!(
+        out.contains("max-age=60 etag"),
+        "the policy is in the route line:\n{out}"
+    );
 }
 
 // The wire end of M2 — the header map on the socket, and a 304 with neither body
@@ -559,14 +677,23 @@ fn a_stream_carries_its_own_vocabulary_and_never_policys() {
     assert!(ok, "the live root must run:\n{out}");
     // `derived` is the stream's own line: no `max-age`, no `etag`, because a
     // `Live` has no `Policy` to write one with.
-    assert!(out.contains("SSE /notes/live retry=2500 resumable"), "{out}");
+    assert!(
+        out.contains("SSE /notes/live retry=2500 resumable"),
+        "{out}"
+    );
     // M3b's line beside it, and the point is which words are NOT in each: a
     // `Live` has no close code and a `Socket` has no retry hint, because an
     // option meaningless to a transport is absent from it rather than ignored.
-    assert!(out.contains("WS /notes/socket close=1001 subprotocol=notes.v1 max-frame=4096"), "{out}");
+    assert!(
+        out.contains("WS /notes/socket close=1001 subprotocol=notes.v1 max-frame=4096"),
+        "{out}"
+    );
     // The frame SSE specifies: a field per line, a `data:` per payload line
     // (a raw newline inside one would end the event), and a blank line to close.
-    assert!(out.contains("id: 7\nevent: note\ndata: a\ndata: b\n"), "{out}");
+    assert!(
+        out.contains("id: 7\nevent: note\ndata: a\ndata: b\n"),
+        "{out}"
+    );
     // The buffered group still answers everything it did before.
     assert!(out.contains("200 application/json"), "{out}");
 }
@@ -575,8 +702,16 @@ fn a_stream_carries_its_own_vocabulary_and_never_policys() {
 fn a_stream_route_that_shadows_a_buffered_one_is_a_startup_error() {
     // The stream resolves first, so `/notes/{id}` behind it would be dead for
     // every id — which is exactly the shape `mount` refuses between groups.
-    let dir = project_using("liveshadow", "http, Route, GET, POST", "[GET(byId(\"/{id}\"))]");
-    write(&dir, "root.vyrn", &LIVE_ROOT.replace("\"/notes/live\"", "\"/notes/{id}\""));
+    let dir = project_using(
+        "liveshadow",
+        "http, Route, GET, POST",
+        "[GET(byId(\"/{id}\"))]",
+    );
+    write(
+        &dir,
+        "root.vyrn",
+        &LIVE_ROOT.replace("\"/notes/live\"", "\"/notes/{id}\""),
+    );
     let (ok, out) = run(&dir, "root.vyrn");
     assert!(!ok, "the shadowed route must trap:\n{out}");
     assert!(out.contains("is unreachable"), "{out}");

@@ -15,7 +15,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_dir(rel: &str) -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap();
     let s = p.to_string_lossy().replace('\\', "/");
     PathBuf::from(s.strip_prefix("//?/").unwrap_or(&s).to_string())
 }
@@ -58,7 +62,11 @@ const MANIFEST_WITHOUT: &str = r#"{ "name": "aud", "main": "main.vyrn" }
 /// the manifest declares an `audience` key.
 fn widening_project(dir: &Path, manifest: &str) {
     write(dir, "vyrn.json", manifest);
-    write(dir, "shared/wire.vyrn", "export type Note = { id: Int64, text: String }\n");
+    write(
+        dir,
+        "shared/wire.vyrn",
+        "export type Note = { id: Int64, text: String }\n",
+    );
     write(
         dir,
         "server/store.vyrn",
@@ -82,14 +90,30 @@ fn widening_project(dir: &Path, manifest: &str) {
 fn a_universal_page_importing_a_server_module_is_an_error_naming_both_files() {
     let dir = scratch("widen");
     widening_project(&dir, MANIFEST_WITH_AUDIENCE);
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
-    assert!(!out.status.success(), "expected the widening import to fail the build");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected the widening import to fail the build"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     // BOTH ends of the edge, named as a reader of the project would type them.
-    assert!(err.contains("`app/routes/index.vyrn` is universal"), "{err}");
-    assert!(err.contains("cannot import `server/store.vyrn`, which is server-only"), "{err}");
+    assert!(
+        err.contains("`app/routes/index.vyrn` is universal"),
+        "{err}"
+    );
+    assert!(
+        err.contains("cannot import `server/store.vyrn`, which is server-only"),
+        "{err}"
+    );
     // The `vyrn.json` key that decided it — the answer to "says who?".
-    assert!(err.contains("declared by vyrn.json:audience.server"), "{err}");
+    assert!(
+        err.contains("declared by vyrn.json:audience.server"),
+        "{err}"
+    );
     // And what to do instead.
     assert!(err.contains("client(\"./server/api\")"), "{err}");
 }
@@ -98,16 +122,29 @@ fn a_universal_page_importing_a_server_module_is_an_error_naming_both_files() {
 fn the_same_project_without_an_audience_key_compiles() {
     let dir = scratch("optout");
     widening_project(&dir, MANIFEST_WITHOUT);
-    let out = vyrn().arg("run").arg(dir.join("main.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
     // `main` returns the note's id, so the exit code IS the evidence it ran.
-    assert_eq!(out.status.code(), Some(7), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
 fn a_server_module_may_import_a_universal_one() {
     let dir = scratch("legal");
     write(&dir, "vyrn.json", MANIFEST_WITH_AUDIENCE);
-    write(&dir, "shared/wire.vyrn", "export fn seven() -> Int64 {\n    return 7\n}\n");
+    write(
+        &dir,
+        "shared/wire.vyrn",
+        "export fn seven() -> Int64 {\n    return 7\n}\n",
+    );
     write(
         &dir,
         "server/store.vyrn",
@@ -118,15 +155,28 @@ fn a_server_module_may_import_a_universal_one() {
         "main.vyrn",
         "import { go } from \"./server/store\"\nfn main() -> Int64 {\n    return go()\n}\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("main.vyrn")).output().unwrap();
-    assert_eq!(out.status.code(), Some(7), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
 fn a_server_module_may_not_reach_a_client_one() {
     let dir = scratch("crosswise");
     write(&dir, "vyrn.json", MANIFEST_WITH_AUDIENCE);
-    write(&dir, "client/boot.vyrn", "export fn boot() -> Int64 {\n    return 1\n}\n");
+    write(
+        &dir,
+        "client/boot.vyrn",
+        "export fn boot() -> Int64 {\n    return 1\n}\n",
+    );
     write(
         &dir,
         "server/store.vyrn",
@@ -137,18 +187,29 @@ fn a_server_module_may_not_reach_a_client_one() {
         "main.vyrn",
         "import { go } from \"./server/store\"\nfn main() -> Int64 {\n    return go()\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("`server/store.vyrn` is server-only"), "{err}");
-    assert!(err.contains("`client/boot.vyrn`, which is client-only"), "{err}");
+    assert!(
+        err.contains("`client/boot.vyrn`, which is client-only"),
+        "{err}"
+    );
 }
 
 #[test]
 fn nearest_segment_wins_so_feature_outer_layouts_work() {
     let dir = scratch("feature");
     write(&dir, "vyrn.json", MANIFEST_WITH_AUDIENCE);
-    write(&dir, "src/notes/server/api/notes.vyrn", "export fn list() -> Int64 {\n    return 1\n}\n");
+    write(
+        &dir,
+        "src/notes/server/api/notes.vyrn",
+        "export fn list() -> Int64 {\n    return 1\n}\n",
+    );
     write(
         &dir,
         "src/notes/app/view.vyrn",
@@ -159,11 +220,24 @@ fn nearest_segment_wins_so_feature_outer_layouts_work() {
         "main.vyrn",
         "import { v } from \"./src/notes/app/view\"\nfn main() -> Int64 {\n    return v()\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
-    assert!(!out.status.success(), "a feature-outer layout must be checked the same way");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a feature-outer layout must be checked the same way"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("`src/notes/app/view.vyrn` is universal"), "{err}");
-    assert!(err.contains("`src/notes/server/api/notes.vyrn`, which is server-only"), "{err}");
+    assert!(
+        err.contains("`src/notes/app/view.vyrn` is universal"),
+        "{err}"
+    );
+    assert!(
+        err.contains("`src/notes/server/api/notes.vyrn`, which is server-only"),
+        "{err}"
+    );
 }
 
 const MANIFEST_TWO_ROOTS: &str = r#"{
@@ -183,7 +257,11 @@ fn a_vyx_reaching_a_server_module_is_an_error_in_the_half_that_ships() {
     // client root bundles it, naming both ends.
     let dir = scratch("vyx");
     write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
-    write(&dir, "server/store.vyrn", "export fn secret() -> String {\n    return \"s\"\n}\n");
+    write(
+        &dir,
+        "server/store.vyrn",
+        "export fn secret() -> String {\n    return \"s\"\n}\n",
+    );
     write(
         &dir,
         "app/widgets/Leak.vyx",
@@ -199,12 +277,22 @@ fn a_vyx_reaching_a_server_module_is_an_error_in_the_half_that_ships() {
          export extern fn v() -> String {\n    return toHtmlString(leak())\n}\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("client/boot.vyrn")).output().unwrap();
-    assert!(!out.status.success(), "a .vyx in the client bundle must not reach a server module");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("client/boot.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a .vyx in the client bundle must not reach a server module"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("app/widgets/Leak.vyx"), "{err}");
     assert!(err.contains("`client/boot.vyrn` is client-only"), "{err}");
-    assert!(err.contains("`server/store.vyrn`, which is server-only"), "{err}");
+    assert!(
+        err.contains("`server/store.vyrn`, which is server-only"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -222,7 +310,11 @@ fn a_pages_ssr_half_may_load_from_the_server_that_mounts_it() {
         "import { Note } from \"../../shared/wire\"\n\
          /// The one note.\nexport fn one() -> Note {\n    return Note { n: 7 }\n}\n",
     );
-    write(&dir, "shared/wire.vyrn", "export type Note = { n: Int64 }\n");
+    write(
+        &dir,
+        "shared/wire.vyrn",
+        "export type Note = { n: Int64 }\n",
+    );
     write(
         &dir,
         "app/routes/index.vyx",
@@ -252,32 +344,65 @@ fn main() -> Int64 {
          export extern fn vyrnRenderPage(p: String) -> String {\n    return renderPage(p)\n}\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("server.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "200");
     // And the client bundle, which is where a leak would matter, still checks.
-    let out = vyrn().arg("check").arg(dir.join("client/boot.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("client/boot.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
 fn why_prints_the_audience_the_deciding_segment_and_the_chains() {
     let dir = scratch("why");
     widening_project(&dir, MANIFEST_WITH_AUDIENCE);
-    let out = vyrn().arg("why").arg(dir.join("server/store.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("why")
+        .arg(dir.join("server/store.vyrn"))
+        .output()
+        .unwrap();
     assert!(out.status.success(), "`why` reports; it does not gate");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("audience: server-only"), "{text}");
-    assert!(text.contains("path segment `server` (vyrn.json audience.server)"), "{text}");
-    assert!(text.contains("main.vyrn -> app/routes/index.vyrn -> server/store.vyrn"), "{text}");
+    assert!(
+        text.contains("path segment `server` (vyrn.json audience.server)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("main.vyrn -> app/routes/index.vyrn -> server/store.vyrn"),
+        "{text}"
+    );
 }
 
 #[test]
 fn why_says_so_when_the_project_declared_no_audience() {
     let dir = scratch("whynone");
     widening_project(&dir, MANIFEST_WITHOUT);
-    let out = vyrn().arg("why").arg(dir.join("server/store.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("why")
+        .arg(dir.join("server/store.vyrn"))
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("declares no `audience` in vyrn.json"), "{text}");
+    assert!(
+        text.contains("declares no `audience` in vyrn.json"),
+        "{text}"
+    );
 }
