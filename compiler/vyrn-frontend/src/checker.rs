@@ -573,7 +573,11 @@ fn check_accum_inner(
                 .iter()
                 .map(|a| (a.clone(), Type::Unit))
                 .collect();
-            let opaque = |t: &Type| crate::types::substitute(t, &probe) != *t;
+            // A position naming `Self` is not compared either, and for a
+            // stronger reason: the protocol is already wrong, and every impl
+            // would otherwise be told so on its own line.
+            let opaque =
+                |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
                 let Some(f) = imp.methods.iter().find(|m| m.name == sig.name) else {
                     out.push(Diagnostic::from_rendered(
@@ -823,6 +827,18 @@ fn check_accum_inner(
         for s in checker.check_contract_decl(c) {
             let mut d = Diagnostic::from_rendered(s, "check");
             d.file = c.module.clone();
+            out.push(d);
+        }
+    }
+
+    // 3c. Validate each protocol decl (RFC-0002 §5): a method signature must
+    //     name types that exist. A protocol read only through its impls put the
+    //     diagnostic on the impl line and named a type nobody declared — `Self`
+    //     being the one every reader writes.
+    for p in &program.protocols {
+        for s in checker.check_protocol_decl(p) {
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = p.module.clone();
             out.push(d);
         }
     }
@@ -1883,6 +1899,26 @@ impl<'a> Checker<'a> {
                 }
                 return Ok(());
             }
+            // `Self` is not a type name in Vyrn — not in the lexer, not in the
+            // parser, not here (RFC-0091's `Copy` section records the same
+            // blocker and took the associated-type spelling instead). It parses
+            // as an ordinary name, so `protocol Grow { fn grow(self) -> Self }`
+            // was accepted and every impl was then refused for providing
+            // `-> Ring`: the diagnostic pointed at the impl, and the mistake was
+            // on the protocol line.
+            //
+            // Named at the one walk every declared type passes through, so a
+            // parameter, a return type and an `Array<Self>` all get this answer
+            // rather than three near-misses. A user `type Self = ..` still wins,
+            // the rule `Code` and `Token` follow above.
+            Type::Named(n) if n == "Self" && !self.types.contains_key("Self") => {
+                return Err(format!(
+                    "line {line}: `Self` is not a type in Vyrn — a protocol that must name the \
+                     implementing type declares an associated type instead: `protocol P {{ type \
+                     Out  fn m(self) -> Out }}`, and each impl binds it with `type Out = ..` \
+                     (RFC-0080)"
+                ))
+            }
             Type::Named(n) => match self.types.get(n) {
                 None => return Err(format!("line {line}: unknown type `{n}`")),
                 Some(d) if !d.type_params.is_empty() => {
@@ -2072,6 +2108,31 @@ impl<'a> Checker<'a> {
             }
             _ => self.ensure_type_exists(ty, line),
         }
+    }
+
+    /// Validate a protocol's method signatures (RFC-0002 §5). Returns every
+    /// problem found.
+    ///
+    /// A protocol is a declaration, so a mistake in one is reported the same way
+    /// a mistake in a `type` or a `contract` is. Until now nothing read a
+    /// protocol's signatures at all: `fn grow(self) -> Blah` passed `vyrn check`
+    /// with no impl, and WITH one the impl was blamed for not providing `-> Blah`
+    /// — the diagnostic pointed at the wrong line, and at a type that does not
+    /// exist. `Self` is the name a reader actually writes, and it gets its own
+    /// answer from [`Checker::ensure_type_exists`].
+    ///
+    /// An associated type (RFC-0080 M2) reaches here as a [`Type::Param`], which
+    /// the walk admits — so `fn get(self) -> Output` needs no exception.
+    fn check_protocol_decl(&self, p: &ProtocolDecl) -> Vec<String> {
+        let mut errs = Vec::new();
+        for m in &p.methods {
+            for t in m.params.iter().chain(std::iter::once(&m.ret)) {
+                if let Err(e) = self.ensure_type_exists(t, m.line) {
+                    errs.push(e);
+                }
+            }
+        }
+        errs
     }
 
     /// Validate a module contract's members (RFC-0071). Returns every problem
@@ -7876,6 +7937,23 @@ fn type_mentions_param(ty: &Type) -> bool {
     found
 }
 
+/// Does `ty` name `Self` anywhere?
+///
+/// `Self` is not a type in Vyrn, and [`Checker::ensure_type_exists`] now says so
+/// at the protocol's own line. Comparing an impl against a signature holding one
+/// would blame the impl for the protocol's mistake — which is how the defect was
+/// reported: `it declares fn grow(self) -> Self, this provides fn grow(self) ->
+/// Ring`, one error per impl and none on the line that was wrong.
+fn type_mentions_self(ty: &Type) -> bool {
+    let mut found = false;
+    walk_type(ty, &mut |t| {
+        if matches!(t, Type::Named(n) if n == "Self") {
+            found = true;
+        }
+    });
+    found
+}
+
 /// Apply `f` to `ty` and to every type nested inside it.
 fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
     f(ty);
@@ -12168,6 +12246,64 @@ mod tests {
             e.contains("associated type `Output`") && e.contains("cannot name it"),
             "{e}"
         );
+    }
+
+    /// A protocol's own signatures are read, and `Self` is refused where it is
+    /// WRITTEN.
+    ///
+    /// `Self` is not a type in Vyrn — not in the lexer, not in the parser, not
+    /// in the checker. It parsed as an ordinary name, so a protocol declaring
+    /// `-> Self` was accepted with no impl at all, and with one every impl was
+    /// refused: `it declares fn grow(self) -> Self, this provides fn grow(self)
+    /// -> Ring`, once per impl, none of them on the line that was wrong.
+    ///
+    /// Three positions, because a hand-written refusal on the return type alone
+    /// would have missed the other two.
+    #[test]
+    fn a_protocol_may_not_name_self() {
+        let want = "`Self` is not a type in Vyrn";
+        let each = [
+            ("a return type", "protocol Grow { fn grow(self) -> Self }"),
+            ("a parameter", "protocol Merge { fn merge(self, other: Self) -> Int64 }"),
+            ("a type argument", "protocol All { fn all(self) -> Array<Self> }"),
+        ];
+        for (what, proto) in each {
+            // Alone: the declaration is the error, so it needs no impl to fire.
+            let bare =
+                check_src(&format!("{proto}\nfn main() -> Int64 {{ return 0 }}")).unwrap_err();
+            assert!(bare.contains(want), "{what}, alone: {bare}");
+            // The way out is named rather than implied.
+            assert!(bare.contains("associated type"), "{what}: no way out named: {bare}");
+        }
+        // And with an impl, the impl is no longer blamed for it: one error, on
+        // the protocol's line.
+        let with_impl = check_src(
+            "protocol Grow { fn grow(self) -> Self }\n\
+             type Ring = { n: Int64 }\n\
+             impl Grow for Ring { fn grow(self) -> Ring { return Ring { n: self.n } } }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(with_impl.contains(want), "{with_impl}");
+        assert!(!with_impl.contains("this provides"), "the impl is still blamed: {with_impl}");
+    }
+
+    /// A protocol's method signatures name types that exist (RFC-0002 §5).
+    /// Nothing read them until now: a protocol was checked only through its
+    /// impls, so a typo in one was reported at every impl and at no impl at all.
+    #[test]
+    fn a_protocol_signature_names_types_that_exist() {
+        let e = check_src("protocol Grow { fn grow(self) -> Blah }\nfn main() -> Int64 { return 0 }")
+            .unwrap_err();
+        assert!(e.contains("unknown type `Blah`"), "{e}");
+        // An associated type is not an unknown one — it reaches the walk as a
+        // type parameter, which is exactly what it is.
+        check_src(
+            "protocol Unwrap { type Output  fn get(self) -> Output }\n\
+             impl Unwrap for Int64 { type Output = Int64  fn get(self) -> Output { return self } }\n\
+             fn main() -> Int64 { return 7.get() }",
+        )
+        .expect("an associated type is not an unknown type");
     }
 
     /// An impl binds exactly what its protocol declares — both directions, both
