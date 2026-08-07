@@ -61,6 +61,12 @@ fn string_predicate_pins_hold() {
 /// and this says which offset and why. `?? panic` in a library is deterministic
 /// text, so parity still compares it byte for byte — `nullish_and_panic_say_the_
 /// same_bytes_on_all_three_engines` is the three-engine half of this.
+///
+/// The `(std/strings.vyrn:NN)` suffix is census U5: a `panic` names where it is
+/// WRITTEN, so this reports the library and not the `substring(..)` call above.
+/// The line numbers are part of the pin. Moving `substring` in `std/strings`
+/// fails this test, which is the point — a location that drifts silently is worth
+/// less than no location.
 #[test]
 fn substring_names_the_offset_it_refused() {
     let dir = std::env::temp_dir().join("vyrn-strpred");
