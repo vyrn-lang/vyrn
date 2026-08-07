@@ -165,6 +165,19 @@ pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
             row.passed.iter().find(|(c, i, _)| r.retains.contains(&(c.clone(), *i)))
         {
             row.gone = Some(Gone::Lent { line: *line, to: to.clone() });
+            continue;
+        }
+        // Handed to a LENDER. A lender returns a projection of what it was given
+        // (`tagOf(v)` is `match v { JStr(s) => s, .. }`), so its result names
+        // storage inside this argument and this block may not release it.
+        //
+        // Phase 10a found this by writing the bug. `if let Some(j) = maybe(x) {
+        // g = tagOf(j) }` released the scrutinee and left module state pointing
+        // at the freed buffer — a store of a CALL result records no move, so
+        // nothing else here could see it. The rule is wider than the row that
+        // needed it, and wider is the safe direction: it can only stop a release.
+        if let Some((to, _, line)) = row.passed.iter().find(|(c, _, _)| r.lending.contains(c)) {
+            row.gone = Some(Gone::Lent { line: *line, to: to.clone() });
         }
     }
     lets
@@ -613,6 +626,35 @@ impl MoveCheck<'_> {
         self.nodes.borrow().get(&root).copied().unwrap_or(0)
     }
 
+    /// Give an `if let` whose scrutinee is a TEMPORARY a row of its own, keyed by
+    /// the statement's node address, and hand back that key (Phase 10a).
+    ///
+    /// The temporary owns what it holds and has no name, so the row is what makes
+    /// it releasable at all: the binders bind to this key, and the ordinary
+    /// `took` path then records a `return`, a store, a capture or a handover onto
+    /// it exactly as it does for a `let`. `from_call` is filled for the same
+    /// reason a `let`'s is — a call to a LENDER hands back storage nobody here
+    /// owns, and [`ownership`] reads that after every body.
+    ///
+    /// The key is the `Stmt::IfLet` address, which is the key `own.rs` reads.
+    fn note_scrutinee(&self, s: &Stmt, scrutinee: &Expr) -> usize {
+        let Some(sink) = &self.lets else { return 0 };
+        let key = let_id(s);
+        sink.borrow_mut().insert(
+            key,
+            LetOwnership {
+                ty: self.type_of(scrutinee),
+                gone: None,
+                from_call: match scrutinee {
+                    Expr::Call { name, .. } => Some(name.clone()),
+                    _ => None,
+                },
+                passed: Vec::new(),
+            },
+        );
+        key
+    }
+
     fn took(&self, name: &str, gone: Gone) {
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
@@ -1012,7 +1054,7 @@ impl MoveCheck<'_> {
         // Whatever it is, the caller may not release it. Recorded even where it
         // is not refused below — that is the half of the hole this phase closes
         // without a diagnostic.
-        if found.is_some() {
+        if found.is_some() || self.lends_through_a_wrapper(e) {
             self.lends();
         }
         let Some((b, root, path)) = found else { return Ok(()) };
@@ -1157,6 +1199,47 @@ impl MoveCheck<'_> {
                 let (root, path) = place_path(e)?;
                 Some((self.borrow_of(&root)?, root, path))
             }
+        }
+    }
+
+    /// The same question, looking THROUGH a constructor and a struct literal —
+    /// used to RECORD a lend and never to refuse one (Phase 10a).
+    ///
+    /// `openRule(c)` is `for m in c.members { return Some(m) }`: a projection of
+    /// a `read` parameter, wrapped. Phase 5 recorded exactly this shape as the
+    /// one nothing could see — "`returned_borrow` reads a returned PLACE, and a
+    /// struct literal is not one" — and Phase 10a paid for it the moment it
+    /// released an `if let` scrutinee: `std/contract` read freed members and the
+    /// `components` generator emitted a mangled spelling.
+    ///
+    /// It is separate from [`MoveCheck::returned_borrow`] because refusing here
+    /// would refuse `return Some(m)` over any loop element, which is most of the
+    /// corpus. Recording is the whole job: a lender's result is the one thing
+    /// this analysis never releases, so this can only stop a free, never cause
+    /// one.
+    fn lends_through_a_wrapper(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Call { name, args, .. } if self.decl.constructs(name) => {
+                args.iter().any(|a| self.returned_borrow(a).is_some())
+            }
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|(_, v)| self.returned_borrow(v).is_some())
+            }
+            Expr::IfExpr { then_branch, else_branch, .. } => {
+                self.lends_through_a_wrapper(then_branch)
+                    || else_branch.as_ref().is_some_and(|b| self.lends_through_a_wrapper(b))
+            }
+            Expr::Match { scrutinee, arms, .. } => arms.iter().any(|arm| {
+                let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
+                self.enter();
+                for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
+                    self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
+                }
+                let r = self.lends_through_a_wrapper(&arm.body);
+                self.exit();
+                r
+            }),
+            _ => false,
         }
     }
 
@@ -1419,21 +1502,25 @@ impl MoveCheck<'_> {
                 scope.push(HashSet::new());
                 self.enter();
                 let (tys, borrow) = self.payload_binding(scrutinee, pattern);
-                // Census §14 asked for the scrutinee of an `if let` over a FRESH
-                // value to be a binding of its own — `if let Some(s) = f()`
-                // matches a heap value with no name, and nothing releases it.
-                // Phase 5 built that and took it out again: the payload escapes
-                // the arm as a PROJECTION (`out.push(v.name)`) or through a call,
-                // and neither is recorded against the scrutinee, so the release
-                // freed what the arm had handed on. `std/contract`'s `headOf` read
-                // a cut String out of a freed buffer within one run of
-                // `examples/vyxdemo.vyrn`. It is the same gap that keeps a record
-                // and a user enum off `own::release_kind`'s list, and it closes
-                // with the same two mechanisms.
+                // Census §14: the scrutinee of an `if let` over a FRESH value is
+                // a binding of its own — `if let Some(s) = f()` matches a heap
+                // value with no name, and until Phase 10a nothing released it.
                 //
-                // A binder over a PLACE is keyed to that place's row, which is a
-                // different question and one this pass can answer.
-                let key = self.place_key(scrutinee);
+                // Phase 5 built the release and took it out again, because the
+                // payload escapes the arm as a projection or through a call and
+                // neither was recorded against the scrutinee. **Recording it is
+                // the whole fix**, and the record is the one every `let` already
+                // gets: the statement's own node address is the key, the binders
+                // are bound to it, and every `took` in this pass then writes the
+                // arm's escape onto that row. A row with `gone: None` at the end
+                // is a value nothing took, and `own.rs` releases exactly those.
+                //
+                // A binder over a PLACE keeps Phase 5's answer: it is keyed to
+                // that place's row, so returning one gives the place up.
+                let key = match self.place_key(scrutinee) {
+                    0 => self.note_scrutinee(s, scrutinee),
+                    k => k,
+                };
                 for (i, b) in pattern_bindings(pattern).into_iter().enumerate() {
                     scope.last_mut().unwrap().insert(b.to_string());
                     // Recording it is the point: an unrecorded binder falls
@@ -2861,6 +2948,35 @@ mod tests {
         assert!(run("fn id(s: String) -> String { return s.copy() } \
                      fn main() -> Int64 { return 0 }")
             .is_ok());
+    }
+
+    /// Phase 10a. `openRule(c)` is `for m in c.members { return Some(m) }` — a
+    /// projection of a `read` parameter, wrapped in a constructor. Phase 5 named
+    /// this as the shape nothing could see, and Phase 10a paid for it: the
+    /// moment an `if let` scrutinee was released, `std/contract` read freed
+    /// members and the `components` generator emitted a mangled spelling.
+    ///
+    /// The record is a LEND, never a refusal — refusing here would refuse
+    /// `return Some(m)` over any loop element, which is most of the corpus.
+    #[test]
+    fn a_borrow_wrapped_in_a_constructor_is_recorded_as_a_lend() {
+        let src = "type M = { name: String } \
+                   type C = { members: Array<M> } \
+                   fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m) } \
+                   return None } \
+                   fn main() -> Int64 { let c = C { members: [] } \
+                   if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }";
+        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        // It compiles: the wrapper is recorded, not refused.
+        assert!(super::check(&program).is_ok());
+        // And every row that names its result is off the release list, so the
+        // `if let` scrutinee is not freed under the arm that reads it.
+        assert!(
+            super::ownership(&program)
+                .values()
+                .all(|r| r.from_call.as_deref() != Some("openRule") || r.gone.is_some()),
+            "a lender's result must never be reclaimed by its caller"
+        );
     }
 
     #[test]

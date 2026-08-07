@@ -2503,6 +2503,35 @@ impl Fn_<'_> {
                 // one's scrutinee would take the same scratch slot back.
                 let addr = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(addr));
+                // Census §14, Phase 10a: a scrutinee that is a TEMPORARY owns
+                // what it holds and has no name, so `own` gives the STATEMENT
+                // the reclamation row. A release frame of its own is what makes
+                // the release survive a `return` out of the arm — an early exit
+                // walks the frames, and this one is on the stack for the whole
+                // statement.
+                self.releases.push(Vec::new());
+                let scrut_boundary = self.releases.len() - 1;
+                if self.drops.contains_key(&(s as *const Stmt as usize)) {
+                    if let Some(r) = self.rel_for(&st, *line)? {
+                        // A slot of its own, and it has to be one. `expr` left the
+                        // aggregate wherever it built it, and the arm can build
+                        // over that — the release then read a slot the then-block
+                        // had reused and freed a pointer nobody allocated. It cost
+                        // `examples/vyxdemo.vyrn` a wrong `None` out of `slice`,
+                        // and only on the direct backend, because the textual one
+                        // copies into an `alloca` at the same point.
+                        //
+                        // The copy is by value, so the copy holds the same buffer
+                        // pointers the binders read and releasing it releases
+                        // exactly those.
+                        let own = b.alloc(sl.size, sl.align);
+                        b.slot(own);
+                        b.ins(&Instruction::LocalGet(addr));
+                        b.ins(&Instruction::I32Const(sl.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                        self.releases.last_mut().unwrap().push((Place::Slot(own), r));
+                    }
+                }
                 self.tag_test(b, addr, &sum, pattern, *line)?;
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
@@ -2523,6 +2552,11 @@ impl Fn_<'_> {
                 }
                 self.depth -= 1;
                 b.ins(&Instruction::End);
+                // The fall-through release, after both arms have rejoined. An arm
+                // that returned already ran it and branched, so this copy lands in
+                // code wasm has marked unreachable — the same rule `block` follows.
+                self.emit_releases_above(m, b, scrut_boundary)?;
+                self.releases.pop();
             }
             Stmt::While { cond, body, line } => {
                 // `block { loop { br_if 1 (!cond); body; br 0 } }` — the block is

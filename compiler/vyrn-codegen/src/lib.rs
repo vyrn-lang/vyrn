@@ -3882,6 +3882,19 @@ impl<'a> Gen<'a> {
                 // (RFC-0060). No `phi` — the arms carry no value (statement form).
                 let (sv, sty) = self.gen_expr(scrutinee)?;
                 let sr = self.resolve(&sty);
+                // Census §14, Phase 10a: a scrutinee that is a TEMPORARY owns
+                // what it holds and has no name, so `own` gives the STATEMENT
+                // the reclamation row. The value goes into a slot and the slot
+                // onto a drop frame of its own, which is what makes the release
+                // survive a `return` out of the arm — `emit_all_drops` walks the
+                // frames, and this one is on the stack for the whole statement.
+                let scrut_drop = self.droppable.get(&(stmt as *const Stmt as usize)).cloned();
+                self.drop_stack.push(Vec::new());
+                if let Some(kind) = scrut_drop {
+                    let slot = self.fresh_alloca(&self.llt(&sr).clone());
+                    self.emit(format!("store {} {sv}, ptr {slot}", self.llt(&sr)));
+                    self.drop_stack.last_mut().unwrap().push((slot, kind));
+                }
                 let then_l = self.fresh_label("il.then");
                 let end_l = self.fresh_label("il.end");
                 let else_l = if else_block.is_some() {
@@ -3912,6 +3925,15 @@ impl<'a> Gen<'a> {
                 }
 
                 self.emit_label(&end_l);
+                // The fall-through release. An arm that returned already ran it
+                // through `emit_all_drops` and left `terminated` set, so nothing
+                // is freed twice — the same rule `gen_block` follows.
+                let drops = self.drop_stack.pop().unwrap();
+                if !self.terminated {
+                    for (slot, kind) in drops.iter().rev() {
+                        self.emit_drop(slot, kind);
+                    }
+                }
                 Ok(())
             }
             Stmt::While { cond, body, .. } => {

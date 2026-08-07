@@ -660,12 +660,36 @@ impl Emit<'_> {
                 then_block,
                 else_block,
                 ..
+            } => {
+                self.block(then_block);
+                if let Some(eb) = else_block {
+                    self.block(eb);
+                }
             }
-            | Stmt::IfLet {
+            // Census §14, Phase 10a. `if let Some(s) = f()` matches a value with
+            // no name, so nothing released it. It has a row now — `movecheck`
+            // writes one keyed by this statement whenever the scrutinee is a
+            // TEMPORARY — and the row answers the same question a `let`'s does:
+            // did anything take it. A row with no `gone` is a value the arms did
+            // not hand on, and releasing it is what closes the row.
+            //
+            // The release is the whole scrutinee, not the payload: `Option` and
+            // `Result` release deeply since Phase 5, and a `None` releases
+            // nothing because the walk reads the tag.
+            Stmt::IfLet {
+                scrutinee,
                 then_block,
                 else_block,
+                line,
                 ..
             } => {
+                let fate = self.fate(s, scrutinee);
+                if let Fate::Reclaimed(kind) = &fate {
+                    self.droppable.insert(id(s), kind.clone());
+                }
+                // No `BindingNote`: `vyrn why --memory` lists bindings, and this
+                // is a temporary with no name to print.
+                let _ = line;
                 self.block(then_block);
                 if let Some(eb) = else_block {
                     self.block(eb);
