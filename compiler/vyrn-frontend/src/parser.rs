@@ -2350,7 +2350,14 @@ impl Parser {
 
     /// Parse an optional capability keyword (`read`/`modify`/`consume`/`share`)
     /// before a parameter's type. Contextual, not reserved: a keyword only counts
-    /// as a capability when another identifier (the type) follows it.
+    /// as a capability when the token after it starts a type.
+    ///
+    /// `Tok::Fn` starts one too, and Phase 10b is what found that out: a stored
+    /// `fn` value owns its capture block since then, so `run: consume fn() -> T`
+    /// is a thing `std/ui` has to be able to write, and until this line it parsed
+    /// `consume` as the type and stopped at the `fn`. Nothing ambiguous joins the
+    /// set — a call to a user function named `consume` is `consume(..)`, and an
+    /// `LParen` is not in it.
     fn parse_capability(&mut self) -> Capability {
         if let Tok::Ident(id) = self.peek() {
             let cap = match id.as_str() {
@@ -2361,7 +2368,7 @@ impl Parser {
                 _ => None,
             };
             if let Some(c) = cap {
-                if matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_)) {
+                if matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Fn) {
                     self.advance();
                     return c;
                 }

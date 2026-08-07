@@ -154,7 +154,7 @@ export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
         method: "",
         pattern: httpTidy(pattern),
         prefix: false,
-        run: run,
+        run: run.copy(),
         whole: httpNoWhole,
         derived: derived.copy(),
         maxAge: -1,
@@ -175,8 +175,8 @@ fn httpCopy(r: Route) -> Route {
         method: r.method.copy(),
         pattern: r.pattern.copy(),
         prefix: r.prefix,
-        run: r.run,
-        whole: r.whole,
+        run: r.run.copy(),
+        whole: r.whole.copy(),
         derived: r.derived.copy(),
         maxAge: r.maxAge,
         validator: r.validator,
@@ -184,7 +184,7 @@ fn httpCopy(r: Route) -> Route {
         varyOn: r.varyOn.copy(),
         ok: r.ok,
         location: r.location.copy(),
-        missing: r.missing,
+        missing: r.missing.copy(),
     }
 }
 
@@ -243,7 +243,7 @@ fn httpWithMethod(r: Route, method: String) -> Route {
 /// router. It answers with `Some` or declines with `None` — the same
 /// `handle`-convention shape those already have (RFC-0016) — so mounting one
 /// costs no adapter at the composition root.
-export fn surface(prefix: String, run: Surface) -> Route {
+export fn surface(prefix: String, run: consume Surface) -> Route {
     return Route {
         method: "*",
         pattern: httpTidy(prefix),
@@ -397,7 +397,7 @@ impl Policy for Route {
 
     fn notFoundWhen(self, isMissing: IsMissing) -> Route {
         let mut out = httpCopy(self)
-        out.missing = isMissing
+        out.missing = isMissing.copy()
         out.derived = out.derived + " not-found-when"
         return out
     }
@@ -448,7 +448,7 @@ export type Live = {
 /// record — there are no fields to check the placeholders against. So `sse` is
 /// the RFC's own `sse("/", tail)` spelling, and it is not a weaker version of
 /// `GET(byId("/{id}"))`; it is the same rule with nothing to check.
-export fn sse(pattern: String, feed: Feed) -> Live {
+export fn sse(pattern: String, feed: consume Feed) -> Live {
     return Live {
         pattern: httpTidy(pattern),
         feed: feed,
@@ -491,7 +491,7 @@ impl Wire for Live {
     fn retryAfter(self, ms: Int64) -> Live {
         return Live {
             pattern: self.pattern.copy(),
-            feed: self.feed,
+            feed: self.feed.copy(),
             retry: ms,
             resume: self.resume,
             derived: self.derived + " retry=\{ms}",
@@ -501,7 +501,7 @@ impl Wire for Live {
     fn resumable(self) -> Live {
         return Live {
             pattern: self.pattern.copy(),
-            feed: self.feed,
+            feed: self.feed.copy(),
             retry: self.retry,
             resume: true,
             derived: self.derived + " resumable",
@@ -571,7 +571,7 @@ export type Socket = {
 /// `retry:` are a design surface — which event name, which id — so `event(..)` is
 /// Vyrn and the host writes what it is handed. A frame's opcode, length and mask
 /// are not a surface; there is no choice in any of them. So the host frames.
-export fn ws(pattern: String, feed: Feed) -> Socket {
+export fn ws(pattern: String, feed: consume Feed) -> Socket {
     return Socket {
         pattern: httpTidy(pattern),
         feed: feed,
@@ -594,7 +594,7 @@ impl Frames for Socket {
     fn closeCode(self, code: Int64) -> Socket {
         return Socket {
             pattern: self.pattern.copy(),
-            feed: self.feed,
+            feed: self.feed.copy(),
             closing: code,
             subproto: self.subproto.copy(),
             fragment: self.fragment,
@@ -605,7 +605,7 @@ impl Frames for Socket {
     fn subprotocol(self, name: String) -> Socket {
         return Socket {
             pattern: self.pattern.copy(),
-            feed: self.feed,
+            feed: self.feed.copy(),
             closing: self.closing,
             subproto: name.copy(),
             fragment: self.fragment,
@@ -616,7 +616,7 @@ impl Frames for Socket {
     fn maxFrame(self, size: Int64) -> Socket {
         return Socket {
             pattern: self.pattern.copy(),
-            feed: self.feed,
+            feed: self.feed.copy(),
             closing: self.closing,
             subproto: self.subproto.copy(),
             fragment: size,

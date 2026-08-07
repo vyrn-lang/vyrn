@@ -667,6 +667,9 @@ const STREAM_LL: &str = "{ ptr, i64, i64, i64, i64, i64 }";
 /// The direct backend parks its receiver under the same spelling.
 const REL_RECV: &str = "@rel";
 
+/// The module's derived copy over the defunctionalized `fn` enum (Phase 10b).
+const FNVAL_COPY: &str = "__vyrn_fnval_copy";
+
 pub const GEN_MODE_READ: i32 = 0;
 pub const GEN_MODE_READ_BYTES: i32 = 1;
 pub const GEN_MODE_LIST: i32 = 2;
@@ -1456,6 +1459,18 @@ pub fn emit(program: &Program) -> Result<String, String> {
         for sig in &sigs {
             dgen.emit_fnval_dispatcher(sig, &mut out)?;
         }
+    }
+
+    // Phase 10b: the derived copy over the same enum, emitted here for the same
+    // reason — a variant's capture layout is only complete once every body has
+    // been read. `internal`, so a module that never copies a `fn` value drops it.
+    if !fnval_registry.is_empty() {
+        let mut cgen = Gen::new(
+            &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
+            &funcs, droppable_map, owned_proto, &regex_globals, &program.impls,
+        );
+        cgen.fnval_variants = fnval_registry.clone();
+        cgen.emit_fnval_copy(&mut out);
     }
 
     // RFC-0090 M3: one release per element type, emitted here for the reason the
@@ -2636,6 +2651,23 @@ impl<'a> Gen<'a> {
                 self.copy_sum(v, &[(Some("1"), vec![*ok]), (Some("0"), vec![*err])])
             }
             Type::Enum(vs) => self.copy_enum(v, &vs),
+            // A stored `fn` value (RFC-0037, Phase 10b): `{ tag, captures }`,
+            // and the copy is a fresh capture block. The block's SIZE is per
+            // tag, so the walk cannot be written here — it is one call to the
+            // derived copy, which switches on the tag the defunctionalizer
+            // chose. Shallow, like the release: two lambdas over one String
+            // build two blocks holding one pointer.
+            Type::Fn(..) => {
+                let tag = self.fresh_tmp();
+                let pay = self.fresh_tmp();
+                let np = self.fresh_tmp();
+                self.emit(format!("{tag} = extractvalue {{ i64, i64 }} {v}, 0"));
+                self.emit(format!("{pay} = extractvalue {{ i64, i64 }} {v}, 1"));
+                self.emit(format!(
+                    "{np} = call i64 @{FNVAL_COPY}(i64 {tag}, i64 {pay})"
+                ));
+                Ok(self.fnval_aggregate_v(&tag, &np))
+            }
             // A handle names something; copying it names the same thing. A
             // `Task<T>`/`lazy T` is a promise, which is the same shape.
             Type::Task(_) | Type::Lazy(_) => Ok(v.to_string()),
@@ -6395,6 +6427,16 @@ impl<'a> Gen<'a> {
         b
     }
 
+    /// The same aggregate where the tag is an SSA value rather than a literal —
+    /// what a copy of an existing `fn` value rebuilds.
+    fn fnval_aggregate_v(&mut self, tag: &str, payload: &str) -> String {
+        let a = self.fresh_tmp();
+        let b = self.fresh_tmp();
+        self.emit(format!("{a} = insertvalue {{ i64, i64 }} undef, i64 {tag}, 0"));
+        self.emit(format!("{b} = insertvalue {{ i64, i64 }} {a}, i64 {payload}, 1"));
+        b
+    }
+
     /// Construct a stored function value from a lambda literal (RFC-0037): the
     /// captures are loaded HERE (the literal's evaluation site — RFC-0023's
     /// capture-timing lock, verbatim), packed by value into a malloc'd capture
@@ -6656,6 +6698,74 @@ impl<'a> Gen<'a> {
     /// the variant's capture block, and DIRECT-call the target. Every call
     /// names an `@symbol`; the default arm is unreachable by construction
     /// (tags only come from registered constructions) and traps defensively.
+    /// Emit the module's one derived copy over the defunctionalized enum
+    /// (RFC-0037 × RFC-0089 rule 4, Phase 10b, census §16).
+    ///
+    /// `x.copy()` of a stored `fn` value has to duplicate the capture block, and
+    /// the block's size is a property of the TAG, chosen at run time. Nothing at
+    /// the copy site can measure it. The defunctionalizer chose those tags and
+    /// knows every one's capture types, so the copy is derived HERE, in one
+    /// function per module: a switch from tag to block size, then one `malloc`
+    /// and one `memcpy`.
+    ///
+    /// It is the answer to the objection [`crate::own::owns_heap`] used to carry
+    /// — "a capture block's layout is per TAG, so a structural copy has nothing
+    /// to measure". The layout is per tag; the copy does not need the layout,
+    /// only the size, and the switch supplies it.
+    ///
+    /// The copy is **shallow**: the block, not what the captures point at. A
+    /// deep one would be an alias bug rather than a fix, because two lambdas
+    /// over one String already build two blocks holding one pointer — so the
+    /// release is shallow for the same reason, and the two stay mirrors.
+    ///
+    /// `internal`, so a module that never copies a `fn` value loses it entirely.
+    fn emit_fnval_copy(&mut self, out: &mut String) {
+        out.push_str(&format!("define internal i64 @{FNVAL_COPY}(i64 %tag, i64 %pay) {{\n"));
+        out.push_str("entry:\n");
+        // A variant with no captures carries payload 0 and copies to itself, so
+        // only the ones that allocate need an arm.
+        let sized: Vec<(usize, String)> = self
+            .fnval_variants
+            .clone()
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.cap_tys.is_empty())
+            .map(|(i, v)| {
+                (
+                    i,
+                    format!(
+                        "{{ {} }}",
+                        v.cap_tys.iter().map(|t| self.llt(t)).collect::<Vec<_>>().join(", ")
+                    ),
+                )
+            })
+            .collect();
+        let arms: Vec<String> =
+            sized.iter().map(|(i, _)| format!("i64 {i}, label %cp.v{i}")).collect();
+        out.push_str(&format!(
+            "  switch i64 %tag, label %cp.share [ {} ]\n",
+            arms.join(" ")
+        ));
+        for (i, block_ll) in &sized {
+            out.push_str(&format!("cp.v{i}:\n"));
+            out.push_str(&format!(
+                "  %s{i} = ptrtoint ptr getelementptr ({block_ll}, ptr null, i64 1) to i64\n"
+            ));
+            out.push_str(&format!("  %o{i} = inttoptr i64 %pay to ptr\n"));
+            out.push_str(&format!("  %n{i} = call ptr @__vyrn_malloc(i64 %s{i})\n"));
+            out.push_str(&format!(
+                "  call void @llvm.memcpy.p0.p0.i64(ptr %n{i}, ptr %o{i}, i64 %s{i}, i1 false)\n"
+            ));
+            out.push_str(&format!("  %r{i} = ptrtoint ptr %n{i} to i64\n"));
+            out.push_str(&format!("  ret i64 %r{i}\n"));
+        }
+        // Every other tag has no block to copy: the payload is 0 and the copy is
+        // the value, exactly as a scalar's is.
+        out.push_str("cp.share:\n");
+        out.push_str("  ret i64 %pay\n");
+        out.push_str("}\n\n");
+    }
+
     fn emit_fnval_dispatcher(&mut self, sig: &Type, out: &mut String) -> Result<(), String> {
         let Type::Fn(ptys, ret) = sig else {
             return Err("internal: dispatcher for a non-fn type".into());

@@ -35,30 +35,30 @@ let mut resPending: Map<String, ResSink> = [:]
 let mut intChain: Array<IntSink> = []
 
 /// The miscompiling shape: a `fn`-typed PARAMETER stored into a Map value.
-fn onInt(k: String, cb: IntSink) {
+fn onInt(k: String, cb: consume IntSink) {
     intPending[k] = cb
 }
 
-fn onUser(k: String, cb: UserSink) {
+fn onUser(k: String, cb: consume UserSink) {
     userPending[k] = cb
 }
 
-fn onVal(k: String, cb: ValSink) {
+fn onVal(k: String, cb: consume ValSink) {
     valPending[k] = cb
 }
 
-fn onRes(k: String, cb: ResSink) {
+fn onRes(k: String, cb: consume ResSink) {
     resPending[k] = cb
 }
 
 /// A fn-param stored into an Array (the same value position, container aside).
-fn pushInt(cb: IntSink) {
+fn pushInt(cb: consume IntSink) {
     intChain.push(cb)
 }
 
 /// A fn-param stored into a record FIELD, then returned — the closure (and any
 /// capture it carries) survives this function's scope exit.
-fn makeHandlers(cb: UserSink) -> Handlers {
+fn makeHandlers(cb: consume UserSink) -> Handlers {
     return Handlers { onSave: cb }
 }
 
@@ -83,7 +83,7 @@ type Deferred<P, T> = { run: fn(P) -> T }
 /// codegen as a bare type parameter — which lowers to `void`: an `alloca void`, a
 /// `void` argument, and a dispatcher keyed on a signature nothing registers. The
 /// interpreter was unaffected, so it showed up as a native-only divergence.
-fn defer<P, T>(run: fn(P) -> T) -> Deferred<P, T> {
+fn defer<P, T>(run: consume fn(P) -> T) -> Deferred<P, T> {
     return Deferred { run: run }
 }
 

@@ -248,23 +248,23 @@ export type ParamQuery<P, T> = { run: fn(P) -> T }
 export type ParamLazy<P, T> = { run: fn(P) -> T }
 
 /// A query over `run`, resolved before the page renders.
-export fn query<T>(run: fn() -> T) -> Query<T> {
+export fn query<T>(run: consume fn() -> T) -> Query<T> {
     return Query { run: run }
 }
 
 /// `q` marked lazy: the page renders its shell and a skeleton first, then fills
 /// the data region in. The server always has the data, so SSR is unaffected.
-export fn lazy<T>(q: Query<T>) -> Lazy<T> {
+export fn lazy<T>(q: consume Query<T>) -> Lazy<T> {
     return Lazy { run: q.run }
 }
 
 /// A query whose deferred call receives the page's route parameters.
-export fn paramQuery<P, T>(run: fn(P) -> T) -> ParamQuery<P, T> {
+export fn paramQuery<P, T>(run: consume fn(P) -> T) -> ParamQuery<P, T> {
     return ParamQuery { run: run }
 }
 
 /// `q` marked lazy — the params-taking counterpart of [`lazy`].
-export fn paramLazy<P, T>(q: ParamQuery<P, T>) -> ParamLazy<P, T> {
+export fn paramLazy<P, T>(q: consume ParamQuery<P, T>) -> ParamLazy<P, T> {
     return ParamLazy { run: q.run }
 }
 

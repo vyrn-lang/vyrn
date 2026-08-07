@@ -348,6 +348,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
         fnvals: RefCell::new(Vec::new()),
+        fnval_copy: 0,
         dispatch: RefCell::new(Dispatch::default()),
         globals: HashMap::new(),
         gappend: HashMap::new(),
@@ -414,6 +415,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // where in the sequence it lands.
     let has_globals = !program.globals.is_empty();
     let init_index = m.reserve_func(&[], &[]);
+    // The derived `fn`-value copy (Phase 10b), reserved for a dispatcher's
+    // reason: its switch covers every construction in the module, so its body
+    // cannot be written until the last body is walked, while a copy site in the
+    // middle of that walk has to be able to call it.
+    cx.fnval_copy = m.reserve_func(&[ValType::I64, ValType::I32], &[ValType::I32]);
 
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
@@ -462,6 +468,10 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         m.fill(dsig.index, body);
         cx.dispatch.borrow_mut().done += 1;
     }
+
+    // The registry is closed now, so the derived copy can be written.
+    let fncopy = lower_fnval_copy(&cx)?;
+    m.fill(cx.fnval_copy, fncopy);
 
     // `_start`: WASI's entry point. The exit code is `main & 255`, the same
     // truncation `vyrn_entry` does natively — `vyrn run` and the native binary
@@ -871,6 +881,11 @@ struct Cx {
     /// RFC-0037's variant registry, module-global so a tag means the same thing in
     /// every body that builds one.
     fnvals: RefCell<Vec<FnVal>>,
+    /// The module's one derived copy over that registry (Phase 10b, census §16):
+    /// `(tag, block) -> block`. Reserved up front and filled after the drain
+    /// loop, for the reason a dispatcher is — a variant's capture layout is only
+    /// complete once the last body is walked.
+    fnval_copy: u32,
     dispatch: RefCell<Dispatch>,
     /// Module state (RFC-0013): name → its fixed address and declared type. Every
     /// body sees all of them, which is the textual backend's `globals` fallback in
@@ -1540,6 +1555,52 @@ fn lower_body(
 /// innermost `else` is the defensive arm, and its `unreachable` is what satisfies a
 /// result-typed chain without any arm having to branch out. That also keeps M1's
 /// rule (no `return` in a body) true by construction.
+/// The module's one derived copy over the defunctionalized enum (RFC-0037 ×
+/// RFC-0089 rule 4, Phase 10b, census §16): `(tag, block) -> block`.
+///
+/// `x.copy()` of a stored `fn` value has to duplicate the capture block, and the
+/// block's size is a property of the TAG, chosen at run time. Nothing at the
+/// copy site can measure it. The defunctionalizer chose those tags and holds
+/// every one's capture types, so the size comes off the registry here — a chain
+/// of tag tests, then one `malloc` and one `memory.copy`.
+///
+/// The copy is **shallow**: the block, not what the captures point at. Two
+/// lambdas over one String already build two blocks holding one pointer, so a
+/// deep copy would need a deep release to match and the release would then free
+/// that pointer twice. The two stay mirrors, both shallow.
+fn lower_fnval_copy(cx: &Cx) -> Result<Frame, String> {
+    let mut b = Frame::new(2, &[], 0);
+    let f = top_level(cx);
+    let (tag, pay) = (0u32, 1u32);
+    let vals = cx.fnvals.borrow().clone();
+    for (i, v) in vals.iter().enumerate() {
+        let cap_tys = &v.target.sig.params[..v.target.ncaps];
+        // No captures means payload 0, and 0 copies to itself.
+        if cap_tys.is_empty() {
+            continue;
+        }
+        let size = f.cap_block(cap_tys)?.size;
+        b.ins(&Instruction::LocalGet(tag));
+        b.ins(&Instruction::I64Const(i as i64));
+        b.ins(&Instruction::I64Eq);
+        b.ins(&Instruction::If(BlockType::Empty));
+        let dst = b.local(ValType::I32);
+        b.ins(&Instruction::I64Const(size as i64));
+        b.ins(&Instruction::Call(cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(dst));
+        b.ins(&Instruction::LocalGet(pay));
+        b.ins(&Instruction::I32Const(size as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::LocalGet(dst));
+        b.ins(&Instruction::Return);
+        b.ins(&Instruction::End);
+    }
+    // Every other tag has no block to copy: the payload is 0 and the copy is the
+    // value, exactly as a scalar's is.
+    b.ins(&Instruction::LocalGet(pay));
+    Ok(b)
+}
+
 fn lower_dispatcher(
     m: &mut Module,
     cx: &Cx,
@@ -1831,8 +1892,10 @@ impl Fn_<'_> {
             // null until the array spills, which is exactly the case `free`
             // refuses. The inline slots need no reclamation.
             Type::SmallArray(..) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[2]])),
-            // Phase 5: an aggregate owns its places.
-            Type::Option(_) | Type::Result(..) if self.owns_heap(&t) =>
+            // Phase 5: an aggregate owns its places. Phase 10b: a stored `fn`
+            // value owns its capture block, which is one allocation whatever the
+            // tag — so it needs no registry to release, only to copy.
+            Type::Option(_) | Type::Result(..) | Type::Fn(..) if self.owns_heap(&t) =>
             {
                 Some(Rel::Deep(t))
             }
@@ -8452,6 +8515,23 @@ impl Fn_<'_> {
                 }
                 Ok(())
             }
+            // A stored `fn` value (RFC-0037, Phase 10b): `{ tag, captures }`, and
+            // the copy is a fresh capture block. The block's SIZE is per tag, so
+            // the walk cannot be written here — it is one call to the module's
+            // derived copy, which holds the registry the tags index.
+            Type::Fn(..) => {
+                let l = self.layout_of(ty, line)?;
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[0])));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::Call(self.cx.fnval_copy));
+                b.ins(&Instruction::I64ExtendI32U);
+                b.ins(&Instruction::I64Store(at(l.fields[1])));
+                Ok(())
+            }
             // A handle names something; copying it names the same thing.
             Type::Task(_) | Type::Lazy(_) => Ok(()),
             other => unsupported(&format!("`copy` of `{other}`"), line),
@@ -13346,6 +13426,7 @@ mod tests {
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             fnvals: RefCell::new(Vec::new()),
+            fnval_copy: 0,
             dispatch: RefCell::new(Dispatch::default()),
             globals: HashMap::new(),
             gappend: HashMap::new(),
