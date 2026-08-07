@@ -72,6 +72,26 @@ struct Roles {
     open_rule_star: bool,
 }
 
+/// A token can be the *last* token of a type, so a tight `>`/`>>` after it can
+/// close a generic argument list. A type ends in a name or type parameter
+/// (`T`, `Int64`), a nested generic close (`Array<T>`), a const-generic size
+/// (`SmallArray<Int64, 8>`), a function type's parameter list when the return
+/// is Unit (`fn(Int64)`), or a record type's brace (`{ a: Int64 }`, and the
+/// right side of an intersection).
+fn is_type_end(t: Option<&Tok>) -> bool {
+    matches!(
+        t,
+        Some(
+            Tok::Ident(_)
+                | Tok::Gt
+                | Tok::Shr
+                | Tok::Int(_)
+                | Tok::RParen
+                | Tok::RBrace
+        )
+    )
+}
+
 /// A token can be the *end* of an operand — i.e. a binary operator that follows
 /// it is genuinely binary, and a `(`/`[` that follows it is a call/index.
 fn is_value_end(t: &Tok) -> bool {
@@ -137,10 +157,14 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
         match kind(idx) {
             Tok::Lt => {
                 // A generic bracket is tight on both sides in the source; a
-                // comparison is spaced. The first argument after `<` is always a
-                // type name (`Box<T>`, `Array<Int64, 3>` — the const-generic size
-                // is a *later* argument, never right after `<`), so a `<` directly
-                // before an integer literal (`n<10`) is a comparison, not a generic.
+                // comparison is spaced. The first argument after `<` starts a
+                // TYPE, so it is a name (`Box<T>`), a function type's `fn`
+                // (`Array<fn(P) -> T>`), or a record type's `{`
+                // (`Array<{ a: Int64 }>`). The const-generic size is always a
+                // *later* argument, never right after `<`, so a `<` directly
+                // before an integer literal (`n<10`) is a comparison, not a
+                // generic. No expression can follow `<` with `fn` or `{`, so
+                // those two cost no ambiguity.
                 let tight_before = !items[idx].space_before;
                 let tight_after = next_idx.map(|n| !items[n].space_before).unwrap_or(false);
                 // `impl<T> P for C<T>` (RFC-0080 M1) opens a generic straight
@@ -148,23 +172,22 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                 // rule does not reach. No comparison can follow `impl`, so this
                 // costs no ambiguity.
                 let prev_ok = matches!(prev, Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Impl));
-                let next_ok = matches!(next, Some(Tok::Ident(_)));
+                let next_ok = matches!(next, Some(Tok::Ident(_)) | Some(Tok::Fn) | Some(Tok::LBrace));
                 if tight_before && tight_after && prev_ok && next_ok {
                     roles[idx].generic_angle = true;
                     generic_depth += 1;
                 }
             }
             Tok::Gt => {
-                // The closing `>` is tight against a type name (`Int64>`), a nested
-                // close (`>>` = a `Shr` then a `>`), or a const-generic integer size
-                // (`Array<Int64, 3>`). It is generic ONLY while a generic `<` is
+                // The closing `>` is tight against the last token of a type
+                // ([`is_type_end`]). It is generic ONLY while a generic `<` is
                 // open — a lone tight `>` whose left side is an operand (`x>0`) is a
-                // comparison.
+                // comparison. The open-`<` count must stay balanced: a shape the
+                // opener recognizes but the closer does not would leave the count
+                // raised and tighten a later comparison, so the two lists are the
+                // two ends of the same grammar.
                 let tight_before = !items[idx].space_before;
-                let prev_ok = matches!(
-                    prev,
-                    Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Shr) | Some(Tok::Int(_))
-                );
+                let prev_ok = is_type_end(prev);
                 if generic_depth > 0 && tight_before && prev_ok {
                     roles[idx].generic_angle = true;
                     generic_depth -= 1;
@@ -176,10 +199,7 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
             // open-`<` depth disambiguate, exactly as for a lone `>`.
             Tok::Shr => {
                 let tight_before = !items[idx].space_before;
-                let prev_ok = matches!(
-                    prev,
-                    Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Shr) | Some(Tok::Int(_))
-                );
+                let prev_ok = is_type_end(prev);
                 if generic_depth >= 2 && tight_before && prev_ok {
                     roles[idx].generic_angle = true;
                     generic_depth -= 2;
@@ -554,6 +574,60 @@ mod tests {
         assert_eq!(
             f("let a: Array<Array<Int64>> = x\n"),
             "let a: Array<Array<Int64>> = x\n"
+        );
+    }
+
+    #[test]
+    fn a_generic_argument_that_is_a_function_type(/* RFC-0023 × RFC-0017 */) {
+        // The argument starts with `fn`, not a name, and carries `(`, `)` and
+        // `->` between the brackets. It is still a generic argument list.
+        assert_eq!(
+            f("type Many<P, T> = { runs: Array<fn(P) -> T> }\n"),
+            "type Many<P, T> = { runs: Array<fn(P) -> T> }\n"
+        );
+        assert_eq!(
+            f("type Maybe<P, T> = { run: Option<fn(P) -> T> }\n"),
+            "type Maybe<P, T> = { run: Option<fn(P) -> T> }\n"
+        );
+        // A Unit-return function type ends the argument at `)`, not at a name.
+        assert_eq!(
+            f("let a: Array<fn(Int64)> = x\n"),
+            "let a: Array<fn(Int64)> = x\n"
+        );
+        // A later argument, and a nesting of both.
+        assert_eq!(
+            f("let m: Map<String, fn(Int64) -> Int64> = x\n"),
+            "let m: Map<String, fn(Int64) -> Int64> = x\n"
+        );
+        assert_eq!(
+            f("let a: Array<Array<fn(P) -> T>> = x\n"),
+            "let a: Array<Array<fn(P) -> T>> = x\n"
+        );
+    }
+
+    #[test]
+    fn a_generic_argument_that_is_a_record_type() {
+        // A record type is a type atom, so it can be a generic argument. It
+        // starts with `{` and ends with `}` — neither is a name.
+        assert_eq!(
+            f("let a: Array<{ x: Int64 }> = v\n"),
+            "let a: Array<{ x: Int64 }> = v\n"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_generic_never_tightens_a_later_comparison() {
+        // The bug this guards: an opener the closer did not recognize left the
+        // open-`<` count raised, and the next tight `>` in the file — a plain
+        // comparison — printed as a generic close. Every shape the opener takes
+        // must close, so the count returns to zero.
+        assert_eq!(
+            f("type A = { r: Array<fn(P) -> T> }\nfn m() -> Int64 { if n>0 { return 1 } return 0 }\n"),
+            "type A = { r: Array<fn(P) -> T> }\nfn m() -> Int64 { if n > 0 { return 1 } return 0 }\n"
+        );
+        assert_eq!(
+            f("let a: Array<{ x: Int64 }> = v\nlet b = i>0\n"),
+            "let a: Array<{ x: Int64 }> = v\nlet b = i > 0\n"
         );
     }
 
