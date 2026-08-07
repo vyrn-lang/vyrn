@@ -4133,6 +4133,21 @@ mod tests {
                 assert!(routed_builtin(b).is_none(), "`{b}` is a desugar, not a route");
             }
         }
+        // A route is matched on the CALL NAME, before any type is known, so it
+        // only means the builtin while no declaration may carry the name. This
+        // is the check `movecheck::every_view_and_sink_name_is_reserved` makes
+        // for its list and `parser::every_method_builtin_is_reserved_or_shadowable`
+        // makes for its own — the same hazard, a third pass. A route spelled
+        // with the method-form `@` prefix is unspellable and needs no guard.
+        for rt in RT_MODULES {
+            for (builtin, _) in rt.routes {
+                assert!(
+                    builtin.starts_with('@') || crate::checker::RESERVED.contains(builtin),
+                    "`{builtin}` is routed to a std function but is not reserved, so a \
+                     user declaration of that name would be silently unreachable"
+                );
+            }
+        }
         assert!(routed_builtin("print").is_none());
         assert!(routed_builtin("lineAt").is_none(), "`lineAt` keeps its interpreter cache");
         // RFC-0079 M3: `slice` was the one refusal on this list that a language
