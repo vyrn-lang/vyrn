@@ -37,36 +37,53 @@ export type Json =
     | JArr(Array<Json>)
     | JObj(Array<JsonField>)
 
-/// A `Json` that shares nothing with `j` — RFC-0089's `copy`, written out.
+/// The structural copy is refused for this type and says why: `Json` reaches
+/// itself through `JArr` and `JObj`, and the builtin walk has no bottom to stop
+/// at. Recursion in the value needs recursion in the code, and this is that code.
+/// Every reader that looks a field out of an object needs it, because a field
+/// belongs to the object that holds it and a return is owned (RFC-0092).
 ///
-/// `j.copy()` is refused for this type and says why: `Json` reaches itself
-/// through `JArr` and `JObj`, and the builtin is a structural walk with no
-/// bottom to stop at. Recursion in the value needs recursion in the code, and
-/// this is that code. Every reader that looks a field out of an object needs it,
-/// because a field belongs to the object that holds it and a return is owned.
-export fn copyJson(j: Json) -> Json {
-    return match j {
-        JNull => JNull,
-        JBool(b) => JBool(b),
-        JNum(s) => JNum(s.copy()),
-        JStr(s) => JStr(s.copy()),
-        JArr(xs) => JArr(copyJsonArray(xs)),
-        JObj(fs) => JObj(copyJsonFields(fs)),
+/// Declaring it as `impl Copy` is what RFC-0091 M1 added, and it is what makes
+/// `j.copy()`, `fs.copy()` and `Array<Json>.copy()` mean this walk rather than
+/// the refusal.
+/// The two list walks stay hand-written: `xs.copy()` on an `Array<Json>` is the
+/// structural walk again, one level out, and it is refused for the same reason.
+/// A declared `Copy` is consulted for the value it is asked about and not for a
+/// part of one.
+impl Copy for Json {
+    fn copy(self) -> Json {
+        return match self {
+            JNull => JNull,
+            JBool(b) => JBool(b),
+            JNum(s) => JNum(s.copy()),
+            JStr(s) => JStr(s.copy()),
+            JArr(xs) => JArr(copyJsonArray(xs)),
+            JObj(fs) => JObj(copyJsonFields(fs)),
+        }
     }
 }
 
-fn copyJsonArray(xs: Array<Json>) -> Array<Json> {
+/// A `Json` that shares nothing with `j` — the name this walk had before it was
+/// a `Copy` impl. `j.copy()` says the same thing and is the one to write.
+export fn copyJson(j: Json) -> Json {
+    return j.copy()
+}
+
+/// `copy` over a list of values. Exported because `xs.copy()` cannot be written
+/// for this element type — see the impl above.
+export fn copyJsonArray(xs: Array<Json>) -> Array<Json> {
     let mut out: Array<Json> = []
     for x in xs {
-        out.push(copyJson(x))
+        out.push(x.copy())
     }
     return out
 }
 
-fn copyJsonFields(fs: Array<JsonField>) -> Array<JsonField> {
+/// `copy` over a list of object fields, for `xs.copy()`'s reason.
+export fn copyJsonFields(fs: Array<JsonField>) -> Array<JsonField> {
     let mut out: Array<JsonField> = []
     for f in fs {
-        out.push(JsonField { key: f.key.copy(), value: copyJson(f.value) })
+        out.push(JsonField { key: f.key.copy(), value: f.value.copy() })
     }
     return out
 }
@@ -170,7 +187,7 @@ export fn emit(j: Json) -> String {
     return match j {
         JNull => "null",
         JBool(b) => if b { "true" } else { "false" },
-        JNum(raw) => raw,
+        JNum(raw) => raw.copy(),
         JStr(s) => emitString(s),
         JArr(items) => emitArr(items),
         JObj(fields) => emitObj(fields),
@@ -227,7 +244,7 @@ fn emitPrettyAt(j: Json, indent: Int64, depth: Int64) -> String {
     return match j {
         JNull => "null",
         JBool(b) => if b { "true" } else { "false" },
-        JNum(raw) => raw,
+        JNum(raw) => raw.copy(),
         JStr(s) => emitString(s),
         JArr(items) => if items.length == 0 { "[]" } else { prettyArr(items, indent, depth) },
         JObj(fields) => if fields.length == 0 { "{}" } else { prettyObj(fields, indent, depth) },

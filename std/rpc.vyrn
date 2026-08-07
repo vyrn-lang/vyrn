@@ -626,7 +626,7 @@ export gen fn rpcInProcess(contract: String) -> String {
 // generator. RFC-0072's audience rule forbids the same edge from the other
 // direction, and neither one depends on the other being right.
 
-import { Json, JsonField, copyJson } from "std/json"
+import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
 import { parseJson } from "std/jsonread"
 import { replace, split } from "std/strings"
 
@@ -706,7 +706,7 @@ gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
 /// A JSON value's string, or "" for anything else.
 fn rpcStrOf(j: Json) -> String {
     return match j {
-        JStr(s) => s,
+        JStr(s) => s.copy(),
         JNull => "",
         JBool(b) => "",
         JNum(n) => "",
@@ -718,7 +718,7 @@ fn rpcStrOf(j: Json) -> String {
 /// A JSON value's object fields, or none for anything else.
 fn rpcFieldsOf(j: Json) -> Array<JsonField> {
     return match j {
-        JObj(fs) => fs,
+        JObj(fs) => copyJsonFields(fs),
         JNull => [],
         JBool(b) => [],
         JNum(n) => [],
@@ -762,7 +762,7 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
     for f in rpcFieldsOf(rpcMember(doc, "pin")) {
         let v = rpcStrOf(f.value)
         if v != "" {
-            keys.push(f.key)
+            keys.push(f.key.copy())
             paths.push(v)
         }
     }
@@ -813,7 +813,7 @@ fn rpcPathFor(cfg: RpcConfig, rel: String, name: String) -> String {
     let mut i = 0
     while i < cfg.pinKeys.length {
         if cfg.pinKeys[i] == key {
-            pinned = cfg.pinPaths[i]
+            pinned = cfg.pinPaths[i].copy()
         }
         i = i + 1
     }
@@ -983,7 +983,7 @@ gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
         let mut i = 0
         while i < typeMods.length {
             if typeMods[i] == spec {
-                names.push(typeNames[i])
+                names.push(typeNames[i].copy())
             }
             i = i + 1
         }

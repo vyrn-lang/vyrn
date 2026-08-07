@@ -31,7 +31,7 @@
 /// `std/jsonread`'s `line N, col M: <reason>` — RFC-0078's strictness ruling
 /// replaced the C reader's 0-based `at position N`.
 
-import { Json, JsonField, copyJson } from "std/json"
+import { Json, JsonField, copyJson, copyJsonArray, copyJsonFields } from "std/json"
 import { parseJson } from "std/jsonread"
 import { parseInt64, parseUInt64, parseFloat64, parseFloat32 } from "std/num"
 
@@ -66,7 +66,7 @@ export fn isNull(v: Json) -> Bool {
 /// An object's fields in document order, or `[]` for anything else.
 export fn fieldsOf(v: Json) -> Array<JsonField> {
     return match v {
-        JObj(fs) => fs,
+        JObj(fs) => copyJsonFields(fs),
         JNull => [],
         JBool(b) => [],
         JNum(t) => [],
@@ -78,7 +78,7 @@ export fn fieldsOf(v: Json) -> Array<JsonField> {
 /// An array's items, or `[]` for anything else.
 export fn itemsOf(v: Json) -> Array<Json> {
     return match v {
-        JArr(items) => items,
+        JArr(items) => copyJsonArray(items),
         JNull => [],
         JBool(b) => [],
         JNum(t) => [],
@@ -90,7 +90,7 @@ export fn itemsOf(v: Json) -> Array<Json> {
 /// A number's raw source text, or `""` for anything else.
 export fn numText(v: Json) -> String {
     return match v {
-        JNum(t) => t,
+        JNum(t) => t.copy(),
         JNull => "",
         JBool(b) => "",
         JStr(s) => "",
@@ -126,14 +126,14 @@ export fn elemAt(items: Array<Json>, i: Int64) -> Json {
     if i < 0 || i >= items.length {
         return JNull
     }
-    return items[i]
+    return copyJson(items[i])
 }
 
 /// A bare string's content (a nullary enum variant's wire form), or `""`. No
 /// variant can be named `""`, so the sentinel cannot collide with a real tag.
 export fn tagOf(v: Json) -> String {
     return match v {
-        JStr(s) => s,
+        JStr(s) => s.copy(),
         JNull => "",
         JBool(b) => "",
         JNum(t) => "",
@@ -145,21 +145,31 @@ export fn tagOf(v: Json) -> String {
 /// The single key of a one-member object (a payload variant's wire form), or
 /// `""` — including for an object with zero or two or more members, which is the
 /// "exactly one wire form per value" rule.
+/// It reads the fields in place rather than through `fieldsOf`, which owes its
+/// caller a copy of the whole object (RFC-0092). One key is what leaves here, so
+/// one key is what is copied.
 export fn keyOf(v: Json) -> String {
-    let fs = fieldsOf(v)
-    if fs.length != 1 {
-        return ""
+    return match v {
+        JObj(fs) => if fs.length == 1 { fs[0].key.copy() } else { "" },
+        JNull => "",
+        JBool(b) => "",
+        JNum(t) => "",
+        JStr(s) => "",
+        JArr(a) => "",
     }
-    return fs[0].key
 }
 
-/// The single value of a one-member object, or `JNull`.
+/// The single value of a one-member object, or `JNull`. Reads in place, for
+/// `keyOf`'s reason.
 export fn valOf(v: Json) -> Json {
-    let fs = fieldsOf(v)
-    if fs.length != 1 {
-        return JNull
+    return match v {
+        JObj(fs) => if fs.length == 1 { fs[0].value.copy() } else { JNull },
+        JNull => JNull,
+        JBool(b) => JNull,
+        JNum(t) => JNull,
+        JStr(s) => JNull,
+        JArr(a) => JNull,
     }
-    return fs[0].value
 }
 
 // ===========================================================================

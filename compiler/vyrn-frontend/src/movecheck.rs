@@ -84,14 +84,16 @@ pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
     run(program, Want::Sites).sites
 }
 
-/// One place RFC-0092's rule would reach: a **projection** — a field, an element
-/// or a pattern binder over a place — read out and put somewhere the frame does
-/// not end with.
+/// One place RFC-0092's rule reaches: a **projection** — a field, an element or
+/// a pattern binder over a place — read out and put somewhere the frame does not
+/// end with.
 ///
-/// M0 records these and refuses nothing. The count is the migration this RFC
-/// costs, and it is the gate on M1: over 300 and the store half does not ship.
-/// A site whose type owns no heap costs nothing, so [`ProjectionSite::owns_heap`]
-/// is what separates the bill from the noise.
+/// M0 recorded these and refused nothing; the count was the gate on M1. **M1
+/// refuses them, and this stays as the regression guard**: the two places that
+/// refuse are still the two places that record, so a site that reappears in the
+/// corpus is counted rather than argued about. A site whose type owns no heap
+/// costs nothing, so [`ProjectionSite::owns_heap`] separates the bill from the
+/// noise.
 #[derive(Clone, Debug)]
 pub struct ProjectionSite {
     /// `store` (the value put into a field, an element, a literal, module state
@@ -113,9 +115,10 @@ pub struct ProjectionSite {
     pub owns_heap: bool,
 }
 
-/// Every [`ProjectionSite`] in `program` (RFC-0092 M0).
+/// Every [`ProjectionSite`] in `program` (RFC-0092).
 ///
-/// The same walk [`check_accum`] runs, with recording on and nothing refused.
+/// The same walk [`check_accum`] runs, with recording on. Since M1 the recorded
+/// sites are also refused, so over a corpus that compiles this answers empty.
 /// Pass a **linked** program: a file read alone cannot name an imported type, so
 /// every cross-module result reads as `?` — the error Phase 4b's per-file
 /// measurement made, by 81 sites.
@@ -986,25 +989,43 @@ impl MoveCheck<'_> {
         outlives: bool,
         consumed: &mut Consumed,
     ) -> Result<bool, String> {
-        // RFC-0092 M0. `xs[i]` stored inline, which nothing below sees: the bail
-        // on the next line is where it leaves. Counted whatever the container is,
-        // because a borrowed container's element is no more storable than an
-        // owned one's and neither is refused today.
-        if self.projections.is_some() && outlives {
-            if let Some((_, path)) = element_path(value) {
+        // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
+        // pass as `at(xs, i)`, which is a call, so the `place_path` bail two
+        // blocks down is where it used to leave — invisible to every rule.
+        //
+        // M1 widens `store` to see it, which M0 left as this milestone's
+        // decision. The reason is the RFC's own thesis: `let t = xs[i]` already
+        // binds a `Borrow::Projection` (see [`MoveCheck::borrow_from`]) and rule
+        // 2 already refuses storing `t`. Leaving the inline form alone would
+        // reproduce, for elements, exactly the two-spellings-two-verdicts defect
+        // this RFC exists to remove. Refused whatever the container is, because a
+        // borrowed container's element is no more storable than an owned one's.
+        if let Some((root, path)) = element_path(value) {
+            if self.projections.is_some() && outlives {
                 let ty = self.type_of(value);
                 self.note_projection("elem-store", &path, into(), ty, line);
+            }
+            if outlives && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
+                let b = self.borrow_of(&root).unwrap_or(Borrow::Projection);
+                self.note_retention(value);
+                return Err(menu(
+                    line,
+                    format!(
+                        "`{path}` may not be stored into {} — it is {}",
+                        into(),
+                        b.what(&path)
+                    ),
+                    self.fixes_here(&b, &root, &path),
+                ));
             }
         }
         let Some((root, path)) = place_path(value) else {
             return Ok(false);
         };
-        // RFC-0092 M0. A projection of a place this frame owns, put somewhere
-        // that outlives the frame: exactly what `path != root` below waves
-        // through, and exactly what the rule would refuse. Recorded BEFORE the
-        // `owns_heap` guard, so a scalar field is counted and told apart rather
-        // than lost. `outlives` is false for a rebinding, which rule 2 does not
-        // refuse either; a root that is already a borrow is refused today.
+        // RFC-0092 M0's instrument, kept as M1's regression guard: it records
+        // what the branch below now refuses, so a site that reappears is counted.
+        // Recorded BEFORE the `owns_heap` guard, so a scalar field is counted and
+        // told apart rather than lost.
         if self.projections.is_some() && path != root && outlives && self.borrow_of(&root).is_none()
         {
             let ty = self.type_of(value);
@@ -1031,10 +1052,30 @@ impl MoveCheck<'_> {
                 self.fixes_here(&b, &root, &path),
             ));
         }
-        // Reading a field out of a record does not take the record: the binding
-        // it makes is itself a borrow (recorded by the caller), so nothing moves.
+        // RFC-0092's rule: **a projection is a borrow of its root, whatever the
+        // root is.** Reading a field out of a record does not take the record —
+        // the record still owns the buffer — so putting that buffer anywhere the
+        // frame does not end with gives it two owners. The old bail said the
+        // binding this store makes is "recorded by the caller", which is true of
+        // a `let` and false of `out.push(d.title)`: there is no `let` and no
+        // caller to record anything.
+        //
+        // A rebinding is not a store, and rule 2 does not refuse one either:
+        // `let t = d.title` is fine and [`MoveCheck::borrow_from`] gives `t` the
+        // projection, which rule 2 then enforces on.
         if path != root {
-            return Ok(false);
+            if !outlives {
+                return Ok(false);
+            }
+            return Err(menu(
+                line,
+                format!(
+                    "`{path}` may not be stored into {} — it is {}",
+                    into(),
+                    Borrow::Projection.what(&path)
+                ),
+                Borrow::Projection.fixes(&root, &path),
+            ));
         }
         self.took(&root, Gone::Moved { line, by: into() });
         consumed.insert(
@@ -1188,12 +1229,12 @@ impl MoveCheck<'_> {
     /// caller RELEASES the result — a `String`, an `Array`, a `Map`, a cell, or a
     /// declared `Owned` type. That is where the hole costs a use-after-free.
     ///
-    /// Two reasons to stop there. An enum or a record releases nothing yet, so a
-    /// borrow smuggled out inside one is today's leak and Phase 5's job. And the
-    /// named fix is `.copy()`, which `Html` and `Json` cannot answer at all: a
-    /// type that refers to itself has no structural copy (RFC-0089 M1b), so
-    /// widening this now would refuse programs with no way out. RFC-0091 M1's
-    /// `Copy` protocol is what makes the wider rule sayable.
+    /// **RFC-0092 M1 widened it to a projection.** Phase 4b stopped at a borrowed
+    /// PARAMETER because the named fix is `.copy()`, which `Html` and `Json` could
+    /// not answer: a type that refers to itself had no structural copy (RFC-0089
+    /// M1b). RFC-0091 M1's `Copy` protocol answers it, so `return d.title` out of
+    /// a record this frame owns is refused now, and so is a projection or a
+    /// pattern binder yielded by a `match` arm.
     fn check_return(&self, e: &Expr, line: usize) -> Result<(), String> {
         self.note_returned_projection(e, line);
         if !self.decl.owns_heap(&self.ret.borrow()) {
@@ -1231,6 +1272,21 @@ impl MoveCheck<'_> {
                     )],
                 ));
             }
+            // RFC-0092's rule at the return. `return d.title` out of a record
+            // this frame owns hands the caller a buffer `d` still holds, and rule
+            // 3 makes the caller free it. `borrow_of` answers `None` for an owned
+            // local, so this shape reached no reading at all — not refused, and
+            // not even recorded as a lend.
+            if path != root {
+                return Err(menu(
+                    line,
+                    format!(
+                        "`{path}` may not be returned — it is {}, and a return is owned",
+                        Borrow::Projection.what(&path)
+                    ),
+                    Borrow::Projection.fixes(&root, &path),
+                ));
+            }
             return Ok(());
         }
         if !self.decl.releases(&self.ret.borrow()) {
@@ -1246,16 +1302,21 @@ impl MoveCheck<'_> {
         let Some((b, root, path)) = found else {
             return Ok(());
         };
-        // Only a borrowed PARAMETER is refused here. It is a lifetime error with
-        // a named fix, and it is the class Phase 4b missed: 4b read `return p`
-        // as a statement, and these return a parameter from inside a `match`
-        // arm, which is an expression. A returned PROJECTION is the other half —
-        // `numText(j)` hands back the enum's own text — and refusing it would
-        // demand `.copy()` from `Json` and `Html`, which refer to themselves and
-        // have no structural copy (RFC-0089 M1b). Those are recorded above
-        // instead, so nothing releases them, and RFC-0091 M1's `Copy` protocol
-        // plus 7a's place projections are what make the wider rule sayable.
-        if !matches!(b, Borrow::Read(_) | Borrow::Modify(_)) {
+        // A borrowed PARAMETER and, since RFC-0092 M1, a PROJECTION. The
+        // parameter is the class Phase 4b missed: 4b read `return p` as a
+        // statement, and these return a parameter from inside a `match` arm,
+        // which is an expression. The projection is the other half — `numText(j)`
+        // hands back the enum's own text — and 4b left it recorded as a lend
+        // because the named fix is `.copy()`, which `Json` and `Html` could not
+        // answer. RFC-0091 M1's `Copy` protocol answers it.
+        //
+        // A `for` variable ([`Borrow::Element`]) is NOT widened here. It is a
+        // projection of its container in kind, but it is outside this RFC's three
+        // sites and outside the count that priced them, so it keeps 4b's verdict.
+        if !matches!(
+            b,
+            Borrow::Read(_) | Borrow::Modify(_) | Borrow::Projection
+        ) {
             // …unless the caller is JS. A Vyrn caller reads the lend out of
             // `lending` and releases nothing; a JS caller reads nothing, and
             // since RFC-0089 M3b `wasi-min.js` frees every String an export
@@ -1377,22 +1438,14 @@ impl MoveCheck<'_> {
 
     /// The first borrow a returned expression yields, looking through the forms
     /// that yield one of their arms.
-    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {
-        self.returned_borrow_with(e, false)
-    }
-
-    /// The same walk under RFC-0092's leaf: a projection is a borrow of its root
-    /// **whatever the root is**, so `d.title` out of a locally built record is a
-    /// borrow too. `borrow_of` answers `None` for an owned local, and `?` then
-    /// drops the whole projection — the hole this RFC names.
     ///
-    /// M0 reads it with `projections = true` to COUNT; nothing calls it that way
-    /// on the check path, so no program's verdict moves. M1 is this flag deleted.
-    fn returned_borrow_with(
-        &self,
-        e: &Expr,
-        projections: bool,
-    ) -> Option<(Borrow, String, String)> {
+    /// It carries RFC-0092's leaf: **a projection is a borrow of its root
+    /// whatever the root is**, so `d.title` out of a locally built record is a
+    /// borrow too, and so is `items[i]`. Before M1 this walk asked
+    /// `borrow_of(&root)?`, and `borrow_of` answers `None` for an owned local, so
+    /// `?` dropped the whole projection — the hole the RFC names. M0 read the
+    /// leaf behind a flag to count it; M1 is that flag deleted.
+    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {
         match e {
             Expr::Match {
                 scrutinee, arms, ..
@@ -1404,7 +1457,7 @@ impl MoveCheck<'_> {
                     for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                     }
-                    let r = self.returned_borrow_with(&arm.body, projections);
+                    let r = self.returned_borrow(&arm.body);
                     self.exit();
                     if r.is_some() {
                         found = r;
@@ -1417,39 +1470,35 @@ impl MoveCheck<'_> {
                 then_branch,
                 else_branch,
                 ..
-            } => self
-                .returned_borrow_with(then_branch, projections)
-                .or_else(|| {
-                    else_branch
-                        .as_ref()
-                        .and_then(|b| self.returned_borrow_with(b, projections))
-                }),
+            } => self.returned_borrow(then_branch).or_else(|| {
+                else_branch.as_ref().and_then(|b| self.returned_borrow(b))
+            }),
             _ => {
                 let Some((root, path)) = place_path(e) else {
-                    // An element read is a projection too, and today no reading
-                    // of a `return` sees one — M0 counts them apart.
-                    let (root, path) = projections.then(|| element_path(e)).flatten()?;
+                    // An element read is a projection too, and `place_path`
+                    // answers `None` for the `at(..)` call it lowers to.
+                    let (root, path) = element_path(e)?;
                     return Some((Borrow::Projection, root, path));
                 };
                 match self.borrow_of(&root) {
                     Some(b) => Some((b, root, path)),
-                    None if projections && path != root => Some((Borrow::Projection, root, path)),
+                    None if path != root => Some((Borrow::Projection, root, path)),
                     None => None,
                 }
             }
         }
     }
 
-    /// RFC-0092 M0: record a returned projection the rule would refuse.
+    /// RFC-0092: record a returned projection, for the instrument.
     ///
-    /// Two shapes reach here and neither is refused today. A place named straight
-    /// at the `return` whose root the frame OWNS (`return d.title`) is invisible
-    /// to `check_return` — `borrow_of` answers `None` and `?` drops it. A
-    /// projection or a pattern binder yielded by a `match`/`if` arm is recorded
-    /// as a lend and waved through.
+    /// Two shapes reach here: a place named straight at the `return` whose root
+    /// the frame OWNS (`return d.title`), and a projection or pattern binder
+    /// yielded by a `match`/`if` arm. Before M1 the first was invisible to
+    /// `check_return` and the second was recorded as a lend and waved through. M1
+    /// refuses both, a few lines below this call.
     ///
-    /// A root that is already a borrow is refused today (rule 3, Phase 4b), so it
-    /// is not part of this bill.
+    /// A root that is already a borrow was refused before this RFC (rule 3, Phase
+    /// 4b), so it is not part of this bill.
     fn note_returned_projection(&self, e: &Expr, line: usize) {
         if self.projections.is_none() {
             return;
@@ -1459,7 +1508,7 @@ impl MoveCheck<'_> {
                 return;
             }
         }
-        let Some((b, _, path)) = self.returned_borrow_with(e, true) else {
+        let Some((b, _, path)) = self.returned_borrow(e) else {
             return;
         };
         if b != Borrow::Projection {
@@ -1715,6 +1764,15 @@ impl MoveCheck<'_> {
                     }
                 };
                 let _ = self.store(value, &into, *line, global, consumed)?;
+                // An assignment rebinds, exactly as a `let` does, so it must
+                // carry the same answer: `t = d.title` makes `t` a projection of
+                // `d`. Without this, `let t = d.title` was refused at the next
+                // store and `let mut t = "" ; t = d.title` was not — RFC-0092's
+                // two-spellings-two-verdicts defect, one statement over.
+                if !global {
+                    let b = self.borrow_from(value);
+                    self.borrows.borrow_mut().rebind(name, b);
+                }
                 consumed.remove(name); // reassignment revives it
                 Ok(false)
             }
@@ -3188,18 +3246,44 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
 /// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `at(xs, i)`,
 /// which is a call, so [`place_path`] answers `None` for it.
 ///
-/// RFC-0092 M0 counts these APART. The RFC says an element read is covered "by
-/// the same three lines as a field read", and that is true of `borrow_from`,
-/// which reads `at(..)` itself — but [`MoveCheck::store`] bails at `place_path`
-/// before it decides anything, so `out.push(xs[i])` reaches none of the three
-/// sites. Whether M1 widens `store` is a decision, and the number is here for it.
+/// M0 found that the RFC was wrong to say an element read is covered "by the
+/// same three lines as a field read". It is true of `borrow_from`, which reads
+/// `at(..)` itself, and false of [`MoveCheck::store`] and of
+/// [`MoveCheck::returned_borrow`], both of which bailed at `place_path` before
+/// deciding anything. **M1 took the decision M0 left open and widened both**, so
+/// `out.push(xs[i])` and `return items[i]` are refused like the field they are.
+/// The instrument still counts them apart, under `elem-store` and `elem-return`.
 fn element_path(e: &Expr) -> Option<(String, String)> {
     match e {
         Expr::Call { name, args, .. } if name == "at" => {
-            let (root, path) = place_path(args.first()?)?;
-            Some((root, format!("{path}[..]")))
+            let a = args.first()?;
+            let (root, path) = place_path(a).or_else(|| element_path(a))?;
+            Some((root, format!("{path}[{}]", index_text(args.get(1)))))
+        }
+        // A field OF an element: `fs[0].key`. [`place_path`] walks a `Field` down
+        // to a `Var` and answers `None` as soon as it meets the `at(..)` call, so
+        // without this arm the escape hatch is one dot wide — `let f = fs[0]`
+        // then `return f.key` is refused and `return fs[0].key` is not.
+        Expr::Field { expr, field, .. } => {
+            let (root, path) = element_path(expr)?;
+            Some((root, format!("{path}.{field}")))
         }
         _ => None,
+    }
+}
+
+/// An index as the reader wrote it, for the quoted path in a diagnostic.
+///
+/// A whole name and a whole integer are spelled back, so `xs[i]` and `fs[0]`
+/// print as themselves and the `.copy()` on the menu is text `vyrn fix` can find
+/// in the line. Anything else prints `..`: the message still says which read is
+/// the problem, and `vyrn fix` then refuses rather than guessing where to put the
+/// call — which is the behaviour it already has for a path it cannot locate.
+fn index_text(e: Option<&Expr>) -> String {
+    match e {
+        Some(Expr::Var { name, .. }) => name.clone(),
+        Some(Expr::Int(n)) => n.to_string(),
+        _ => "..".to_string(),
     }
 }
 
