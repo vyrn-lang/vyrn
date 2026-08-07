@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{Tok, Token};
+use std::collections::HashSet;
 
 /// Whether `name`, written in a contract member's type, is one of that member's
 /// implicit type parameters (RFC-0071) rather than a named type.
@@ -85,6 +86,125 @@ fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {
         && matches!(at(pos + 2), Some(Tok::LBrace))
 }
 
+/// The builtins written as `x.m(..)` and nowhere else: the surface spelling, and
+/// the unspellable internal name every engine dispatches on.
+///
+/// A method-form builtin has no free spelling — `pop(a)` and `has(m, k)` are
+/// ordinary unknown calls — so the surface name is only ever *this* builtin when
+/// nothing else in the module answers to it. That last clause is the whole
+/// point, and it was missing: the rewrite ran in `postfix`, before any
+/// declaration was in, so `people.remove(h)` meant the `Map` builtin even where
+/// `remove` is `std/slots`' own export. [`unshadow_method_builtins`] is the
+/// second half — it reads this same table backwards and gives the name back.
+///
+/// One table, read twice. A name that is intercepted but cannot be given back
+/// is the hazard PR #88 found in `movecheck::views`, and
+/// `every_method_builtin_is_reserved_or_shadowable` is the check.
+pub const METHOD_BUILTINS: &[(&str, &str)] = &[
+    ("toString", "@str"),
+    ("join", "@join"),
+    // `s.charCount()` (RFC-0058) — Unicode scalar count.
+    ("charCount", "@charCount"),
+    // In-place array mutation (RFC-0011).
+    ("pop", "@pop"),
+    ("swapRemove", "@swapRemove"),
+    // `xs.toArray()` (RFC-0056) — copy a SmallArray out to a growable Array.
+    ("toArray", "@toArray"),
+    // `x.copy()` (RFC-0089 M1b) — a deep copy of an owned heap value.
+    ("copy", "@copy"),
+    // Map methods (RFC-0028).
+    ("has", "@has"),
+    ("remove", "@remove"),
+    ("keys", "@keys"),
+    // `v.lane(k)` reads one lane of a vector (RFC-0083); `v.replaceLane(k, x)`
+    // writes one back (M2). Value methods rather than `F32x4.lane(v, k)` because
+    // nothing exports either name — a value-receiver method name is a GLOBAL
+    // default in this table, and `min`/`max`/`abs` are `std/math` exports, which
+    // is why the rest of the vector surface is on the type name instead.
+    ("lane", "@lane"),
+    ("replaceLane", "@replaceLane"),
+    // `m.anyTrue()` / `m.allTrue()` reduce a mask to a `Bool` (RFC-0083 M2).
+    // The wasm instructions' own names rather than Rust's `any`/`all`, which are
+    // the two names a future `std/arrays` predicate would most want.
+    ("anyTrue", "@anyTrue"),
+    ("allTrue", "@allTrue"),
+];
+
+/// The internal name `recv.name(..)` defaults to, if any.
+pub fn method_builtin(name: &str) -> Option<&'static str> {
+    METHOD_BUILTINS
+        .iter()
+        .find(|(surface, _)| *surface == name)
+        .map(|(_, internal)| *internal)
+}
+
+/// Hand a method-form builtin's name back to a declaration that answers to it.
+///
+/// `postfix` rewrites `people.remove(h)` to the `Map` builtin `@remove` before
+/// the module's declarations exist, so a call written on a user's container
+/// reached a builtin that refuses it. This runs when they all do, and undoes the
+/// default wherever the module can resolve the surface name itself: its own
+/// top-level declarations, the names it imported (under the local spelling), and
+/// the methods of the protocols it declares. `x.m(a)` is `m(x, a)` again, which
+/// is how `people.insert(x)` and `people.get(h)` already worked — those names
+/// were simply never on the table.
+///
+/// A name in [`crate::checker::RESERVED`] can never be given back, because no
+/// declaration may take one. That is what makes `toString`, `join`, `pop` and
+/// `swapRemove` mean the builtin and nothing else, and it is why the check
+/// beside this one accepts either half.
+///
+/// **Scope, not type.** The receiver's type would be the exact answer, and four
+/// engines would each have to ask it; the flat namespace is program-wide unique,
+/// so at most one declaration can hold a surface name and "the module can see it"
+/// is one lookup with no type at all. A module that both declares `remove` and
+/// calls `.remove(k)` on a `Map` now gets a type error at the call rather than
+/// two meanings for one name — refused, not miscompiled.
+fn unshadow_method_builtins(program: &mut Program) {
+    let mut scope: HashSet<String> = HashSet::new();
+    for f in &program.functions {
+        scope.insert(f.name.clone());
+    }
+    for t in &program.type_decls {
+        scope.insert(t.name.clone());
+    }
+    for g in &program.globals {
+        scope.insert(g.name.clone());
+    }
+    for p in &program.protocols {
+        scope.insert(p.name.clone());
+        for m in &p.methods {
+            scope.insert(m.name.clone());
+        }
+    }
+    for imp in &program.imports {
+        for n in &imp.names {
+            scope.insert(n.alias.clone().unwrap_or_else(|| n.original.clone()));
+        }
+    }
+    // Impl methods are deliberately absent: `impl Copy for T { fn copy(..) }` is
+    // how a type overrides the `@copy` builtin, which dispatches to it by the
+    // receiver's type. Counting it here would take the builtin away from every
+    // OTHER receiver in the same module.
+    if !METHOD_BUILTINS
+        .iter()
+        .any(|(surface, _)| scope.contains(*surface))
+    {
+        return; // the common case: no walk at all
+    }
+    let mut give_back = |e: &mut Expr| {
+        if let Expr::Call { name, .. } = e {
+            if let Some((surface, _)) = METHOD_BUILTINS
+                .iter()
+                .find(|(surface, internal)| name == internal && scope.contains(*surface))
+            {
+                *name = (*surface).to_string();
+            }
+        }
+    };
+    crate::project::walk_program(program, &mut give_back);
+}
+
 /// Parse a token stream into a [`Program`].
 ///
 /// Returns the *first* parse error (the historical single-error surface). For
@@ -120,6 +240,9 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         errors: Vec::new(),
     }
     .program_accum();
+    // Before the injected declarations below, so only what the module itself
+    // declares or imports can claim a method-form builtin's name.
+    unshadow_method_builtins(&mut program);
     // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
     // template can interpolate. Injected so every program can name `Array<Value>`
     // and match `IntVal`/`StrVal`/`BoolVal` — the tag surface — without a `use`.
@@ -4010,11 +4133,18 @@ impl Parser {
                         }
                         self.no_struct = saved;
                         self.eat(&Tok::RParen)?;
-                        // Method-only builtins map to their internal spellings:
-                        // `x.toString()` renders via the `@str` machinery and
-                        // `t.join()` awaits via `@join`. The bare free-function
-                        // forms (`toString(x)`, `join(t)`) never reach this arm,
-                        // so the checker reports them with a migration hint.
+                        // Method-form builtins ([`METHOD_BUILTINS`]) map to their
+                        // internal spellings: `x.toString()` renders via the
+                        // `@str` machinery and `t.join()` awaits via `@join`. The
+                        // bare free-function forms (`toString(x)`, `join(t)`) never
+                        // reach this arm, so the checker reports them with a
+                        // migration hint.
+                        //
+                        // This is a DEFAULT, not an interception. The parser has no
+                        // types here, so it cannot know whose method was written;
+                        // [`unshadow_method_builtins`] runs once the module's
+                        // declarations are all in and hands the name back to any
+                        // that answers to it.
                         //
                         // The pre-table spelling is kept for the type-name arm
                         // below, which reports what the program WROTE: without it
@@ -4023,55 +4153,9 @@ impl Parser {
                         // "`F32x4` has no `@anyTrue`", the internal name leaking
                         // through two rewrites.
                         let wrote = name.clone();
-                        let name = match name.as_str() {
-                            "toString" => "@str".to_string(),
-                            "join" => "@join".to_string(),
-                            // `s.charCount()` (RFC-0058) — Unicode scalar count.
-                            // Method-only, so a free `charCount(s)` never reaches
-                            // here (and can still be a user function name).
-                            "charCount" => "@charCount".to_string(),
-                            // In-place array mutation (RFC-0011): method-only, so
-                            // they map to unspellable internal names — a free
-                            // `pop(a)` / `swapRemove(a, i)` never reaches here and
-                            // the checker reports it as an unknown call.
-                            "pop" => "@pop".to_string(),
-                            "swapRemove" => "@swapRemove".to_string(),
-                            // `xs.toArray()` (RFC-0056) — copy a SmallArray out
-                            // to a growable Array. Method-only, so a free
-                            // `toArray(xs)` never reaches here and the checker
-                            // reports it as an unknown call.
-                            "toArray" => "@toArray".to_string(),
-                            // `x.copy()` (RFC-0089 M1b) — a deep copy of an
-                            // owned heap value. Method-only, so a free
-                            // `copy(x)` never reaches here and stays available
-                            // as a user function name.
-                            "copy" => "@copy".to_string(),
-                            // Map methods (RFC-0028): method-only, unspellable
-                            // internal names so a free `has(m, k)` never reaches
-                            // here and the checker reports it as an unknown call.
-                            "has" => "@has".to_string(),
-                            "remove" => "@remove".to_string(),
-                            "keys" => "@keys".to_string(),
-                            // `v.lane(k)` reads one lane of a vector (RFC-0083).
-                            // Method-only, like the array and map mutators above.
-                            "lane" => "@lane".to_string(),
-                            // `v.replaceLane(k, x)` writes one lane back
-                            // (RFC-0083 M2). A value method rather than
-                            // `F32x4.replaceLane(v, k, x)` because it is `lane`'s
-                            // inverse and nothing exports the name — the same two
-                            // reasons that made `lane` one.
-                            "replaceLane" => "@replaceLane".to_string(),
-                            // `m.anyTrue()` / `m.allTrue()` reduce a mask to a
-                            // `Bool` (RFC-0083 M2). Value methods rather than
-                            // `Mask32x4.anyTrue(m)` for the rule the comment below
-                            // states: the type name is for names something else
-                            // exports, and nothing exports these. They are the
-                            // wasm instructions' own names rather than Rust's
-                            // `any`/`all`, which are the two names a future
-                            // `std/arrays` predicate would most want.
-                            "anyTrue" => "@anyTrue".to_string(),
-                            "allTrue" => "@allTrue".to_string(),
-                            _ => name,
+                        let name = match method_builtin(&name) {
+                            Some(internal) => internal.to_string(),
+                            None => name,
                         };
                         // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`
                         // — the receiver is the type NAME, not a value, so it is
@@ -5053,6 +5137,94 @@ mod tests {
 
     fn parse_src(s: &str) -> Program {
         parse(lex(s).unwrap()).unwrap()
+    }
+
+    /// The name of the first call in `main`'s first statement.
+    fn first_call(p: &Program) -> String {
+        let main = p.functions.iter().find(|f| f.name == "main").unwrap();
+        let mut got = None;
+        let mut grab = |e: &mut Expr| {
+            if let Expr::Call { name, .. } = e {
+                got.get_or_insert(name.clone());
+            }
+        };
+        let mut body = main.body.clone();
+        crate::project::walk_block(&mut body, &mut grab);
+        got.unwrap_or_default()
+    }
+
+    // ---- the method-form builtin table -------------------------------------
+
+    /// [`METHOD_BUILTINS`] decides a question that belongs to the receiver, from
+    /// a name, before any type is known. That is only safe while the name means
+    /// the builtin and nothing else — and two things can make it so: the name is
+    /// in `checker::RESERVED`, so no declaration may take it, or the rewrite is
+    /// given back when a declaration does.
+    ///
+    /// Ten of the fourteen entries had neither. `remove` is `std/slots`' own
+    /// export, and `people.remove(h)` reached the `Map` builtin instead. This is
+    /// the same check `movecheck::every_view_and_sink_name_is_reserved` makes for
+    /// a list matched on the call name, and the same hazard PR #88 found there.
+    #[test]
+    fn every_method_builtin_is_reserved_or_shadowable() {
+        for (surface, internal) in METHOD_BUILTINS {
+            if crate::checker::RESERVED.contains(surface) {
+                continue;
+            }
+            // A declaration of the name in the same module must take it back.
+            let p = parse_src(&format!(
+                "fn {surface}(x: Int64) -> Int64 {{ return x }}\n\
+                 fn main() -> Int64 {{ let y = 1\n return y.{surface}() }}"
+            ));
+            assert_eq!(
+                first_call(&p),
+                *surface,
+                "`{surface}` is neither reserved nor given back, so a declaration \
+                 of that name is unreachable in method form and `{internal}` \
+                 answers instead"
+            );
+            // And an import of it, under whichever name it is spelled here.
+            let p = parse_src(&format!(
+                "import {{ {surface} }} from \"lib\"\n\
+                 fn main() -> Int64 {{ let y = 1\n return y.{surface}() }}"
+            ));
+            assert_eq!(first_call(&p), *surface, "an import of `{surface}`");
+        }
+    }
+
+    /// The other direction: nothing declares the name, so the builtin keeps it.
+    #[test]
+    fn a_method_builtin_keeps_its_name_when_nothing_else_claims_it() {
+        for (surface, internal) in METHOD_BUILTINS {
+            let p = parse_src(&format!(
+                "fn main() -> Int64 {{ let y = 1\n return y.{surface}() }}"
+            ));
+            assert_eq!(first_call(&p), *internal, "`{surface}` with no declaration");
+        }
+    }
+
+    /// An `impl` method is how a type OVERRIDES a method-form builtin — `@copy`
+    /// dispatches to `impl Copy for T` by the receiver's type. Counting it as a
+    /// module-scope declaration would take the builtin away from every other
+    /// receiver in the same file, which is what `std/slots` and
+    /// `examples/container.vyrn` both do.
+    #[test]
+    fn an_impl_method_does_not_claim_a_method_builtin_name() {
+        let p = parse_src(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Copy for Ring { fn copy(self) -> Ring { return Ring { data: [] } } }\n\
+             fn main() -> Int64 { let s = \"x\"\n let t = s.copy()\n return 0 }",
+        );
+        let main = p.functions.iter().find(|f| f.name == "main").unwrap();
+        let mut names = Vec::new();
+        let mut grab = |e: &mut Expr| {
+            if let Expr::Call { name, .. } = e {
+                names.push(name.clone());
+            }
+        };
+        let mut body = main.body.clone();
+        crate::project::walk_block(&mut body, &mut grab);
+        assert!(names.contains(&"@copy".to_string()), "got {names:?}");
     }
 
     // ---- RFC-0091 M2: `place` / `yield` ------------------------------------
