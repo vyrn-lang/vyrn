@@ -152,7 +152,7 @@ fn DELETE(r: Route) -> Route
 ## surface
 
 ```vyrn
-fn surface(prefix: String, run: Surface) -> Route
+fn surface(prefix: String, run: consume Surface) -> Route
 ```
 
 A whole subsystem mounted under `prefix`: the derived RPC surface, a page
@@ -300,7 +300,7 @@ record with the options quietly doing nothing.
 ## sse
 
 ```vyrn
-fn sse(pattern: String, feed: Feed) -> Live
+fn sse(pattern: String, feed: consume Feed) -> Live
 ```
 
 `sse(pattern, feed)` — mount `feed` as an event stream at `pattern`.
@@ -391,7 +391,7 @@ adapter shares with `sse`, and it costs no ping.
 ## ws
 
 ```vyrn
-fn ws(pattern: String, feed: Feed) -> Socket
+fn ws(pattern: String, feed: consume Feed) -> Socket
 ```
 
 `ws(pattern, feed)` — mount `feed` as a WebSocket at `pattern`.

@@ -245,7 +245,7 @@ type ParamLazy = { run: fn(P) -> T }
 ## query
 
 ```vyrn
-fn query<T>(run: fn() -> T) -> Query<T>
+fn query<T>(run: consume fn() -> T) -> Query<T>
 ```
 
 A query over `run`, resolved before the page renders.
@@ -253,7 +253,7 @@ A query over `run`, resolved before the page renders.
 ## lazy
 
 ```vyrn
-fn lazy<T>(q: Query<T>) -> Lazy<T>
+fn lazy<T>(q: consume Query<T>) -> Lazy<T>
 ```
 
 `q` marked lazy: the page renders its shell and a skeleton first, then fills
@@ -262,7 +262,7 @@ the data region in. The server always has the data, so SSR is unaffected.
 ## paramQuery
 
 ```vyrn
-fn paramQuery<P, T>(run: fn(P) -> T) -> ParamQuery<P, T>
+fn paramQuery<P, T>(run: consume fn(P) -> T) -> ParamQuery<P, T>
 ```
 
 A query whose deferred call receives the page's route parameters.
@@ -270,7 +270,7 @@ A query whose deferred call receives the page's route parameters.
 ## paramLazy
 
 ```vyrn
-fn paramLazy<P, T>(q: ParamQuery<P, T>) -> ParamLazy<P, T>
+fn paramLazy<P, T>(q: consume ParamQuery<P, T>) -> ParamLazy<P, T>
 ```
 
 `q` marked lazy — the params-taking counterpart of [`lazy`].

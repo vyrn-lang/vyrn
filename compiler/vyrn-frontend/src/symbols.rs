@@ -2414,22 +2414,29 @@ fn local_detail(b: &LocalBinding) -> String {
 // ---------------------------------------------------------------------------
 
 fn function_detail(f: &Function) -> String {
-    // A capability is shown wherever it was written. It is the whole contract of
-    // the call — whether the callee mutates what it is handed, or takes it — and
-    // hover that hides it leaves a reader guessing from the name. An impl
-    // method's receiver keeps its type here (`modify self: Tally`) rather than
-    // reading exactly as written: hover is the one place a reader learns what
-    // `self` IS, and the capability adds to that rather than replacing it.
+    // A capability is shown wherever it was written, and in the position it is
+    // written in: before the TYPE for a parameter (`iss: modify Array<Issue>`),
+    // before `self` for a receiver (`modify self: Tally`). It is the whole
+    // contract of the call — whether the callee mutates what it is handed, or
+    // takes it — and hover that hides it leaves a reader guessing from the name.
+    // The receiver keeps its type, which is the one thing hover adds: a program
+    // writes `modify self` and never says what `self` is.
     let params = f
         .params
         .iter()
-        .map(|p| {
-            let base = format!("{}: {}", p.name, type_to_string(&p.ty));
-            match p.capability {
-                Capability::Read => base,
-                Capability::Modify => format!("modify {base}"),
-                Capability::Consume => format!("consume {base}"),
-                Capability::Share => format!("share {base}"),
+        .enumerate()
+        .map(|(i, p)| {
+            let word = match p.capability {
+                Capability::Read => "",
+                Capability::Modify => "modify ",
+                Capability::Consume => "consume ",
+                Capability::Share => "share ",
+            };
+            let ty = type_to_string(&p.ty);
+            if i == 0 && p.name == "self" {
+                format!("{word}self: {ty}")
+            } else {
+                format!("{}: {word}{ty}", p.name)
             }
         })
         .collect::<Vec<_>>()

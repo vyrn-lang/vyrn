@@ -129,7 +129,7 @@ The single value of a one-member object, or `JNull`.
 ## pushType
 
 ```vyrn
-fn pushType(iss: Array<Issue>, path: String, expected: String, found: String) -> Unit
+fn pushType(iss: modify Array<Issue>, path: String, expected: String, found: String) -> Unit
 ```
 
 `json.type`: `expected <what>, found <kind>`.
@@ -137,7 +137,7 @@ fn pushType(iss: Array<Issue>, path: String, expected: String, found: String) ->
 ## pushMissing
 
 ```vyrn
-fn pushMissing(iss: Array<Issue>, path: String, field: String) -> Unit
+fn pushMissing(iss: modify Array<Issue>, path: String, field: String) -> Unit
 ```
 
 ``json.missing``: ``missing required field `name` ``.
@@ -145,7 +145,7 @@ fn pushMissing(iss: Array<Issue>, path: String, field: String) -> Unit
 ## pushValidate
 
 ```vyrn
-fn pushValidate(iss: Array<Issue>, path: String, message: String) -> Unit
+fn pushValidate(iss: modify Array<Issue>, path: String, message: String) -> Unit
 ```
 
 `validate`: a refined type's `where` clause did not hold. The message is the
@@ -171,7 +171,7 @@ A path extended by an array index.
 ## readDoc
 
 ```vyrn
-fn readDoc(src: String, iss: Array<Issue>) -> Array<Json>
+fn readDoc(src: String, iss: modify Array<Issue>) -> Array<Json>
 ```
 
 Parse `src` into a one-element array, or record the single `json.parse` Issue
@@ -180,7 +180,7 @@ and return `[]`. The wording is `std/jsonread`'s `line N, col M: <reason>`.
 ## dStr
 
 ```vyrn
-fn dStr(v: Json, path: String, iss: Array<Issue>) -> Array<String>
+fn dStr(v: Json, path: String, iss: modify Array<Issue>) -> Array<String>
 ```
 
 A JSON string as a `String`.
@@ -188,7 +188,7 @@ A JSON string as a `String`.
 ## dBool
 
 ```vyrn
-fn dBool(v: Json, path: String, iss: Array<Issue>) -> Array<Bool>
+fn dBool(v: Json, path: String, iss: modify Array<Issue>) -> Array<Bool>
 ```
 
 A JSON boolean as a `Bool`.
@@ -196,7 +196,7 @@ A JSON boolean as a `Bool`.
 ## dInt64
 
 ```vyrn
-fn dInt64(v: Json, path: String, iss: Array<Issue>) -> Array<Int64>
+fn dInt64(v: Json, path: String, iss: modify Array<Issue>) -> Array<Int64>
 ```
 
 A JSON integer-syntax number as an exact `Int64`. A fractional or exponent
@@ -206,7 +206,7 @@ rounded through a `Float64`.
 ## dIntRange
 
 ```vyrn
-fn dIntRange(v: Json, path: String, iss: Array<Issue>, lo: Int64, hi: Int64) -> Array<Int64>
+fn dIntRange(v: Json, path: String, iss: modify Array<Issue>, lo: Int64, hi: Int64) -> Array<Int64>
 ```
 
 The same, restricted to `[lo, hi]` — the sized signed integers.
@@ -214,7 +214,7 @@ The same, restricted to `[lo, hi]` — the sized signed integers.
 ## dUIntMax
 
 ```vyrn
-fn dUIntMax(v: Json, path: String, iss: Array<Issue>, hi: UInt64) -> Array<UInt64>
+fn dUIntMax(v: Json, path: String, iss: modify Array<Issue>, hi: UInt64) -> Array<UInt64>
 ```
 
 A JSON integer-syntax number as an exact `UInt64`, restricted to `[0, hi]` —
@@ -224,7 +224,7 @@ has no room above `Int64.max` (RFC-0078 M4a).
 ## dFloat64
 
 ```vyrn
-fn dFloat64(v: Json, path: String, iss: Array<Issue>) -> Array<Float64>
+fn dFloat64(v: Json, path: String, iss: modify Array<Issue>) -> Array<Float64>
 ```
 
 A JSON number as a `Float64`, correctly rounded (`std/num`). Integer syntax is
@@ -233,7 +233,7 @@ accepted: `1` decodes into a `Float64` target as `1.0`.
 ## dFloat32
 
 ```vyrn
-fn dFloat32(v: Json, path: String, iss: Array<Issue>) -> Array<Float32>
+fn dFloat32(v: Json, path: String, iss: modify Array<Issue>) -> Array<Float32>
 ```
 
 A JSON number as a `Float32`, rounded to single precision DIRECTLY rather

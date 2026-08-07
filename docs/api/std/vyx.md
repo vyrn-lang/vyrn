@@ -71,7 +71,7 @@ reuse it for `.vyx` pages.
 ## vyxBuildModule
 
 ```vyrn
-fn vyxBuildModule(comps: Array<VyxComp>, themed: Bool, theme: String) -> String
+fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String) -> String
 ```
 
 Assemble the whole synthesized module from the compiled components. When
