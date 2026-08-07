@@ -31,12 +31,12 @@
 //! signatures against the C the shim actually defines.
 
 use std::collections::{BTreeMap, HashMap};
+pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 use wasm_encoder::{
     CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind, ExportSection,
     Function, FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType,
     TypeSection,
 };
-pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 
 /// Top of the generated module's shadow stack; it grows down from here to 0.
 pub const STACK_TOP: u32 = 65_536;
@@ -102,7 +102,9 @@ pub fn boundary() -> &'static BTreeMap<String, Option<Sig>> {
         let ir = crate::emit(&program).expect("the boundary declarations are unconditional");
         let mut out = BTreeMap::new();
         for line in ir.lines() {
-            let Some(rest) = line.strip_prefix("declare ") else { continue };
+            let Some(rest) = line.strip_prefix("declare ") else {
+                continue;
+            };
             let (ret, rest) = rest.split_once(" @").expect("declare RET @NAME(..)");
             let (name, rest) = rest.split_once('(').expect("declare RET @NAME(..)");
             // `llvm.memcpy` is an intrinsic, not an import: it becomes `memory.copy`.
@@ -269,7 +271,13 @@ impl Module {
     /// ones, so every import has to be declared before the first [`Module::func`]
     /// — a rule worth panicking on rather than debugging as an off-by-N in every
     /// call in the module.
-    pub fn import(&mut self, module: &str, field: &str, params: &[ValType], results: &[ValType]) -> u32 {
+    pub fn import(
+        &mut self,
+        module: &str,
+        field: &str,
+        params: &[ValType],
+        results: &[ValType],
+    ) -> u32 {
         assert!(
             self.bodies.is_empty(),
             "import {module}.{field} declared after a defined function: \
@@ -355,7 +363,11 @@ impl Module {
     /// module WHILE it emits — interning a string literal mid-expression, say,
     /// which a `build` closure borrowing `&mut Module` could not do.
     pub fn add(&mut self, params: &[ValType], results: &[ValType], f: Frame) -> u32 {
-        debug_assert_eq!(f.base, params.len() as u32, "frame built for a different signature");
+        debug_assert_eq!(
+            f.base,
+            params.len() as u32,
+            "frame built for a different signature"
+        );
         self.bodies.push(Defined {
             params: params.to_vec(),
             results: results.to_vec(),
@@ -386,7 +398,11 @@ impl Module {
     pub fn fill(&mut self, index: u32, f: Frame) {
         let i = (index - self.n_imports()) as usize;
         let d = &mut self.bodies[i];
-        debug_assert_eq!(f.base, d.params.len() as u32, "frame built for a different signature");
+        debug_assert_eq!(
+            f.base,
+            d.params.len() as u32,
+            "frame built for a different signature"
+        );
         assert!(d.body.is_none(), "function {index} filled twice");
         d.body = Some(f);
     }
@@ -521,7 +537,9 @@ impl Module {
                 return i;
             }
             let i = types.len();
-            types.ty().function(params.iter().copied(), results.iter().copied());
+            types
+                .ty()
+                .function(params.iter().copied(), results.iter().copied());
             type_ids.insert(key, i);
             i
         };
@@ -567,7 +585,11 @@ impl Module {
 
         let mut globals = GlobalSection::new();
         globals.global(
-            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
             &ConstExpr::i32_const(STACK_TOP as i32),
         );
         // The bump heap starts where the statics end, 16-aligned so a `malloc`
@@ -575,13 +597,21 @@ impl Module {
         // number M0 said a direct emitter would know by construction instead of
         // reading back out of linked bytes.
         globals.global(
-            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
             &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
         );
         // The same address, immutable, because [`HEAP`] moves and a `free` has to
         // ask where the heap STARTS (RFC-0077 M6). See [`HEAP_BASE`].
         globals.global(
-            GlobalType { val_type: ValType::I32, mutable: false, shared: false },
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: false,
+                shared: false,
+            },
             &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
         );
 
@@ -615,7 +645,11 @@ impl Module {
                 j += 1;
             }
             let at = DATA_BASE + start as u32;
-            data.active(0, &ConstExpr::i32_const(at as i32), self.pool[start..end].iter().copied());
+            data.active(
+                0,
+                &ConstExpr::i32_const(at as i32),
+                self.pool[start..end].iter().copied(),
+            );
             i = end;
         }
 
@@ -655,7 +689,10 @@ impl Module {
 
 /// One finished body, with the shadow-stack prologue and epilogue around it.
 fn encode(f: Frame, n_params: usize) -> Function {
-    debug_assert_eq!(f.base, n_params as u32, "frame built for a different signature");
+    debug_assert_eq!(
+        f.base, n_params as u32,
+        "frame built for a different signature"
+    );
     let mut decl = vec![ValType::I32]; // the frame base
     decl.extend(f.locals.iter().copied());
     let mut out = Function::new_with_locals_types(decl);
@@ -826,7 +863,10 @@ mod tests {
         m.export("vyrn_entry", f);
         let ids = section_ids(&m.finish());
         assert_eq!(ids, vec![1, 2, 3, 5, 6, 7, 10, 11]);
-        assert!(ids.windows(2).all(|w| w[0] < w[1]), "sections out of order: {ids:?}");
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "sections out of order: {ids:?}"
+        );
     }
 
     /// An imported memory moves the memory section away but NOT the export —
@@ -858,19 +898,38 @@ mod tests {
         // (asserted in the next test) with no live crossing to point at. M3 took
         // the rest of the DOM, so the census has no JSON row at all — pinned as an
         // absence, since a returning row would mean a second reader appeared.
-        assert!(!b.keys().any(|k| k.starts_with("__vyrn_vj_")), "the DOM is gone");
+        assert!(
+            !b.keys().any(|k| k.starts_with("__vyrn_vj_")),
+            "the DOM is gone"
+        );
         // A `ptr -> i64` crossing, which is where a pointer's widening to `i32` and
         // a 64-bit return meet. This used to be `__vyrn_charcount`; RFC-0078's census
         // called that the one builtin with no justification for being one and it is
         // `std/text`'s `charCountV` now, so the witness is `__vyrn_strlen` — the same
         // signature, and one that CANNOT move, because `byteLength` is a view.
-        assert_eq!(b["__vyrn_strlen"], Some((vec![Some(ValType::I32)], Some(ValType::I64))));
-        assert!(!b.contains_key("__vyrn_charcount"), "`charCount` is Vyrn, not a crossing");
-        assert_eq!(b["__vyrn_malloc"], Some((vec![Some(ValType::I64)], Some(ValType::I32))));
+        assert_eq!(
+            b["__vyrn_strlen"],
+            Some((vec![Some(ValType::I32)], Some(ValType::I64)))
+        );
+        assert!(
+            !b.contains_key("__vyrn_charcount"),
+            "`charCount` is Vyrn, not a crossing"
+        );
+        assert_eq!(
+            b["__vyrn_malloc"],
+            Some((vec![Some(ValType::I64)], Some(ValType::I32)))
+        );
         assert_eq!(b["__vyrn_now_millis"], Some((vec![], Some(ValType::I64))));
-        assert_eq!(b["free"], Some((vec![Some(ValType::I32)], None)), "void is None");
+        assert_eq!(
+            b["free"],
+            Some((vec![Some(ValType::I32)], None)),
+            "void is None"
+        );
         assert_eq!(b["printf"], None, "variadic has no wasm signature at all");
-        assert!(!b.contains_key("llvm.memcpy.p0.p0.i64"), "an intrinsic is not an import");
+        assert!(
+            !b.contains_key("llvm.memcpy.p0.p0.i64"),
+            "an intrinsic is not an import"
+        );
     }
 
     #[test]
@@ -893,7 +952,11 @@ mod tests {
     fn the_data_pool_packs_and_shares() {
         let mut m = Module::new();
         assert_eq!(m.data(b"hello\0", 1), DATA_BASE);
-        assert_eq!(m.data(b"hello\0", 1), DATA_BASE, "identical contents are one string");
+        assert_eq!(
+            m.data(b"hello\0", 1),
+            DATA_BASE,
+            "identical contents are one string"
+        );
         assert_eq!(m.data(b"bye\0", 1), DATA_BASE + 6);
         // An aligned static skips the hole rather than landing mid-word.
         assert_eq!(m.data(&[0u8; 8], 8), DATA_BASE + 16);
@@ -909,7 +972,11 @@ mod tests {
         let b = m.reserve(8, 8);
         assert_ne!(a, b);
         assert_eq!(b, a + 8);
-        assert_eq!(m.data(b"x\0", 1), b + 8, "a later string packs after the reservation");
+        assert_eq!(
+            m.data(b"x\0", 1),
+            b + 8,
+            "a later string packs after the reservation"
+        );
         // And a reservation reads as zeroes, not as whatever preceded it.
         assert_eq!(m.reserve(4, 4), b + 12);
     }
@@ -971,16 +1038,28 @@ mod tests {
     fn the_sweep_takes_the_imports_and_the_bodies_nothing_reaches() {
         let mut m = Module::new();
         let exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
-        m.import("wasi_snapshot_preview1", "fd_write", &[ValType::I32; 4], &[ValType::I32]);
+        m.import(
+            "wasi_snapshot_preview1",
+            "fd_write",
+            &[ValType::I32; 4],
+            &[ValType::I32],
+        );
         m.reserve_func(&[], &[ValType::F64]); // never filled, never reached
         let start = m.func(&[], &[], &[], 0, |b| {
-            b.ins(&Instruction::I32Const(0)).ins(&Instruction::Call(exit));
+            b.ins(&Instruction::I32Const(0))
+                .ins(&Instruction::Call(exit));
         });
         m.export("_start", start);
         m.sweep();
         let bytes = m.finish();
-        assert!(bytes.windows(9).any(|w| w == b"proc_exit"), "the reached import stays");
-        assert!(!bytes.windows(8).any(|w| w == b"fd_write"), "the unreached import goes");
+        assert!(
+            bytes.windows(9).any(|w| w == b"proc_exit"),
+            "the reached import stays"
+        );
+        assert!(
+            !bytes.windows(8).any(|w| w == b"fd_write"),
+            "the unreached import goes"
+        );
         // The unreached signature went with it: `f64` (0x7c) appears nowhere.
         assert!(!bytes.contains(&0x7c), "a type only a pruned function used");
     }

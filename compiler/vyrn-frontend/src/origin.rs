@@ -429,7 +429,10 @@ mod tests {
         let src = "//@origin ./comp/Widget.vyx:6:8\n<expr>\n";
         let mut maps = OriginMaps::new();
         maps.add_module(banner, src, "/tmp/probe");
-        assert_eq!(maps.input_files(), vec!["/tmp/probe/comp/Widget.vyx".to_string()]);
+        assert_eq!(
+            maps.input_files(),
+            vec!["/tmp/probe/comp/Widget.vyx".to_string()]
+        );
         assert_eq!(maps.regions_for("/tmp/probe/comp/Widget.vyx").len(), 1);
     }
 
@@ -498,7 +501,11 @@ fn x() {}
         assert_eq!(ds[0].col, 1);
         assert_eq!(ds[0].message, "`fn old` is deprecated");
         // The generated location is not lost, only demoted to a note.
-        assert!(ds[0].note.as_deref().unwrap().contains("generated code b:1"));
+        assert!(ds[0]
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("generated code b:1"));
         assert!(ds[0].from_generated);
     }
 
@@ -528,8 +535,13 @@ fn x() {}
 
     #[test]
     fn an_empty_directive_says_nothing() {
-        assert!(warnings("b", "//@warning
+        assert!(warnings(
+            "b",
+            "//@warning
 //@warning   
-", "").is_empty());
+",
+            ""
+        )
+        .is_empty());
     }
 }

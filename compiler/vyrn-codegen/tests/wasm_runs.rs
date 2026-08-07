@@ -53,16 +53,32 @@ fn import_fd_write(m: &mut Module) -> u32 {
 }
 
 fn i32_store(off: u32) -> Instruction<'static> {
-    Instruction::I32Store(MemArg { offset: off as u64, align: 2, memory_index: 0 })
+    Instruction::I32Store(MemArg {
+        offset: off as u64,
+        align: 2,
+        memory_index: 0,
+    })
 }
 fn i64_store(off: u32) -> Instruction<'static> {
-    Instruction::I64Store(MemArg { offset: off as u64, align: 3, memory_index: 0 })
+    Instruction::I64Store(MemArg {
+        offset: off as u64,
+        align: 3,
+        memory_index: 0,
+    })
 }
 fn i32_load(off: u32) -> Instruction<'static> {
-    Instruction::I32Load(MemArg { offset: off as u64, align: 2, memory_index: 0 })
+    Instruction::I32Load(MemArg {
+        offset: off as u64,
+        align: 2,
+        memory_index: 0,
+    })
 }
 fn i64_load(off: u32) -> Instruction<'static> {
-    Instruction::I64Load(MemArg { offset: off as u64, align: 3, memory_index: 0 })
+    Instruction::I64Load(MemArg {
+        offset: off as u64,
+        align: 3,
+        memory_index: 0,
+    })
 }
 
 /// The floor: sections, an import, an export, and a body that does one thing.
@@ -72,7 +88,8 @@ fn a_module_that_only_returns_a_constant() {
     let mut m = Module::new();
     let exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
     let start = m.func(&[], &[], &[], 0, |b| {
-        b.ins(&Instruction::I32Const(7)).ins(&Instruction::Call(exit));
+        b.ins(&Instruction::I32Const(7))
+            .ins(&Instruction::Call(exit));
     });
     m.export("_start", start);
     let Some((code, _, err)) = run("constant", &m.finish()) else {
@@ -95,8 +112,12 @@ fn a_frame_and_a_data_segment_and_an_imported_call() {
     let len = 37u32;
     // iovec { ptr, len } at 0, the returned byte count at 8.
     let start = m.func(&[], &[], &[], 12, |b| {
-        b.slot(0).ins(&Instruction::I32Const(hello as i32)).ins(&i32_store(0));
-        b.slot(0).ins(&Instruction::I32Const(len as i32)).ins(&i32_store(4));
+        b.slot(0)
+            .ins(&Instruction::I32Const(hello as i32))
+            .ins(&i32_store(0));
+        b.slot(0)
+            .ins(&Instruction::I32Const(len as i32))
+            .ins(&i32_store(4));
         b.ins(&Instruction::I32Const(1)); // stdout
         b.slot(0);
         b.ins(&Instruction::I32Const(1)); // one iovec
@@ -108,7 +129,10 @@ fn a_frame_and_a_data_segment_and_an_imported_call() {
         return;
     };
     assert_eq!(code, 0, "{err}");
-    assert_eq!(String::from_utf8_lossy(&out), "hello from a directly emitted module\n");
+    assert_eq!(
+        String::from_utf8_lossy(&out),
+        "hello from a directly emitted module\n"
+    );
 }
 
 /// The round trip M0's clang comparison could only make on paper: one function
@@ -126,7 +150,11 @@ fn a_frame_and_a_data_segment_and_an_imported_call() {
 fn a_struct_round_trips_through_the_shadow_stack_at_the_computed_offsets() {
     let l = of_ll("{ ptr, i64, i64 }").unwrap();
     assert_eq!((l.size, &l.fields[..]), (24, &[0, 8, 16][..]));
-    let (p, a, c) = (0x1111_1111u32, 0x2222_2222_2222_2222u64, 0x3333_3333_3333_3333u64);
+    let (p, a, c) = (
+        0x1111_1111u32,
+        0x2222_2222_2222_2222u64,
+        0x3333_3333_3333_3333u64,
+    );
 
     let mut m = Module::new();
     let fd_write = import_fd_write(&mut m);
@@ -153,10 +181,18 @@ fn a_struct_round_trips_through_the_shadow_stack_at_the_computed_offsets() {
             .ins(&i32_load(l.fields[0]))
             .ins(&Instruction::I64ExtendI32U)
             .ins(&i64_store(0));
-        b.slot(24).slot(0).ins(&i64_load(l.fields[1])).ins(&i64_store(8));
-        b.slot(24).slot(0).ins(&i64_load(l.fields[2])).ins(&i64_store(16));
+        b.slot(24)
+            .slot(0)
+            .ins(&i64_load(l.fields[1]))
+            .ins(&i64_store(8));
+        b.slot(24)
+            .slot(0)
+            .ins(&i64_load(l.fields[2]))
+            .ins(&i64_store(16));
         b.slot(48).slot(0).ins(&i32_store(0));
-        b.slot(48).ins(&Instruction::I32Const(48)).ins(&i32_store(4));
+        b.slot(48)
+            .ins(&Instruction::I32Const(48))
+            .ins(&i32_store(4));
         b.ins(&Instruction::I32Const(1));
         b.slot(48);
         b.ins(&Instruction::I32Const(1));
@@ -223,8 +259,14 @@ fn a_swept_module_still_calls_what_it_meant_to() {
     };
     // 7 says both surviving calls landed on their own bodies. 93, 94, 181 or a
     // trap would each be one specific renumbering mistake.
-    assert_eq!(code, 7, "the swept module called something else; stderr:\n{err}");
-    assert!(!bytes.windows(8).any(|w| w == b"fd_write"), "an unreached import survived");
+    assert_eq!(
+        code, 7,
+        "the swept module called something else; stderr:\n{err}"
+    );
+    assert!(
+        !bytes.windows(8).any(|w| w == b"fd_write"),
+        "an unreached import survived"
+    );
 }
 
 /// The half of the memory map that is a safety property rather than an address:

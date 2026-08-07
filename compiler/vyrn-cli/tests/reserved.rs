@@ -17,7 +17,11 @@ fn check(src: &str) -> String {
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("r.vyrn");
     std::fs::write(&f, src).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_vyrn")).arg("check").arg(&f).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("check")
+        .arg(&f)
+        .output()
+        .unwrap();
     String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n")
         + &String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
 }

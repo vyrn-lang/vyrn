@@ -135,7 +135,10 @@ impl Declared {
         }
         let decls = crate::types::decl_map(program);
         let mut variants: std::collections::HashSet<String> =
-            ["Some", "Ok", "Err", "Success", "Failure"].into_iter().map(String::from).collect();
+            ["Some", "Ok", "Err", "Success", "Failure"]
+                .into_iter()
+                .map(String::from)
+                .collect();
         for d in decls.values() {
             if let Type::Enum(vs) = &d.base {
                 variants.extend(vs.iter().map(|v| v.name.clone()));
@@ -268,22 +271,27 @@ impl Declared {
             // outer String `m` reads as a concatenation otherwise, and the
             // backend then frees the integer 2. `movecheck` answers that one,
             // because it is the pass that can bind a payload.
-            Expr::IfExpr { then_branch, else_branch, .. } => self
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => self
                 .type_of(vars, then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|e| self.type_of(vars, e))),
             // `e?` yields the success payload of what `e` is.
-            Expr::Try { expr, .. } => match crate::types::resolve(
-                &self.type_of(vars, expr)?,
-                &self.decls,
-            ) {
-                Type::Option(t) | Type::Result(t, _) => Some(*t),
-                _ => None,
-            },
+            Expr::Try { expr, .. } => {
+                match crate::types::resolve(&self.type_of(vars, expr)?, &self.decls) {
+                    Type::Option(t) | Type::Result(t, _) => Some(*t),
+                    _ => None,
+                }
+            }
             // A fallible construction (RFC-0009) names its own type.
             Expr::TryConstruct { name, .. } => Some(Type::Named(name.clone())),
-            Expr::Spawn { name, .. } => {
-                self.rets.get(name).cloned().map(|t| Type::Task(Box::new(t)))
-            }
+            Expr::Spawn { name, .. } => self
+                .rets
+                .get(name)
+                .cloned()
+                .map(|t| Type::Task(Box::new(t))),
             _ => None,
         }
     }

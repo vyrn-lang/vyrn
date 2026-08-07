@@ -73,12 +73,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
 }
 
 fn find_node() -> Option<PathBuf> {
     let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
-    Command::new(&node).arg("--version").output().ok().filter(|o| o.status.success())?;
+    Command::new(&node)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
     Some(PathBuf::from(node))
 }
 
@@ -155,14 +161,21 @@ fn the_wasm_heap_reaches_a_steady_state() {
         .arg(n.to_string())
         .output()
         .expect("node");
-    assert!(out.status.success(), "node failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
-    let sizes: Vec<u64> =
-        text.split_whitespace().map(|s| s.parse().expect("a byte count")).collect();
+    let sizes: Vec<u64> = text
+        .split_whitespace()
+        .map(|s| s.parse().expect("a byte count"))
+        .collect();
     assert_eq!(sizes.len(), 2, "expected two byte counts, got {text:?}");
 
     assert_eq!(
-        sizes[0], sizes[1],
+        sizes[0],
+        sizes[1],
         "the wasm heap grew with the call count: {} bytes after {n} calls, {} after {}. \
          Four times the work must cost the same memory — a difference means something \
          allocated is never handed back.",
@@ -319,8 +332,10 @@ fn why_memory_says_which_functions_transfer_ownership() {
         "{text}"
     );
     assert!(
-        text.contains("fn takes(s: String) -> Int64\n    transfers: no — the return type Int64 \
-                       owns no heap"),
+        text.contains(
+            "fn takes(s: String) -> Int64\n    transfers: no — the return type Int64 \
+                       owns no heap"
+        ),
         "{text}"
     );
 }
@@ -665,7 +680,11 @@ fn the_census_shapes_hold_their_measured_baseline() {
         .arg(dir.join("shapes.wasm"))
         .output()
         .expect("vyrn build");
-    assert!(build.status.success(), "build failed:\n{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     // 500 and 2000. `selfAppend` is quadratic in the call count (census P1), so
     // a larger N buys nothing and costs minutes.
@@ -676,12 +695,18 @@ fn the_census_shapes_hold_their_measured_baseline() {
         cmd.arg(r.export);
     }
     let out = cmd.output().expect("node");
-    assert!(out.status.success(), "node failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
 
     let mut lines = text.lines();
     for r in ROWS {
-        let line = lines.next().unwrap_or_else(|| panic!("no reading for `{}`", r.export));
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("no reading for `{}`", r.export));
         let cols: Vec<&str> = line.split_whitespace().collect();
         assert_eq!(cols.len(), 3, "expected `name n 4n`, got {line:?}");
         assert_eq!(cols[0], r.export, "the driver answered out of order");

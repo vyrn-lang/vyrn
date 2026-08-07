@@ -19,7 +19,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_dir(rel: &str) -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap();
     let s = p.to_string_lossy().replace('\\', "/");
     PathBuf::from(s.strip_prefix("//?/").unwrap_or(&s).to_string())
 }
@@ -66,7 +70,12 @@ fn api_attaches_by_role_and_why_reports_it() {
     );
     write(&dir, "main.vyrn", "fn main() -> Int64 {\n    return 0\n}\n");
 
-    let out = vyrn().arg("why").arg("--contract").arg(dir.join("server/api/pastes.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(dir.join("server/api/pastes.vyrn"))
+        .output()
+        .unwrap();
     assert!(out.status.success(), "`why` reports; it does not gate");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("path segments `server/api`"), "{text}");
@@ -79,14 +88,26 @@ fn api_attaches_by_role_and_why_reports_it() {
 fn the_same_inner_segment_under_a_different_audience_is_a_different_role() {
     let dir = scratch("compose");
     write(&dir, "vyrn.json", MANIFEST);
-    write(&dir, "client/api/thing.vyrn", "export fn go() -> Int64 {\n    return 1\n}\n");
+    write(
+        &dir,
+        "client/api/thing.vyrn",
+        "export fn go() -> Int64 {\n    return 1\n}\n",
+    );
     write(&dir, "main.vyrn", "fn main() -> Int64 {\n    return 0\n}\n");
 
-    let out = vyrn().arg("why").arg("--contract").arg(dir.join("client/api/thing.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(dir.join("client/api/thing.vyrn"))
+        .output()
+        .unwrap();
     // `client/api` is in no declared role: the run `server/api` does not match.
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("no contract: this file is in no role"), "{text}");
+    assert!(
+        text.contains("no contract: this file is in no role"),
+        "{text}"
+    );
 }
 
 /// A procedure whose PARAMETER cannot cross the wire, named against the rule.
@@ -105,10 +126,17 @@ fn a_non_serializable_parameter_is_a_named_error() {
          import { rpcHandle } from rpcServer(\"./api\")\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("go__parameter_Array_Int64__is_not_serializable"), "{err}");
+    assert!(
+        err.contains("go__parameter_Array_Int64__is_not_serializable"),
+        "{err}"
+    );
     assert!(err.contains("it_must_be_an_exported_named_type"), "{err}");
 }
 
@@ -129,10 +157,17 @@ fn a_non_serializable_return_is_a_named_error() {
          import { rpcHandle } from rpcServer(\"./api\")\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("go__return_Array_Int64__is_not_serializable"), "{err}");
+    assert!(
+        err.contains("go__return_Array_Int64__is_not_serializable"),
+        "{err}"
+    );
     assert!(err.contains("it_must_be_an_exported_named_type"), "{err}");
 }
 
@@ -160,12 +195,22 @@ fn a_nameable_record_that_cannot_be_encoded_is_refused_at_the_contract() {
          import { rpcHandle } from rpcServer(\"./api\")\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("go__return_Cb_is_not_serializable__Cb_cannot_cross_a_json_wire"), "{err}");
+    assert!(
+        err.contains("go__return_Cb_is_not_serializable__Cb_cannot_cross_a_json_wire"),
+        "{err}"
+    );
     // …and it is the contract that objects, not the generated module.
-    assert!(!err.contains("toJson"), "the objection must arrive before generation: {err}");
+    assert!(
+        !err.contains("toJson"),
+        "the objection must arrive before generation: {err}"
+    );
 }
 
 /// A stream is refused on BOTH ends, and by name rather than by falling through
@@ -174,8 +219,14 @@ fn a_nameable_record_that_cannot_be_encoded_is_refused_at_the_contract() {
 #[test]
 fn a_stream_is_refused_by_name_and_pointed_at_sse() {
     for (tag, decl) in [
-        ("streamret", "export fn go(req: Req) -> Stream<Req> {\n    return unfold(0, step)\n}\n"),
-        ("streamparam", "export fn go(s: Stream<Req>) -> Req {\n    drop s\n    return Req { id: 1 }\n}\n"),
+        (
+            "streamret",
+            "export fn go(req: Req) -> Stream<Req> {\n    return unfold(0, step)\n}\n",
+        ),
+        (
+            "streamparam",
+            "export fn go(s: Stream<Req>) -> Req {\n    drop s\n    return Req { id: 1 }\n}\n",
+        ),
     ] {
         let dir = scratch(tag);
         write(
@@ -194,11 +245,18 @@ fn a_stream_is_refused_by_name_and_pointed_at_sse() {
              import { rpcHandle } from rpcServer(\"./api\")\n\
              fn main() -> Int64 {\n    return 0\n}\n",
         );
-        let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
+        let out = vyrn()
+            .arg("check")
+            .arg(dir.join("main.vyrn"))
+            .output()
+            .unwrap();
         assert!(!out.status.success(), "{tag}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("Stream_Req__is_a_stream"), "{tag}: {err}");
-        assert!(err.contains("publish_a_feed_with_sse_or_ws"), "{tag}: {err}");
+        assert!(
+            err.contains("publish_a_feed_with_sse_or_ws"),
+            "{tag}: {err}"
+        );
     }
 }
 
@@ -218,8 +276,16 @@ fn a_unit_return_is_serializable() {
          import { rpcHandle } from rpcServer(\"./api\")\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// RFC-0072 M2 closes the item RFC-0071 M2b, M2c and M4 each recorded and each
@@ -243,8 +309,15 @@ fn a_vyrn_page_gets_the_closed_rule_too() {
          import { route } from pages(\"./routes\")\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
-    assert!(!out.status.success(), "an export the contract does not name must fail");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "an export the contract does not name must fail"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("contract_unknown_didYouMean__hedd"), "{err}");
 }
@@ -267,6 +340,14 @@ fn an_ordinary_vyrn_page_still_satisfies_the_contract() {
          import { route } from pages(\"./routes\")\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

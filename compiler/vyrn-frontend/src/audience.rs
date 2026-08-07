@@ -116,7 +116,10 @@ pub struct Verdict {
 impl Verdict {
     /// The universal default: nothing on the path said otherwise.
     pub fn universal() -> Self {
-        Verdict { audience: Audience::Universal, reason: Reason::Default }
+        Verdict {
+            audience: Audience::Universal,
+            reason: Reason::Default,
+        }
     }
 
     /// `path segment `server` (vyrn.json audience.server)`, or the default's
@@ -172,8 +175,11 @@ pub fn from_manifest(json_text: &str, base: &str) -> Option<AudienceMap> {
         ("main", Audience::Server),
     ] {
         if let Some(Json::Str(rel)) = doc.get(key) {
-            let path =
-                if base.is_empty() { rel.clone() } else { format!("{base}/{rel}") };
+            let path = if base.is_empty() {
+                rel.clone()
+            } else {
+                format!("{base}/{rel}")
+            };
             entries.push((crate::loader::normalize(&path), audience, key.to_string()));
         }
     }
@@ -224,7 +230,10 @@ fn declared_audience_of(path: &str, map: &AudienceMap) -> Verdict {
     // beats anything read off the path. There is nothing above a composition
     // root for a segment to be nearer than.
     if let Some((_, a, key)) = map.entries.iter().find(|(p, _, _)| same_path(p, &path)) {
-        return Verdict { audience: *a, reason: Reason::Entry(key.clone()) };
+        return Verdict {
+            audience: *a,
+            reason: Reason::Entry(key.clone()),
+        };
     }
     let rel = match relative_to(&path, &map.base) {
         Some(r) => r,
@@ -240,7 +249,10 @@ fn declared_audience_of(path: &str, map: &AudienceMap) -> Verdict {
     let mut out = Verdict::universal();
     for c in comps {
         if let Some(a) = classify(c, map) {
-            out = Verdict { audience: a, reason: Reason::Segment(c.to_string()) };
+            out = Verdict {
+                audience: a,
+                reason: Reason::Segment(c.to_string()),
+            };
         }
     }
     out
@@ -270,7 +282,9 @@ fn same_path(a: &str, b: &str) -> bool {
 /// a DIRECTORY (`pages("./app/routes")`) has no single input file; its module is
 /// router glue, and it inherits the calling module's audience.
 pub fn source_file(key: &str) -> String {
-    let importer = crate::loader::generated_importer(key).unwrap_or(key).replace('\\', "/");
+    let importer = crate::loader::generated_importer(key)
+        .unwrap_or(key)
+        .replace('\\', "/");
     let Some(arg) = first_generator_arg(key) else {
         return importer;
     };
@@ -312,7 +326,11 @@ fn join_normalized(dir: &str, rel: &str) -> String {
         }
     }
     let joined = out.join("/");
-    if dir.starts_with('/') { format!("/{joined}") } else { joined }
+    if dir.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    }
 }
 
 /// Which audience `segment` names, if any. A segment listed under several keys
@@ -432,7 +450,10 @@ mod tests {
     #[test]
     fn audience_outer_and_feature_outer_agree() {
         let m = map();
-        assert_eq!(audience_of("/p/server/api/pastes.vyrn", &m).audience, Audience::Server);
+        assert_eq!(
+            audience_of("/p/server/api/pastes.vyrn", &m).audience,
+            Audience::Server
+        );
         assert_eq!(
             audience_of("/p/src/pastes/server/api/pastes.vyrn", &m).audience,
             Audience::Server
@@ -475,7 +496,10 @@ mod tests {
     #[test]
     fn outside_the_project_has_no_audience() {
         let m = map();
-        assert_eq!(audience_of("/elsewhere/server/x.vyrn", &m).audience, Audience::Universal);
+        assert_eq!(
+            audience_of("/elsewhere/server/x.vyrn", &m).audience,
+            Audience::Universal
+        );
     }
 
     #[test]

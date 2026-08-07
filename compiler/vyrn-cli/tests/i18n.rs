@@ -17,7 +17,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_file(rel: &str) -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -46,15 +50,32 @@ fn write(path: &Path, body: &str) {
 #[test]
 fn emit_gen_shows_the_synthesized_translation_module() {
     let demo = repo_file("examples/i18ndemo.vyrn");
-    let out = vyrn().arg("emit-gen").arg(&demo).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(&demo)
+        .output()
+        .expect("emit-gen");
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let src = String::from_utf8_lossy(&out.stdout);
 
     // The Locale enum + module state (the RFC-0021 carve-out).
     assert!(src.contains("export type Locale ="), "Locale enum:\n{src}");
-    assert!(src.contains("| En") && src.contains("| Uk"), "locale variants:\n{src}");
-    assert!(src.contains("let mut currentLocale: Locale = En"), "module state:\n{src}");
-    assert!(src.contains("export fn setLocale(l: Locale)"), "setLocale:\n{src}");
+    assert!(
+        src.contains("| En") && src.contains("| Uk"),
+        "locale variants:\n{src}"
+    );
+    assert!(
+        src.contains("let mut currentLocale: Locale = En"),
+        "module state:\n{src}"
+    );
+    assert!(
+        src.contains("export fn setLocale(l: Locale)"),
+        "setLocale:\n{src}"
+    );
 
     // TransKey — the finite validated string type of every dotted key.
     assert!(
@@ -71,24 +92,48 @@ fn emit_gen_shows_the_synthesized_translation_module() {
     );
 
     // Per-key typed functions with args derived from the ICU message.
-    assert!(src.contains("export fn tCartItems(count: Int64) -> String"), "plural fn:\n{src}");
-    assert!(src.contains("export fn tGreeting(name: String) -> String"), "string-arg fn:\n{src}");
-    assert!(src.contains("export fn tStatus(state: TStatusState) -> String"), "select fn:\n{src}");
+    assert!(
+        src.contains("export fn tCartItems(count: Int64) -> String"),
+        "plural fn:\n{src}"
+    );
+    assert!(
+        src.contains("export fn tGreeting(name: String) -> String"),
+        "string-arg fn:\n{src}"
+    );
+    assert!(
+        src.contains("export fn tStatus(state: TStatusState) -> String"),
+        "select fn:\n{src}"
+    );
 
     // Each exported function carries the source-locale message as its `///` doc.
     assert!(src.contains("/// Welcome"), "arg-less doc:\n{src}");
-    assert!(src.contains("/// {count, plural, one {# item} other {# items}}"), "plural doc:\n{src}");
+    assert!(
+        src.contains("/// {count, plural, one {# item} other {# items}}"),
+        "plural doc:\n{src}"
+    );
 
     // The plural compiled to a real Vyrn if-chain (no ICU runtime).
-    assert!(src.contains("count % 10 == 1 && count % 100 != 11"), "uk one rule:\n{src}");
+    assert!(
+        src.contains("count % 10 == 1 && count % 100 != 11"),
+        "uk one rule:\n{src}"
+    );
 
     // The argument-less lookup.
-    assert!(src.contains("export fn t(key: TransKey) -> String"), "t():\n{src}");
+    assert!(
+        src.contains("export fn t(key: TransKey) -> String"),
+        "t():\n{src}"
+    );
 
     // RFC-0041 §4: every key ALSO exports an un-prefixed alias for namespace
     // access (`import * as t` → `t.cartItems()`), delegating to the prefixed fn.
-    assert!(src.contains("export fn cartItems(count: Int64) -> String"), "un-prefixed plural fn:\n{src}");
-    assert!(src.contains("export fn greeting(name: String) -> String"), "un-prefixed string-arg fn:\n{src}");
+    assert!(
+        src.contains("export fn cartItems(count: Int64) -> String"),
+        "un-prefixed plural fn:\n{src}"
+    );
+    assert!(
+        src.contains("export fn greeting(name: String) -> String"),
+        "un-prefixed string-arg fn:\n{src}"
+    );
 }
 
 // ---- RFC-0041 §4: namespace access via the un-prefixed aliases --------------
@@ -96,7 +141,10 @@ fn emit_gen_shows_the_synthesized_translation_module() {
 #[test]
 fn namespace_access_reads_unprefixed_keys() {
     let dir = scratch("nsaccess");
-    write(&dir.join("locales/en.json"), "{ \"app\": { \"title\": \"Paste Bin\" }, \"greeting\": \"Hi {name}\" }");
+    write(
+        &dir.join("locales/en.json"),
+        "{ \"app\": { \"title\": \"Paste Bin\" }, \"greeting\": \"Hi {name}\" }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { i18n } from \"std/i18n\"\n\
@@ -107,11 +155,25 @@ fn namespace_access_reads_unprefixed_keys() {
          return 0\n\
          }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "namespace i18n access must run:\n{combined}");
-    assert!(combined.contains("Paste Bin"), "un-prefixed arg-less key:\n{combined}");
-    assert!(combined.contains("Hi Bob"), "un-prefixed arg key:\n{combined}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "namespace i18n access must run:\n{combined}"
+    );
+    assert!(
+        combined.contains("Paste Bin"),
+        "un-prefixed arg-less key:\n{combined}"
+    );
+    assert!(
+        combined.contains("Hi Bob"),
+        "un-prefixed arg key:\n{combined}"
+    );
 }
 
 // ---- drift: a mismatched locale pair fails the load ------------------------
@@ -119,20 +181,40 @@ fn namespace_access_reads_unprefixed_keys() {
 #[test]
 fn drift_between_locales_is_a_readable_load_error() {
     let dir = scratch("drift");
-    write(&dir.join("locales/en.json"), "{ \"home\": { \"title\": \"Hi\" }, \"bye\": \"Bye\" }");
-    write(&dir.join("locales/uk.json"), "{ \"home\": { \"title\": \"Pryvit\" }, \"extra\": \"X\" }");
+    write(
+        &dir.join("locales/en.json"),
+        "{ \"home\": { \"title\": \"Hi\" }, \"bye\": \"Bye\" }",
+    );
+    write(
+        &dir.join("locales/uk.json"),
+        "{ \"home\": { \"title\": \"Pryvit\" }, \"extra\": \"X\" }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { i18n } from \"std/i18n\"\n\
          import { t } from i18n(\"./locales\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a drifting locale pair must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a drifting locale pair must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     // uk is missing `bye` (en has it) and carries an `extra` key en does not.
-    assert!(err.contains("I18N_DRIFT__locale_uk__missing__bye"), "missing-key drift:\n{err}");
-    assert!(err.contains("I18N_DRIFT__locale_uk__extra__extra"), "extra-key drift:\n{err}");
+    assert!(
+        err.contains("I18N_DRIFT__locale_uk__missing__bye"),
+        "missing-key drift:\n{err}"
+    );
+    assert!(
+        err.contains("I18N_DRIFT__locale_uk__extra__extra"),
+        "extra-key drift:\n{err}"
+    );
 }
 
 // ---- unsupported input fails generation ------------------------------------
@@ -148,10 +230,21 @@ fn unsupported_value_fails_generation() {
          import { t } from i18n(\"./locales\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "an unsupported value must fail to load");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("I18N_PARSE_ERROR__locale_en"), "parse-error diagnostic:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "an unsupported value must fail to load"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("I18N_PARSE_ERROR__locale_en"),
+        "parse-error diagnostic:\n{err}"
+    );
 }
 
 #[test]
@@ -168,10 +261,21 @@ fn plural_in_a_locale_without_a_rule_fails() {
          import { t } from i18n(\"./locales\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a plural in a ruleless locale must fail");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("I18N_NO_PLURAL_RULE__locale_xx"), "no-plural-rule diagnostic:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a plural in a ruleless locale must fail"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("I18N_NO_PLURAL_RULE__locale_xx"),
+        "no-plural-rule diagnostic:\n{err}"
+    );
 }
 
 // ---- ICU apostrophe quoting (RFC-0020): a lone apostrophe is a literal --------
@@ -180,32 +284,57 @@ fn plural_in_a_locale_without_a_rule_fails() {
 fn a_lone_apostrophe_is_literal_and_keeps_the_placeholder() {
     let dir = scratch("apos");
     // "It's {name}!" previously deleted the apostrophe AND swallowed {name}.
-    write(&dir.join("locales/en.json"), "{ \"greet\": \"It's {name}!\" }");
+    write(
+        &dir.join("locales/en.json"),
+        "{ \"greet\": \"It's {name}!\" }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { i18n } from \"std/i18n\"\n\
          import { tGreet } from i18n(\"./locales\")\n\
          fn main() -> Int64 { print(tGreet(\"Bob\")) return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(out.status.success(), "apostrophe message must compile with the arg:\n{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "apostrophe message must compile with the arg:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let sout = String::from_utf8_lossy(&out.stdout);
-    assert!(sout.contains("It's Bob!"), "expected `It's Bob!`, got:\n{sout}");
+    assert!(
+        sout.contains("It's Bob!"),
+        "expected `It's Bob!`, got:\n{sout}"
+    );
 }
 
 #[test]
 fn paired_and_quoting_apostrophes_render_per_icu() {
     let dir = scratch("apos2");
     // `''` -> one apostrophe; `'{'` -> a literal brace.
-    write(&dir.join("locales/en.json"), "{ \"a\": \"b''c\", \"d\": \"x '{' y\" }");
+    write(
+        &dir.join("locales/en.json"),
+        "{ \"a\": \"b''c\", \"d\": \"x '{' y\" }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { i18n } from \"std/i18n\"\n\
          import { tA, tD } from i18n(\"./locales\")\n\
          fn main() -> Int64 { print(tA()) print(tD()) return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let sout = String::from_utf8_lossy(&out.stdout);
     assert!(sout.contains("b'c"), "paired '' -> one apostrophe:\n{sout}");
     assert!(sout.contains("x { y"), "'{{' -> literal brace:\n{sout}");
@@ -217,17 +346,31 @@ fn paired_and_quoting_apostrophes_render_per_icu() {
 fn an_unmatched_brace_fails_generation() {
     let dir = scratch("brace");
     // A lone `{` used to fabricate a phantom param; now a named diagnostic.
-    write(&dir.join("locales/en.json"), "{ \"msg\": \"50% off { sale\" }");
+    write(
+        &dir.join("locales/en.json"),
+        "{ \"msg\": \"50% off { sale\" }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { i18n } from \"std/i18n\"\n\
          import { t } from i18n(\"./locales\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "an unmatched brace must fail generation");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("I18N_BAD_BRACES__locale_en__msg"), "brace diagnostic naming the key:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "an unmatched brace must fail generation"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("I18N_BAD_BRACES__locale_en__msg"),
+        "brace diagnostic naming the key:\n{err}"
+    );
 }
 
 // ---- key collisions are named, not a confusing "defined twice" -------------
@@ -236,36 +379,70 @@ fn an_unmatched_brace_fails_generation() {
 fn a_dotted_vs_nested_key_collision_is_named() {
     let dir = scratch("dupkey");
     // "a.b" and {"a":{"b":…}} flatten to the same entry.
-    write(&dir.join("locales/en.json"), "{ \"a.b\": \"x\", \"a\": { \"b\": \"y\" } }");
+    write(
+        &dir.join("locales/en.json"),
+        "{ \"a.b\": \"x\", \"a\": { \"b\": \"y\" } }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { i18n } from \"std/i18n\"\n\
          import { t } from i18n(\"./locales\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a duplicate flattened key must fail generation");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("I18N_DUP_KEY__a_b"), "dup-key diagnostic:\n{err}");
-    assert!(!err.contains("defined twice"), "must not surface as the confusing duplicate-fn error:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a duplicate flattened key must fail generation"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("I18N_DUP_KEY__a_b"),
+        "dup-key diagnostic:\n{err}"
+    );
+    assert!(
+        !err.contains("defined twice"),
+        "must not surface as the confusing duplicate-fn error:\n{err}"
+    );
 }
 
 #[test]
 fn a_fn_name_key_collision_is_named() {
     let dir = scratch("clashkey");
     // home.title and homeTitle both make tHomeTitle.
-    write(&dir.join("locales/en.json"), "{ \"home.title\": \"A\", \"homeTitle\": \"B\" }");
+    write(
+        &dir.join("locales/en.json"),
+        "{ \"home.title\": \"A\", \"homeTitle\": \"B\" }",
+    );
     write(
         &dir.join("app.vyrn"),
         "import { i18n } from \"std/i18n\"\n\
          import { t } from i18n(\"./locales\")\n\
          fn main() -> Int64 { return 0 }\n",
     );
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
-    assert!(!out.status.success(), "a fn-name key collision must fail generation");
-    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("I18N_KEY_COLLISION__home_title__homeTitle"), "collision diagnostic listing both keys:\n{err}");
-    assert!(!err.contains("defined twice"), "must not surface as the confusing duplicate-fn error:\n{err}");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "a fn-name key collision must fail generation"
+    );
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        err.contains("I18N_KEY_COLLISION__home_title__homeTitle"),
+        "collision diagnostic listing both keys:\n{err}"
+    );
+    assert!(
+        !err.contains("defined twice"),
+        "must not surface as the confusing duplicate-fn error:\n{err}"
+    );
 }
 
 // ---- the demo runs green ---------------------------------------------------
@@ -277,5 +454,8 @@ fn demo_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "demo tests failed:\n{combined}");
-    assert!(combined.contains("4 passed, 0 failed"), "expected 4 green tests:\n{combined}");
+    assert!(
+        combined.contains("4 passed, 0 failed"),
+        "expected 4 green tests:\n{combined}"
+    );
 }

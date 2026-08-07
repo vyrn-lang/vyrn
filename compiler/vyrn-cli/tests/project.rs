@@ -20,15 +20,34 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn new_scaffolds_a_runnable_project() {
     let dir = scratch("scaffold");
-    let out = vyrn().current_dir(&dir).args(["new", "app"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["new", "app"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     for f in ["vyrn.json", "src/main.vyrn", ".gitignore"] {
         assert!(dir.join("app").join(f).is_file(), "missing {f}");
     }
     // `vyrn run` with no file argument uses the manifest's main.
-    let run = vyrn().current_dir(dir.join("app")).arg("run").output().unwrap();
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "hello from app");
+    let run = vyrn()
+        .current_dir(dir.join("app"))
+        .arg("run")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "hello from app"
+    );
 }
 
 #[test]
@@ -52,7 +71,11 @@ fn bare_specifiers_resolve_through_the_manifest() {
     )
     .unwrap();
     let run = vyrn().current_dir(&dir).arg("run").output().unwrap();
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1200");
 
     // `vyrn deps` prints the graph including the aliased module.
@@ -66,7 +89,11 @@ fn bare_specifiers_resolve_through_the_manifest() {
 fn unknown_bare_specifier_names_the_manifest_fix() {
     let dir = scratch("unknown");
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join("vyrn.json"), r#"{"name": "t", "main": "src/main.vyrn"}"#).unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"name": "t", "main": "src/main.vyrn"}"#,
+    )
+    .unwrap();
     std::fs::write(
         dir.join("src/main.vyrn"),
         "import { x } from \"nope\"\nfn main() -> Int64 { return 0 }\n",
@@ -75,7 +102,10 @@ fn unknown_bare_specifier_names_the_manifest_fix() {
     let run = vyrn().current_dir(&dir).arg("run").output().unwrap();
     assert!(!run.status.success());
     let err = String::from_utf8_lossy(&run.stderr);
-    assert!(err.contains("vyrn.json"), "should point at the manifest: {err}");
+    assert!(
+        err.contains("vyrn.json"),
+        "should point at the manifest: {err}"
+    );
 }
 
 #[test]
@@ -100,11 +130,24 @@ fn an_unknown_native_target_names_the_manifest_key() {
         r#"{"name": "t", "main": "src/main.vyrn", "nativeTarget": "haswell"}"#,
     )
     .unwrap();
-    std::fs::write(dir.join("src/main.vyrn"), "fn main() -> Int64 { return 0 }\n").unwrap();
-    let out = vyrn().current_dir(&dir).args(["build", "src/main.vyrn"]).output().unwrap();
+    std::fs::write(
+        dir.join("src/main.vyrn"),
+        "fn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["build", "src/main.vyrn"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    for want in ["nativeTarget", "haswell", "vyrn.json", "v1, v2, v3, v4, native"] {
+    for want in [
+        "nativeTarget",
+        "haswell",
+        "vyrn.json",
+        "v1, v2, v3, v4, native",
+    ] {
         assert!(err.contains(want), "missing {want:?} in: {err}");
     }
     // `--native-target` wins, so the same project gets past the config error.
@@ -116,7 +159,10 @@ fn an_unknown_native_target_names_the_manifest_key() {
         .output()
         .unwrap();
     let ov_err = String::from_utf8_lossy(&ov.stderr);
-    assert!(!ov_err.contains("nativeTarget"), "the override did not win: {ov_err}");
+    assert!(
+        !ov_err.contains("nativeTarget"),
+        "the override did not win: {ov_err}"
+    );
 
     // A wasm build ignores the key entirely rather than failing on it — and
     // since RFC-0077 M5 it needs no clang, so this half can assert success.

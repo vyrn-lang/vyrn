@@ -36,31 +36,29 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, Diagnostic as LspDiagnostic, DiagnosticSeverity,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CompletionItem, CompletionItemKind, CompletionOptions,
+    CompletionParams, CompletionResponse, CompletionTextEdit, Diagnostic as LspDiagnostic,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
+    DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
-    InsertTextFormat, Location, MarkupContent, MarkupKind,
-    OneOf, Position, PrepareRenameResponse,
+    InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, RenameOptions, RenameParams, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WorkspaceEdit,
+    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
+use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
     analyze, class_completions, class_token_hover, completions, member_completions, references,
     resolve, string_literal_completions, Analysis, Completion, RefRange, SemKind, SemMods,
     SymbolKind,
 };
-use vyrn_frontend::symbolmap::MappedSymbol;
 
 use templates::VyxCursor;
 
@@ -93,9 +91,15 @@ fn load_context(
     uri: &Url,
     overlays: &HashMap<String, String>,
 ) -> Option<(vyrn_frontend::loader::LoadOptions, EditorResolver, String)> {
-    let path = uri.to_file_path().ok()?.to_string_lossy().replace('\\', "/");
-    let mut opts =
-        vyrn_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
+    let path = uri
+        .to_file_path()
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut opts = vyrn_frontend::loader::LoadOptions {
+        std_root: std_root(),
+        ..Default::default()
+    };
     let manifest_dir = std::path::Path::new(&path)
         .parent()
         .and_then(|d| find_manifest(d))
@@ -105,7 +109,10 @@ fn load_context(
             opts.audience = m.audience;
             m.dir
         });
-    let resolver = EditorResolver { manifest_dir, overlays: overlays.clone() };
+    let resolver = EditorResolver {
+        manifest_dir,
+        overlays: overlays.clone(),
+    };
     Some((opts, resolver, path))
 }
 
@@ -153,7 +160,11 @@ fn find_manifest(start: &std::path::Path) -> Option<Manifest> {
             };
             let slash = dir.to_string_lossy().replace('\\', "/");
             let audience = vyrn_frontend::audience::from_manifest(&text, &slash);
-            return Some(Manifest { dir: slash, deps, audience });
+            return Some(Manifest {
+                dir: slash,
+                deps,
+                audience,
+            });
         }
         dir = dir.parent()?.to_path_buf();
     }
@@ -187,8 +198,9 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             // Prefer the open buffer's live text over the on-disk file.
             // Overlay keys come from `uri_path` (normalized); `resolved` comes
             // from the loader (original case) — normalize or unsaved edits miss.
-            if let Some(text) =
-                self.overlays.get(&vyrn_frontend::origin::OriginMaps::norm_path_key(resolved))
+            if let Some(text) = self
+                .overlays
+                .get(&vyrn_frontend::origin::OriginMaps::norm_path_key(resolved))
             {
                 return Ok(text.clone());
             }
@@ -198,8 +210,10 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             .manifest_dir
             .as_deref()
             .ok_or_else(|| "remote import outside a vyrn.json project".to_string())?;
-        let lock = std::fs::read_to_string(std::path::Path::new(dir).join("vyrn.lock"))
-            .map_err(|_| format!("`{resolved}` is not pinned yet — run `vyrn check` once to fetch it"))?;
+        let lock =
+            std::fs::read_to_string(std::path::Path::new(dir).join("vyrn.lock")).map_err(|_| {
+                format!("`{resolved}` is not pinned yet — run `vyrn check` once to fetch it")
+            })?;
         // vyrn.lock is TSV: `specifier ⇥ resolved-url ⇥ sha256`, keyed by the
         // exact specifier string the loader hands us.
         let sha = lock
@@ -211,7 +225,9 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             .find(|(spec, _)| *spec == resolved)
             .map(|(_, sha)| sha.to_string())
             .ok_or_else(|| {
-                format!("`{resolved}` is not pinned in vyrn.lock — run `vyrn check` once to fetch it")
+                format!(
+                    "`{resolved}` is not pinned in vyrn.lock — run `vyrn check` once to fetch it"
+                )
             })?;
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
@@ -224,13 +240,16 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
                 return Ok(text);
             }
         }
-        Err(format!("`{resolved}` is pinned but not cached — run `vyrn check` once to fetch it"))
+        Err(format!(
+            "`{resolved}` is pinned but not cached — run `vyrn check` once to fetch it"
+        ))
     }
 
     /// Generation-time `listDir` (RFC-0021): read the local directory. The
     /// generator's inputs are local files, so this is a plain read-only listing.
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let entries = std::fs::read_dir(resolved).map_err(|_| format!("cannot list `{resolved}`"))?;
+        let entries =
+            std::fs::read_dir(resolved).map_err(|_| format!("cannot list `{resolved}`"))?;
         let mut names: Vec<String> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -277,7 +296,11 @@ fn dbg_log(msg: &str) {
             .unwrap_or_else(|_| ".".into());
         format!("{tmp}/vyrn-lsp-debug.log")
     });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{msg}");
     }
 }
@@ -438,7 +461,10 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
             // `.` for member access; `<`/`@`/`:`/`-`/space for `.vyx` template
             // structural + class-token completion (RFC-0042).
             trigger_characters: Some(
-                [".", "<", "@", ":", "-", " ", "\""].iter().map(|s| s.to_string()).collect(),
+                [".", "<", "@", ":", "-", " ", "\""]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             ),
             ..Default::default()
         }),
@@ -484,7 +510,10 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
     };
     let result = InitializeResult {
         capabilities,
-        server_info: Some(ServerInfo { name: "vyrn-lsp".into(), version: Some("0.1.0".into()) }),
+        server_info: Some(ServerInfo {
+            name: "vyrn-lsp".into(),
+            version: Some("0.1.0".into()),
+        }),
     };
     let value = serde_json::to_value(result).unwrap();
     connection.initialize_finish(id, value).map_err(|_| ())?;
@@ -540,7 +569,10 @@ fn main_loop(connection: &Connection, server: &mut Server) {
                 dbg_log(&format!(
                     "RESP {m} -> {}{}",
                     if empty { "EMPTY/null" } else { "ok" },
-                    resp.error.as_ref().map(|e| format!(" ERROR {}", e.message)).unwrap_or_default()
+                    resp.error
+                        .as_ref()
+                        .map(|e| format!(" ERROR {}", e.message))
+                        .unwrap_or_default()
                 ));
                 let _ = connection.sender.send(Message::Response(resp));
             }
@@ -588,8 +620,12 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
             dbg_log(&format!(
                 "  vyx owner for {} => {:?} (ownerless={})",
                 uri.path(),
-                uri_path(&uri).and_then(|p| server.vyx_owner.get(&p)).map(|u| u.to_string()),
-                uri_path(&uri).map(|p| server.vyx_ownerless.contains(&p)).unwrap_or(false)
+                uri_path(&uri)
+                    .and_then(|p| server.vyx_owner.get(&p))
+                    .map(|u| u.to_string()),
+                uri_path(&uri)
+                    .map(|p| server.vyx_ownerless.contains(&p))
+                    .unwrap_or(false)
             ));
         }
     }
@@ -603,8 +639,12 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         // rejects ("neither a result nor an error property"). A null `result` is
         // the spec-correct "nothing to hover / no definition".
         "textDocument/hover" => Response::new_ok(req.id, handle_hover(server, req.params)),
-        "textDocument/definition" => Response::new_ok(req.id, handle_definition(server, req.params)),
-        "textDocument/completion" => Response::new_ok(req.id, handle_completion(server, req.params)),
+        "textDocument/definition" => {
+            Response::new_ok(req.id, handle_definition(server, req.params))
+        }
+        "textDocument/completion" => {
+            Response::new_ok(req.id, handle_completion(server, req.params))
+        }
         "textDocument/documentSymbol" => {
             Response::new_ok(req.id, handle_document_symbol(server, req.params))
         }
@@ -626,7 +666,9 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
             Ok(e) => Response::new_ok(req.id, Some(e)),
             Err(msg) => Response::new_err(req.id, -32803, msg),
         },
-        "textDocument/formatting" => Response::new_ok(req.id, handle_formatting(server, req.params)),
+        "textDocument/formatting" => {
+            Response::new_ok(req.id, handle_formatting(server, req.params))
+        }
         // RFC-0087 U1: a `-> f(..)` label at every move.
         "textDocument/inlayHint" => Response::new_ok(req.id, handle_inlay_hint(server, req.params)),
         "textDocument/semanticTokens/full" => {
@@ -638,14 +680,18 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         // RFC-0064: a cheap predicate the extension queries to decide whether to
         // render the "▶ Run dev server" CodeLens. Always answers a bool (never
         // leaves the client waiting).
-        "vyrn/isDevEntry" => Response::new_ok(req.id, Some(handle_is_dev_entry(server, req.params))),
+        "vyrn/isDevEntry" => {
+            Response::new_ok(req.id, Some(handle_is_dev_entry(server, req.params)))
+        }
         // RFC-0073 M3: the derived route of every procedure this document
         // declares, for the CodeLens above each one. A custom request and not a
         // `code_lens_provider`, because every lens this editor shows — the
         // RFC-0064 dev entry, the RFC-0055 bench lenses, the run lens — is built
         // in `extension.js` from an answer like this one, and one lens source is
         // worth more than the capability.
-        "vyrn/routeLenses" => Response::new_ok(req.id, Some(handle_route_lenses(server, req.params))),
+        "vyrn/routeLenses" => {
+            Response::new_ok(req.id, Some(handle_route_lenses(server, req.params)))
+        }
         _ => Response {
             id: req.id,
             result: None,
@@ -665,7 +711,9 @@ fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
     let Some(uri) = params.pointer("/textDocument/uri").and_then(|v| v.as_str()) else {
         return false;
     };
-    let Ok(uri) = Url::parse(uri) else { return false };
+    let Ok(uri) = Url::parse(uri) else {
+        return false;
+    };
     if !is_vyrn_uri(&uri) {
         return false;
     }
@@ -695,7 +743,9 @@ fn handle_route_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut seen: Vec<(usize, String)> = Vec::new();
     for m in route_facts(server, &uri).iter() {
-        let (Some(path), Some(title)) = (m.derived("path"), m.route_line()) else { continue };
+        let (Some(path), Some(title)) = (m.derived("path"), m.route_line()) else {
+            continue;
+        };
         // A procedure is mapped twice — once by the client's stub, once by the
         // server's handler — and they name the same declaration at the same
         // place. One lens per declaration, not one per generated symbol.
@@ -787,9 +837,12 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
         vyx_forward(server, uri, line, col).and_then(|fwd| {
             match resolve(&fwd.synth.analysis, fwd.line, fwd.col) {
                 Some(r) => Some(r.hover),
-                None => {
-                    class_token_hover(&fwd.synth.analysis, &fwd.synth.gen_source, fwd.line, fwd.col)
-                }
+                None => class_token_hover(
+                    &fwd.synth.analysis,
+                    &fwd.synth.gen_source,
+                    fwd.line,
+                    fwd.col,
+                ),
             }
         })
     };
@@ -924,8 +977,14 @@ fn component_tag_definition(
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: target,
         range: Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 0 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
         },
     }))
 }
@@ -959,8 +1018,14 @@ fn import_path_definition(
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: url,
         range: Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 0 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
         },
     }))
 }
@@ -970,7 +1035,11 @@ fn import_path_definition(
 /// resolves to the `.vyrn` guess that doesn't exist, so it falls back to the
 /// directory the spec names — an entry file inside it, else the directory itself
 /// (RFC-0050 §2). `None` when nothing on disk matches.
-fn import_target_file(spec: &str, importer: &str, opts: &vyrn_frontend::loader::LoadOptions) -> Option<String> {
+fn import_target_file(
+    spec: &str,
+    importer: &str,
+    opts: &vyrn_frontend::loader::LoadOptions,
+) -> Option<String> {
     let resolved = vyrn_frontend::loader::resolve_spec(spec, importer, opts).ok()?;
     if std::path::Path::new(&resolved).is_file() {
         return Some(resolved);
@@ -989,8 +1058,16 @@ fn dir_target(dir: &str) -> Option<String> {
     if !p.is_dir() {
         return None;
     }
-    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    for cand in [format!("{name}.vyx"), format!("{name}.vyrn"), "index.vyx".into(), "index.vyrn".into()] {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for cand in [
+        format!("{name}.vyx"),
+        format!("{name}.vyrn"),
+        "index.vyx".into(),
+        "index.vyrn".into(),
+    ] {
         let f = p.join(&cand);
         if f.is_file() {
             return Some(f.to_string_lossy().replace('\\', "/"));
@@ -1075,8 +1152,11 @@ fn vyx_highlights(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Ve
         let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
             continue;
         };
-        let Some(gen_line) =
-            fwd.synth.gen_source.lines().nth(region.gen_start_line.saturating_sub(1))
+        let Some(gen_line) = fwd
+            .synth
+            .gen_source
+            .lines()
+            .nth(region.gen_start_line.saturating_sub(1))
         else {
             continue;
         };
@@ -1120,9 +1200,10 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     // type is a sequence type (`theme.cls("…")` → `Tw`), offer the class alphabet
     // as token-in-sequence replacements. Falls back to member / top-level.
     if is_string_literal_context(raw, line, col) {
-        if let (Some(src), Some(cls)) =
-            (raw, raw.and_then(|s| class_completions(analysis, s, line, col)))
-        {
+        if let (Some(src), Some(cls)) = (
+            raw,
+            raw.and_then(|s| class_completions(analysis, s, line, col)),
+        ) {
             return Some(class_completion_response(src, line, col, cls));
         }
         let items = raw
@@ -1159,7 +1240,12 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
 /// vocabularies or sibling components. A non-structural position (`{{ expr }}`,
 /// script) falls through to the RFC-0033 forward-map path, which now also serves
 /// finite/sequence string-literal completion (TransKey keys, `Tw` classes).
-fn vyx_completion(server: &Server, uri: &Url, line: usize, col: usize) -> Option<CompletionResponse> {
+fn vyx_completion(
+    server: &Server,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Option<CompletionResponse> {
     let raw = server
         .docs
         .get(uri)
@@ -1169,18 +1255,36 @@ fn vyx_completion(server: &Server, uri: &Url, line: usize, col: usize) -> Option
         VyxCursor::TagName { prefix, start_col } => {
             Some(tag_name_completion(uri, &prefix, line, start_col, col))
         }
-        VyxCursor::AttrName { tag, prefix: _, is_component, start_col } => {
-            Some(attr_name_completion(uri, &tag, is_component, line, start_col, col))
-        }
-        VyxCursor::EventName { prefix: _, start_col } => {
-            Some(event_name_completion(line, start_col, col))
-        }
-        VyxCursor::ClassValue { token: _, start_col } => {
+        VyxCursor::AttrName {
+            tag,
+            prefix: _,
+            is_component,
+            start_col,
+        } => Some(attr_name_completion(
+            uri,
+            &tag,
+            is_component,
+            line,
+            start_col,
+            col,
+        )),
+        VyxCursor::EventName {
+            prefix: _,
+            start_col,
+        } => Some(event_name_completion(line, start_col, col)),
+        VyxCursor::ClassValue {
+            token: _,
+            start_col,
+        } => {
             // The Tw alphabet comes from the synthesized (themed) module via the
             // forward map; a non-themed `.vyx` has no domain and gets nothing.
             let fwd = vyx_forward(server, uri, line, col)?;
-            let cls =
-                class_completions(&fwd.synth.analysis, &fwd.synth.gen_source, fwd.line, fwd.col)?;
+            let cls = class_completions(
+                &fwd.synth.analysis,
+                &fwd.synth.gen_source,
+                fwd.line,
+                fwd.col,
+            )?;
             Some(class_token_response(&raw, line, start_col, col, cls))
         }
         VyxCursor::Other => {
@@ -1213,8 +1317,7 @@ fn vyx_completion(server: &Server, uri: &Url, line: usize, col: usize) -> Option
             } else {
                 completions(&fwd.synth.analysis)
             };
-            let mut out: Vec<CompletionItem> =
-                items.into_iter().map(to_completion_item).collect();
+            let mut out: Vec<CompletionItem> = items.into_iter().map(to_completion_item).collect();
             members.append(&mut out);
             Some(CompletionResponse::Array(members))
         }
@@ -1234,13 +1337,27 @@ fn tag_name_completion(
     let mut items: Vec<CompletionItem> = Vec::new();
     if let Some((dir, self_name)) = vyx_dir_and_name(uri) {
         for name in templates::sibling_components(&dir, &self_name) {
-            items.push(edit_item(&name, CompletionItemKind::CLASS, "component", range));
+            items.push(edit_item(
+                &name,
+                CompletionItemKind::CLASS,
+                "component",
+                range,
+            ));
         }
     }
     // Common HTML elements, for a lowercase tag start.
-    if !prefix.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+    if !prefix
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+    {
         for el in HTML_ELEMENTS {
-            items.push(edit_item(el, CompletionItemKind::KEYWORD, "html element", range));
+            items.push(edit_item(
+                el,
+                CompletionItemKind::KEYWORD,
+                "html element",
+                range,
+            ));
         }
     }
     CompletionResponse::Array(items)
@@ -1277,10 +1394,20 @@ fn attr_name_completion(
         return CompletionResponse::Array(items);
     }
     for a in templates::GLOBAL_ATTRS {
-        items.push(edit_item(a, CompletionItemKind::PROPERTY, "html attribute", range));
+        items.push(edit_item(
+            a,
+            CompletionItemKind::PROPERTY,
+            "html attribute",
+            range,
+        ));
     }
     for a in templates::element_attrs(tag) {
-        items.push(edit_item(a, CompletionItemKind::PROPERTY, "html attribute", range));
+        items.push(edit_item(
+            a,
+            CompletionItemKind::PROPERTY,
+            "html attribute",
+            range,
+        ));
     }
     for (d, detail) in templates::DIRECTIVES {
         items.push(edit_item(d, CompletionItemKind::KEYWORD, detail, range));
@@ -1294,7 +1421,14 @@ fn event_name_completion(line: usize, start_col: usize, col: usize) -> Completio
     let range = replace_range(line, start_col, col);
     let items = templates::EVENTS
         .iter()
-        .map(|e| edit_item(&format!("@{e}"), CompletionItemKind::EVENT, "dom event", range))
+        .map(|e| {
+            edit_item(
+                &format!("@{e}"),
+                CompletionItemKind::EVENT,
+                "dom event",
+                range,
+            )
+        })
         .collect();
     CompletionResponse::Array(items)
 }
@@ -1367,8 +1501,14 @@ fn line_slice(raw: &str, line: usize, start_col: usize, col: usize) -> String {
 fn replace_range(line: usize, start_col: usize, col: usize) -> Range {
     let l = line.saturating_sub(1) as u32;
     Range {
-        start: Position { line: l, character: start_col.saturating_sub(1) as u32 },
-        end: Position { line: l, character: col.saturating_sub(1) as u32 },
+        start: Position {
+            line: l,
+            character: start_col.saturating_sub(1) as u32,
+        },
+        end: Position {
+            line: l,
+            character: col.saturating_sub(1) as u32,
+        },
     }
 }
 
@@ -1398,10 +1538,10 @@ fn vyx_dir_and_name(uri: &Url) -> Option<(std::path::PathBuf, String)> {
 
 /// A small set of common HTML element names for lowercase tag completion.
 const HTML_ELEMENTS: &[&str] = &[
-    "div", "span", "p", "a", "ul", "ol", "li", "section", "header", "footer",
-    "nav", "main", "article", "aside", "h1", "h2", "h3", "h4", "h5", "h6",
-    "button", "input", "label", "select", "option", "textarea", "form", "img",
-    "table", "thead", "tbody", "tr", "td", "th", "pre", "code", "strong", "em",
+    "div", "span", "p", "a", "ul", "ol", "li", "section", "header", "footer", "nav", "main",
+    "article", "aside", "h1", "h2", "h3", "h4", "h5", "h6", "button", "input", "label", "select",
+    "option", "textarea", "form", "img", "table", "thead", "tbody", "tr", "td", "th", "pre",
+    "code", "strong", "em",
 ];
 
 /// Map one frontend completion to an LSP `CompletionItem`.
@@ -1413,7 +1553,10 @@ fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {
         // RFC-0051 §1: the declaration's `///` doc, shown in the completion
         // item's detail pane (markdown, verbatim).
         documentation: c.doc.map(|d| {
-            Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })
+            Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: d,
+            })
         }),
         ..Default::default()
     }
@@ -1447,7 +1590,10 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
     let mut region: Option<vyrn_frontend::origin::Region> = None;
     for r in owner_analysis.origins.regions_for(&vyx_path) {
         if r.origin.line == line && r.origin.col <= col {
-            let better = region.as_ref().map(|b| r.origin.col >= b.origin.col).unwrap_or(true);
+            let better = region
+                .as_ref()
+                .map(|b| r.origin.col >= b.origin.col)
+                .unwrap_or(true);
             if better {
                 region = Some(r);
             }
@@ -1464,10 +1610,23 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
         .cloned()
         .or_else(|| std::fs::read_to_string(&vyx_path).ok())?;
     let vyx_line = vyx_text.lines().nth(line.saturating_sub(1))?;
-    let gen_line =
-        synth.gen_source.lines().nth(region.gen_start_line.saturating_sub(1)).unwrap_or("");
-    let (gline, gcol) = map_into_region(vyx_line, region.origin.col, col, gen_line, region.gen_start_line);
-    Some(VyxFwd { synth, line: gline, col: gcol })
+    let gen_line = synth
+        .gen_source
+        .lines()
+        .nth(region.gen_start_line.saturating_sub(1))
+        .unwrap_or("");
+    let (gline, gcol) = map_into_region(
+        vyx_line,
+        region.origin.col,
+        col,
+        gen_line,
+        region.gen_start_line,
+    );
+    Some(VyxFwd {
+        synth,
+        line: gline,
+        col: gcol,
+    })
 }
 
 /// The analyzed synthesized module (RFC-0049 §2) for `owner`'s generated module
@@ -1489,12 +1648,20 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
         Some(e) if e.sig == sig => cache.get_mut(owner).unwrap(),
         _ => {
             // (Re)generate: the owner or an input changed (or first touch).
-            let gen_modules =
-                vyrn_frontend::loader::generated_modules(&owner_text, &owner_path, &opts, &resolver)
-                    .ok()?;
+            let gen_modules = vyrn_frontend::loader::generated_modules(
+                &owner_text,
+                &owner_path,
+                &opts,
+                &resolver,
+            )
+            .ok()?;
             cache.insert(
                 owner.clone(),
-                OwnerSynth { sig, gen_modules, analyzed: HashMap::new() },
+                OwnerSynth {
+                    sig,
+                    gen_modules,
+                    analyzed: HashMap::new(),
+                },
             );
             cache.get_mut(owner).unwrap()
         }
@@ -1503,15 +1670,22 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
     if let Some(a) = entry.analyzed.get(banner) {
         return Some(a.clone());
     }
-    let gen_source =
-        entry.gen_modules.iter().find(|(b, _)| b == banner).map(|(_, s)| s.clone())?;
+    let gen_source = entry
+        .gen_modules
+        .iter()
+        .find(|(b, _)| b == banner)
+        .map(|(_, s)| s.clone())?;
     // Analyze the synthesized module as a linked root under the owner's dir, so
     // its imports (std/html, rebased relatives) resolve. Its own diagnostics
     // (e.g. "no main") are ignored — only the symbol index / tokens are queried.
     let synth_path = synth_path_for(&owner_path);
     let analysis = vyrn_frontend::analyze_linked(&gen_source, &synth_path, &opts, &resolver);
     let tokens = vyrn_frontend::semantic_tokens(&analysis);
-    let a = Rc::new(AnalyzedSynth { gen_source, analysis, tokens });
+    let a = Rc::new(AnalyzedSynth {
+        gen_source,
+        analysis,
+        tokens,
+    });
     entry.analyzed.insert(banner.to_string(), a.clone());
     Some(a)
 }
@@ -1564,7 +1738,10 @@ fn map_into_region(
 /// the generated line (the expression, since the following input bytes — `}`,
 /// `>` — diverge from the generated wrapper).
 fn align_expr(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<usize> {
-    let tail: Vec<char> = vyx_line.chars().skip(origin_col.saturating_sub(1)).collect();
+    let tail: Vec<char> = vyx_line
+        .chars()
+        .skip(origin_col.saturating_sub(1))
+        .collect();
     let mut len = tail.len();
     while len >= 1 {
         let cand: String = tail[..len].iter().collect();
@@ -1618,7 +1795,10 @@ fn handle_formatting(server: &Server, params: serde_json::Value) -> Option<Vec<T
     if &formatted == text {
         return Some(vec![]);
     }
-    Some(vec![TextEdit { range: whole_document_range(text), new_text: formatted }])
+    Some(vec![TextEdit {
+        range: whole_document_range(text),
+        new_text: formatted,
+    }])
 }
 
 /// A `Range` covering the entire `text` (start of the document to just past its
@@ -1638,8 +1818,14 @@ fn whole_document_range(text: &str) -> Range {
         }
     }
     Range {
-        start: Position { line: 0, character: 0 },
-        end: Position { line: last_line, character: last_line_len },
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: last_line,
+            character: last_line_len,
+        },
     }
 }
 
@@ -1762,7 +1948,10 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         return Some(Vec::new());
     }
     let (analysis, _) = lookup(server, &p.text_document.uri)?;
-    let (from, to) = (p.range.start.line as usize + 1, p.range.end.line as usize + 1);
+    let (from, to) = (
+        p.range.start.line as usize + 1,
+        p.range.end.line as usize + 1,
+    );
     Some(
         vyrn_frontend::inlay_hints(analysis)
             .into_iter()
@@ -1796,7 +1985,11 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>) -> SemanticTokens {
         let line = t.line.saturating_sub(1) as u32;
         let col = t.col.saturating_sub(1) as u32;
         let delta_line = line.saturating_sub(prev_line);
-        let delta_start = if delta_line == 0 { col.saturating_sub(prev_col) } else { col };
+        let delta_start = if delta_line == 0 {
+            col.saturating_sub(prev_col)
+        } else {
+            col
+        };
         data.push(SemanticToken {
             delta_line,
             delta_start,
@@ -1807,7 +2000,10 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>) -> SemanticTokens {
         prev_line = line;
         prev_col = col;
     }
-    SemanticTokens { result_id: None, data }
+    SemanticTokens {
+        result_id: None,
+        data,
+    }
 }
 
 /// Classify a `.vyx` input's identifiers by mapping each verbatim origin region
@@ -1819,9 +2015,15 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>) -> SemanticTokens {
 /// spans) contribute nothing, leaving them to the TextMate grammar.
 fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::SemToken> {
     let mut out = Vec::new();
-    let Some(vyx_path) = uri_path(vyx_uri) else { return out };
-    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else { return out };
-    let Some(owner_analysis) = server.analyses.get(&owner) else { return out };
+    let Some(vyx_path) = uri_path(vyx_uri) else {
+        return out;
+    };
+    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else {
+        return out;
+    };
+    let Some(owner_analysis) = server.analyses.get(&owner) else {
+        return out;
+    };
     let regions = owner_analysis.origins.regions_for(&vyx_path);
     if regions.is_empty() {
         return out;
@@ -1849,7 +2051,10 @@ fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::Sem
         let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
             continue;
         };
-        let Some(gen_line) = gen_source.lines().nth(region.gen_start_line.saturating_sub(1)) else {
+        let Some(gen_line) = gen_source
+            .lines()
+            .nth(region.gen_start_line.saturating_sub(1))
+        else {
             continue;
         };
         // Where the verbatim input expression lands in the generated line, and how
@@ -1885,7 +2090,10 @@ fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::Sem
 /// run — the longest input tail (from `origin_col`) that occurs in `gen_line`.
 /// `(1-based gen col, matched char length)`, or `None` when nothing aligns.
 fn align_expr_span(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<(usize, usize)> {
-    let tail: Vec<char> = vyx_line.chars().skip(origin_col.saturating_sub(1)).collect();
+    let tail: Vec<char> = vyx_line
+        .chars()
+        .skip(origin_col.saturating_sub(1))
+        .collect();
     let mut len = tail.len();
     while len >= 1 {
         let cand: String = tail[..len].iter().collect();
@@ -1912,7 +2120,11 @@ fn to_document_symbol(sym: &vyrn_frontend::Symbol) -> Option<DocumentSymbol> {
         SymbolKind::Field | SymbolKind::Param | SymbolKind::Local => return None,
     };
     let range = lsp_range(sym.line, sym.col, sym.end_col);
-    let detail = if sym.detail.is_empty() { None } else { Some(sym.detail.clone()) };
+    let detail = if sym.detail.is_empty() {
+        None
+    } else {
+        Some(sym.detail.clone())
+    };
     // `deprecated` is a deprecated field of `DocumentSymbol` but the struct has
     // no `Default`, so it must be named; silence the lint locally.
     #[allow(deprecated)]
@@ -2090,7 +2302,10 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     // A manifest role's relative specifier is relative to the MANIFEST, so the
     // importer is the manifest — not the page, which may live several
     // directories down.
-    let manifest = app_dir.join("vyrn.json").to_string_lossy().replace('\\', "/");
+    let manifest = app_dir
+        .join("vyrn.json")
+        .to_string_lossy()
+        .replace('\\', "/");
     let view = vyrn_frontend::contracts::load_role_contract(&role, &manifest, &opts, &resolver)?;
     let file_sig = contracts::file_sig(std::path::Path::new(&view.file));
     entry.views.insert(key, (file_sig, view.clone()));
@@ -2111,7 +2326,12 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
 /// go and nowhere else (never inside a function body, never inside a record
 /// type). **Role** — a `layout.vyx` beside a page is chrome with no contract, so
 /// it is not in the role and gets nothing.
-fn contract_completion_items(server: &Server, uri: &Url, line: usize, col: usize) -> Vec<CompletionItem> {
+fn contract_completion_items(
+    server: &Server,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Vec<CompletionItem> {
     let Some(ctx) = contract_ctx(server, uri) else {
         return Vec::new();
     };
@@ -2133,7 +2353,10 @@ fn contract_completion_items(server: &Server, uri: &Url, line: usize, col: usize
             kind: Some(CompletionItemKind::SNIPPET),
             detail: Some(c.detail),
             documentation: c.doc.map(|d| {
-                Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d,
+                })
             }),
             insert_text: Some(c.snippet),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
@@ -2150,7 +2373,12 @@ fn contract_completion_items(server: &Server, uri: &Url, line: usize, col: usize
 ///
 /// Module scope is the discriminator that keeps a local variable called `data`
 /// inside a function body from claiming to be a contract member.
-fn contract_member_at(server: &Server, uri: &Url, line: usize, col: usize) -> Option<(ContractCtx, String)> {
+fn contract_member_at(
+    server: &Server,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Option<(ContractCtx, String)> {
     let ctx = contract_ctx(server, uri)?;
     let src_line = ctx.to_source_line(line)?;
     if !vyrn_frontend::at_module_scope(&ctx.source, src_line, col) {
@@ -2178,7 +2406,8 @@ fn contract_member_definition(
 ) -> Option<GotoDefinitionResponse> {
     let (ctx, name) = contract_member_at(server, uri, line, col)?;
     let m = ctx.view.member(&name)?;
-    let target = Url::from_file_path(ctx.view.file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
+    let target =
+        Url::from_file_path(ctx.view.file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: target,
         range: lsp_range(m.line, m.col, m.end_col),
@@ -2193,7 +2422,10 @@ fn contract_member_definition(
 /// own business, and reading it here would make the server know a generator.
 /// The diagnostics the client sent are attached by RANGE overlap, so the
 /// lightbulb still appears on the squiggle.
-fn handle_code_action(server: &Server, params: serde_json::Value) -> Option<Vec<CodeActionOrCommand>> {
+fn handle_code_action(
+    server: &Server,
+    params: serde_json::Value,
+) -> Option<Vec<CodeActionOrCommand>> {
     let p: CodeActionParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document.uri;
     let ctx = contract_ctx(server, uri)?;
@@ -2213,13 +2445,24 @@ fn handle_code_action(server: &Server, params: serde_json::Value) -> Option<Vec<
         let mut changes = std::collections::HashMap::new();
         changes.insert(
             uri.clone(),
-            vec![TextEdit { range, new_text: fix.to.clone() }],
+            vec![TextEdit {
+                range,
+                new_text: fix.to.clone(),
+            }],
         );
         out.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Rename `{}` to `{}` ({})", fix.from, fix.to, ctx.view.site()),
+            title: format!(
+                "Rename `{}` to `{}` ({})",
+                fix.from,
+                fix.to,
+                ctx.view.site()
+            ),
             kind: Some(CodeActionKind::QUICKFIX),
             diagnostics: (!diagnostics.is_empty()).then_some(diagnostics),
-            edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
             is_preferred: Some(true),
             ..Default::default()
         }));
@@ -2244,11 +2487,25 @@ fn to_frontend(pos: &Position) -> (usize, usize) {
 /// `publish()`).
 fn lsp_range(line: usize, col: usize, end_col: usize) -> Range {
     let l = line.saturating_sub(1) as u32;
-    let c = if col == 0 { 0 } else { col.saturating_sub(1) as u32 };
-    let ec = if end_col == 0 { c } else { end_col.saturating_sub(1) as u32 };
+    let c = if col == 0 {
+        0
+    } else {
+        col.saturating_sub(1) as u32
+    };
+    let ec = if end_col == 0 {
+        c
+    } else {
+        end_col.saturating_sub(1) as u32
+    };
     Range {
-        start: Position { line: l, character: c },
-        end: Position { line: l, character: ec },
+        start: Position {
+            line: l,
+            character: c,
+        },
+        end: Position {
+            line: l,
+            character: ec,
+        },
     }
 }
 
@@ -2280,7 +2537,11 @@ fn uri_path(uri: &Url) -> Option<String> {
     // carry `N:/…`. Windows paths are case-insensitive but `String` equality is
     // not, so an un-normalized key made every `.vyx` lookup miss — the bug
     // behind "hover/Ctrl+Click/colour do nothing in .vyx".
-    let p = uri.to_file_path().ok()?.to_string_lossy().replace('\\', "/");
+    let p = uri
+        .to_file_path()
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
     Some(vyrn_frontend::origin::OriginMaps::norm_path_key(&p))
 }
 
@@ -2391,7 +2652,9 @@ const MAX_WALK_UP: usize = 8;
 /// the request path). A `.vyx` already owned, or already known owner-less, is a
 /// cheap no-op.
 fn ensure_vyx_owner(server: &mut Server, vyx_uri: &Url) {
-    let Some(path) = uri_path(vyx_uri) else { return };
+    let Some(path) = uri_path(vyx_uri) else {
+        return;
+    };
     if !path.ends_with(".vyx") {
         return;
     }
@@ -2410,7 +2673,9 @@ fn ensure_vyx_owner(server: &mut Server, vyx_uri: &Url) {
 /// path). Returns whether an owner was found. A genuine scratch `.vyx` is cached
 /// owner-less so a subsequent keystroke does not re-scan.
 fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Url) -> bool {
-    let Some(path) = uri_path(vyx_uri) else { return false };
+    let Some(path) = uri_path(vyx_uri) else {
+        return false;
+    };
     if server.vyx_owner.contains_key(&path) {
         return true;
     }
@@ -2502,7 +2767,9 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
         return hit.clone();
     }
     let claims = |a: &Analysis| {
-        a.symbol_maps.iter().any(|m| vyrn_frontend::symbolmap::same_file(&m.file, path))
+        a.symbol_maps
+            .iter()
+            .any(|m| vyrn_frontend::symbolmap::same_file(&m.file, path))
     };
     let probed = if server.analyses.values().any(claims) {
         None
@@ -2511,15 +2778,16 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
         // map-emitting generator — a handful in a real project, and none at all
         // in a directory that mounts nothing, which is what keeps a hover in an
         // ordinary module from paying for this at all.
-        mounting_roots(path, RPC_GENERATORS).into_iter().find_map(|cand| {
-            let text = server
-                .docs
-                .get(&cand)
-                .cloned()
-                .or_else(|| uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok()))?;
-            let a = analyze_doc(&cand, &text, &overlays_of(server));
-            claims(&a).then_some(a)
-        })
+        mounting_roots(path, RPC_GENERATORS)
+            .into_iter()
+            .find_map(|cand| {
+                let text =
+                    server.docs.get(&cand).cloned().or_else(|| {
+                        uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok())
+                    })?;
+                let a = analyze_doc(&cand, &text, &overlays_of(server));
+                claims(&a).then_some(a)
+            })
     };
     // Cache what these analyses say about EVERY file they map, not just the one
     // asked for: a client's map covers the whole api directory, so the second
@@ -2539,13 +2807,21 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
     for (k, v) in grouped {
         cache.insert(k, Rc::new(v));
     }
-    cache.get(path).cloned().unwrap_or_else(|| Rc::new(Vec::new()))
+    cache
+        .get(path)
+        .cloned()
+        .unwrap_or_else(|| Rc::new(Vec::new()))
 }
 
 /// The generators whose maps carry a DERIVED ROUTE — what a hover and a lens are
 /// asking about.
-const RPC_GENERATORS: &[&str] =
-    &["rpc(", "rpcServer(", "client(", "rpcClient(", "rpcInProcess("];
+const RPC_GENERATORS: &[&str] = &[
+    "rpc(",
+    "rpcServer(",
+    "client(",
+    "rpcClient(",
+    "rpcInProcess(",
+];
 
 /// Every generator that emits a map at all. The REST projection's is route-less
 /// (its paths are written in the projection file, not derived), so it is useless
@@ -2567,7 +2843,9 @@ const MAP_GENERATORS: &[&str] = &[
 /// possible, and a root that never calls one of these cannot map anything.
 fn mounting_roots(path: &str, gens: &[&str]) -> Vec<Url> {
     let file = std::path::Path::new(path);
-    let Some(dir) = file.parent() else { return Vec::new() };
+    let Some(dir) = file.parent() else {
+        return Vec::new();
+    };
     let app_root = app_root_for(dir);
     let mut files = Vec::new();
     collect_vyrn(&app_root, 0, &mut files);
@@ -2580,7 +2858,10 @@ fn mounting_roots(path: &str, gens: &[&str]) -> Vec<Url> {
         .map(|p| (path_distance(&p, dir), p))
         .collect();
     scored.sort_by_key(|(d, _)| *d);
-    scored.into_iter().filter_map(|(_, p)| Url::from_file_path(p).ok()).collect()
+    scored
+        .into_iter()
+        .filter_map(|(_, p)| Url::from_file_path(p).ok())
+        .collect()
 }
 
 /// RFC-0073 M4: every generated symbol standing for a declaration in `path`,
@@ -2647,7 +2928,9 @@ fn derived_hover_note(server: &Server, uri: &Url, line: usize, col: usize) -> Op
     })?;
     let name = decl.name.clone();
     let facts = route_facts(server, uri);
-    let m = facts.iter().find(|m| m.decl == name && m.line == line && m.route_line().is_some())?;
+    let m = facts
+        .iter()
+        .find(|m| m.decl == name && m.line == line && m.route_line().is_some())?;
     m.route_line()
 }
 
@@ -2712,7 +2995,15 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
     let path = uri_path(&uri).ok_or_else(|| "this document has no file path".to_string())?;
     let maps = all_mapped_symbols(server, &path);
     let (analysis, _) = lookup(server, &uri).ok_or_else(|| "no analysis".to_string())?;
-    rename::workspace_edit(&target, &p.new_name, &maps, analysis, &uri, &overlays, &opts)
+    rename::workspace_edit(
+        &target,
+        &p.new_name,
+        &maps,
+        analysis,
+        &uri,
+        &overlays,
+        &opts,
+    )
 }
 
 /// The `.vyrn` roots to try as owners of `vyx_path`, most-likely first. Finds the
@@ -2723,8 +3014,13 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
 /// generator-importing root, then by path proximity.
 fn candidate_owners(vyx_path: &str) -> Vec<Url> {
     let vyx = std::path::Path::new(vyx_path);
-    let Some(vyx_dir) = vyx.parent() else { return Vec::new() };
-    let dir_name = vyx_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let Some(vyx_dir) = vyx.parent() else {
+        return Vec::new();
+    };
+    let dir_name = vyx_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let app_root = app_root_for(vyx_dir);
 
     let mut files = Vec::new();
@@ -2782,7 +3078,9 @@ fn app_root_for(vyx_dir: &std::path::Path) -> std::path::PathBuf {
 /// Whether `dir` directly contains a `.vyrn` file importing a page/component
 /// generator — the "app root" signal when there is no `vyrn.json`.
 fn dir_has_generator_root(dir: &std::path::Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
@@ -2827,12 +3125,17 @@ fn collect_sources(
     if out.len() >= cap || depth > MAX_WALK_UP {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut subdirs = Vec::new();
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             // Skip noise that never holds an owner root.
             if name.starts_with('.')
                 || name == "vyrn_vendor"
@@ -2909,7 +3212,10 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
         // previously owner-less `.vyx` to be re-discovered.
         server.vyx_ownerless.clear();
         reanalyze_root(connection, server, uri);
-    } else if let Some(owner) = uri_path(uri).and_then(|p| server.vyx_owner.get(&p)).cloned() {
+    } else if let Some(owner) = uri_path(uri)
+        .and_then(|p| server.vyx_owner.get(&p))
+        .cloned()
+    {
         reanalyze_root(connection, server, &owner);
     } else {
         discover_vyx_owner(connection, server, uri);
@@ -2923,11 +3229,7 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
 /// character. That matters most where analysis is slowest: editing a `.vyx`
 /// re-runs its owner's generators, which is seconds, and five queued keystrokes
 /// used to mean five of them back to back.
-fn handle_notification(
-    connection: &Connection,
-    server: &mut Server,
-    notif: Notification,
-) -> Owed {
+fn handle_notification(connection: &Connection, server: &mut Server, notif: Notification) -> Owed {
     // Dispatch on the notification method. `lsp-types` gives typed params per
     // known method; unknown notifications are ignored.
     if DidOpenTextDocument::METHOD == notif.method {
@@ -2957,14 +3259,16 @@ fn handle_notification(
             server.docs.remove(&params.text_document.uri);
             server.analyses.remove(&params.text_document.uri);
             let closed = params.text_document.uri.clone();
-            let _ = connection.sender.send(Message::Notification(Notification::new(
-                PublishDiagnostics::METHOD.to_string(),
-                PublishDiagnosticsParams {
-                    uri: params.text_document.uri,
-                    diagnostics: vec![],
-                    version: None,
-                },
-            )));
+            let _ = connection
+                .sender
+                .send(Message::Notification(Notification::new(
+                    PublishDiagnostics::METHOD.to_string(),
+                    PublishDiagnosticsParams {
+                        uri: params.text_document.uri,
+                        diagnostics: vec![],
+                        version: None,
+                    },
+                )));
             return Owed::Forget(closed);
         }
     }
@@ -3009,13 +3313,23 @@ fn publish(
                 (0, line_char_len(source, d.line.saturating_sub(1)))
             } else {
                 let s = d.col.saturating_sub(1) as u32;
-                let e = if d.end_col == 0 { s } else { d.end_col.saturating_sub(1) as u32 };
+                let e = if d.end_col == 0 {
+                    s
+                } else {
+                    d.end_col.saturating_sub(1) as u32
+                };
                 (s, e)
             };
             LspDiagnostic {
                 range: Range {
-                    start: Position { line, character: start_char },
-                    end: Position { line, character: end_char },
+                    start: Position {
+                        line,
+                        character: start_char,
+                    },
+                    end: Position {
+                        line,
+                        character: end_char,
+                    },
                 },
                 severity: Some(match d.severity {
                     vyrn_frontend::diagnostics::Severity::Error => DiagnosticSeverity::ERROR,
@@ -3039,10 +3353,16 @@ fn publish(
             }
         })
         .collect();
-    let _ = connection.sender.send(Message::Notification(Notification::new(
-        PublishDiagnostics::METHOD.to_string(),
-        PublishDiagnosticsParams { uri: uri.clone(), diagnostics: mapped, version: None },
-    )));
+    let _ = connection
+        .sender
+        .send(Message::Notification(Notification::new(
+            PublishDiagnostics::METHOD.to_string(),
+            PublishDiagnosticsParams {
+                uri: uri.clone(),
+                diagnostics: mapped,
+                version: None,
+            },
+        )));
 }
 
 /// The character length of line `line_idx` (0-based) in `source`, or 0 if out
@@ -3051,7 +3371,11 @@ fn publish(
 /// *end* of a whole-line squiggle this is a cosmetic detail the client clamps
 /// to the line end, and Vyrn sources are overwhelmingly ASCII.)
 fn line_char_len(source: &str, line_idx: usize) -> u32 {
-    source.lines().nth(line_idx).map(|l| l.chars().count() as u32).unwrap_or(0)
+    source
+        .lines()
+        .nth(line_idx)
+        .map(|l| l.chars().count() as u32)
+        .unwrap_or(0)
 }
 // ---------------------------------------------------------------------------
 // RFC-0052 — a safelisted class hovers with the app's OWN CSS.
@@ -3075,10 +3399,16 @@ const MAX_VYX_SCAN: usize = 64;
 /// own matching CSS rule(s); otherwise (a utility's generated rule, or any other
 /// hover) return it untouched.
 fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
-    let Some(class) = safelisted_class_of(&hover) else { return hover };
-    let Some(path) = uri_path(uri) else { return hover };
+    let Some(class) = safelisted_class_of(&hover) else {
+        return hover;
+    };
+    let Some(path) = uri_path(uri) else {
+        return hover;
+    };
     let file = std::path::PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let Some(dir) = file.parent() else { return hover };
+    let Some(dir) = file.parent() else {
+        return hover;
+    };
     let root = app_root_for(dir);
     let rules = app_css_rules(server, &root, &class);
     if rules.is_empty() {
@@ -3113,8 +3443,11 @@ fn app_css_rules(
     let mut lines = 0usize;
     for (path, text) in app_stylesheets(server, root) {
         for (line, rule) in css_rules_for_class(&text, class) {
-            let rel =
-                path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
             lines += rule.lines().count();
             out.push((rel, line, rule));
             if out.len() >= MAX_CSS_RULES || lines >= MAX_CSS_LINES {
@@ -3139,7 +3472,13 @@ fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::P
         .filter_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t)))
         .collect();
     let sig = css_sig(root, files.iter().map(|(p, _)| p.as_path()));
-    cache.insert(root.to_path_buf(), CssIndex { sig, files: files.clone() });
+    cache.insert(
+        root.to_path_buf(),
+        CssIndex {
+            sig,
+            files: files.clone(),
+        },
+    );
     files
 }
 
@@ -3188,7 +3527,9 @@ fn discover_stylesheets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     collect_vyx(root, 0, &mut vyx);
     vyx.sort();
     for v in &vyx {
-        let Ok(src) = std::fs::read_to_string(v) else { continue };
+        let Ok(src) = std::fs::read_to_string(v) else {
+            continue;
+        };
         for url in stylesheet_urls(&src) {
             let rel = url.trim_start_matches('/');
             if rel.is_empty() {
@@ -3207,7 +3548,9 @@ fn discover_stylesheets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         return out;
     }
     for dir in [root.join("public"), root.to_path_buf()] {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut css: Vec<std::path::PathBuf> = entries
             .flatten()
             .map(|e| e.path())
@@ -3226,8 +3569,12 @@ fn discover_stylesheets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 fn stylesheet_urls(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in src.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("stylesheet") else { continue };
-        let Some(rest) = rest.trim_start().strip_prefix('"') else { continue };
+        let Some(rest) = line.trim_start().strip_prefix("stylesheet") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else {
+            continue;
+        };
         if let Some(end) = rest.find('"') {
             out.push(rest[..end].to_string());
         }
@@ -3241,12 +3588,17 @@ fn collect_vyx(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::Pat
     if depth > MAX_WALK_UP || out.len() >= MAX_VYX_SCAN {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut subdirs = Vec::new();
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if name.starts_with('.')
                 || name == "vyrn_vendor"
                 || name == "target"
@@ -3298,13 +3650,18 @@ fn collect_css_rules(css: &str, base: usize, class: &str, out: &mut Vec<(usize, 
         }
         if b[i] == b'{' {
             let selector = css[sel_start..i].trim();
-            let Some(close) = matching_brace(css, i) else { return };
+            let Some(close) = matching_brace(css, i) else {
+                return;
+            };
             if selector.starts_with('@') {
                 collect_css_rules(&css[i + 1..close], base + i + 1, class, out);
             } else if selector_has_class(selector, class) {
                 let lead = css[sel_start..].len() - css[sel_start..].trim_start().len();
                 let start = sel_start + lead;
-                out.push((line_of(css, base + start), css[start..=close].trim().to_string()));
+                out.push((
+                    line_of(css, base + start),
+                    css[start..=close].trim().to_string(),
+                ));
             }
             i = close + 1;
             sel_start = i;

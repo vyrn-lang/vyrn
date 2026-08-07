@@ -84,7 +84,11 @@ fn leb(b: &[u8]) -> (u32, usize) {
 }
 
 fn i32_store(off: u32) -> Instruction<'static> {
-    Instruction::I32Store(MemArg { offset: off as u64, align: 2, memory_index: 0 })
+    Instruction::I32Store(MemArg {
+        offset: off as u64,
+        align: 2,
+        memory_index: 0,
+    })
 }
 
 /// Build the guest: it imports the whole boundary, then does the smallest thing
@@ -98,8 +102,12 @@ type Wrong<'a> = Option<(&'a str, Vec<ValType>, Vec<ValType>)>;
 fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
     let mut m = Module::new();
     m.import_memory();
-    let fd_write =
-        m.import("wasi_snapshot_preview1", "fd_write", &[ValType::I32; 4], &[ValType::I32]);
+    let fd_write = m.import(
+        "wasi_snapshot_preview1",
+        "fd_write",
+        &[ValType::I32; 4],
+        &[ValType::I32],
+    );
     let proc_exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
 
     let mut at: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
@@ -147,7 +155,11 @@ fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
         for (off, byte) in [(0u64, b'h'), (1, b'i'), (2, 0)] {
             b.ins(&Instruction::LocalGet(p))
                 .ins(&Instruction::I32Const(byte as i32))
-                .ins(&Instruction::I32Store8(MemArg { offset: off, align: 0, memory_index: 0 }));
+                .ins(&Instruction::I32Store8(MemArg {
+                    offset: off,
+                    align: 0,
+                    memory_index: 0,
+                }));
         }
         // The bytes we compare are the ones the guest just wrote into the shim's
         // allocation, read back through C. This used to be `__vyrn_vj_bool(true)`
@@ -158,7 +170,8 @@ fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
         // shared address space makes a pointer the guest filled mean anything over
         // there. `strlen` is the one that cannot leave, because `byteLength` is a
         // view rather than an operation.
-        b.ins(&Instruction::LocalGet(p)).ins(&Instruction::LocalSet(s));
+        b.ins(&Instruction::LocalGet(p))
+            .ins(&Instruction::LocalSet(s));
         b.slot(0).ins(&Instruction::LocalGet(s)).ins(&i32_store(0));
         b.slot(0)
             .ins(&Instruction::LocalGet(s))
@@ -209,7 +222,9 @@ fn run(wasmtime: &Path, shim: &Path, name: &str, wasm: &[u8]) -> (i32, Vec<u8>, 
 #[test]
 fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
     let Some((wasmtime, shim)) = tools() else {
-        eprintln!("SKIP: needs clang, a wasi sysroot and wasmtime — the shim link is unverified here");
+        eprintln!(
+            "SKIP: needs clang, a wasi sysroot and wasmtime — the shim link is unverified here"
+        );
         return;
     };
     let exports = exported_funcs(&std::fs::read(&shim).unwrap());
@@ -217,7 +232,10 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
     let (code, out, err) = run(&wasmtime, &shim, "boundary", &wasm);
 
     assert_ne!(code, 99, "the allocation did not come from the shim's heap");
-    assert_eq!(code, 22, "expected strlen(\"hi\")*10 + strlen(\"hi\"); stderr:\n{err}");
+    assert_eq!(
+        code, 22,
+        "expected strlen(\"hi\")*10 + strlen(\"hi\"); stderr:\n{err}"
+    );
     assert_eq!(
         String::from_utf8_lossy(&out),
         "hi",
@@ -237,8 +255,13 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
     // 33 -> 32 when the census retired `charCount`: one declare, one C definition,
     // and the smallest drop this RFC has produced, which is what a builtin with one
     // caller and no justification is worth.
-    assert!(n >= 32, "only {n} of the boundary was importable — the census shrank");
-    eprintln!("shim link: {n} boundary signatures instantiated against the module that defines them");
+    assert!(
+        n >= 32,
+        "only {n} of the boundary was importable — the census shrank"
+    );
+    eprintln!(
+        "shim link: {n} boundary signatures instantiated against the module that defines them"
+    );
 }
 
 /// What agreeing is worth, in the two ways it can fail.

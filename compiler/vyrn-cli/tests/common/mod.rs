@@ -108,12 +108,17 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
 /// for an `extern` import at all. The build is pinned now, in
 /// [`the_rfc_0012_host_boundary_is_named_in_the_module`], which is what an
 /// exclusion from the run comparison should have cost all along.
-pub const WASM_ONLY: &[(&str, &str)] =
-    &[("externdemo.vyrn", "calls `extern` fns; only the browser provides the `vyrn` namespace")];
+pub const WASM_ONLY: &[(&str, &str)] = &[(
+    "externdemo.vyrn",
+    "calls `extern` fns; only the browser provides the `vyrn` namespace",
+)];
 
 pub fn examples_dir() -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root -> examples/
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .canonicalize()
+        .unwrap()
 }
 
 pub fn vyrn() -> Command {

@@ -168,14 +168,20 @@ fn generate(name: &str) -> PathBuf {
 fn golden_module_page_is_byte_pinned() {
     let out = generate("golden-page");
     let page = std::fs::read_to_string(out.join("widgets.md")).unwrap();
-    assert_eq!(page, EXPECTED_PAGE, "generated page drifted from the golden");
+    assert_eq!(
+        page, EXPECTED_PAGE,
+        "generated page drifted from the golden"
+    );
 }
 
 #[test]
 fn golden_index_is_byte_pinned() {
     let out = generate("golden-index");
     let index = std::fs::read_to_string(out.join("index.md")).unwrap();
-    assert_eq!(index, EXPECTED_INDEX, "generated index drifted from the golden");
+    assert_eq!(
+        index, EXPECTED_INDEX,
+        "generated index drifted from the golden"
+    );
 }
 
 #[test]
@@ -191,7 +197,15 @@ fn verify_passes_on_freshly_generated_docs() {
     std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
     let out = dir.join("out");
     assert_eq!(
-        vyrn().arg("doc").arg(&dir).arg("-o").arg(&out).output().unwrap().status.code(),
+        vyrn()
+            .arg("doc")
+            .arg(&dir)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .unwrap()
+            .status
+            .code(),
         Some(0)
     );
     // A --verify immediately after a generate must be a no-op success.
@@ -216,7 +230,13 @@ fn verify_flags_out_of_date_docs() {
     let dir = scratch("verify-drift");
     std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
     let out = dir.join("out");
-    vyrn().arg("doc").arg(&dir).arg("-o").arg(&out).output().unwrap();
+    vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
     // Corrupt a generated page: --verify must exit 1.
     std::fs::write(out.join("widgets.md"), "stale\n").unwrap();
     let verified = vyrn()
@@ -239,7 +259,13 @@ fn verify_flags_a_stale_extra_page() {
     let dir = scratch("verify-stale");
     std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
     let out = dir.join("out");
-    vyrn().arg("doc").arg(&dir).arg("-o").arg(&out).output().unwrap();
+    vyrn()
+        .arg("doc")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
     // A page no longer generated (e.g. a removed module) is drift too.
     std::fs::write(out.join("orphan.md"), "# gone\n").unwrap();
     let verified = vyrn()

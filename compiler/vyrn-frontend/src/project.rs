@@ -192,11 +192,7 @@ pub fn lookup_in<'a>(impls: &'a [ImplBlock], ty: &Type, method: &str) -> Option<
 /// [`lookup_in`], by type key rather than by type. The interpreter reaches this
 /// one: a record value carries the name `coerce` stamped on it, which is the
 /// key, where its static type may only be the anonymous record it aliases.
-pub fn lookup_by_key<'a>(
-    impls: &'a [ImplBlock],
-    key: &str,
-    method: &str,
-) -> Option<&'a Function> {
+pub fn lookup_by_key<'a>(impls: &'a [ImplBlock], key: &str, method: &str) -> Option<&'a Function> {
     lookup_impl_by_key(impls, key, method).map(|(_, f)| f)
 }
 
@@ -306,7 +302,15 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     if !rename.is_empty() {
         let renames: HashMap<String, Expr> = rename
             .iter()
-            .map(|(k, v)| (k.clone(), Expr::Var { name: v.clone(), line }))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    Expr::Var {
+                        name: v.clone(),
+                        line,
+                    },
+                )
+            })
             .collect();
         rename_bindings(&mut body, &rename);
         subst_block(&mut body, &renames);
@@ -335,7 +339,10 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     }
     subst_block(&mut body, &map);
 
-    let Some(Stmt::Return { value: Some(place), .. }) = body.stmts.last() else {
+    let Some(Stmt::Return {
+        value: Some(place), ..
+    }) = body.stmts.last()
+    else {
         return Err(format!(
             "line {line}: `place {}` has no `yield` — a projection ends by \
              yielding the place it names",
@@ -581,7 +588,9 @@ fn collect_bindings(b: &Block, tag: usize, out: &mut HashMap<String, String>) {
                     collect_bindings(e, tag, out);
                 }
             }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => collect_bindings(body, tag, out),
+            Stmt::While { body, .. } | Stmt::Region { body, .. } => {
+                collect_bindings(body, tag, out)
+            }
             Stmt::ForIn { var, body, .. } => {
                 out.insert(var.clone(), format!("@b{tag}.{var}"));
                 collect_bindings(body, tag, out);
@@ -1035,7 +1044,11 @@ mod tests {
         .unwrap();
         // A place receiver binds no temporary: the loop reads the container
         // where it lives, which is what makes the element a borrow of it.
-        assert_eq!(blk.stmts.len(), 3, "size, index, loop — and no receiver copy");
+        assert_eq!(
+            blk.stmts.len(),
+            3,
+            "size, index, loop — and no receiver copy"
+        );
         let Some(Stmt::While { body, .. }) = blk.stmts.last() else {
             panic!("expected a while loop")
         };
@@ -1111,6 +1124,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pr.prologue.len(), 1);
-        assert!(matches!(&pr.prologue[0], Stmt::Let { name, .. } if name.starts_with("@b") && name.ends_with(".j")));
+        assert!(
+            matches!(&pr.prologue[0], Stmt::Let { name, .. } if name.starts_with("@b") && name.ends_with(".j"))
+        );
     }
 }

@@ -60,13 +60,21 @@ fn write(path: &Path, body: &str) {
 
 fn emit_gen(root: &Path) -> String {
     let out = vyrn().arg("emit-gen").arg(root).output().expect("emit-gen");
-    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "emit-gen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 fn run(root: &Path) -> String {
     let out = vyrn().arg("run").arg(root).output().expect("run");
-    assert!(out.status.success(), "run failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "run failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
@@ -149,24 +157,62 @@ fn emit_gen_connect_server_shows_the_router_and_dispatchers() {
     let src = emit_gen(&dir.join("connect_server.vyrn"));
     // Imports the procedures (and the contract's own `IdReq`) from the contract,
     // and the closure types from wire.
-    assert!(src.contains("import { getUser, createUser, listTally, shape"), "procedures imported:\n{src}");
-    assert!(src.contains("} from \"./contract\""), "contract import:\n{src}");
-    assert!(src.contains("from \"./wire\""), "wire types imported:\n{src}");
+    assert!(
+        src.contains("import { getUser, createUser, listTally, shape"),
+        "procedures imported:\n{src}"
+    );
+    assert!(
+        src.contains("} from \"./contract\""),
+        "contract import:\n{src}"
+    );
+    assert!(
+        src.contains("from \"./wire\""),
+        "wire types imported:\n{src}"
+    );
     // The Connect error envelope + the two error builders.
-    assert!(src.contains("type ConnectError = { code: String, message: String, details: Array<Issue> }"), "{src}");
-    assert!(src.contains("code: \"invalid_argument\""), "invalid_argument builder:\n{src}");
-    assert!(src.contains("\\\"unimplemented\\\"") || src.contains("\"unimplemented\""), "unimplemented:\n{src}");
+    assert!(
+        src.contains(
+            "type ConnectError = { code: String, message: String, details: Array<Issue> }"
+        ),
+        "{src}"
+    );
+    assert!(
+        src.contains("code: \"invalid_argument\""),
+        "invalid_argument builder:\n{src}"
+    );
+    assert!(
+        src.contains("\\\"unimplemented\\\"") || src.contains("\"unimplemented\""),
+        "unimplemented:\n{src}"
+    );
     // A validated request decodes and a Result return is a 200 (RFC-0024).
-    assert!(src.contains("fn connectDispatchGetUser(body: String) -> Response"), "{src}");
+    assert!(
+        src.contains("fn connectDispatchGetUser(body: String) -> Response"),
+        "{src}"
+    );
     assert!(src.contains("Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(getUser(input)), vary: \"\", headers: [:] }"), "{src}");
-    assert!(src.contains("Invalid(issues) => connectFail400(issues)"), "{src}");
+    assert!(
+        src.contains("Invalid(issues) => connectFail400(issues)"),
+        "{src}"
+    );
     // The router uses the Connect path shape `/contract.<Proc>` and mounts as an
     // Option-returning handler (beside rpcHandle).
-    assert!(src.contains("export fn connectHandle(req: Request) -> Option<Response>"), "{src}");
-    assert!(src.contains("req.method == \"POST\" && req.path == \"/contract.getUser\""), "{src}");
-    assert!(src.contains("if req.path.startsWith(\"/contract.\")"), "unknown-proc prefix:\n{src}");
+    assert!(
+        src.contains("export fn connectHandle(req: Request) -> Option<Response>"),
+        "{src}"
+    );
+    assert!(
+        src.contains("req.method == \"POST\" && req.path == \"/contract.getUser\""),
+        "{src}"
+    );
+    assert!(
+        src.contains("if req.path.startsWith(\"/contract.\")"),
+        "unknown-proc prefix:\n{src}"
+    );
     // A zero-parameter procedure ignores the body.
-    assert!(src.contains("fn connectDispatchListTally(body: String) -> Response"), "{src}");
+    assert!(
+        src.contains("fn connectDispatchListTally(body: String) -> Response"),
+        "{src}"
+    );
 }
 
 #[test]
@@ -174,15 +220,30 @@ fn emit_gen_connect_client_shows_stubs_dispatchers_and_unify() {
     let dir = fixture();
     let src = emit_gen(&dir.join("connect_client.vyrn"));
     // The contract's types re-emitted verbatim (the client links no server body).
-    assert!(src.contains("export type UserResult = Result<User, String>"), "{src}");
+    assert!(
+        src.contains("export type UserResult = Result<User, String>"),
+        "{src}"
+    );
     // One shared transport extern.
-    assert!(src.contains("extern fn vyrnConnectCall(path: String, body: String) -> Int64"), "{src}");
+    assert!(
+        src.contains("extern fn vyrnConnectCall(path: String, body: String) -> Int64"),
+        "{src}"
+    );
     // A same-named stub POSTing to the Connect path, and a completion dispatcher.
     assert!(src.contains("export fn getUser(req: IdReq) {"), "{src}");
-    assert!(src.contains("vyrnConnectCall(\"/contract.getUser\", toJson(req))"), "{src}");
-    assert!(src.contains("export extern fn connectDoneGetUser(id: Int64, status: Int64, body: String)"), "{src}");
+    assert!(
+        src.contains("vyrnConnectCall(\"/contract.getUser\", toJson(req))"),
+        "{src}"
+    );
+    assert!(
+        src.contains("export extern fn connectDoneGetUser(id: Int64, status: Int64, body: String)"),
+        "{src}"
+    );
     // The unifier: 200 decode, 400 -> the Connect error's details, transport Issue.
-    assert!(src.contains("if status == 200 { return fromJson(UserResult, body) }"), "{src}");
+    assert!(
+        src.contains("if status == 200 { return fromJson(UserResult, body) }"),
+        "{src}"
+    );
     assert!(src.contains("Valid(err) => Invalid(err.details)"), "{src}");
     assert!(src.contains("procedure `getUser` is unreachable"), "{src}");
 }
@@ -196,22 +257,46 @@ fn openapi_document_is_wellformed_and_deterministic() {
     let doc = doc.trim_end();
     // Deterministic: generate again, byte-equal.
     let again = run(&dir.join("oa.vyrn"));
-    assert_eq!(doc, again.trim_end(), "OpenAPI generation must be byte-stable");
+    assert_eq!(
+        doc,
+        again.trim_end(),
+        "OpenAPI generation must be byte-stable"
+    );
 
     // Parse with the compiler's OWN minimal JSON parser (no new dependency).
     let v = parse_json(doc).expect("OpenAPI must parse as JSON");
     assert_eq!(v.get("openapi").and_then(|j| j.as_str()), Some("3.1.0"));
-    assert!(v.get("info").and_then(|i| i.get("title")).and_then(|t| t.as_str()).is_some(), "info.title");
-    assert!(v.get("info").and_then(|i| i.get("version")).and_then(|t| t.as_str()).is_some(), "info.version");
+    assert!(
+        v.get("info")
+            .and_then(|i| i.get("title"))
+            .and_then(|t| t.as_str())
+            .is_some(),
+        "info.title"
+    );
+    assert!(
+        v.get("info")
+            .and_then(|i| i.get("version"))
+            .and_then(|t| t.as_str())
+            .is_some(),
+        "info.version"
+    );
     // One path per procedure, in declaration order.
     let paths = v.get("paths").expect("paths");
     assert_eq!(
         obj_keys(paths),
-        vec!["/rpc/getUser", "/rpc/createUser", "/rpc/listTally", "/rpc/shape"]
+        vec![
+            "/rpc/getUser",
+            "/rpc/createUser",
+            "/rpc/listTally",
+            "/rpc/shape"
+        ]
     );
     // getUser's request refs a component; its 200 refs the Result component; the
     // 422 carries the Issues shape.
-    let op = paths.get("/rpc/getUser").and_then(|p| p.get("post")).expect("getUser.post");
+    let op = paths
+        .get("/rpc/getUser")
+        .and_then(|p| p.get("post"))
+        .expect("getUser.post");
     let ref_of = |op: &Json, code: &str| -> String {
         op.get("responses")
             .and_then(|r| r.get(code))
@@ -244,27 +329,57 @@ fn openapi_document_is_wellformed_and_deterministic() {
         "422 Issues shape"
     );
     // components/schemas is sorted and carries imported wire types.
-    let schemas = v.get("components").and_then(|c| c.get("schemas")).expect("schemas");
+    let schemas = v
+        .get("components")
+        .and_then(|c| c.get("schemas"))
+        .expect("schemas");
     let names = obj_keys(schemas);
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted, "components/schemas keys must be sorted");
-    for want in ["UserId", "UserName", "User", "UserResult", "Tally", "Shape", "Colour", "IdReq"] {
-        assert!(names.iter().any(|n| n == want), "missing schema {want}: {names:?}");
+    for want in [
+        "UserId",
+        "UserName",
+        "User",
+        "UserResult",
+        "Tally",
+        "Shape",
+        "Colour",
+        "IdReq",
+    ] {
+        assert!(
+            names.iter().any(|n| n == want),
+            "missing schema {want}: {names:?}"
+        );
     }
     // A validated scalar's bound, a Result oneOf, and a Map additionalProperties
     // all survive into components.
-    assert_eq!(schemas.get("UserId").and_then(|s| s.get("minimum")), Some(&Json::Num(1.0)));
+    assert_eq!(
+        schemas.get("UserId").and_then(|s| s.get("minimum")),
+        Some(&Json::Num(1.0))
+    );
     assert!(
-        matches!(schemas.get("UserResult").and_then(|s| s.get("oneOf")), Some(Json::Arr(_))),
+        matches!(
+            schemas.get("UserResult").and_then(|s| s.get("oneOf")),
+            Some(Json::Arr(_))
+        ),
         "Result -> oneOf"
     );
     assert!(
-        schemas.get("Tally").and_then(|s| s.get("additionalProperties")).is_some(),
+        schemas
+            .get("Tally")
+            .and_then(|s| s.get("additionalProperties"))
+            .is_some(),
         "Map -> additionalProperties"
     );
     // Each component is $id-scoped so its self-contained $defs refs resolve.
-    assert_eq!(schemas.get("User").and_then(|s| s.get("$id")).and_then(|i| i.as_str()), Some("User"));
+    assert_eq!(
+        schemas
+            .get("User")
+            .and_then(|s| s.get("$id"))
+            .and_then(|i| i.as_str()),
+        Some("User")
+    );
 }
 
 // ---- std/graphql: a grammar-sane, deterministic SDL document ----------------
@@ -293,30 +408,74 @@ fn graphql_sdl_is_wellformed_and_deterministic() {
     assert!(sdl.contains("id: UserId!"), "non-null field:\n{sdl}");
     // A nullary enum => a real enum; a payload enum + Result => tagged objects.
     assert!(sdl.contains("enum Colour {"), "nullary enum:\n{sdl}");
-    assert!(sdl.contains("type Shape {"), "payload enum -> tagged type:\n{sdl}");
-    assert!(sdl.contains("Circle: Int"), "single-payload variant:\n{sdl}");
-    assert!(sdl.contains("Rect: JSON"), "multi-payload variant -> JSON:\n{sdl}");
-    assert!(sdl.contains("Dot: Boolean"), "nullary variant marker:\n{sdl}");
-    assert!(sdl.contains("type UserResult {") && sdl.contains("Ok: User") && sdl.contains("Err: String"), "Result -> tagged:\n{sdl}");
+    assert!(
+        sdl.contains("type Shape {"),
+        "payload enum -> tagged type:\n{sdl}"
+    );
+    assert!(
+        sdl.contains("Circle: Int"),
+        "single-payload variant:\n{sdl}"
+    );
+    assert!(
+        sdl.contains("Rect: JSON"),
+        "multi-payload variant -> JSON:\n{sdl}"
+    );
+    assert!(
+        sdl.contains("Dot: Boolean"),
+        "nullary variant marker:\n{sdl}"
+    );
+    assert!(
+        sdl.contains("type UserResult {")
+            && sdl.contains("Ok: User")
+            && sdl.contains("Err: String"),
+        "Result -> tagged:\n{sdl}"
+    );
     // Map => the documented JSON scalar (named alias => its own scalar).
     assert!(sdl.contains("scalar JSON"), "JSON scalar:\n{sdl}");
-    assert!(sdl.contains("scalar Tally"), "named map alias -> scalar:\n{sdl}");
+    assert!(
+        sdl.contains("scalar Tally"),
+        "named map alias -> scalar:\n{sdl}"
+    );
     // Query/Mutation split: a `mut fn` is a Mutation, everything else a Query
     // (RFC-0074 M4a). `shape` is the pin — no `get`/`list` prefix, so the naming
     // convention this replaced would have filed it under Mutation.
-    let q = sdl.split("type Query {").nth(1).unwrap().split('}').next().unwrap();
-    assert!(q.contains("getUser(input: IdReqInput!): UserResult"), "getUser in Query:\n{q}");
+    let q = sdl
+        .split("type Query {")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(
+        q.contains("getUser(input: IdReqInput!): UserResult"),
+        "getUser in Query:\n{q}"
+    );
     assert!(q.contains("listTally: Tally"), "listTally in Query:\n{q}");
-    assert!(q.contains("shape: Shape"), "unprefixed accessor in Query:\n{q}");
-    let m = sdl.split("type Mutation {").nth(1).unwrap().split('}').next().unwrap();
-    assert!(m.contains("createUser(input: CreateReqInput!): UserResult"), "createUser in Mutation:\n{m}");
+    assert!(
+        q.contains("shape: Shape"),
+        "unprefixed accessor in Query:\n{q}"
+    );
+    let m = sdl
+        .split("type Mutation {")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(
+        m.contains("createUser(input: CreateReqInput!): UserResult"),
+        "createUser in Mutation:\n{m}"
+    );
     assert_eq!(
         m.lines().filter(|l| !l.trim().is_empty()).count(),
         1,
         "only the `mut fn` is a Mutation:\n{m}"
     );
     // A type's /// doc becomes a description block string.
-    assert!(sdl.contains("\"\"\"A stored user.\"\"\""), "type doc -> description:\n{sdl}");
+    assert!(
+        sdl.contains("\"\"\"A stored user.\"\"\""),
+        "type doc -> description:\n{sdl}"
+    );
 }
 
 /// A validated scalar whose regex predicate carries a `"` (and a `,` and `}`),
@@ -358,7 +517,13 @@ export fn getRec(req: IdReq) -> Rec {
     sdl_block_strings_wellformed(&sdl);
     // The record split into EXACTLY two fields — the predicate's comma did not
     // fabricate a phantom field.
-    let rec = sdl.split("type Rec {").nth(1).unwrap().split('}').next().unwrap();
+    let rec = sdl
+        .split("type Rec {")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap();
     assert!(rec.contains("url: Url!"), "url field:\n{rec}");
     assert!(rec.contains("weird: Weird!"), "weird field:\n{rec}");
     assert_eq!(rec.matches(':').count(), 2, "exactly two fields:\n{rec}");
@@ -388,7 +553,12 @@ fn sdl_block_strings_wellformed(sdl: &str) {
             i += 3;
             loop {
                 assert!(i < n, "unterminated block string in SDL:\n{sdl}");
-                if b[i] == b'\\' && i + 3 < n && b[i + 1] == b'"' && b[i + 2] == b'"' && b[i + 3] == b'"' {
+                if b[i] == b'\\'
+                    && i + 3 < n
+                    && b[i + 1] == b'"'
+                    && b[i + 2] == b'"'
+                    && b[i + 3] == b'"'
+                {
                     i += 4; // an escaped `\"""`
                 } else if is_tq(i) {
                     i += 3;
@@ -404,7 +574,10 @@ fn sdl_block_strings_wellformed(sdl: &str) {
             while i < n && b[i] != b'"' {
                 i += if b[i] == b'\\' { 2 } else { 1 };
             }
-            assert!(i < n, "stray quote / quadruple-quote boundary in SDL:\n{sdl}");
+            assert!(
+                i < n,
+                "stray quote / quadruple-quote boundary in SDL:\n{sdl}"
+            );
             i += 1;
         } else {
             match b[i] {
@@ -470,7 +643,11 @@ fn sdl_grammar_sane(sdl: &str) {
 
 /// The path of a repo-relative file, in the loader-parseable spelling.
 fn repo_file(rel: &str) -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap();
     let s = p.to_string_lossy().replace('\\', "/");
     PathBuf::from(s.strip_prefix("//?/").unwrap_or(&s).to_string())
 }
@@ -478,7 +655,11 @@ fn repo_file(rel: &str) -> PathBuf {
 /// `vyrn test <file>` must be green, and must have run at least `least` blocks —
 /// a suite that silently stops being discovered would otherwise pass.
 fn assert_suite_green(rel: &str, least: usize) {
-    let out = vyrn().arg("test").arg(repo_file(rel)).output().expect("vyrn test");
+    let out = vyrn()
+        .arg("test")
+        .arg(repo_file(rel))
+        .output()
+        .expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");
@@ -489,7 +670,10 @@ fn assert_suite_green(rel: &str, least: usize) {
         .and_then(|s| s.rsplit(|c: char| !c.is_ascii_digit()).next())
         .and_then(|n| n.parse().ok())
         .unwrap_or(0);
-    assert!(ran >= least, "{rel}: expected at least {least} tests, ran {ran}:\n{combined}");
+    assert!(
+        ran >= least,
+        "{rel}: expected at least {least} tests, ran {ran}:\n{combined}"
+    );
 }
 
 /// The executor's projection/parser suite (RFC-0085 M1–M3): the null-bubbling

@@ -49,7 +49,10 @@ pub struct MappedSymbol {
 
 impl MappedSymbol {
     pub fn derived(&self, key: &str) -> Option<&str> {
-        self.derived.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.derived
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// The wire facts as one hover line — `POST /_/pastes/create · convention` —
@@ -75,9 +78,15 @@ pub fn json_of(gen_source: &str) -> Option<String> {
     let start = gen_source.rfind("export fn symbolMap")?;
     let tokens = crate::lexer::lex(&gen_source[start..]).ok()?;
     let (program, _) = crate::parser::parse_accum(tokens);
-    let f = program.functions.iter().find(|f| f.name.starts_with("symbolMap"))?;
+    let f = program
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with("symbolMap"))?;
     match f.body.stmts.first() {
-        Some(Stmt::Return { value: Some(Expr::Str(s)), .. }) => Some(s.clone()),
+        Some(Stmt::Return {
+            value: Some(Expr::Str(s)),
+            ..
+        }) => Some(s.clone()),
         _ => None,
     }
 }
@@ -86,9 +95,15 @@ pub fn json_of(gen_source: &str) -> Option<String> {
 /// a map that will not parse — a consumer's answer to "where does this come
 /// from" is then the one it gave before this RFC, never a wrong location.
 pub fn read(gen_source: &str) -> Vec<MappedSymbol> {
-    let Some(json) = json_of(gen_source) else { return Vec::new() };
-    let Ok(doc) = parse_json(&json) else { return Vec::new() };
-    let Some(Json::Arr(symbols)) = doc.get("symbols") else { return Vec::new() };
+    let Some(json) = json_of(gen_source) else {
+        return Vec::new();
+    };
+    let Ok(doc) = parse_json(&json) else {
+        return Vec::new();
+    };
+    let Some(Json::Arr(symbols)) = doc.get("symbols") else {
+        return Vec::new();
+    };
     let num = |v: Option<&Json>| match v {
         Some(Json::Num(n)) => *n as usize,
         _ => 0,
@@ -108,10 +123,18 @@ pub fn read(gen_source: &str) -> Vec<MappedSymbol> {
         };
         out.push(MappedSymbol {
             name: name.to_string(),
-            file: origin.get("file").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            file: origin
+                .get("file")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
             line: num(origin.get("line")),
             col: num(origin.get("col")),
-            decl: origin.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            decl: origin
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
             derived,
         });
     }
@@ -150,7 +173,10 @@ export fn symbolMapClientApi() -> String {\n    return \"{\\\"module\\\":\\\"cli
         assert_eq!(syms[0].decl, "create");
         assert_eq!((syms[0].line, syms[0].col), (28, 15));
         assert_eq!(syms[0].file, "server/api/pastes.vyrn");
-        assert_eq!(syms[0].route_line().as_deref(), Some("`POST /_/pastes/create` · convention"));
+        assert_eq!(
+            syms[0].route_line().as_deref(),
+            Some("`POST /_/pastes/create` · convention")
+        );
         // A re-emitted type keeps its origin and derives nothing.
         assert_eq!(syms[1].decl, "PasteList");
         assert_eq!(syms[1].route_line(), None);

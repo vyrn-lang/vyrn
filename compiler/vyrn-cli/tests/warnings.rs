@@ -124,9 +124,13 @@ fn run(tag: &str, genfn: &str, cmd: &str, extra: &[&str], env: &[(&str, &str)]) 
 fn a_warning_rides_a_successful_load() {
     let r = run("rides", "legacy", "run", &[], &[]);
     assert_eq!(r.code, 0, "the load SUCCEEDED:\n{}", r.stderr);
-    assert_eq!(r.stdout, "hi\n", "the program ran and printed its own output");
+    assert_eq!(
+        r.stdout, "hi\n",
+        "the program ran and printed its own output"
+    );
     assert!(
-        r.stderr.contains("warning: `fn old` is deprecated — write `fn new` instead"),
+        r.stderr
+            .contains("warning: `fn old` is deprecated — write `fn new` instead"),
         "the notice reaches the user as a warning:\n{}",
         r.stderr
     );
@@ -179,7 +183,11 @@ fn warnings_change_neither_the_exit_code_nor_a_byte_of_program_output() {
     let quiet = run("same_quiet", "quiet", "run", &[], &[]);
     assert_eq!(warned.code, quiet.code, "same exit code");
     assert_eq!(warned.stdout, quiet.stdout, "byte-identical stdout");
-    assert!(quiet.stderr.is_empty(), "the quiet run says nothing: {}", quiet.stderr);
+    assert!(
+        quiet.stderr.is_empty(),
+        "the quiet run says nothing: {}",
+        quiet.stderr
+    );
     assert!(!warned.stderr.is_empty(), "the warned one does");
 }
 
@@ -210,9 +218,19 @@ fn deny_warnings_leaves_a_clean_load_alone() {
 #[test]
 fn the_environment_variable_is_the_same_switch() {
     // Spelled and stripped exactly like `--offline`, so CI can set it once.
-    let r = run("deny_env", "legacy", "run", &[], &[("VYRN_DENY_WARNINGS", "1")]);
+    let r = run(
+        "deny_env",
+        "legacy",
+        "run",
+        &[],
+        &[("VYRN_DENY_WARNINGS", "1")],
+    );
     assert_ne!(r.code, 0, "refused:\n{}", r.stderr);
-    assert!(r.stderr.contains("refused by --deny-warnings"), "{}", r.stderr);
+    assert!(
+        r.stderr.contains("refused by --deny-warnings"),
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]
@@ -245,8 +263,15 @@ fn a_failing_load_reports_the_failure_and_not_the_advice() {
          fn main() -> Int64 {\n    print(nope())\n    return 0\n}\n",
     )
     .unwrap();
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run vyrn");
     let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
     assert!(!out.status.success(), "the load failed: {stderr}");
-    assert!(!stderr.contains("warning:"), "no advice on a failure:\n{stderr}");
+    assert!(
+        !stderr.contains("warning:"),
+        "no advice on a failure:\n{stderr}"
+    );
 }

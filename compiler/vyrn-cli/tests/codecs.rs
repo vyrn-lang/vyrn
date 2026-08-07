@@ -48,7 +48,11 @@ use std::process::Command;
 use vyrn_frontend::hash::sha256_hex;
 
 fn repo_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -62,7 +66,10 @@ fn unit_tests_green(rel: &str, expected: &str) {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");
-    assert!(combined.contains(expected), "expected `{expected}`:\n{combined}");
+    assert!(
+        combined.contains(expected),
+        "expected `{expected}`:\n{combined}"
+    );
 }
 
 /// `std/codecs`'s own hand-picked pins, including the NUL rows. Literals, so they
@@ -91,13 +98,15 @@ fn the_example_pins_hold() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(!text.lines().any(|l| l.trim_end() == "false"), "a round trip failed:\n{text}");
+    assert!(
+        !text.lines().any(|l| l.trim_end() == "false"),
+        "a round trip failed:\n{text}"
+    );
     assert!(text.lines().count() >= 35, "too few rows:\n{text}");
     assert!(text.contains("4869"), "the hex pin is missing:\n{text}");
 }
 
-const B64_ALPHABET: &str =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// A Vyrn byte-array literal for a string's UTF-8 bytes: `['\x41', '\xc3']`.
 ///
@@ -152,7 +161,9 @@ fn encoder_corpus() -> Vec<String> {
         }
     }
     // The boundaries of each UTF-8 width, and the ends of the scalar range.
-    for cp in [0x7Fu32, 0x80, 0x7FF, 0x800, 0xD7FF, 0xE000, 0xFFFD, 0xFFFF, 0x10000, 0x10FFFF] {
+    for cp in [
+        0x7Fu32, 0x80, 0x7FF, 0x800, 0xD7FF, 0xE000, 0xFFFD, 0xFFFF, 0x10000, 0x10FFFF,
+    ] {
         out.push(char::from_u32(cp).unwrap().to_string());
     }
     // Lengths 0..=9: base64 pads by `len % 3` and hex by nothing, so the residues
@@ -217,18 +228,68 @@ fn decoder_corpus() -> Vec<String> {
     }
     // Padding, at every residue and in every wrong place.
     for s in [
-        "Q", "QQ", "QQQ", "QQQQ", "QQQQQ", "QQ==", "QUI=", "QUJD", "QQ=", "Q===", "====", "=",
-        "==", "===", "Q=QQ", "=QQQ", "QQ==QQ==", "QQQQQQ==", "SGVsbG8=", "SGVsbG8sIFZ5cm4h",
-        "AA==", "AAAA", "gA==", "/w==", "////", "++++", "w7/Dvw==", "8J+YgA==",
+        "Q",
+        "QQ",
+        "QQQ",
+        "QQQQ",
+        "QQQQQ",
+        "QQ==",
+        "QUI=",
+        "QUJD",
+        "QQ=",
+        "Q===",
+        "====",
+        "=",
+        "==",
+        "===",
+        "Q=QQ",
+        "=QQQ",
+        "QQ==QQ==",
+        "QQQQQQ==",
+        "SGVsbG8=",
+        "SGVsbG8sIFZ5cm4h",
+        "AA==",
+        "AAAA",
+        "gA==",
+        "/w==",
+        "////",
+        "++++",
+        "w7/Dvw==",
+        "8J+YgA==",
     ] {
         out.push(s.to_string());
     }
     // Percent escapes: truncated, non-hex, mixed with plain text, and the ones
     // whose bytes are not UTF-8 or are a NUL.
     for s in [
-        "%", "%4", "%zz", "%4z", "%z4", "%%", "%%41", "%41", "%41%", "%41%4", "a%2", "a%20b",
-        "a+b", "%C3%A9", "%c3%a9", "%C3", "%A9", "%00", "a%00b", "%2F%2f", "%7E", "%E2%98%95",
-        "%F0%9F%98%80", "100%25", "name%3Da%20b%26x", "%GG", "% 41", "%4%41",
+        "%",
+        "%4",
+        "%zz",
+        "%4z",
+        "%z4",
+        "%%",
+        "%%41",
+        "%41",
+        "%41%",
+        "%41%4",
+        "a%2",
+        "a%20b",
+        "a+b",
+        "%C3%A9",
+        "%c3%a9",
+        "%C3",
+        "%A9",
+        "%00",
+        "a%00b",
+        "%2F%2f",
+        "%7E",
+        "%E2%98%95",
+        "%F0%9F%98%80",
+        "100%25",
+        "name%3Da%20b%26x",
+        "%GG",
+        "% 41",
+        "%4%41",
     ] {
         out.push(s.to_string());
     }
@@ -311,8 +372,7 @@ fn corpus_program(enc: &[String], dec: &[String]) -> String {
 
 /// The SHA-256 of the transcript, `std/codecs` answering. Captured post-swap; the
 /// pre-swap value and the exact difference are in this file's header.
-const CORPUS_DIGEST: &str =
-    "2c1e8a949d6a051aea91bd9b6ca0fe67b8a8b1c6bb0a6e26ca7b163dfddac675";
+const CORPUS_DIGEST: &str = "2c1e8a949d6a051aea91bd9b6ca0fe67b8a8b1c6bb0a6e26ca7b163dfddac675";
 
 #[test]
 fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
@@ -332,7 +392,10 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     std::fs::write(dir.join("transcript.txt"), stdout.as_bytes()).unwrap();
-    assert!(!stdout.contains("BADINPUT"), "a corpus entry was not valid UTF-8");
+    assert!(
+        !stdout.contains("BADINPUT"),
+        "a corpus entry was not valid UTF-8"
+    );
     let rows = stdout.lines().count();
     assert_eq!(rows, enc.len() * 6 + dec.len() * 3, "one line per check");
 
@@ -341,7 +404,10 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
     // by input rather than by corpus index so reordering the corpus cannot make
     // them silently pin a different row.
     let enc_row = |input: &str, kind: &str| -> String {
-        let i = enc.iter().position(|s| s == input).expect("encoder input in corpus");
+        let i = enc
+            .iter()
+            .position(|s| s == input)
+            .expect("encoder input in corpus");
         stdout
             .lines()
             .find(|l| l.starts_with(&format!("e{i} {kind} ")))
@@ -349,7 +415,10 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
             .to_string()
     };
     let dec_row = |input: &str, kind: &str| -> String {
-        let i = dec.iter().position(|s| s == input).expect("decoder input in corpus");
+        let i = dec
+            .iter()
+            .position(|s| s == input)
+            .expect("decoder input in corpus");
         stdout
             .lines()
             .find(|l| l.starts_with(&format!("d{i} {kind} ")))
@@ -357,7 +426,10 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
             .to_string()
     };
     let ends = |row: &str| -> String { row.rsplit(' ').next().unwrap().to_string() };
-    assert_eq!(ends(&enc_row("Hello, Vyrn!", "hexE")), "48656c6c6f2c205679726e21");
+    assert_eq!(
+        ends(&enc_row("Hello, Vyrn!", "hexE")),
+        "48656c6c6f2c205679726e21"
+    );
     assert_eq!(ends(&enc_row("Hello, Vyrn!", "b64E")), "SGVsbG8sIFZ5cm4h");
     assert_eq!(ends(&enc_row("name=a b&x", "urlE")), "name%3Da%20b%26x");
     // Both alphabet entries above 61 — the two a naive table gets wrong.
@@ -369,7 +441,12 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
     // `String` cannot hold a NUL, so a decoder that would produce one must
     // decline). Spelled out rather than left inside the digest, because pre-swap
     // they were `Some` and did not agree across engines.
-    for (input, kind) in [("00", "hexD"), ("004100", "hexD"), ("AA==", "b64D"), ("%00", "urlD")] {
+    for (input, kind) in [
+        ("00", "hexD"),
+        ("004100", "hexD"),
+        ("AA==", "b64D"),
+        ("%00", "urlD"),
+    ] {
         let row = dec_row(input, kind);
         assert_eq!(
             ends(&row),
@@ -380,7 +457,8 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
 
     let digest = sha256_hex(stdout.as_bytes());
     assert_eq!(
-        digest, CORPUS_DIGEST,
+        digest,
+        CORPUS_DIGEST,
         "the codec builtins' answers moved over {rows} checks ({} encoder, {} decoder inputs). \
          The transcript is at {}. If the change is deliberate, diff it against the previous one \
          and repin.",

@@ -35,7 +35,10 @@ fn unit_tests_green(rel: &str, expected: &str) {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");
-    assert!(combined.contains(expected), "expected `{expected}`:\n{combined}");
+    assert!(
+        combined.contains(expected),
+        "expected `{expected}`:\n{combined}"
+    );
 }
 
 #[test]
@@ -84,7 +87,10 @@ fn an_injected_runtime_module_cannot_collide_with_the_users_names() {
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "collision program failed:\n{combined}");
+    assert!(
+        out.status.success(),
+        "collision program failed:\n{combined}"
+    );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
         "user emit 7\nuser hex2\nuser emitString\nv\n{\"n\":5}\n",
@@ -95,11 +101,18 @@ fn an_injected_runtime_module_cannot_collide_with_the_users_names() {
 #[test]
 fn tojson_byte_pins_hold() {
     let example = repo_file("examples/jsonbytes.vyrn");
-    let out = vyrn().arg("test").arg(&example).output().expect("vyrn test");
+    let out = vyrn()
+        .arg("test")
+        .arg(&example)
+        .output()
+        .expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "toJson byte pins failed:\n{combined}");
-    assert!(combined.contains("7 passed, 0 failed"), "expected 7 green pins:\n{combined}");
+    assert!(
+        combined.contains("7 passed, 0 failed"),
+        "expected 7 green pins:\n{combined}"
+    );
 }
 
 /// `toJson` was O(N²) in array length — 40k `Int64` took 2.5 s, 80k took 23.5 s,
@@ -131,8 +144,16 @@ fn the_json_writer_does_not_copy_once_per_element() {
          }\n",
     )
     .unwrap();
-    let out = vyrn().arg("emit-ir").arg(&file).output().expect("vyrn emit-ir");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = vyrn()
+        .arg("emit-ir")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-ir");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let ir = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     for writer in ["vyrn_json$emitArr", "vyrn_json$emitObj"] {
         let start = ir
@@ -164,9 +185,19 @@ fn the_json_writer_does_not_copy_once_per_element() {
 #[test]
 fn fromjson_byte_pins_hold() {
     let example = repo_file("examples/jsondecbytes.vyrn");
-    let out = vyrn().arg("test").arg(&example).output().expect("vyrn test");
+    let out = vyrn()
+        .arg("test")
+        .arg(&example)
+        .output()
+        .expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "fromJson byte pins failed:\n{combined}");
-    assert!(combined.contains("10 passed, 0 failed"), "expected 10 green pins:\n{combined}");
+    assert!(
+        out.status.success(),
+        "fromJson byte pins failed:\n{combined}"
+    );
+    assert!(
+        combined.contains("10 passed, 0 failed"),
+        "expected 10 green pins:\n{combined}"
+    );
 }

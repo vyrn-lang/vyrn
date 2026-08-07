@@ -148,8 +148,10 @@ impl Walk<'_> {
         // (It went unnoticed at first because the `Array` body happens to register
         // the same name, so any program encoding an array looked fine.)
         let json = self.rt("Json");
-        self.source
-            .push_str(&format!("fn {ph}(v: {}) -> {json} {{\n{body}}}\n", spell(ty)));
+        self.source.push_str(&format!(
+            "fn {ph}(v: {}) -> {json} {{\n{body}}}\n",
+            spell(ty)
+        ));
         Ok(ph)
     }
 
@@ -301,8 +303,12 @@ impl Walk<'_> {
     /// onto its reserved spelling. A failure here is a bug in this module, so it
     /// reports with the source attached rather than as a user diagnostic.
     fn parse(self) -> Result<Vec<Function>, String> {
-        let tokens = crate::lexer::lex(&self.source)
-            .map_err(|d| format!("internal: toJson encoders do not lex: {}\n{}", d.message, self.source))?;
+        let tokens = crate::lexer::lex(&self.source).map_err(|d| {
+            format!(
+                "internal: toJson encoders do not lex: {}\n{}",
+                d.message, self.source
+            )
+        })?;
         let (program, errors) = crate::parser::parse_accum(tokens);
         if let Some(d) = errors.first() {
             return Err(format!(
@@ -353,8 +359,14 @@ mod tests {
             Type::Array(Box::new(Type::Int)),
             Type::Option(Box::new(Type::Str)),
             Type::Record(vec![
-                Field { name: "n".into(), ty: Type::Int },
-                Field { name: "s".into(), ty: Type::Str },
+                Field {
+                    name: "n".into(),
+                    ty: Type::Int,
+                },
+                Field {
+                    name: "s".into(),
+                    ty: Type::Str,
+                },
             ]),
             Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
             Type::Result(Box::new(Type::Int), Box::new(Type::Str)),

@@ -43,6 +43,23 @@ jobs:
           workspaces: |
             compiler
             compiler/vyrn-lsp
+      - name: Formatting gate
+        # First, because it is seconds and its fix is mechanical — a reader gets
+        # the verdict before the build spends five minutes.
+        #
+        # Three manifests, not one: `vyrn-lsp` and `vyrn-genwasm` are excluded
+        # from the workspace (see compiler/Cargo.toml), so `cargo fmt` at the
+        # root never reaches them. An excluded crate is exactly the kind that
+        # drifts unwatched.
+        #
+        # rustfmt's defaults, with no rustfmt.toml: every crate is edition 2021,
+        # so style_edition is 2021 and the defaults are frozen by rustfmt's own
+        # stability promise. Nothing here needs configuring.
+        working-directory: compiler
+        run: |
+          cargo fmt --check
+          cargo fmt --check --manifest-path vyrn-lsp/Cargo.toml
+          cargo fmt --check --manifest-path vyrn-genwasm/Cargo.toml
       - name: Workspace tests
         working-directory: compiler
         run: cargo test --quiet

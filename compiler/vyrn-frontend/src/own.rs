@@ -210,8 +210,7 @@ impl Owned {
         if crate::types::type_key(ty).is_some_and(|k| self.linear.contains(&k)) {
             return Some(Linear::Declared);
         }
-        matches!(crate::types::resolve(ty, &self.types), Type::Stream(_))
-            .then_some(Linear::Stream)
+        matches!(crate::types::resolve(ty, &self.types), Type::Stream(_)).then_some(Linear::Stream)
     }
 
     /// Whether a value of `ty` has to be handed on by name — letting it go out
@@ -323,11 +322,9 @@ impl Owned {
             // to a frame the join owns, and `lazy T` IS `fn() -> T` (RFC-0085
             // M4a) — `resolve` normally answers that, and this is the
             // depth-limited fallback.
-            Type::Record(_)
-            | Type::Enum(_)
-            | Type::ArrayN(..)
-            | Type::Task(_)
-            | Type::Lazy(_) => None,
+            Type::Record(_) | Type::Enum(_) | Type::ArrayN(..) | Type::Task(_) | Type::Lazy(_) => {
+                None
+            }
             // ---- shapes that are not a runtime value ------------------------
             // A type operator survives only until `resolve` reaches its base, a
             // `Param` is erased by monomorphization, and an unresolved `Named`
@@ -357,11 +354,7 @@ impl Owned {
 /// needs recursion in the code, and `std/json`'s `copyJson` is the worked
 /// example. RFC-0091 M1's `Copy` protocol is where a type declares its own.
 pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<String> {
-    fn go(
-        ty: &Type,
-        types: &HashMap<String, TypeDecl>,
-        seen: &mut Vec<String>,
-    ) -> Option<String> {
+    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> Option<String> {
         if let Type::Named(n) | Type::App(n, _) = ty {
             if seen.iter().any(|s| s == n) {
                 return Some(n.clone());
@@ -637,11 +630,7 @@ struct FnResult {
 }
 
 /// One body's drop sites, in source order.
-fn emit_body(
-    body: &Block,
-    lets: &HashMap<usize, LetOwnership>,
-    proto: &Owned,
-) -> FnResult {
+fn emit_body(body: &Block, lets: &HashMap<usize, LetOwnership>, proto: &Owned) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
         notes: Vec::new(),
@@ -799,7 +788,9 @@ impl Emit<'_> {
                     self.lambdas(v);
                 }
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 self.lambdas(scrutinee);
                 for a in arms {
                     self.lambdas(&a.body);
@@ -1251,10 +1242,14 @@ pub(crate) mod tests {
     /// `pub(crate)` so the RFC-0089 gates measure ONE corpus: `movecheck`'s
     /// Phase-4a site census walks exactly the files this one does.
     pub(crate) fn sources(rel: &str, out: &mut Vec<std::path::PathBuf>) {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(rel);
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in rd.flatten() {
                 let p = e.path();
                 if p.is_dir() {
@@ -1290,9 +1285,13 @@ pub(crate) mod tests {
         let (mut total, mut kept) = (0usize, 0usize);
 
         for path in &files {
-            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
             lines += src.lines().count();
-            let Ok(tokens) = crate::lexer::lex(&src) else { continue };
+            let Ok(tokens) = crate::lexer::lex(&src) else {
+                continue;
+            };
             let (program, errs) = crate::parser::parse_accum(tokens);
             if !errs.is_empty() {
                 continue;
@@ -1341,17 +1340,28 @@ pub(crate) mod tests {
         let mut rows: Vec<_> = reasons.into_iter().collect();
         rows.sort_by(|a, b| b.1.cmp(&a.1));
         let leaks: usize = rows.iter().map(|(_, c)| c).sum();
-        println!("corpus: {} files ({parsed} parsed), {lines} lines", files.len());
-        println!("RFC-0089 rule 3 — returns of a parameter: {}", param_returns.len());
+        println!(
+            "corpus: {} files ({parsed} parsed), {lines} lines",
+            files.len()
+        );
+        println!(
+            "RFC-0089 rule 3 — returns of a parameter: {}",
+            param_returns.len()
+        );
         for s in &param_returns {
             println!("    {s}");
         }
-        println!("RFC-0089 rule 1 — bare aliases of an owning type: {}", aliases.len());
+        println!(
+            "RFC-0089 rule 1 — bare aliases of an owning type: {}",
+            aliases.len()
+        );
         for s in &aliases {
             println!("    {s}");
         }
         println!("move surface: {}", param_returns.len() + aliases.len());
-        println!("bindings: {total} — {kept} reclaimed/moved/dropped/static, {leaks} not reclaimed");
+        println!(
+            "bindings: {total} — {kept} reclaimed/moved/dropped/static, {leaks} not reclaimed"
+        );
         for (reason, count) in rows {
             println!("  {count:>5}  {reason}");
         }
@@ -1434,12 +1444,11 @@ pub(crate) mod tests {
                         walk_stmts(eb, f);
                     }
                 }
-                Stmt::While { body, .. }
-                | Stmt::ForIn { body, .. }
-                | Stmt::Region { body, .. } => walk_stmts(body, f),
+                Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
+                    walk_stmts(body, f)
+                }
                 _ => {}
             }
         }
     }
-
 }

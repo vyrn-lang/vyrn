@@ -227,9 +227,7 @@ pub const RESERVED: &[&str] = &[
 
 use crate::types::INT32;
 
-pub fn check_accum_with_json_types(
-    program: &Program,
-) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {
+pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {
     let (out, _, _, json, jdec) = check_accum_full(program);
     (out, json, jdec)
 }
@@ -293,12 +291,12 @@ fn render_method_sig(
         Capability::Share => format!("share {t}"),
     };
     let mut ps = vec![word(recv, "self".to_string())];
-    ps.extend(
-        params
-            .iter()
-            .enumerate()
-            .map(|(i, t)| word(caps.get(i).copied().unwrap_or(Capability::Read), t.to_string())),
-    );
+    ps.extend(params.iter().enumerate().map(|(i, t)| {
+        word(
+            caps.get(i).copied().unwrap_or(Capability::Read),
+            t.to_string(),
+        )
+    }));
     format!("fn {name}({}) -> {ret}", ps.join(", "))
 }
 
@@ -340,8 +338,6 @@ fn check_accum_inner(
         }
         types.insert(t.name.clone(), t.clone());
     }
-
-
 
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
@@ -603,11 +599,8 @@ fn check_accum_inner(
             // only the NAMES, so `Output` here and `String` there are the same
             // type and nothing at this point can prove it. Everything else in
             // the signature is still compared, which is where the mistakes are.
-            let probe: HashMap<String, Type> = p
-                .assoc
-                .iter()
-                .map(|a| (a.clone(), Type::Unit))
-                .collect();
+            let probe: HashMap<String, Type> =
+                p.assoc.iter().map(|a| (a.clone(), Type::Unit)).collect();
             // A position naming `Self` is not compared either, and for a
             // stronger reason: the protocol is already wrong, and every impl
             // would otherwise be told so on its own line.
@@ -647,7 +640,11 @@ fn check_accum_inner(
                 let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
                 let got_caps: Vec<Capability> =
                     f.params.iter().skip(1).map(|p| p.capability).collect();
-                let f_recv = f.params.first().map(|p| p.capability).unwrap_or(Capability::Read);
+                let f_recv = f
+                    .params
+                    .first()
+                    .map(|p| p.capability)
+                    .unwrap_or(Capability::Read);
                 let agrees = got.len() == sig.params.len()
                     && (sig.ret == f.ret || opaque(&sig.ret))
                     && f_recv == sig.recv
@@ -694,7 +691,12 @@ fn check_accum_inner(
                 let near = p
                     .methods
                     .iter()
-                    .map(|sig| (crate::contracts::edit_distance(&m.name, &sig.name), &sig.name))
+                    .map(|sig| {
+                        (
+                            crate::contracts::edit_distance(&m.name, &sig.name),
+                            &sig.name,
+                        )
+                    })
                     .filter(|(d, _)| *d <= crate::contracts::NEAR_THRESHOLD)
                     .min_by_key(|(d, _)| *d)
                     .map(|(_, n)| n);
@@ -713,7 +715,11 @@ fn check_accum_inner(
                 let got: Vec<Type> = m.params.iter().skip(1).map(|p| p.ty.clone()).collect();
                 let got_caps: Vec<Capability> =
                     m.params.iter().skip(1).map(|p| p.capability).collect();
-                let recv = m.params.first().map(|p| p.capability).unwrap_or(Capability::Read);
+                let recv = m
+                    .params
+                    .first()
+                    .map(|p| p.capability)
+                    .unwrap_or(Capability::Read);
                 out.push(Diagnostic::from_rendered(
                     format!(
                         "line {}: `{}` provides `{}`, which protocol `{}` does not declare — \
@@ -952,7 +958,6 @@ fn check_accum_inner(
     // Only meaningful when reuse was asked for; computed once for the whole pass.
     let sig_fp = reuse.map(|_| signature_fingerprint(&types, &sigs));
 
-
     for f in &program.functions {
         // Reusable only if this function's module is known AND unchanged.
         let memo_key = match (reuse, sig_fp, f.module.as_ref()) {
@@ -964,7 +969,11 @@ fn check_accum_inner(
         if let Some(k) = &memo_key {
             if let Some(cached) = CHECK_MEMO.with(|m| {
                 let m = m.borrow();
-                if Some(m.0) == sig_fp { m.1.get(k).cloned() } else { None }
+                if Some(m.0) == sig_fp {
+                    m.1.get(k).cloned()
+                } else {
+                    None
+                }
             }) {
                 out.extend(cached);
                 continue;
@@ -1136,7 +1145,11 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             out.push(d);
         };
         let yields = count_yields(&f.body);
-        if yields != 1 || !matches!(f.body.stmts.last(), Some(Stmt::Return { value: Some(_), .. }))
+        if yields != 1
+            || !matches!(
+                f.body.stmts.last(),
+                Some(Stmt::Return { value: Some(_), .. })
+            )
         {
             push(format!(
                 "line {}: `place {}` must end with exactly one `yield <place>` — \
@@ -1203,10 +1216,7 @@ fn count_yields(b: &crate::ast::Block) -> usize {
                 then_block,
                 else_block,
                 ..
-            } => {
-                count_yields(then_block)
-                    + else_block.as_ref().map(count_yields).unwrap_or(0)
-            }
+            } => count_yields(then_block) + else_block.as_ref().map(count_yields).unwrap_or(0),
             Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
                 count_yields(body)
             }
@@ -1548,7 +1558,10 @@ impl<'a> Checker<'a> {
             return None;
         }
         if let Some(k) = crate::types::type_key(ty) {
-            if self.impls.contains(&(crate::types::OWNED.to_string(), k.clone())) {
+            if self
+                .impls
+                .contains(&(crate::types::OWNED.to_string(), k.clone()))
+            {
                 return Some(k);
             }
         }
@@ -3204,9 +3217,7 @@ impl<'a> Checker<'a> {
                                     &ity,
                                     crate::types::ITERATE_NTH,
                                 ) {
-                                    Some((imp, _)) => {
-                                        self.solve_head(imp, &ity, &nth.ret, *line)
-                                    }
+                                    Some((imp, _)) => self.solve_head(imp, &ity, &nth.ret, *line),
                                     None => nth.ret.clone(),
                                 }
                             }
@@ -3697,9 +3708,11 @@ impl<'a> Checker<'a> {
                                 return Err(format!("line {line}: invalid regex `{pat}`: {e}"));
                             }
                         }
-                        _ => return Err(format!(
+                        _ => {
+                            return Err(format!(
                             "line {line}: the right side of `=~` must be a string-literal pattern"
-                        )),
+                        ))
+                        }
                     }
                 }
                 // A shift by a COMPILE-TIME-CONSTANT amount out of range is a
@@ -3876,9 +3889,7 @@ impl<'a> Checker<'a> {
                         Some(Type::Array(t)) => Ok(Type::Array(t.clone())),
                         // An empty `[]` against a `SmallArray<T, N>` slot is the
                         // empty small-buffer array (RFC-0056), inline state.
-                        Some(Type::SmallArray(t, n)) => {
-                            Ok(Type::SmallArray(t.clone(), *n))
-                        }
+                        Some(Type::SmallArray(t, n)) => Ok(Type::SmallArray(t.clone(), *n)),
                         // An annotation IS present and it is not an array. Saying
                         // "annotate it" to somebody who annotated sends them to
                         // fix the one thing that is right.
@@ -4084,7 +4095,9 @@ impl<'a> Checker<'a> {
         // still report the field the reader's eye reaches first.
         for (fname, _) in fields {
             if !rfields.iter().any(|f| &f.name == fname) {
-                return Err(format!("line {line}: record `{name}` has no field `{fname}`"));
+                return Err(format!(
+                    "line {line}: record `{name}` has no field `{fname}`"
+                ));
             }
             if !provided.insert(fname.clone()) {
                 return Err(format!("line {line}: field `{fname}` set twice"));
@@ -4286,9 +4299,11 @@ impl<'a> Checker<'a> {
         let want: [&str; 2] = match &sty {
             Type::Option(_) => ["Some", "None"],
             Type::Result(_, _) => ["Ok", "Err"],
-            other => return Err(format!(
+            other => {
+                return Err(format!(
                 "line {line}: `match` scrutinee must be an Option, Result, or enum, found {other}"
-            )),
+            ))
+            }
         };
         let mut seen: Vec<&str> = Vec::new();
         let mut result: Option<Type> = expected.cloned();
@@ -4571,8 +4586,8 @@ impl<'a> Checker<'a> {
             Type::Result(_, _) => ["Ok", "Err"],
             other => {
                 return Err(format!(
-                    "line {line}: `if let` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
+                "line {line}: `if let` scrutinee must be an Option, Result, or enum, found {other}"
+            ))
             }
         };
         if !want.contains(&tag) {
@@ -4681,9 +4696,7 @@ impl<'a> Checker<'a> {
             // Two lanes of 64 bits answer TWO questions, so this is where M2's
             // warning comes due: the mask is `Mask64x2` and not the one above.
             // Nothing else about the operators changes.
-            Lt | LtEq | Gt | GtEq | Eq | NotEq if l == r && l == Type::F64x2 => {
-                Ok(Type::Mask64x2)
-            }
+            Lt | LtEq | Gt | GtEq | Eq | NotEq if l == r && l == Type::F64x2 => Ok(Type::Mask64x2),
             // Combining masks (RFC-0083 M2): `(a < b) & (c < d)` is the lane-wise
             // AND, and `&`/`|`/`^` rather than `&&`/`||` is the one spelling
             // decision here. `&&` and `||` are Vyrn's SHORT-CIRCUIT Bool operators
@@ -4998,7 +5011,11 @@ impl<'a> Checker<'a> {
             // bitwise instruction's clothes, and `v != F32x4.splat(0.0)` already
             // spells it with the NaN behaviour written down.
             "@anyTrue" | "@allTrue" => {
-                let what = if name == "@anyTrue" { "anyTrue" } else { "allTrue" };
+                let what = if name == "@anyTrue" {
+                    "anyTrue"
+                } else {
+                    "allTrue"
+                };
                 if args.len() != 1 {
                     return Err(format!(
                         "line {line}: `{what}` takes no arguments (it is `m.{what}()`), \
@@ -5139,16 +5156,8 @@ impl<'a> Checker<'a> {
             // reduction loop would be the census justifying itself by symmetry,
             // which is the thing it exists to prevent. Named so the absence is a
             // decision; `F64x2.ceil` reports itself through the arm below.
-            "@f32x4Min"
-            | "@f32x4Max"
-            | "@f32x4Sqrt"
-            | "@f32x4Ceil"
-            | "@f32x4Floor"
-            | "@f32x4Trunc"
-            | "@f32x4Nearest"
-            | "@f64x2Min"
-            | "@f64x2Max"
-            | "@f64x2Sqrt" => {
+            "@f32x4Min" | "@f32x4Max" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
+            | "@f32x4Trunc" | "@f32x4Nearest" | "@f64x2Min" | "@f64x2Max" | "@f64x2Sqrt" => {
                 let (vec, _, ty, _) = width(name);
                 let m = &name[6..];
                 let want = if m == "Min" || m == "Max" { 2 } else { 1 };
@@ -5165,9 +5174,7 @@ impl<'a> Checker<'a> {
                         return Ok(Type::Err);
                     }
                     if t != vec {
-                        return Err(format!(
-                            "line {line}: `{ty}.{what}` takes {ty}, found {t}"
-                        ));
+                        return Err(format!("line {line}: `{ty}.{what}` takes {ty}, found {t}"));
                     }
                 }
                 Ok(vec)
@@ -5549,7 +5556,13 @@ impl<'a> Checker<'a> {
             let b = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
             let is_bytes = match &b {
                 Type::Array(el) => {
-                    matches!(self.base(el), Type::IntN { bits: 8, signed: false })
+                    matches!(
+                        self.base(el),
+                        Type::IntN {
+                            bits: 8,
+                            signed: false
+                        }
+                    )
                 }
                 _ => false,
             };
@@ -5560,9 +5573,7 @@ impl<'a> Checker<'a> {
             }
             let o = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(o, Type::Err | Type::Int) {
-                return Err(format!(
-                    "line {line}: `{name}`'s offset must be an `Int64`"
-                ));
+                return Err(format!("line {line}: `{name}`'s offset must be an `Int64`"));
             }
             return Ok(Type::Int);
         }
@@ -5675,7 +5686,9 @@ impl<'a> Checker<'a> {
                     }
                     let t = self.base(&self.expr(&args[0], scope, Some(&code()), fn_ret)?);
                     if !matches!(t, Type::Err) && t != code() {
-                        return Err(format!("line {line}: `render` needs a Code value, found {t}"));
+                        return Err(format!(
+                            "line {line}: `render` needs a Code value, found {t}"
+                        ));
                     }
                     return Ok(Type::Str);
                 }
@@ -5922,9 +5935,21 @@ impl<'a> Checker<'a> {
                 ));
             }
             let (want, got) = if name == "floatBits" {
-                (Type::Float, Type::IntN { bits: 64, signed: false })
+                (
+                    Type::Float,
+                    Type::IntN {
+                        bits: 64,
+                        signed: false,
+                    },
+                )
             } else {
-                (Type::IntN { bits: 64, signed: false }, Type::Float)
+                (
+                    Type::IntN {
+                        bits: 64,
+                        signed: false,
+                    },
+                    Type::Float,
+                )
             };
             let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
             if matches!(t, Type::Err) {
@@ -6138,10 +6163,7 @@ impl<'a> Checker<'a> {
             // `push` returns the SAME collection kind it received, so
             // `xs = xs.push(v)` keeps a `SmallArray<T, N>` binding (RFC-0056).
             let (elem, rebuild): (Type, Box<dyn Fn(Type) -> Type>) = match self.base(&at) {
-                Type::Array(inner) => (
-                    (*inner).clone(),
-                    Box::new(|e| Type::Array(Box::new(e))),
-                ),
+                Type::Array(inner) => ((*inner).clone(), Box::new(|e| Type::Array(Box::new(e)))),
                 Type::SmallArray(inner, n) => (
                     (*inner).clone(),
                     Box::new(move |e| Type::SmallArray(Box::new(e), n)),
@@ -6385,7 +6407,11 @@ impl<'a> Checker<'a> {
             }
             // Both answer a type nothing in the call carries, for the reason
             // `pull` always did: an address is an `Int64` whatever it addresses.
-            let want = if name == "unboxStream" { "Stream<T>" } else { "Option<T>" };
+            let want = if name == "unboxStream" {
+                "Stream<T>"
+            } else {
+                "Option<T>"
+            };
             let Some(exp) = expected else {
                 return Err(format!(
                     "line {line}: `{name}` needs the element type from context —                      write `let x: {want} = {name}(a)`"
@@ -6415,7 +6441,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Unit);
             }
             if !matches!(at, Type::Stream(_)) {
-                return Err(format!("line {line}: `close` needs a `Stream<T>`, found {at}"));
+                return Err(format!(
+                    "line {line}: `close` needs a `Stream<T>`, found {at}"
+                ));
             }
             return Ok(Type::Unit);
         }
@@ -6546,9 +6574,11 @@ impl<'a> Checker<'a> {
             // invariant a structural copy would break declares its own. This is
             // the row and the dispatch; every refusal below is what it overrides.
             if let Some(key) = crate::types::type_key(&t) {
-                if self.impls.contains(&(crate::types::COPY.to_string(), key.clone())) {
-                    let mangled =
-                        crate::types::impl_method_name(crate::types::COPY, &key, "copy");
+                if self
+                    .impls
+                    .contains(&(crate::types::COPY.to_string(), key.clone()))
+                {
+                    let mangled = crate::types::impl_method_name(crate::types::COPY, &key, "copy");
                     return self.call(&mangled, args, line, scope, expected, fn_ret);
                 }
             }
@@ -9026,9 +9056,9 @@ fn global_ref_expr(
             scrutinee, arms, ..
         } => {
             global_ref_expr(scrutinee, globals, local)
-                || arms.iter().any(|a| {
-                    global_ref_expr(&a.body, globals, &locals_with(local, &a.pattern))
-                })
+                || arms
+                    .iter()
+                    .any(|a| global_ref_expr(&a.body, globals, &locals_with(local, &a.pattern)))
         }
         Expr::IfExpr {
             cond,
@@ -9259,7 +9289,11 @@ fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
 }
 fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
     match e {
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
         | Expr::Var { .. } => {}
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             calls_expr(expr, out)
@@ -9969,7 +10003,6 @@ mod tests {
         assert!(e.contains("must return"), "{e}");
     }
 
-
     // ---- input I/O (RFC-0014) ---------------------------------------------
 
     #[test]
@@ -10018,8 +10051,8 @@ mod tests {
         assert!(e.contains("`slice` takes 3 arguments"), "{e}");
         let e = check_src("fn main() -> Int64 { let x = slice(42, 0, 1) return 0 }").unwrap_err();
         assert!(e.contains("`slice` needs a String"), "{e}");
-        let e =
-            check_src("fn main() -> Int64 { let x = slice(\"hi\", \"a\", 1) return 0 }").unwrap_err();
+        let e = check_src("fn main() -> Int64 { let x = slice(\"hi\", \"a\", 1) return 0 }")
+            .unwrap_err();
         assert!(e.contains("`slice` needs Int64 offsets"), "{e}");
     }
 
@@ -10151,7 +10184,8 @@ mod tests {
                        let s: Result<Bool, String> = fsyncFile(\"a\") \
                        return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-        let e = check_src("fn main() -> Int64 { let r = renameFile(\"a\"); return 0 }").unwrap_err();
+        let e =
+            check_src("fn main() -> Int64 { let r = renameFile(\"a\"); return 0 }").unwrap_err();
         assert!(e.contains("`renameFile` takes 2 arguments"), "{e}");
         let e = check_src("fn main() -> Int64 { let r = fsyncFile(1); return 0 }").unwrap_err();
         assert!(e.contains("`fsyncFile` needs a String path"), "{e}");
@@ -11499,10 +11533,10 @@ mod tests {
             "{e}"
         );
         // Arrays and SmallArrays keep `.length`.
-        assert!(check_src(
-            "fn main() -> Int64 { let a: Array<Int64> = [1, 2] return a.length }"
-        )
-        .is_ok());
+        assert!(
+            check_src("fn main() -> Int64 { let a: Array<Int64> = [1, 2] return a.length }")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -12310,10 +12344,7 @@ mod tests {
              let s = toJson(xs)\n\
              return xs.length }";
         let e = check_src(src).unwrap_err();
-        assert!(
-            e.contains("SmallArray") && e.contains("codable"),
-            "{e}"
-        );
+        assert!(e.contains("SmallArray") && e.contains("codable"), "{e}");
     }
 
     #[test]
@@ -12405,13 +12436,11 @@ mod tests {
     #[test]
     fn line_at_and_col_at_demand_a_byte_buffer() {
         // The shape every real caller passes.
-        assert!(
-            check_src(
-                "fn main() -> Int64 { let b = bytes(\"a\\nb\")  print(lineAt(b, 2))  \
+        assert!(check_src(
+            "fn main() -> Int64 { let b = bytes(\"a\\nb\")  print(lineAt(b, 2))  \
                  print(colAt(b, 2))  return 0 }"
-            )
-            .is_ok()
-        );
+        )
+        .is_ok());
         // The program RFC-0077 M2n could not pick an answer for: interpreted it
         // said 2 (one `u8` per element), native it said 1 (byte 1 of `01 00 00 …`
         // is zero). It is now refused instead.
@@ -12461,8 +12490,7 @@ mod tests {
             "print(v.lane(0 - 1))",
             "let i = 0  print(v.lane(i))",
         ] {
-            let src =
-                format!("fn main() -> Int64 {{ let v = F32x4.splat(1.0)  {bad}  return 0 }}");
+            let src = format!("fn main() -> Int64 {{ let v = F32x4.splat(1.0)  {bad}  return 0 }}");
             let e = check_src(&src).unwrap_err();
             assert!(e.contains("compile-time constant in 0..3"), "{bad}: {e}");
         }
@@ -12531,8 +12559,14 @@ mod tests {
         let want = "`Self` is not a type in Vyrn";
         let each = [
             ("a return type", "protocol Grow { fn grow(self) -> Self }"),
-            ("a parameter", "protocol Merge { fn merge(self, other: Self) -> Int64 }"),
-            ("a type argument", "protocol All { fn all(self) -> Array<Self> }"),
+            (
+                "a parameter",
+                "protocol Merge { fn merge(self, other: Self) -> Int64 }",
+            ),
+            (
+                "a type argument",
+                "protocol All { fn all(self) -> Array<Self> }",
+            ),
         ];
         for (what, proto) in each {
             // Alone: the declaration is the error, so it needs no impl to fire.
@@ -12540,7 +12574,10 @@ mod tests {
                 check_src(&format!("{proto}\nfn main() -> Int64 {{ return 0 }}")).unwrap_err();
             assert!(bare.contains(want), "{what}, alone: {bare}");
             // The way out is named rather than implied.
-            assert!(bare.contains("associated type"), "{what}: no way out named: {bare}");
+            assert!(
+                bare.contains("associated type"),
+                "{what}: no way out named: {bare}"
+            );
         }
         // And with an impl, the impl is no longer blamed for it: one error, on
         // the protocol's line.
@@ -12552,7 +12589,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(with_impl.contains(want), "{with_impl}");
-        assert!(!with_impl.contains("this provides"), "the impl is still blamed: {with_impl}");
+        assert!(
+            !with_impl.contains("this provides"),
+            "the impl is still blamed: {with_impl}"
+        );
     }
 
     /// A protocol's method signatures name types that exist (RFC-0002 §5).
@@ -12560,8 +12600,9 @@ mod tests {
     /// impls, so a typo in one was reported at every impl and at no impl at all.
     #[test]
     fn a_protocol_signature_names_types_that_exist() {
-        let e = check_src("protocol Grow { fn grow(self) -> Blah }\nfn main() -> Int64 { return 0 }")
-            .unwrap_err();
+        let e =
+            check_src("protocol Grow { fn grow(self) -> Blah }\nfn main() -> Int64 { return 0 }")
+                .unwrap_err();
         assert!(e.contains("unknown type `Blah`"), "{e}");
         // An associated type is not an unknown one — it reaches the walk as a
         // type parameter, which is exactly what it is.
@@ -12583,7 +12624,10 @@ mod tests {
              fn main() -> Int64 { return 7.get() }",
         )
         .unwrap_err();
-        assert!(missing.contains("does not bind the associated type `Output`"), "{missing}");
+        assert!(
+            missing.contains("does not bind the associated type `Output`"),
+            "{missing}"
+        );
         let unknown = check_src(
             "protocol Unwrap { type Output  fn get(self) -> Output }\n\
              impl Unwrap for Int64 { type Output = Int64  type Elem = Int64\n\
@@ -12624,7 +12668,10 @@ mod tests {
              fn main() -> Int64 { return 0 }",
         )
         .unwrap_err();
-        assert!(param.contains("this provides `fn scale(self, String) -> Int64`"), "{param}");
+        assert!(
+            param.contains("this provides `fn scale(self, String) -> Int64`"),
+            "{param}"
+        );
         let missing = check_src(
             "protocol Shape { fn area(self) -> Int64  fn name(self) -> String }\n\
              type Sq = { side: Int64 }\n\
@@ -12689,9 +12736,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            extra.contains("provides `fn perimeter(self) -> Int64`, which protocol `Shape` does \
-                            not declare")
-                && extra.contains("no inherent methods"),
+            extra.contains(
+                "provides `fn perimeter(self) -> Int64`, which protocol `Shape` does \
+                            not declare"
+            ) && extra.contains("no inherent methods"),
             "{extra}"
         );
         // The shape that costs an afternoon: the extra method is a typo beside
@@ -12747,7 +12795,10 @@ mod tests {
             ("type G<T> = { o: Option<T> }", "G { o: Some(2) }"),
             ("type G<T> = { m: Map<String, T> }", "G { m: [\"k\": 2] }"),
             ("type G<T> = { r: Result<T, String> }", "G { r: Ok(2) }"),
-            ("type P<T> = { v: T }\ntype G<T> = { p: P<T> }", "G { p: P { v: 2 } }"),
+            (
+                "type P<T> = { v: T }\ntype G<T> = { p: P<T> }",
+                "G { p: P { v: 2 } }",
+            ),
         ] {
             let r = check_src(&format!(
                 "{decl}\nfn main() -> Int64 {{ let g = {lit}\n return 0 }}"
@@ -12762,7 +12813,10 @@ mod tests {
     #[test]
     fn an_empty_field_leaves_the_parameter_for_a_later_one() {
         let head = "type D<T> = { front: Array<T>, back: Array<T> }\n";
-        for lit in ["D { front: [2, 1], back: [] }", "D { back: [], front: [2, 1] }"] {
+        for lit in [
+            "D { front: [2, 1], back: [] }",
+            "D { back: [], front: [2, 1] }",
+        ] {
             let r = check_src(&format!(
                 "{head}fn main() -> Int64 {{ let d = {lit}\n return 0 }}"
             ));
@@ -12838,7 +12892,10 @@ mod tests {
              fn main() -> Int64 { let p = P { a: 1, b: \"x\" }\n return 0 }",
         )
         .unwrap_err();
-        assert!(e.contains("type parameter `T` is both Int64 and String"), "{e}");
+        assert!(
+            e.contains("type parameter `T` is both Int64 and String"),
+            "{e}"
+        );
     }
 
     /// Fields that say nothing stay an error, and the error names the fix. This

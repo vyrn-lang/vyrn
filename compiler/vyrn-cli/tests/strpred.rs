@@ -26,7 +26,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -42,13 +46,19 @@ fn string_predicate_pins_hold() {
     let module = repo_file("examples/strpredbytes.vyrn");
     let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined = norm(&out.stdout) + &norm(&out.stderr);
-    assert!(out.status.success(), "strpredbytes unit tests failed:\n{combined}");
+    assert!(
+        out.status.success(),
+        "strpredbytes unit tests failed:\n{combined}"
+    );
     // Four, not five: M4c deleted the `predsAgree` block, which after the routing
     // asserted that a function equals itself over twenty inputs. Its rows became
     // the literal table in the block that replaced it. M3 kept the count — the
     // `sliceV`-declines block became "slice names which cut failed and at which
     // byte", which is a stronger statement over the same fourteen ranges.
-    assert!(combined.contains("4 passed, 0 failed"), "expected 4 green:\n{combined}");
+    assert!(
+        combined.contains("4 passed, 0 failed"),
+        "expected 4 green:\n{combined}"
+    );
 }
 
 /// `std/strings`'s `substring` is the ONE place in `std/` that turns a `SliceError`

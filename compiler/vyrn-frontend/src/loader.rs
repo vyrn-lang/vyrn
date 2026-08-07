@@ -802,7 +802,13 @@ pub fn last_module_hashes() -> HashMap<String, String> {
 fn graph_of(modules: &[Module]) -> ModuleGraph {
     modules
         .iter()
-        .map(|m| (m.key.clone(), m.import_targets.clone(), m.gen_source.clone()))
+        .map(|m| {
+            (
+                m.key.clone(),
+                m.import_targets.clone(),
+                m.gen_source.clone(),
+            )
+        })
         .collect()
 }
 
@@ -860,7 +866,12 @@ fn load_modules(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<
-    (Vec<Module>, String, crate::origin::OriginMaps, Vec<Diagnostic>),
+    (
+        Vec<Module>,
+        String,
+        crate::origin::OriginMaps,
+        Vec<Diagnostic>,
+    ),
     (Vec<Diagnostic>, crate::origin::OriginMaps),
 > {
     let root_key = normalize(root_path);
@@ -937,10 +948,9 @@ fn load_modules(
             // notice arrives more than once for one authored line — de-duplicate
             // on what the user sees (file, line, message), never on the banner.
             for d in crate::origin::warnings(key, &text, dir_of(importer)) {
-                if !warnings
-                    .iter()
-                    .any(|w: &Diagnostic| w.file == d.file && w.line == d.line && w.message == d.message)
-                {
+                if !warnings.iter().any(|w: &Diagnostic| {
+                    w.file == d.file && w.line == d.line && w.message == d.message
+                }) {
                     warnings.push(d);
                 }
             }
@@ -1118,8 +1128,15 @@ fn load_modules(
             let hit = {
                 let imp = &program.imports[idx];
                 match &imp.source {
-                    ImportSource::Path(spec) => builtin_alias_exports(spec)
-                        .map(|exports| (spec.clone(), imp.namespace.is_some(), imp.names.clone(), imp.line, exports)),
+                    ImportSource::Path(spec) => builtin_alias_exports(spec).map(|exports| {
+                        (
+                            spec.clone(),
+                            imp.namespace.is_some(),
+                            imp.names.clone(),
+                            imp.line,
+                            exports,
+                        )
+                    }),
                     _ => None,
                 }
             };
@@ -1529,8 +1546,7 @@ fn run_generator(
     //     skip on a hit: an entry is only written after a successful run, which
     //     already passed this same check, and the generator's sources are part
     //     of the cache key — so any edit to it misses and re-checks here.
-    let (loaded, _, _, gen_graph) =
-        load_with_origins(&gen_source, &gen_mod_key, opts, resolver);
+    let (loaded, _, _, gen_graph) = load_with_origins(&gen_source, &gen_mod_key, opts, resolver);
     let mut gen_program = loaded?;
     // The same check+synthesize a root gets (`crate::check_and_synthesize`): a
     // generator is a runnable program, and RFC-0076 compiles it to wasm, so a
@@ -1646,7 +1662,12 @@ fn run_generator(
 /// changed. Same files checked, discovered from the entry instead of rediscovered
 /// by parsing. The trade is that two versions of a generator now collide on one
 /// key and take turns owning the entry, rather than each keeping their own.
-fn generator_cache_key(gen_mod_key: &str, name: &str, arg_repr: &str, resolved_inputs: &[String]) -> String {
+fn generator_cache_key(
+    gen_mod_key: &str,
+    name: &str,
+    arg_repr: &str,
+    resolved_inputs: &[String],
+) -> String {
     let mut blob: Vec<u8> = Vec::new();
     for part in [gen_mod_key, name, arg_repr] {
         blob.extend_from_slice(part.as_bytes());
@@ -1684,7 +1705,8 @@ fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<Strin
     }
     let out = current_input_hash_uncached(resolver, path);
     HASH_MEMO.with(|m| {
-        m.borrow_mut().insert(path.to_string(), (epoch, out.clone()));
+        m.borrow_mut()
+            .insert(path.to_string(), (epoch, out.clone()));
     });
     out
 }
@@ -1931,7 +1953,10 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         .collect();
     let mut injected_variants: HashMap<String, HashMap<String, String>> = HashMap::new();
     for (key, prefix) in &injected {
-        let m = modules.iter().find(|m| &m.key == key).expect("injected module");
+        let m = modules
+            .iter()
+            .find(|m| &m.key == key)
+            .expect("injected module");
         let vars = injected_variants.entry(key.clone()).or_default();
         let mut names: Vec<String> = Vec::new();
         for t in &m.program.type_decls {
@@ -2230,7 +2255,9 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // variant list lives in the decl's `Type::Enum` base, which no reference
     // rewrite touches.
     for (key, _) in &injected {
-        let Some(vars) = injected_variants.get(key) else { continue };
+        let Some(vars) = injected_variants.get(key) else {
+            continue;
+        };
         if let Some(tm) = modules.iter_mut().find(|m| &m.key == key) {
             for t in &mut tm.program.type_decls {
                 if t.line == 0 {
@@ -3105,7 +3132,11 @@ fn import_site<'a>(
             if t != target {
                 continue;
             }
-            if imp.names.iter().any(|n| names.contains(&n.original.as_str())) {
+            if imp
+                .names
+                .iter()
+                .any(|n| names.contains(&n.original.as_str()))
+            {
                 return Some((m, imp));
             }
             fallback.get_or_insert((m, imp));
@@ -3119,7 +3150,10 @@ fn import_site<'a>(
 fn ns_suggestion(spec: &str) -> String {
     let tail = spec.rsplit(['/', '\\', ':']).next().unwrap_or(spec);
     let stem = tail.strip_suffix(".vyrn").unwrap_or(tail);
-    let n: String = stem.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
+    let n: String = stem
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     if n.is_empty() || n.starts_with(|c: char| c.is_ascii_digit()) {
         "ns".to_string()
     } else {
@@ -3166,7 +3200,10 @@ fn clash_diagnostics(
                     0,
                     0,
                     "load",
-                    format!("`{}` is declared by both `{first}` and `{second}`", names[0]),
+                    format!(
+                        "`{}` is declared by both `{first}` and `{second}`",
+                        names[0]
+                    ),
                 ));
                 continue;
             }
@@ -3250,7 +3287,10 @@ fn fn_body_names(b: &Block, ns: &HashSet<String>) -> Vec<(String, usize)> {
             self.out.push(n);
         }
     }
-    let mut out = Sink { out: Vec::new(), ns };
+    let mut out = Sink {
+        out: Vec::new(),
+        ns,
+    };
     fn stmt(s: &Stmt, out: &mut Sink) {
         match s {
             Stmt::Let {
@@ -4022,7 +4062,11 @@ fn program_ref_names(p: &Program) -> HashSet<String> {
     // The module's own namespace bindings, read off its imports rather than
     // passed in: both callers hold only a `Program`, and `ns.member` is spelled
     // against the namespaces this file declares.
-    let ns: HashSet<String> = p.imports.iter().filter_map(|i| i.namespace.clone()).collect();
+    let ns: HashSet<String> = p
+        .imports
+        .iter()
+        .filter_map(|i| i.namespace.clone())
+        .collect();
     let add_block = |b: &Block, out: &mut HashSet<String>| {
         for (n, _) in fn_body_names(b, &ns) {
             out.insert(n);
@@ -4124,13 +4168,20 @@ mod tests {
                     "`{builtin}` names `{reserved}`, which is not `{}`-prefixed",
                     rt.prefix
                 );
-                assert!(reserved.starts_with(rt.prefix), "`{reserved}` vs `{}`", rt.prefix);
+                assert!(
+                    reserved.starts_with(rt.prefix),
+                    "`{reserved}` vs `{}`",
+                    rt.prefix
+                );
                 assert!(!seen.contains(builtin), "`{builtin}` is routed twice");
                 seen.push(builtin);
                 assert_eq!(routed_builtin(builtin), Some(*reserved));
             }
             for b in rt.desugared {
-                assert!(routed_builtin(b).is_none(), "`{b}` is a desugar, not a route");
+                assert!(
+                    routed_builtin(b).is_none(),
+                    "`{b}` is a desugar, not a route"
+                );
             }
         }
         // A route is matched on the CALL NAME, before any type is known, so it
@@ -4149,7 +4200,10 @@ mod tests {
             }
         }
         assert!(routed_builtin("print").is_none());
-        assert!(routed_builtin("lineAt").is_none(), "`lineAt` keeps its interpreter cache");
+        assert!(
+            routed_builtin("lineAt").is_none(),
+            "`lineAt` keeps its interpreter cache"
+        );
         // RFC-0079 M3: `slice` was the one refusal on this list that a language
         // change could retire, and it did. The row is inverted rather than deleted
         // — the reason it moved is the milestone.
@@ -4166,8 +4220,15 @@ mod tests {
     /// a link error in a program that formats a float, which is most of them.
     #[test]
     fn the_float_formatter_is_std_nums() {
-        let num = RT_MODULES.iter().find(|rt| rt.spec == "std/num").expect("std/num is linked");
-        assert!(F64_STR.starts_with(num.prefix), "`{F64_STR}` vs `{}`", num.prefix);
+        let num = RT_MODULES
+            .iter()
+            .find(|rt| rt.spec == "std/num")
+            .expect("std/num is linked");
+        assert!(
+            F64_STR.starts_with(num.prefix),
+            "`{F64_STR}` vs `{}`",
+            num.prefix
+        );
         // Both spellings that reach it, and neither is a route: the float case is
         // one case of a type-directed builtin.
         assert!(num.desugared.contains(&"@str") && num.desugared.contains(&"print"));
@@ -4197,20 +4258,36 @@ mod tests {
     /// implies.
     const RT_FILES: &[(&str, &str)] = &[
         ("std/json.vyrn", include_str!("../../../std/json.vyrn")),
-        ("std/jsonread.vyrn", include_str!("../../../std/jsonread.vyrn")),
-        ("std/jsondec.vyrn", include_str!("../../../std/jsondec.vyrn")),
+        (
+            "std/jsonread.vyrn",
+            include_str!("../../../std/jsonread.vyrn"),
+        ),
+        (
+            "std/jsondec.vyrn",
+            include_str!("../../../std/jsondec.vyrn"),
+        ),
         ("std/num.vyrn", include_str!("../../../std/num.vyrn")),
         ("std/codecs.vyrn", include_str!("../../../std/codecs.vyrn")),
         ("std/text.vyrn", include_str!("../../../std/text.vyrn")),
-        ("std/strpred.vyrn", include_str!("../../../std/strpred.vyrn")),
+        (
+            "std/strpred.vyrn",
+            include_str!("../../../std/strpred.vyrn"),
+        ),
     ];
 
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
-        let files: Vec<(&str, &str)> = files.iter().copied().chain(RT_FILES.iter().copied()).collect();
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .copied()
+            .chain(RT_FILES.iter().copied())
+            .collect();
         let files = &files[..];
-        let mut program = load(root, "main.vyrn", &opts(), &map(files))
-            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("
-"))?;
+        let mut program = load(root, "main.vyrn", &opts(), &map(files)).map_err(|ds| {
+            ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
+                "
+",
+            )
+        })?;
         // `check_and_synthesize` rather than a bare check: since RFC-0078 M2b/M3 a
         // linked program is not runnable until the JSON builtins' generated Vyrn is
         // in it, and `loader::load` deliberately stops at the link. A test that ran
@@ -4388,10 +4465,7 @@ mod tests {
         let root = "import * as r from \"std/result\" \
                     fn main() -> Int64 { return 0 }";
         let e = load_err(root, &[]);
-        assert!(
-            e.contains("cannot be imported as a namespace"),
-            "{e}"
-        );
+        assert!(e.contains("cannot be imported as a namespace"), "{e}");
     }
 
     #[test]
@@ -4411,7 +4485,10 @@ mod tests {
                     import { f } from \"./b\" \
                     fn main() -> Int64 { return f() }";
         let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("`f` is declared by both `a.vyrn` and `b.vyrn`"), "{e}");
+        assert!(
+            e.contains("`f` is declared by both `a.vyrn` and `b.vyrn`"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -4427,7 +4504,12 @@ mod tests {
         let root = "import { f } from \"./a\" \n\
                     import { f } from \"./b\" \n\
                     fn main() -> Int64 { return f() }";
-        let ds = match load(root, "main.vyrn", &opts(), &map(&[("a.vyrn", a), ("b.vyrn", b)])) {
+        let ds = match load(
+            root,
+            "main.vyrn",
+            &opts(),
+            &map(&[("a.vyrn", a), ("b.vyrn", b)]),
+        ) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds,
         };
@@ -4480,7 +4562,12 @@ mod tests {
         let root = "import { f } from \"./a\" \n\
                     import { h } from \"./b\" \n\
                     fn main() -> Int64 { return f() + h() }";
-        let ds = match load(root, "main.vyrn", &opts(), &map(&[("a.vyrn", a), ("b.vyrn", b)])) {
+        let ds = match load(
+            root,
+            "main.vyrn",
+            &opts(),
+            &map(&[("a.vyrn", a), ("b.vyrn", b)]),
+        ) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds,
         };
@@ -4516,7 +4603,10 @@ mod tests {
                     import * as bt from \"./b\" \
                     fn main() -> Int64 { return routes() + bt.routes() }";
         let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("`routes` is not in scope — it was imported as `pageRoutes`"), "{e}");
+        assert!(
+            e.contains("`routes` is not in scope — it was imported as `pageRoutes`"),
+            "{e}"
+        );
         // One cause, one error: the collision diagnostics next door do not pile on.
         assert!(!e.contains("is declared by both"), "{e}");
     }
@@ -5491,7 +5581,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
         );
 
         // Edit the generator module itself.
-        r.files.insert("gen.vyrn".to_string(), gen.replace("tag()", "tag() + \"!\""));
+        r.files.insert(
+            "gen.vyrn".to_string(),
+            gen.replace("tag()", "tag() + \"!\""),
+        );
         assert_eq!(
             run_with(root, &r).unwrap(),
             6,

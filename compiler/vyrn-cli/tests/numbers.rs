@@ -15,7 +15,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+        .canonicalize()
+        .unwrap()
 }
 
 fn vyrn() -> Command {
@@ -29,7 +33,10 @@ fn unit_tests_green(rel: &str, expected: &str) {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");
-    assert!(combined.contains(expected), "expected `{expected}`:\n{combined}");
+    assert!(
+        combined.contains(expected),
+        "expected `{expected}`:\n{combined}"
+    );
 }
 
 #[test]
@@ -59,23 +66,73 @@ fn std_num_unit_tests_run_green() {
 #[test]
 fn f64str_is_byte_identical_to_rusts_own_formatter() {
     let mut corpus: Vec<u64> = vec![
-        0.0f64, -0.0, 1.0, -1.0, 1.5, -1.5, 0.1, 0.2, 0.3, 2.0, 10.0, 100.0,
+        0.0f64,
+        -0.0,
+        1.0,
+        -1.0,
+        1.5,
+        -1.5,
+        0.1,
+        0.2,
+        0.3,
+        2.0,
+        10.0,
+        100.0,
         // The two exact ties at the sixth place: half-to-even keeps the even
         // digit in one and rounds the odd one up.
-        0.0078125, 0.0234375, 0.5, 0.05, 0.005, 0.0005, 0.00005, 0.000005, 0.0000005, 0.00000005,
+        0.0078125,
+        0.0234375,
+        0.5,
+        0.05,
+        0.005,
+        0.0005,
+        0.00005,
+        0.000005,
+        0.0000005,
+        0.00000005,
         // A carry that runs out of the top of the number.
-        0.9999999, -0.9999999, 0.99999949999, 9.9999995, 1e300, 1e-300, 1e22, 1e23, 1e100,
-        123456789.123456789, 3.141592653589793, 2.718281828459045, 9007199254740992.0,
-        9007199254740993.0, 4503599627370495.5, f64::MAX, f64::MIN, f64::MIN_POSITIVE,
-        f64::INFINITY, f64::NEG_INFINITY, f64::NAN, f64::EPSILON, 2.2250738585072011e-308,
+        0.9999999,
+        -0.9999999,
+        0.99999949999,
+        9.9999995,
+        1e300,
+        1e-300,
+        1e22,
+        1e23,
+        1e100,
+        123456789.123456789,
+        3.141592653589793,
+        2.718281828459045,
+        9007199254740992.0,
+        9007199254740993.0,
+        4503599627370495.5,
+        f64::MAX,
+        f64::MIN,
+        f64::MIN_POSITIVE,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        f64::EPSILON,
+        2.2250738585072011e-308,
     ]
     .into_iter()
     .map(f64::to_bits)
     .collect();
     // The bottom of the subnormal range and the top of the finite one, by bits —
     // there is no literal for either end.
-    corpus.extend([1u64, 2, 3, 0x000F_FFFF_FFFF_FFFF, 0x0010_0000_0000_0000, 0x7FEF_FFFF_FFFF_FFFF]);
-    corpus.extend([0x8000_0000_0000_0001u64, 0xFFF0_0000_0000_0000, 0xFFF8_0000_0000_0000]);
+    corpus.extend([
+        1u64,
+        2,
+        3,
+        0x000F_FFFF_FFFF_FFFF,
+        0x0010_0000_0000_0000,
+        0x7FEF_FFFF_FFFF_FFFF,
+    ]);
+    corpus.extend([
+        0x8000_0000_0000_0001u64,
+        0xFFF0_0000_0000_0000,
+        0xFFF8_0000_0000_0000,
+    ]);
 
     // Deterministic pseudorandom, a fixed LCG so a failure reproduces. Whole
     // random bit patterns reach every exponent including the extremes; the
@@ -83,7 +140,9 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
     // where a rounding bug would be seen rather than merely present.
     let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut next = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         seed
     };
     for _ in 0..400 {
@@ -95,8 +154,10 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
         corpus.push((m * 10f64.powi(e)).to_bits());
     }
 
-    let calls: String =
-        corpus.iter().map(|b| format!("    print(f64Str(floatFromBits({b})))\n")).collect();
+    let calls: String = corpus
+        .iter()
+        .map(|b| format!("    print(f64Str(floatFromBits({b})))\n"))
+        .collect();
     let src = format!(
         "import {{ f64Str }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
     );
@@ -110,8 +171,10 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
         "differential program failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let got: Vec<String> =
-        String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim_end().to_string()).collect();
+    let got: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .collect();
     assert_eq!(got.len(), corpus.len(), "one line per input");
 
     let mut bad: Vec<String> = Vec::new();
@@ -122,7 +185,13 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
             bad.push(format!("{bits} ({x:e}): f64Str {mine}, Rust {oracle}"));
         }
     }
-    assert!(bad.is_empty(), "{} of {} disagree:\n{}", bad.len(), corpus.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} of {} disagree:\n{}",
+        bad.len(),
+        corpus.len(),
+        bad.join("\n")
+    );
 }
 
 /// `std/num`'s `parseFloat64` against Rust's own `str::parse::<f64>()`, bit for
@@ -148,21 +217,52 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
 #[test]
 fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
     let mut corpus: Vec<String> = vec![
-        "0", "-0", "0.0", "1", "-1", "1.5", "-1.5", "0.1", "0.2", "0.3", "1e0", "1E0", "+1.5",
-        "1e3", "1e-3", "-2.5E-1", "123456789.123456789", "3.141592653589793",
+        "0",
+        "-0",
+        "0.0",
+        "1",
+        "-1",
+        "1.5",
+        "-1.5",
+        "0.1",
+        "0.2",
+        "0.3",
+        "1e0",
+        "1E0",
+        "+1.5",
+        "1e3",
+        "1e-3",
+        "-2.5E-1",
+        "123456789.123456789",
+        "3.141592653589793",
         "2.718281828459045",
         // The exact ties at 2^53, where half-to-even decides the last bit.
-        "9007199254740992", "9007199254740993", "9007199254740994", "9007199254740995",
+        "9007199254740992",
+        "9007199254740993",
+        "9007199254740994",
+        "9007199254740995",
         "9007199254740996",
         // The two literals that hung a production runtime, on both sides.
-        "2.2250738585072011e-308", "2.2250738585072012e-308", "2.2250738585072014e-308",
+        "2.2250738585072011e-308",
+        "2.2250738585072012e-308",
+        "2.2250738585072014e-308",
         // Both ends of the subnormal range, and half of the smallest one — a tie
         // that must round DOWN to zero rather than up to something.
-        "5e-324", "4.9406564584124654e-324", "2.4703282292062327e-324",
-        "2.4703282292062328e-324", "1e-323", "2.2250738585072009e-308",
+        "5e-324",
+        "4.9406564584124654e-324",
+        "2.4703282292062327e-324",
+        "2.4703282292062328e-324",
+        "1e-323",
+        "2.2250738585072009e-308",
         // The largest finite double, the first value past it, and beyond.
-        "1.7976931348623157e308", "1.7976931348623158e308", "1.8e308", "1e309", "1e400",
-        "-1e400", "1e-400", "1e-1000",
+        "1.7976931348623157e308",
+        "1.7976931348623158e308",
+        "1.8e308",
+        "1e309",
+        "1e400",
+        "-1e400",
+        "1e-400",
+        "1e-1000",
         // A rounding carry OUT of the top mantissa bit — the class RFC-0078 M3's
         // decode corpus found this oracle missing. Every one of these rounds up to
         // an exact power of two, so the mantissa leaves the doubling loop at 2^53
@@ -170,21 +270,61 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         // `|` is idempotent, so the bug showed only for an ODD biased exponent:
         // `1.9999999999999999999` was `1.0` and `9223372036854775807` was 2^62,
         // while `0.9999999999999999999` and `3.9999999999999999999` were right.
-        "9223372036854775807", "9223372036854775808", "0.9999999999999999999",
-        "1.9999999999999999999", "3.9999999999999999999", "7.9999999999999999999",
-        "0.49999999999999999999", "0.24999999999999999999", "18446744073709551615",
-        "4611686018427387903", "1.4999999999999999999", "2.9999999999999999999",
+        "9223372036854775807",
+        "9223372036854775808",
+        "0.9999999999999999999",
+        "1.9999999999999999999",
+        "3.9999999999999999999",
+        "7.9999999999999999999",
+        "0.49999999999999999999",
+        "0.24999999999999999999",
+        "18446744073709551615",
+        "4611686018427387903",
+        "1.4999999999999999999",
+        "2.9999999999999999999",
         // Powers of ten, which are exact in decimal and not in binary.
-        "1e22", "1e23", "1e-22", "1e-23", "1e100", "-1e100", "1e-100",
+        "1e22",
+        "1e23",
+        "1e-22",
+        "1e-23",
+        "1e100",
+        "-1e100",
+        "1e-100",
         // Values that a fast path computed in floating point gets wrong.
-        "8.98846567431158e307", "7.8459735791271921e65", "3.5844466002796428e298",
-        "9.194366959071701e-91", "7.4e47", "5.9e-8",
+        "8.98846567431158e307",
+        "7.8459735791271921e65",
+        "3.5844466002796428e298",
+        "9.194366959071701e-91",
+        "7.4e47",
+        "5.9e-8",
         // Forms the scanner has to accept, and edges of its own grammar.
-        "000123", "0.000000000000000000001", "123000000000000000000000", ".5", "5.", "-.5",
-        "1e+3", "1e-0", "0e999999999", "-0e-99",
+        "000123",
+        "0.000000000000000000001",
+        "123000000000000000000000",
+        ".5",
+        "5.",
+        "-.5",
+        "1e+3",
+        "1e-0",
+        "0e999999999",
+        "-0e-99",
         // Refusals.
-        "", "-", "+", ".", "abc", "1 ", " 1", "1x", "1e", "1e+", "1.2.3", "--1", "1_000", "NaN",
-        "inf", "0x10",
+        "",
+        "-",
+        "+",
+        ".",
+        "abc",
+        "1 ",
+        " 1",
+        "1x",
+        "1e",
+        "1e+",
+        "1.2.3",
+        "--1",
+        "1_000",
+        "NaN",
+        "inf",
+        "0x10",
     ]
     .into_iter()
     .map(str::to_string)
@@ -199,14 +339,21 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
     // Deterministic pseudorandom: a fixed LCG so a failure is reproducible.
     let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
     let mut next = |m: u64| {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) % m
     };
     for _ in 0..220 {
         let ndig = 1 + next(19) as usize;
         let digits: String = (0..ndig).map(|_| (b'0' + next(10) as u8) as char).collect();
         let exp = next(61) as i64 - 30;
-        corpus.push(format!("{}{}e{}", if next(2) == 0 { "-" } else { "" }, digits, exp));
+        corpus.push(format!(
+            "{}{}e{}",
+            if next(2) == 0 { "-" } else { "" },
+            digits,
+            exp
+        ));
     }
 
     let calls: String = corpus
@@ -232,8 +379,10 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         "differential program failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let got: Vec<String> =
-        String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim_end().to_string()).collect();
+    let got: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .collect();
     assert_eq!(got.len(), corpus.len(), "one line per input");
 
     let mut bad: Vec<String> = Vec::new();
@@ -251,5 +400,11 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
             bad.push(format!("{input:?}: std/num {mine}, Rust {oracle}"));
         }
     }
-    assert!(bad.is_empty(), "{} of {} disagree:\n{}", bad.len(), corpus.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} of {} disagree:\n{}",
+        bad.len(),
+        corpus.len(),
+        bad.join("\n")
+    );
 }

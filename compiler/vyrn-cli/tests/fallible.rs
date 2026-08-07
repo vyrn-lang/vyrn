@@ -89,7 +89,10 @@ fn rejects(name: &str, src: &str, needle: &str) {
     let out = vyrn().arg("check").arg(&path).output().expect("vyrn check");
     let all = norm(&out.stdout) + &norm(&out.stderr);
     assert!(!out.status.success(), "{name} was accepted:\n{all}");
-    assert!(all.contains(needle), "{name}: expected {needle:?}, got:\n{all}");
+    assert!(
+        all.contains(needle),
+        "{name}: expected {needle:?}, got:\n{all}"
+    );
 }
 
 /// The claim RFC-0080 makes and never executed: Vyrn needs no residual type
@@ -262,10 +265,17 @@ fn main() -> Int64 {
 }
 ";
     let path = write("nominal", src);
-    let out = vyrn().arg("emit-ir").arg(&path).output().expect("vyrn emit-ir");
+    let out = vyrn()
+        .arg("emit-ir")
+        .arg(&path)
+        .output()
+        .expect("vyrn emit-ir");
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let ir = norm(&out.stdout);
-    assert!(ir.contains("try.ok"), "`?` on an Option still lowers through `gen_try`");
+    assert!(
+        ir.contains("try.ok"),
+        "`?` on an Option still lowers through `gen_try`"
+    );
     assert!(
         !ir.contains("Fallible__"),
         "`?` on an Option must not call an impl method:\n{ir}"

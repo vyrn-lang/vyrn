@@ -93,7 +93,13 @@ fn examples_interp_native_parity() {
         let interp = run_io(interp_cmd, &dir, &stdin_fixture);
 
         let exe = out_dir.join(format!("{name}.exe"));
-        let build = vyrn().arg("build").arg(path).arg("-o").arg(&exe).output().expect("build");
+        let build = vyrn()
+            .arg("build")
+            .arg(path)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build");
         if !build.status.success() {
             failures.push(format!(
                 "{name}: native build failed:\n{}{}",
@@ -148,8 +154,12 @@ fn examples_interp_native_parity() {
             wasm_cmd.arg("run").arg("--dir").arg(".");
             // Forward the RFC-0043 fixed clock/seed into the guest: wasmtime does
             // not inherit host env, so the shim's getenv only sees them via --env.
-            wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_TIME={FIXED_TIME}"));
-            wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_SEED={FIXED_SEED}"));
+            wasm_cmd
+                .arg("--env")
+                .arg(format!("VYRN_FIXED_TIME={FIXED_TIME}"));
+            wasm_cmd
+                .arg("--env")
+                .arg(format!("VYRN_FIXED_SEED={FIXED_SEED}"));
             wasm_cmd.arg(&module);
             // wasmtime forwards guest argv AFTER the module path (RFC-0061).
             wasm_cmd.args(&prog_args);
@@ -195,7 +205,11 @@ fn wasm_only_examples_trap_identically() {
         let path = dir.join(name);
 
         let interp = vyrn().arg("run").arg(&path).output().expect("run interp");
-        assert_eq!(interp.status.code(), Some(1), "{name}: interp must trap (exit 1)");
+        assert_eq!(
+            interp.status.code(),
+            Some(1),
+            "{name}: interp must trap (exit 1)"
+        );
         let i_err = norm(&interp.stderr);
         assert!(
             i_err.contains("is not available on this target"),
@@ -203,20 +217,34 @@ fn wasm_only_examples_trap_identically() {
         );
 
         let exe = out_dir.join(format!("{name}.exe"));
-        let build = vyrn().arg("build").arg(&path).arg("-o").arg(&exe).output().expect("build");
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build");
         assert!(
             build.status.success(),
             "{name}: native build must succeed (extern trap stubs link):\n{}",
             norm(&build.stderr)
         );
         let native = Command::new(&exe).output().expect("run native");
-        assert_eq!(native.status.code(), Some(1), "{name}: native must trap (exit 1)");
+        assert_eq!(
+            native.status.code(),
+            Some(1),
+            "{name}: native must trap (exit 1)"
+        );
         assert_eq!(
             norm(&native.stderr),
             i_err,
             "{name}: interp and native extern traps must be byte-identical"
         );
-        assert_eq!(norm(&native.stdout), norm(&interp.stdout), "{name}: stdout identical too");
+        assert_eq!(
+            norm(&native.stdout),
+            norm(&interp.stdout),
+            "{name}: stdout identical too"
+        );
     }
 }
 
@@ -235,8 +263,18 @@ fn threaded_spawn_matches_sequential_and_interp() {
 
     let interp = vyrn().arg("run").arg(&path).output().expect("run interp");
     let exe = out_dir.join("parallel-seq-check.exe");
-    let build = vyrn().arg("build").arg(&path).arg("-o").arg(&exe).output().expect("build");
-    assert!(build.status.success(), "native build failed:\n{}", norm(&build.stderr));
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "native build failed:\n{}",
+        norm(&build.stderr)
+    );
 
     let threaded = Command::new(&exe).output().expect("run threaded");
     let sequential = Command::new(&exe)
@@ -244,10 +282,25 @@ fn threaded_spawn_matches_sequential_and_interp() {
         .output()
         .expect("run sequential");
 
-    for (label, run) in [("threaded", &threaded), ("VYRN_SEQUENTIAL_SPAWN=1", &sequential)] {
-        assert_eq!(norm(&run.stdout), norm(&interp.stdout), "{label}: stdout != interp");
-        assert_eq!(norm(&run.stderr), norm(&interp.stderr), "{label}: stderr != interp");
-        assert_eq!(run.status.code(), interp.status.code(), "{label}: exit code != interp");
+    for (label, run) in [
+        ("threaded", &threaded),
+        ("VYRN_SEQUENTIAL_SPAWN=1", &sequential),
+    ] {
+        assert_eq!(
+            norm(&run.stdout),
+            norm(&interp.stdout),
+            "{label}: stdout != interp"
+        );
+        assert_eq!(
+            norm(&run.stderr),
+            norm(&interp.stderr),
+            "{label}: stderr != interp"
+        );
+        assert_eq!(
+            run.status.code(),
+            interp.status.code(),
+            "{label}: exit code != interp"
+        );
     }
 }
 
@@ -267,8 +320,18 @@ fn task_trap_prints_once_and_exits_1_threaded() {
     let file = out_dir.join("taskboom.vyrn");
     std::fs::write(&file, src).unwrap();
     let exe = out_dir.join("taskboom.exe");
-    let build = vyrn().arg("build").arg(&file).arg("-o").arg(&exe).output().expect("build");
-    assert!(build.status.success(), "native build failed:\n{}", norm(&build.stderr));
+    let build = vyrn()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "native build failed:\n{}",
+        norm(&build.stderr)
+    );
 
     let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
     let threaded = Command::new(&exe).output().expect("run threaded");
@@ -277,9 +340,11 @@ fn task_trap_prints_once_and_exits_1_threaded() {
         .output()
         .expect("run sequential");
 
-    for (label, run) in
-        [("interp", &interp), ("threaded", &threaded), ("VYRN_SEQUENTIAL_SPAWN=1", &sequential)]
-    {
+    for (label, run) in [
+        ("interp", &interp),
+        ("threaded", &threaded),
+        ("VYRN_SEQUENTIAL_SPAWN=1", &sequential),
+    ] {
         assert_eq!(run.status.code(), Some(1), "{label}: task trap must exit 1");
         assert_eq!(norm(&run.stdout), "", "{label}: no stdout");
         assert_eq!(
@@ -351,8 +416,13 @@ fn stored_fn_param_compiles_for_any_payload() {
         );
 
         let exe = out_dir.join(format!("fnparam_{label}.exe"));
-        let build =
-            vyrn().arg("build").arg(&file).arg("-o").arg(&exe).output().expect("build");
+        let build = vyrn()
+            .arg("build")
+            .arg(&file)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build");
         assert!(
             build.status.success(),
             "{label}: native build of a stored fn-param ({payload_ty}) must succeed \
@@ -366,7 +436,11 @@ fn stored_fn_param_compiles_for_any_payload() {
             norm(&interp.stdout),
             "{label}: native stdout must match the interpreter"
         );
-        assert_eq!(native.status.code(), interp.status.code(), "{label}: exit code");
+        assert_eq!(
+            native.status.code(),
+            interp.status.code(),
+            "{label}: exit code"
+        );
     }
 }
 
@@ -410,8 +484,13 @@ fn subdir_server_examples_native_build() {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let exe = out_dir.join(format!("subdir_server_{label}.exe"));
-        let build =
-            vyrn().arg("build").arg(path).arg("-o").arg(&exe).output().expect("build server");
+        let build = vyrn()
+            .arg("build")
+            .arg(path)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build server");
         assert!(
             build.status.success(),
             "{label}/server.vyrn: native build must succeed, got:\n{}{}",
@@ -550,7 +629,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -562,9 +645,17 @@ fn main() -> Int64 {
     // A merged specialization is the failure this is really about: `twice<Int64>`
     // and `twice<String>` are the same source and different code, and merging
     // them prints a plausible number where a string belongs.
-    assert_eq!(norm(&interp.stdout), "42\nhi\ntrue\n", "the interpreter moved");
+    assert_eq!(
+        norm(&interp.stdout),
+        "42\nhi\ntrue\n",
+        "the interpreter moved"
+    );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -623,7 +714,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -642,7 +737,11 @@ fn main() -> Int64 {
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -728,7 +827,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -745,7 +848,11 @@ fn main() -> Int64 {
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -804,7 +911,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -816,9 +927,17 @@ fn main() -> Int64 {
     // Spelled out, because the failure was a plausible-looking string rather than
     // a crash: garbage bytes where "hi there" belonged, and a byte count where a
     // character count belonged.
-    assert_eq!(norm(&interp.stdout), "hi there\ntrue\n-7\n5\n6\n0\n", "the interpreter moved");
+    assert_eq!(
+        norm(&interp.stdout),
+        "hi there\ntrue\n-7\n5\n6\n0\n",
+        "the interpreter moved"
+    );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -916,7 +1035,11 @@ fn main() -> Int64 {
             .arg(&module)
             .output()
             .expect("build wasm");
-        assert!(build.status.success(), "{name}: {}", String::from_utf8_lossy(&build.stderr));
+        assert!(
+            build.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
 
         let mut interp_cmd = vyrn();
         interp_cmd.arg("run").arg(&path);
@@ -926,7 +1049,11 @@ fn main() -> Int64 {
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
         assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{name}: stdout");
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{name}: stderr");
+        assert_eq!(
+            runtime_err(&interp.stderr),
+            runtime_err(&w.stderr),
+            "{name}: stderr"
+        );
         assert_eq!(interp.status.code(), w.status.code(), "{name}: exit");
         // Comparing two backends would pass if both were silently wrong about
         // which failure happened, so the interpreter's own answer is pinned.
@@ -1066,7 +1193,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -1089,7 +1220,11 @@ fn main() -> Int64 {
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 
     // The numeric traps, at widths other than `Int64` — the divide-overflow guard
@@ -1274,7 +1409,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -1294,7 +1433,11 @@ fn main() -> Int64 {
     );
     assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -1558,7 +1701,13 @@ fn main() -> Int64 {
         ),
         // The NUL line is `None`, so the loop ends there — one line printed, and
         // the rest of stdin unread. That IS the semantics, not a truncation bug.
-        ("nulline", lines, Some(stdin_bad), no_args.clone(), "1 [good] 6\nlines 1\n"),
+        (
+            "nulline",
+            lines,
+            Some(stdin_bad),
+            no_args.clone(),
+            "1 [good] 6\nlines 1\n",
+        ),
         (
             "files",
             files,
@@ -1616,18 +1765,31 @@ fn main() -> Int64 {
             .arg(&module)
             .output()
             .expect("build wasm");
-        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+        assert!(
+            build.status.success(),
+            "{what}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
 
         let mut interp_cmd = vyrn();
         interp_cmd.arg("run").arg(&path).args(&prog_args);
         let interp = run_io(interp_cmd, &dir, &stdin_path);
         let mut wasm_cmd = Command::new(&wasmtime);
-        wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module).args(&prog_args);
+        wasm_cmd
+            .arg("run")
+            .arg("--dir")
+            .arg(".")
+            .arg(&module)
+            .args(&prog_args);
         let w = run_io(wasm_cmd, &dir, &stdin_path);
 
         assert_eq!(norm(&interp.stdout), want, "{what}: the interpreter moved");
         assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(
+            runtime_err(&interp.stderr),
+            runtime_err(&w.stderr),
+            "{what}: stderr"
+        );
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
     }
 }
@@ -1691,7 +1853,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -1700,9 +1866,17 @@ fn main() -> Int64 {
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
-    assert_eq!(norm(&interp.stdout), "20000\n20101\n", "the interpreter moved");
+    assert_eq!(
+        norm(&interp.stdout),
+        "20000\n20101\n",
+        "the interpreter moved"
+    );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -1768,7 +1942,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -1792,7 +1970,11 @@ fn main() -> Int64 {
         "the reader moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -1919,7 +2101,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -1937,7 +2123,11 @@ fn main() -> Int64 {
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -2011,7 +2201,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -2026,10 +2220,13 @@ fn main() -> Int64 {
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
-
 
 /// The three things a `Task` (RFC-0025) can be that no example makes one of.
 ///
@@ -2085,8 +2282,11 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
              p.a = 99\n let q = t.join()\n print(p.a)\n print(q.a)\n print(q.b)\n \
              return 0\n}\n",
         ),
-        ("unit", "fn noop(x: Int64) {\n let y = x + 1\n}\n\
-             fn main() -> Int64 {\n let t = spawn noop(3)\n t.join()\n print(1)\n return 0\n}\n"),
+        (
+            "unit",
+            "fn noop(x: Int64) {\n let y = x + 1\n}\n\
+             fn main() -> Int64 {\n let t = spawn noop(3)\n t.join()\n print(1)\n return 0\n}\n",
+        ),
     ] {
         let path = dir.join(format!("{what}.vyrn"));
         std::fs::write(&path, src).unwrap();
@@ -2100,7 +2300,11 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
             .arg(&module)
             .output()
             .expect("build wasm");
-        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+        assert!(
+            build.status.success(),
+            "{what}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
 
         let mut interp_cmd = vyrn();
         interp_cmd.arg("run").arg(&path);
@@ -2110,7 +2314,11 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
         assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(
+            runtime_err(&interp.stderr),
+            runtime_err(&w.stderr),
+            "{what}: stderr"
+        );
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
         // A pass with no output at all would be two engines agreeing on nothing.
         assert!(!norm(&w.stdout).is_empty(), "{what}: printed nothing");
@@ -2250,7 +2458,11 @@ fn main() -> Int64 {
             .arg(&module)
             .output()
             .expect("build wasm");
-        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+        assert!(
+            build.status.success(),
+            "{what}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
 
         let mut interp_cmd = vyrn();
         interp_cmd.arg("run").arg(&path);
@@ -2261,7 +2473,11 @@ fn main() -> Int64 {
 
         // The interpreter's own answers, not a spelling written here: two backends
         // can be confidently wrong about the depth bound together.
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(
+            runtime_err(&interp.stderr),
+            runtime_err(&w.stderr),
+            "{what}: stderr"
+        );
         assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
         // The two cases have to be opposite, or a run in which nothing at all
@@ -2348,7 +2564,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -2363,7 +2583,11 @@ fn main() -> Int64 {
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -2440,7 +2664,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
@@ -2453,7 +2681,11 @@ fn main() -> Int64 {
                 direct first: 42\ndirect second: -1\n";
     assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&w.stderr),
+        "stderr"
+    );
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
@@ -2560,10 +2792,18 @@ fn a_log_sink_is_whichever_descriptor_the_config_named() {
             .arg(&module)
             .output()
             .expect("build wasm");
-        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+        assert!(
+            build.status.success(),
+            "{what}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
 
         let log = dir.join("sink.log");
-        let read_log = || std::fs::read_to_string(&log).unwrap_or_default().replace("\r\n", "\n");
+        let read_log = || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .replace("\r\n", "\n")
+        };
 
         // Twice each, so a sink that APPENDS where the interpreter truncates is a
         // failure rather than a coincidence.
@@ -2585,11 +2825,27 @@ fn a_log_sink_is_whichever_descriptor_the_config_named() {
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
         let wasm_log = read_log();
 
-        assert_eq!(norm(&interp.stdout), want_out, "{what}: the interpreter moved (stdout)");
-        assert_eq!(runtime_err(&interp.stderr), want_err, "{what}: the interpreter moved (stderr)");
-        assert_eq!(interp_log, want_file.unwrap_or("").to_string(), "{what}: the interpreter moved (file)");
+        assert_eq!(
+            norm(&interp.stdout),
+            want_out,
+            "{what}: the interpreter moved (stdout)"
+        );
+        assert_eq!(
+            runtime_err(&interp.stderr),
+            want_err,
+            "{what}: the interpreter moved (stderr)"
+        );
+        assert_eq!(
+            interp_log,
+            want_file.unwrap_or("").to_string(),
+            "{what}: the interpreter moved (file)"
+        );
         assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(
+            runtime_err(&interp.stderr),
+            runtime_err(&w.stderr),
+            "{what}: stderr"
+        );
         assert_eq!(interp_log, wasm_log, "{what}: the log file");
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
     }
@@ -2635,22 +2891,39 @@ fn a_suppressed_log_call_is_not_in_the_module() {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
     let bytes = std::fs::read(&module).unwrap();
-    let has = |needle: &str| {
-        bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
-    };
+    let has = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
     for lvl in ["[TRACE] ", "[DEBUG] ", "[INFO] "] {
-        assert!(!has(lvl), "{lvl} is in the module, so a suppressed call emitted a write");
+        assert!(
+            !has(lvl),
+            "{lvl} is in the module, so a suppressed call emitted a write"
+        );
     }
     for lvl in ["[WARN] ", "[ERROR] "] {
-        assert!(has(lvl), "{lvl} is NOT in the module, so an enabled call emitted nothing");
+        assert!(
+            has(lvl),
+            "{lvl} is NOT in the module, so an enabled call emitted nothing"
+        );
     }
     // The other half of Q4: the suppressed calls' arguments are still evaluated,
     // so their strings are still there. Without this the test would also pass on a
     // backend that dropped the statement whole.
-    for msg in ["gone-trace", "gone-debug", "gone-info", "kept-warn", "kept-error"] {
-        assert!(has(msg), "`{msg}` is not in the module: a suppressed call lost its argument");
+    for msg in [
+        "gone-trace",
+        "gone-debug",
+        "gone-info",
+        "kept-warn",
+        "kept-error",
+    ] {
+        assert!(
+            has(msg),
+            "`{msg}` is not in the module: a suppressed call lost its argument"
+        );
     }
 }
 
@@ -2750,10 +3023,21 @@ fn three_engines(
     let mut interp_cmd = vyrn();
     interp_cmd.arg("run").arg(&path);
     let i = run_io(interp_cmd, &dir, &no_stdin);
-    out.push(("interp", norm(&i.stdout), runtime_err(&i.stderr), i.status.code()));
+    out.push((
+        "interp",
+        norm(&i.stdout),
+        runtime_err(&i.stderr),
+        i.status.code(),
+    ));
 
     let exe = dir.join(format!("{what}.exe"));
-    let b = vyrn().arg("build").arg(&path).arg("-o").arg(&exe).output().expect("build native");
+    let b = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("build native");
     assert!(
         b.status.success(),
         "{what}: NATIVE BUILD FAILED\n{}{}",
@@ -2761,7 +3045,12 @@ fn three_engines(
         norm(&b.stderr)
     );
     let n = run_io(Command::new(&exe), &dir, &no_stdin);
-    out.push(("native", norm(&n.stdout), runtime_err(&n.stderr), n.status.code()));
+    out.push((
+        "native",
+        norm(&n.stdout),
+        runtime_err(&n.stderr),
+        n.status.code(),
+    ));
 
     if let Some(wasmtime) = wasmtime() {
         let module = dir.join(format!("{what}.wasm"));
@@ -2774,11 +3063,20 @@ fn three_engines(
             .arg(&module)
             .output()
             .expect("build wasm");
-        assert!(b.status.success(), "{what}: wasm build: {}", norm(&b.stderr));
+        assert!(
+            b.status.success(),
+            "{what}: wasm build: {}",
+            norm(&b.stderr)
+        );
         let mut c = Command::new(&wasmtime);
         c.arg("run").arg(&module);
         let w = run_io(c, &dir, &no_stdin);
-        out.push(("wasm", norm(&w.stdout), runtime_err(&w.stderr), w.status.code()));
+        out.push((
+            "wasm",
+            norm(&w.stdout),
+            runtime_err(&w.stderr),
+            w.status.code(),
+        ));
     }
     out
 }
@@ -2788,14 +3086,16 @@ fn three_engines(
 /// three of the defects below exactly two were.
 fn all_agree(rows: &[(&str, String, String, Option<i32>)], what: &str) {
     let (_, out, err, code) = &rows[0];
-    assert!(!out.is_empty() || !err.is_empty(), "{what}: no engine printed anything");
+    assert!(
+        !out.is_empty() || !err.is_empty(),
+        "{what}: no engine printed anything"
+    );
     for (eng, o, e, c) in &rows[1..] {
         assert_eq!(o, out, "{what}: {eng} stdout");
         assert_eq!(e, err, "{what}: {eng} stderr");
         assert_eq!(c, code, "{what}: {eng} exit");
     }
 }
-
 
 /// `NaN != NaN` is TRUE, and native was the one engine that said otherwise.
 ///
@@ -2844,7 +3144,10 @@ fn main() -> Int64 {
     // Spelled out as well as compared, because "all three engines say 0" is what
     // the bug looked like: the interpreter is the reference, so its answer is
     // asserted against IEEE 754 rather than against the other two.
-    assert_eq!(rows[0].1, "1\n0\n0\n0\n0\n0\n1\n1\n0\n", "IEEE 754: only `!=` is unordered");
+    assert_eq!(
+        rows[0].1, "1\n0\n0\n0\n0\n0\n1\n1\n0\n",
+        "IEEE 754: only `!=` is unordered"
+    );
 }
 
 /// A contextual array literal is built at the element type its slot DECLARES.
@@ -2961,7 +3264,10 @@ fn main() -> Int64 {
     );
     all_agree(&rows, "validated");
     assert_eq!(rows[0].1, "50\n", "the valid pair prints before the trap");
-    assert_eq!(rows[0].2, "error: validation failed for `Age`\n", "5 is not an `Age`");
+    assert_eq!(
+        rows[0].2, "error: validation failed for `Age`\n",
+        "5 is not an `Age`"
+    );
     assert_eq!(rows[0].3, Some(1), "a failed validation exits 1");
 }
 
@@ -3133,7 +3439,10 @@ fn main() -> Int64 {
     all_agree(&rows, "balance");
     // The interpreter's own numbers, and every one of them requires the run to
     // have got past 64 regions: 4900 is 70 returns, and the rest are 200 turns.
-    assert_eq!(rows[0].1, "4900\n900\n20100\n5050\nn=199\n100\n400\n", "the balanced answers");
+    assert_eq!(
+        rows[0].1, "4900\n900\n20100\n5050\nn=199\n100\n400\n",
+        "the balanced answers"
+    );
     assert_eq!(rows[0].2, "", "nothing traps once the stack balances");
     assert_eq!(rows[0].3, Some(0), "exit 0");
 
@@ -3163,7 +3472,10 @@ fn main() -> Int64 {
     );
     all_agree(&rows, "deep");
     assert_eq!(rows[0].1, "63\n", "63 nested regions are fine");
-    assert_eq!(rows[0].2, "error: region nesting exceeds 64\n", "the 65th is not");
+    assert_eq!(
+        rows[0].2, "error: region nesting exceeds 64\n",
+        "the 65th is not"
+    );
     assert_eq!(rows[0].3, Some(1));
 }
 
@@ -3223,10 +3535,12 @@ fn main() -> Int64 {
     // Spelled out, not only compared: the failure this is about is a message that
     // still looks like a message — one byte short, or the prefix in the wrong
     // place — and three engines can be wrong together about where `error: ` goes.
-    assert_eq!(rows[0].1, "n=7\nrégion\n", "the live arm ran, and the region printed");
     assert_eq!(
-        rows[0].2,
-        "error: wrøng tag «bäd» — nothing to label (bytes.vyrn:5)\n",
+        rows[0].1, "n=7\nrégion\n",
+        "the live arm ran, and the region printed"
+    );
+    assert_eq!(
+        rows[0].2, "error: wrøng tag «bäd» — nothing to label (bytes.vyrn:5)\n",
         "the caller's text, framed by the compiler, with the site the loader stamped"
     );
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
@@ -3252,10 +3566,12 @@ fn main() -> Int64 {
 "#,
     );
     all_agree(&rows, "region");
-    assert_eq!(rows[0].1, "hëld\n", "the region's own String survived to be printed");
     assert_eq!(
-        rows[0].2,
-        "error: inside two regions, 1 deep (region.vyrn:9)\n",
+        rows[0].1, "hëld\n",
+        "the region's own String survived to be printed"
+    );
+    assert_eq!(
+        rows[0].2, "error: inside two regions, 1 deep (region.vyrn:9)\n",
         "the message, in full"
     );
     assert_eq!(rows[0].3, Some(1));
@@ -3317,8 +3633,7 @@ fn main() -> Int64 {
     );
     all_agree(&rows, "never");
     assert_eq!(
-        rows[0].1,
-        "5\n6\n9\nthen-wins\nelse-wins\nregion intact\n",
+        rows[0].1, "5\n6\n9\nthen-wins\nelse-wins\nregion intact\n",
         "every join took the arm that has a value"
     );
     assert_eq!(rows[0].2, "", "nothing panicked");
@@ -3382,10 +3697,12 @@ fn main() -> Int64 {
 "#,
     );
     all_agree(&rows, "panicsite");
-    assert_eq!(rows[0].1, "2\n", "the live access answered before the dead one refused");
     assert_eq!(
-        rows[0].2,
-        "error: cage: no such key (bank.vyrn:10)\n",
+        rows[0].1, "2\n",
+        "the live access answered before the dead one refused"
+    );
+    assert_eq!(
+        rows[0].2, "error: cage: no such key (bank.vyrn:10)\n",
         "the projection's own file and line, not the access site's"
     );
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
@@ -3450,17 +3767,18 @@ fn main() -> Int64 {
     );
     all_agree(&rows, "both");
     assert_eq!(
-        rows[0].1,
-        "5\n-1\n1\n-1\n2\n4\n1\n",
+        rows[0].1, "5\n-1\n1\n-1\n2\n4\n1\n",
         "both sums unwrap, the chain is right-associative, and an untaken `panic` costs nothing"
     );
     // The discarded `Err` payload — a fresh interpolated String on each failing
     // call — appears on NEITHER channel. `Failure`'s binder exists so the payload
     // is bound and goes nowhere, not so it can be read.
-    assert!(!rows[0].1.contains("bad «"), "an error payload reached stdout");
+    assert!(
+        !rows[0].1.contains("bad «"),
+        "an error payload reached stdout"
+    );
     assert_eq!(
-        rows[0].2,
-        "error: no number in «tvä» (both.vyrn:24)\n",
+        rows[0].2, "error: no number in «tvä» (both.vyrn:24)\n",
         "the only text on stderr is the reason the caller wrote, and where they wrote it"
     );
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
@@ -3564,8 +3882,7 @@ fn main() -> Int64 {
     );
     all_agree(&rows, "accum");
     assert_eq!(
-        rows[0].1,
-        "[]\n[0,]\n[0,1,2,3,]\ncd!\n<0><1><2>\n[x\n[xx\n[xxx\n[xxx\n",
+        rows[0].1, "[]\n[0,]\n[0,1,2,3,]\ncd!\n<0><1><2>\n[x\n[xx\n[xxx\n[xxx\n",
         "an empty loop, one turn, four turns, a reset mid-way, a per-turn `let`, \
          and the aliased accumulator that still copies"
     );
@@ -3688,7 +4005,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let out = Command::new(&wasmtime)
         .arg("run")
@@ -3709,7 +4030,10 @@ fn main() -> Int64 {
          spinning again"
     );
     assert_eq!(out.status.code(), Some(1), "exit 1, like every trap");
-    assert!(out.stdout.is_empty(), "the loop never completes, so nothing is printed");
+    assert!(
+        out.stdout.is_empty(),
+        "the loop never completes, so nothing is printed"
+    );
     // Parity compares stderr byte for byte, so the wasm wording is not a spelling
     // chosen here — it is the one `__vyrn_alloc_check` already prints for the same
     // failure on native.
@@ -3787,7 +4111,11 @@ fn main() -> Int64 {
         .arg(&module)
         .output()
         .expect("build wasm");
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let call = |n: &str| {
         Command::new(&wasmtime)
@@ -3812,12 +4140,24 @@ fn main() -> Int64 {
             "malloc({n}) must trap, got:\n{}",
             norm(&out.stderr)
         );
-        assert_eq!(out.status.code(), Some(1), "malloc({n}): exit 1, like every trap");
-        assert!(out.stdout.is_empty(), "malloc({n}) returned a pointer: {:?}", norm(&out.stdout));
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "malloc({n}): exit 1, like every trap"
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "malloc({n}) returned a pointer: {:?}",
+            norm(&out.stdout)
+        );
     }
 
     let ok = call("64");
-    assert_eq!(ok.status.code(), Some(0), "64 bytes is an ordinary allocation");
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "64 bytes is an ordinary allocation"
+    );
     assert!(
         !norm(&ok.stdout).trim().is_empty(),
         "64 bytes must still come back as a pointer, or the check is just a trap"

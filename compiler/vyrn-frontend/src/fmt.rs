@@ -81,14 +81,7 @@ struct Roles {
 fn is_type_end(t: Option<&Tok>) -> bool {
     matches!(
         t,
-        Some(
-            Tok::Ident(_)
-                | Tok::Gt
-                | Tok::Shr
-                | Tok::Int(_)
-                | Tok::RParen
-                | Tok::RBrace
-        )
+        Some(Tok::Ident(_) | Tok::Gt | Tok::Shr | Tok::Int(_) | Tok::RParen | Tok::RBrace)
     )
 }
 
@@ -185,7 +178,10 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                 // rule does not reach. No comparison can follow `impl`, so this
                 // costs no ambiguity.
                 let prev_ok = matches!(prev, Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Impl));
-                let next_ok = matches!(next, Some(Tok::Ident(_)) | Some(Tok::Fn) | Some(Tok::LBrace));
+                let next_ok = matches!(
+                    next,
+                    Some(Tok::Ident(_)) | Some(Tok::Fn) | Some(Tok::LBrace)
+                );
                 if tight_before && tight_after && prev_ok && next_ok {
                     roles[idx].generic_angle = true;
                     generic_depth += 1;

@@ -314,7 +314,11 @@ fn main() -> Int64 {
 "#,
     )
     .unwrap();
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run vyrn");
     assert!(
         out.status.success(),
         "run failed:\nstdout: {}\nstderr: {}",
@@ -329,7 +333,10 @@ fn an_fn_member_with_a_default_is_optional() {
     // `fn label() -> String = "untitled"` — the module omits it, and its absence
     // is silent, exactly as a `let` member's default already made it. Without the
     // default the same module would be told it must export `label`.
-    let out = run_widget_fixture("optfn", "export fn view() -> String {\n    return \"v\"\n}\n");
+    let out = run_widget_fixture(
+        "optfn",
+        "export fn view() -> String {\n    return \"v\"\n}\n",
+    );
     assert!(!out.contains("widget contract.missing"), "{out}");
     assert!(out.contains("supplies=false"), "{out}");
 }
@@ -373,7 +380,11 @@ fn a_named_member_may_not_leave_its_parameters_open() {
         "contract P { fn head(..) -> String }\nfn main() -> Int64 { return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run vyrn");
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -390,7 +401,11 @@ fn the_open_rule_may_not_have_a_default() {
         "contract P { fn *(a: String) -> String = \"\" }\nfn main() -> Int64 { return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run vyrn");
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -485,7 +500,11 @@ fn run_alt(tag: &str, module: &str) -> String {
     std::fs::write(dir.join("gen.vyrn"), ALT_GEN).unwrap();
     std::fs::write(dir.join("app.vyrn"), ALT_APP).unwrap();
     std::fs::write(dir.join("mod.vyrn"), module).unwrap();
-    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run vyrn");
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
@@ -497,11 +516,20 @@ fn run_alt(tag: &str, module: &str) -> String {
 fn any_one_alternative_satisfies_the_member() {
     for (arity, module) in [
         (0, "export fn render() -> String {\n    return \"\"\n}\n"),
-        (1, "export fn render(a: Int64) -> String {\n    return \"\"\n}\n"),
-        (2, "export fn render(a: Int64, b: String) -> String {\n    return \"\"\n}\n"),
+        (
+            1,
+            "export fn render(a: Int64) -> String {\n    return \"\"\n}\n",
+        ),
+        (
+            2,
+            "export fn render(a: Int64, b: String) -> String {\n    return \"\"\n}\n",
+        ),
     ] {
         let out = run_alt(&format!("alt{arity}"), module);
-        assert!(!out.contains("contract."), "shape {arity} must satisfy `render`:\n{out}");
+        assert!(
+            !out.contains("contract."),
+            "shape {arity} must satisfy `render`:\n{out}"
+        );
         assert!(
             out.contains(&format!("matched={arity}")),
             "the generator learns WHICH shape it got (expected {arity}):\n{out}"
@@ -517,8 +545,14 @@ fn an_export_matching_no_alternative_names_all_of_them() {
         "export fn render(a: Int64, b: String, c: Bool) -> String {\n    return \"\"\n}\n",
     );
     let hits = out.matches("contract.type").count();
-    assert_eq!(hits, 1, "one issue for one member, not one per alternative:\n{out}");
-    assert!(out.contains("must be one of"), "the wording admits several shapes:\n{out}");
+    assert_eq!(
+        hits, 1,
+        "one issue for one member, not one per alternative:\n{out}"
+    );
+    assert!(
+        out.contains("must be one of"),
+        "the wording admits several shapes:\n{out}"
+    );
     assert!(
         out.contains("fn() -> String") && out.contains("fn(T, R) -> String"),
         "every alternative is named:\n{out}"
@@ -530,9 +564,18 @@ fn a_default_on_any_alternative_makes_the_name_optional() {
     // `render`'s FIRST alternative carries a default, so omitting the export
     // entirely is legal — optionality is a property of the name, because an
     // absent export is absent at every shape.
-    let out = run_alt("altmissing", "fn helper() -> String {\n    return \"\"\n}\n");
-    assert!(!out.contains("contract.missing"), "the member is optional:\n{out}");
-    assert!(out.contains("matched=-1"), "and reported as not supplied:\n{out}");
+    let out = run_alt(
+        "altmissing",
+        "fn helper() -> String {\n    return \"\"\n}\n",
+    );
+    assert!(
+        !out.contains("contract.missing"),
+        "the member is optional:\n{out}"
+    );
+    assert!(
+        out.contains("matched=-1"),
+        "and reported as not supplied:\n{out}"
+    );
 }
 
 #[test]
@@ -546,10 +589,17 @@ fn a_name_cannot_change_member_form_between_alternatives() {
          fn main() -> Int64 { return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run vyrn");
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "must be refused:\n{err}");
-    assert!(err.contains("both a value and a function"), "naming the reason:\n{err}");
+    assert!(
+        err.contains("both a value and a function"),
+        "naming the reason:\n{err}"
+    );
 }
 
 #[test]
@@ -561,7 +611,11 @@ fn a_contract_still_has_at_most_one_open_rule() {
          fn main() -> Int64 { return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run vyrn");
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "must be refused:\n{err}");
     assert!(err.contains("at most one"), "naming the reason:\n{err}");
@@ -582,22 +636,46 @@ fn a_contract_still_has_at_most_one_open_rule() {
 #[test]
 fn why_contract_reports_the_matched_shape_of_a_real_page() {
     let page = repo_dir("examples/bin/app/routes/index.vyx");
-    let out = vyrn().arg("why").arg("--contract").arg(&page).output().expect("why");
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(&page)
+        .output()
+        .expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "why must answer:\n{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "why must answer:\n{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         text.contains("role: directory") && text.contains("examples/bin/app/routes"),
         "the role, discovered from the generator call site:\n{text}"
     );
-    assert!(text.contains("contract: Page (std/ui)"), "the resolved contract:\n{text}");
-    assert!(text.contains("std/ui.vyrn"), "where it is declared:\n{text}");
+    assert!(
+        text.contains("contract: Page (std/ui)"),
+        "the resolved contract:\n{text}"
+    );
+    assert!(
+        text.contains("std/ui.vyrn"),
+        "where it is declared:\n{text}"
+    );
     // `export fn head() -> Head` is the first of `head`'s four shapes, and
     // `Lazy<Array<Paste>>` is the second of `data`'s — laziness is a TYPE now
     // (RFC-0071 M2b), so the report reads it off the declaration.
-    assert!(text.contains("ok        head: shape 1 of 4"), "head's shape:\n{text}");
-    assert!(text.contains("ok        data: shape 2 of 4"), "data's shape:\n{text}");
+    assert!(
+        text.contains("ok        head: shape 1 of 4"),
+        "head's shape:\n{text}"
+    );
+    assert!(
+        text.contains("ok        data: shape 2 of 4"),
+        "data's shape:\n{text}"
+    );
     // Private helpers are outside the contract entirely.
-    assert!(!text.contains("isLoading"), "a helper is not part of the surface:\n{text}");
+    assert!(
+        !text.contains("isLoading"),
+        "a helper is not part of the surface:\n{text}"
+    );
     // A `.vyx`'s `<template>` IS its page. The report read the `<script>` and
     // called the page absent — of every `.vyx` in the corpus, none of which can
     // be written any other way.
@@ -611,7 +689,10 @@ fn why_contract_reports_the_matched_shape_of_a_real_page() {
     );
     // `respond` is the alternative to `page`, and this page has a view: the
     // correction is about the member the template writes, not about absence.
-    assert!(text.contains("default   respond: absent, optional"), "{text}");
+    assert!(
+        text.contains("default   respond: absent, optional"),
+        "{text}"
+    );
 }
 
 /// A `.http` projection sits in the api DIRECTORY and is not a procedure module:
@@ -620,24 +701,46 @@ fn why_contract_reports_the_matched_shape_of_a_real_page() {
 #[test]
 fn why_contract_refuses_to_grade_a_projection() {
     let proj = repo_dir("examples/bin/server/api/pastes.http.vyrn");
-    let out = vyrn().arg("why").arg("--contract").arg(&proj).output().expect("why");
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(&proj)
+        .output()
+        .expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("no contract: this file is in no role"), "{text}");
-    assert!(text.contains("its stem is dotted"), "naming the reason:\n{text}");
+    assert!(
+        text.contains("no contract: this file is in no role"),
+        "{text}"
+    );
+    assert!(
+        text.contains("its stem is dotted"),
+        "naming the reason:\n{text}"
+    );
     assert!(
         !text.contains("matches the open rule"),
         "and never grades `routes()`/`feeds()` against `Api`:\n{text}"
     );
-    assert!(!out.status.success(), "no contract governs it, which is not the question asked");
+    assert!(
+        !out.status.success(),
+        "no contract governs it, which is not the question asked"
+    );
 
     // The procedure module BESIDE it is unaffected — the rule is the dot, not
     // the directory.
     let procs = repo_dir("examples/bin/server/api/pastes.vyrn");
-    let out = vyrn().arg("why").arg("--contract").arg(&procs).output().expect("why");
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(&procs)
+        .output()
+        .expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "{text}");
     assert!(text.contains("contract: Api (std/rpc)"), "{text}");
-    assert!(text.contains("ok        recent: matches the open rule"), "{text}");
+    assert!(
+        text.contains("ok        recent: matches the open rule"),
+        "{text}"
+    );
 }
 
 /// A layout is chrome, not a page: it is in no role, and `why` says so rather
@@ -645,10 +748,21 @@ fn why_contract_refuses_to_grade_a_projection() {
 #[test]
 fn why_contract_says_a_layout_is_in_no_role() {
     let layout = repo_dir("examples/bin/app/routes/layout.vyx");
-    let out = vyrn().arg("why").arg("--contract").arg(&layout).output().expect("why");
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(&layout)
+        .output()
+        .expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("no contract: this file is in no role"), "{text}");
-    assert!(!out.status.success(), "and that is not the answer that was asked for");
+    assert!(
+        text.contains("no contract: this file is in no role"),
+        "{text}"
+    );
+    assert!(
+        !out.status.success(),
+        "and that is not the answer that was asked for"
+    );
 }
 
 /// The four statuses on a synthetic page: satisfied, defaulted, unknown with a
@@ -664,7 +778,11 @@ fn why_contract_reports_every_status_class() {
          fn main() -> Int64 { return 0 }\n",
     )
     .unwrap();
-    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"why\", \"main\": \"app.vyrn\" }\n").unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"why\", \"main\": \"app.vyrn\" }\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("pages/index.vyx"),
         "<script>\n\
@@ -685,8 +803,14 @@ fn why_contract_reports_every_status_class() {
         .output()
         .expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("ok        data: shape 1 of 4"), "satisfied:\n{text}");
-    assert!(text.contains("default   head: absent, optional"), "defaulted:\n{text}");
+    assert!(
+        text.contains("ok        data: shape 1 of 4"),
+        "satisfied:\n{text}"
+    );
+    assert!(
+        text.contains("default   head: absent, optional"),
+        "defaulted:\n{text}"
+    );
     assert!(
         text.contains("ok        page: the `<template>` compiles to it"),
         "synthesized by the form, which is a fifth status class:\n{text}"
@@ -710,9 +834,13 @@ fn why_contract_reports_every_status_class() {
 #[test]
 fn why_contract_resolves_the_open_component_contract() {
     let widget = repo_dir("examples/bin/app/widgets/CreateForm.vyx");
-    let out = vyrn().arg("why").arg("--contract").arg(&widget).output().expect("why");
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(&widget)
+        .output()
+        .expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "{text}");
     assert!(text.contains("contract: Component (std/vyx)"), "{text}");
 }
-

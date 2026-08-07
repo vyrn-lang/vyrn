@@ -1008,9 +1008,9 @@ fn reads_place(e: &Expr) -> bool {
         Expr::Unary { expr, .. } => reads_place(expr),
         Expr::Binary { lhs, rhs, .. } => reads_place(lhs) || reads_place(rhs),
         Expr::ArrayLit { elems, .. } => elems.iter().any(reads_place),
-        Expr::MapLit { entries, .. } => {
-            entries.iter().any(|(k, v)| reads_place(k) || reads_place(v))
-        }
+        Expr::MapLit { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| reads_place(k) || reads_place(v)),
         _ => true,
     }
 }
@@ -1244,8 +1244,8 @@ impl Parser {
                 // `export mut fn ..` (RFC-0074 M4a) — `export` is outermost, the
                 // same order `export gen fn` / `export extern fn` already use, so
                 // there is one spelling to read and one to write.
-                let is_export_mut = *self.peek() == Tok::Mut
-                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
+                let is_export_mut =
+                    *self.peek() == Tok::Mut && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
                 if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol)
                     && !is_export_extern
                     && !is_export_gen
@@ -1751,8 +1751,10 @@ impl Parser {
                 }
                 let same_form = matches!(
                     (&prev.kind, &member.kind),
-                    (ContractMemberKind::Value { .. }, ContractMemberKind::Value { .. })
-                        | (ContractMemberKind::Fn { .. }, ContractMemberKind::Fn { .. })
+                    (
+                        ContractMemberKind::Value { .. },
+                        ContractMemberKind::Value { .. }
+                    ) | (ContractMemberKind::Fn { .. }, ContractMemberKind::Fn { .. })
                 );
                 if !same_form {
                     return Err(Diagnostic::error(
@@ -1854,7 +1856,8 @@ impl Parser {
         // `fn *(..) -> R` — the open rule may leave its parameters open, so it
         // constrains the return type only. `..` is two `.` tokens; there is no
         // dedicated one, and nothing else can follow `(` in this position.
-        let variadic = *self.peek() == Tok::Dot && self.tokens.get(self.pos + 1).map(|t| &t.tok) == Some(&Tok::Dot);
+        let variadic = *self.peek() == Tok::Dot
+            && self.tokens.get(self.pos + 1).map(|t| &t.tok) == Some(&Tok::Dot);
         if variadic {
             if name != OPEN_RULE_NAME {
                 return Err(Diagnostic::error(
@@ -3411,7 +3414,7 @@ impl Parser {
     /// number (diagnostics point at the real `else if`, not the outer `if`).
     fn if_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {
         self.advance(); // `if`
-        // `if let PAT = e { .. }` (RFC-0060): the pattern-binding form.
+                        // `if let PAT = e { .. }` (RFC-0060): the pattern-binding form.
         if *self.peek() == Tok::Let {
             return self.if_let_stmt(line);
         }
@@ -3437,7 +3440,7 @@ impl Parser {
         if *self.peek() == Tok::If {
             let else_line = self.line();
             self.advance(); // `if`
-            // `else if let` chains the pattern form; `else if` the ordinary one.
+                            // `else if let` chains the pattern form; `else if` the ordinary one.
             let nested = if *self.peek() == Tok::Let {
                 self.if_let_stmt(else_line)?
             } else {
@@ -3704,10 +3707,18 @@ impl Parser {
                                 let (index, value) = if moves.is_empty() {
                                     (index, value)
                                 } else {
-                                    let i =
-                                        hoist_operand(index, format!("{recv}[]idx"), &mut hoists, line);
-                                    let v =
-                                        hoist_operand(value, format!("{recv}[]val"), &mut hoists, line);
+                                    let i = hoist_operand(
+                                        index,
+                                        format!("{recv}[]idx"),
+                                        &mut hoists,
+                                        line,
+                                    );
+                                    let v = hoist_operand(
+                                        value,
+                                        format!("{recv}[]val"),
+                                        &mut hoists,
+                                        line,
+                                    );
                                     (i, v)
                                 };
                                 hoists.extend(moves);
@@ -3769,8 +3780,12 @@ impl Parser {
                                         &mut hoists,
                                         line,
                                     );
-                                    let value =
-                                        hoist_operand(value, format!("{tmp}val"), &mut hoists, line);
+                                    let value = hoist_operand(
+                                        value,
+                                        format!("{tmp}val"),
+                                        &mut hoists,
+                                        line,
+                                    );
                                     // `let mut @tmp = a[i]`, `@tmp.f = v`, then
                                     // `a[i] = @tmp` — inside whatever move-out /
                                     // move-back `place_receiver` asked for.
@@ -3800,10 +3815,7 @@ impl Parser {
                                     pre.push(Stmt::IndexSet {
                                         name: recv,
                                         index,
-                                        value: Expr::Var {
-                                            name: tmp,
-                                            line,
-                                        },
+                                        value: Expr::Var { name: tmp, line },
                                         line,
                                     });
                                     hoists.extend(pre);
@@ -4893,7 +4905,10 @@ impl Parser {
                             body: call("Loaded", vec![var("@v")]),
                         },
                         MatchArm {
-                            pattern: Pattern::Variant("Invalid".to_string(), vec!["@i".to_string()]),
+                            pattern: Pattern::Variant(
+                                "Invalid".to_string(),
+                                vec!["@i".to_string()],
+                            ),
                             body: call("Corrupt", vec![var("@i")]),
                         },
                     ],
@@ -4924,7 +4939,10 @@ impl Parser {
                             body: var("@v"),
                         },
                         MatchArm {
-                            pattern: Pattern::Variant("Invalid".to_string(), vec!["@i".to_string()]),
+                            pattern: Pattern::Variant(
+                                "Invalid".to_string(),
+                                vec!["@i".to_string()],
+                            ),
                             body: default.clone(),
                         },
                     ],
@@ -5265,7 +5283,8 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let (_, errs) = parse_accum(lex(src).unwrap());
         assert!(
-            errs.iter().any(|e| e.message.contains("yields, it does not return")),
+            errs.iter()
+                .any(|e| e.message.contains("yields, it does not return")),
             "{errs:?}"
         );
     }
@@ -5277,7 +5296,8 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let (_, errs) = parse_accum(lex(src).unwrap());
         assert!(
-            errs.iter().any(|e| e.message.contains("needs a return type")),
+            errs.iter()
+                .any(|e| e.message.contains("needs a return type")),
             "{errs:?}"
         );
     }
@@ -5307,7 +5327,11 @@ mod tests {
             panic!("expected a while loop");
         };
         assert_eq!(*cond, Expr::Bool(true));
-        let Stmt::IfLet { else_block: Some(eb), .. } = &body.stmts[0] else {
+        let Stmt::IfLet {
+            else_block: Some(eb),
+            ..
+        } = &body.stmts[0]
+        else {
             panic!("expected an if-let as the while body");
         };
         assert!(matches!(eb.stmts[0], Stmt::Break { .. }));
@@ -5318,8 +5342,7 @@ mod tests {
         let src = "fn main() -> Int64 { let x = if let Some(v) = f() { v } else { 0 } return x }";
         let err = parse(lex(src).unwrap()).unwrap_err();
         assert!(
-            err.render().contains("`if let` is a statement")
-                && err.render().contains("match"),
+            err.render().contains("`if let` is a statement") && err.render().contains("match"),
             "{}",
             err.render()
         );
@@ -5332,7 +5355,11 @@ mod tests {
                    else if let Ok(b) = g() { return b } \
                    else { return 0 } }";
         let p = parse_src(src);
-        let Stmt::IfLet { else_block: Some(eb), .. } = &p.functions[0].body.stmts[0] else {
+        let Stmt::IfLet {
+            else_block: Some(eb),
+            ..
+        } = &p.functions[0].body.stmts[0]
+        else {
             panic!("expected an if-let");
         };
         assert!(matches!(eb.stmts[0], Stmt::IfLet { .. }));
@@ -5482,12 +5509,26 @@ mod tests {
         );
         let c = p.functions.iter().find(|f| f.name == "create").unwrap();
         assert!(c.is_mut && c.exported && !c.is_gen && !c.is_extern);
-        assert!(p.functions.iter().find(|f| f.name == "touch").unwrap().is_mut);
-        assert!(!p.functions.iter().find(|f| f.name == "read").unwrap().is_mut);
+        assert!(
+            p.functions
+                .iter()
+                .find(|f| f.name == "touch")
+                .unwrap()
+                .is_mut
+        );
+        assert!(
+            !p.functions
+                .iter()
+                .find(|f| f.name == "read")
+                .unwrap()
+                .is_mut
+        );
         // A local `let mut` is untouched — `mut` only starts a declaration
         // directly before `fn`, and only at the top level.
-        assert!(matches!(&p.functions.iter().find(|f| f.name == "main").unwrap().body.stmts[0],
-            Stmt::Let { name, mutable: true, .. } if name == "n"));
+        assert!(
+            matches!(&p.functions.iter().find(|f| f.name == "main").unwrap().body.stmts[0],
+            Stmt::Let { name, mutable: true, .. } if name == "n")
+        );
     }
 
     #[test]
@@ -5890,7 +5931,13 @@ mod tests {
         );
         let proto = p.protocols.iter().find(|p| p.name == "P").unwrap();
         let doc = |n: &str| {
-            proto.methods.iter().find(|m| m.name == n).unwrap().doc.clone()
+            proto
+                .methods
+                .iter()
+                .find(|m| m.name == n)
+                .unwrap()
+                .doc
+                .clone()
         };
         assert_eq!(doc("show").as_deref(), Some("what show does"));
         assert_eq!(doc("debug"), None, "a blank line detaches the block");
@@ -5925,9 +5972,20 @@ mod tests {
         let p = parse_src("fn main() -> Int64 { let b = x & mask == 0; return 0; }");
         let f = &p.functions[0];
         match &f.body.stmts[0] {
-            Stmt::Let { value: Expr::Binary { op: BinOp::Eq, lhs, .. }, .. } => {
+            Stmt::Let {
+                value: Expr::Binary {
+                    op: BinOp::Eq, lhs, ..
+                },
+                ..
+            } => {
                 assert!(
-                    matches!(**lhs, Expr::Binary { op: BinOp::BitAnd, .. }),
+                    matches!(
+                        **lhs,
+                        Expr::Binary {
+                            op: BinOp::BitAnd,
+                            ..
+                        }
+                    ),
                     "`x & mask == 0` must be `(x & mask) == 0`, got {lhs:?}"
                 );
             }
@@ -5937,7 +5995,15 @@ mod tests {
         // `a + b << c` is `(a + b) << c` (shift looser than additive).
         let p = parse_src("fn main() -> Int64 { let s = a + b << c; return 0; }");
         match &p.functions[0].body.stmts[0] {
-            Stmt::Let { value: Expr::Binary { op: BinOp::Shl, lhs, .. }, .. } => {
+            Stmt::Let {
+                value:
+                    Expr::Binary {
+                        op: BinOp::Shl,
+                        lhs,
+                        ..
+                    },
+                ..
+            } => {
                 assert!(matches!(**lhs, Expr::Binary { op: BinOp::Add, .. }));
             }
             other => panic!("unexpected: {other:?}"),
@@ -5957,7 +6023,10 @@ mod tests {
         );
         assert!(matches!(
             f.body.stmts[0],
-            Stmt::Return { value: Some(Expr::Binary { op: BinOp::Shr, .. }), .. }
+            Stmt::Return {
+                value: Some(Expr::Binary { op: BinOp::Shr, .. }),
+                ..
+            }
         ));
     }
 
@@ -6143,8 +6212,9 @@ mod tests {
     /// statement count and the absence of any loop or `push` can.
     #[test]
     fn index_assign_through_a_record_field_is_a_move() {
-        let p =
-            parse_src("fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[0] = 9  return 0 }");
+        let p = parse_src(
+            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[0] = 9  return 0 }",
+        );
         let stmts = &p.functions[0].body.stmts;
         // [0] is the `let mut s = ..`; the desugar is [1..=3].
         match &stmts[1] {
@@ -6170,11 +6240,18 @@ mod tests {
                 value: Expr::Var { name: v, .. },
                 ..
             } => {
-                assert_eq!((name.as_str(), field.as_str(), v.as_str()), ("s", "xs", "s.xs[]"));
+                assert_eq!(
+                    (name.as_str(), field.as_str(), v.as_str()),
+                    ("s", "xs", "s.xs[]")
+                );
             }
             other => panic!("expected `s.xs = s.xs[]`, got {other:?}"),
         }
-        assert_eq!(stmts.len(), 5, "three statements plus the let and the return");
+        assert_eq!(
+            stmts.len(),
+            5,
+            "three statements plus the let and the return"
+        );
     }
 
     #[test]
@@ -6283,7 +6360,9 @@ mod tests {
             }
             other => panic!("expected `let x = s.xs[].pop()`, got {other:?}"),
         }
-        assert!(matches!(&stmts[3], Stmt::SetField { name, field, .. } if name == "s" && field == "xs"));
+        assert!(
+            matches!(&stmts[3], Stmt::SetField { name, field, .. } if name == "s" && field == "xs")
+        );
     }
 
     #[test]
@@ -6294,7 +6373,8 @@ mod tests {
         let src = "fn main() -> Int64 { let mut s: S = S { xs: [1] }  if s.xs.pop() == None { return 1 }  return 0 }";
         let p = parse_src(src);
         // The parser leaves it alone: the receiver is still the field.
-        assert!(format!("{:?}", p.functions[0].body.stmts).contains(r#"Call { name: "@pop", args: [Field"#));
+        assert!(format!("{:?}", p.functions[0].body.stmts)
+            .contains(r#"Call { name: "@pop", args: [Field"#));
     }
 
     // ---- statement-position `push` writes back through its receiver place ---
@@ -6630,17 +6710,22 @@ mod tests {
     fn duplicate_contract_members_are_rejected() {
         let (_, errors) = parse_accum(lex("contract P { let a: String  let a: Int64 }").unwrap());
         assert!(
-            errors.iter().any(|d| d.message.contains("already declares `a`")),
+            errors
+                .iter()
+                .any(|d| d.message.contains("already declares `a`")),
             "{errors:?}"
         );
     }
 
     #[test]
     fn a_second_open_rule_is_rejected() {
-        let (_, errors) =
-            parse_accum(lex("contract P { fn *(a: String) -> String  fn *(b: Int64) -> Int64 }").unwrap());
+        let (_, errors) = parse_accum(
+            lex("contract P { fn *(a: String) -> String  fn *(b: Int64) -> Int64 }").unwrap(),
+        );
         assert!(
-            errors.iter().any(|d| d.message.contains("already has an open rule")),
+            errors
+                .iter()
+                .any(|d| d.message.contains("already has an open rule")),
             "{errors:?}"
         );
     }
@@ -6658,11 +6743,13 @@ mod tests {
     fn a_broken_contract_recovers_to_the_next_declaration() {
         // Parser recovery must see `contract` as a top-level starter, or a
         // declaration after a broken one would be swallowed.
-        let (p, errors) =
-            parse_accum(lex("fn a() -> Int64 { return 0 }
+        let (p, errors) = parse_accum(
+            lex("fn a() -> Int64 { return 0 }
 contract P { let x }
 contract Q { let y: String }
-").unwrap());
+")
+            .unwrap(),
+        );
         assert!(!errors.is_empty());
         assert_eq!(p.contracts.len(), 1);
         assert_eq!(p.contracts[0].name, "Q");
@@ -6696,7 +6783,10 @@ impl Unwrap for Int64 { type Output = Int64  fn get(self) -> Output { return sel
         assert_eq!(p.protocols[0].assoc, vec!["Output".to_string()]);
         // The protocol keeps `Output` as the type variable it is; the impl has
         // already resolved it, so nothing downstream ever sees the name.
-        assert_eq!(p.protocols[0].methods[0].ret, Type::Param("Output".to_string()));
+        assert_eq!(
+            p.protocols[0].methods[0].ret,
+            Type::Param("Output".to_string())
+        );
         assert_eq!(p.impls[0].methods[0].ret, Type::Int);
         assert_eq!(p.impls[0].assoc, vec!["Output".to_string()]);
 
@@ -6707,7 +6797,8 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
             .unwrap(),
         );
         assert!(
-            late.iter().any(|d| d.message.contains("must be declared before the methods")),
+            late.iter()
+                .any(|d| d.message.contains("must be declared before the methods")),
             "{late:?}"
         );
     }

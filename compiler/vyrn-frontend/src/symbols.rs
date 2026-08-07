@@ -607,7 +607,13 @@ fn analyze_inner(
     // keeps it off the hot path — an editor spends most of a keystroke burst on
     // a document that does not parse.
     let memory = match &checked {
-        Some(prog) if !diags.iter().any(|d| d.severity == crate::diagnostics::Severity::Error) => memory_notes(prog),
+        Some(prog)
+            if !diags
+                .iter()
+                .any(|d| d.severity == crate::diagnostics::Severity::Error) =>
+        {
+            memory_notes(prog)
+        }
         _ => Vec::new(),
     };
 
@@ -643,13 +649,22 @@ fn analyze_inner(
 fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote> {
     let own = crate::own::analyze(program);
     let mut out = Vec::new();
-    for f in program.functions.iter().filter(|f| f.module.is_none() && !f.is_extern) {
-        let Some(notes) = own.notes.get(&f.name) else { continue };
+    for f in program
+        .functions
+        .iter()
+        .filter(|f| f.module.is_none() && !f.is_extern)
+    {
+        let Some(notes) = own.notes.get(&f.name) else {
+            continue;
+        };
         for n in notes {
             // A binding whose type owns no heap has nothing to reclaim, so
             // "NOT reclaimed" is the wrong sentence about it. `vyrn why --memory`
             // counts it in a summary; a hover on an `Int64` would just alarm.
-            if matches!(&n.fate, crate::own::Fate::Leaked(crate::own::Leak::NoRelease(_))) {
+            if matches!(
+                &n.fate,
+                crate::own::Fate::Leaked(crate::own::Leak::NoRelease(_))
+            ) {
                 continue;
             }
             out.push(MemoryNote {
@@ -902,7 +917,10 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
                 target_col: decl.map_or(0, |d| d.col),
                 target_end_col: decl.map_or(0, |d| d.end_col),
                 target_file: decl.and_then(|d| d.file.clone()),
-                hover: with_doc(&c.detail, &c.doc.clone().or_else(|| decl.and_then(|d| d.doc.clone()))),
+                hover: with_doc(
+                    &c.detail,
+                    &c.doc.clone().or_else(|| decl.and_then(|d| d.doc.clone())),
+                ),
                 definition: decl.is_some(),
             });
         }
@@ -1064,7 +1082,12 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
     // `std/result` / `std/option` name explicitly), so `Ok`/`Some`/… complete.
     for name in ["Result", "Ok", "Err", "Option", "Some", "None"] {
         if let Some((kind, detail)) = builtin_type_or_ctor(name) {
-            out.push(Completion { label: name.to_string(), kind, detail, doc: None });
+            out.push(Completion {
+                label: name.to_string(),
+                kind,
+                detail,
+                doc: None,
+            });
         }
     }
     out
@@ -1342,7 +1365,9 @@ pub fn class_token_hover(
         return None;
     }
     match css_rule_for(&analysis.tw_css, &token) {
-        Some(rule) => Some(format!("**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```")),
+        Some(rule) => Some(format!(
+            "**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```"
+        )),
         None => Some(format!("**`{token}`** — safelisted (app-styled)")),
     }
 }
@@ -1383,9 +1408,10 @@ fn css_rule_for(css: &str, class: &str) -> Option<String> {
     if css.is_empty() {
         return None;
     }
-    let escaped: String = class.chars().flat_map(|c| {
-        if c == ':' { vec!['\\', ':'] } else { vec![c] }
-    }).collect();
+    let escaped: String = class
+        .chars()
+        .flat_map(|c| if c == ':' { vec!['\\', ':'] } else { vec![c] })
+        .collect();
     // `css()` renders base rules as `.<class> {…}` and variant rules with the
     // selector's `:` escaped plus an appended pseudo (`.md\:hover\:bg-… :hover {…}`),
     // so match the escaped selector prefix and take the rule up to its `}`. The
@@ -1418,7 +1444,11 @@ fn css_constant(program: &ast::Program) -> Option<String> {
         .iter()
         .find(|f| f.name == "css" && f.params.is_empty())?;
     for stmt in &f.body.stmts {
-        if let Stmt::Return { value: Some(Expr::Str(s)), .. } = stmt {
+        if let Stmt::Return {
+            value: Some(Expr::Str(s)),
+            ..
+        } = stmt
+        {
             return Some(s.clone());
         }
     }
@@ -1879,12 +1909,17 @@ fn index_imported_symbols(
     // symbol, it stands for a real declaration instead — under the ORIGINAL
     // name, since the map is keyed by what the generator emitted and not by the
     // alias the importer chose.
-    let original_of: std::collections::HashMap<&str, &str> =
-        local_of.iter().map(|(orig, local)| (*local, *orig)).collect();
+    let original_of: std::collections::HashMap<&str, &str> = local_of
+        .iter()
+        .map(|(orig, local)| (*local, *orig))
+        .collect();
     for s in &mut out {
         if let Some(module) = s.file.clone() {
-            let generated =
-                original_of.get(s.name.as_str()).copied().unwrap_or(s.name.as_str()).to_string();
+            let generated = original_of
+                .get(s.name.as_str())
+                .copied()
+                .unwrap_or(s.name.as_str())
+                .to_string();
             origins.apply(&module, &generated, s);
         }
     }
@@ -1937,7 +1972,10 @@ fn index_namespaces(
                 let generated = m.name.clone();
                 origins.apply(target, &generated, m);
             }
-            out.push(NamespaceInfo { name: ns.clone(), members });
+            out.push(NamespaceInfo {
+                name: ns.clone(),
+                members,
+            });
         }
     }
     out
@@ -1967,7 +2005,11 @@ fn namespace_members(
         },
     };
     let file = |t: &str| -> Option<String> {
-        if gen_source.is_some() { None } else { Some(t.to_string()) }
+        if gen_source.is_some() {
+            None
+        } else {
+            Some(t.to_string())
+        }
     };
     let Ok(tokens) = lexer::lex(&text) else {
         return Vec::new();
@@ -2061,7 +2103,10 @@ pub(crate) struct OriginIndex {
 }
 
 impl OriginIndex {
-    fn build(graph: &crate::loader::ModuleGraph, resolver: &dyn crate::loader::ModuleResolver) -> Self {
+    fn build(
+        graph: &crate::loader::ModuleGraph,
+        resolver: &dyn crate::loader::ModuleResolver,
+    ) -> Self {
         let mut out = OriginIndex::default();
         for (key, _, gen) in graph {
             let Some(src) = gen else { continue };
@@ -2080,17 +2125,23 @@ impl OriginIndex {
         files.sort_unstable();
         files.dedup();
         for file in files {
-            let Ok(text) = resolver.read(file) else { continue };
-            let Ok(tokens) = lexer::lex(&text) else { continue };
+            let Ok(text) = resolver.read(file) else {
+                continue;
+            };
+            let Ok(tokens) = lexer::lex(&text) else {
+                continue;
+            };
             let (program, _) = parser::parse_accum(tokens);
             for f in &program.functions {
                 if let Some(d) = &f.doc {
-                    out.docs.insert((file.to_string(), f.name.clone()), d.clone());
+                    out.docs
+                        .insert((file.to_string(), f.name.clone()), d.clone());
                 }
             }
             for t in &program.type_decls {
                 if let Some(d) = &t.doc {
-                    out.docs.insert((file.to_string(), t.name.clone()), d.clone());
+                    out.docs
+                        .insert((file.to_string(), t.name.clone()), d.clone());
                 }
             }
         }
@@ -2105,10 +2156,16 @@ impl OriginIndex {
     /// was generated from: the jump target becomes the declaration, the doc is
     /// borrowed from it, and the derived wire facts join the detail.
     fn apply(&self, module: &str, generated_name: &str, sym: &mut Symbol) {
-        let Some(m) = self.get(module, generated_name) else { return };
+        let Some(m) = self.get(module, generated_name) else {
+            return;
+        };
         sym.line = m.line;
         sym.col = m.col;
-        sym.end_col = if m.col == 0 { 0 } else { m.col + m.decl.chars().count() };
+        sym.end_col = if m.col == 0 {
+            0
+        } else {
+            m.col + m.decl.chars().count()
+        };
         sym.file = Some(m.file.clone());
         // The note goes in the DOC and not the detail, so a hover reads
         // signature → what the declaration says about itself → where it is and
@@ -2371,7 +2428,11 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
     // RFC-0087 U1: three bindings of one shape can have opposite outcomes, and
     // nothing in the source says which. Matched on the DECLARATION line, so it is
     // this binding's answer and not a same-named one from another scope.
-    let hover = match analysis.memory.iter().find(|m| m.name == b.name && m.line == b.line) {
+    let hover = match analysis
+        .memory
+        .iter()
+        .find(|m| m.name == b.name && m.line == b.line)
+    {
         Some(m) => format!("{hover}\n\nmemory: {}", m.text),
         None => hover,
     };
@@ -2538,7 +2599,12 @@ fn method_sig_detail(m: &MethodSig) -> String {
             type_to_string(t),
         )
     }));
-    format!("fn {}({}) -> {}", m.name, ps.join(", "), type_to_string(&m.ret))
+    format!(
+        "fn {}({}) -> {}",
+        m.name,
+        ps.join(", "),
+        type_to_string(&m.ret)
+    )
 }
 
 fn protocol_detail(p: &ProtocolDecl) -> String {
@@ -2733,7 +2799,10 @@ fn module_header_doc(tokens: &[lexer::Token]) -> Option<String> {
 /// verbatim — sorted by declaration line so output is stable and reads top-down.
 pub fn module_doc(source: &str) -> ModuleDoc {
     let Ok(tokens) = lexer::lex(source) else {
-        return ModuleDoc { header_doc: None, exports: Vec::new() };
+        return ModuleDoc {
+            header_doc: None,
+            exports: Vec::new(),
+        };
     };
     let header_doc = module_header_doc(&tokens);
     let (program, _errs) = parser::parse_accum(tokens);
@@ -2761,9 +2830,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
                 members: p
                     .methods
                     .iter()
-                    .filter_map(|m| {
-                        m.doc.clone().map(|d| (method_sig_detail(m), d))
-                    })
+                    .filter_map(|m| m.doc.clone().map(|d| (method_sig_detail(m), d)))
                     .collect(),
             });
         }
@@ -2786,7 +2853,10 @@ pub fn module_doc(source: &str) -> ModuleDoc {
     // Declaration order: sort by source line (stable across runs). Ties (two
     // decls on one line — synthetic only) fall back to name for determinism.
     exports.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.name.cmp(&b.name)));
-    ModuleDoc { header_doc, exports }
+    ModuleDoc {
+        header_doc,
+        exports,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2852,12 +2922,41 @@ pub struct SemToken {
 /// Contextual reserved words (`value`/`list` in a `where` clause) are excluded so
 /// they are never mis-coloured. Kept in sync with the checker's `RESERVED` list.
 static MACRO_BUILTINS: &[&str] = &[
-    "print", "len", "concat", "slice", "bytes", "chars", "floatBits", "floatFromBits", "hexEncode",
+    "print",
+    "len",
+    "concat",
+    "slice",
+    "bytes",
+    "chars",
+    "floatBits",
+    "floatFromBits",
+    "hexEncode",
     "hexDecode",
-    "base64Encode", "base64Decode", "urlEncode", "urlDecode", "args", "readLine",
-    "readFile", "writeFile", "renameFile", "fsyncFile", "readFileBytes",
-    "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "contractOf", "jsonSchema",
-    "toJson", "fromJson", "assert", "assertEq", "array", "parse", "str", "panic",
+    "base64Encode",
+    "base64Decode",
+    "urlEncode",
+    "urlDecode",
+    "args",
+    "readLine",
+    "readFile",
+    "writeFile",
+    "renameFile",
+    "fsyncFile",
+    "readFileBytes",
+    "stringFromBytes",
+    "listDir",
+    "moduleInterface",
+    "schemaOf",
+    "contractOf",
+    "jsonSchema",
+    "toJson",
+    "fromJson",
+    "assert",
+    "assertEq",
+    "array",
+    "parse",
+    "str",
+    "panic",
 ];
 
 /// Option / result constructors — builtin enum-like variants, coloured as
@@ -2881,7 +2980,8 @@ fn sem_of_symbol_kind(k: SymbolKind) -> SemKind {
 /// Whether an imported symbol's source file is a std-library module (so it earns
 /// the `defaultLibrary` modifier).
 fn is_std_file(file: &Option<String>) -> bool {
-    file.as_deref().is_some_and(|f| f.contains("/std/") || f.starts_with("std/"))
+    file.as_deref()
+        .is_some_and(|f| f.contains("/std/") || f.starts_with("std/"))
 }
 
 /// Classify every identifier in the document for semantic highlighting
@@ -2929,7 +3029,9 @@ pub struct InlayHint {
 pub fn inlay_hints(analysis: &Analysis) -> Vec<InlayHint> {
     let mut out = Vec::new();
     for m in &analysis.memory {
-        let (Some(at), Some(into)) = (m.last_use, m.moved_into.as_ref()) else { continue };
+        let (Some(at), Some(into)) = (m.last_use, m.moved_into.as_ref()) else {
+            continue;
+        };
         // The occurrence of the name on the move line. A move is a use, so the
         // token is there; if the source moved on since the analysis, no hint.
         let Some(tok) = analysis
@@ -2942,7 +3044,11 @@ pub fn inlay_hints(analysis: &Analysis) -> Vec<InlayHint> {
         // `into` is written for a diagnostic, where a name wears backticks. An
         // inlay hint is drawn in the code, where it must not.
         let into = into.trim_matches('`');
-        out.push(InlayHint { line: at, col: tok.end_col, label: format!("→ {into}") });
+        out.push(InlayHint {
+            line: at,
+            col: tok.end_col,
+            label: format!("→ {into}"),
+        });
     }
     out.sort_by_key(|h| (h.line, h.col));
     out.dedup();
@@ -3034,7 +3140,12 @@ pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange>
                 continue;
             }
             if receiver_before_dot(analysis, t.line, t.col).as_deref() == recv.as_deref() {
-                out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write: false });
+                out.push(RefRange {
+                    line: t.line,
+                    col: t.col,
+                    end_col: t.end_col,
+                    write: false,
+                });
             }
         }
         return dedup_refs(out);
@@ -3087,7 +3198,12 @@ pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange>
             if shadowed {
                 continue;
             }
-            out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write: false });
+            out.push(RefRange {
+                line: t.line,
+                col: t.col,
+                end_col: t.end_col,
+                write: false,
+            });
         }
         return dedup_refs(out);
     }
@@ -3152,7 +3268,12 @@ pub fn references_to(analysis: &Analysis, name: &str, qualifiers: &[String]) -> 
                 continue;
             }
         }
-        out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write: false });
+        out.push(RefRange {
+            line: t.line,
+            col: t.col,
+            end_col: t.end_col,
+            write: false,
+        });
     }
     dedup_refs(out)
 }
@@ -3234,7 +3355,10 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
                 LocalKind::Param => SemKind::Parameter,
                 LocalKind::Let { .. } | LocalKind::ForVar => SemKind::Variable,
             };
-            let readonly = matches!(b.kind, LocalKind::Let { mutable: false } | LocalKind::ForVar);
+            let readonly = matches!(
+                b.kind,
+                LocalKind::Let { mutable: false } | LocalKind::ForVar
+            );
             let declaration = b.line == tok.line && b.col == tok.col;
             // RFC-0087 U1: the line where an owning value stops being live — a
             // move or a `drop`. Marked so the point is visible rather than
@@ -3246,7 +3370,12 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
                     .any(|m| m.name == b.name && m.line == b.line && m.last_use == Some(tok.line));
             return Some((
                 kind,
-                SemMods { declaration, readonly, default_library: false, last_use },
+                SemMods {
+                    declaration,
+                    readonly,
+                    default_library: false,
+                    last_use,
+                },
             ));
         }
     }
@@ -3312,7 +3441,12 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
             && !best.detail.starts_with("let mut");
         return Some((
             sem_of_symbol_kind(best.kind),
-            SemMods { declaration, readonly, default_library: is_std_file(&best.file), last_use: false },
+            SemMods {
+                declaration,
+                readonly,
+                default_library: is_std_file(&best.file),
+                last_use: false,
+            },
         ));
     }
 
@@ -3332,7 +3466,12 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
 
 /// `SemMods` with only `default_library` set (the common builtin shape).
 fn mods_default_lib() -> SemMods {
-    SemMods { declaration: false, readonly: false, default_library: true, last_use: false }
+    SemMods {
+        declaration: false,
+        readonly: false,
+        default_library: true,
+        last_use: false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3498,7 +3637,11 @@ mod tests {
                    fn main() -> Int64 { return cls(\"flex a-1\") }\n";
         let a = analyze(src);
         // The alphabet is enumerated (order-independent set check).
-        let (_, alpha) = a.sequence_string_types.iter().find(|(n, _)| n == "Tw").expect("Tw seq");
+        let (_, alpha) = a
+            .sequence_string_types
+            .iter()
+            .find(|(n, _)| n == "Tw")
+            .expect("Tw seq");
         for m in ["a-1", "a-2", "flex"] {
             assert!(alpha.iter().any(|s| s == m), "alphabet has {m}: {alpha:?}");
         }
@@ -3526,8 +3669,14 @@ mod tests {
     fn rfc42_css_rule_lookup() {
         let css = ".p-2 {padding:0.5rem}\n.p-20 {padding:5rem}\n\
                    .md\\:hover\\:bg-x:hover {background:#000}";
-        assert_eq!(css_rule_for(css, "p-2").as_deref(), Some(".p-2 {padding:0.5rem}"));
-        assert_eq!(css_rule_for(css, "p-20").as_deref(), Some(".p-20 {padding:5rem}"));
+        assert_eq!(
+            css_rule_for(css, "p-2").as_deref(),
+            Some(".p-2 {padding:0.5rem}")
+        );
+        assert_eq!(
+            css_rule_for(css, "p-20").as_deref(),
+            Some(".p-20 {padding:5rem}")
+        );
         assert_eq!(
             css_rule_for(css, "md:hover:bg-x").as_deref(),
             Some(".md\\:hover\\:bg-x:hover {background:#000}")
@@ -3780,8 +3929,10 @@ mod tests {
         let a = analyze(src);
         let line = src.lines().nth(2).unwrap();
         let col = line.find("s.").unwrap() + 3;
-        let labels: Vec<String> =
-            member_completions(&a, 3, col).into_iter().map(|c| c.label).collect();
+        let labels: Vec<String> = member_completions(&a, 3, col)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
         assert!(labels.iter().any(|l| l == "copy"), "{labels:?}");
         let hover = builtin_method("copy").expect("`copy` hovers").detail;
         assert!(hover.contains("shares no heap"), "{hover}");
@@ -3793,8 +3944,10 @@ mod tests {
         let a2 = analyze(scalar);
         let l2 = scalar.lines().nth(2).unwrap();
         let c2 = l2.find("n.").unwrap() + 3;
-        let labels2: Vec<String> =
-            member_completions(&a2, 3, c2).into_iter().map(|c| c.label).collect();
+        let labels2: Vec<String> = member_completions(&a2, 3, c2)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
         assert!(!labels2.iter().any(|l| l == "copy"), "{labels2:?}");
     }
 
@@ -3913,7 +4066,10 @@ mod tests {
         assert_eq!(d.exports[0].doc.as_deref(), Some("the protocol"));
         assert_eq!(
             d.exports[0].members,
-            vec![("fn show(self) -> String".to_string(), "what show does".to_string())]
+            vec![(
+                "fn show(self) -> String".to_string(),
+                "what show does".to_string()
+            )]
         );
     }
 
@@ -4013,10 +4169,17 @@ fn main() -> Int64 {
         let a = analyze(MEM_SRC);
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
         let note = |n: &str| {
-            a.memory.iter().find(|m| m.name == n).map(|m| m.text.clone()).unwrap_or_default()
+            a.memory
+                .iter()
+                .find(|m| m.name == n)
+                .map(|m| m.text.clone())
+                .unwrap_or_default()
         };
         assert_eq!(note("a"), "moved at line 4 into `take(..)`");
-        assert_eq!(note("b"), "reclaimed at block exit — freeing the String buffer");
+        assert_eq!(
+            note("b"),
+            "reclaimed at block exit — freeing the String buffer"
+        );
         assert_eq!(note("c"), "reclaimed by `drop` at line 7");
         // `n` is an Int64. There is nothing to reclaim, so there is no sentence
         // to say about it — a "NOT reclaimed" hover on a scalar is only alarm.
@@ -4028,7 +4191,11 @@ fn main() -> Int64 {
         let a = analyze(MEM_SRC);
         // The `a` in `let a = ..` on line 3.
         let r = resolve(&a, 3, 9).expect("a resolves");
-        assert!(r.hover.contains("memory: moved at line 4 into `take(..)`"), "{}", r.hover);
+        assert!(
+            r.hover.contains("memory: moved at line 4 into `take(..)`"),
+            "{}",
+            r.hover
+        );
     }
 
     #[test]

@@ -355,7 +355,10 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origin
             ("params", array_lit(params)),
             ("ret", Expr::Str(ret_spelling)),
             ("retSchema", schema_lit_for_type(&f.ret, types)),
-            ("retUncodable", Expr::Str(uncodable_of(&f.ret, types, false))),
+            (
+                "retUncodable",
+                Expr::Str(uncodable_of(&f.ret, types, false)),
+            ),
             ("mutates", Expr::Bool(f.is_mut)),
             ("origin", origins.lit(&f.module, &f.name, f.line)),
         ],
@@ -655,7 +658,11 @@ mod tests {
         };
         let name = str_of(field(origin, "name"));
         let text = src.lines().nth(line - 1).expect("line in range");
-        let at: String = text.chars().skip(col - 1).take(name.chars().count()).collect();
+        let at: String = text
+            .chars()
+            .skip(col - 1)
+            .take(name.chars().count())
+            .collect();
         assert_eq!(at, name, "origin {line}:{col} does not point at `{name}`");
     }
 
@@ -688,11 +695,8 @@ mod tests {
         let two = "\n\nexport fn pong() -> String { return \"\" }\n";
         let origin_of = |src: &str| {
             let (p, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
-            let iface = module_interface_lit(
-                &p,
-                &HashMap::new(),
-                &Origins::new([(None, "m.vyrn", src)]),
-            );
+            let iface =
+                module_interface_lit(&p, &HashMap::new(), &Origins::new([(None, "m.vyrn", src)]));
             field(&elems(field(&iface, "functions"))[0], "origin").clone()
         };
         let a = origin_of(one);
@@ -727,7 +731,11 @@ mod tests {
         }
         let mut srcs: Vec<(Option<String>, &str, &str)> = Vec::new();
         for (k, v) in files {
-            let key = if *k == root { None } else { Some(k.to_string()) };
+            let key = if *k == root {
+                None
+            } else {
+                Some(k.to_string())
+            };
             srcs.push((key, k, v));
         }
         let origins = Origins::new(srcs);

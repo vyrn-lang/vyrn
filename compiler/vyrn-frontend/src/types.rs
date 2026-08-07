@@ -63,7 +63,10 @@ pub fn numeric_conv_target(name: &str) -> Option<Type> {
 /// naming it. The other half belongs to a `U32x4` that is not proposed — the
 /// choice is the operand's, so a second set of spellings on one type would be
 /// two answers to a question the type already answered.
-pub const INT32: Type = Type::IntN { bits: 32, signed: true };
+pub const INT32: Type = Type::IntN {
+    bits: 32,
+    signed: true,
+};
 
 /// The lane `v.lane(k)` reads, or `None` when `k` is not a compile-time constant
 /// in `0..lanes` (RFC-0083).
