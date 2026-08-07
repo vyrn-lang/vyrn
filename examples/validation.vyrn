@@ -29,7 +29,7 @@ fn validatePerson(name: String, age: Int64) -> Validation<Person> {
 fn issuesOf(v: Validation<Person>) -> Array<Issue> {
     return match v {
         Valid(p) => [],
-        Invalid(is) => is,
+        Invalid(is) => is.copy(),
     }
 }
 

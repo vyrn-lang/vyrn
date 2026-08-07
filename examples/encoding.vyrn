@@ -18,7 +18,7 @@ fn charCount(s: String) -> Int64 {
 
 fn show(o: Option<String>) -> String {
     return match o {
-        Some(s) => s,
+        Some(s) => s.copy(),
         None => "<invalid>",
     }
 }

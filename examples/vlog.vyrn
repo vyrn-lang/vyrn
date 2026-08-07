@@ -67,13 +67,11 @@ type Rec = { raw: String, line: LogLine }
 /// `--level wizard` is rejected). Log lines themselves carry raw strings.
 type Level = | Trace | Debug | Info | Warn | Error
 
-/// One stdin read: `eof` or a line. A bool-tagged record because `match` arms
-/// are expression-only (no statement blocks) and there is no `while let`, so
-/// branching-with-side-effects wraps the `Option` in a record. (NOTES.)
-type Read = { eof: Bool, line: String }
-
-/// One decode attempt, same bool-tagged-record shape as `Read` and for the same
-/// reason: to branch on a `Validation` with ordinary statements afterwards.
+/// One decode attempt: a bool-tagged record, so the caller can branch on a
+/// `Validation` with ordinary statements afterwards. It costs a copy of the
+/// decoded record at the one place that reads it back out (RFC-0092) — a
+/// carrier owns what it carries. `Read` used to be its twin and is gone;
+/// `readLine` already answers an `Option`, and `if let` reads one.
 type Decoded = { ok: Bool, line: LogLine, err: String }
 
 // ---------------------------------------------------------------------------
@@ -165,14 +163,6 @@ fn humanizeDuration(ms: Int64) -> String {
 // Reading & decoding
 // ---------------------------------------------------------------------------
 
-/// One stdin line, wrapped so the caller can branch with statements.
-fn readOne() -> Read {
-    return match readLine() {
-        Some(s) => Read { eof: false, line: s },
-        None => Read { eof: true, line: "" },
-    }
-}
-
 /// Decode one line, wrapping the `Validation` in a bool-tagged record.
 fn decodeLine(raw: String) -> Decoded {
     return match fromJson(LogLine, raw) {
@@ -192,11 +182,14 @@ fn readStdinLines() -> Array<String> {
     let mut lines: Array<String> = []
     let mut going = true
     while going {
-        let r = readOne()
-        if r.eof {
-            going = false
+        // Read straight out of `readLine`. The `{ eof, line }` wrapper this
+        // used to go through put the String in a place the frame owned, and
+        // taking it back out is a projection — a copy per line, for a shape
+        // `if let` already says (RFC-0092, and RFC-0060 gave the `if let`).
+        if let Some(s) = readLine() {
+            lines.push(s)
         } else {
-            lines.push(r.line)
+            going = false
         }
     }
     return lines
@@ -215,7 +208,9 @@ fn recordsFrom(lines: Array<String>) -> Array<Rec> {
         if t.byteLength > 0 {
             let d = decodeLine(t)
             if d.ok {
-                recs.push(Rec { raw: t, line: d.line })
+                // `d` owns the decoded record, so the push copies it. The
+                // bool-tagged carrier is what costs this: see `Decoded`.
+                recs.push(Rec { raw: t, line: d.line.copy() })
             } else {
                 log.warn("line \{lineNo}: \{d.err}")
             }

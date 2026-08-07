@@ -44,7 +44,7 @@ fn asciiSweep() -> String {
 /// blank line.
 fn show(o: Option<String>) -> String {
     return match o {
-        Some(s) => s,
+        Some(s) => s.copy(),
         None => "None",
     }
 }

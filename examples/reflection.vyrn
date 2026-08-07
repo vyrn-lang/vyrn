@@ -20,7 +20,7 @@ fn optOr(o: Option<Int64>, d: Int64) -> Int64 {
     return match o { Some(n) => n, None => d }
 }
 fn optStrOr(o: Option<String>, d: String) -> String {
-    return match o { Some(s) => s, None => d }
+    return match o { Some(s) => s.copy(), None => d.copy() }
 }
 
 // Turn a Schema into an OpenAPI-style JSON fragment (the motivating use case).

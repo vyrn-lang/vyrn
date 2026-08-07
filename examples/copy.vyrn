@@ -34,7 +34,7 @@ fn built(s: String) -> String {
 fn render(v: Note) -> String {
     return match v {
         Blank => "blank",
-        Text(s) => s,
+        Text(s) => s.copy(),
         Counted(s, k) => s + "/" + k.toString(),
     }
 }

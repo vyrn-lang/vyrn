@@ -464,7 +464,9 @@ impl Walk<'_> {
                      \x20   }}\n"
                 ));
                 guards.push(format!("f{i}.length == 1"));
-                inits.push(format!("{name}: f{i}[0]"));
+                // The decoded value is TAKEN out of its one-element carrier —
+                // see the `swapRemove` note in `variant_payload`.
+                inits.push(format!("{name}: f{i}.swapRemove(0)"));
             }
         }
         let lit = format!("{lit_name} {{ {} }}", inits.join(", "));
@@ -645,10 +647,13 @@ impl Walk<'_> {
         for (i, p) in payload.iter().enumerate() {
             let d = self.decoder(p)?;
             out.push_str(&format!(
-                "        let a{i} = {d}({elem}(items, {i}), {ipath}(c, {i}), iss)\n"
+                "        let mut a{i} = {d}({elem}(items, {i}), {ipath}(c, {i}), iss)\n"
             ));
             guards.push(format!("a{i}.length == 1"));
-            binds.push(format!("a{i}[0]"));
+            // `swapRemove` and not `a{i}[0]`: an element read is a borrow of its
+            // container (RFC-0092), and the copy that would make it a value is
+            // pure waste here — the one-element array dies on the next line.
+            binds.push(format!("a{i}.swapRemove(0)"));
         }
         out.push_str(&format!(
             "        if {} {{\n            out.push({name}({}))\n        }}\n",
