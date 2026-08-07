@@ -93,7 +93,19 @@ fn is_type_end(t: Option<&Tok>) -> bool {
 }
 
 /// A token can be the *end* of an operand — i.e. a binary operator that follows
-/// it is genuinely binary, and a `(`/`[` that follows it is a call/index.
+/// it is genuinely binary.
+///
+/// `}` is on the list because a brace ends an operand in three shapes a reader
+/// writes: a `match` expression, an `if` expression (RFC-0030), and a record
+/// literal. It is the one entry the token stream cannot prove — a `}` can also
+/// close a *statement* block, after which a `-` would open a new statement. The
+/// rest of the spacing table already decided that question the same way: every
+/// other binary operator after `}` prints spaced, because the table's default is
+/// one space and nothing special-cases `}`. Only `-` has a unary role, so only
+/// `-` disagreed, and `} - 1` printed as `} -1`. Neither spelling changes
+/// meaning — the parser never reads spacing, which is why the re-lex invariant
+/// cannot see this — so the choice is which reading the corpus writes, and a
+/// discarded `-x` statement is not one anybody writes.
 fn is_value_end(t: &Tok) -> bool {
     matches!(
         t,
@@ -107,6 +119,7 @@ fn is_value_end(t: &Tok) -> bool {
             | Tok::Vself
             | Tok::RParen
             | Tok::RBracket
+            | Tok::RBrace
             | Tok::Question
     )
 }
@@ -695,6 +708,37 @@ mod tests {
         assert_eq!(
             f("return match s { Err(e) => -1, }\n"),
             "return match s { Err(e) => -1, }\n"
+        );
+    }
+
+    #[test]
+    fn a_binary_operator_after_a_block_expression_stays_binary() {
+        // A `}` can end an operand: a match/if expression, a record literal. Every
+        // binary operator in that position already printed spaced, because the
+        // spacing table's default is one space — `-` alone disagreed, because it is
+        // the one operator with a unary role and `is_value_end` did not list
+        // `}`. So `} - 1` printed as `} -1`, which reads as a unary minus opening a
+        // new statement. The re-lex invariant cannot see it: both spellings lex to
+        // the same tokens, and the parser never reads spacing.
+        for op in ["-", "+", "*", "/", "%", "==", "<<", "&"] {
+            let src = format!("let x = match n {{ 0 => 1, _ => 2, }} {op} 1\n");
+            assert_eq!(f(&src), src, "operator `{op}` after a match block");
+        }
+        // The other two shapes a `}` can end: an `if` expression (RFC-0030) and a
+        // record literal.
+        assert_eq!(
+            f("let x = if c { 1 } else { 2 } - 1\n"),
+            "let x = if c { 1 } else { 2 } - 1\n"
+        );
+        assert_eq!(
+            f("let x = Box { value: 41 }.value - 1\n"),
+            "let x = Box { value: 41 }.value - 1\n"
+        );
+        // A unary minus still hugs everywhere it is genuinely unary, including the
+        // first token of an arm body right after a `{`.
+        assert_eq!(
+            f("let x = match n { 0 => -1, _ => a - 1, }\n"),
+            "let x = match n { 0 => -1, _ => a - 1, }\n"
         );
     }
 
