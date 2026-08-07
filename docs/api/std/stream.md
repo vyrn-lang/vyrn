@@ -91,16 +91,6 @@ Apply `f` to every element. `s` is consumed; the result is a new obligation.
 asks the feed n times. Nothing is buffered on the way through — a mapped
 buffer stream allocates less than the eager version did, not more.
 
-The three wrappers below share a shape and not a function. Each puts its
-source in a box, keeps the address in its own cursor slot, reads the source
-with `pullAt`, and on the closing call gives the slot back, takes the source out
-of the box and CLOSES it — an ordinary `close` in ordinary Vyrn, which is why
-`movecheck` checks the chain's releases the way it checks every other one.
-One shared `wrap` would be the better spelling and does not compile: its step
-would be a lambda capturing a `fn` parameter that itself has captures, and
-the LLVM backend loses the inner captures at that second level. See
-RFC-0075 "As landed — M3".
-
 ## filter
 
 ```vyrn

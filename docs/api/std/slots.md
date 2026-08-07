@@ -11,18 +11,18 @@ A `Handle<T>` is a plain value: a slot, the generation that was live when it
 was issued, and the identity of the container that issued it. It owns no
 heap, so it copies freely, never moves, and never has to be released.
 
-    import { Slots, Handle, newSlots, insert, remove, fetch } from "std/slots"
+    import { Slots, Handle, newSlots, insert, remove, get } from "std/slots"
 
     let mut people: Slots<Person> = newSlots()
     let h = insert(people, Person { name: "ada" })
     people[h].name = "lovelace"       // traps on a dead handle, like a[i] on OOB
-    match fetch(people, h) { Some(p) => .., None => .. }   // liveness as a value
+    match get(people, h) { Some(p) => .., None => .. }     // liveness as a value
     remove(people, h)                 // the slot's generation bumps
     // (the container itself is not reclaimed yet — see `impl Owned` below)
 
 **Two spellings, and the difference is what a dead handle does.** `s[h]`
 joins the bounds-trap family: the handle must be alive, and the program stops
-if it is not. `fetch` returns `Option<T>`, so staleness is a value the caller
+if it is not. `get` returns `Option<T>`, so staleness is a value the caller
 handles. The old `Ref` could only ever trap.
 
 **The identity word.** A `Handle<Person>` from one container used on another
@@ -44,9 +44,11 @@ holds a removed string until one of those two, and never past them.
 elements, and `remove` fills the hole it makes with the last live element.
 That is what keeps `remove` O(1). Iterate handles if the order matters.
 
-**What this module does not do.** It does not name `get`, `set` or `release`
-— Path B reserves all three (RFC-0004), which is why the reading half is
-`fetch`. RFC-0090 M4 deletes Path B and the names come free.
+**The reading half is `get` again.** Path B reserved `get`, `set` and
+`release` (RFC-0004), so M1 spelled the reader `fetch` and said the name
+would come free when M4 deleted Path B. M4 landed in Phase 8e and this is
+that name coming back. There is still no `set`: `s[h] = v` and `s[h].f = v`
+write where the element lives, and a free `set` would only copy one in.
 
 ## Handle
 
@@ -101,10 +103,10 @@ Whether `h` still names a live element of `s`. False for a handle from
 another container, an out-of-range slot, and a slot whose generation has
 moved on.
 
-## fetch
+## get
 
 ```vyrn
-fn fetch<T>(s: Slots<T>, h: Handle<T>) -> Option<T>
+fn get<T>(s: Slots<T>, h: Handle<T>) -> Option<T>
 ```
 
 Read through a handle. `None` when the handle is not alive — which is the
