@@ -79,7 +79,7 @@ fn main() -> Int64 {
     print(e.back[0]) // z
     // The parameter under an `Option` and under a `Map`, in one literal.
     let bag = Bag { one: Some(5), many: ["k": 6] }
-    print(match bag.many["k"] { Some(v) => v, None => 0 } - 1) // 5
+    print(match bag.many["k"] { Some(v) => v, None => 0 }) // 6
     print(match bag.one { Some(v) => v, None => 0 }) // 5
     // A generic record inside a generic record: the inner literal solves first
     // and the outer one takes its answer.
