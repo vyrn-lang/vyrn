@@ -63,7 +63,8 @@ fn runAll(req: Request) -> Response {
 - **Sources:** anywhere an expression of a matching fn type is required,
   a lambda literal or a named function is accepted (as in v1 call
   arguments), and now also **a fn-typed value** read from storage
-  (composition: `let g = h`).
+  (composition: `let g = h`) — including a `fn`-typed call ARGUMENT, which
+  takes any expression of `fn` type.
 - **Calling:** `f(args)` where `f` is a fn-typed binding/field/element —
   call syntax unchanged from v1 parameters.
 
@@ -191,8 +192,12 @@ dispatch (names remain the extern-boundary mechanism).
   zero-cost path (pinned). Generic HO functions solve their outbound
   parameter from the stored signature's return.
 
-- **Known limits.** Calls are by NAME only (`r.f()` / `chain[0](x)` need a
-  binding first — the parser has no call-on-expression form); `Array<T>`
+- **Known limits.** CALLS are by name only (`r.f()` / `chain[0](x)` need a
+  binding first — the parser has no call-on-expression form). PASSING is not:
+  since 2026-08-07 a `fn`-typed argument may be any expression of `fn` type
+  (`wrap(h.f, 30)`, `wrap(fns[0], 30)`, `wrap(make(3), 30)`), which is the same
+  lowering a bare name took — see RFC-0023's "as landed" for what it cost.
+  `Array<T>`
   unification still wants a bound array (not a bare `[..]` literal) at
   generic HO call sites (pre-existing); `vyrn fmt` learned the storage-position
   lambda pipes (tight) with a type-decl guard keeping enum-variant `|` spaced.

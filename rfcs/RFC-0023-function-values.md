@@ -115,6 +115,25 @@ capture-by-move syntax, mutable capture.
   is no bitwise-or operator). A lambda is legal only as a call argument in a
   `fn`-typed parameter position; a named function is accepted there too.
 
+- **A `fn`-typed argument may be any expression of `fn` type** (added 2026-08-07,
+  after RFC-0037). The check used to name a lambda literal and a bare name and
+  refuse the rest, so `wrap(h.f, 30)` was refused where `let prev = h.f` then
+  `wrap(prev, 30)` was accepted. Since RFC-0037 a stored function value carries
+  its own tag, and since RFC-0091 Phase 10b it owns its capture block: the `let`
+  was moving the same `{ tag, captures }` pair through a slot and telling the
+  backends nothing they could not read from the expression. The two
+  monomorphizing backends resolve such an argument the way they already resolved
+  a stored value read from a binding — the target is the signature's dispatcher
+  and the value is the specialized instance's capture — so nothing is copied,
+  the capture block keeps its owner, and every call still names a symbol.
+
+  What it cost was an evaluation-order fix. The direct wasm backend laid its
+  specialization out as ordinary parameters then captures, so a capture operand
+  was pushed after every ordinary argument. A capture was always a load, which
+  cannot be observed, and an expression can print or trap. The specialization now
+  interleaves — a `fn` parameter becomes its captures at that parameter's own
+  place — so a wasm argument is evaluated where the interpreter evaluates it.
+
 - **Capture-timing lock.** Captures are materialized where the lambda *argument*
   is evaluated — the outer call site — in every backend. The interpreter takes a
   by-value snapshot of the enclosing locals at that point; the monomorphized
