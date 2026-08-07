@@ -3,6 +3,12 @@
 - **Status:** M1 implemented, and extended twice since. M2 blocked — the protocol
   needs a receiver-less method and the language has none; see "M2 — what it
   needs". M3–M4 designed, and M3 is the open half of RFC-0087 U7.
+  **`solve_param` was the last of the six hand-written lists still open, and it
+  is closed:** the match is exhaustive with no `_`. The blast radius measured
+  **zero** over the whole corpus, and the deferral's stated reason — that the two
+  backends disagree about an unsolved parameter — proved not to apply, because
+  the checker refuses all four shapes first. **No program's meaning changed.**
+  See "`solve_param`'s fall-through" below.
   **Two corrections to "M1 — as landed" below, both later than it.**
   RFC-0089 Phase 4c deleted `Analysis::transfers` and the whole inference half of
   `own.rs`: ownership is emission from the type, not inference over the
@@ -43,6 +49,9 @@ wrong:
   `let m: IntMap = [:]` was refused with "cannot infer; annotate it" to somebody
   who had annotated.
 - `solve_param` falls through to `Unit` for `Lazy`, `Record`, `Enum` and `Task`.
+  **The one list with no victim.** The checker refuses those four shapes first,
+  so the fall-through was dead rather than wrong — measured, not assumed, and
+  the only one of the six that reads this way.
 - The parser's method table bound `remove` to the `Map` builtin, so
   `people.remove(h)` did not compile where `people` is a `Slots<T>` and
   `std/slots` exports `remove`. Ten of its fourteen names were neither reserved
@@ -345,22 +354,75 @@ Unchanged, and not the obstacle here. The seeded rows for a literal are the
 layout arms, which are already intrinsic and need no resolver. A bare file has
 no user containers to build in the first place.
 
-## What this does not decide
+## `solve_param`'s fall-through — the sixth list, and the last one. Closed.
 
-`solve_param`'s fall-through. **Decided in M1: exhaustiveness, not a protocol,
-and not in M1.**
+**Decided in M1: exhaustiveness, not a protocol, and not in M1. Done later, and
+the deferral's stated reason turned out not to apply.**
 
 It is unification, not a property. Nothing is declared, and there is no third
 party who *could* declare it — a protocol needs somebody to write an impl, and
 "how do two type constructors match" has no author but the compiler. The rule is
 already mechanical: same constructor, recurse on the children; different
 constructors, bind nothing. So the fix is the shape of the `match`, not a table:
-pair the two types and give every constructor an arm, with no `_`, so a new
-`Type` variant fails to compile instead of silently binding nothing.
+give every constructor an arm, with no `_`, so a new `Type` variant fails to
+compile instead of silently binding nothing.
 
-It is deferred because the blast radius is monomorphization rather than
-reclamation, and the two backends **already disagree about what a `None` means** —
-the LLVM emitter substitutes `Unit` and lowers it to `void`, the direct backend
-refuses. Filling in `Lazy`, `Record`, `Enum` and `Task` turns some silent `Unit`
-into a real type and some refusal into a compile, and neither belongs in a
-milestone about when memory is freed.
+That is what `solve_param` now is. It matches on the **parameter** type alone —
+the pairing was what made a `_` look unavoidable, since a tuple of two types has
+no exhaustive spelling — with 35 arms and no catch-all. The inner match on the
+argument type keeps its `_`, and that one is not a hole: it is the rule's second
+half written down.
+
+### Why the deferral did not apply
+
+M1 deferred it for this reason:
+
+> the two backends already disagree about what a `None` means — the LLVM emitter
+> substitutes `Unit` and lowers it to `void`, the direct backend refuses. Filling
+> in `Lazy`, `Record`, `Enum` and `Task` turns some silent `Unit` into a real type
+> and some refusal into a compile.
+
+**The disagreement is still there** — `lib.rs` still writes
+`unwrap_or(Type::Unit)` and `direct.rs` still answers "a generic type parameter
+`T` the call `f` does not fix". Nothing in the memory arc changed it.
+
+**It is not reachable from these four shapes**, and that is the finding. The
+CHECKER holds the same list. `Checker::unify` descends into `Option`, `Result`,
+`App`, `Array`, `ArrayN`, `Stream`, `SmallArray`, `Fn` and `Map`, and its
+fall-through is a **diagnostic**, not a substitution. So a type parameter under a
+`Record`, an `Enum`, a `Lazy` or a `Task` is refused before codegen is asked:
+
+| written | what the checker says |
+|---|---|
+| `fn unwrap<T>(b: { value: T }) -> T` | `argument expects { value: T }, found Box<Int64>` |
+| `type Wrap<T> = \| W({ v: T })` | `argument expects { v: T }, found Cell` |
+| `type Holder<T> = { body: lazy T }` | `argument expects lazy T, found lazy Int64` |
+| `fn await<T>(t: Task<T>) -> T` | `argument expects Task<T>, found Task<Int64>` |
+| `impl<T: Show> Show for { v: T }` | `impl Show for { v: T }` is not supported |
+
+Every one is byte-identical before and after the arms were filled. **Nothing
+became newly legal**, so nothing needed the three engines to be re-agreed on.
+They were re-run anyway: 123 checked, 10 skipped, 0 failed.
+
+### The blast radius
+
+**Zero.** `rfc0086_unsolvable_parameter_positions_over_the_corpus` walks
+`examples/**` and `std/`, takes the declared types `solve_param` is actually
+handed — a generic function's parameters and return, a generic record's fields, a
+generic enum's variant payloads, a generic impl head — and counts the type
+parameters sitting under a constructor the old match had no arm for. Over 208
+files and 990 declared root types: **0**.
+
+So this was a latent defect with no victim, and the census is the record of that
+rather than a bug report. Two tests hold the two halves apart:
+`the_filled_arms_bind_a_parameter_the_fall_through_walked_past` says the new arms
+are right, and
+`the_checker_refuses_every_shape_the_fall_through_used_to_swallow` says why they
+are dead. If the checker ever accepts one of the five programs above, the second
+test fails and points at the first — the arms it unblocks are written and tested
+already.
+
+**The census has been wrong in both directions.** `Expr::ArrayLit`'s absence from
+`owner_producing` leaked on every engine and nobody had noticed; this one had no
+victim and the fix is still worth having, because what it buys is that the next
+`Type` variant cannot be added without answering.
