@@ -464,10 +464,16 @@ struct MoveCheck<'a> {
 /// refused in the same three positions, and each variant names a different fix.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Borrow {
-    /// A `read` or `share` parameter — the caller still owns it.
-    Read,
+    /// A `read` or `share` parameter — the caller still owns it. Carries the
+    /// PARAMETER's name, which is not always the name at the offending line: a
+    /// local inherits the borrow (`let t = s`), and Phase 9 recorded that the
+    /// menu then offered ``declare the parameter `t: consume ..` `` for a `t`
+    /// that is a local. `vyrn fix` never applies that entry, so it was wording
+    /// and not correctness — and wording a reader has to see through.
+    Read(String),
     /// A `modify` parameter — exclusive in-place access, still the caller's.
-    Modify,
+    /// Carries the parameter's name, for [`Borrow::Read`]'s reason.
+    Modify(String),
     /// A `for` variable over a container the loop does NOT own, carrying that
     /// container's name so the diagnostic can spell the consuming form. A loop
     /// over a `consume`d container or over a temporary binds an owner instead.
@@ -479,12 +485,24 @@ enum Borrow {
 
 impl Borrow {
     /// What this borrow is, in words, for the message.
-    fn what(&self) -> &'static str {
+    ///
+    /// `at` is the name the message is about. It is not always the parameter:
+    /// `let t = s` gives `t` the borrow `s` carries, and calling `t` a parameter
+    /// is the wording defect Phase 9 recorded on the fix menu. Both halves say
+    /// the same thing now.
+    fn what(&self, at: &str) -> String {
+        let of = |kind: &str, p: &String| {
+            if root_of(at) == *p {
+                format!("a `{kind}` parameter")
+            } else {
+                format!("a second name for the `{kind}` parameter `{p}`")
+            }
+        };
         match self {
-            Borrow::Read => "a `read` parameter",
-            Borrow::Modify => "a `modify` parameter",
-            Borrow::Element(_) => "a loop variable",
-            Borrow::Projection => "read out of a place that owns it",
+            Borrow::Read(p) => of("read", p),
+            Borrow::Modify(p) => of("modify", p),
+            Borrow::Element(_) => "a loop variable".to_string(),
+            Borrow::Projection => "read out of a place that owns it".to_string(),
         }
     }
 
@@ -495,8 +513,8 @@ impl Borrow {
     fn fixes(&self, root: &str, path: &str) -> Vec<String> {
         let copy = format!("`{path}.copy()` if both sides need a value");
         match self {
-            Borrow::Read | Borrow::Modify => vec![
-                format!("declare the parameter `{root}: consume ..` if this function should own it"),
+            Borrow::Read(p) | Borrow::Modify(p) => vec![
+                format!("declare the parameter `{p}: consume ..` if this function should own it"),
                 copy,
             ],
             // A loop variable has a second way out: let the loop take the
@@ -509,6 +527,17 @@ impl Borrow {
             ],
             Borrow::Element(_) | Borrow::Projection => vec![copy],
         }
+    }
+}
+
+/// The base name of a place path: `r.a[0]` is `r`.
+///
+/// A message names a PATH and a borrow names the PARAMETER it came from, so the
+/// two are comparable only at the root.
+fn root_of(path: &str) -> &str {
+    match path.find(['.', '[']) {
+        Some(i) => &path[..i],
+        None => path,
     }
 }
 
@@ -572,8 +601,8 @@ impl MoveCheck<'_> {
                     match p.capability {
                         Capability::Consume => None,
                         _ if !self.decl.owns_heap(&p.ty) => None,
-                        Capability::Modify => Some(Borrow::Modify),
-                        _ => Some(Borrow::Read),
+                        Capability::Modify => Some(Borrow::Modify(p.name.clone())),
+                        _ => Some(Borrow::Read(p.name.clone())),
                     },
                 );
             }
@@ -730,7 +759,7 @@ impl MoveCheck<'_> {
     /// signature (RFC-0089 M3b). Offering it would send a reader to a second
     /// error. `.copy()` is the one answer, so it is the only one named.
     fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String> {
-        if matches!(b, Borrow::Read | Borrow::Modify)
+        if matches!(b, Borrow::Read(_) | Borrow::Modify(_))
             && self.exported.contains(&*self.cur_fn.borrow())
         {
             return vec![format!(
@@ -852,7 +881,7 @@ impl MoveCheck<'_> {
             // anywhere that outlives the call.
             return Err(menu(
                 line,
-                format!("`{path}` may not be stored into {} — it is {}", into(), b.what()),
+                format!("`{path}` may not be stored into {} — it is {}", into(), b.what(&path)),
                 self.fixes_here(&b, &root, &path),
             ));
         }
@@ -985,7 +1014,7 @@ impl MoveCheck<'_> {
         if let Some(b) = self.borrow_of(&root) {
             return Err(menu(
                 line,
-                format!("`{root}` may not be consumed — it is {}", b.what()),
+                format!("`{root}` may not be consumed — it is {}", b.what(&root)),
                 b.fixes(&root, &path),
             ));
         }
@@ -1023,7 +1052,7 @@ impl MoveCheck<'_> {
                     line,
                     format!(
                         "`{path}` may not be returned — it is {}, and a return is owned",
-                        b.what()
+                        b.what(&path)
                     ),
                     b.fixes(&root, &path),
                 ));
@@ -1067,7 +1096,7 @@ impl MoveCheck<'_> {
         // have no structural copy (RFC-0089 M1b). Those are recorded above
         // instead, so nothing releases them, and RFC-0091 M1's `Copy` protocol
         // plus 7a's place projections are what make the wider rule sayable.
-        if !matches!(b, Borrow::Read | Borrow::Modify) {
+        if !matches!(b, Borrow::Read(_) | Borrow::Modify(_)) {
             // …unless the caller is JS. A Vyrn caller reads the lend out of
             // `lending` and releases nothing; a JS caller reads nothing, and
             // since RFC-0089 M3b `wasi-min.js` frees every String an export
@@ -1078,7 +1107,7 @@ impl MoveCheck<'_> {
                     format!(
                         "`{path}` may not be returned from an exported function — it is {}, \
                          and the JS caller releases what it is handed",
-                        b.what()
+                        b.what(&path)
                     ),
                     vec![format!("`{path}.copy()` — an `export extern fn` owns its result")],
                 ));
@@ -1087,7 +1116,7 @@ impl MoveCheck<'_> {
         }
         Err(menu(
             line,
-            format!("`{path}` may not be returned — it is {}, and a return is owned", b.what()),
+            format!("`{path}` may not be returned — it is {}, and a return is owned", b.what(&path)),
             b.fixes(&root, &path),
         ))
     }
@@ -1155,7 +1184,7 @@ impl MoveCheck<'_> {
     fn note_retention(&self, e: &Expr) {
         let Some(sink) = &self.retains else { return };
         let Some((root, _)) = place_path(e) else { return };
-        if !matches!(self.borrow_of(&root), Some(Borrow::Read) | Some(Borrow::Modify)) {
+        if !matches!(self.borrow_of(&root), Some(Borrow::Read(_)) | Some(Borrow::Modify(_))) {
             return;
         }
         if let Some(&ix) = self.param_ix.borrow().get(&root) {
@@ -1762,7 +1791,7 @@ impl MoveCheck<'_> {
             line,
             format!(
                 "`{name}` may not be captured by a closure that outlives this call — it is {}",
-                b.what()
+                b.what(name)
             ),
             b.fixes(name, name),
         ))
