@@ -1,7 +1,7 @@
 # RFC-0092 — A Projection Is a Borrow
 
-- **Status:** **Designed, not built.** M0 is a measurement and it is the gate on
-  everything after it. Supersedes nothing. Closes named gaps in RFC-0087 (§3,
+- **Status:** **M0 measured; M1 to M4 designed, not built.** The gate passes:
+  92 sites over the linked corpus, against a 300 limit. See "M0 as measured". Supersedes nothing. Closes named gaps in RFC-0087 (§3,
   §14's remainder, U4), RFC-0089 rule 4 (the half its own status line says is
   missing) and RFC-0086 M3 (the recorded storage hole).
 - **Depends on:** RFC-0089 (rules 1 to 4, all landed), RFC-0086 M1 and M3
@@ -149,6 +149,10 @@ answers `None` (`own.rs:829`) and its wording is `"the type owns no heap"`
 question the text claims to. The printer is the one place a reader is told what
 the model does, so this is worth one line of M0.
 
+**Fixed in M0.** `Leak::NoRelease` carries both answers now, and the two reasons
+are worded apart: a scalar keeps "the type owns no heap", and a type that owns
+heap with no row reads "nothing releases the type `Doc` yet".
+
 ---
 
 ## The rule
@@ -246,7 +250,15 @@ generation-time only and reaches no compiled drop site.
 `interp.rs:4945-4952` builds each key as `Val::Str(Rc::new(k.clone()))` — a deep
 copy. The two compiling backends copy the pointer array. Nothing observes the
 difference today because nothing releases an element. The day an element release
-lands, the interpreter is right and the backends are wrong. So making `keys()`
+lands, the interpreter is right and the backends are wrong.
+
+M0 checked that "nothing observes it" holds rather than assuming it. A program
+that snapshots the keys, then inserts, removes and finally `drop`s the map, and
+then reads the snapshot, prints the same five lines on all three engines. Three
+things keep it unobservable and all three are load-bearing: no element release,
+a String no program can mutate, and `FreeMap` freeing the two map buffers and no
+key. So the disagreement is in the representation only. It is not a live
+divergence and parity is not missing a case — there is nothing yet to observe. So making `keys()`
 copy its keys is a **parity repair**, not a new cost, and the oracle already
 pays it.
 
@@ -491,6 +503,41 @@ scalar field. So the honest expectation is **under 160 and probably well under**
 Also in M0, because it is one line and the reader deserves it: `Leak::NoRelease`
 prints "the type owns no heap" for a type that owns heap and has no row
 (`own.rs:493`). Split the two reasons.
+
+**M0 as measured.** `movecheck::projection_sites` records what the two sites
+would refuse and refuses nothing;
+`rfc0092_projection_sites_over_the_corpus` links every `.vyrn` under
+`examples/` and `std/` as a root — 210 files, all 210 link — and counts a site
+once per (file, line, path, kind).
+
+| | owns heap | scalar |
+|---|---|---|
+| stores of a projection | 48 | 41 |
+| returns of a projection | 44 | 21 |
+| **total** | **92** | 62 |
+
+**The gate passes.** 92 is under 300, and under the 160 this section expected.
+The textual bound counted 160 because a grep cannot type: two thirds of the
+sites it found name a scalar, and rule 2 already refuses the rest of what it
+matched.
+
+Three readings the count corrects.
+
+- **Linking is what made it small, not large.** Phase 4b's warning was that a
+  file read alone cannot name an imported type. It is still true — 8 store
+  sites read `?` even linked — but 4 of those 8 are `.length`, and the other 4
+  (`t.module` and `t.name` in `std/rpc`'s generators, `tk.text` in
+  `std/http`'s) are Strings the declared reading cannot name because the value
+  comes from `moduleInterface`. So the honest store number is 48, and at most
+  52.
+- **An element read reaches none of the three sites.** §"Three sites" says
+  `a[i]` is covered because `borrow_from` reads `at(..)`. That is true of the
+  `let` path and false of the store path: `store` bails at `place_path`, which
+  answers `None` for a call, before it decides anything. 19 more sites live
+  there (17 stores, 2 returns), and M1 either widens `store` or writes down
+  that it did not.
+- **The return half is nearly half the bill**, not the small tail the
+  recommendation's fallback assumes. 44 of 92.
 
 **Gate.** If the linked count is over 300, STOP and report. The premise is that
 this is a migration the size of RFC-0089 M2's, which was 241 `.copy()` and 21
