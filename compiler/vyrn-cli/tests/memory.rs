@@ -45,8 +45,8 @@
 //! | `selfAppend` | §4 / P1 | steady | Phase 5: a store releases the old value, and a module-state accumulator grows in place |
 //! | `fieldOverwrite` | §4 | steady | Phase 5: `r.field = v` releases the old field |
 //! | `returnedString` | §9a | steady | Phase 6: a return is owned, so the wrapper frees it after decoding |
-//! | `optionString` | §14 | leaks | an `Option` owns its payload since Phase 5, but this row binds nothing to release |
-//! | `lambdaLoop` | §16 | leaks | a stored closure's capture block is never freed — it needs a copy derived over the defunctionalized enum, which `Copy` as a protocol does not give it |
+//! | `optionString` | §14 | steady | Phase 10a: an `if let` over a temporary gets the reclamation row a `let` gets, so the arms' escapes are recorded against it |
+//! | `lambdaLoop` | §16 | steady | Phase 10b: a stored closure owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum |
 //! | `elementLeak` | U4 | leaks | a heap element inside a BUILT-IN container; an array cannot say whether it owns its elements |
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
@@ -410,28 +410,30 @@ const ROWS: &[Row] = &[
     Row {
         export: "optionString",
         census: "§14",
-        today: Shape::Leaks,
-        why: "an `Option` DOES own its payload since Phase 5, so `let o = maybe(x)` reclaims \
-              one. This row does not bind: `if let Some(s) = maybe(tag())` matches a value \
-              with no name, and releasing that needs the payload's escape from the arm to be \
-              tracked — the same gap that keeps a record and a user enum off the list. Phase \
-              5 built the release and took it out again; `own::release_kind` carries the \
-              measurement",
+        today: Shape::Steady,
+        why: "Phase 10a: an `if let` whose scrutinee is a TEMPORARY gets the reclamation row \
+              a `let` gets, keyed by the statement. Phase 5 built the release and took it out \
+              again because the payload escapes the arm and nothing recorded that; recording \
+              it is the whole fix. The binders bind to the statement's row, so every `return`, \
+              store, capture and handover this pass already writes lands on it, and a row with \
+              nothing written is a value the arms did not hand on. The release runs on a drop \
+              frame of its own, so an arm that returns early releases it too",
     },
     Row {
         export: "lambdaLoop",
         census: "§16",
-        today: Shape::Leaks,
-        why: "a stored closure's capture block is never freed. Phase 5 measured the price of \
-              releasing it: a `fn` value would have to MOVE under rule 1, and the corpus \
-              copies them — `std/http`'s `httpCopy` hands `run` across into a new `Route` for \
-              each of seven combinators. The fix menu's `.copy()` cannot be written either: a \
-              capture block's layout is per TAG and chosen at run time. Phase 5 named RFC-0091 \
-              M1 as the mechanism and 7b measured that it is not: a `Copy` row is keyed by a \
-              type key, a `fn` type has none, and an alias over one is refused where it is \
-              written because the value erases and carries no name to dispatch on. What it \
-              waits on is a copy DERIVED over the defunctionalized enum, in the closure \
-              lowering that chose the tags",
+        today: Shape::Steady,
+        why: "Phase 10b: a stored closure owns its capture block, so the block is freed at \
+              block exit and the loop stops allocating one per turn. The copy rule 1 then \
+              demands is DERIVED over RFC-0037's defunctionalized enum — one function per \
+              module, a switch from tag to block size, then one malloc and one memcpy — \
+              because a copy site cannot measure a size the tag decides at run time. Phase 5 \
+              said the fix menu's `.copy()` could not be written and 7b said `Copy` as a \
+              protocol was not the mechanism; both were right about the type key and wrong \
+              about the dead end. Copy and release are both SHALLOW: two lambdas over one \
+              String build two blocks holding one pointer, so a deep release would free it \
+              twice. A captured String therefore still leaks, and `Gone::Captured` already \
+              says why nothing else releases it either",
     },
     Row {
         export: "elementLeak",

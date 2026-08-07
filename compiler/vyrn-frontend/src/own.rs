@@ -213,6 +213,19 @@ impl Owned {
             t @ (Type::Option(_) | Type::Result(..)) => {
                 owns_heap(&t, &self.types).then(|| DropKind::Deep(t))
             }
+            // A stored function value (RFC-0037) is `{ tag, captures }` and the
+            // capture block IS heap — one `malloc` per evaluation of the lambda,
+            // which is census §16. Phase 10b releases it: the block is one
+            // allocation whatever the tag, so the release is the same three
+            // instructions the stream closer already emits, and the walk reaches
+            // it through `Deep` like any other place.
+            //
+            // The release is SHALLOW — the block, not what the captures point
+            // at. Two lambdas over one String build two blocks holding one
+            // pointer, so a deep release would free it twice. A captured String
+            // therefore still leaks, and `Gone::Captured` already says why
+            // nothing else releases it either.
+            t @ Type::Fn(..) => Some(DropKind::Deep(t)),
             // A **record** and a **user enum** are not on the list, and Phase 5
             // measured why rather than assuming either way.
             //
@@ -251,7 +264,6 @@ impl Owned {
             Type::Record(_)
             | Type::Enum(_)
             | Type::ArrayN(..)
-            | Type::Fn(..)
             | Type::Task(_)
             | Type::Lazy(_) => None,
             // ---- shapes that are not a runtime value ------------------------
@@ -365,34 +377,37 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(&deeper)),
             // A stored function value (RFC-0037) is `{ tag, captures }` and the
             // capture block IS heap — one `malloc` per evaluation of the lambda,
-            // which is census §16. It answers `false` anyway, and Phase 5
-            // measured the price of the honest answer before writing this down.
+            // which is census §16.
             //
-            // Saying `true` makes a `Fn` move under rule 1, which is the only
-            // thing that would let rule 4 release it: a value that copies freely
-            // is two names for one block and the release runs twice. The corpus
-            // copies them. `std/http`'s `httpCopy` rebuilds a `Route` thirteen
-            // fields at a time and hands `run` and `whole` straight across, which
-            // is where seven combinators get their new route; `std/ui` and
-            // `examples/rest` do the same. Under rule 1 every one of those is a
-            // store of a borrowed `fn`, and the fix menu's second entry —
-            // `.copy()` — cannot be written: a capture block's layout is per
-            // TAG, chosen at run time, so a structural copy has nothing to
-            // measure.
+            // It answered `false` until Phase 10b, and the price of the honest
+            // answer is what held it there. `true` makes a `fn` move under rule
+            // 1, which is the only thing that lets rule 4 release it: a value
+            // that copies freely is two names for one block and the release runs
+            // twice. The corpus stores them — `std/http` hands `run`, `whole`
+            // and `feed` straight across into a new record and `std/ui` does the
+            // same for `Query.run` — so each of those became a store of a
+            // borrowed `fn`, and the fix menu's second entry, `.copy()`, had
+            // nothing to lower to: a capture block's layout is per TAG, chosen
+            // at run time, so a structural copy has nothing to measure.
             //
-            // **RFC-0091 M1 was named as the mechanism and is not it.** M1
-            // landed, and it keys a `Copy` row by a TYPE KEY. A `fn` type is
-            // structural and has none, and a `type Bump = fn(..) -> ..` alias
-            // over one is refused where it is written: the value erases at run
-            // time and carries no name to dispatch on. So §16 has nowhere to
-            // hang a declaration, and nothing to write in it either — the tags
-            // are the defunctionalizer's and have no source name.
+            // **RFC-0091 M1 was named as the mechanism and is not it.** M1 keys
+            // a `Copy` row by a TYPE KEY. A `fn` type is structural and has
+            // none, and a `type Bump = fn(..) -> ..` alias over one is refused
+            // where it is written: the value erases at run time and carries no
+            // name to dispatch on. So §16 has nowhere to hang a declaration, and
+            // nothing to write in it either — the tags are the
+            // defunctionalizer's and have no source name.
             //
-            // What it waits on is a copy DERIVED over the defunctionalized enum,
-            // emitted where RFC-0037 already emits that enum, which knows every
-            // tag's layout because it chose them. That is a job in the closure
-            // lowering, not a row in a protocol table.
-            Type::Fn(..) => false,
+            // Phase 10b derived the copy over the defunctionalized enum instead,
+            // where RFC-0037 emits that enum and knows every tag's layout
+            // because it chose them. `@__vyrn_fnval_copy` is one function per
+            // module: a switch from tag to block size, then one `malloc` and one
+            // `memcpy`. The corpus price came out at 22 sites rather than the
+            // "the corpus copies them" this comment predicted — 17 take
+            // `consume` and 5 take `.copy()`, and the 5 are the ones whose
+            // source is `self.feed`, where an impl receiver cannot be declared
+            // `consume` at all.
+            Type::Fn(..) => true,
             _ => false,
         }
     }
@@ -645,12 +660,36 @@ impl Emit<'_> {
                 then_block,
                 else_block,
                 ..
+            } => {
+                self.block(then_block);
+                if let Some(eb) = else_block {
+                    self.block(eb);
+                }
             }
-            | Stmt::IfLet {
+            // Census §14, Phase 10a. `if let Some(s) = f()` matches a value with
+            // no name, so nothing released it. It has a row now — `movecheck`
+            // writes one keyed by this statement whenever the scrutinee is a
+            // TEMPORARY — and the row answers the same question a `let`'s does:
+            // did anything take it. A row with no `gone` is a value the arms did
+            // not hand on, and releasing it is what closes the row.
+            //
+            // The release is the whole scrutinee, not the payload: `Option` and
+            // `Result` release deeply since Phase 5, and a `None` releases
+            // nothing because the walk reads the tag.
+            Stmt::IfLet {
+                scrutinee,
                 then_block,
                 else_block,
+                line,
                 ..
             } => {
+                let fate = self.fate(s, scrutinee);
+                if let Fate::Reclaimed(kind) = &fate {
+                    self.droppable.insert(id(s), kind.clone());
+                }
+                // No `BindingNote`: `vyrn why --memory` lists bindings, and this
+                // is a temporary with no name to print.
+                let _ = line;
                 self.block(then_block);
                 if let Some(eb) = else_block {
                     self.block(eb);

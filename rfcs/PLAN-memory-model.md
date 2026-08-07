@@ -1,8 +1,10 @@
 # PLAN — The Memory Model Overhaul (RFC-0087 → RFC-0091)
 
-**COMPLETE.** Phases 0 to 9, fifteen PRs. The census's final state is in
-RFC-0087, "The census, closed": nine of twelve memory rows steady, three leaking
-with a named reason each, and four design questions open and undesigned.
+**COMPLETE.** Phases 0 to 9, fifteen PRs; **Phase 10 closes the tail.** The
+census's final state is in RFC-0087, "The census, closed". Phase 9 left nine of
+twelve memory rows steady and three leaking with a named reason each; Phase 10
+took two of the three, so the suite reads **eleven steady of twelve**. `U4` stays
+leaking and correctly so. Four design questions are open and undesigned.
 
 Execution plan for delegation. Each phase is one agent arc: one branch, one PR,
 merged on local verification (do not wait for CI). Phases are ordered by
@@ -428,6 +430,62 @@ the other: `panic` lowers to `error: %s` and carries no source position on any
 engine. 8e checked this by running `examples/slots.vyrn` after its own first draft
 claimed otherwise. U5 is **narrowed, not closed**, and it stays in the census as
 RFC-0079's gap.
+
+## Phase 10 — the tail. Two rows, and both corrected the brief.
+
+- **10a. `optionString` (§14) — LANDED.** An `if let` whose scrutinee is a
+  TEMPORARY now carries the reclamation row a `let` carries, keyed by the
+  statement's own node address, with the arm binders bound to it. Every `return`,
+  store, capture and handover `movecheck` already writes then lands on that row,
+  and a row with nothing written is a value the arms did not hand on. The release
+  runs on a drop frame of its own, so an arm that returns early releases it too.
+  **The brief said this was the same gap that stopped deep drop for records,
+  enums and fixed arrays, and it is not.** Those wait on a returned projection
+  being refused or tracked through a store and a container. This row waited on
+  something smaller: nothing gave the STATEMENT a row, so there was nowhere to
+  write the escape that was already being computed.
+  Two live use-after-frees were written and then read out of the emitted code
+  before it held. A binder handed to a LENDER — `g = tagOf(j)` freed what the
+  store had just kept, because a store of a CALL result records no move. And a
+  borrow wrapped in a CONSTRUCTOR — `openRule(c)` is
+  `for m in c.members { return Some(m) }` and `returned_borrow` reads a returned
+  PLACE, so `openRule` was not a lender; `std/contract` read freed members and
+  the `components` generator emitted a mangled spelling. **That second one is the
+  shape Phase 5 recorded as the one nothing could see.** It is recorded now, as a
+  lend and never as a refusal: refusing it would refuse `return Some(m)` over any
+  loop element.
+  Parity was byte-identical with the second bug in it. The direct wasm backend
+  caught it only because a generator runs as compiled wasm and printed a name it
+  had mangled.
+- **10b. `lambdaLoop` (§16) — LANDED.** A `fn` value owns its capture block, so
+  rule 1 moves it and rule 4 releases it — the three instructions the stream
+  closer already emitted at one site. The copy rule 1 then demands is **derived
+  over RFC-0037's defunctionalized enum**: one `@__vyrn_fnval_copy` per module, a
+  switch from tag to block size, then one `malloc` and one `memcpy`. A copy SITE
+  cannot measure that size because the size is a property of the tag.
+  Copy and release are both SHALLOW. Two lambdas over one String build two blocks
+  holding one pointer, so a deep release would free it twice; a captured String
+  therefore still leaks and `Gone::Captured` already says why.
+  The corpus price was 22 sites against a comment that predicted "the corpus
+  copies them": 16 take `consume`, 6 take `.copy()`, and the 6 are the ones whose
+  source is `self.feed` or `r.run`, where an impl receiver cannot be declared
+  `consume`. `std/rpc`'s generated client takes `.copy()` for a different reason
+  — a client reuses one named callback across calls and `consume` refuses the
+  second use.
+  It also found that `consume` did not parse in front of a structural `fn` type:
+  `parse_capability` required an identifier after the keyword, so
+  `run: consume fn() -> T` stopped at the `fn`. The convention was unspellable for
+  exactly the type §16 is about.
+- **10c. One wording defect.** Phase 9 recorded that `let t = s; return t` where
+  `s: read String` offered ``declare the parameter `t: consume ..` `` and `t` is
+  the local. A borrow carries the parameter's name now, so the menu names `s` and
+  the message says "a second name for the `read` parameter `s`".
+
+**What Phase 10 did NOT close.** A record, a user enum and a fixed array still
+release nothing. Phase 4b's reason for not refusing a returned projection has been
+re-priced and is weaker than it was — RFC-0091 M1 gave a self-referring type
+`impl Copy`, so `.copy()` on a `Json` is writable. What is unpriced is the corpus
+cost of demanding it, and that measurement is the next phase's first job.
 
 ---
 
