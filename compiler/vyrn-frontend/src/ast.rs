@@ -308,7 +308,17 @@ pub struct MethodSig {
     /// Retained for the same reason [`ContractMember::doc`] is: `vyrn doc` and
     /// LSP hover are the only readers a signature-only declaration has.
     pub doc: Option<String>,
+    /// The receiver's capability: `read` for a bare `self`, or whatever
+    /// `modify self` / `consume self` wrote. Part of the signature, so an impl
+    /// must match it — a caller reads this and nothing else when the receiver
+    /// is a bounded type parameter.
+    pub recv: Capability,
     pub params: Vec<Type>,
+    /// Each parameter's capability, parallel to `params`. Carried for the same
+    /// reason `recv` is: the call site sees the SURFACE name (`s.insert(v)`),
+    /// so `movecheck` reads the discipline here rather than off the impl it
+    /// cannot select.
+    pub param_caps: Vec<Capability>,
     pub ret: Type,
     pub line: usize,
 }

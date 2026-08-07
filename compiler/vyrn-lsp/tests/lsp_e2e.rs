@@ -572,6 +572,53 @@ fn main() -> Int64 {
     assert!(!labels.contains(&"main"), "top-level `main` leaked into member completion: {labels:?}");
 }
 
+/// A `modify self` method is offered after a dot and hovers with the receiver's
+/// capability written out. A reader deciding whether to call `t.record(..)`
+/// wants to know it will mutate `t`, and the word is the only place that says
+/// so.
+#[test]
+fn member_completion_and_hover_show_a_modify_self_receiver() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+
+    let uri = "file:///member/recv.vyrn";
+    let src = "\
+type Tally = { running: Int64 }
+protocol Counting {
+    fn record(modify self, n: Int64) -> Unit
+}
+impl Counting for Tally {
+    fn record(modify self, n: Int64) -> Unit { self.running = self.running + n }
+}
+fn main() -> Int64 {
+    let mut t = Tally { running: 0 }
+    t.record(2)
+    return t.running
+}
+";
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    // Right after the dot in `t.record(2)`.
+    let (line, ch) = pos_after(src, "    t.");
+    let labels = completion_labels(&mut client, uri, line, ch);
+    assert!(labels.contains(&"record".to_string()), "method missing: {labels:?}");
+
+    // Hover over the protocol's own declaration of it.
+    let (hline, hch) = pos_after(src, "    fn r");
+    let hover = hover_value(&mut client, uri, hline, hch).expect("hover on the declaration");
+    assert!(
+        hover.contains("fn record(modify self: Tally, n: Int64)"),
+        "hover hides the receiver's capability: {hover}"
+    );
+}
+
 /// RFC-0020 M1: `textDocument/completion` inside a string literal whose expected
 /// type is a finite string type offers that type's whole language (`t("` → every
 /// key), NOT the top-level symbol list.

@@ -86,7 +86,7 @@ Whether the input at the cursor begins with `s`.
 ## advance
 
 ```vyrn
-fn advance(sc: Scanner) -> Unit
+fn advance(sc: modify Scanner) -> Unit
 ```
 
 Advance one byte, keeping `line`/`col` in sync (an LF starts a new line).
@@ -94,7 +94,7 @@ Advance one byte, keeping `line`/`col` in sync (an LF starts a new line).
 ## skipWs
 
 ```vyrn
-fn skipWs(sc: Scanner) -> Unit
+fn skipWs(sc: modify Scanner) -> Unit
 ```
 
 Skip ASCII whitespace AND comments (line comments through end of line, block
@@ -104,7 +104,7 @@ mistake comment text for structure.
 ## ident
 
 ```vyrn
-fn ident(sc: Scanner) -> String
+fn ident(sc: modify Scanner) -> String
 ```
 
 Consume a `[A-Za-z0-9_]+` run and return it (empty string if none here).
@@ -112,7 +112,7 @@ Consume a `[A-Za-z0-9_]+` run and return it (empty string if none here).
 ## quotedString
 
 ```vyrn
-fn quotedString(sc: Scanner) -> Option<String>
+fn quotedString(sc: modify Scanner) -> Option<String>
 ```
 
 If the cursor is at a quote, consume the whole quoted run (respecting the
@@ -122,7 +122,7 @@ written — the caller decodes per its own dialect). `None` if not at a quote.
 ## until
 
 ```vyrn
-fn until(sc: Scanner, stop: Int64) -> String
+fn until(sc: modify Scanner, stop: Int64) -> String
 ```
 
 Consume up to (but NOT including) the first top-level occurrence of byte
@@ -132,7 +132,7 @@ text. Stops at end of input if `stop` never appears at the top level.
 ## untilStr
 
 ```vyrn
-fn untilStr(sc: Scanner, stop: String) -> String
+fn untilStr(sc: modify Scanner, stop: String) -> String
 ```
 
 Like `until`, but stops at the first top-level occurrence of the multi-byte
@@ -141,7 +141,7 @@ string `stop` (string/comment aware). The cursor is left ON `stop`.
 ## balanced
 
 ```vyrn
-fn balanced(sc: Scanner, open: Int64, close: Int64) -> String
+fn balanced(sc: modify Scanner, open: Int64, close: Int64) -> String
 ```
 
 Assuming the cursor is at byte `open`, consume the balanced region through the

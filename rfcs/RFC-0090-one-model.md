@@ -304,6 +304,15 @@ example — `people.insert(..)` and `people.remove(h)` — are unavailable. `s[h
 `s[h] = v` and `for x in s` DO work, because those three are what a `place`
 member reaches.
 
+*The paragraph above is wrong on its main claim, and the correction is in
+RFC-0091 "The receiver may be written". `people.insert(p)` compiled from the
+first day: Vyrn has no inherent methods, so `x.m(a)` parses as `m(x, a)` and
+resolves to a plain function of that name, `modify` parameter and all. What
+could not be written was the impl METHOD, which a receiver may now spell
+`modify self`. `people.remove(h)` is still refused — the parser rewrites
+`.remove(..)` to the Map builtin `@remove` before any type is known, which is a
+reserved-name defect and not a capability one.*
+
 **`drop people` did not reclaim anything, and Phase 8b is why it does now.**
 Phase 8a found three refusals between a slab and its buffers, all of them the
 memory model's rather than the container's. Phase 8b closed all three.

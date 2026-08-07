@@ -266,7 +266,7 @@ pub fn borrow_store_sites(program: &Program) -> Vec<Diagnostic> {
 /// `want` turns each record on; with neither the pass still builds and carries
 /// its type environment, and asks `owns_heap` nowhere.
 fn run(program: &Program, want: Want) -> Run {
-    let caps: HashMap<String, Vec<Capability>> = program
+    let mut caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
         .map(|f| {
@@ -276,6 +276,20 @@ fn run(program: &Program, want: Want) -> Run {
             )
         })
         .collect();
+    // A method call is written `s.insert(v)` and reaches this pass as
+    // `insert(s, v)` — the SURFACE name, because the impl is selected by the
+    // receiver's type and this pass does not select impls. The protocol is what
+    // both sides agree on (conformance compares capabilities), so its
+    // declaration is the discipline every call site reads: without this the
+    // exclusivity rule and the `consume` move would both go silent the moment a
+    // function became a method.
+    for p in &program.protocols {
+        for m in &p.methods {
+            let mut cs = vec![m.recv];
+            cs.extend(m.param_caps.iter().copied());
+            caps.insert(m.name.clone(), cs);
+        }
+    }
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
     // `export extern fn` names. Rule 3 is stricter here, because the caller is
     // JS and JS frees every String it is handed (RFC-0089 M3b).
@@ -3245,6 +3259,37 @@ mod tests {
         let e = run(src).unwrap_err();
         assert!(e.contains("as `modify` and read again in the same call"), "{e}");
         assert!(e.contains("fix: `xs.copy()`"), "{e}");
+    }
+
+    #[test]
+    fn a_modify_receiver_is_exclusive_too() {
+        // The receiver form of the rule above. It falls out of one check, but
+        // only because the PROTOCOL carries the capability: a method call
+        // reaches this pass under its surface name (`merge`), and the impl it
+        // will dispatch to is flattened under a mangled one this pass never
+        // sees. Without the protocol's declaration there is nothing under
+        // `merge` and the rule goes silent.
+        let src = "type T = { n: Int64 } \
+                   protocol Merging { fn merge(modify self, other: T) -> Unit } \
+                   impl Merging for T { fn merge(modify self, other: T) -> Unit \
+                   { self.n = self.n + other.n } } \
+                   fn main() -> Int64 { let mut t = T { n: 1 } t.merge(t) return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("as `modify` and read again in the same call"), "{e}");
+    }
+
+    #[test]
+    fn a_consume_parameter_of_a_method_still_moves() {
+        // The same map, for the other capability. `insert(s, v)` moving `v` and
+        // `s.insert(v)` not moving it would be two languages.
+        let src = "type T = { n: Int64 } \
+                   protocol Taking { fn take(modify self, s: consume String) -> Unit } \
+                   impl Taking for T { fn take(modify self, s: consume String) -> Unit \
+                   { self.n = self.n + s.byteLength } } \
+                   fn main() -> Int64 { let mut t = T { n: 1 } let s = \"a\" \
+                   t.take(s) return s.byteLength }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("already consumed by `take(..)`"), "{e}");
     }
 
     #[test]

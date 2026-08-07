@@ -41,7 +41,7 @@ said rather than what a generator reconstructed.
 ## symbol
 
 ```vyrn
-fn symbol(name: String, origin: Origin, derived: Array<JsonField>) -> Symbol
+fn symbol(name: String, origin: Origin, derived: consume Array<JsonField>) -> Symbol
 ```
 
 A mapped symbol. `derived` is `[]` for a symbol with nothing derived about it.

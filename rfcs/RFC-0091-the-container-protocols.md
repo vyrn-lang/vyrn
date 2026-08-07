@@ -314,6 +314,10 @@ implicit. A `place` member is the one member form that spells it
 inconsistency is real and is left where it is; making an impl method's receiver
 capability writable is new syntax.
 
+**Since "The receiver may be written", `fn copy(read self)` parses.** This RFC's
+own text is writable, and the inconsistency between a `place` member and a
+method is gone.
+
 ### `Iterate`
 
 ```vyrn
@@ -472,6 +476,36 @@ language migrated to over ten RFCs stops at the read/write line: `s[h]`,
 `s[h] = v` and `for x in s` are methods in all but name, and everything that
 grows or shrinks the container is a call.
 
+#### The correction: the receiver takes the word, and two claims above were wrong
+
+The new syntax is built. A receiver is written `read self`, `modify self` or
+`consume self`, a bare `self` still means `read`, a protocol declares the
+receiver's capability and each parameter's, and conformance compares both. See
+"The receiver may be written" below.
+
+Two claims here did not survive the building of it.
+
+**`people.insert(..)` compiles, and always did.** Vyrn has no inherent methods,
+so `x.m(a)` parses as `m(x, a)` and falls through to a plain function of that
+name — the behaviour `an_impl_provides_only_the_methods_its_protocol_declared`
+already asserts, and the fix the "no inherent methods" diagnostic already
+offers. A free function whose first parameter is the receiver IS callable as a
+method, `modify` parameter and all. So the subject-first surface never stopped
+at the read/write line: `people.insert(p)`, `people.get(h)` and `people.count()`
+all ran on the day 8a shipped.
+
+**What could not be written was the METHOD, not the call.** That is the real
+defect, and it is narrower and more serious: a user container could not offer a
+mutating operation through a protocol, so nothing could be generic over one and
+nothing could dispatch to one. `modify self` is that.
+
+**One name still does not work, for an unrelated reason.** `people.remove(h)`
+does not compile, and no receiver capability changes it: the parser rewrites
+`.remove(..)` to the Map builtin `@remove` before any type is known, exactly as
+it does `.pop()`, `.copy()` and `.keys()`. A method-only builtin name is
+reserved for every receiver in the language. That is the same shape as the `get`
+Path B held for four milestones, and it is its own defect.
+
 ### A generic `impl Owned` has no release
 
 `Owned` predates this RFC and takes the same correction. A generic impl's
@@ -480,3 +514,98 @@ name with no type arguments — a symbol nothing defines, reported by clang at t
 end of a build. Phase 8a filters generic impls out of the `Owned` table, so the
 result is a missing release rather than a link error. Monomorphizing a declared
 release is the work; `Slots<T>` is what wants it.
+
+---
+
+## The receiver may be written
+
+An impl method's receiver takes the three words a parameter takes. `read self`
+is what a bare `self` has always meant, so nothing existing moves; `modify self`
+is RFC-0089 rule 2 in the one position it never reached; `consume self` hands
+the method the value rather than a borrow of it.
+
+```vyrn
+protocol Counting {
+    fn record(modify self, n: Int64) -> Unit
+    fn sum(read self) -> Int64
+}
+```
+
+**A protocol declares the discipline and an impl must match it.** A `MethodSig`
+carries the receiver's capability and each parameter's, and conformance compares
+both. That is not bookkeeping: inside `fn feed<T: Counting>(t: modify T, ..)`
+there is no impl to look at, so the protocol's word is the only thing that says
+`t` must be a mutable binding. An impl free to take `modify self` where the
+protocol wrote `self` would mutate through a borrow with nothing at the call
+site to say so.
+
+### What it cost, engine by engine
+
+An impl method is flattened to a top-level function with the receiver as its
+first parameter, so a receiver capability is a parameter capability everywhere
+below the parser. **Both compiled backends needed no change at all.** A method
+call lowers to the call the free function got: the emitted `.ll` for `c.bump(4)`
+and for `bump(c, 4)` differ in the alloca's name (`self.addr0` against
+`c.addr0`) and in the order the two definitions are emitted, and `vyrn_main` —
+the call site, where the address is handed over — is identical.
+
+Three things did move.
+
+- **`self.n = v` did not parse.** The two statement forms that read the target's
+  root off the TOKEN were gated on an identifier, and `self` is its own token.
+  Everything else already treats `self` as an ordinary binding, which is why
+  `self.vals[i] = v` and `self.free.pop()` have always worked: they go through
+  `primary`, which returns `Expr::Var { name: "self" }`.
+- **The interpreter dispatched a protocol method and returned from there**,
+  ahead of the `modify` copy-back every other call takes. That was right while
+  every receiver was `read`. It is the one engine where the receiver's
+  capability had to be read at the call rather than at the definition.
+- **`movecheck` had nothing under a method's name.** A call site carries the
+  SURFACE name (`insert`), and the impl it will dispatch to is flattened under a
+  mangled one. The protocol's declaration is what both sides agree on, so the
+  pass reads capabilities from there. Without it the exclusivity rule and the
+  `consume` move both go silent the moment a function becomes a method — which
+  is the answer to "does `a.mutate(a)` fall out of the existing check": it does,
+  through `check_exclusive` unchanged, and only because the protocol carries the
+  word.
+
+### `consume self` and `drop` of a projection
+
+RFC-0089 records two findings, and this closes half of one. `drop` of a
+projection is a double free the moment its place is released, and the rule is
+written in `movecheck` as a comment rather than as a check — because the one
+legitimate way to reclaim a declared container's buffer is `impl Owned for Ring
+{ fn release(self) { let slots = self.slots  drop slots } }`, and `self` was a
+`read` parameter, so the honest rule would have refused the mechanism RFC-0086
+M1 shipped.
+
+`consume self` is the spelling that unblocks it, and `std/slots` now uses it.
+The check itself is NOT written here, and the reason is migration rather than
+design: the rule refuses `drop` of a borrow, so every declared `release` in the
+corpus has to say `consume self` before it can be turned on, and a `release`
+that still says `self` would then fail to compile rather than warn. The change
+is one word per impl and it is somebody's afternoon, not this one's.
+
+`consume self` is refused on a `place` member. A projection yields a place
+inside the receiver, so the receiver has to outlive the yield.
+
+### `std/slots` did not become methods, and the reason is worth keeping
+
+The obvious next step is a `Slab` protocol carrying `insert`, `remove`, `get`,
+`alive`, `count`, `capacity` and `handles`. It buys nothing and costs something
+real.
+
+It buys nothing because the surface is already there: `people.insert(p)` is
+`insert(people, p)` and compiles today.
+
+It costs a program-wide name. Protocol-method resolution keys on the method
+name alone, before any function of that name is considered, so declaring
+`fn handles(self)` in a protocol makes `handles` mean "dispatch on the
+receiver's type" in every program that links the module. `examples/copy.vyrn`
+declares `fn handles()` and imports `std/slots`; the protocol would break it on
+the day it was added. `count` and `get` are the same hazard with more callers.
+
+And `remove` could not join it anyway — see the note above on `@remove`.
+
+So the free functions stay free, `impl Owned`'s receiver becomes `consume self`,
+and the feature's user in the corpus is `examples/modifyself.vyrn`.

@@ -133,7 +133,7 @@ An event binding: `on("click", "removeItem", "42")`.
 ## keyed
 
 ```vyrn
-fn keyed(k: String, node: Html) -> Html
+fn keyed(k: String, node: consume Html) -> Html
 ```
 
 Attach a list-identity `Key` to an element for the M2 keyed differ. Keying a

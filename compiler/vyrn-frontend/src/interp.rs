@@ -4943,26 +4943,37 @@ impl<'a> Interp<'a> {
                     "Err" => Ok(Val::Result(false, Box::new(vals.remove(0)))),
                     _ => {
                         // Protocol-method dispatch (RFC-0002 §5): resolve by the
-                        // receiver's runtime type to the impl, then call it.
-                        if let Some(proto) = self.protocol_methods.get(name.as_str()).cloned() {
+                        // receiver's runtime type to the impl, and then take the
+                        // SAME path an ordinary call takes.
+                        //
+                        // It used to call the impl and return from here, which
+                        // was right while every receiver was `read`. A `modify
+                        // self` receiver is call-by-value-result like any other
+                        // `modify` parameter, so returning early skipped the
+                        // copy-back and `people.insert(x)` left `people` empty
+                        // in the interpreter alone.
+                        let target = if let Some(proto) =
+                            self.protocol_methods.get(name.as_str()).cloned()
+                        {
                             let key = self.val_type_key(&vals[0]).ok_or_else(|| {
                                 Ctrl::Err(format!("cannot dispatch `{name}` on {:?}", vals[0]))
                             })?;
-                            let mangled = crate::types::impl_method_name(&proto, &key, name);
-                            return self.call(&mangled, &vals);
-                        }
-                        // Enum variant with payload(s), e.g. `Circle(5)`, `Rect(w, h)`.
-                        if self.variants.contains(name.as_str()) {
-                            return Ok(Val::Enum(name.clone(), vals));
-                        }
-                        if let Some(decl) = self.types.get(name.as_str()) {
-                            return self.construct(decl, vals.remove(0));
-                        }
+                            crate::types::impl_method_name(&proto, &key, name)
+                        } else {
+                            // Enum variant with payload(s), e.g. `Circle(5)`, `Rect(w, h)`.
+                            if self.variants.contains(name.as_str()) {
+                                return Ok(Val::Enum(name.clone(), vals));
+                            }
+                            if let Some(decl) = self.types.get(name.as_str()) {
+                                return self.construct(decl, vals.remove(0));
+                            }
+                            name.clone()
+                        };
                         // `modify` parameters copy back into the caller's variable
                         // after the call (call-by-value-result).
                         let modifies: Vec<usize> = self
                             .funcs
-                            .get(name.as_str())
+                            .get(target.as_str())
                             .map(|f| {
                                 f.params
                                     .iter()
@@ -4973,9 +4984,9 @@ impl<'a> Interp<'a> {
                             })
                             .unwrap_or_default();
                         if modifies.is_empty() {
-                            return self.call(name, &vals);
+                            return self.call(&target, &vals);
                         }
-                        let (ret, finals) = self.call_capturing(name, &vals)?;
+                        let (ret, finals) = self.call_capturing(&target, &vals)?;
                         for i in modifies {
                             if let Expr::Var { name: vn, .. } = &args[i] {
                                 let mut wrote = false;

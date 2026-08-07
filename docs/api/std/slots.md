@@ -87,7 +87,7 @@ An empty slab. The element type comes from the context that names it:
 ## insert
 
 ```vyrn
-fn insert<T>(s: Slots<T>, v: T) -> Handle<T>
+fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T>
 ```
 
 Put `v` in the slab and hand back a handle to it. Reuses a released slot when
@@ -119,7 +119,7 @@ The element is COPIED out, because a return is owned (RFC-0089 rule 3). Read
 ## remove
 
 ```vyrn
-fn remove<T>(s: Slots<T>, h: Handle<T>) -> Bool
+fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Bool
 ```
 
 Release the element `h` names: bump the slot's generation, so every
