@@ -12443,6 +12443,40 @@ mod tests {
         );
     }
 
+    /// The receiver's capability is part of the signature the two sides agree
+    /// on. It has to be: inside `fn f<T: Bump>(x: T)` there is no impl to look
+    /// at, so an impl free to take `modify self` where the protocol wrote
+    /// `self` would mutate through a borrow with nothing at the call site to
+    /// say so.
+    #[test]
+    fn an_impl_matches_the_receiver_capability_its_protocol_declared() {
+        let src = |proto: &str, imp: &str| {
+            format!(
+                "type C = {{ n: Int64 }}\n\
+                 protocol Bump {{ fn bump({proto} self) -> Unit }}\n\
+                 impl Bump for C {{ fn bump({imp} self) -> Unit {{ self.n = 1 }} }}\n\
+                 fn main() -> Int64 {{ let mut c = C {{ n: 0 }} c.bump() return c.n }}"
+            )
+        };
+        assert!(check_src(&src("modify", "modify")).is_ok());
+        let e = check_src(&src("", "modify")).unwrap_err();
+        assert!(
+            e.contains("it declares `fn bump(self) -> Unit`")
+                && e.contains("provides `fn bump(modify self) -> Unit`"),
+            "{e}"
+        );
+        // And a `modify` receiver demands a `mut` binding, exactly as a `modify`
+        // parameter does.
+        let imm = check_src(
+            "type C = { n: Int64 }\n\
+             protocol Bump { fn bump(modify self) -> Unit }\n\
+             impl Bump for C { fn bump(modify self) -> Unit { self.n = 1 } }\n\
+             fn main() -> Int64 { let c = C { n: 0 } c.bump() return c.n }",
+        )
+        .unwrap_err();
+        assert!(imm.contains("declared `mut`"), "{imm}");
+    }
+
     /// The other direction, and the mirror of
     /// `an_impl_binds_exactly_the_protocols_associated_types`: a method the
     /// protocol never declared. It was accepted until now and described as

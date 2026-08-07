@@ -229,8 +229,16 @@ impl<T> Iterate for Slots<T> {
 /// `T` is concrete here, because a declared release monomorphizes with the rest
 /// of the module. `drop v` on a `Slots<String>` frees a buffer; on a
 /// `Slots<Int64>` it emits nothing at all.
+///
+/// **`consume self`, and it had no other spelling until now.** A release moves
+/// five buffers out of the container and gives each one back. RFC-0089 recorded
+/// that this was legal only because the rule that would refuse it — `drop` of a
+/// borrow — was written in `movecheck` as a comment rather than as a check: the
+/// receiver was `read`, so the honest rule would have refused the one mechanism
+/// RFC-0086 M1 shipped. The receiver now says what it always meant, and the
+/// moves below are moves out of a value this method was handed.
 impl<T> Owned for Slots<T> {
-    fn release(self) {
+    fn release(consume self) {
         let mut i = 0
         while i < self.vals.length {
             let v = self.vals[i]

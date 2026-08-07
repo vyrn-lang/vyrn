@@ -3262,6 +3262,37 @@ mod tests {
     }
 
     #[test]
+    fn a_modify_receiver_is_exclusive_too() {
+        // The receiver form of the rule above. It falls out of one check, but
+        // only because the PROTOCOL carries the capability: a method call
+        // reaches this pass under its surface name (`merge`), and the impl it
+        // will dispatch to is flattened under a mangled one this pass never
+        // sees. Without the protocol's declaration there is nothing under
+        // `merge` and the rule goes silent.
+        let src = "type T = { n: Int64 } \
+                   protocol Merging { fn merge(modify self, other: T) -> Unit } \
+                   impl Merging for T { fn merge(modify self, other: T) -> Unit \
+                   { self.n = self.n + other.n } } \
+                   fn main() -> Int64 { let mut t = T { n: 1 } t.merge(t) return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("as `modify` and read again in the same call"), "{e}");
+    }
+
+    #[test]
+    fn a_consume_parameter_of_a_method_still_moves() {
+        // The same map, for the other capability. `insert(s, v)` moving `v` and
+        // `s.insert(v)` not moving it would be two languages.
+        let src = "type T = { n: Int64 } \
+                   protocol Taking { fn take(modify self, s: consume String) -> Unit } \
+                   impl Taking for T { fn take(modify self, s: consume String) -> Unit \
+                   { self.n = self.n + s.byteLength } } \
+                   fn main() -> Int64 { let mut t = T { n: 1 } let s = \"a\" \
+                   t.take(s) return s.byteLength }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("already consumed by `take(..)`"), "{e}");
+    }
+
+    #[test]
     fn an_escaping_closure_may_not_capture_a_borrow() {
         // A lambda written at a call site does not outlive the call, so it
         // borrows freely; one that is stored is a value and may not.
