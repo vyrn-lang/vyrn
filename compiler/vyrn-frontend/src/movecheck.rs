@@ -266,7 +266,7 @@ pub fn borrow_store_sites(program: &Program) -> Vec<Diagnostic> {
 /// `want` turns each record on; with neither the pass still builds and carries
 /// its type environment, and asks `owns_heap` nowhere.
 fn run(program: &Program, want: Want) -> Run {
-    let caps: HashMap<String, Vec<Capability>> = program
+    let mut caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
         .map(|f| {
@@ -276,6 +276,20 @@ fn run(program: &Program, want: Want) -> Run {
             )
         })
         .collect();
+    // A method call is written `s.insert(v)` and reaches this pass as
+    // `insert(s, v)` — the SURFACE name, because the impl is selected by the
+    // receiver's type and this pass does not select impls. The protocol is what
+    // both sides agree on (conformance compares capabilities), so its
+    // declaration is the discipline every call site reads: without this the
+    // exclusivity rule and the `consume` move would both go silent the moment a
+    // function became a method.
+    for p in &program.protocols {
+        for m in &p.methods {
+            let mut cs = vec![m.recv];
+            cs.extend(m.param_caps.iter().copied());
+            caps.insert(m.name.clone(), cs);
+        }
+    }
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
     // `export extern fn` names. Rule 3 is stricter here, because the caller is
     // JS and JS frees every String it is handed (RFC-0089 M3b).

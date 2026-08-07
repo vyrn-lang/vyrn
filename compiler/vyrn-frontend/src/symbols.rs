@@ -17,8 +17,8 @@
 //! from the cached [`Analysis`].
 
 use crate::ast::{
-    self, Block, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Stmt, Type,
-    TypeDecl,
+    self, Block, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl,
+    Stmt, Type, TypeDecl,
 };
 use crate::checker;
 use crate::diagnostics::Diagnostic;
@@ -2501,19 +2501,23 @@ fn signature_doc(protocols: &[ProtocolDecl], protocol: &str, method: &str) -> Op
 
 fn method_sig_detail(m: &MethodSig) -> String {
     // MethodSig.params are types only (names are dropped by the parser); the
-    // receiver `self` is implied and prepended.
-    let params = m
-        .params
-        .iter()
-        .map(type_to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sig = if params.is_empty() {
-        "self".to_string()
-    } else {
-        format!("self, {}", params)
+    // receiver `self` is implied and prepended. Capabilities ARE shown — a
+    // reader hovering `insert` wants to know it takes the container by `modify`
+    // and the element by `consume`, which is the whole discipline of the call.
+    let cap = |c: Capability, t: String| match c {
+        Capability::Read => t,
+        Capability::Modify => format!("modify {t}"),
+        Capability::Consume => format!("consume {t}"),
+        Capability::Share => format!("share {t}"),
     };
-    format!("fn {}({}) -> {}", m.name, sig, type_to_string(&m.ret))
+    let mut ps = vec![cap(m.recv, "self".to_string())];
+    ps.extend(m.params.iter().enumerate().map(|(i, t)| {
+        cap(
+            m.param_caps.get(i).copied().unwrap_or(Capability::Read),
+            type_to_string(t),
+        )
+    }));
+    format!("fn {}({}) -> {}", m.name, ps.join(", "), type_to_string(&m.ret))
 }
 
 fn protocol_detail(p: &ProtocolDecl) -> String {

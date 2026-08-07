@@ -1047,6 +1047,22 @@ impl Parser {
         }
     }
 
+    /// The root name of an assignment target: an identifier, or `self`.
+    ///
+    /// `self` is its own token but an ordinary binding everywhere else in the
+    /// parser — `primary` already returns `Expr::Var { name: "self" }` for it,
+    /// which is how `self.vals[i] = v` and `self.free.pop()` have always
+    /// parsed. Only the two statement forms that read the root off the TOKEN
+    /// (`self = ..`, `self.n = ..`) needed telling, and they were unreachable
+    /// while every receiver was `read`.
+    fn place_root(&mut self) -> Result<String, Diagnostic> {
+        if *self.peek() == Tok::Vself {
+            self.advance();
+            return Ok("self".to_string());
+        }
+        self.expect_ident()
+    }
+
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {
         match self.advance() {
             Tok::Ident(name) => Ok(name),
@@ -1505,12 +1521,15 @@ impl Parser {
             self.eat(&Tok::Fn)?;
             let mname = self.expect_ident()?;
             self.eat(&Tok::LParen)?;
+            let recv = self.parse_self_capability();
             self.eat(&Tok::Vself)?;
             let mut params = Vec::new();
+            let mut param_caps = Vec::new();
             while *self.peek() == Tok::Comma {
                 self.advance();
                 let _pname = self.expect_ident()?;
                 self.eat(&Tok::Colon)?;
+                param_caps.push(self.parse_capability());
                 params.push(self.type_()?);
             }
             self.eat(&Tok::RParen)?;
@@ -1524,7 +1543,9 @@ impl Parser {
             methods.push(MethodSig {
                 name: mname,
                 doc,
+                recv,
                 params,
+                param_caps,
                 ret,
                 line: mline,
             });
@@ -1916,7 +1937,19 @@ impl Parser {
         self.advance(); // `place`
         let name = self.expect_ident()?;
         self.eat(&Tok::LParen)?;
+        let (cline, ccol) = (self.line(), self.col());
         let capability = self.parse_self_capability();
+        if capability == Capability::Consume {
+            return Err(Diagnostic::error(
+                cline,
+                ccol,
+                "parse",
+                format!(
+                    "`place {name}` cannot take `consume self` — a projection yields a place \
+                     inside the receiver, so the receiver has to outlive the yield"
+                ),
+            ));
+        }
         self.eat(&Tok::Vself)?;
         let mut params = vec![Param {
             name: "self".to_string(),
@@ -1972,14 +2005,16 @@ impl Parser {
         })
     }
 
-    /// `read self` / `modify self` on a projection's receiver. Contextual, and
-    /// distinct from [`Parser::parse_capability`] because the token that follows
-    /// is `self` rather than a type name. Defaults to `read`.
+    /// `read self` / `modify self` / `consume self` on a receiver. Contextual,
+    /// and distinct from [`Parser::parse_capability`] because the token that
+    /// follows is `self` rather than a type name. Defaults to `read`, which is
+    /// what a bare `self` has always meant.
     fn parse_self_capability(&mut self) -> Capability {
         if let Tok::Ident(id) = self.peek() {
             let cap = match id.as_str() {
                 "read" => Some(Capability::Read),
                 "modify" => Some(Capability::Modify),
+                "consume" => Some(Capability::Consume),
                 _ => None,
             };
             if let Some(c) = cap {
@@ -1992,17 +2027,24 @@ impl Parser {
         Capability::Read
     }
 
-    /// One `fn m(self, ..) -> R { .. }` inside an `impl`. Returns a [`Function`]
-    /// whose first parameter is `self`, typed to the implementing type.
+    /// One `fn m(read|modify|consume self, ..) -> R { .. }` inside an `impl`.
+    /// Returns a [`Function`] whose first parameter is `self`, typed to the
+    /// implementing type and carrying the receiver's capability.
+    ///
+    /// A bare `self` is `read`, which is what it has always meant. Writing the
+    /// word is what makes a mutating method sayable: `modify self` is RFC-0089
+    /// rule 2 on the receiver, so `people.insert(x)` is the method
+    /// `insert(people, x)` was written as a function to avoid.
     fn impl_method(&mut self, self_ty: &Type) -> Result<Function, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Fn)?;
         let name = self.expect_ident()?;
         self.eat(&Tok::LParen)?;
+        let capability = self.parse_self_capability();
         self.eat(&Tok::Vself)?;
         let mut params = vec![Param {
             name: "self".to_string(),
-            capability: Capability::Read,
+            capability,
             ty: self_ty.clone(),
         }];
         while *self.peek() == Tok::Comma {
@@ -3486,20 +3528,20 @@ impl Parser {
                 Ok(Stmt::Drop { name, line })
             }
             // assignment `name = expr;` or a bare expression statement
-            Tok::Ident(_) if self.tokens[self.pos + 1].tok == Tok::Eq => {
-                let name = self.expect_ident()?;
+            Tok::Ident(_) | Tok::Vself if self.tokens[self.pos + 1].tok == Tok::Eq => {
+                let name = self.place_root()?;
                 self.eat(&Tok::Eq)?;
                 let value = self.expr()?;
                 self.eat_semi();
                 Ok(Stmt::Assign { name, value, line })
             }
             // field mutation `name.field = expr;`
-            Tok::Ident(_)
+            Tok::Ident(_) | Tok::Vself
                 if self.tokens[self.pos + 1].tok == Tok::Dot
                     && matches!(self.tokens[self.pos + 2].tok, Tok::Ident(_))
                     && self.tokens[self.pos + 3].tok == Tok::Eq =>
             {
-                let name = self.expect_ident()?;
+                let name = self.place_root()?;
                 self.eat(&Tok::Dot)?;
                 let field = self.expect_ident()?;
                 self.eat(&Tok::Eq)?;

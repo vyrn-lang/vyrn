@@ -272,9 +272,31 @@ fn render_impl_head(imp: &crate::ast::ImplBlock) -> String {
 /// Types only, no parameter names: a `MethodSig` never had them (the parser
 /// drops them at the declaration), so printing the impl's would make the two
 /// quoted lines differ in a place where they agree.
-fn render_method_sig(name: &str, params: &[Type], ret: &Type) -> String {
-    let mut ps = vec!["self".to_string()];
-    ps.extend(params.iter().map(|t| t.to_string()));
+///
+/// A capability IS printed, on the receiver and on every parameter, because it
+/// is now part of what the two sides have to agree on: `modify self` and `self`
+/// are different signatures, and a diagnostic that hid the difference would
+/// quote two identical lines and call them a mismatch.
+fn render_method_sig(
+    name: &str,
+    recv: Capability,
+    params: &[Type],
+    caps: &[Capability],
+    ret: &Type,
+) -> String {
+    let word = |c: Capability, t: String| match c {
+        Capability::Read => t,
+        Capability::Modify => format!("modify {t}"),
+        Capability::Consume => format!("consume {t}"),
+        Capability::Share => format!("share {t}"),
+    };
+    let mut ps = vec![word(recv, "self".to_string())];
+    ps.extend(
+        params
+            .iter()
+            .enumerate()
+            .map(|(i, t)| word(caps.get(i).copied().unwrap_or(Capability::Read), t.to_string())),
+    );
     format!("fn {name}({}) -> {ret}", ps.join(", "))
 }
 
@@ -412,7 +434,7 @@ fn check_accum_inner(
         .map(|f| (f.name.clone(), f.type_bounds.clone()))
         .collect();
     // Each function's parameter capabilities, for checking `modify` call sites.
-    let caps: HashMap<String, Vec<Capability>> = program
+    let mut caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
         .map(|f| {
@@ -422,6 +444,17 @@ fn check_accum_inner(
             )
         })
         .collect();
+    // A protocol method under its SURFACE name (`s.insert(v)` arrives as
+    // `insert(s, v)`), receiver first. The call path re-dispatches to the
+    // mangled impl and reads its capabilities there; this entry is for the
+    // checks that see only the written name — the lambda-capture rule below.
+    for p in &program.protocols {
+        for m in &p.methods {
+            let mut cs = vec![m.recv];
+            cs.extend(m.param_caps.iter().copied());
+            caps.insert(m.name.clone(), cs);
+        }
+    }
 
     // Which functions are "spawn-safe" — pure enough to run as a concurrent task:
     // no I/O (`print`), no shared-mutable-state ops (`cell`/`set`/`release`), no
@@ -588,7 +621,13 @@ fn check_accum_inner(
                             imp.line,
                             imp.protocol,
                             imp.ty,
-                            render_method_sig(&sig.name, &sig.params, &sig.ret),
+                            render_method_sig(
+                                &sig.name,
+                                sig.recv,
+                                &sig.params,
+                                &sig.param_caps,
+                                &sig.ret
+                            ),
                             imp.protocol,
                             imp.protocol
                         ),
@@ -598,10 +637,19 @@ fn check_accum_inner(
                 };
                 // `self` is implicit in the declaration and the first parameter
                 // of the method the parser built, whose type is the impl's own
-                // head — so it is dropped rather than compared.
+                // head — so its TYPE is dropped rather than compared. Its
+                // CAPABILITY is compared: a bounded generic types `x.m(..)` from
+                // the protocol, so an impl free to take `modify self` where the
+                // protocol says `self` would mutate through a borrow with
+                // nothing at the call site to say so.
                 let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                let got_caps: Vec<Capability> =
+                    f.params.iter().skip(1).map(|p| p.capability).collect();
+                let f_recv = f.params.first().map(|p| p.capability).unwrap_or(Capability::Read);
                 let agrees = got.len() == sig.params.len()
                     && (sig.ret == f.ret || opaque(&sig.ret))
+                    && f_recv == sig.recv
+                    && got_caps == sig.param_caps
                     && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
                 if !agrees {
                     out.push(Diagnostic::from_rendered(
@@ -611,8 +659,14 @@ fn check_accum_inner(
                             f.line,
                             render_impl_head(imp),
                             imp.protocol,
-                            render_method_sig(&sig.name, &sig.params, &sig.ret),
-                            render_method_sig(&f.name, &got, &f.ret)
+                            render_method_sig(
+                                &sig.name,
+                                sig.recv,
+                                &sig.params,
+                                &sig.param_caps,
+                                &sig.ret
+                            ),
+                            render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
                         ),
                         "check",
                     ));
@@ -655,6 +709,9 @@ fn check_accum_inner(
                     ),
                 };
                 let got: Vec<Type> = m.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                let got_caps: Vec<Capability> =
+                    m.params.iter().skip(1).map(|p| p.capability).collect();
+                let recv = m.params.first().map(|p| p.capability).unwrap_or(Capability::Read);
                 out.push(Diagnostic::from_rendered(
                     format!(
                         "line {}: `{}` provides `{}`, which protocol `{}` does not declare — \
@@ -662,7 +719,7 @@ fn check_accum_inner(
                          reachable from nowhere; {fix}",
                         m.line,
                         render_impl_head(imp),
-                        render_method_sig(&m.name, &got, &m.ret),
+                        render_method_sig(&m.name, recv, &got, &got_caps, &m.ret),
                         imp.protocol
                     ),
                     "check",
@@ -6813,7 +6870,15 @@ impl<'a> Checker<'a> {
                             args.len() - 1
                         ));
                     }
-                    for (arg, pty) in args[1..].iter().zip(&sig.params) {
+                    // The receiver's capability comes from the PROTOCOL here —
+                    // the impl is not selected, and conformance has already made
+                    // the two agree. A `modify self` method demands the same
+                    // mutable variable at this call site that a `modify`
+                    // parameter demands at any other.
+                    if sig.recv == Capability::Modify {
+                        self.check_modify_arg(name, 0, &args[0], &recv, &recv, scope, line)?;
+                    }
+                    for (i, (arg, pty)) in args[1..].iter().zip(&sig.params).enumerate() {
                         let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
                         if !self.coercible(&aty, pty) {
                             return Err(format!(
@@ -6821,6 +6886,9 @@ impl<'a> Checker<'a> {
                             ));
                         }
                         self.prove_coercion(arg, pty, line)?;
+                        if sig.param_caps.get(i) == Some(&Capability::Modify) {
+                            self.check_modify_arg(name, i + 1, arg, &aty, pty, scope, line)?;
+                        }
                     }
                     return Ok(sig.ret.clone());
                 }
