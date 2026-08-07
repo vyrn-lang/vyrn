@@ -480,6 +480,10 @@ Two smaller findings, recorded where they were found:
   self.slots  drop slots } }` — and `self` is a `read` parameter, so the rule
   would refuse the mechanism RFC-0086 M1 shipped. It needs `consume self` on
   `Owned::release` first.
+  **`consume self` exists now** (RFC-0091, "The receiver may be written"), and
+  `std/slots` uses it. The check is still not written, and the reason changed
+  from "unsayable" to "unmigrated": every declared `release` in the corpus has
+  to take the word before the rule can be turned on.
 - **§16 needs `Copy` before it needs effort.** Releasing a stored closure's
   capture block means a `fn` value must MOVE under rule 1, and the corpus
   copies them: `std/http`'s `httpCopy` rebuilds a `Route` thirteen fields at a

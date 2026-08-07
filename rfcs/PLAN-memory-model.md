@@ -265,7 +265,9 @@ carried the ownership fact — see the note under Phase 9.
   **`-> Self` still blocks.** `Self` is not a type name anywhere in this
   compiler, and neither RFC-0084 nor 7a introduced one. M1 takes the
   associated-type spelling. The RFC's `fn copy(read self)` also does not parse:
-  an impl method's receiver is bare `self` and IS `read`.
+  an impl method's receiver is bare `self` and IS `read`. *(It parses now — a
+  receiver takes `read`/`modify`/`consume`; see RFC-0091 "The receiver may be
+  written".)*
   **No memory row flipped**, and §16's stated reason was wrong: a `Copy` row is
   keyed by a type key, a `fn` type has none, and an alias over one is refused
   where it is written. See RFC-0091 "M1 and M3 as landed".
@@ -291,6 +293,11 @@ carried the ownership fact — see the note under Phase 9.
   `people.insert(..)` is `insert(people, ..)`, because an impl method's receiver
   cannot be `modify`. See RFC-0090 "M1 as landed" and RFC-0091 "The
   generic-container correction".
+  *(Both halves of that last sentence are wrong. `people.insert(..)` compiled
+  the day this shipped — Vyrn has no inherent methods, so `x.m(a)` falls through
+  to a plain `m(x, a)`. What could not be written was the METHOD. A receiver may
+  be `modify` since RFC-0091 "The receiver may be written"; `people.remove(h)`
+  is still refused, by the Map builtin `@remove` and not by any capability.)*
 - **8b. A declared container is released — LANDED.** This phase was not in the
   plan; Phase 8a created it, and 8c and 8d were both blocked on it. Three
   refusals closed, all named at their sites in `own.rs`:
