@@ -19,6 +19,18 @@ fn pick<T>(cond: Bool, a: T, b: T) -> T {
 type Box<T> = { value: T }
 type Pair<A, B> = { first: A, second: B }
 
+// A literal with no annotation reads its parameter off the field VALUES, and it
+// reads them through whatever carries the parameter — an array, a map, an
+// `Option`, a `Result`, another generic record. Each of these used to be
+// refused: the field was checked against `Array<T>` with `T` still open, and the
+// value was reported against a type no value has ("expected T, found Int64").
+type Deque<T> = { front: Array<T>, back: Array<T> }
+type Bag<T> = { one: Option<T>, many: Map<String, T> }
+type Boxed<T> = { inner: Box<T> }
+type Fixed<T> = { xs: Array<T, 2> }
+type Small<T> = { xs: SmallArray<T, 4> }
+type Outcome<T> = { r: Result<T, String> }
+
 fn unbox<T>(b: Box<T>) -> T {
     return b.value
 }
@@ -60,6 +72,30 @@ fn main() -> Int64 {
     print(p.second) // seven
     let flag = Box { value: true } // Box<Bool>, a different instantiation
     print(flag.value) // true
+
+    // The parameter under a container, with no annotation. The empty `back`
+    // says only that it is an array, so `front` is what settles `T` — and it
+    // does so whichever field is written first.
+    let d = Deque { front: [2, 1], back: [] }
+    print(d.front[0] + d.back.length) // 2
+    let e = Deque { back: ["z"], front: [] }
+    print(e.back[0]) // z
+    // The parameter under an `Option` and under a `Map`, in one literal.
+    let bag = Bag { one: Some(5), many: ["k": 6] }
+    print(match bag.many["k"] { Some(v) => v, None => 0 }) // 6
+    print(match bag.one { Some(v) => v, None => 0 }) // 5
+    // A generic record inside a generic record: the inner literal solves first
+    // and the outer one takes its answer.
+    let nested = Boxed { inner: Box { value: 40 } }
+    print(nested.inner.value + 2) // 42
+    // The fixed and small-buffer array shapes, and a `Result` whose error half
+    // the field type already names.
+    let fixed = Fixed { xs: [3, 4] }
+    print(fixed.xs[1]) // 4
+    let small = Small { xs: [8] }
+    print(small.xs[0]) // 8
+    let outcome = Outcome { r: Ok(9) }
+    print(match outcome.r { Ok(v) => v, Err(m) => 0 }) // 9
 
     let a = Wrap(41) // Opt<Int64>, inferred from the payload
     let b: Opt<Int64> = Empty // a nullary variant takes its type from context

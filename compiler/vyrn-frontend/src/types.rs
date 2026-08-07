@@ -1029,6 +1029,62 @@ fn num_lit(e: &Expr) -> Option<String> {
     }
 }
 
+/// Visit `ty` and every type inside it. Beside [`substitute`] because it walks
+/// the same shape — anything the substitution recurses into, this visits.
+pub fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
+    f(ty);
+    match ty {
+        Type::Option(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Stream(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => walk_type(a, f),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            walk_type(a, f);
+            walk_type(b, f);
+        }
+        Type::App(_, args) => {
+            for a in args {
+                walk_type(a, f);
+            }
+        }
+        Type::Record(fields) => {
+            for fl in fields {
+                walk_type(&fl.ty, f);
+            }
+        }
+        Type::Enum(variants) => {
+            for v in variants {
+                for p in &v.payload {
+                    walk_type(p, f);
+                }
+            }
+        }
+        Type::Fn(params, ret) => {
+            for p in params {
+                walk_type(p, f);
+            }
+            walk_type(ret, f);
+        }
+        _ => {}
+    }
+}
+
+/// Whether `ty` mentions a type parameter anywhere inside it.
+pub fn mentions_param(ty: &Type) -> bool {
+    let mut found = false;
+    walk_type(ty, &mut |t| {
+        if matches!(t, Type::Param(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
 /// Replace generic parameters in `ty` with their bindings from `subst`,
 /// recursing through every compound type.
 pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {

@@ -3586,7 +3586,10 @@ impl Fn_<'_> {
             self.expect.push(vyrn_frontend::types::substitute(&self.cx.sub(&f.ty), &solved));
             let t = self.peek(e, line);
             self.expect.pop();
-            crate::solve_param(&f.ty, &self.cx.sub(&t?), &mut solved);
+            let t = self.cx.sub(&t?);
+            if crate::settles_type_args(e) {
+                crate::solve_param(&f.ty, &t, &mut solved);
+            }
         }
         Ok(crate::applied_type(
             Some(&decl),
@@ -3938,13 +3941,19 @@ impl Fn_<'_> {
                 // `Ok(v)` cannot name the error half, so the expectation has to.
                 // Without this the arm falls through to `sigs`, which has no entry
                 // for a constructor, and reads as "a branch yielding `Ok`".
+                "Some" | "Ok" | "Err" if args.len() == 1 => {
+                    match self.sum_ctor_types(name, &args[0], line)? {
+                        Some((t, _)) => t,
+                        None => {
+                            return unsupported(
+                                &format!("a branch yielding `{name}` with no expected type"),
+                                line,
+                            )
+                        }
+                    }
+                }
                 "None" | "Some" | "Ok" | "Err" => match self.expected_sum() {
                     Some(t) => t,
-                    // A bare `Some` still types itself from its payload; the other
-                    // three carry only one half of theirs.
-                    None if name == "Some" && args.len() == 1 => {
-                        Type::Option(Box::new(self.peek(&args[0], line)?))
-                    }
                     None => {
                         return unsupported(
                             &format!("a branch yielding `{name}` with no expected type"),
@@ -7827,7 +7836,13 @@ impl Fn_<'_> {
             b.slot(off);
             return Ok(ty);
         }
-        let elem = match elem_want {
+        // An element type that IS an unsolved parameter names no type — `Deque {
+        // front: [2, 1] }` reaches here with `Array<T>` expected and `T` open,
+        // and there is no lowering for `T`. The elements answer for it, and the
+        // enclosing literal's `solve_param` reads the parameter back off the
+        // result. Only a BARE parameter, matching the checker and the textual
+        // backend: an `Array<Array<T>>` field is refused in the checker.
+        let elem = match elem_want.filter(|t| !matches!(t, Type::Param(_))) {
             Some(t) => t,
             None => self.peek(&elems[0], line)?,
         };
@@ -8892,6 +8907,50 @@ impl Fn_<'_> {
         self.expect.last().filter(|t| self.sum_of(t).is_some()).cloned()
     }
 
+    /// The sum type a `Some`/`Ok`/`Err` is built at, with the payload's own type.
+    /// `None` when the position names no sum and the constructor cannot type
+    /// itself.
+    ///
+    /// The position decides both — a `Some(0)` in an `Option<UInt8>` slot is a
+    /// UInt8. Except where the position has not solved its own parameter yet:
+    /// `Bag { one: Some(5) }` reaches here with `Option<T>` expected, `T` has no
+    /// lowering, and the payload is the only thing that knows. Solving the
+    /// parameter from the payload rebuilds the whole sum, so an `Ok(5)` under
+    /// `Result<T, String>` keeps the error half the position named.
+    ///
+    /// Shared by `peek` and by `sum_ctor` for `expected_type_args`'s reason: the
+    /// two must report one type for one constructor, or the field is built at
+    /// one and read at the other.
+    fn sum_ctor_types(
+        &mut self,
+        name: &str,
+        arg: &Expr,
+        line: usize,
+    ) -> Result<Option<(Type, Type)>, String> {
+        let want = self.expected_sum();
+        let picked = want.as_ref().and_then(|t| self.sum_of(t).map(|s| (t.clone(), s)));
+        let (ty, payload) = match picked {
+            Some((t, Sum::Opt(p))) if name == "Some" => (t, p),
+            Some((t, Sum::Res(ok, er))) if name != "Some" => {
+                (t, if name == "Ok" { ok } else { er })
+            }
+            // An unexpected `Some` still types itself from its payload;
+            // `Ok`/`Err` cannot, because the other half is unknowable.
+            _ if name == "Some" => {
+                let p = self.peek(arg, line)?;
+                return Ok(Some((Type::Option(Box::new(p.clone())), p)));
+            }
+            _ => return Ok(None),
+        };
+        if !matches!(payload, Type::Param(_)) {
+            return Ok(Some((ty, payload)));
+        }
+        let p = self.peek(arg, line)?;
+        let mut sub = HashMap::new();
+        crate::solve_param(&payload, &p, &mut sub);
+        Ok(Some((ftypes::substitute(&ty, &sub), ftypes::substitute(&payload, &sub))))
+    }
+
     /// `Some(x)` / `Ok(x)` / `Err(e)` / `Circle(r)` / `None`, or `Ok(None)` if
     /// `name` is not a constructor at all.
     fn sum_ctor(
@@ -8914,21 +8973,8 @@ impl Fn_<'_> {
                 }
                 // The payload's type is the position's, not the argument's — a
                 // `Some(0)` in an `Option<UInt8>` slot is a UInt8.
-                let picked = want.as_ref().and_then(|t| self.sum_of(t).map(|s| (t.clone(), s)));
-                let (ty, payload) = match picked {
-                    Some((t, Sum::Opt(p))) if name == "Some" => (t, p),
-                    Some((t, Sum::Res(ok, er))) if name != "Some" => {
-                        (t, if name == "Ok" { ok } else { er })
-                    }
-                    // An unexpected `Some` still types itself from its payload;
-                    // `Ok`/`Err` cannot, because the other half is unknowable.
-                    _ if name == "Some" => {
-                        let p = self.peek(&args[0], line)?;
-                        (Type::Option(Box::new(p.clone())), p)
-                    }
-                    _ => {
-                        return unsupported(&format!("`{name}` with no expected Result type"), line);
-                    }
+                let Some((ty, payload)) = self.sum_ctor_types(name, &args[0], line)? else {
+                    return unsupported(&format!("`{name}` with no expected Result type"), line);
                 };
                 let tag = i32::from(name != "Err");
                 return self
@@ -9475,7 +9521,9 @@ impl Fn_<'_> {
             Some(Type::Map(_, v)) => Some(*v),
             _ => None,
         };
-        let val = match (want, entries.first()) {
+        // A value type that IS an unsolved parameter names no type (see
+        // `array_lit`) — the first value answers.
+        let val = match (want.filter(|t| !matches!(t, Type::Param(_))), entries.first()) {
             (Some(v), _) => v,
             (None, Some((_, ve))) => self.peek(ve, line)?,
             // An empty literal in no map position at all. `Map<String, Int64>` is
