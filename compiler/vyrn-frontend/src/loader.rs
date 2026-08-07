@@ -263,9 +263,8 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
 
 /// Rewrite every `panic(msg)` in `program` to [`PANIC_AT`]`(msg, "file:line")`.
 ///
-/// One walk over every body a module can hold. `impls` is in the list because a
-/// `place` projection lives only there — it is never flattened into
-/// `Program::functions`, and `std/slots`' dead-handle refusal is exactly one.
+/// One walk over every body a module can hold — [`crate::project::walk_program`],
+/// which is where the list of those bodies lives.
 fn stamp_panic_sites(program: &mut Program, file: &str) {
     let mut stamp = |e: &mut Expr| {
         if let Expr::Call { name, args, line } = e {
@@ -275,42 +274,7 @@ fn stamp_panic_sites(program: &mut Program, file: &str) {
             }
         }
     };
-    let mut block = |b: &mut Block| crate::project::walk_block(b, &mut stamp);
-    for f in &mut program.functions {
-        block(&mut f.body);
-    }
-    for imp in &mut program.impls {
-        for f in imp.methods.iter_mut().chain(imp.places.iter_mut()) {
-            block(&mut f.body);
-        }
-    }
-    for t in &mut program.tests {
-        block(&mut t.body);
-    }
-    for b in &mut program.benches {
-        block(&mut b.body);
-    }
-    for g in &mut program.globals {
-        stamp_expr(&mut g.init, &mut stamp);
-    }
-    for t in &mut program.type_decls {
-        if let Some(p) = &mut t.predicate {
-            stamp_expr(p, &mut stamp);
-        }
-    }
-}
-
-/// [`stamp_panic_sites`] over a bare expression — a global's initializer or a
-/// refinement predicate, neither of which is a block.
-fn stamp_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
-    let mut b = Block {
-        stmts: vec![Stmt::Expr(std::mem::replace(e, Expr::Int(0)))],
-    };
-    crate::project::walk_block(&mut b, f);
-    let Some(Stmt::Expr(back)) = b.stmts.pop() else {
-        unreachable!("one statement in, one statement out")
-    };
-    *e = back;
+    crate::project::walk_program(program, &mut stamp);
 }
 
 /// The directory part of a resolved module path ("" when it has none).
@@ -4167,6 +4131,21 @@ mod tests {
             }
             for b in rt.desugared {
                 assert!(routed_builtin(b).is_none(), "`{b}` is a desugar, not a route");
+            }
+        }
+        // A route is matched on the CALL NAME, before any type is known, so it
+        // only means the builtin while no declaration may carry the name. This
+        // is the check `movecheck::every_view_and_sink_name_is_reserved` makes
+        // for its list and `parser::every_method_builtin_is_reserved_or_shadowable`
+        // makes for its own — the same hazard, a third pass. A route spelled
+        // with the method-form `@` prefix is unspellable and needs no guard.
+        for rt in RT_MODULES {
+            for (builtin, _) in rt.routes {
+                assert!(
+                    builtin.starts_with('@') || crate::checker::RESERVED.contains(builtin),
+                    "`{builtin}` is routed to a std function but is not reserved, so a \
+                     user declaration of that name would be silently unreachable"
+                );
             }
         }
         assert!(routed_builtin("print").is_none());

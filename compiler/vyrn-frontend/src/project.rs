@@ -823,6 +823,53 @@ fn walk_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     f(e);
 }
 
+/// Apply `f` to every expression a whole program can hold, innermost-last.
+///
+/// Every body and every bare expression: functions, impl methods AND `place`
+/// projections (a projection is never flattened into `Program::functions`),
+/// tests, benches, module-state initializers and refinement predicates. Two
+/// passes want exactly this walk — the loader stamps every `panic` with its
+/// source site, and the parser hands a method-form builtin's name back to a
+/// declaration that answers to it — so the list of places a body hides in is
+/// written once.
+pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr)) {
+    for fun in &mut program.functions {
+        walk_block(&mut fun.body, f);
+    }
+    for imp in &mut program.impls {
+        for m in imp.methods.iter_mut().chain(imp.places.iter_mut()) {
+            walk_block(&mut m.body, f);
+        }
+    }
+    for t in &mut program.tests {
+        walk_block(&mut t.body, f);
+    }
+    for b in &mut program.benches {
+        walk_block(&mut b.body, f);
+    }
+    for g in &mut program.globals {
+        walk_bare(&mut g.init, f);
+    }
+    for t in &mut program.type_decls {
+        if let Some(p) = &mut t.predicate {
+            walk_bare(p, f);
+        }
+    }
+}
+
+/// [`walk_program`] over a bare expression — a global's initializer or a
+/// refinement predicate, neither of which is a block.
+pub(crate) fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+    let mut b = Block {
+        stmts: vec![Stmt::Expr(std::mem::replace(e, Expr::Int(0)))],
+    };
+    walk_block(&mut b, f);
+    let Some(Stmt::Expr(back)) = b.stmts.pop() else {
+        unreachable!("one statement in, one statement out")
+    };
+    *e = back;
+}
+
 /// Is `e` a place — something with an address the access site can read from or
 /// write to, rather than a value it would have to copy?
 ///

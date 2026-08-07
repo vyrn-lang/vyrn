@@ -28,6 +28,7 @@ Five places decide a property *of a type* by consulting a list written by hand.
 | `Expr::ArrayLit` / `Expr::MapLit` in the checker | which types a literal can build |
 | `codec::encodable` / `decodable` | which types cross a JSON wire |
 | `solve_param` | which types unify a parameter |
+| `parser::METHOD_BUILTINS` | which `.m(..)` calls are a builtin, before any type is known |
 
 Each list is complete only while someone remembers to extend it. Each has been
 wrong:
@@ -42,6 +43,11 @@ wrong:
   `let m: IntMap = [:]` was refused with "cannot infer; annotate it" to somebody
   who had annotated.
 - `solve_param` falls through to `Unit` for `Lazy`, `Record`, `Enum` and `Task`.
+- The parser's method table bound `remove` to the `Map` builtin, so
+  `people.remove(h)` did not compile where `people` is a `Slots<T>` and
+  `std/slots` exports `remove`. Ten of its fourteen names were neither reserved
+  nor given back. **The sixth list, found after this RFC was written, and it is
+  the earliest of them: it decides before a type exists.**
 
 Every one is the same mistake. **The compiler asked a list when it should have
 asked the type.**

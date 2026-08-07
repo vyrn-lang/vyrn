@@ -38,12 +38,17 @@ fn main() -> Int64 {
 
     // `get` copies the element out, so staleness is a value rather than a
     // trap. A live handle answers `Some`.
-    print((get(people, bob) ?? Person { name: "?", age: 0 }).name) // bob
+    //
+    // Written as a method: `x.m(a)` is `m(x, a)`, so an imported free function
+    // takes the method form for nothing. `people.remove(h)` below is the same
+    // rule — it was refused until the parser stopped binding `remove` to the
+    // `Map` builtin before any type was known.
+    print((people.get(bob) ?? Person { name: "?", age: 0 }).name) // bob
 
     // ---- removal, reuse, and a handle that outlived its element ------------
-    remove(people, bob)
+    people.remove(bob)
     print(alive(people, bob)) // false
-    print((get(people, bob) ?? Person { name: "gone", age: 0 }).name) // gone
+    print((people.get(bob) ?? Person { name: "gone", age: 0 }).name) // gone
     let carl = insert(people, Person { name: "carl", age: 7 })
     print(carl.slot == bob.slot) // true — the slot came back
     print(alive(people, bob)) // false — and the old handle did not
@@ -74,7 +79,7 @@ fn main() -> Int64 {
     print(alive(twin, w)) // false — same slot, same generation, other container
 
     // ---- and the trap ------------------------------------------------------
-    remove(words, w)
+    words.remove(w)
     print(words[w]) // stops here: slots: handle is not alive
     return 0
 }
