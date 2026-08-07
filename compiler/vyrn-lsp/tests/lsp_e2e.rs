@@ -3940,3 +3940,95 @@ fn main() -> Int64 {
     // a last use, and `b` has no such point.
     assert_eq!(marked, vec![3], "marked last uses: {marked:?}");
 }
+
+/// A container that exports `remove` gets the method form, in the editor as
+/// well as in the compiler. The parser bound `.remove(..)` to the `Map` builtin
+/// before any type was known, so `people.remove(h)` was refused where `people`
+/// is the container and `remove` is its own export.
+///
+/// The claim here is that the NAME resolves to the declaration: go-to-definition
+/// on the method-form call lands in the container module, not on a builtin, and
+/// the buffer has no diagnostic. A `Map` receiver in the same server still
+/// completes `remove` as the builtin, which is the other half of "the right one".
+#[test]
+fn a_containers_own_remove_takes_the_method_form() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-shadow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("bag.vyrn"),
+        "export type Bag = { items: Array<Int64> }\n\
+         export fn add(b: modify Bag, v: Int64) -> Int64 { b.items.push(v)\n return b.items.length }\n\
+         export fn remove(b: modify Bag, i: Int64) -> Bool { let x = b.items.swapRemove(i)\n return true }\n",
+    )
+    .unwrap();
+    let app = "\
+import { Bag, add, remove } from \"./bag\"
+fn main() -> Int64 {
+    let mut b = Bag { items: [] }
+    let n = b.add(7)
+    let gone = b.remove(0)
+    return n
+}
+";
+    let app_path = dir.join("app.vyrn");
+    std::fs::write(&app_path, app).unwrap();
+    let uri = file_uri(&app_path);
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", app);
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "method-form `remove` on a container: {diags:?}");
+
+    // `b.remove(0)` resolves to the container's declaration, in its own file.
+    let (l, c) = at(app, 5, "b.remove");
+    let target = definition_target(&mut client, &uri, l, c + 2).expect("definition on b.remove");
+    assert!(target.ends_with("/bag.vyrn"), "b.remove → bag.vyrn: {target}");
+
+    // A module that does NOT claim the name keeps the builtin: `m.remove(k)`
+    // checks, and completion after `m.` still offers it.
+    let maps = "\
+fn main() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    let had = m.remove(\"k\")
+    return m.length
+}
+";
+    let maps_path = dir.join("maps.vyrn");
+    std::fs::write(&maps_path, maps).unwrap();
+    let maps_uri = file_uri(&maps_path);
+    did_open(&mut client, &maps_uri, "vyrn", maps);
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "builtin `remove` on a Map: {diags:?}");
+    let (l, c) = at(maps, 3, "m.remove");
+    let labels = completion_labels(&mut client, &maps_uri, l, c + 2);
+    assert!(labels.contains(&"remove".to_string()), "map completes `remove`: {labels:?}");
+
+    // The trade-off, pinned: scope answers, not the receiver's type, so one
+    // module cannot mean both. It is refused at the call and says which type it
+    // wanted — a compile error, never two meanings for one name.
+    let clash = "\
+import { Bag, remove } from \"./bag\"
+fn main() -> Int64 {
+    let mut m: Map<String, Int64> = [:]
+    let had = m.remove(\"k\")
+    return 0
+}
+";
+    let clash_path = dir.join("clash.vyrn");
+    std::fs::write(&clash_path, clash).unwrap();
+    let clash_uri = file_uri(&clash_path);
+    did_open(&mut client, &clash_uri, "vyrn", clash);
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    let msg = diags
+        .first()
+        .and_then(|d| d["message"].as_str())
+        .unwrap_or("");
+    assert!(msg.contains("expects Bag"), "the clash names the type it wanted: {diags:?}");
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
