@@ -177,6 +177,10 @@ Recorded as open, gated on a concrete need (arena-backed containers may be it).
 - **M4 — resume RFC-0082 M2**: port one built-in (`SmallArray` is the
   smallest) to std Vyrn behind the protocols, three-way parity as the gate.
   **STOPPED. Nothing was ported and nothing was deleted.** See "M4 as landed".
+- **M5 — the conditional place**: a projection may yield an `if` whose branches
+  are places. **DESIGNED, not built.** It closes the third of M4's three
+  blockers, it does not close the `Iterate` gap 8a found, and it is not a
+  performance feature. See "M5 — a projection may choose between two places".
 
 ---
 
@@ -836,3 +840,354 @@ Three features, in this order, and the third is the only one this RFC owns.
 
 Feature 3 is worth doing on its own merits, for the containers that are not
 `SmallArray`. Features 1 and 2 are a language, not a milestone.
+
+---
+
+## M5 — a projection may choose between two places
+
+Two phases met the same refusal from opposite sides. Phase 8a found that
+`Iterate` cannot skip. M4 found that `Index` cannot pick a buffer. This section
+says what closing that costs, what it buys, and what it does not buy. It also
+takes the two findings apart, because **they are not the same feature and this
+RFC has been calling them siblings.**
+
+### What is refused today, and it is one rule, not two
+
+`checker::check_places` (`compiler/vyrn-frontend/src/checker.rs:1129`) writes the
+four rules. Two of them are in play.
+
+M4's blocker-3 program trips rule 1. Checked, on the file as M4 wrote it:
+
+```text
+`place at` must end with exactly one `yield <place>` — a projection is inlined
+at the access site, so it has one exit
+```
+
+That is `checker.rs:1140`, and the shape it refuses is a `yield` inside an `if`
+with a second `yield` after it. But that is a choice of spelling. The same
+container written with the branch INSIDE the yielded expression trips rule 2
+instead:
+
+```text
+`place at` yields a value, not a place — write `yield <field or element of
+self>`; a projection that computes a new value is an ordinary `fn`
+```
+
+That is `checker.rs:1160`, reached from `project::is_place`
+(`compiler/vyrn-frontend/src/project.rs:878`), which answers `false` for
+`Expr::IfExpr`.
+
+**The second spelling already parses.** `yield` takes an ordinary expression
+(`compiler/vyrn-frontend/src/parser.rs:3551-3552`), and an `if` reached in
+expression position is `Expr::IfExpr` (`parser.rs:4380`, RFC-0030). The lexer,
+the parser and the grammar do not move. The refusal is one arm of one function.
+
+So **M5 relaxes rule 2 and leaves rule 1 exactly as written.** A projection
+still has one `yield`, still last, still one exit. What changes is what a place
+may be: a variable, a field of one, an element of one — **or an `if` whose
+every branch is a place.**
+
+That distinction is the design, not a detail. Rule 1 is what says a projection
+has ONE frame to bracket, and M2's whole inlining is written around it.
+
+### The syntax, and the container it closes
+
+There is no new syntax. This is a two-buffer deque, written today, in a file
+`vyrn fmt --check` accepts unchanged:
+
+```vyrn
+type Deque<T> = { front: Array<T>, back: Array<T> }
+
+impl<T> Index for Deque<T> {
+    type Key = Int64
+    type Value = T
+    place at(read self, i: Int64) -> T {
+        yield if i < self.front.length {
+            self.front[self.front.length - 1 - i]
+        } else {
+            self.back[i - self.front.length]
+        }
+    }
+    place atSet(modify self, i: Int64) -> T {
+        yield if i < self.front.length {
+            self.front[self.front.length - 1 - i]
+        } else {
+            self.back[i - self.front.length]
+        }
+    }
+}
+
+impl<T> Iterate for Deque<T> {
+    fn size(read self) -> Int64 {
+        return self.front.length + self.back.length
+    }
+    place nth(read self, i: Int64) -> T {
+        yield if i < self.front.length {
+            self.front[self.front.length - 1 - i]
+        } else {
+            self.back[i - self.front.length]
+        }
+    }
+}
+```
+
+`vyrn check` on that file reports **three diagnostics and they are all rule 2**,
+one per projection, and nothing else. The generic impl head solves, `type Key`
+and `type Value` are read, `size` is accepted, the record literal builds. So a
+generic container over two growable `Array`s is blocked by exactly one thing
+today, and this is it.
+
+That is the class M5 opens: a container whose element lives in one of two heap
+buffers. A deque as two stacks, a rope as two halves, a hot and cold pair.
+**Every one of them is on the NEAR side of the boundary M4 drew** — its spare
+capacity is a heap buffer it owns, RFC-0082's argument reaches it, and
+`std/slots` is the evidence that the argument holds there.
+
+### `SmallArray`'s two-state read — closed, and still not portable
+
+```vyrn
+type Small4<T> = { len: Int64, inline: Array<T, 4>, spill: Array<T> }
+
+impl<T> Index for Small4<T> {
+    type Key = Int64
+    type Value = T
+    place at(read self, i: Int64) -> T {
+        yield if self.spill.length == 0 { self.inline[i] } else { self.spill[i] }
+    }
+}
+```
+
+Checked: the only complaint against that `impl` is rule 2. M5 closes it exactly.
+The container still does not exist, because nothing above builds an empty
+`Small4` and nothing names the capacity — M4's blockers 1 and 2, untouched. See
+"Does `SmallArray` become portable" below.
+
+### `Slots`' skip — NOT closed, and it is a different feature
+
+What a skipping `Slots` would want to write is not a choice between two places:
+
+```text
+place nth(read self, i: Int64) -> T {
+    yield if self.alive[i] { self.data[i] } else { <no place at all> }
+}
+```
+
+`nth` must answer for every `i` in `0 .. size`. A conditional place has two arms
+and BOTH yield. A skip yields nothing on some turns, and the loop then has
+nothing to bind: `project::iterate_loop` makes the element a `let x = <the
+place>` (`project.rs:536-543`), and there is no expression for "no element this
+turn". A place that may not exist is an `Option` of a borrow, which is a
+different feature and a much larger one.
+
+**So Phase 8a's gap stays open after M5, and this RFC's own text calling the two
+gaps siblings is wrong.** M4 wrote "it is the sibling of the gap Phase 8a
+found". 8a's gap is a missing CURSOR. M5 is a missing BRANCH. Closing one does
+not touch the other.
+
+### Should `Iterate` gain a skip predicate instead? No
+
+The cheap form is real. `iterate_loop` (`project.rs:473`) would take a third
+member, `fn live(read self, i: Int64) -> Bool`, and wrap the turn's tail in an
+`if`. About ten lines, one function, no engine change — smaller than M5.
+
+It should still not be built, and `std/slots` is the reason. `Slots` keeps a
+dense array of live slots plus the map back from a slot to its place in it.
+RFC-0090's "M1 as landed" calls that the standard slot-map layout and records
+that it is what makes `remove` O(1). **The dense list is not a workaround for a
+missing predicate. It is the layout**, and a container that has paid for O(1)
+removal has already paid for an honest walk. A predicate would let a container
+walk `n` slots to yield fewer than `n`, which is the slower of the two designs,
+and no container in the corpus wants it.
+
+Recorded as refused with a reason, not deferred. What Phase 8a needs is a
+correction to its own wording: "`Slots` skips dead slots by implementing
+`Iterate`" was wrong, and the dense list is the right answer rather than the
+consolation one.
+
+### What it costs to check
+
+Three arms, in two frontend files.
+
+- **`is_place`** (`project.rs:878`) gains an `Expr::IfExpr` arm: every branch
+  must be a place. It already recurses, so an `else if` chain falls out.
+- **Rule 3 becomes a leaf walk.** `check_places` reads `project::place_root`
+  once and checks one root (`checker.rs:1167-1172`). A conditional place has one
+  root PER LEAF. `self.front[i]` and `self.back[j]` are two leaves and one root;
+  `self.data[i]` and `other.data[j]` are two leaves and two roots, and only the
+  second is refused. So `place_root` collects roots instead of returning one,
+  and every root is checked. An `IfExpr` arm that read the `then` branch and
+  stopped would be a hole in rule 3, which is the one thing this milestone must
+  not get wrong.
+- **Typing costs nothing.** The branches unify like any if-expression, which the
+  checker has done since RFC-0030, and `place_result` solves the impl head from
+  the DECLARED return type (Phase 8a), never from the body.
+
+One new diagnostic is worth writing. An `if` used as a place with no `else` is a
+place that may not exist. The checker already refuses it with "`if` used as an
+expression needs an `else`", which says the right thing for the wrong reason.
+
+### What it costs to lower, engine by engine: nothing
+
+All three engines reach a projection through the same two calls, which is what
+`project.rs` was written to make true (`project.rs:12-16`).
+
+**A conditional read is zero lines in every engine.** A read is the prologue
+followed by the yielded expression — textual
+`compiler/vyrn-codegen/src/lib.rs:8408-8418`, direct
+`compiler/vyrn-codegen/src/direct.rs:8064-8072`, interpreter
+`compiler/vyrn-frontend/src/interp.rs:3449-3458`. `Expr::IfExpr` is already an
+expression each of them lowers: `lib.rs:4373`, `direct.rs:3446`,
+`interp.rs:1200`.
+
+**A conditional store is one arm in `project.rs` and zero lines in every
+engine.** All three call `project::store_stmts` (`project.rs:372`) and take back
+statements — `lib.rs:3179-3186`, `direct.rs:835-840`, `interp.rs:3423-3434`. It
+gains an `IfExpr` arm: a `Stmt::If` whose two blocks are `store_stmts` of the
+two branches, with the stored value put in a `let` first so it runs once and
+both arms write the same temporary. `parser::hoist_operand` is what the two
+existing arms already use for exactly that. Each arm keeps its own
+`parser::place_receiver` move-out and move-back, which is correct: the two
+branches name different receivers.
+
+**`for x in c` costs nothing.** `iterate_loop` uses the yielded place as the
+initializer of `let x` (`project.rs:536-543`), so it is a conditional read.
+
+The textual backend's `static_ty` and the direct backend's `peek` are asked
+about the RECEIVER, never about the yielded place, so neither learns a new
+shape.
+
+### Node identity, and why 7a's byte-identity result does not move
+
+Phase 7a's result — 118 `.ll` files and 119 `.wasm` modules byte-identical —
+holds because `Projection::is_identity` (`project.rs:72`) recognizes the seeded
+row's identity substitution, and each engine then lowers the ORIGINAL nodes.
+
+A conditional place is never the identity. `is_identity` matches only an empty
+prologue yielding `@slot` of the access site's own expressions
+(`project.rs:73-80`), and an `IfExpr` fails on the first arm. Every builtin
+container keeps the identity path, and no builtin container has any reason to
+declare a conditional projection, so **no emitted byte in the corpus moves.**
+
+For a user container, the choice that matters is putting the branch INSIDE the
+yielded expression rather than around the body. **The body is not cloned into
+two arms.** `project::inline` (`project.rs:278`) clones the body once per access
+site, exactly as it does today. The two side tables 7a called out — the elided
+`get`/`set` generation checks and the lambda monomorphization keys, both keyed
+by node address (`interp.rs:2452`, `direct.rs:6623`, `lib.rs:3643`) — see one
+clone where they see one clone now. 7a's two conservative misses (one extra
+check, one duplicated instance) do not double and do not change. A design that
+branched around the BODY would double both, and that is the reason not to write
+one.
+
+### Rule 2 of RFC-0089 survives, and there is still one frame
+
+A projection exists because rule 3 says a return is owned and rule 2 says a
+borrow may not be returned. The borrow never escapes because the caller's access
+runs bracketed inside the callee's frame (`project.rs:5-9`).
+
+**A conditional place does not have two frames to bracket. It has one.** One
+prologue, one exit, one caller frame. The branch is a condition inside a single
+expression evaluated at the access site, and one arm's place is read. The
+property M2 rests on is unchanged, and it holds for two arms for the same reason
+it holds for one.
+
+What keeps it true is the per-leaf rule 3 above: every arm must be a place
+rooted in the receiver or in a parameter, so no arm can hand out a place the
+access site does not own. Rule 3 is where a conditional place could break rule
+2, and it is the only place.
+
+### The straight-line drop site — checked, and Phase 5 is what is true
+
+RFC-0075 M2b put the variant branch inside `@__vyrn_stream_close` on the stated
+ground that `emit_all_drops` runs mid-block on an early exit and needs every
+drop SITE straight-line. `compiler/vyrn-frontend/src/own.rs:64-71` still carries
+that sentence. RFC-0089 M3a reports that the argument "did not survive contact"
+(RFC-0089, "Where the release lives", line 495).
+
+**Phase 5's report is what is true today, and the emitted code says so.**
+`DropKind::Deep` (`lib.rs:3505`) calls `deep_release`, which reaches
+`release_sum` (`lib.rs:2829`) and `release_enum` (`lib.rs:2869`), and both emit
+`br i1` with fresh labels (`lib.rs:2842`, `lib.rs:2886`) at whatever point in
+the block the drop was reached — including from `emit_all_drops`
+(`lib.rs:3380`) before a `ret`. A branching lowering mid-block is something this
+backend already emits on the early-exit path.
+
+**M5 does not test the rule either way.** Its branch sits inside a read or a
+store, and the binding the drop stack records is the container, never the
+projected place. The rule matters here only as a warning to a future design that
+tries to give a projection two exits. This one does not.
+
+### What it does not buy
+
+**Not speed.** M4 wrote the branch at the access site by hand — which is what an
+inlined conditional yield emits — and measured it beside the projection it would
+replace. `vyrn bench`, native, median:
+
+| bench | Vyrn, projection | Vyrn, branch hand-inlined |
+|---|---|---|
+| indexed sum, 1024 reads | 882 ns | **901 ns** |
+
+19 ns apart on 1024 reads, and in the direction that is not an argument for
+building it. **M5 is an expressiveness feature and this RFC must not claim
+otherwise.** Everything M4 measured as the cost of a Vyrn small-buffer container
+— 7.9x on reads, and the 20x fixed-array spill underneath it — is untouched.
+
+It also deletes nothing. No built-in goes away and the census does not move.
+
+### Does `SmallArray` become portable? No, and here is how the three separate
+
+M4 named three blockers. M5 closes the third and only the third.
+
+- **Blocker 3 is separable in both directions.** The deque above needs it and
+  needs neither of the others. A `SmallArray` with const parameters and an empty
+  inline buffer would still need it.
+- **Blocker 1, const generic parameters, is separable from 3 and not from 2.**
+  One module per capacity (`Small4`, `Small8`, …) is the workaround for 1, and
+  such a module still cannot write its own empty state.
+- **Blocker 2, an uninitialized place, decides `SmallArray`, and it is not
+  separable from anything, because it is the model.** RFC-0089 exists so that
+  every place holds exactly one value. A place that holds none is that rule
+  inverted, not a feature beside it. The weaker form IS separable — a `Default`
+  protocol and a container that seeds `N` values — and it costs `N`
+  constructions where the built-in costs nothing, which makes it a different
+  container.
+
+So `SmallArray` needs 1 and 2, in that order, and then it needs 3. M5 on its own
+moves the port from three blockers to two, and the two are the ones M4 called a
+language rather than a milestone. Nothing about the port changes.
+
+### The milestone, and its gate
+
+**M5 — a projection may yield a conditional place.** `is_place` admits an `if`
+whose every leaf is a place; `place_root` becomes a leaf walk and rule 3 checks
+each leaf; `store_stmts` gains an `IfExpr` arm. Rule 1 does not move, no keyword
+is added, and no engine is touched.
+
+The gate is not a benchmark — M4 has already measured that there is nothing to
+win. It is three conditions, and the first is the one that can stop the work.
+
+1. **The diff touches `project.rs` and `checker.rs` and nothing else.** If any
+   engine needs one line, the branch was put in the wrong place and the design
+   above is wrong. Three engines' worth of `IfExpr` lowering already exists;
+   reaching it is the entire claim.
+2. **A container that this alone unblocks compiles and passes three-way
+   parity.** A two-buffer deque in the corpus, exercising `c[i]`, `c[i] = v` and
+   `for x in c`, on three engines, with the interpreter as the oracle. A
+   milestone whose only product is expressiveness has to ship the expression.
+3. **The corpus does not move a byte.** 118 `.ll` and 119 `.wasm` diffed against
+   the parent, zero differences outside the new file. `is_identity` must still
+   answer `true` everywhere it answers `true` today, and the emitted output is
+   how that is proved rather than asserted.
+
+**Recommended, and gated on condition 2.** It is the smallest milestone in this
+chain, and it is the last refusal in `check_places` that refuses a program the
+memory model permits: the other three each refuse something rule 2 or rule 3 of
+RFC-0089 forbids, while this one refuses a shape the model allows and the
+lowering can already express.
+
+Condition 2 is a real gate and not a formality. **If no container in the corpus
+wants a second buffer, M5 does not ship.** A language feature whose only user is
+its own test is ungated multiplicity, and the workspace rule is that ungated
+multiplicity rots. The honest way to find the user is to reach for a deque in a
+dogfood program first — which is how `Window`, `Slice` and `Ring` found seven of
+this RFC's bugs.
