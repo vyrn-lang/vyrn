@@ -7239,12 +7239,49 @@ impl<'a> Checker<'a> {
                 self.unify(&ret, &sig.1, subst, line)?;
                 Ok(())
             }
-            other => Err(format!(
-                "line {}: `{callee}` argument {} must be a lambda `|..| ..` or a function \
-                 name (RFC-0023)",
-                other.line(),
-                i + 1
-            )),
+            // Any other expression of `fn` type (RFC-0037): a field read, an
+            // element, a call's result. A stored function value carries its own
+            // tag, and the specialized instance dispatches on that tag — so the
+            // call site needs no static name, and the `let` this used to demand
+            // was only moving the same `{ tag, captures }` pair through a slot.
+            // The v1 zero-cost path (a lambda literal or a bare name) is above
+            // and untouched.
+            other => {
+                let aty = self.expr(other, scope, None, fn_ret)?;
+                let Type::Fn(vptys, vret) = self.base(&aty) else {
+                    return Err(format!(
+                        "line {}: `{callee}` argument {} must be a lambda `|..| ..`, a \
+                         function name, or an expression of `fn` type (RFC-0023); \
+                         found {aty}",
+                        other.line(),
+                        i + 1
+                    ));
+                };
+                if vptys.len() != ptys.len() {
+                    return Err(format!(
+                        "line {line}: this is a {}-argument function value, but \
+                         `{callee}` argument {} expects {}",
+                        vptys.len(),
+                        i + 1,
+                        ptys.len()
+                    ));
+                }
+                for (a, b) in vptys.iter().zip(&ptys) {
+                    // A type parameter that occurs ONLY inside this `fn`
+                    // parameter's own parameter list is solved from the value's
+                    // declared types, exactly as a bare name solves it
+                    // (RFC-0071 M2b).
+                    let b = &self.solve_fn_param(b, a, subst, line);
+                    if !self.assignable(a, b) && !self.assignable(b, a) {
+                        return Err(format!(
+                            "line {line}: this function value has parameter type {a}, \
+                             but `{callee}` expects {b}"
+                        ));
+                    }
+                }
+                self.unify(&ret, &vret, subst, line)?;
+                Ok(())
+            }
         }
     }
 

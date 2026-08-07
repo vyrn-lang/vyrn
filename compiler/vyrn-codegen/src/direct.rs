@@ -6154,7 +6154,7 @@ impl Fn_<'_> {
         if generic {
             for (i, p) in f.params.iter().enumerate() {
                 let Type::Fn(dptys, _) = &p.ty else { continue };
-                if let Some(tptys) = self.fn_arg_param_types(&args[i]) {
+                if let Some(tptys) = self.fn_arg_param_types(&args[i], line) {
                     for (d, t) in dptys.iter().zip(&tptys) {
                         crate::solve_param(d, t, &mut subst);
                     }
@@ -6165,7 +6165,7 @@ impl Fn_<'_> {
         // outbound parameter (`U` in `map<T, U>`) from the target's own return.
         let mut targets: Vec<FnTarget> = Vec::new();
         let mut cap_tys: Vec<Vec<Type>> = Vec::new();
-        let mut cap_srcs: Vec<Vec<String>> = Vec::new();
+        let mut cap_srcs: Vec<Vec<Expr>> = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             let Type::Fn(dptys, dret) = &p.ty else { continue };
             let ptys: Vec<Type> =
@@ -6192,30 +6192,38 @@ impl Fn_<'_> {
                 }
             }
         }
-        // The specialization's own signature: the ordinary parameters, then one
-        // capture parameter per capture per `fn` parameter, in `fn`-parameter
-        // order. A synthesized `Function` rather than a hand-built signature, so
-        // `lower_fn` lowers it with no case of its own — the prologue's by-value
-        // copy of an aggregate parameter is exactly what a captured record wants.
+        // The specialization's own signature, and the argument list to call it
+        // with, built in ONE walk of the callee's parameters: an ordinary
+        // parameter keeps its place, and a `fn` parameter becomes its captures at
+        // that same place. A synthesized `Function` rather than a hand-built
+        // signature, so `lower_fn` lowers it with no case of its own — the
+        // prologue's by-value copy of an aggregate parameter is exactly what a
+        // captured record wants.
+        //
+        // Interleaved rather than ordinary-then-captures, because a wasm argument
+        // is evaluated where its operand is pushed, and a `fn`-typed argument can
+        // be an expression that prints or traps (a stored value read from a
+        // place). Collecting the captures at the end evaluated that expression
+        // after every ordinary argument, which the other two engines do not do.
         let mut sf = f.clone();
         sf.type_params.clear();
         sf.type_bounds.clear();
         let mut params: Vec<Param> = Vec::new();
-        for p in &f.params {
-            if matches!(p.ty, Type::Fn(..)) {
+        let mut call_args: Vec<Expr> = Vec::new();
+        let mut binds: HashMap<String, FnBinding> = HashMap::new();
+        let mut fi = 0usize;
+        for (i, p) in f.params.iter().enumerate() {
+            if !matches!(p.ty, Type::Fn(..)) {
+                params.push(Param {
+                    name: p.name.clone(),
+                    capability: p.capability,
+                    ty: ftypes::substitute(&p.ty, &subst),
+                });
+                call_args.push(args[i].clone());
                 continue;
             }
-            params.push(Param {
-                name: p.name.clone(),
-                capability: p.capability,
-                ty: ftypes::substitute(&p.ty, &subst),
-            });
-        }
-        let mut binds: HashMap<String, FnBinding> = HashMap::new();
-        let fn_params = f.params.iter().filter(|p| matches!(p.ty, Type::Fn(..)));
-        for ((p, target), tys) in fn_params.zip(&targets).zip(&cap_tys) {
             let mut srcs = Vec::new();
-            for t in tys {
+            for t in &cap_tys[fi] {
                 // A reserved spelling: no Vyrn identifier can contain `@`, so an
                 // instance's capture parameter cannot shadow or be shadowed by
                 // anything the callee's body names.
@@ -6223,7 +6231,11 @@ impl Fn_<'_> {
                 params.push(Param { name: n.clone(), capability: Capability::Read, ty: t.clone() });
                 srcs.push(n);
             }
-            binds.insert(p.name.clone(), FnBinding { target: target.clone(), cap_srcs: srcs });
+            binds.insert(p.name.clone(), FnBinding { target: targets[fi].clone(), cap_srcs: srcs });
+            // The capture values, read from the caller's own scope — which is
+            // what fixes them at this site.
+            call_args.extend(cap_srcs[fi].iter().cloned());
+            fi += 1;
         }
         sf.params = params;
         sf.ret = ftypes::substitute(&f.ret, &subst);
@@ -6234,20 +6246,6 @@ impl Fn_<'_> {
             subst,
             binds,
         )?;
-        // Ordinary arguments in parameter order, then the capture values — read
-        // from the caller's own scope, which is what fixes them at this site.
-        let mut call_args: Vec<Expr> = f
-            .params
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !matches!(p.ty, Type::Fn(..)))
-            .map(|(i, _)| args[i].clone())
-            .collect();
-        for srcs in &cap_srcs {
-            for s in srcs {
-                call_args.push(Expr::Var { name: s.clone(), line });
-            }
-        }
         self.emit_call(m, b, &sig, &call_args)
     }
 
@@ -6281,8 +6279,8 @@ impl Fn_<'_> {
         self.emit_call(m, b, &bnd.target.sig, &all)
     }
 
-    /// Resolve one `fn`-typed argument to a call target, giving the names to read
-    /// its capture values from at THIS site and their types.
+    /// Resolve one `fn`-typed argument to a call target, giving the EXPRESSIONS to
+    /// read its capture values from at THIS site and their types.
     ///
     /// Nothing is emitted: the captures are named, not loaded, because the call
     /// they become arguments to has not started pushing operands yet.
@@ -6293,7 +6291,8 @@ impl Fn_<'_> {
         ptys: &[Type],
         expected_ret: &Type,
         line: usize,
-    ) -> Result<(FnTarget, Vec<String>, Vec<Type>), String> {
+    ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
+        let var = |n: &String| Expr::Var { name: n.clone(), line };
         match arg {
             Expr::Lambda { params, body, line } => {
                 self.lift_lambda(m, arg, params, body, ptys, expected_ret, *line)
@@ -6305,7 +6304,8 @@ impl Fn_<'_> {
                 // instance never learns there was an outer one.
                 if let Some(bnd) = self.fn_binds.get(name) {
                     let tys = bnd.target.sig.params[..bnd.target.ncaps].to_vec();
-                    return Ok((bnd.target.clone(), bnd.cap_srcs.clone(), tys));
+                    let srcs = bnd.cap_srcs.iter().map(&var).collect();
+                    return Ok((bnd.target.clone(), srcs, tys));
                 }
                 // A stored function value (RFC-0037) flowing into a `fn`-typed
                 // parameter: the target is the signature's DISPATCHER and the
@@ -6320,7 +6320,7 @@ impl Fn_<'_> {
                         let dsig = self.dispatcher(m, &norm, line)?;
                         return Ok((
                             FnTarget { sig: dsig, ncaps: 1 },
-                            vec![name.clone()],
+                            vec![var(name)],
                             vec![norm],
                         ));
                     }
@@ -6339,10 +6339,27 @@ impl Fn_<'_> {
                     None => unsupported(&format!("`{name}` as a function value"), line),
                 }
             }
-            other => unsupported(
-                &format!("a `fn`-typed argument that is {}", expr_name(other)),
-                Expr::line(other),
-            ),
+            // Any other expression of `fn` type (RFC-0037): a field read, an
+            // element, a call's result. It produces the same defunctionalized
+            // value a binding holds, so it takes the arm above — the target is
+            // the signature's dispatcher and the "capture" is the value itself,
+            // read at this site by the expression rather than by a name.
+            other => {
+                let ty = self.peek(other, line)?;
+                let norm = crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types);
+                if !matches!(norm, Type::Fn(..)) {
+                    return unsupported(
+                        &format!("a `fn`-typed argument that is {}", expr_name(other)),
+                        Expr::line(other),
+                    );
+                }
+                let dsig = self.dispatcher(m, &norm, line)?;
+                Ok((
+                    FnTarget { sig: dsig, ncaps: 1 },
+                    vec![other.clone()],
+                    vec![norm],
+                ))
+            }
         }
     }
 
@@ -6407,7 +6424,7 @@ impl Fn_<'_> {
         if generic {
             for (i, p) in f.params.iter().enumerate() {
                 let Type::Fn(dptys, _) = &p.ty else { continue };
-                if let Some(tptys) = self.fn_arg_param_types(&args[i]) {
+                if let Some(tptys) = self.fn_arg_param_types(&args[i], line) {
                     for (d, t) in dptys.iter().zip(&tptys) {
                         crate::solve_param(d, t, &mut subst);
                     }
@@ -6452,18 +6469,27 @@ impl Fn_<'_> {
                     None => unsupported(&format!("`{name}` as a function value"), line),
                 }
             }
-            other => unsupported(
-                &format!("a `fn`-typed argument that is {}", expr_name(other)),
-                Expr::line(other),
-            ),
+            other => match self.fn_expr_sig(other, line)? {
+                Type::Fn(_, ret) => Ok(*ret),
+                _ => unsupported(
+                    &format!("a `fn`-typed argument that is {}", expr_name(other)),
+                    Expr::line(other),
+                ),
+            },
         }
     }
 
     /// The DECLARED parameter types of a `fn`-typed argument's target, when the
-    /// argument names one. `None` for a lambda literal, whose parameters take their
-    /// types from the signature they flow into and so can solve nothing.
-    fn fn_arg_param_types(&self, arg: &Expr) -> Option<Vec<Type>> {
-        let Expr::Var { name, .. } = arg else { return None };
+    /// argument names one or is an expression of `fn` type. `None` for a lambda
+    /// literal, whose parameters take their types from the signature they flow
+    /// into and so can solve nothing.
+    fn fn_arg_param_types(&mut self, arg: &Expr, line: usize) -> Option<Vec<Type>> {
+        let Expr::Var { name, .. } = arg else {
+            return match self.fn_expr_sig(arg, line) {
+                Ok(Type::Fn(ptys, _)) => Some(ptys),
+                _ => None,
+            };
+        };
         if let Some(bnd) = self.fn_binds.get(name) {
             return Some(bnd.target.sig.params[bnd.target.ncaps..].to_vec());
         }
@@ -6474,6 +6500,16 @@ impl Fn_<'_> {
             };
         }
         self.cx.sigs.get(name).map(|s| s.params.clone())
+    }
+
+    /// The normalized `fn` signature an expression produces — a lambda literal
+    /// excepted, since it has none of its own. Peeked, so nothing is emitted.
+    fn fn_expr_sig(&mut self, arg: &Expr, line: usize) -> Result<Type, String> {
+        if matches!(arg, Expr::Lambda { .. }) {
+            return Ok(Type::Unit);
+        }
+        let ty = self.peek(arg, line)?;
+        Ok(crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types))
     }
 
     /// Lift a lambda literal to a top-level function: `(captures.., params..) ->
@@ -6494,7 +6530,7 @@ impl Fn_<'_> {
         ptys: &[Type],
         expected_ret: &Type,
         line: usize,
-    ) -> Result<(FnTarget, Vec<String>, Vec<Type>), String> {
+    ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
         if params.len() != ptys.len() {
             return unsupported("a lambda with the wrong number of parameters", line);
         }
@@ -6575,7 +6611,8 @@ impl Fn_<'_> {
         under.sort_by(|a, b| a.0.cmp(&b.0));
         let key = Key::Lambda(at as *const Expr as usize, shape, under);
         let sig = self.cx.enqueue(m, key, Rc::new(sf), self.cx.subst.clone(), HashMap::new())?;
-        Ok((FnTarget { sig, ncaps: cap_names.len() }, cap_names, cap_tys))
+        let srcs = cap_names.iter().map(|n| Expr::Var { name: n.clone(), line }).collect();
+        Ok((FnTarget { sig, ncaps: cap_names.len() }, srcs, cap_tys))
     }
 
     // ---- RFC-0037 stored function values ----------------------------------
@@ -6627,7 +6664,7 @@ impl Fn_<'_> {
         b: &mut Frame,
         sig_ty: &Type,
         target: FnTarget,
-        cap_srcs: &[String],
+        cap_srcs: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
         let cap_tys = target.sig.params[..target.ncaps].to_vec();
@@ -6649,14 +6686,13 @@ impl Fn_<'_> {
             b.ins(&Instruction::I64Const(bl.size as i64));
             b.ins(&Instruction::Call(self.cx.rt.malloc));
             b.ins(&Instruction::LocalSet(p));
-            for (i, (name, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
-                let src = Expr::Var { name: name.clone(), line };
+            for (i, (src, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
                 b.ins(&Instruction::LocalGet(p));
                 if bl.fields[i] != 0 {
                     b.ins(&Instruction::I32Const(bl.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                 }
-                self.expr_as(m, b, &src, ty)?;
+                self.expr_as(m, b, src, ty)?;
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
                         b.ins(&store_of(&self.cx.ll(ty)));
@@ -6758,7 +6794,9 @@ impl Fn_<'_> {
             &self.cx.types,
         );
         let sig_ty = self.expected_fn_sig().unwrap_or(own);
-        self.build_fnval(m, b, &sig_ty, t.clone(), &bnd.cap_srcs, line)
+        let srcs: Vec<Expr> =
+            bnd.cap_srcs.iter().map(|n| Expr::Var { name: n.clone(), line }).collect();
+        self.build_fnval(m, b, &sig_ty, t.clone(), &srcs, line)
     }
 
     /// The dispatcher for one signature, reserving its index the first time

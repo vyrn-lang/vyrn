@@ -5913,8 +5913,19 @@ impl<'a> Gen<'a> {
         let mut call_subst: HashMap<String, Type> = HashMap::new();
         // Ordinary argument operands, in parameter order.
         let mut nonfn_ops: Vec<String> = Vec::new();
+        // A `fn`-typed argument that is neither a lambda literal nor a bare name
+        // is an ORDINARY expression producing a stored function value, and it can
+        // have effects. It is evaluated here, in argument order alongside the
+        // non-`fn` arguments, because the interpreter evaluates arguments left to
+        // right and a value resolved in the second pass would run late. A lambda's
+        // captures and a name's load have no effects, so those stay where they are.
+        let mut evaluated: HashMap<usize, (String, Type)> = HashMap::new();
         for (i, p) in callee.params.iter().enumerate() {
             if matches!(p.ty, Type::Fn(..)) {
+                if !matches!(args[i], Expr::Lambda { .. } | Expr::Var { .. }) {
+                    let (v, vty) = self.gen_expr(&args[i])?;
+                    evaluated.insert(i, (v, vty));
+                }
                 continue;
             }
             let (v, vty) = self.gen_expr(&args[i])?;
@@ -5942,7 +5953,14 @@ impl<'a> Gen<'a> {
             // The checker's `check_fn_arg` learned the same rule; this is its
             // codegen half.
             if generic {
-                if let Some(tptys) = self.fn_arg_param_types(&args[i]) {
+                let tptys = match evaluated.get(&i) {
+                    Some((_, t)) => match self.normalize_sig(t) {
+                        Type::Fn(ps, _) => Some(ps),
+                        _ => None,
+                    },
+                    None => self.fn_arg_param_types(&args[i]),
+                };
+                if let Some(tptys) = tptys {
                     for (d, t) in dptys.iter().zip(&tptys) {
                         solve_param(d, t, &mut call_subst);
                     }
@@ -5954,8 +5972,13 @@ impl<'a> Gen<'a> {
                 .map(|t| vyrn_frontend::types::substitute(t, &call_subst))
                 .collect();
             let dret_sub = vyrn_frontend::types::substitute(dret, &call_subst);
-            let (target_sym, capture_tys, target_ret) =
-                self.resolve_fn_arg(&args[i], &ptys, &dret_sub, &mut capture_ops)?;
+            let (target_sym, capture_tys, target_ret) = self.resolve_fn_arg(
+                &args[i],
+                &ptys,
+                &dret_sub,
+                &mut capture_ops,
+                evaluated.remove(&i),
+            )?;
             // Solve the outbound generic parameter (`U`) from the target's return.
             if generic {
                 solve_param(dret, &target_ret, &mut call_subst);
@@ -6033,6 +6056,7 @@ impl<'a> Gen<'a> {
         ptys: &[Type],
         expected_ret: &Type,
         capture_ops: &mut Vec<String>,
+        evaluated: Option<(String, Type)>,
     ) -> Result<(String, Vec<Type>, Type), String> {
         match arg {
             Expr::Lambda { params, body, .. } => {
@@ -6087,7 +6111,26 @@ impl<'a> Gen<'a> {
                 let ret = self.ret_types.get(vn).cloned().unwrap_or(Type::Unit);
                 Ok((format!("vyrn_{vn}"), Vec::new(), ret))
             }
-            _ => Err("internal: unexpected `fn`-typed argument".into()),
+            // Any other expression of `fn` type (RFC-0037): a field read, an
+            // element, a call's result. The value it produces is the same
+            // `{ i64, i64 }` pair a slot holds, so it takes the arm above: the
+            // target is the signature's dispatcher and the enum is the capture.
+            // Nothing is copied — a field read is an `extractvalue`, so the
+            // capture block stays owned by the place the value was read from,
+            // exactly as the slot load leaves it owned by the `let`.
+            _ => {
+                let Some((v, ty)) = evaluated else {
+                    return Err("internal: unexpected `fn`-typed argument".into());
+                };
+                let sig = self.normalize_sig(&vyrn_frontend::types::substitute(&ty, self.subst));
+                let Type::Fn(_, ref sret) = sig else {
+                    return Err("internal: unexpected `fn`-typed argument".into());
+                };
+                capture_ops.push(format!("{{ i64, i64 }} {v}"));
+                let sym = self.fnval_dispatcher_sym(&sig);
+                let ret = (**sret).clone();
+                Ok((sym, vec![sig.clone()], ret))
+            }
         }
     }
 
