@@ -2414,10 +2414,24 @@ fn local_detail(b: &LocalBinding) -> String {
 // ---------------------------------------------------------------------------
 
 fn function_detail(f: &Function) -> String {
+    // A capability is shown wherever it was written. It is the whole contract of
+    // the call — whether the callee mutates what it is handed, or takes it — and
+    // hover that hides it leaves a reader guessing from the name. An impl
+    // method's receiver keeps its type here (`modify self: Tally`) rather than
+    // reading exactly as written: hover is the one place a reader learns what
+    // `self` IS, and the capability adds to that rather than replacing it.
     let params = f
         .params
         .iter()
-        .map(|p| format!("{}: {}", p.name, type_to_string(&p.ty)))
+        .map(|p| {
+            let base = format!("{}: {}", p.name, type_to_string(&p.ty));
+            match p.capability {
+                Capability::Read => base,
+                Capability::Modify => format!("modify {base}"),
+                Capability::Consume => format!("consume {base}"),
+                Capability::Share => format!("share {base}"),
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let tp = if f.type_params.is_empty() {
