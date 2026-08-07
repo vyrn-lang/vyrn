@@ -1175,6 +1175,31 @@ pub(crate) mod tests {
         );
     }
 
+    /// RFC-0086 M3, the same test one protocol over: nothing in the compiler
+    /// knows the name `Txn`, and the obligation comes out of the program.
+    #[test]
+    fn a_user_type_declares_that_it_must_be_used() {
+        let src = "protocol MustUse {} \
+                   type Txn = { id: Int64 } \
+                   impl MustUse for Txn {} \
+                   type Plain = { id: Int64 } \
+                   fn main() -> Int64 { return 0 }";
+        let (_, p) = analyze_src(src);
+        let owned = Owned::new(&p);
+        assert_eq!(
+            owned.linear_kind(&Type::Named("Txn".into())),
+            Some(Linear::Declared)
+        );
+        assert_eq!(owned.linear_kind(&Type::Named("Plain".into())), None);
+        // And the seeded row is still there for a program that declares nothing,
+        // which is the bootstrap answer `Owned` gives above: a bare file has no
+        // resolver, so `Stream` may not depend on one.
+        assert_eq!(
+            Owned::default().linear_kind(&Type::Stream(Box::new(Type::Int))),
+            Some(Linear::Stream)
+        );
+    }
+
     /// A record is still reclaimed by nothing, and Phase 5 kept it that way with
     /// a measurement rather than with the old argument. See
     /// [`Owned::release_kind`] for the three parity failures a row here produced:
