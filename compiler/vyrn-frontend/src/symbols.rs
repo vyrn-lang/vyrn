@@ -663,7 +663,10 @@ fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote> {
             // counts it in a summary; a hover on an `Int64` would just alarm.
             if matches!(
                 &n.fate,
-                crate::own::Fate::Leaked(crate::own::Leak::NoRelease(_))
+                crate::own::Fate::Leaked(crate::own::Leak::NoRelease {
+                    owns_heap: false,
+                    ..
+                })
             ) {
                 continue;
             }
