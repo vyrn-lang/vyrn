@@ -4649,7 +4649,21 @@ impl<'a> Gen<'a> {
             .ok_or_else(|| format!("`{name}` is not a record type"))?;
 
         // Emit each field value in declared order; infer generic parameters.
-        let mut solved: HashMap<String, Type> = HashMap::new();
+        //
+        // The type this literal is BUILT FOR comes first, when the site names it.
+        // Solving from the field VALUES alone cannot see through a `fn`-typed
+        // field: `Deferred<P, T> = { run: fn(P) -> T }` gives the value the still
+        // open `fn(P) -> T` as its expected type, the value registers its
+        // RFC-0037 variant against that signature, and the dispatcher the call
+        // site reaches is keyed on `fn(Int64) -> String` — which has no arm for
+        // it. Every carrier of a `fn` under a parameter has the same hole: an
+        // `Option<fn(P) -> T>` field, an `Array<fn(P) -> T>` field, a nested
+        // generic record. One seed closes all of them, because the parameters are
+        // known before the first field is emitted.
+        // Substituted, not resolved: `resolve` takes an `App` all the way to the
+        // `Record` it stands for, and the arguments are the whole point here.
+        let want = self.expect.last().map(|t| vyrn_frontend::types::substitute(t, self.subst));
+        let mut solved = expected_type_args(want.as_ref(), name, self.types.get(name));
         let mut vals: Vec<(String, Type)> = Vec::new();
         for decl_f in &rfields {
             let (_, value_expr) = fields
@@ -4670,11 +4684,22 @@ impl<'a> Gen<'a> {
         // shared rule an enum variant's construction uses. `solved` above is the
         // incremental form of it, kept because each field's own type needs it
         // while the fields are still being emitted.
+        //
+        // The actual types are the DECLARED ones under `solved`, not the values'
+        // own. Those two agree everywhere the values are the only source. Where
+        // the site's expectation seeded a parameter they can differ — a field
+        // given a wider record than the expected instantiation declares — and
+        // then the values' answer is the wrong one: each field is inserted at its
+        // `solved` type below, so the aggregate must be the same type or the
+        // `insertvalue` is invalid IR.
         let result_ty = applied_type(
             self.types.get(name),
             name,
             &rfields.iter().map(|f| f.ty.clone()).collect::<Vec<_>>(),
-            &vals.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+            &rfields
+                .iter()
+                .map(|f| vyrn_frontend::types::substitute(&f.ty, &solved))
+                .collect::<Vec<_>>(),
         );
         let ll = self.llt(&result_ty);
 
@@ -10738,6 +10763,41 @@ pub(crate) fn applied_type(
     let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else { return named() };
     let (_, args) = solve_type_args(&decl.type_params, declared, actual);
     Type::App(name.to_string(), args.into_iter().map(|a| a.unwrap_or(Type::Unit)).collect())
+}
+
+/// The type arguments a construction site's EXPECTED type already names.
+///
+/// [`applied_type`] reads a generic's arguments off what is supplied — a record's
+/// field values, a variant's payload. That is the only source when there is no
+/// other, and it is enough for a field whose value carries its own type. It is
+/// NOT enough for a field that carries a `fn` (RFC-0037): a stored `fn` value
+/// registers its dispatch variant against the type it is being built FOR, so if
+/// that type is still `fn(P) -> T` when the value is built, the variant lands
+/// under a signature no dispatcher covers.
+///
+/// The site's own expectation knows the answer before any field is read. This
+/// takes the arguments it names, and only the ones it settles: a `Unit`
+/// placeholder or an open `Param` says nothing, so the value-side solve keeps
+/// those.
+///
+/// Shared with the direct wasm backend, for [`applied_type`]'s reason — two
+/// backends seeding one construction differently would build two different
+/// types for one literal.
+pub(crate) fn expected_type_args(
+    expected: Option<&Type>,
+    name: &str,
+    decl: Option<&TypeDecl>,
+) -> HashMap<String, Type> {
+    let Some(Type::App(en, args)) = expected else { return HashMap::new() };
+    let Some(decl) = decl.filter(|d| en == name && d.type_params.len() == args.len()) else {
+        return HashMap::new();
+    };
+    decl.type_params
+        .iter()
+        .zip(args)
+        .filter(|(_, a)| !matches!(a, Type::Unit | Type::Param(_)))
+        .map(|(p, a)| (p.clone(), a.clone()))
+        .collect()
 }
 
 /// Whether `t` is a generic instantiation whose every type argument is known —
