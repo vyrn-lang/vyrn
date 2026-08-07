@@ -1,0 +1,84 @@
+/// A receiver may be written — `read self`, `modify self`, `consume self`.
+///
+/// An impl method's receiver used to be a bare `self`, and a bare `self` IS
+/// `read`. So a method could not mutate what it was called on, and the one
+/// position RFC-0089 rule 2 never reached was the receiver. `modify self` is
+/// that position saying what every parameter has been able to say since
+/// RFC-0004: exclusive in-place access, for the length of the call.
+///
+/// A bare `self` still means `read`. Writing the word changes nothing about a
+/// method that already worked; it is what makes a MUTATING one sayable.
+///
+/// The protocol declares the discipline and the impl must match it. That is not
+/// bookkeeping: inside `fn feed<T: Counting>(t: modify T, ..)` the compiler has
+/// no impl to look at, so the protocol's `modify self` is the only thing that
+/// says `t` must be a mutable binding.
+
+type Tally = { counts: Array<Int64>, running: Int64 }
+
+protocol Counting {
+    /// Mutates. The receiver is the caller's own binding, not a copy of it.
+    fn record(modify self, n: Int64)
+    /// Reads. `read self` is what a bare `self` has always meant — spelled out
+    /// here so the two sit side by side.
+    fn sum(read self) -> Int64
+}
+
+impl Counting for Tally {
+    fn record(modify self, n: Int64) {
+        self.counts.push(n)
+        self.running = self.running + n
+    }
+    fn sum(read self) -> Int64 {
+        return self.running
+    }
+}
+
+/// A slab gives back what it took. `consume self` is the receiver that says so:
+/// `release` is handed the container, not a borrow of it, so moving a buffer out
+/// of `self` and dropping it is a move rather than a second name for somebody
+/// else's memory. RFC-0089 recorded that `impl Owned`'s `release` had one legal
+/// spelling and that a rule refusing `drop` of a projection would have refused
+/// it. This is the spelling that ends that.
+impl Owned for Tally {
+    fn release(consume self) {
+        let counts = self.counts
+        drop counts
+    }
+}
+
+/// A bounded generic over a mutating method. The receiver arrives as `modify T`
+/// and the call `t.record(n)` reads `Counting`'s declaration to know it may.
+fn feed<T: Counting>(t: modify T, xs: Array<Int64>) -> Unit {
+    for x in xs {
+        t.record(x)
+    }
+}
+
+fn main() -> Int64 {
+    let mut t = Tally { counts: [], running: 0 }
+
+    // A method call on a `modify self` receiver. `t` is the caller's binding:
+    // the write lands in it, and the next line reads it.
+    t.record(3)
+    t.record(4)
+    print(t.sum()) // 7
+    print(t.running) // 7
+    print(t.counts.length) // 2
+
+    // The same method through a bound. Nothing here knows the impl.
+    let more: Array<Int64> = [10, 20]
+    feed(t, more)
+    print(t.sum()) // 37
+    print(t.counts.length) // 4
+
+    // `t.record(..)` needs `t` declared `mut`, exactly as `record(t, ..)` would.
+    // Two refusals go with it and neither can be written in a passing example:
+    // a `modify` receiver read again in the same call (`t.merge(t)`) is the
+    // exclusivity rule, and an impl whose receiver disagrees with the protocol's
+    // is a conformance error.
+    //
+    // `t` is released at the end of this block, through the `consume self`
+    // above — nothing here says `drop`.
+    return 0
+}
