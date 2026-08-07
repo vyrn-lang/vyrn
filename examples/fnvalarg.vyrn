@@ -10,6 +10,12 @@
 /// after every ordinary argument — so `apply(sideFn(), sideInt())` printed in
 /// the other order there. The specialization now takes its captures at the `fn`
 /// parameter's own place, and all three engines evaluate left to right.
+///
+/// A generic container holding a `fn` is built HERE, by literal, in every shape
+/// that carries one: bare, in an array, in an `Option`, and one record inside
+/// another. The parameters come from the type the literal is built for, because
+/// the field values cannot answer in time — a value built for the still-open
+/// `fn(P) -> T` registers a variant no dispatcher covers.
 
 import { map } from "std/arrays"
 
@@ -20,6 +26,12 @@ type Holder = { f: IntFn }
 type Nest = { inner: Holder }
 
 type Deferred<P, T> = { run: fn(P) -> T }
+
+type Many<P, T> = { runs: Array < fn(P) -> T > }
+
+type Maybe<P, T> = { run: Option < fn(P) -> T > }
+
+type Outer<P, T> = { inner: Deferred<P, T> }
 
 fn addTen(x: Int64) -> Int64 {
     return x + 10
@@ -82,9 +94,39 @@ fn main() -> Int64 {
     print(apply(scale(7), 3)) // 21
 
     // A generic container's field, where the parameter type is the only place
-    // the type parameter occurs.
-    let d = defer(label)
+    // the type parameter occurs. Built by literal: the annotation names `P` and
+    // `T`, and the field value is read against `fn(Int64) -> String`.
+    let d: Deferred<Int64, String> = Deferred { run: label }
     print(callWith(d.run, 12)) // n=12
+    let df = d.run
+    print(df(13)) // n=13
+
+    // A lambda in that field: its parameter type comes from the annotation too.
+    let lam: Deferred<Int64, String> = Deferred { run: |n| "n=\{n}" }
+    let lf = lam.run
+    print(lf(15)) // n=15
+
+    // The other carriers of a `fn` under a type parameter: an array of them, an
+    // `Option` of one, and a generic record inside a generic record.
+    let many: Many<Int64, String> = Many { runs: [label] }
+    let mf = many.runs[0]
+    print(mf(16)) // n=16
+
+    let maybe: Maybe<Int64, String> = Maybe { run: Some(label) }
+    match maybe.run {
+        Some(g) => print(g(17)), // n=17
+        None => print("none"),
+    }
+
+    let outer: Outer<Int64, String> = Outer { inner: Deferred { run: label } }
+    let of = outer.inner.run
+    print(of(18)) // n=18
+
+    // The same field built through a generic function, where the instance's own
+    // substitution fixes `P` and `T`. It takes `label` by `consume`, so it comes
+    // after every other use of the name.
+    let viaFn = defer(label)
+    print(callWith(viaFn.run, 19)) // n=19
 
     // A generic higher-order call: the outbound parameter solves from the
     // field's own return type.

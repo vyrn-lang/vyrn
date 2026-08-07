@@ -4649,7 +4649,21 @@ impl<'a> Gen<'a> {
             .ok_or_else(|| format!("`{name}` is not a record type"))?;
 
         // Emit each field value in declared order; infer generic parameters.
-        let mut solved: HashMap<String, Type> = HashMap::new();
+        //
+        // The type this literal is BUILT FOR comes first, when the site names it.
+        // Solving from the field VALUES alone cannot see through a `fn`-typed
+        // field: `Deferred<P, T> = { run: fn(P) -> T }` gives the value the still
+        // open `fn(P) -> T` as its expected type, the value registers its
+        // RFC-0037 variant against that signature, and the dispatcher the call
+        // site reaches is keyed on `fn(Int64) -> String` — which has no arm for
+        // it. Every carrier of a `fn` under a parameter has the same hole: an
+        // `Option<fn(P) -> T>` field, an `Array<fn(P) -> T>` field, a nested
+        // generic record. One seed closes all of them, because the parameters are
+        // known before the first field is emitted.
+        // Substituted, not resolved: `resolve` takes an `App` all the way to the
+        // `Record` it stands for, and the arguments are the whole point here.
+        let want = self.expect.last().map(|t| vyrn_frontend::types::substitute(t, self.subst));
+        let mut solved = expected_type_args(want.as_ref(), name, self.types.get(name));
         let mut vals: Vec<(String, Type)> = Vec::new();
         for decl_f in &rfields {
             let (_, value_expr) = fields
@@ -4670,11 +4684,22 @@ impl<'a> Gen<'a> {
         // shared rule an enum variant's construction uses. `solved` above is the
         // incremental form of it, kept because each field's own type needs it
         // while the fields are still being emitted.
+        //
+        // The actual types are the DECLARED ones under `solved`, not the values'
+        // own. Those two agree everywhere the values are the only source. Where
+        // the site's expectation seeded a parameter they can differ — a field
+        // given a wider record than the expected instantiation declares — and
+        // then the values' answer is the wrong one: each field is inserted at its
+        // `solved` type below, so the aggregate must be the same type or the
+        // `insertvalue` is invalid IR.
         let result_ty = applied_type(
             self.types.get(name),
             name,
             &rfields.iter().map(|f| f.ty.clone()).collect::<Vec<_>>(),
-            &vals.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+            &rfields
+                .iter()
+                .map(|f| vyrn_frontend::types::substitute(&f.ty, &solved))
+                .collect::<Vec<_>>(),
         );
         let ll = self.llt(&result_ty);
 
@@ -10740,6 +10765,41 @@ pub(crate) fn applied_type(
     Type::App(name.to_string(), args.into_iter().map(|a| a.unwrap_or(Type::Unit)).collect())
 }
 
+/// The type arguments a construction site's EXPECTED type already names.
+///
+/// [`applied_type`] reads a generic's arguments off what is supplied — a record's
+/// field values, a variant's payload. That is the only source when there is no
+/// other, and it is enough for a field whose value carries its own type. It is
+/// NOT enough for a field that carries a `fn` (RFC-0037): a stored `fn` value
+/// registers its dispatch variant against the type it is being built FOR, so if
+/// that type is still `fn(P) -> T` when the value is built, the variant lands
+/// under a signature no dispatcher covers.
+///
+/// The site's own expectation knows the answer before any field is read. This
+/// takes the arguments it names, and only the ones it settles: a `Unit`
+/// placeholder or an open `Param` says nothing, so the value-side solve keeps
+/// those.
+///
+/// Shared with the direct wasm backend, for [`applied_type`]'s reason — two
+/// backends seeding one construction differently would build two different
+/// types for one literal.
+pub(crate) fn expected_type_args(
+    expected: Option<&Type>,
+    name: &str,
+    decl: Option<&TypeDecl>,
+) -> HashMap<String, Type> {
+    let Some(Type::App(en, args)) = expected else { return HashMap::new() };
+    let Some(decl) = decl.filter(|d| en == name && d.type_params.len() == args.len()) else {
+        return HashMap::new();
+    };
+    decl.type_params
+        .iter()
+        .zip(args)
+        .filter(|(_, a)| !matches!(a, Type::Unit | Type::Param(_)))
+        .map(|(p, a)| (p.clone(), a.clone()))
+        .collect()
+}
+
 /// Whether `t` is a generic instantiation whose every type argument is known —
 /// no `Unit` placeholder [`applied_type`] put there, no unresolved `Param`.
 ///
@@ -11520,8 +11580,18 @@ mod tests {
     /// a stored value passed into a v1 `fn`-typed parameter — as a binding, as a
     /// record FIELD, as an array ELEMENT and as a call's RESULT — and calls
     /// through every storage form.
+    ///
+    /// A GENERIC record built by literal is here too, in each shape that carries
+    /// a `fn` under a type parameter. Those solve their parameters from the type
+    /// the literal is built for, and a wrong solve there registers a variant no
+    /// dispatcher covers — which is a trap, not a pointer, but the same
+    /// dispatcher is what keeps the module pointer-free.
     const STORED: &str = "type M = fn(Int64) -> Int64\n\
         type Ops = { plus: M, minus: M }\n\
+        type Def<P, T> = { run: fn(P) -> T }\n\
+        type Many<P, T> = { runs: Array<fn(P) -> T> }\n\
+        type Maybe<P, T> = { run: Option<fn(P) -> T> }\n\
+        type Outer<P, T> = { inner: Def<P, T> }\n\
         let mut chain: Array<M> = []\n\
         fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
         fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
@@ -11544,7 +11614,18 @@ mod tests {
             let zs = twice([1, 2], ops.minus)\n\
             let ws = twice([1, 2], chain[1])\n\
             let vs = twice([1, 2], makeAdder(7))\n\
-            return h(1) + named(2) + p(3) + q + m(4) + ys[0] + zs[0] + ws[0] + vs[0] }";
+            let d: Def<Int64, Int64> = Def { run: dbl }\n\
+            let dl: Def<Int64, Int64> = Def { run: |x| x + 3 }\n\
+            let many: Many<Int64, Int64> = Many { runs: [dbl] }\n\
+            let maybe: Maybe<Int64, Int64> = Maybe { run: Some(dbl) }\n\
+            let outer: Outer<Int64, Int64> = Outer { inner: Def { run: dbl } }\n\
+            let dr = d.run\n\
+            let dlr = dl.run\n\
+            let mr = many.runs[0]\n\
+            let mbr = match maybe.run { Some(f) => f(1), None => 0 }\n\
+            let or = outer.inner.run\n\
+            return h(1) + named(2) + p(3) + q + m(4) + ys[0] + zs[0] + ws[0] + vs[0]\n\
+                + dr(1) + dlr(1) + mr(1) + mbr + or(1) }";
 
     #[test]
     fn stored_fn_values_lower_with_no_indirect_calls() {

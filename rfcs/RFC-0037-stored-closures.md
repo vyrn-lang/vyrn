@@ -192,6 +192,20 @@ dispatch (names remain the extern-boundary mechanism).
   zero-cost path (pinned). Generic HO functions solve their outbound
   parameter from the stored signature's return.
 
+- **A variant is registered against the type its value is BUILT FOR**, so that
+  type has to be known first. A generic record read its parameters off the field
+  VALUES, and a field holding a `fn` cannot answer in time: the value was built
+  for the still-open `fn(P) -> T` and registered under that signature, while the
+  call site reached the dispatcher for `fn(Int64) -> String`, which had no arm
+  for it. Both monomorphizing backends now seed the solve from the type the
+  construction site expects and use the field values for what it leaves open.
+  Native trapped; the interpreter stores a fn value with no signature at all, so
+  it never asks the question and printed the right answer — which is why parity
+  could not name this. Four carriers of a `fn` under a type parameter were
+  affected, not one: the bare field, a lambda in it, an `Array<fn(P) -> T>`
+  field and an `Option<fn(P) -> T>` field. `examples/fnvalarg.vyrn` builds all
+  of them by literal.
+
 - **Known limits.** CALLS are by name only (`r.f()` / `chain[0](x)` need a
   binding first — the parser has no call-on-expression form). PASSING is not:
   since 2026-08-07 a `fn`-typed argument may be any expression of `fn` type

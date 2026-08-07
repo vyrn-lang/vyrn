@@ -3541,11 +3541,18 @@ impl Fn_<'_> {
 
     /// The concrete type a record literal produces.
     ///
-    /// For a generic record the type arguments come from the FIELD values, by the
-    /// same shared rule a call site uses — and they have to be solved before the
-    /// literal's slot is allocated, because `Box<Int64>` and `Box<Bool>` are not
-    /// the same size. Non-generic is the overwhelming majority and costs nothing:
-    /// the name IS the type.
+    /// For a generic record the type arguments come from the site's own
+    /// expectation first ([`crate::expected_type_args`]) and from the FIELD values
+    /// for whatever the expectation leaves open, by the same shared rule a call
+    /// site uses — and they have to be solved before the literal's slot is
+    /// allocated, because `Box<Int64>` and `Box<Bool>` are not the same size.
+    /// Non-generic is the overwhelming majority and costs nothing: the name IS
+    /// the type.
+    ///
+    /// The expectation is not a nicety. A field that holds a `fn` under a
+    /// parameter — an `Array<fn(P) -> T>` field, an `Option<fn(P) -> T>` field —
+    /// peeks at the still-open `fn(P) -> T`, and a value built for that signature
+    /// registers an RFC-0037 variant no dispatcher covers.
     fn applied_record(
         &mut self,
         name: &str,
@@ -3564,27 +3571,31 @@ impl Fn_<'_> {
             .cx
             .fields(&named)
             .ok_or_else(|| gap(&format!("the record literal `{name}`"), line))?;
-        let mut actual = Vec::new();
+        let want = self.expect.last().map(|t| self.cx.sub(t));
+        let mut solved = crate::expected_type_args(want.as_ref(), name, Some(&decl));
         for f in &declared {
             let e = fields
                 .iter()
                 .find(|(n, _)| *n == f.name)
                 .map(|(_, e)| e)
                 .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), line))?;
-            // The declared field type, under this body's substitution, is what
-            // the value is read against: an empty array literal has no element
-            // to be typed by, and `vals: []` for a field declared `Array<T>` is
-            // how an empty container is built.
-            self.expect.push(self.cx.sub(&f.ty));
+            // The declared field type, under this body's substitution and what is
+            // solved so far, is what the value is read against: an empty array
+            // literal has no element to be typed by, and `vals: []` for a field
+            // declared `Array<T>` is how an empty container is built.
+            self.expect.push(vyrn_frontend::types::substitute(&self.cx.sub(&f.ty), &solved));
             let t = self.peek(e, line);
             self.expect.pop();
-            actual.push(self.cx.sub(&t?));
+            crate::solve_param(&f.ty, &self.cx.sub(&t?), &mut solved);
         }
         Ok(crate::applied_type(
             Some(&decl),
             name,
             &declared.iter().map(|f| f.ty.clone()).collect::<Vec<_>>(),
-            &actual,
+            &declared
+                .iter()
+                .map(|f| vyrn_frontend::types::substitute(&f.ty, &solved))
+                .collect::<Vec<_>>(),
         ))
     }
 
