@@ -12934,6 +12934,35 @@ mod tests {
         assert!(!ir.contains("@.trap.verr.Wide, ptr"), "contained finite var needs no check: {ir}");
     }
 
+    /// A read of `Array<T, N>` indexes the storage the receiver already has.
+    /// It used to copy all N elements to a fresh slot first, because
+    /// `getelementptr` cannot index an SSA aggregate by a dynamic index — 128
+    /// bytes per read at N = 16, and 8x the whole loop. A receiver with no
+    /// address keeps the copy, which is the value form's own cost.
+    #[test]
+    fn a_fixed_array_read_indexes_the_receivers_own_storage() {
+        let src = "type Cells = { at: Array<Int64, 4> } \
+                   fn mk() -> Array<Int64, 4> { return [1, 2, 3, 4] } \
+                   fn local(i: Int64) -> Int64 { let a: Array<Int64, 4> = [1, 2, 3, 4] return a[i] } \
+                   fn field(i: Int64) -> Int64 { let c = Cells { at: [1, 2, 3, 4] } return c.at[i] } \
+                   fn call(i: Int64) -> Int64 { return mk()[i] } \
+                   fn main() -> Int64 { return local(0) + field(1) + call(2) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let stores = ir.matches("store [4 x i64] ").count();
+        // Two: the literal that initializes `a`, and the one spill `call` still
+        // needs. `field`'s literal is stored as part of the record and `mk`
+        // returns its value, so neither is one of these.
+        assert_eq!(stores, 2, "no aggregate store may be per-read: {ir}");
+        assert!(
+            ir.contains("getelementptr [4 x i64], ptr %a.addr"),
+            "a binding is indexed through its own slot: {ir}"
+        );
+        assert!(
+            ir.contains("getelementptr [4 x i64], ptr %spill"),
+            "a receiver with no address is still spilled once: {ir}"
+        );
+    }
+
     // ---- SmallArray<T, N> (RFC-0056) --------------------------------------
 
     #[test]
