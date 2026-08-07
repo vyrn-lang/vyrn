@@ -3908,7 +3908,7 @@ impl Fn_<'_> {
                 n if self.gen_peek(n, args).is_some() => {
                     self.gen_peek(n, args).expect("guarded above")
                 }
-                "panic" | "serveStream" => Type::Never,
+                "panic" | vyrn_frontend::ast::PANIC_AT | "serveStream" => Type::Never,
                 "@str" | "@concat" | "jsonSchema" | "toJson" => Type::Str,
                 "floatBits" => Type::IntN { bits: 64, signed: false },
                 "floatFromBits" => Type::Float,
@@ -4938,12 +4938,21 @@ impl Fn_<'_> {
             // never frees). The LAST piece is handed to `trap`, which writes its
             // argument and `proc_exit(1)`s — so the exit path is the one every
             // trap already takes, and this lowering adds no runtime function.
-            "panic" => {
-                if args.len() != 1 {
+            //
+            // Census U5 costs this site NOTHING. The site the loader stamped is
+            // fused into the constant `trap` already receives — `"\n"` becomes
+            // `" (std/slots.vyrn:189)\n"` — so the code is the same three calls
+            // with one different immediate, and only the data segment grows.
+            "panic" | vyrn_frontend::ast::PANIC_AT => {
+                if args.is_empty() || args.len() > 2 {
                     return unsupported("`panic` with other than one argument", line);
                 }
                 let write_all = self.cx.rt.write_all;
-                let (pre, nl) = (self.cx.rt.intern(m, "error: "), self.cx.rt.intern(m, "\n"));
+                let tail = match args.get(1) {
+                    Some(Expr::Str(at)) => format!(" ({at})\n"),
+                    _ => "\n".to_string(),
+                };
+                let (pre, nl) = (self.cx.rt.intern(m, "error: "), self.cx.rt.intern(m, &tail));
                 // Parked in a local because `write_all` consumes three operands,
                 // so the message cannot wait on the stack under the prefix's
                 // call. Evaluated FIRST, since the other two engines evaluate the

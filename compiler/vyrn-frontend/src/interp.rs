@@ -3966,11 +3966,20 @@ impl<'a> Interp<'a> {
                 match name.as_str() {
                     // RFC-0079: `panic(msg)` is a trap whose text the caller
                     // wrote. Same channel as every `@.trap.*` — the CLI prefixes
-                    // `error: ` and the newline — so nothing here formats it.
-                    "panic" => match &vals[0] {
-                        Val::Str(s) => Err(Ctrl::Err((**s).clone())),
-                        other => Err(Ctrl::Err(format!("{other:?}"))),
-                    },
+                    // `error: ` and the newline — so nothing here frames it but
+                    // the site, which census U5 appends: `msg (file:line)`.
+                    // `panic` without a site is the single-file `analyze` path,
+                    // which never runs the loader that stamps one.
+                    "panic" | crate::ast::PANIC_AT => {
+                        let msg = match &vals[0] {
+                            Val::Str(s) => (**s).clone(),
+                            other => format!("{other:?}"),
+                        };
+                        Err(Ctrl::Err(match vals.get(1) {
+                            Some(Val::Str(at)) => format!("{msg} ({at})"),
+                            _ => msg,
+                        }))
+                    }
                     "print" => {
                         match &vals[0] {
                             Val::Int(n) => println!("{n}"),

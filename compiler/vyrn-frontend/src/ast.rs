@@ -1,5 +1,29 @@
 //! Abstract syntax tree for the Vyrn v0 subset.
 
+/// `panic(msg)` with its source site attached: `@panicAt(msg, "file:line")`
+/// (RFC-0079, census U5). The loader rewrites every `panic` into this form as
+/// it enters the module, because that is the one pass that knows both halves —
+/// the parser knows the line and not the file, and every stage after the loader
+/// knows neither once a body has been cloned.
+///
+/// The site travels as an ordinary string literal in the argument list, so all
+/// three engines read it the same way and a projection inlined into another
+/// module carries its own site with it. A second **name** rather than a second
+/// **argument** to `panic`: `@` does not lex, so no source can write this call
+/// and no user gains an undocumented two-argument `panic`. Same reason
+/// [`crate::project::ELEM`] is spelled `@slot`.
+pub const PANIC_AT: &str = "@panicAt";
+
+/// Is this call name a `panic` — written by the user, or stamped with its site?
+///
+/// Every pass that asks "does this statement diverge" asks through here, so a
+/// stamped `panic` diverges exactly as an unstamped one does. Both spellings
+/// stay live: the single-file `analyze` path the LSP uses never runs the loader,
+/// and it must still type-check and still diverge.
+pub fn is_panic(name: &str) -> bool {
+    name == "panic" || name == PANIC_AT
+}
+
 /// A whole program: top-level type declarations plus functions. `main` is the
 /// entry point.
 #[derive(Debug, Clone, PartialEq)]

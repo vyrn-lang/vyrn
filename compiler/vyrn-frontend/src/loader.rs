@@ -236,6 +236,83 @@ pub fn import_specifier(importer_dir: &str, key: &str, std_root: Option<&str>) -
     }
 }
 
+/// The file name a `panic` in this module reports (census U5).
+///
+/// **Not the module key.** A key is a resolved path, so it is absolute whenever
+/// the root was given as one — which the parity harness always does, and which a
+/// shipped wasm module would then carry the build machine's directory layout in.
+/// The name here is derived instead: the root module by its own base name, every
+/// other module by the specifier an import would spell it with, plus `.vyrn`.
+/// `std/slots.vyrn`, `sub/lib.vyrn`, `../shared/lib.vyrn`. It depends on the
+/// project's shape and on nothing outside it, so two machines building one
+/// program bake the same bytes.
+fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
+    if key == root_key {
+        return key.rsplit('/').next().unwrap_or(key).to_string();
+    }
+    // A generated module (RFC-0021) has no path — its key is a banner ending in
+    // the importer's resolved path, which is absolute for the same reason. Name
+    // the generator and the file it was synthesized for, each stably.
+    if let Some(importer) = generated_importer(key) {
+        let head = key.strip_suffix(importer).unwrap_or(key).trim_end();
+        return format!("{head} {}", site_file(importer, root_key, std_root));
+    }
+    let spec = import_specifier(dir_of(root_key), key, std_root);
+    format!("{}.vyrn", spec.strip_prefix("./").unwrap_or(&spec))
+}
+
+/// Rewrite every `panic(msg)` in `program` to [`PANIC_AT`]`(msg, "file:line")`.
+///
+/// One walk over every body a module can hold. `impls` is in the list because a
+/// `place` projection lives only there — it is never flattened into
+/// `Program::functions`, and `std/slots`' dead-handle refusal is exactly one.
+fn stamp_panic_sites(program: &mut Program, file: &str) {
+    let mut stamp = |e: &mut Expr| {
+        if let Expr::Call { name, args, line } = e {
+            if name == "panic" && args.len() == 1 {
+                *name = PANIC_AT.to_string();
+                args.push(Expr::Str(format!("{file}:{line}")));
+            }
+        }
+    };
+    let mut block = |b: &mut Block| crate::project::walk_block(b, &mut stamp);
+    for f in &mut program.functions {
+        block(&mut f.body);
+    }
+    for imp in &mut program.impls {
+        for f in imp.methods.iter_mut().chain(imp.places.iter_mut()) {
+            block(&mut f.body);
+        }
+    }
+    for t in &mut program.tests {
+        block(&mut t.body);
+    }
+    for b in &mut program.benches {
+        block(&mut b.body);
+    }
+    for g in &mut program.globals {
+        stamp_expr(&mut g.init, &mut stamp);
+    }
+    for t in &mut program.type_decls {
+        if let Some(p) = &mut t.predicate {
+            stamp_expr(p, &mut stamp);
+        }
+    }
+}
+
+/// [`stamp_panic_sites`] over a bare expression — a global's initializer or a
+/// refinement predicate, neither of which is a block.
+fn stamp_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+    let mut b = Block {
+        stmts: vec![Stmt::Expr(std::mem::replace(e, Expr::Int(0)))],
+    };
+    crate::project::walk_block(&mut b, f);
+    let Some(Stmt::Expr(back)) = b.stmts.pop() else {
+        unreachable!("one statement in, one statement out")
+    };
+    *e = back;
+}
+
 /// The directory part of a resolved module path ("" when it has none).
 fn dir_of(resolved: &str) -> &str {
     match resolved.rfind('/') {
@@ -1048,6 +1125,20 @@ fn load_modules(
                 b.module = Some(key.to_string());
             }
         }
+
+        // Census U5: stamp every `panic` in this module with the file and line
+        // it is written at, HERE, because this is the only pass that knows both.
+        // The parser knows the line and not the file; every stage after this one
+        // knows neither, because a `place` projection is cloned into its access
+        // site and a monomorphized generic is cloned per instantiation.
+        //
+        // After the parse cache, deliberately: the cache is keyed by content
+        // hash, so two files with identical text share one parse and would
+        // otherwise share one file name.
+        stamp_panic_sites(
+            &mut program,
+            &site_file(key, root_key, opts.std_root.as_deref()),
+        );
 
         // RFC-0062: `std/result` / `std/option` are validated NO-OP imports —
         // their only job is to spell the ambient builtins (`Ok`/`Err`/`Result`,
