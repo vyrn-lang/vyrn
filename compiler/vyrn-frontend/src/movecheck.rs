@@ -1577,8 +1577,28 @@ impl MoveCheck<'_> {
                 //
                 // A binder over a PLACE keeps Phase 5's answer: it is keyed to
                 // that place's row, so returning one gives the place up.
+                //
+                // `place_key` answers 0 for two different things, and Phase 10a
+                // read them as one: an expression that names no place, and a
+                // place with no `let` row — a PARAMETER (bound to node 0 above),
+                // module state, a field read, an element. Minting a row for the
+                // second kind releases somebody else's value. `showOpt(name, v)`
+                // in `examples/argsdemo.vyrn` is `if let Some(s) = v` over a
+                // plain `Option<String>` parameter, and it freed the `args()`
+                // element `opt` had lent it; the next `opt` call then read that
+                // freed String's header, and CI's three-way parity went red for
+                // twenty-four runs. Windows hid it — glibc writes the tcache
+                // link over the String header and the Windows allocator does
+                // not, so only the Linux job ever read the corrupt length.
+                //
+                // `names_a_place` is the question a `let` already asks before it
+                // is given a reclamation row, and it is the same question here:
+                // a borrow, module state, a field read or a view builtin owns
+                // nothing this block may release.
                 let key = match self.place_key(scrutinee) {
-                    0 => self.note_scrutinee(s, scrutinee),
+                    0 if self.names_a_place(scrutinee).is_none() => {
+                        self.note_scrutinee(s, scrutinee)
+                    }
                     k => k,
                 };
                 for (i, b) in pattern_bindings(pattern).into_iter().enumerate() {
@@ -3119,6 +3139,33 @@ mod tests {
                 .values()
                 .all(|r| r.from_call.as_deref() != Some("openRule") || r.gone.is_some()),
             "a lender's result must never be reclaimed by its caller"
+        );
+    }
+
+    /// Phase 10a keyed the scrutinee row on `place_key == 0`, and 0 means two
+    /// things: no place at all, and a place with no `let` row. A parameter is
+    /// the second — it binds node 0 — so `if let Some(s) = v` released the
+    /// caller's value. `examples/argsdemo.vyrn` fed it an `args()` element and
+    /// CI's parity job went red for twenty-four runs.
+    #[test]
+    fn an_if_let_over_a_parameter_gets_no_reclamation_row() {
+        let src = "fn show(v: Option<String>) -> Int64 { \
+                   if let Some(s) = v { return s.byteLength } return 0 } \
+                   fn main() -> Int64 { return 0 }";
+        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        assert!(super::check(&program).is_ok());
+        assert!(
+            super::ownership(&program).values().all(|r| r.gone.is_some()),
+            "a parameter is the caller's, so the `if let` over one may not be reclaimed"
+        );
+        // A genuine temporary still gets one — the row Phase 10a is for.
+        let tmp = "fn maybe() -> Option<String> { return Some(\"a\" + \"b\") } \
+                   fn main() -> Int64 { if let Some(s) = maybe() { return s.byteLength } \
+                   return 0 }";
+        let program = crate::parser::parse(crate::lexer::lex(tmp).unwrap()).unwrap();
+        assert!(
+            super::ownership(&program).values().any(|r| r.gone.is_none()),
+            "an `if let` over a call result owns what it matched"
         );
     }
 
