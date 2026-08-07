@@ -11580,8 +11580,18 @@ mod tests {
     /// a stored value passed into a v1 `fn`-typed parameter — as a binding, as a
     /// record FIELD, as an array ELEMENT and as a call's RESULT — and calls
     /// through every storage form.
+    ///
+    /// A GENERIC record built by literal is here too, in each shape that carries
+    /// a `fn` under a type parameter. Those solve their parameters from the type
+    /// the literal is built for, and a wrong solve there registers a variant no
+    /// dispatcher covers — which is a trap, not a pointer, but the same
+    /// dispatcher is what keeps the module pointer-free.
     const STORED: &str = "type M = fn(Int64) -> Int64\n\
         type Ops = { plus: M, minus: M }\n\
+        type Def<P, T> = { run: fn(P) -> T }\n\
+        type Many<P, T> = { runs: Array<fn(P) -> T> }\n\
+        type Maybe<P, T> = { run: Option<fn(P) -> T> }\n\
+        type Outer<P, T> = { inner: Def<P, T> }\n\
         let mut chain: Array<M> = []\n\
         fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
         fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
@@ -11604,7 +11614,18 @@ mod tests {
             let zs = twice([1, 2], ops.minus)\n\
             let ws = twice([1, 2], chain[1])\n\
             let vs = twice([1, 2], makeAdder(7))\n\
-            return h(1) + named(2) + p(3) + q + m(4) + ys[0] + zs[0] + ws[0] + vs[0] }";
+            let d: Def<Int64, Int64> = Def { run: dbl }\n\
+            let dl: Def<Int64, Int64> = Def { run: |x| x + 3 }\n\
+            let many: Many<Int64, Int64> = Many { runs: [dbl] }\n\
+            let maybe: Maybe<Int64, Int64> = Maybe { run: Some(dbl) }\n\
+            let outer: Outer<Int64, Int64> = Outer { inner: Def { run: dbl } }\n\
+            let dr = d.run\n\
+            let dlr = dl.run\n\
+            let mr = many.runs[0]\n\
+            let mbr = match maybe.run { Some(f) => f(1), None => 0 }\n\
+            let or = outer.inner.run\n\
+            return h(1) + named(2) + p(3) + q + m(4) + ys[0] + zs[0] + ws[0] + vs[0]\n\
+                + dr(1) + dlr(1) + mr(1) + mbr + or(1) }";
 
     #[test]
     fn stored_fn_values_lower_with_no_indirect_calls() {
