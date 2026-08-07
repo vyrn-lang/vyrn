@@ -11733,6 +11733,46 @@ mod tests {
         assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
     }
 
+    /// A `fn`-typed argument may be any expression of `fn` type, not only a
+    /// lambda literal or a name. The value carries its own tag, so binding it to
+    /// a `let` first — which is what the old check demanded — told nothing to
+    /// anybody. What is still refused is an argument of the wrong TYPE, and the
+    /// diagnostic names what it found.
+    #[test]
+    fn a_fn_argument_may_be_read_from_where_it_is_stored() {
+        let field = format!(
+            "{TWICE}type R = {{ f: fn(Int64) -> Int64 }}\n\
+             fn dbl(n: Int64) -> Int64 {{ return n * 2 }}\n\
+             fn main() -> Int64 {{ let r = R {{ f: dbl }}  let a = twice([1], r.f)  return 0 }}"
+        );
+        assert!(check_src(&field).is_ok(), "{:?}", check_src(&field));
+
+        let elem = format!(
+            "{TWICE}fn dbl(n: Int64) -> Int64 {{ return n * 2 }}\n\
+             fn main() -> Int64 {{\n\
+             let mut xs: Array<fn(Int64) -> Int64> = []\n\
+             xs.push(dbl)\n\
+             let a = twice([1], xs[0])\n\
+             return 0 }}"
+        );
+        assert!(check_src(&elem).is_ok(), "{:?}", check_src(&elem));
+
+        let call = format!(
+            "{TWICE}fn dbl(n: Int64) -> Int64 {{ return n * 2 }}\n\
+             fn pick() -> fn(Int64) -> Int64 {{ return dbl }}\n\
+             fn main() -> Int64 {{ let a = twice([1], pick())  return 0 }}"
+        );
+        assert!(check_src(&call).is_ok(), "{:?}", check_src(&call));
+
+        let wrong = format!(
+            "{TWICE}type B = {{ n: Int64 }}\n\
+             fn main() -> Int64 {{ let b = B {{ n: 1 }}  let a = twice([1], b.n)  return 0 }}"
+        );
+        let err = check_src(&wrong).unwrap_err();
+        assert!(err.contains("an expression of `fn` type"), "{err}");
+        assert!(err.contains("found Int64"), "{err}");
+    }
+
     #[test]
     fn fn_types_are_storable() {
         // RFC-0037 lifts the v1 parameter-only restriction: `fn(..) -> ..` is
