@@ -253,6 +253,9 @@ and `impl Copy`. `genref`, `freelist`, `linkedlist`, `tree`, `autorelease` and
 `slottable` all run on it, on three engines, and `cell`/`get`/`set`/`release`
 are untouched beside it.
 
+The reader is `get` now. M1 spelled it `fetch` because Path B held the name;
+M4 deleted Path B and a follow-through took the name back.
+
 ### The gate, measured
 
 `vyrn bench examples/membench.vyrn`, native, release build:

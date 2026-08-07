@@ -15,7 +15,7 @@ import {
     newSlots,
     insert,
     remove,
-    fetch,
+    get,
     alive,
     count,
     capacity,
@@ -36,14 +36,14 @@ fn main() -> Int64 {
     print(people[ada].name) // lovelace
     print(people[ada].age) // 36
 
-    // `fetch` copies the element out, so staleness is a value rather than a
+    // `get` copies the element out, so staleness is a value rather than a
     // trap. A live handle answers `Some`.
-    print((fetch(people, bob) ?? Person { name: "?", age: 0 }).name) // bob
+    print((get(people, bob) ?? Person { name: "?", age: 0 }).name) // bob
 
     // ---- removal, reuse, and a handle that outlived its element ------------
     remove(people, bob)
     print(alive(people, bob)) // false
-    print((fetch(people, bob) ?? Person { name: "gone", age: 0 }).name) // gone
+    print((get(people, bob) ?? Person { name: "gone", age: 0 }).name) // gone
     let carl = insert(people, Person { name: "carl", age: 7 })
     print(carl.slot == bob.slot) // true — the slot came back
     print(alive(people, bob)) // false — and the old handle did not

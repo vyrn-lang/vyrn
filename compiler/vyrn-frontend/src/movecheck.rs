@@ -210,12 +210,17 @@ fn let_id(s: &Stmt) -> usize {
 ///
 /// A builtin has no signature to carry a capability, so the ones that read a
 /// place rather than allocate are named here — the same gap `sinks` fills for
-/// the opposite direction (RFC-0087 §2b). `at` and `get` read an element out of
-/// a container or a cell; `bytes` is a view of a String's buffer, which is what
+/// the opposite direction (RFC-0087 §2b). `at` reads an element out of a
+/// container; `bytes` is a view of a String's buffer, which is what
 /// `std/codecs` and `std/text` are written on. A binding to one of these owns
 /// nothing, so nothing may release it.
+///
+/// `get` was here for Path B's cell read and RFC-0090 M4 deleted that builtin.
+/// The name matches on the CALL and not on a builtin table, so leaving it would
+/// have made every user function called `get` hand back a view — including
+/// `std/slots`' own, whose element is copied out and therefore owned.
 fn views(name: &str) -> bool {
-    matches!(name, "at" | "get" | "bytes")
+    matches!(name, "at" | "bytes")
 }
 
 /// Check every function for use-after-consume, returning **all** problems found
