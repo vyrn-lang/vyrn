@@ -10489,49 +10489,176 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
 /// Bind type parameters by matching a (possibly generic) parameter type against
 /// a concrete argument type. Mirrors the checker's `unify`, minus error checks
 /// (the checker already validated the call).
+/// The rule is mechanical, and RFC-0086 M1 said so when it decided this is
+/// exhaustiveness rather than a protocol: **same constructor, recurse on the
+/// children; different constructors, bind nothing.** Nothing is declared here
+/// and no third party could declare it — "how do two type constructors match"
+/// has no author but the compiler.
+///
+/// So the match is over `pty` with **no `_` arm**, and a new [`Type`] variant
+/// has to answer. It used to pair the two types and fall through, which meant
+/// four constructors — `Record`, `Enum`, `Lazy`, `Task` — walked past a type
+/// parameter they contained and left it for `applied_type` to fill with `Unit`.
+/// The inner match on `aty` keeps its `_`: that one is the rule's second half.
 pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
-    match (pty, aty) {
-        (Type::Param(t), _) => {
+    match pty {
+        Type::Param(t) => {
             subst.entry(t.clone()).or_insert_with(|| aty.clone());
         }
-        (Type::Option(p), Type::Option(a)) => solve_param(p, a, subst),
-        (Type::Result(p1, p2), Type::Result(a1, a2)) => {
-            solve_param(p1, a1, subst);
-            solve_param(p2, a2, subst);
-        }
-        (Type::App(pn, pa), Type::App(an, aa)) if pn == an && pa.len() == aa.len() => {
-            for (p, a) in pa.iter().zip(aa) {
+        Type::Option(p) => {
+            if let Type::Option(a) = aty {
                 solve_param(p, a, subst);
+            }
+        }
+        Type::Result(p1, p2) => {
+            if let Type::Result(a1, a2) = aty {
+                solve_param(p1, a1, subst);
+                solve_param(p2, a2, subst);
+            }
+        }
+        Type::App(pn, pa) => {
+            if let Type::App(an, aa) = aty {
+                if pn == an && pa.len() == aa.len() {
+                    for (p, a) in pa.iter().zip(aa) {
+                        solve_param(p, a, subst);
+                    }
+                }
             }
         }
         // Generic collection/reference element inference (RFC-0023): bind the
         // element type parameter from the concrete argument.
-        (Type::Array(p), Type::Array(a)) => solve_param(p, a, subst),
-        (Type::ArrayN(p, _), Type::ArrayN(a, _)) => solve_param(p, a, subst),
-        (Type::SmallArray(p, _), Type::SmallArray(a, _)) => solve_param(p, a, subst),
+        Type::Array(p) => {
+            if let Type::Array(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::ArrayN(p, _) => {
+            if let Type::ArrayN(a, _) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::SmallArray(p, _) => {
+            if let Type::SmallArray(a, _) = aty {
+                solve_param(p, a, subst);
+            }
+        }
         // A `Stream<T>` (RFC-0075) binds its element exactly as an `Array<T>`
         // does — it is the same three words. M2's combinators are the first
         // signatures with a type parameter inside a stream, and without this the
         // direct backend refused `take` outright while the LLVM emitter quietly
         // substituted `Unit`, i.e. the two backends specialized different
         // functions for one call site.
-        (Type::Stream(p), Type::Stream(a)) => solve_param(p, a, subst),
-        (Type::Map(pk, pv), Type::Map(ak, av)) => {
-            solve_param(pk, ak, subst);
-            solve_param(pv, av, subst);
+        Type::Stream(p) => {
+            if let Type::Stream(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::Map(pk, pv) => {
+            if let Type::Map(ak, av) = aty {
+                solve_param(pk, ak, subst);
+                solve_param(pv, av, subst);
+            }
         }
         // A `fn` type (RFC-0023/RFC-0037), parameter-wise then on the return.
         // Without this a generic record holding a `fn` whose parameter is the
         // record's own type parameter — `Deferred<P, T> = { run: fn(P) -> T }`,
         // the `std/ui` `ParamQuery` shape — solves NOTHING from its field, and
         // `applied_type` fills both in with `Unit`.
-        (Type::Fn(pp, pr), Type::Fn(ap, ar)) if pp.len() == ap.len() => {
-            for (p, a) in pp.iter().zip(ap) {
+        Type::Fn(pp, pr) => {
+            if let Type::Fn(ap, ar) = aty {
+                if pp.len() == ap.len() {
+                    for (p, a) in pp.iter().zip(ap) {
+                        solve_param(p, a, subst);
+                    }
+                    solve_param(pr, ar, subst);
+                }
+            }
+        }
+        // A record matches FIELD BY NAME, not by position: width subtyping
+        // (RFC-0002) lets the concrete side carry fields the pattern does not
+        // ask for, and its order is its own.
+        Type::Record(pf) => {
+            if let Type::Record(af) = aty {
+                for p in pf {
+                    if let Some(a) = af.iter().find(|a| a.name == p.name) {
+                        solve_param(&p.ty, &a.ty, subst);
+                    }
+                }
+            }
+        }
+        // An enum matches VARIANT BY NAME, then payload-wise.
+        Type::Enum(pv) => {
+            if let Type::Enum(av) = aty {
+                for p in pv {
+                    if let Some(a) = av.iter().find(|a| a.name == p.name) {
+                        for (pp, ap) in p.payload.iter().zip(&a.payload) {
+                            solve_param(pp, ap, subst);
+                        }
+                    }
+                }
+            }
+        }
+        // `lazy T` IS `fn() -> T` at runtime (RFC-0085 M4a) and
+        // `types::resolve` answers that, so the concrete side reaches here in
+        // either spelling and both bind the same `T`.
+        Type::Lazy(p) => match aty {
+            Type::Lazy(a) => solve_param(p, a, subst),
+            Type::Fn(ap, ar) if ap.is_empty() => solve_param(p, ar, subst),
+            _ => {}
+        },
+        Type::Task(p) => {
+            if let Type::Task(a) = aty {
                 solve_param(p, a, subst);
             }
-            solve_param(pr, ar, subst);
         }
-        _ => {}
+        // The compile-time record transformers (RFC-0002 §7). The checker
+        // expands one before codegen sees it, so these arms are the rule
+        // written down rather than a path anything takes today.
+        Type::Partial(p) => {
+            if let Type::Partial(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::Omit(p, pk) => {
+            if let Type::Omit(a, ak) = aty {
+                if pk == ak {
+                    solve_param(p, a, subst);
+                }
+            }
+        }
+        Type::Pick(p, pk) => {
+            if let Type::Pick(a, ak) = aty {
+                if pk == ak {
+                    solve_param(p, a, subst);
+                }
+            }
+        }
+        Type::Merge(p1, p2) => {
+            if let Type::Merge(a1, a2) = aty {
+                solve_param(p1, a1, subst);
+                solve_param(p2, a2, subst);
+            }
+        }
+        // Nothing inside to descend into: a scalar, a SIMD value, a nominal
+        // name, a logger handle, a const type argument, and the two types no
+        // signature can spell (`Never`, `Err`).
+        Type::Int
+        | Type::IntN { .. }
+        | Type::Float
+        | Type::Float32
+        | Type::F32x4
+        | Type::I32x4
+        | Type::F64x2
+        | Type::Mask32x4
+        | Type::Mask64x2
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Named(_)
+        | Type::ConstInt(_)
+        | Type::Logger
+        | Type::Never
+        | Type::Err => {}
     }
 }
 
@@ -10995,6 +11122,167 @@ mod tests {
         for (name, arity) in [("Enum0", 0), ("Enum1", 1), ("Enum3", 3)] {
             let want = layout::SHAPES.iter().find(|(n, _)| *n == name).unwrap().1;
             assert_eq!(enum_ll(arity), want, "enum_ll({arity}) drifted");
+        }
+    }
+
+    // ---- RFC-0086: the shapes `solve_param` cannot descend into ---------
+
+    /// Every `.vyrn` file under `rel`, relative to the repository root.
+    fn corpus(rel: &str, out: &mut Vec<std::path::PathBuf>) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel);
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "vyrn") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    /// The constructors [`solve_param`] descends through. A [`Type::Param`]
+    /// reached by any other route is a parameter the solver cannot bind.
+    fn unreachable_params(t: &Type, under: Option<&'static str>, out: &mut Vec<&'static str>) {
+        let go = unreachable_params;
+        match t {
+            // The root arm: a bare `Param` binds whatever it faces.
+            Type::Param(_) => {
+                if let Some(k) = under {
+                    out.push(k);
+                }
+            }
+            Type::Option(a) | Type::Array(a) | Type::ArrayN(a, _) | Type::SmallArray(a, _)
+            | Type::Stream(a) => go(a, under, out),
+            Type::Result(a, b) | Type::Map(a, b) => {
+                go(a, under, out);
+                go(b, under, out);
+            }
+            Type::App(_, args) => {
+                for a in args {
+                    go(a, under, out);
+                }
+            }
+            Type::Fn(ps, r) => {
+                for p in ps {
+                    go(p, under, out);
+                }
+                go(r, under, out);
+            }
+            // Everything below carries a type and has no arm.
+            Type::Record(fs) => {
+                for f in fs {
+                    go(&f.ty, under.or(Some("Record")), out);
+                }
+            }
+            Type::Enum(vs) => {
+                for v in vs {
+                    for p in &v.payload {
+                        go(p, under.or(Some("Enum")), out);
+                    }
+                }
+            }
+            Type::Lazy(a) => go(a, under.or(Some("Lazy")), out),
+            Type::Task(a) => go(a, under.or(Some("Task")), out),
+            Type::Partial(a) | Type::Omit(a, _) | Type::Pick(a, _) => {
+                go(a, under.or(Some("Omit/Pick/Partial")), out)
+            }
+            Type::Merge(a, b) => {
+                go(a, under.or(Some("Merge")), out);
+                go(b, under.or(Some("Merge")), out);
+            }
+            _ => {}
+        }
+    }
+
+    /// RFC-0086's last open list: how many places in the corpus hand
+    /// [`solve_param`] a declared type whose type parameter sits under a
+    /// constructor the match has no arm for.
+    ///
+    /// It counts the four positions the solver is actually called from — a
+    /// generic function's parameters and return, a generic record declaration's
+    /// fields, a generic enum's variant payloads, and a generic impl head. Each
+    /// of those types is a *root* the solver receives, so a `Param` directly at
+    /// the root is fine; only one buried under an unhandled constructor is a
+    /// site the solver walks past.
+    ///
+    /// It parses each file ALONE — no loader, no linking — like the RFC-0089
+    /// corpus measurements. A declared type is written where it is declared, so
+    /// linking would add no site this misses.
+    ///
+    /// Ignored by default: it reads the repository, so it is a measurement, not
+    /// a unit test. Run it with
+    /// `cargo test -p vyrn-codegen --lib rfc0086 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn rfc0086_unsolvable_parameter_positions_over_the_corpus() {
+        let mut files = Vec::new();
+        corpus("examples", &mut files);
+        corpus("std", &mut files);
+        files.sort();
+
+        let mut by_kind: std::collections::BTreeMap<&'static str, usize> = Default::default();
+        let mut rows: Vec<String> = Vec::new();
+        let (mut parsed, mut roots) = (0, 0);
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            let Ok(tokens) = vyrn_frontend::lexer::lex(&src) else { continue };
+            let (program, errs) = vyrn_frontend::parser::parse_accum(tokens);
+            if !errs.is_empty() {
+                continue;
+            }
+            parsed += 1;
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            // (what it is, the generic's name, the line, the root types)
+            let mut sites: Vec<(&str, String, usize, Vec<Type>)> = Vec::new();
+            for f in &program.functions {
+                if f.type_params.is_empty() {
+                    continue;
+                }
+                let mut ts: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
+                ts.push(f.ret.clone());
+                sites.push(("fn", f.name.clone(), f.line, ts));
+            }
+            for d in &program.type_decls {
+                if d.type_params.is_empty() {
+                    continue;
+                }
+                let ts = match &d.base {
+                    Type::Record(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+                    Type::Enum(vs) => vs.iter().flat_map(|v| v.payload.clone()).collect(),
+                    other => vec![other.clone()],
+                };
+                sites.push(("type", d.name.clone(), d.line, ts));
+            }
+            for i in &program.impls {
+                if i.type_params.is_empty() {
+                    continue;
+                }
+                sites.push(("impl", i.protocol.clone(), i.line, vec![i.ty.clone()]));
+            }
+            for (kind, who, line, ts) in sites {
+                for t in &ts {
+                    roots += 1;
+                    let mut hits = Vec::new();
+                    unreachable_params(t, None, &mut hits);
+                    for h in hits {
+                        *by_kind.entry(h).or_default() += 1;
+                        rows.push(format!("{name}:{line} {kind} `{who}` — {t} under {h}"));
+                    }
+                }
+            }
+        }
+
+        println!("corpus: {} files ({parsed} parsed), {roots} declared root types", files.len());
+        println!("parameters `solve_param` cannot reach: {}", rows.len());
+        for (k, c) in &by_kind {
+            println!("  {k:>18}: {c}");
+        }
+        for r in &rows {
+            println!("    {r}");
         }
     }
 
