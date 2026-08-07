@@ -1,8 +1,16 @@
 # RFC-0086 — The Compiler Asks the Type
 
-- **Status:** M1 implemented, and extended twice since. M2 blocked — the protocol
-  needs a receiver-less method and the language has none; see "M2 — what it
-  needs". M3–M4 designed, and M3 is the open half of RFC-0087 U7.
+- **Status:** M1 and **M3 implemented**; M1 extended twice since. M2 blocked —
+  the protocol needs a receiver-less method and the language has none; see
+  "M2 — what it needs". M4 designed.
+  **M3 shipped `impl MustUse for T`,** so RFC-0075's obligation — acquired once,
+  disposed exactly once, proved at compile time — is a declaration a third party
+  writes. `movecheck`'s `mod streams` is `mod linear`, its `Type::Stream` matches
+  are one lookup in the table `impl Owned` already fed, and the diagnostics name
+  the user's type. It closes RFC-0087 U7, whose undecided half is decided in
+  "M3 — as landed": `consume` and `MustUse` stay **two** declarations. See
+  "M3 — as landed" for the two gaps it had to close first, both of which were
+  the milestone being unusable rather than optional.
   **`solve_param` was the last of the six hand-written lists still open, and it
   is closed:** the match is exhaustive with no `_`. The blast radius measured
   **zero** over the whole corpus, and the deferral's stated reason — that the two
@@ -30,7 +38,7 @@ Five places decide a property *of a type* by consulting a list written by hand.
 | the list | what it decides |
 |---|---|
 | `own::owner_producing` | which expressions allocate, so which bindings need cleanup |
-| three `Type::Stream` matches in `movecheck` | which types are linear |
+| ~~three `Type::Stream` matches in `movecheck`~~ | which types are linear — **M3, closed** |
 | `Expr::ArrayLit` / `Expr::MapLit` in the checker | which types a literal can build |
 | `codec::encodable` / `decodable` | which types cross a JSON wire |
 | `solve_param` | which types unify a parameter |
@@ -127,10 +135,13 @@ intrinsic. Properties get declared.**
 - **M2 — `FromElements` / `FromEntries`.** `[]` and `[:]` build anything that
   implements them. *Blocked.* A constructor has no receiver, and every protocol
   method in Vyrn has one. See "M2 — what it needs".
-- **M3 — linearity is a declaration.** The three `Type::Stream` matches in
-  `movecheck` become a protocol lookup, so a user's file handle, lock or
-  connection gets RFC-0075's obligation. That mechanism was built for one type
-  and never exposed.
+- **M3 — linearity is a declaration.** *Implemented.* `impl MustUse for T`, and
+  the `Type::Stream` matches in `movecheck` become a lookup, so a user's file
+  handle, lock or connection gets RFC-0075's obligation. That mechanism was
+  built for one type and never exposed. Pin:
+  `examples/mustuse_abandoned.vyrn`, an expected check failure whose three
+  rejections are `Stream`'s and whose diagnostics say `Txn`. See "M3 — as
+  landed" below.
 - **M4 — `Codable`.** `encodable`/`decodable` become the protocol. This is the
   one with the most existing behaviour to preserve, so it is last.
 
@@ -353,6 +364,151 @@ and the rows that decide layout are the compiler's own.
 Unchanged, and not the obstacle here. The seeded rows for a literal are the
 layout arms, which are already intrinsic and need no resolver. A bare file has
 no user containers to build in the first place.
+
+## M3 — as landed
+
+### Half of it was already done, and nobody had written that down
+
+The milestone says "three `Type::Stream` matches in `movecheck` become a
+lookup". By the time it was picked up there was **one** implementation:
+`own::must_use`, asked through `Declared::must_use`, resolving aliases so a
+`type Events = Stream<Event>` carried the obligation its base did. The
+consolidation had happened during the memory arc and left no record.
+
+So the milestone's remaining half was the one that matters: the body was
+hardcoded, and a user type could not declare the obligation. That is exactly the
+shape M1 fixed for `Owned`, and M1's reasoning transferred unchanged — including
+the bootstrap: `vyrn run` on a bare file has no resolver and therefore no `std/`,
+so the built-in row is **seeded** rather than imported, and `Stream` is that row.
+
+Two matches were left, and neither was where the milestone looked. One decided
+whether a **parameter** carries the obligation into the callee. One decided the
+**wording** of the fix menu. Both are lookups now, and the second is a lookup
+into a two-valued answer rather than a boolean — see "the menu" below.
+
+### The declaration
+
+```vyrn
+protocol MustUse {}
+
+impl MustUse for Txn {}
+```
+
+**It declares no methods, and that is the design.** The obligation is a fact
+about the type — this value must be disposed of by name — and the disposal is
+already declared, by `impl Owned for T` or by nothing where the type owns no
+heap. A method here would be a second `release`. A generic head carries a row
+like any other, so `impl<T> MustUse for Pool<T>` obliges every instantiation:
+Phase 8b keyed `Owned` on the type CONSTRUCTOR and this reads the same key, so
+generics fell out rather than needing inventing.
+
+### RFC-0087 U7, decided: they are two declarations
+
+U7 asks whether `consume` and the obligation should be one. **They should not.**
+
+They answer different questions. `consume` is a **calling convention** — who
+owns this argument after the call. Must-use is an **obligation on a type** —
+this value must be disposed of, wherever it goes. A `String` is consumable and
+carries no obligation. A `Stream` carries one however any particular function
+takes it. Merging them would make every `consume` parameter linear and every
+linear value a calling convention, and neither implication is true.
+
+`examples/mustuse.vyrn` shows the two doing their separate work in one function:
+`consume` is why `drop t` is legal in `finish`, and the obligation is why
+leaving `finish`'s body without that `drop` is an error.
+
+### What a declared obligation gets, and what it does not
+
+It gets all three of `Stream`'s rules, because all three were about a name, a
+block and the paths out of one, and none of them ever mentioned a stream's
+representation:
+
+- **abandoned** — acquired and never named again;
+- **disposed twice** — named again after the disposal;
+- **the branches disagree** — one path discharges it and the other does not;
+- and a **parameter** carries the obligation into the callee, so
+  `fn sink(t: Txn) {}` is not the hole that lets it evaporate.
+
+A **receiver** does not, and that is the one rule this milestone added. `impl
+Owned for Txn { fn release(self) }` IS the disposal, so a rule that made it
+discharge its own receiver before it could read it would leave the declared
+release unwritable. `self` is a keyword, so a parameter carrying that name is an
+impl receiver and nothing else.
+
+**It does not get RFC-0075's storage ban, and that is deliberate.**
+`ensure_type_exists` refuses a `Stream` in any position that stores one — a
+record field, an array element, module state — and says so in the words "the
+obligation would be laundered away by one field declaration". That is true, and
+it is still `Stream`'s rule alone. Two reasons:
+
+1. The ban is about **representation**, not obligation. A stream is a cursor
+   over a producer and a stored cursor is an aliased one. A user's `Txn` has no
+   cursor, and `Array<Txn>` is the shape a real program with a pool of them
+   wants.
+2. Widening it would refuse programs that are correct today, to close a hole
+   that is narrower than the ban.
+
+**So the hole is real and recorded.** A declared must-use value stored into a
+record field or an array counts as *disposed* — a store mentions the name — and
+the obligation stops there rather than moving to the container. What is proved
+is that the value does not silently evaporate inside a body; what is not proved
+is that a container that swallowed one ever discharges it. Closing that needs
+the obligation to travel through a place, which is the same mechanism census U4
+and RFC-0091's projections need, and it is not a `Type::Stream` match to delete.
+
+### The menu, and why it is not one string
+
+The fix note differs by row, and the reason is that the two disposals differ:
+
+| row | note |
+|---|---|
+| `Stream` (seeded) | consumed with `for … in`, forwarded by returning it, or released with `close(s)` |
+| `impl MustUse for T` | handed on by name — to a call, to the return — or released with `drop t` |
+
+`drop s` on a `Stream` reclaims **nothing**: a stream's release is pushed by its
+own lowering (M2b) and `release_kind` answers `None` for it on purpose. So a
+single note would name a statement that silently does nothing for half the types
+it is printed for. `own::Linear` is the two-valued answer, read out of the same
+lookup that decides *whether*, so there is still one table.
+
+### The two gaps it had to close first
+
+Both were found by writing the corpus example, and both are the milestone being
+unusable rather than optional.
+
+**The checker refused `drop x` on any type declaring `impl Owned`.** The gate
+listed `String`, `Array`, `SmallArray`, `Map` and a heap-carrying `Option`/
+`Result`, and its own comment said it "follows `own::release_kind` rather than
+deciding a second time" — which it did for the seeded rows and not for the
+declared ones. So `impl Owned for Ring` could only ever run on the *automatic*
+block-exit path. That is fatal here: must-use says "dispose by name", and
+handing the value to a call or returning it only moves the obligation on, so
+`drop` is the only terminal discharge there is. The gate now reads the declared
+row first, off the written type — resolving `Ring` to its record shape is
+exactly the lookup that loses the answer.
+
+**The interpreter's `Stmt::Drop` was a no-op.** Both compiling backends already
+lowered an explicit `drop x` through `release_kind`. The interpreter looked the
+binding up and threw the value away, so a declared `release` ran on the
+automatic path and not on the explicit one. It went unseen because the checker
+refused `drop` on every type that could declare one — two defects holding each
+other up. `examples/mustuse.vyrn` prints five releases and all three engines
+print the same five.
+
+### The design's own test
+
+`examples/mustuse.vyrn` declares both protocols itself, so it imports nothing and
+`std/` is untouched. Nothing in the compiler knows the name `Txn`. It discharges
+the obligation four ways — `drop`, a call, a forward-and-then-discharge chain,
+and once per loop turn — and all three engines agree byte for byte.
+
+`examples/mustuse_abandoned.vyrn` is the same declarations with the discharges
+taken away, listed under `EXPECTED_CHECK_FAILURE`. It produces the three
+rejections above, each naming `Txn`.
+
+`parity: 124 checked, 11 skipped, 0 failed`. No existing example changed: the
+`Stream` diagnostics are byte-identical, the eleven census rows hold their
+baseline, and the corpus gained no free and lost none.
 
 ## `solve_param`'s fall-through — the sixth list, and the last one. Closed.
 

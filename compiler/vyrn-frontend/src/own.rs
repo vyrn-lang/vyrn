@@ -104,6 +104,25 @@ impl DropKind {
     }
 }
 
+/// Which row gives a type its must-use obligation — the one thing the two rows
+/// do not share, because they are discharged differently.
+///
+/// The obligation itself is identical: acquired once, disposed exactly once,
+/// proved on every path. What differs is the menu a diagnostic offers, and a
+/// wrong menu is worse than a vague one — `drop s` on a `Stream` reclaims
+/// nothing, because a stream's release is pushed by its own lowering
+/// (RFC-0075 M2b) and [`Owned::release_kind`] answers `None` for it on purpose.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Linear {
+    /// The seeded row: a `Stream<T>`, consumed with `for … in`, forwarded by
+    /// returning it, or released with `close(s)`.
+    Stream,
+    /// A declared `impl MustUse for T` row. The value is handed on by name — to
+    /// a call, or to the return — or released with `drop t`, which runs whatever
+    /// `impl Owned for T` declared.
+    Declared,
+}
+
 /// The `Owned` protocol: **how a type is released**, and the only place that
 /// question is answered (RFC-0086 M1).
 ///
@@ -123,6 +142,9 @@ impl DropKind {
 pub struct Owned {
     /// One row per `impl Owned for T`: the type key -> its flattened `release`.
     impls: HashMap<String, String>,
+    /// One row per `impl MustUse for T` (RFC-0086 M3): the type key alone, since
+    /// the obligation declares no method. See [`Owned::must_use`].
+    linear: std::collections::HashSet<String>,
     /// Nominal declarations, so `type Email = String` answers as a String does.
     types: HashMap<String, TypeDecl>,
 }
@@ -154,8 +176,48 @@ impl Owned {
             .collect();
         Owned {
             impls,
+            // The same read, one protocol over. A GENERIC head carries a row for
+            // the reason Phase 8b gave above: the key is the type CONSTRUCTOR,
+            // so `impl<T> MustUse for Pool<T>` obliges every instantiation.
+            linear: program
+                .impls
+                .iter()
+                .filter(|i| i.protocol == crate::types::MUST_USE)
+                .filter_map(|i| crate::types::type_key(&i.ty))
+                .collect(),
             types: crate::types::decl_map(program),
         }
+    }
+
+    /// Whether a value of `ty` carries a **must-use** obligation, and which row
+    /// says so (RFC-0086 M3). `None` for a type that carries none.
+    ///
+    /// Ownership is affine — under RFC-0089 rule 1 a value you stop using is
+    /// simply released, and that alone would have deleted RFC-0075's "a stream
+    /// must be consumed" diagnostic the day rule 1 landed. A must-use type is
+    /// the opt-in **linear** case: releasing its memory is not the same thing as
+    /// discharging it, because its producer has a teardown no memory drop can
+    /// run.
+    ///
+    /// The lookup is [`Owned::release_kind`]'s, one protocol over, and it is
+    /// the same two halves in the same order. A **declared** row is read off the
+    /// type key, so `impl MustUse for Txn` is what `Txn` means. Otherwise the
+    /// type is resolved through its declarations and answered by the one seeded
+    /// row, `Stream` — so a `type Events = Stream<Event>` carries the obligation
+    /// its base does. The seed is in the compiler rather than in `std/` for the
+    /// reason [`crate::types::MUST_USE`] records.
+    pub fn linear_kind(&self, ty: &Type) -> Option<Linear> {
+        if crate::types::type_key(ty).is_some_and(|k| self.linear.contains(&k)) {
+            return Some(Linear::Declared);
+        }
+        matches!(crate::types::resolve(ty, &self.types), Type::Stream(_))
+            .then_some(Linear::Stream)
+    }
+
+    /// Whether a value of `ty` has to be handed on by name — letting it go out
+    /// of scope is an error. [`Owned::linear_kind`] with the row forgotten.
+    pub fn must_use(&self, ty: &Type) -> bool {
+        self.linear_kind(ty).is_some()
     }
 
     /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
@@ -331,25 +393,6 @@ pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<St
         }
     }
     go(ty, types, &mut Vec::new())
-}
-
-/// Whether a value of `ty` carries a **must-use** obligation: it has to be
-/// consumed by name, and letting it go out of scope is an error.
-///
-/// This is the row RFC-0090's downsides list promised. Ownership is affine —
-/// under RFC-0089 rule 1 a value you stop using is simply released, and that
-/// alone would have deleted RFC-0075's "a stream must be consumed" diagnostic
-/// the day rule 1 landed. A must-use type is the opt-in linear case: releasing
-/// its memory is not the same thing as discharging it, because its producer has
-/// a teardown no memory drop can run.
-///
-/// One row today, `Stream`, reached through the alias resolver so a
-/// `type Events = Stream<Event>` carries the obligation its base does. A user
-/// type joins the table when it can declare the obligation (RFC-0091 M1's
-/// protocol work), not before: an inferred must-use would be exactly the
-/// guessing this whole arc removes.
-pub fn must_use(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
-    matches!(crate::types::resolve(ty, types), Type::Stream(_))
 }
 
 /// Whether a value of `ty` transitively owns heap, under RFC-0089 rule 1.
@@ -1129,6 +1172,31 @@ pub(crate) mod tests {
         assert_eq!(
             drop_kinds(src, "main"),
             vec![DropKind::Release("Owned__Ring__release".to_string())]
+        );
+    }
+
+    /// RFC-0086 M3, the same test one protocol over: nothing in the compiler
+    /// knows the name `Txn`, and the obligation comes out of the program.
+    #[test]
+    fn a_user_type_declares_that_it_must_be_used() {
+        let src = "protocol MustUse {} \
+                   type Txn = { id: Int64 } \
+                   impl MustUse for Txn {} \
+                   type Plain = { id: Int64 } \
+                   fn main() -> Int64 { return 0 }";
+        let (_, p) = analyze_src(src);
+        let owned = Owned::new(&p);
+        assert_eq!(
+            owned.linear_kind(&Type::Named("Txn".into())),
+            Some(Linear::Declared)
+        );
+        assert_eq!(owned.linear_kind(&Type::Named("Plain".into())), None);
+        // And the seeded row is still there for a program that declares nothing,
+        // which is the bootstrap answer `Owned` gives above: a bare file has no
+        // resolver, so `Stream` may not depend on one.
+        assert_eq!(
+            Owned::default().linear_kind(&Type::Stream(Box::new(Type::Int))),
+            Some(Linear::Stream)
         );
     }
 

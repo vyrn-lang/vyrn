@@ -3341,7 +3341,21 @@ impl<'a> Interp<'a> {
                     .find_map(|f| f.get(name))
                     .map(|s| s.v.clone())
                     .or_else(|| self.globals.borrow().get(name).map(|s| s.v.clone()));
-                let _ = v;
+                // A DECLARED release is ordinary Vyrn and may print, so it is
+                // the one reclamation this engine cannot leave to the host —
+                // exactly the reason `run_drops` runs it on the automatic path.
+                // Both compiling backends already lowered `drop x` through the
+                // same table (`release_kind` / `rel_for`); this arm was the
+                // engine that did not, and it went unseen while the checker
+                // refused `drop` on every type that could declare one.
+                if let Some(v) = v {
+                    if let Some(f) = self
+                        .val_type_key(&v)
+                        .and_then(|k| crate::types::owned_impl_by_key(self.impls, &k))
+                    {
+                        self.call(&f, std::slice::from_ref(&v))?;
+                    }
+                }
                 Ok(Flow::Normal)
             }
             Stmt::Expr(e) => {

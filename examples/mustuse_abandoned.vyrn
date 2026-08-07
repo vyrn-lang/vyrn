@@ -1,0 +1,71 @@
+// The declared obligation does not launder — RFC-0086 M3.
+//
+// mustuse.vyrn is this file with every discharge in place. This one keeps the
+// declarations and takes the discharges away, so each binding below is here to
+// FAIL rather than to run.
+//
+// Nothing in the compiler knows the word `Txn`. The rejections are the ones
+// RFC-0075 M1 wrote for `Stream`, reaching a user's type through the same
+// lookup `impl Owned` is read from, and naming that type rather than saying
+// "stream".
+//
+// This file is an INTENTIONAL compile error, listed under
+// EXPECTED_CHECK_FAILURE. Observe the diagnostics with:
+//
+//   vyrn check examples/mustuse_abandoned.vyrn
+
+/// A value that must be disposed of by name.
+protocol MustUse {}
+
+protocol Owned {
+    fn release(self)
+}
+
+type Txn = {
+    label: String,
+    ops: Array<String>
+}
+
+impl MustUse for Txn {}
+
+impl Owned for Txn {
+    fn release(self) {
+        print("end " + self.label)
+        let ops = self.ops
+        drop ops
+    }
+}
+
+fn begin(label: String) -> Txn {
+    let mut ops: Array<String> = []
+    ops.push(label.copy())
+    return Txn { label: label.copy(), ops: ops }
+}
+
+fn finish(t: consume Txn) {
+    drop t
+}
+
+fn main() -> Int64 {
+    // Rejected: acquired and abandoned. `impl Owned for Txn` would still free
+    // the buffer at block exit, and that is not the same thing as discharging
+    // the obligation — a transaction nobody ended is a transaction nobody
+    // ended.
+    let a = begin("orders")
+    print(0)
+
+    // Rejected: a call that takes the obligation in and hands none back is not
+    // a loophole. `finish` consumed it, and `drop b` names a value that is gone.
+    let b = begin("ledger")
+    finish(b)
+    drop b
+
+    // Rejected: one branch discharges it and the other does not. Whatever
+    // follows, one of the two paths is wrong.
+    let c = begin("audit")
+    if true {
+        finish(c)
+    }
+
+    return 0
+}

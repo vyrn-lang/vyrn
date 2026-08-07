@@ -231,8 +231,29 @@ at compile time. A stream parameter carries the obligation into the callee. This
 is the **only** compile-time reclamation proof in the language.
 
 **Issue.** It is three `Type::Stream` matches. A user's file handle, socket or
-connection gets nothing. RFC-0086 M3 turns those matches into a lookup, so a
-declared type joins the mechanism the way `impl Owned` joins §2.
+connection gets nothing.
+
+**Closed by RFC-0086 M3.** The matches are a lookup in the table `impl Owned`
+already feeds, so `impl MustUse for T` joins a declared type to the mechanism the
+way `impl Owned` joins §2, and the diagnostics name that type. Half the
+consolidation had already happened during this arc and was not recorded: by the
+time M3 was picked up there was one `must_use`, resolving aliases, and what was
+left was that its body was hardcoded.
+
+Two things were found on the way, and both were the milestone being unusable
+rather than optional. The checker refused `drop x` on **any** type declaring
+`impl Owned`, so a declared release could only run on the automatic path — and
+must-use says "dispose by name", so `drop` is the only terminal discharge there
+is. And the interpreter's `Stmt::Drop` was a no-op, so a declared `release` ran
+at block exit and not at an explicit `drop`; both compiling backends had asked
+`release_kind` there all along. Neither had a victim while the other stood.
+
+**One restriction stays `Stream`'s.** Nothing may store a stream (§7's own
+reason: a cursor is aliased the moment it is stored), and a declared must-use
+type may be stored freely — so a value put into a record field or an array
+counts as discharged there and the obligation does not travel with the
+container. That is representation against obligation, and it is recorded in U7
+rather than fixed by widening a rule written for a cursor.
 
 ---
 
@@ -754,7 +775,7 @@ inferred, invisible regions and nothing was designed.
 
 ---
 
-## U7. `consume` and linearity look like one mechanism and are two
+## U7. `consume` and linearity look like one mechanism and are two — CLOSED
 
 A user writes `consume` and gets move checking: use the value twice and the
 compiler refuses. They get **no release obligation** — nothing requires them to
@@ -763,9 +784,37 @@ dispose of it and nothing frees it.
 A `Stream<T>` gets the obligation and a user cannot declare one.
 
 Read together, the surface says "declare intent with a capability", and then the
-one capability that means ownership does half the job. RFC-0086 M3 closes the
-second half. Whether `consume` and `impl Owned` should be one declaration is
-undecided, and should not stay undecided.
+one capability that means ownership does half the job.
+
+**The second half is closed by RFC-0086 M3.** `impl MustUse for T` gives a
+user's type what `Stream<T>` had, out of the same table `impl Owned` feeds:
+abandoned, disposed twice, and branches that disagree are all refused, a
+must-use parameter carries the obligation into the callee, and the diagnostics
+name the user's type. `examples/mustuse_abandoned.vyrn` pins all three.
+
+**And the undecided question is decided: they stay two declarations.** They
+answer different questions.
+
+- `consume` is a **calling convention**. It says who owns this argument after
+  the call, and it is a property of one parameter position.
+- Must-use is an **obligation on a type**. It says this value must be disposed
+  of by name, wherever it goes, whoever holds it.
+
+A `String` is consumable and carries no obligation — nothing requires you to
+name a `String` you were handed, and nothing should. A `Stream` carries an
+obligation however any particular function takes it. Merging them would make
+every `consume` parameter linear and every linear value a calling convention,
+and neither implication is true. `examples/mustuse.vyrn` shows both doing their
+separate work in one function: `consume` is why `drop t` is legal there, and the
+obligation is why leaving without it is an error.
+
+**What is still open is narrower than the gap was**, and it is not this
+question. A declared must-use value stored into a record field or an array
+counts as discharged, because a store names it; the obligation stops rather than
+travelling with the container. `Stream` has no such hole because RFC-0075
+forbids storing one at all — a **representation** rule, kept for streams and
+deliberately not widened. Closing it needs the obligation to travel through a
+place, which is the mechanism U4 and RFC-0091's projections also want.
 
 ---
 
@@ -850,7 +899,7 @@ rule, and the type is in the module.
 | 4 | **U8** a declared container cannot be read | `impl Owned` is shipped and not yet usable | **CLOSED in practice.** Phase 4c deleted the escape walker that removed a read receiver from `droppable`, and `std/slots` is a declared container the corpus reads on every call |
 | 5 | **U5** the failure message has no location | the worst moment to say the least | **CLOSED.** `error: slots: handle is not alive (std/slots.vyrn:189)` on all three engines. The loader stamps `panic(msg)` into `@panicAt(msg, "file:line")`, so the site travels as data in the AST |
 | 6 | **U4** an element is unreclaimable | the largest silent restriction | **HALF, and the other half is correct.** A DECLARED container reaches its elements (Phase 8b); a built-in `Array<T>` cannot say whether it owns them, and `m.keys()` is the view a per-element release would free twice |
-| 7 | **U7** `consume` and linearity are two things | the surface implies one | **OPEN.** RFC-0086 M3. The arc did not touch it, and the decision it asks for is still undecided |
+| 7 | **U7** `consume` and linearity are two things | the surface implies one | **CLOSED.** `impl MustUse for T` (RFC-0086 M3) gives a user's type the whole obligation, and the question is decided: they stay two declarations, because a calling convention and an obligation on a type are not the same fact |
 | 8 | **U6** the arena excludes its own case | the model's best tool is unreachable | **OPEN.** RFC-0004 Q3, undesigned. Path B went; Path A's arena stayed |
 | 9 | **U9** three layouts, one syntax | justified, but unannounced | **COVERED by U1** — hover names the layout, because it names the type |
 
@@ -1157,11 +1206,12 @@ key pointers, which a per-element release would free twice. The answer moved fro
 has nothing to declare it with" — and `slotsContainer` is the row that proves the
 declaration works. This is a restriction, recorded, not a defect to chase.
 
-Beside the three rows, three design questions are open and undesigned: **§5/U6**
-inferred regions (RFC-0004 Q3), **§7/U7** linearity as a declaration (RFC-0086
-M3, and the undecided question of whether `consume` and `impl Owned` should be one
-declaration), and **§10** the native spawn frame. **U5** was the fourth and is
-closed: `panic` names the file and line it is written at, on all three engines.
+Beside the three rows, two design questions are open and undesigned: **§5/U6**
+inferred regions (RFC-0004 Q3) and **§10** the native spawn frame. **§7/U7** was
+the third and is closed: linearity is a declaration (RFC-0086 M3), and `consume`
+and the obligation stay two declarations because a calling convention and a
+property of a type are not the same fact. **U5** was the fourth and is closed
+too: `panic` names the file and line it is written at, on all three engines.
 
 ### §10, measured
 

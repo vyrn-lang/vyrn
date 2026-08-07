@@ -170,10 +170,18 @@ impl Declared {
         crate::own::owns_heap(ty, &self.decls)
     }
 
-    /// Whether `ty` carries a must-use obligation — RFC-0090's opt-in linear
-    /// row, through the one implementation in [`crate::own::must_use`].
+    /// Whether `ty` carries a must-use obligation, and which row says so — the
+    /// opt-in linear rows (RFC-0086 M3), through the one implementation in
+    /// [`crate::own::Owned::linear_kind`]. A seeded `Stream` and an
+    /// `impl MustUse for T` are read out of the same table, so nothing in the
+    /// compiler asks this question twice.
+    pub fn linear_kind(&self, ty: &Type) -> Option<crate::own::Linear> {
+        self.owned.linear_kind(ty)
+    }
+
+    /// [`Declared::linear_kind`] with the row forgotten.
     pub fn must_use(&self, ty: &Type) -> bool {
-        crate::own::must_use(ty, &self.decls)
+        self.owned.must_use(ty)
     }
 
     /// Whether a value of `ty` is **released** by whoever holds it — the `Owned`

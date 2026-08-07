@@ -1,0 +1,100 @@
+// A third party's linear obligation, proved by the same mechanism a `Stream`'s
+// is — RFC-0086 M3.
+//
+// Nothing here is known to the compiler. `MustUse` is declared in this file, not
+// imported: `vyrn run` on a bare file has no resolver and therefore no `std/`, so
+// an answer the compiler refuses programs over may not depend on one. The
+// compiler seeds the one row it knows intrinsically (`Stream`) and reads the rest
+// out of the program. Both are one lookup.
+//
+// `MustUse` declares no methods, and that is the design. The obligation is a fact
+// about the type — this value must be disposed of by name — and the disposal
+// itself is already declared, by `impl Owned`. A method here would be a second
+// `release`.
+//
+// It is NOT `consume`, which the surface has always made look like the same
+// thing. `consume` is a calling convention: who owns this argument after the
+// call. `MustUse` is an obligation on a type: this value must be disposed of
+// wherever it goes. A `String` is consumable and carries no obligation; a `Txn`
+// carries one however any particular function takes it.
+//
+// Compare mustuse_abandoned.vyrn, which is the same declarations with every
+// discharge removed.
+
+/// A value that must be disposed of by name.
+protocol MustUse {}
+
+/// A type that owns heap and can say how to give it back (RFC-0086 M1).
+protocol Owned {
+    fn release(self)
+}
+
+type Txn = {
+    label: String,
+    ops: Array<String>
+}
+
+impl MustUse for Txn {}
+
+impl Owned for Txn {
+    fn release(self) {
+        // Printing here is what makes the disposal observable. All three engines
+        // run it, at the same point, in the same order.
+        print("end " + self.label + " (" + self.ops.length.toString() + ")")
+        let ops = self.ops
+        drop ops
+    }
+}
+
+/// Hands the caller a transaction it owes. The compiler reads the return TYPE,
+/// finds a must-use row for it, and makes every receiving `let` an obligation.
+fn begin(label: String) -> Txn {
+    let mut ops: Array<String> = []
+    ops.push(label.copy())
+    return Txn { label: label.copy(), ops: ops }
+}
+
+/// A must-use PARAMETER carries the obligation into the callee: the caller
+/// discharged its own by handing the value over, and `fn finish(t: Txn) {}` must
+/// not be the hole that lets it evaporate. This one discharges it.
+///
+/// `consume` and the obligation are separate declarations doing separate work.
+/// `consume` is why `drop t` is legal here — the callee owns the argument. The
+/// obligation is why leaving the body without that `drop` is an error.
+fn finish(t: consume Txn) {
+    drop t
+}
+
+/// Forwarding by returning is a discharge too: this function's caller owes what
+/// this function was handed.
+fn carry(t: consume Txn) -> Txn {
+    return t
+}
+
+fn main() -> Int64 {
+    // Released by name, here and nowhere else.
+    let a = begin("orders")
+    drop a
+
+    // Handed to a call, which owes it from then on.
+    let b = begin("ledger")
+    finish(b)
+
+    // Forwarded, then discharged once at the end of the chain. Only the
+    // outermost value is live — each call consumed the one it was handed.
+    let c = begin("audit")
+    let d = carry(c)
+    finish(d)
+
+    // Each turn's obligation is discharged inside the turn, so nothing
+    // accumulates across the loop.
+    let mut i = 0
+    while i < 2 {
+        let r = begin("retry" + i.toString())
+        finish(r)
+        i = i + 1
+    }
+
+    print("done")
+    return 0
+}

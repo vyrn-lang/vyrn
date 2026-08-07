@@ -3204,6 +3204,25 @@ impl<'a> Checker<'a> {
                 // "conventions checked per monomorphized instance". Refusing it
                 // here is what kept a generic container from giving its elements
                 // back (census U4).
+                // A DECLARED row passes too, and the key is read off the written
+                // type rather than off `base` — `impl Owned for Ring` is what
+                // `Ring` means, so resolving it to its record shape first is
+                // exactly the lookup that loses the answer.
+                //
+                // RFC-0086 M3 is why this arm exists. `impl MustUse for T` says a
+                // value must be disposed of BY NAME, and `drop` is the only
+                // terminal way to say that — handing it to a call or returning it
+                // only moves the obligation on. Without this arm the milestone
+                // would have shipped an obligation with no way to discharge it,
+                // and the fix menu would have named a statement the checker
+                // refuses. Nothing else was needed: `release_kind` already
+                // answers `Release(..)` for the type and every engine's `drop`
+                // lowering already asks it, so the gate was the whole gap.
+                if crate::types::type_key(&b.ty)
+                    .is_some_and(|k| self.impls.contains(&(crate::types::OWNED.to_string(), k)))
+                {
+                    return Ok(false);
+                }
                 if matches!(
                     t,
                     Type::Str
@@ -3218,7 +3237,8 @@ impl<'a> Checker<'a> {
                 }
                 Err(format!(
                     "line {line}: `drop` needs a heap value (a String, an Array, a Map, a Ref, \
-                     or an Option/Result carrying one), but `{name}` is {t}"
+                     or an Option/Result carrying one, or a type declaring `impl Owned`), but \
+                     `{name}` is {t}"
                 ))
             }
             Stmt::Expr(e) => {
