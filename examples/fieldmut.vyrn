@@ -110,7 +110,9 @@ fn main() -> Int64 {
     // `let owned = names.items` reads the field without taking it, and a record
     // releases its fields since RFC-0092 M3 — so dropping that binding hands the
     // same buffer back twice. `consume` is the verb that says the field leaves
-    // (RFC-0093 M1); `names` keeps its hole and is not reclaimed.
+    // (RFC-0093 M1). Since M2 the hole travels to the release walk, so `names` is
+    // reclaimed MINUS `items` — the field it gave away — and `drop owned` is the
+    // only thing that hands that buffer back.
     let mut names: NameBox = NameBox { items: [] }
     names.items.push("ada")
     names.items.push("grace")

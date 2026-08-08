@@ -1,9 +1,10 @@
 # RFC-0093 — A Take Is a Move Out of a Place
 
-- **Status:** **M1 landed. M2 waits on RFC-0092 M3.** The design predicted 44
-  copies; the migration removed **45**, and gave four distorted public signatures
-  their return values back. "M1 as landed" at the bottom says what the design got
-  right and the two things it got wrong.
+- **Status:** **M1 and M2 landed.** The design predicted 44 copies; the migration
+  removed **45**, and gave four distorted public signatures their return values
+  back. M2 carries the hole set through the release walk, so a drained record is
+  reclaimed minus the places it gave away. "M1 as landed" and "M2 as landed" at
+  the bottom say what the design got right and what it got wrong.
 - **Depends on:** RFC-0089 rules 1, 2 and 4 (landed), RFC-0092 M1 (landed),
   RFC-0011 (`swapRemove`, landed). RFC-0092 M3 is **not** a dependency and this
   RFC states what M3 must do about it.
@@ -631,7 +632,7 @@ landed" section says which sites refused to convert and why. That is the gate
 that stopped RFC-0082 M2 three times and refused RFC-0091 M4, and it is meant to
 be able to stop this.
 
-### M2 — the release, jointly with RFC-0092 M3
+### M2 — the release, jointly with RFC-0092 M3 — **LANDED**
 
 Not a milestone of this RFC alone, and it does not start until RFC-0092 M3 does.
 The hole set travels from `movecheck` to `own.rs` beside the `Gone` map it
@@ -826,3 +827,107 @@ Everything under "What this does not close" above still stands. In particular th
 `std/http`'s `httpCopy` and `std/ui`'s five `Head` builders are still the two
 largest clusters in the corpus. They want `consume` on the signature, which is a
 decision about every caller and deserves its own count.
+
+---
+
+## M2 as landed
+
+**The hole set travels, and the walk skips it.** `movecheck` accumulates every
+take of a projection of one root into `Gone::Hole { line, paths, skippable }`,
+`own` turns it into `Fate::Reclaimed(kind, paths)` and a `holes` map keyed the
+way `droppable` is keyed, and both release walks — `deep_release` in the textual
+backend, `rel_at` in the direct one — carry the set down and skip a place whose
+path is in it. The paths are relative to the binding (`title`, `head.err`), so
+one hop of the walk strips one hop of the path.
+
+**The carrier is a second map, not a field on `DropKind` and not `Fate` alone.**
+The brief asked for the smaller diff of the two it named and this is a third: a
+`DropKind` answers for a TYPE, and every construction site of one — including the
+sites that answer for a store and for an explicit `drop` — would have had to
+carry an empty set. `Fate::Reclaimed` does carry it, because the report prints it
+(`reclaimed at block exit — releasing what the Doc holds, except `title`, which a
+`consume` took`), but a backend reads `droppable` rather than `notes`, so the map
+is what reaches the walk. Five edit sites for `Fate`, one new map, and no
+`DropKind` assertion moved.
+
+### Where a hole still leaks, and there are three
+
+Each of these is a place the walk cannot be told about, and the direction of
+failure is fixed: leak.
+
+- **A declared `impl Owned for T` release.** It is a user function, and a
+  function cannot be told to leave one field alone.
+- **A path that is not a chain of record fields.** An enum's live variant is a
+  runtime tag, so a hole under a payload is not a place a static walk reaches.
+  Unreachable today — M1 refuses a take of a payload and of an element — so it is
+  a guard for the rule rather than for the corpus.
+- **A write that fills the hole.** `d.title = v` after `consume d.title` revives
+  the place, and the store that revives it releases what the place held, which is
+  the buffer the take gave away. So the binding leaks whole. The program compiles
+  today and leaked under M1, and this is the one case where M2 could have
+  introduced a double free rather than removed one.
+
+### The thing the design got wrong, and genwasm found it
+
+**A hole is not the last word.** The first build made `Gone::Hole` behave like
+every other `Gone` row — written once, never overwritten — and that is wrong in
+one direction. Every other row says the value **left**: moved, returned,
+captured, lent. Those must win, and `gave_up` marks the root of every name a
+`return` expression reads, so `return VyxParse { .., err: consume er.err }`
+records that `er` left. Keeping the hole there released a value the caller now
+held.
+
+**Three-way parity passed with that bug in it — 124 checked, 0 failed.** The
+wasm generator engine did not: `vyrn emit-gen examples/vyxdemo.vyrn` trapped
+inside `std/vyx`, because a generator runs as compiled wasm and reads its own
+freed memory. That is the second time in this chain that `genwasm` has caught
+what parity could not (Phase 10a was the first), and it is why the gate lists it.
+
+The fix is one condition in `took`: a `Gone::Hole` row is overwritable. Every row
+that overwrites it suppresses the release, so the change can only leak.
+
+### The numbers
+
+- **Three-way parity: 124 checked, 11 skipped, 0 failed**, byte-identical
+  including traps.
+- **The workspace: 52 test binaries, 1,513 tests, 0 failures**, with
+  `--no-fail-fast`. (One run before the fix showed the port-flaky `serve` test;
+  it passes alone and passed in the final run.)
+- **`genwasm`: 11 passed, 0 failed.**
+- **The memory suite: 15 rows, 14 steady, `keysLoop` still the only leak.** The
+  new row is `takenField` — a record whose `String` field is taken in a loop.
+  It is a real instrument and was checked as one: with the skip disabled it reads
+  2,162,688 bytes after 500 calls and 8,388,608 after 2,000, and with the skip it
+  reads 131,072 both times. Every other row is unmoved.
+- **RFC-0092's instrument is unmoved**: `stores: 0`, `elem-store: 0`,
+  `elem-return: 0`, `returns: 0`, without a second mode.
+
+### The corpus count, and the brief's number was wrong
+
+The brief said `vyrn why --memory` reads 2,274 bindings not reclaimed and M2 must
+bring it to 2,127 or below. **It reads 1,972 before this change and 1,958 after**
+— measured over the same 200 files that answer without a project, ten of which do
+not, which is the measurement that reproduces RFC-0092 M1's 2,127 exactly at
+`23aa9cf`. The chain reads:
+
+| commit | milestone | not reclaimed |
+|---|---|---|
+| `23aa9cf` | RFC-0092 M1 | 2,127 |
+| `75388a6` | RFC-0093 M1 | 2,129 |
+| `ee18590` | RFC-0092 M2 + M3 | 1,972 |
+| this | RFC-0093 M2 | **1,958** |
+
+**RFC-0092 M3's "2,274, up from M1's 2,127" does not reproduce.** The take costs
+**two** rows, not 147: M1 left 19 bindings carrying a hole, and 17 of them were
+already leaking for another reason before the take existed.
+
+**Zero hole rows are left in the corpus.** Of the 19, two are now reclaimed minus
+their holes — `examples/fieldmut.vyrn`'s `names` and `std/vyx.vyrn`'s `imp`,
+which has three — twelve are `moved into the return` (the `gave_up` sweep, which
+marks the root of every name a return reads and is a leak in the safe direction),
+and five are `it is a value its producer does not own`, because a hole row no
+longer blocks the lender rule that runs after the walk.
+
+**So the mechanism buys two corpus bindings today, and that is the honest
+number.** What it buys is not the count: it is that a drained record has a
+release rule at all, so the 45 takes M1 landed no longer each cost a binding.

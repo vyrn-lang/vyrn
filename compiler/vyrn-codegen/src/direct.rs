@@ -360,6 +360,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         gappend: HashMap::new(),
         externs,
         droppable: ownership.droppable,
+        // RFC-0093 M2, flattened across functions: the key is the `let`'s node
+        // address, which is unique in the program.
+        holes: ownership
+            .holes
+            .values()
+            .flatten()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect(),
         owned: ownership.proto,
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
@@ -935,6 +943,9 @@ struct Cx {
     /// — but the map's membership is `own`'s answer and stays authoritative about
     /// WHICH `let`s own their value.
     droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// Per `let` node, the places a `consume` took out of it (RFC-0093 M2). The
+    /// release walk skips them: the take already gave them an owner.
+    holes: HashMap<usize, Vec<String>>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -1250,7 +1261,11 @@ enum Rel {
     /// payload, a closure's capture block. The walk is the type, so the type is
     /// what this carries — a variant payload is chosen at run time and only the
     /// live one is released.
-    Deep(Type),
+    ///
+    /// The second field is RFC-0093 M2's hole set — the places a `consume` took
+    /// out of THIS binding, relative to it. Empty everywhere but at a `let` that
+    /// was drained, and the walk skips exactly these.
+    Deep(Type, Vec<String>),
     /// A type that declared `impl Owned` (RFC-0086 M1) — call the `release` it
     /// declared, whose flattened name this carries. The receiver's own type, so
     /// the call goes through the ordinary path rather than a second ABI.
@@ -1340,6 +1355,10 @@ struct Fn_<'a> {
     region_depth: u32,
     /// [`Cx::droppable`] for the function being lowered.
     drops: HashMap<usize, DropKind>,
+    /// The holes the walk in progress must skip, relative to the place it is
+    /// looking at (RFC-0093 M2). Taken at the top of [`Fn_::rel_at`], so a walk
+    /// into anything that is not a record starts empty.
+    rel_holes: Vec<String>,
     /// The type a value is being built FOR, innermost last.
     ///
     /// `None` and `Some(x)` do not say what they are — an `Option<T>`'s `T`
@@ -1380,6 +1399,7 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
         releases: Vec::new(),
         region_depth: 0,
         drops: HashMap::new(),
+        rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
         append_ok: std::collections::HashSet::new(),
@@ -1469,6 +1489,7 @@ fn lower_body(
         releases: Vec::new(),
         region_depth: 0,
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
+        rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: binds,
         append_ok: crate::append_candidates(&f.body),
@@ -1899,10 +1920,15 @@ impl Fn_<'_> {
             }
             // The walk is the type, and it needs an address: an aggregate in a
             // wasm local IS its address, and everything else has one.
-            Rel::Deep(ty) => {
+            Rel::Deep(ty, holes) => {
                 let a = self.addr_local(b, p, 0);
                 let t = ty.clone();
-                self.rel_at(b, a, &t, line)
+                // RFC-0093 M2: the places a take gave away. Empty for every
+                // binding nothing took from, which is nearly all of them.
+                self.rel_holes = holes.clone();
+                let r = self.rel_at(b, a, &t, line);
+                self.rel_holes.clear();
+                r
             }
             // The receiver is parked under a reserved name so the ordinary call
             // path finds it as it finds any argument — the same trick `?` uses
@@ -1987,7 +2013,7 @@ impl Fn_<'_> {
             // walk needs an address, so that answer is `Deep` and the
             // buffer-only one stays a `Buffers`.
             Type::Array(_) | Type::Map(..) | Type::SmallArray(..) if self.deep_row(&t) => {
-                Some(Rel::Deep(t.clone()))
+                Some(Rel::Deep(t.clone(), Vec::new()))
             }
             Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
             Type::Map(..) => {
@@ -2007,12 +2033,12 @@ impl Fn_<'_> {
             // re-derived: it carries the stop for a type that reaches itself,
             // whose walk has no bottom.
             Type::Option(_) | Type::Result(..) | Type::Fn(..) if self.owns_heap(&t) => {
-                Some(Rel::Deep(t))
+                Some(Rel::Deep(t, Vec::new()))
             }
             Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)
                 if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_))) =>
             {
-                Some(Rel::Deep(t))
+                Some(Rel::Deep(t, Vec::new()))
             }
             _ => None,
         })
@@ -2034,6 +2060,11 @@ impl Fn_<'_> {
     /// and a `SmallArray` still give back their buffers alone: their element
     /// rows are M3.
     fn rel_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
+        // RFC-0093 M2: the holes belong to the place this call is looking at,
+        // and only the record arm below can be told about them. Taking them here
+        // is what makes every other arm — an element, a payload, a buffer —
+        // start empty, which is right: `own` refuses a hole under any of them.
+        let holes = std::mem::take(&mut self.rel_holes);
         // A type that declares its own release keeps it. Reaching past the
         // declaration into its fields would reclaim what the declaration says it
         // reclaims, in a different order, and without the print a user `release`
@@ -2138,11 +2169,17 @@ impl Fn_<'_> {
                     if !self.owns_heap(&f.ty) {
                         continue;
                     }
+                    // RFC-0093 M2. A `consume` took this field, so it has an
+                    // owner already and this walk is not it.
+                    if holes.iter().any(|h| *h == f.name) {
+                        continue;
+                    }
                     let p = b.local(ValType::I32);
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::I32Const(l.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
+                    self.rel_holes = vyrn_frontend::own::holes_under(&holes, &f.name);
                     self.rel_at(b, p, &f.ty, line)?;
                 }
                 Ok(())
@@ -2283,7 +2320,7 @@ impl Fn_<'_> {
             // the elements it held leak, exactly as they did before the row
             // landed, and freeing them here would mean reading a length the
             // store is in the middle of replacing.
-            Some(Rel::Deep(t)) => match self.cx.resolve(&t) {
+            Some(Rel::Deep(t, _)) => match self.cx.resolve(&t) {
                 Type::Array(_) => vec![(self.layout_of(&t, line)?.fields[0], false)],
                 Type::Map(..) => {
                     let l = self.layout_of(&t, line)?;
@@ -2539,7 +2576,16 @@ impl Fn_<'_> {
                 // what.
                 self.scope.push((name.clone(), place, bound.clone()));
                 if owns {
-                    if let Some(r) = self.rel_for(&bound, *line)? {
+                    if let Some(mut r) = self.rel_for(&bound, *line)? {
+                        // RFC-0093 M2: a take gave one of this binding's places
+                        // away, so the walk must not hand it back. `rel_for`
+                        // answers for the TYPE, and the hole is a fact about
+                        // this binding, so it is attached here.
+                        if let (Rel::Deep(_, holes), Some(h)) =
+                            (&mut r, self.cx.holes.get(&(s as *const Stmt as usize)))
+                        {
+                            *holes = h.clone();
+                        }
                         self.releases
                             .last_mut()
                             .expect("a `let` outside any block")
@@ -14699,6 +14745,7 @@ mod tests {
             higher_order: HashMap::new(),
             protocol_methods: HashMap::new(),
             owned: Default::default(),
+            holes: HashMap::new(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             fnvals: RefCell::new(Vec::new()),

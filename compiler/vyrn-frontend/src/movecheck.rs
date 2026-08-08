@@ -156,16 +156,26 @@ pub enum Gone {
     Aliased { line: usize },
     /// It was handed to a declared function, which may keep it.
     Lent { line: usize, to: String },
-    /// A `consume` took one of its PLACES (RFC-0093 M1), so the value has a
-    /// hole in it. Carries the place taken.
+    /// A `consume` took one or more of its PLACES (RFC-0093 M1), so the value
+    /// has holes in it. Carries every place taken, RELATIVE to the binding
+    /// (`title`, `head.err`), and the line of the first take.
     ///
-    /// The release walk is the type and the type does not know about the hole,
-    /// so releasing this binding would free the field the take already gave
-    /// away. RFC-0092 M3 leaves it unreclaimed instead: the untaken places leak,
-    /// which is the answer this analysis gives wherever it cannot prove
-    /// otherwise, and RFC-0093 M2 is the milestone that carries the hole set
-    /// through and releases the rest.
-    Hole { line: usize, path: String },
+    /// It is a SET, not one path: `std/vyx.vyrn:1431` drains nine fields out of
+    /// one record. RFC-0093 M2 carries the set to [`crate::own`], which hands it
+    /// to the release walk so the walk skips exactly these places and reclaims
+    /// the rest.
+    ///
+    /// `skippable` is false where the walk may not be told to skip. A write to
+    /// a place of this binding is the case: it revives the hole, and a store
+    /// into an owning place releases what the place held — which is the buffer
+    /// the take gave away. Then nothing may be skipped and nothing may be
+    /// released, so the whole binding leaks, exactly as M1 shipped it. A leak is
+    /// a task; a double free is a bug in a language that promises memory safety.
+    Hole {
+        line: usize,
+        paths: Vec<String>,
+        skippable: bool,
+    },
 }
 
 /// One `let` binding, as the rules see it: its type and what became of it.
@@ -198,7 +208,12 @@ pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
     // binding that names it may not be released. Applied here rather than at the
     // `let`, because a lender is only known once every body has been read.
     for row in lets.values_mut() {
-        if row.gone.is_some() {
+        // A HOLE row is not a decision yet — it says the binding is reclaimed
+        // minus a few places (RFC-0093 M2), so the two rules below still apply
+        // to it and still overwrite it. They only ever answer "somebody else
+        // holds this", which is a leak, and a leak beats releasing a value a
+        // callee kept.
+        if row.gone.is_some() && !matches!(row.gone, Some(Gone::Hole { .. })) {
             continue;
         }
         if let Some(name) = &row.from_call {
@@ -915,8 +930,74 @@ impl MoveCheck<'_> {
             return;
         }
         if let Some(row) = sink.borrow_mut().get_mut(&key) {
-            if row.gone.is_none() {
+            // A HOLE is not the last word (RFC-0093 M2): it says the binding is
+            // reclaimed minus a few places, and every row written here says the
+            // value LEFT — moved, returned, captured, lent. Those win, and they
+            // have to. `gave_up` marks the root of every name a `return`
+            // expression reads, so `return f(er.next)` after `consume er.node`
+            // records that `er` left; keeping the hole instead would release a
+            // value the caller now holds. The wasm generator engine trapped on
+            // `std/vyx` within one run of this rule being wrong.
+            if row.gone.is_none() || matches!(row.gone, Some(Gone::Hole { .. })) {
                 row.gone = Some(gone);
+            }
+        }
+    }
+
+    /// A take of the place `rel` out of the binding `name` (RFC-0093 M2).
+    ///
+    /// Not [`MoveCheck::took`], because a hole ACCUMULATES: the ninth take out
+    /// of one record must not overwrite the first eight, and `took` writes only
+    /// where nothing is written yet. A row that already says something else —
+    /// moved, captured, lent — keeps saying it, and that row is a leak or a
+    /// move, so it is the safe answer either way.
+    fn hole(&self, name: &str, line: usize, rel: Option<String>) {
+        let Some(sink) = &self.lets else { return };
+        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        if key == 0 {
+            return;
+        }
+        if let Some(row) = sink.borrow_mut().get_mut(&key) {
+            match &mut row.gone {
+                None => {
+                    row.gone = Some(Gone::Hole {
+                        line,
+                        paths: rel.iter().cloned().collect(),
+                        // A path this pass cannot state relative to the binding
+                        // is a path the walk cannot be told to skip.
+                        skippable: rel.is_some(),
+                    })
+                }
+                Some(Gone::Hole {
+                    paths, skippable, ..
+                }) => match rel {
+                    Some(p) => {
+                        if !paths.contains(&p) {
+                            paths.push(p);
+                        }
+                    }
+                    None => *skippable = false,
+                },
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// A write to a place of `name`, after a take took one (RFC-0093 M2).
+    ///
+    /// The write fills the hole, and the store that fills it releases what the
+    /// place held — the buffer the take gave away. So the binding stops being
+    /// skippable and leaks whole. Only a binding that already carries a hole is
+    /// touched; a write to any other binding means nothing here.
+    fn wrote_into(&self, name: &str) {
+        let Some(sink) = &self.lets else { return };
+        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        if key == 0 {
+            return;
+        }
+        if let Some(row) = sink.borrow_mut().get_mut(&key) {
+            if let Some(Gone::Hole { skippable, .. }) = &mut row.gone {
+                *skippable = false;
             }
         }
     }
@@ -2024,6 +2105,7 @@ impl MoveCheck<'_> {
                     self.borrows.borrow_mut().rebind(name, b);
                 }
                 revive(consumed, name); // reassignment revives it
+                self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
             }
             Stmt::SetField {
@@ -2045,6 +2127,7 @@ impl MoveCheck<'_> {
                 // sentence `Stmt::Assign` has carried since Phase 4b, one dot
                 // down — and the reason no drop flag is needed to say it.
                 revive(consumed, &format!("{name}.{field}"));
+                self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
             }
             // `a[i] = v` — the stored value is consumed like a `push` argument
@@ -2062,6 +2145,7 @@ impl MoveCheck<'_> {
                 self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
                 let _ = self.store(value, &|| format!("`{name}`"), *line, true, consumed)?;
+                self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
             }
             Stmt::Return { value, line } => {
@@ -2263,8 +2347,7 @@ impl MoveCheck<'_> {
                     // RFC-0093: the loop takes the PATH, so `for t in consume
                     // b.tags` empties that field and leaves the rest of `b`
                     // readable — the same hole the prefix makes, recorded the
-                    // same way. `own.rs` still hears about a whole binding
-                    // through `took`, which is the only case it has a row for.
+                    // same way and handed to the same walk (M2).
                     if let Some((root, path)) = place_path(iter) {
                         let fixes = vec![format!("`{path}.copy()` if both sides need a value")];
                         if root == path {
@@ -2275,6 +2358,13 @@ impl MoveCheck<'_> {
                                     by: "the `for .. in consume` loop".into(),
                                 },
                             );
+                        } else {
+                            let rel = path
+                                .strip_prefix(&root)
+                                .and_then(|r| r.strip_prefix('.'))
+                                .filter(|r| !r.contains('['))
+                                .map(str::to_string);
+                            self.hole(&root, *line, rel);
                         }
                         consumed.insert(
                             path.clone(),
@@ -2568,28 +2658,33 @@ impl MoveCheck<'_> {
                 // loop writes, so `own.rs` suppresses its drop through the two
                 // lines it already has.
                 //
-                // A PARTIAL take wrote nothing until RFC-0092 M3, because a
-                // record had no release to collide with. It has one now, and the
-                // release walk is the TYPE — which does not know that one field
-                // left. So the root stops being reclaimed: the hole is what
-                // RFC-0093 M1 shipped with, and the untaken places join it until
-                // RFC-0093 M2 carries the hole set through to the walk. A leak is
-                // a task; a double free is a bug in a language that promises
-                // memory safety.
-                self.took(
-                    &root,
-                    if root == path {
+                // A PARTIAL take leaves a hole, and the release walk is the TYPE
+                // — which does not know that one field left. RFC-0093 M2 hands
+                // the hole set to [`crate::own`], which hands it to the walk: the
+                // binding is reclaimed MINUS these places. Every take of the same
+                // root joins the set, because a record is drained a field at a
+                // time.
+                if root == path {
+                    self.took(
+                        &root,
                         Gone::Moved {
                             line: *line,
                             by: "`consume`".into(),
-                        }
-                    } else {
-                        Gone::Hole {
-                            line: *line,
-                            path: path.clone(),
-                        }
-                    },
-                );
+                        },
+                    );
+                } else {
+                    // The walk starts at the binding, so the path it skips is
+                    // relative to it. A name that is not a prefix of its own path
+                    // is RFC-0082's place desugar, whose temporaries are named
+                    // after the paths they took (`o.i[]`); it is one binding and
+                    // not a path, and the walk cannot be told to skip inside it.
+                    let rel = path
+                        .strip_prefix(&root)
+                        .and_then(|r| r.strip_prefix('.'))
+                        .filter(|r| !r.contains('['))
+                        .map(str::to_string);
+                    self.hole(&root, *line, rel);
+                }
                 consumed.insert(
                     path.clone(),
                     Consumption {

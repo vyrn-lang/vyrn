@@ -49,6 +49,7 @@
 //! | `lambdaLoop` | §16 | steady | Phase 10b: a stored closure owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum |
 //! | `elementLeak` | U4 | steady | RFC-0092 M2: an array owns its elements, because M1's rule proves every route into one is a store |
 //! | `recordFields` | RFC-0089 rule 4 | steady | RFC-0092 M3: an aggregate releases its places, so a record hands its two Strings back with it |
+//! | `takenField` | RFC-0093 M2 | steady | the walk skips the place a `consume` took, so N turns allocate N and free N — not 2N, which is the double free, and not 0, which is the leak M1 shipped |
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `keysLoop` | U4's price | leaks | `for k in m.keys()` — the snapshot is a temporary nothing releases, and M2 made its elements copies |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
@@ -480,6 +481,12 @@ const ROWS: &[Row] = &[
               has no bottom, which is the guard the `Array` row already carried",
     },
     Row {
+        export: "takenField",
+        census: "RFC-0093 M2",
+        today: Shape::Steady,
+        why: "RFC-0093 M2: a take moves a field out of a record and leaves a hole, and the               release walk is the TYPE — which does not know the field left. M1 left the whole               binding unreclaimed, because a leak is a task and a double free is a bug; M2               carries the hole set from `movecheck` to `own` to both walks, so the record is               reclaimed MINUS the place it gave away. The row is the arithmetic: N turns               allocate two Strings and free two — N, not 2N and not 0. Where the walk cannot be               told, the binding still leaks whole: a declared `release` is a user function, a               path that is not a chain of record fields is not a place a static walk reaches,               and a write that fills the hole already released what the take gave away",
+    },
+    Row {
         export: "slotsContainer",
         census: "U4 / RFC-0090 M1",
         today: Shape::Steady,
@@ -654,6 +661,21 @@ export extern fn elementLeak() {{
 export extern fn recordFields() {{
     let d = Doc {{ title: tag() + "t", body: tag() + "b" }}
     seen = seen + Int64(d.title.byteLength) + Int64(d.body.byteLength)
+}}
+
+/// RFC-0093 M2. `consume d.title` moves the field out; the record's release
+/// walk skips it and hands back `body` alone, so the loop allocates two Strings
+/// a turn and frees two. Under M1 `d` was left unreclaimed and `body` leaked
+/// once per turn; under a walk that did not skip, `title` would be freed twice
+/// — which this harness cannot see and parity can.
+export extern fn takenField() {{
+    let mut i = 0
+    while i < 4 {{
+        let d = Doc {{ title: tag() + "t", body: tag() + "b" }}
+        let t = consume d.title
+        seen = seen + Int64(t.byteLength) + Int64(d.body.byteLength)
+        i = i + 1
+    }}
 }}
 
 export extern fn slotsContainer() {{

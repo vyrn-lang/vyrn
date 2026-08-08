@@ -539,10 +539,18 @@ pub enum Leak {
     Aliased { line: usize },
     /// It reached a call that may retain it.
     Escaped { callee: String, line: usize },
-    /// A `consume` took one of its places (RFC-0093 M1), so the value has a hole
-    /// and the release walk — which is the type — would free what the take gave
-    /// away. Carries the place taken.
-    Hole { path: String, line: usize },
+    /// A `consume` took one of its places (RFC-0093 M1) and the walk may not be
+    /// told to skip it, so releasing the binding would free what the take gave
+    /// away. Carries the places taken.
+    ///
+    /// RFC-0093 M2 releases the rest of the value wherever the walk CAN skip
+    /// them, which is [`Fate::Reclaimed`]'s second field. Three cases stay here,
+    /// and each of them is a place the walk cannot be told about: a declared
+    /// `release`, which is a user function; a path that is not a chain of record
+    /// fields, because an enum's live variant is a runtime tag; and a hole a
+    /// later write filled, because the store that filled it already released
+    /// what the take gave away.
+    Hole { paths: Vec<String>, line: usize },
 }
 
 impl Leak {
@@ -585,19 +593,48 @@ impl std::fmt::Display for Leak {
             Leak::Escaped { callee, line } => {
                 write!(f, "it escapes into the call to `{callee}` at line {line}")
             }
-            Leak::Hole { path, line } => write!(
+            Leak::Hole { paths, line } => write!(
                 f,
-                "a `consume` took `{path}` at line {line}, so it has a hole in it"
+                "a `consume` took {} at line {line}, so it has a hole in it",
+                places(paths)
             ),
         }
     }
 }
 
+/// The holes that live INSIDE the field `name`, with the field's own hop
+/// removed — what a release walk carries one level down (RFC-0093 M2).
+///
+/// One copy for both backends. `hs.head.err` reaches the walk of `head` as
+/// `err`, and a hole naming a sibling field reaches it as nothing.
+pub fn holes_under(holes: &[String], name: &str) -> Vec<String> {
+    holes
+        .iter()
+        .filter_map(|h| h.strip_prefix(name)?.strip_prefix('.'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The places a hole names, in the words both surfaces print.
+fn places(paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|p| format!("`{p}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// What happens to a `let` binding's value at the end of its block.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Fate {
-    /// The engines release it here, this way.
-    Reclaimed(DropKind),
+    /// The engines release it here, this way — MINUS the places a `consume`
+    /// took out of it (RFC-0093 M2), which are relative to the binding
+    /// (`title`, `head.err`) and empty for every binding nothing took from.
+    ///
+    /// The set rides with the verdict rather than with the [`DropKind`], because
+    /// a kind is a property of the TYPE and a hole is a property of one binding:
+    /// two records of one type, one drained and one whole, release differently.
+    Reclaimed(DropKind, Vec<String>),
     /// It left: a `return` carried it out, or a store took it. Whoever holds it
     /// now reclaims it, so this block must not.
     Moved { line: usize, into: String },
@@ -617,7 +654,14 @@ impl Fate {
     /// the editor says the same thing (RFC-0087 U1). Nothing re-derives it.
     pub fn words(&self) -> String {
         match self {
-            Fate::Reclaimed(kind) => format!("reclaimed at block exit — {}", kind.words()),
+            Fate::Reclaimed(kind, holes) if holes.is_empty() => {
+                format!("reclaimed at block exit — {}", kind.words())
+            }
+            Fate::Reclaimed(kind, holes) => format!(
+                "reclaimed at block exit — {}, except {}, which a `consume` took",
+                kind.words(),
+                places(holes)
+            ),
             Fate::Moved { line, into } => format!("moved at line {line} into {into}"),
             Fate::Dropped { line } => format!("reclaimed by `drop` at line {line}"),
             Fate::Static => "static data — nothing reclaims it, and nothing needs to".into(),
@@ -659,6 +703,14 @@ pub struct Ownership {
     pub owned_fns: HashMap<String, DropKind>,
     /// Per function: identity of each droppable `let` and how to reclaim it.
     pub droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// Per function: the places a `consume` took out of a droppable `let`
+    /// (RFC-0093 M2), keyed the same way and relative to the binding. A `let`
+    /// with no row here has no hole, which is nearly all of them.
+    ///
+    /// A second map rather than a field on [`DropKind`]: the kind answers for a
+    /// TYPE and every construction site of it would have to carry an empty set,
+    /// including the ones that answer for a store or for an explicit `drop`.
+    pub holes: HashMap<String, HashMap<usize, Vec<String>>>,
     /// Per function: every `let` in source order, and what happens to its value
     /// — the same decisions `droppable` carries, plus the reason for each one
     /// this analysis did NOT take. Recorded by the walker that decides, so the
@@ -679,10 +731,12 @@ pub fn analyze(program: &Program) -> Ownership {
     let lets = crate::movecheck::ownership(program);
 
     let mut droppable = HashMap::new();
+    let mut holes = HashMap::new();
     let mut notes = HashMap::new();
     let mut emit = |name: String, body: &Block| {
         let r = emit_body(body, &lets, &proto);
         droppable.insert(name.clone(), r.droppable);
+        holes.insert(name.clone(), r.holes);
         notes.insert(name, r.notes);
     };
     for f in &program.functions {
@@ -708,6 +762,7 @@ pub fn analyze(program: &Program) -> Ownership {
     Ownership {
         owned_fns,
         droppable,
+        holes,
         notes,
         proto,
     }
@@ -715,6 +770,7 @@ pub fn analyze(program: &Program) -> Ownership {
 
 struct FnResult {
     droppable: HashMap<usize, DropKind>,
+    holes: HashMap<usize, Vec<String>>,
     notes: Vec<BindingNote>,
 }
 
@@ -722,6 +778,7 @@ struct FnResult {
 fn emit_body(body: &Block, lets: &HashMap<usize, LetOwnership>, proto: &Owned) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
+        holes: HashMap::new(),
         notes: Vec::new(),
         region_depth: 0,
         lets,
@@ -730,6 +787,7 @@ fn emit_body(body: &Block, lets: &HashMap<usize, LetOwnership>, proto: &Owned) -
     e.block(body);
     FnResult {
         droppable: e.droppable,
+        holes: e.holes,
         notes: e.notes,
     }
 }
@@ -746,6 +804,8 @@ fn id(s: &Stmt) -> usize {
 /// [`crate::movecheck`]. There is no expression analysis here at all.
 struct Emit<'a> {
     droppable: HashMap<usize, DropKind>,
+    /// The places a take took out of a droppable `let` (RFC-0093 M2).
+    holes: HashMap<usize, Vec<String>>,
     /// One row per `let`, in source order, with what happens to its value.
     notes: Vec<BindingNote>,
     region_depth: usize,
@@ -768,8 +828,11 @@ impl Emit<'_> {
                 name, value, line, ..
             } => {
                 let fate = self.fate(s, value);
-                if let Fate::Reclaimed(kind) = &fate {
+                if let Fate::Reclaimed(kind, holes) = &fate {
                     self.droppable.insert(id(s), kind.clone());
+                    if !holes.is_empty() {
+                        self.holes.insert(id(s), holes.clone());
+                    }
                 }
                 self.notes.push(BindingNote {
                     name: name.clone(),
@@ -805,8 +868,11 @@ impl Emit<'_> {
                 ..
             } => {
                 let fate = self.fate(s, scrutinee);
-                if let Fate::Reclaimed(kind) = &fate {
+                if let Fate::Reclaimed(kind, holes) = &fate {
                     self.droppable.insert(id(s), kind.clone());
+                    if !holes.is_empty() {
+                        self.holes.insert(id(s), holes.clone());
+                    }
                 }
                 // No `BindingNote`: `vyrn why --memory` lists bindings, and this
                 // is a temporary with no name to print.
@@ -907,6 +973,42 @@ impl Emit<'_> {
         }
     }
 
+    /// Whether the release walk can be told to skip every one of `paths` in a
+    /// value of `ty` (RFC-0093 M2).
+    ///
+    /// The walk carries a path and skips a place whose path is in the set, so
+    /// the set has to name places the walk actually visits: a chain of RECORD
+    /// fields, each hop resolved through the declarations. Two things end the
+    /// chain and both answer false.
+    ///
+    /// **A declared `release`.** `impl Owned for T` is a user function, and a
+    /// function cannot be told to leave one field alone.
+    ///
+    /// **Anything that is not a record.** An enum's live variant is a runtime
+    /// tag, so a hole under a payload is not a place a static walk can skip; an
+    /// array's element is chosen by an index the walk does not have. Both leak,
+    /// and neither is reachable today — a take of a payload or of an element is
+    /// refused (RFC-0093 M1) — so this is the guard for the rule rather than for
+    /// the corpus.
+    fn skippable(&self, ty: &Type, paths: &[String]) -> bool {
+        paths.iter().all(|p| {
+            let mut cur = ty.clone();
+            for seg in p.split('.') {
+                if matches!(self.proto.release_kind(&cur), Some(DropKind::Release(_))) {
+                    return false;
+                }
+                let Type::Record(fields) = crate::types::resolve(&cur, &self.proto.types) else {
+                    return false;
+                };
+                let Some(f) = fields.iter().find(|f| f.name == seg) else {
+                    return false;
+                };
+                cur = f.ty.clone();
+            }
+            true
+        })
+    }
+
     /// What happens to one `let` binding's value — RFC-0089 rule 4, in full.
     ///
     /// The order of the questions is the order a reader needs them. What does
@@ -939,7 +1041,7 @@ impl Emit<'_> {
         // print — runs on the same value everywhere and a `mut` container
         // reclaims. Nothing refuses a binding for being `mut` any more.
         match row.and_then(|r| r.gone.as_ref()) {
-            None => Fate::Reclaimed(kind),
+            None => Fate::Reclaimed(kind, Vec::new()),
             Some(Gone::Borrowed(what)) => Fate::Leaked(Leak::Borrowed(what)),
             Some(Gone::Aliased { line }) => Fate::Leaked(Leak::Aliased { line: *line }),
             Some(Gone::Lent { line, to }) => Fate::Leaked(Leak::Escaped {
@@ -947,10 +1049,29 @@ impl Emit<'_> {
                 line: *line,
             }),
             Some(Gone::Captured { line }) => Fate::Leaked(Leak::Captured { line: *line }),
-            Some(Gone::Hole { line, path }) => Fate::Leaked(Leak::Hole {
-                path: path.clone(),
-                line: *line,
-            }),
+            // RFC-0093 M2. The walk is the type and the type does not know that
+            // a place left, so the hole set travels with the verdict and the
+            // walk skips exactly these places. Where it cannot be told — a
+            // declared `release`, a path that is not a chain of record fields, a
+            // hole a later write filled — the whole binding leaks, which is what
+            // M1 shipped and the direction this analysis fails in.
+            Some(Gone::Hole {
+                line,
+                paths,
+                skippable,
+            }) => {
+                if *skippable
+                    && matches!(kind, DropKind::Deep(_))
+                    && bty.is_some_and(|t| self.skippable(t, paths))
+                {
+                    Fate::Reclaimed(kind, paths.clone())
+                } else {
+                    Fate::Leaked(Leak::Hole {
+                        paths: paths.clone(),
+                        line: *line,
+                    })
+                }
+            }
             Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
             Some(Gone::Returned { line }) => Fate::Moved {
                 line: *line,
@@ -1174,6 +1295,128 @@ pub(crate) mod tests {
             .unwrap_or_default()
     }
 
+    // ---- RFC-0093 M2: a take leaves a hole, and the walk skips it --------
+
+    /// The fate of every binding in `which`, in source order.
+    fn fates(src: &str, which: &str) -> Vec<Fate> {
+        let (o, _) = analyze_src(src);
+        o.notes
+            .get(which)
+            .map(|ns| ns.iter().map(|n| n.fate.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The hole set of the binding named `name`, or `None` where it leaks.
+    fn holes_of(src: &str, name: &str) -> Option<Vec<String>> {
+        let (o, _) = analyze_src(src);
+        let n = o
+            .notes
+            .get("main")
+            .unwrap()
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap();
+        match &n.fate {
+            Fate::Reclaimed(_, holes) => Some(holes.clone()),
+            _ => None,
+        }
+    }
+
+    const DOC: &str = "type Doc = { title: String, body: String } \
+                       fn mk(a: String) -> Doc { return Doc { title: a + \"t\", body: a + \"b\" } } ";
+
+    #[test]
+    fn a_taken_field_is_the_only_place_the_walk_skips() {
+        let src = format!(
+            "{DOC} fn main() -> Int64 {{ let d = mk(\"x\"); let t = consume d.title; \
+             return Int64(t.byteLength) + Int64(d.body.byteLength); }}"
+        );
+        assert_eq!(holes_of(&src, "d"), Some(vec!["title".to_string()]));
+    }
+
+    /// The hole is a SET. `std/vyx.vyrn:1431` drains nine fields out of one
+    /// record, and `took` writes only where nothing is written yet — so a second
+    /// take had to stop going through it.
+    #[test]
+    fn every_take_of_one_record_joins_the_hole_set() {
+        let src = format!(
+            "{DOC} fn main() -> Int64 {{ let d = mk(\"x\"); let t = consume d.title; \
+             let b = consume d.body; return Int64(t.byteLength) + Int64(b.byteLength); }}"
+        );
+        assert_eq!(
+            holes_of(&src, "d"),
+            Some(vec!["title".to_string(), "body".to_string()])
+        );
+    }
+
+    /// The path is relative to the binding and may be more than one hop:
+    /// `std/vyx.vyrn:4091` writes `consume hs.head.err`.
+    #[test]
+    fn a_hole_can_be_a_chain_of_fields() {
+        let src = "type Inner = { err: String, n: Int64 } \
+                   type Outer = { head: Inner, tail: String } \
+                   fn mk(a: String) -> Outer { return Outer { head: Inner { err: a + \"e\", n: 1 }, tail: a + \"l\" } } \
+                   fn main() -> Int64 { let hs = mk(\"y\"); let e = consume hs.head.err; \
+                   return Int64(e.byteLength) + Int64(hs.tail.byteLength); }";
+        assert_eq!(holes_of(src, "hs"), Some(vec!["head.err".to_string()]));
+    }
+
+    /// A write fills the hole, and the store that fills it releases what the
+    /// place held — the buffer the take gave away. So the binding leaks whole
+    /// rather than skipping a place that is no longer empty.
+    #[test]
+    fn a_write_after_a_take_leaks_the_whole_binding() {
+        let src = format!(
+            "{DOC} fn main() -> Int64 {{ let mut d = mk(\"x\"); let t = consume d.title; \
+             d.title = \"z\"; return Int64(t.byteLength) + Int64(d.title.byteLength); }}"
+        );
+        assert!(
+            matches!(holes_of(&src, "d"), None),
+            "a filled hole must not be skipped: {:?}",
+            fates(&src, "main")
+        );
+    }
+
+    /// A hole is not the last word. Every later row says the value LEFT, and
+    /// those win — `gave_up` marks the root of every name a `return` expression
+    /// reads, so a return after a take records that the whole binding went.
+    ///
+    /// The wasm generator engine trapped on `std/vyx` while this rule was the
+    /// other way round, and three-way parity passed through the same bug: the
+    /// binding was released here AND held by the caller.
+    #[test]
+    fn a_return_after_a_take_beats_the_hole() {
+        let src = format!(
+            "{DOC} fn take(a: String) -> String {{ let d = mk(a); return consume d.title; }} \
+             fn main() -> Int64 {{ return take(\"x\").byteLength; }}"
+        );
+        let (o, _) = analyze_src(&src);
+        let n = o.notes.get("take").unwrap().iter().find(|n| n.name == "d");
+        assert!(
+            matches!(n.map(|n| &n.fate), Some(Fate::Moved { .. })),
+            "{:?}",
+            n.map(|n| &n.fate)
+        );
+        assert!(o.droppable.get("take").unwrap().is_empty());
+    }
+
+    /// A declared `release` is a user function, and a function cannot be told to
+    /// leave one field alone.
+    #[test]
+    fn a_declared_release_keeps_leaking_its_hole() {
+        let src = "protocol Owned { fn release(self) } \
+                   type Box = { name: String, n: Int64 } \
+                   impl Owned for Box { fn release(self) { print(1) } } \
+                   fn mk(a: String) -> Box { return Box { name: a + \"n\", n: 1 } } \
+                   fn main() -> Int64 { let b = mk(\"x\"); let t = consume b.name; \
+                   return Int64(t.byteLength) + b.n; }";
+        assert!(
+            matches!(holes_of(src, "b"), None),
+            "{:?}",
+            fates(src, "main")
+        );
+    }
+
     // ---- auto-free for mutable arrays -----------------------------------
 
     #[test]
@@ -1354,16 +1597,35 @@ pub(crate) mod tests {
         assert_eq!(drop_count(src, "main"), 0);
     }
 
-    /// RFC-0093 M1's hole. `consume d.title` takes one field and leaves the
-    /// record behind; the release walk is the TYPE and does not know that, so a
-    /// binding with a hole in it is left unreclaimed rather than freed twice.
+    /// RFC-0093's hole. `consume d.title` takes one field and leaves the record
+    /// behind. M1 left the whole binding unreclaimed rather than free the field
+    /// twice; M2 carries the hole set to the walk, so the record is reclaimed
+    /// MINUS the place the take gave away.
     #[test]
-    fn a_record_with_a_taken_field_is_left_alone() {
+    fn a_record_with_a_taken_field_is_reclaimed_minus_the_hole() {
         let src = "type Doc = { title: String, body: String } \
                    fn main() -> Int64 { let d = Doc { title: \"a\" + \"b\", body: \"c\" }; \
                    let t = consume d.title; return t.byteLength; }";
-        // `t` alone: `d` has a hole, and `t` is the String it gave away.
-        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
+        // `t` is the String the record gave away, and `d` is the rest of it.
+        assert_eq!(
+            fates(src, "main"),
+            vec![
+                Fate::Reclaimed(
+                    DropKind::Deep(Type::Record(vec![
+                        Field {
+                            name: "title".into(),
+                            ty: Type::Str,
+                        },
+                        Field {
+                            name: "body".into(),
+                            ty: Type::Str,
+                        },
+                    ])),
+                    vec!["title".to_string()]
+                ),
+                Fate::Reclaimed(DropKind::FreeStr, Vec::new()),
+            ]
+        );
     }
 
     /// Census §14, Phase 5. An `Option` and a `Result` DO own their payload:
