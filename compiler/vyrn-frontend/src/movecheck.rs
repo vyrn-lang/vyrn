@@ -1313,10 +1313,7 @@ impl MoveCheck<'_> {
         // A `for` variable ([`Borrow::Element`]) is NOT widened here. It is a
         // projection of its container in kind, but it is outside this RFC's three
         // sites and outside the count that priced them, so it keeps 4b's verdict.
-        if !matches!(
-            b,
-            Borrow::Read(_) | Borrow::Modify(_) | Borrow::Projection
-        ) {
+        if !matches!(b, Borrow::Read(_) | Borrow::Modify(_) | Borrow::Projection) {
             // …unless the caller is JS. A Vyrn caller reads the lend out of
             // `lending` and releases nothing; a JS caller reads nothing, and
             // since RFC-0089 M3b `wasi-min.js` frees every String an export
@@ -1470,9 +1467,9 @@ impl MoveCheck<'_> {
                 then_branch,
                 else_branch,
                 ..
-            } => self.returned_borrow(then_branch).or_else(|| {
-                else_branch.as_ref().and_then(|b| self.returned_borrow(b))
-            }),
+            } => self
+                .returned_borrow(then_branch)
+                .or_else(|| else_branch.as_ref().and_then(|b| self.returned_borrow(b))),
             _ => {
                 let Some((root, path)) = place_path(e) else {
                     // An element read is a projection too, and `place_path`
@@ -4341,6 +4338,10 @@ mod tests {
     /// projection, returns of a projection, and how many of each name a type that
     /// owns no heap — the rule does not reach those and they cost nothing.
     ///
+    /// M0 measured with this and refused nothing; **M1 refuses, and this is the
+    /// regression guard**. The store classes must read zero. The returns that
+    /// remain are the ones waiting on M3's release row — see the assertions.
+    ///
     /// Ignored by default: it reads the repository and links it. Run it with
     /// `cargo test -p vyrn-frontend --lib rfc0092 -- --ignored --nocapture`.
     #[test]
@@ -4439,7 +4440,7 @@ mod tests {
         for f in &unlinkable {
             println!("    not linked: {f}");
         }
-        println!("RFC-0092 projection sites the rule would refuse");
+        println!("RFC-0092 projection sites over the corpus");
         println!("  stores:  {stores}  (+{} scalar)", count("store", false));
         println!("  returns: {returns}  (+{} scalar)", count("return", false));
         println!("  total:   {}", stores + returns);
@@ -4448,10 +4449,12 @@ mod tests {
             unknown("store"),
             unknown("return")
         );
-        // An element read is a projection the RFC's three sites do not reach —
-        // see [`element_path`]. Reported beside the bill, not inside it.
+        // M1 widened `store` and `returned_borrow` to see an element read, so
+        // these are refused like the field they are. Still counted apart,
+        // because M0 counted them apart and the two numbers have to stay
+        // comparable.
         println!(
-            "  element reads, outside the three sites: {} store (+{} scalar), {} return (+{} scalar)",
+            "  element reads: {} store (+{} scalar), {} return (+{} scalar)",
             count("elem-store", true),
             count("elem-store", false),
             count("elem-return", true),
@@ -4465,10 +4468,36 @@ mod tests {
                 s.kind, s.line, s.func, s.path, s.into, s.ty
             );
         }
-        assert!(
-            stores + returns <= 300,
-            "RFC-0092 M0 gate: {} sites is over 300 — ship the return path only",
-            stores + returns
+        // M1's regression guard. Every store the rule refuses is migrated, and
+        // the corpus compiles, so the instrument reads zero for all three store
+        // classes and for an element return. A site that reappears fails here
+        // with its file and line already printed above.
+        assert_eq!(stores, 0, "RFC-0092 M1: a projection store came back");
+        assert_eq!(
+            count("elem-store", true),
+            0,
+            "RFC-0092 M1: an element store came back"
+        );
+        assert_eq!(
+            count("elem-return", true),
+            0,
+            "RFC-0092 M1: an element return came back"
+        );
+        // The returns that remain are all one shape and it is DELIBERATE.
+        // `check_return` refuses an arm-yielded projection only where the caller
+        // RELEASES the result (Phase 4b's guard, which this RFC does not move),
+        // and a record and a user enum have no release rule until M3. So
+        // `return match hit { Some(r) => r, .. }` on an `Option<Response>` is
+        // recorded and not refused: it cannot dangle while nothing frees a
+        // `Response`, and the day M3 gives `Type::Record` its row it can.
+        //
+        // **M3 closes these, in the change that gives the row.** Refusing them
+        // here would buy nothing and cost a copy of a whole HTTP response on
+        // every request. The number is asserted so it cannot grow in the
+        // meantime.
+        assert_eq!(
+            returns, 7,
+            "RFC-0092: the returns waiting on M3's release row moved — see the list above"
         );
     }
 

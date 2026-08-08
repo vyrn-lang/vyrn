@@ -82,6 +82,16 @@ means the whole UI-runtime surface (`Html` + `Sub`) is one import. The
 vocabulary is deliberately tiny — it grows by demand, and third parties can
 define their own `Sub`-like types with their own runtime.
 
+## copyHtmlArray
+
+```vyrn
+fn copyHtmlArray(ks: Array<Html>) -> Array<Html>
+```
+
+`copy` over a list of nodes. Exported because `ks.copy()` cannot be written
+for this element type — a declared `Copy` answers about the value it is asked
+about, not about a part of one.
+
 ## el
 
 ```vyrn

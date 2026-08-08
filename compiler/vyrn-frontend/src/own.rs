@@ -495,8 +495,12 @@ impl Leak {
     /// The reason with its lines and names removed, so a corpus of them groups.
     pub fn kind(&self) -> &'static str {
         match self {
-            Leak::NoRelease { owns_heap: false, .. } => "the type owns no heap",
-            Leak::NoRelease { owns_heap: true, .. } => "the type has no release rule",
+            Leak::NoRelease {
+                owns_heap: false, ..
+            } => "the type owns no heap",
+            Leak::NoRelease {
+                owns_heap: true, ..
+            } => "the type has no release rule",
             Leak::Borrowed(_) => "it names somebody else's value",
             Leak::Region => "inside a `region`",
             Leak::Captured { .. } => "captured by a lambda or a spawn",

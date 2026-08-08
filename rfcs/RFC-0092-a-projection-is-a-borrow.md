@@ -1,7 +1,8 @@
 # RFC-0092 — A Projection Is a Borrow
 
-- **Status:** **M0 measured; M1 to M4 designed, not built.** The gate passes:
-  92 sites over the linked corpus, against a 300 limit. See "M0 as measured". Supersedes nothing. Closes named gaps in RFC-0087 (§3,
+- **Status:** **M0 measured; M1 landed; M2 to M4 designed, not built.** The rule
+  is enforced and the corpus is migrated — see "M1 as landed". Supersedes
+  nothing. Closes named gaps in RFC-0087 (§3,
   §14's remainder, U4), RFC-0089 rule 4 (the half its own status line says is
   missing) and RFC-0086 M3 (the recorded storage hole).
 - **Depends on:** RFC-0089 (rules 1 to 4, all landed), RFC-0086 M1 and M3
@@ -185,6 +186,13 @@ The fix menu is the one that already prints: `.copy()`, or `consume` the source.
 (`movecheck.rs:988-993`), so an element read is covered by the same three lines
 as a field read.
 
+**That last sentence is wrong and M0 found it.** It is true of `borrow_from`,
+which reads `at(..)` itself, and false of both `store` and `returned_borrow`,
+which bail at `place_path` — and `place_path` answers `None` for a call. So
+`out.push(xs[i])` reached none of the three sites. **M1 widened both**, and
+`element_path` also walks a field OF an element (`fs[0].key`), which was
+otherwise a one-dot-wide way around the rule. Four lines, not zero.
+
 ### Why "refuse" is affordable now and was not in Phase 4b
 
 `check_return` states its reason in the source (`movecheck.rs:1164-1172`):
@@ -318,7 +326,7 @@ already migrated in spirit by RFC-0089 M2's loop work:
 | site | shape | fix |
 |---|---|---|
 | `std/jsondec`'s `tagOf(v)` | `match v { JStr(s) => s, .. }` | `s.copy()`; the binder is a projection of the scrutinee |
-| `std/graphql`'s `gqlScanner(src)` | a record holding `bytes(src)` | `bytes` already allocates, so the record owns it — the lend is the ARGUMENT, and `src: consume String` states it |
+| `std/graphql`'s `gqlScanner(src)` | a record holding a view of its argument | **nothing to do, and M1 checked.** `std/scan`'s `scanner` copies every String it is handed (`std/scan.vyrn:82-88`), so the `Scanner` owns what it holds. RFC-0054's migration closed this before this RFC was written |
 | `gqlParseQuery` | `GqlQuery { sels: set.sels }` | `set.sels.copy()`, or consume `set` |
 | `std/contract`'s `headOf` | a cut out of a scrutinee | already closed by Phase 10a's row |
 
@@ -553,6 +561,103 @@ what the export boundary still needs (RFC-0089 M3b).
 **Gate.** Three-way parity byte-identical including traps, and the memory suite
 unmoved — eleven steady of twelve, with `elementLeak` still leaking. M1 changes
 what a program may **say** and must move no row.
+
+**M1 as landed.** The gate is met: `124 checked, 11 skipped, 0 failed`, and the
+memory suite reads eleven steady with `elementLeak` still leaking. The
+instrument stays as the regression guard and now asserts zero for every store
+class.
+
+**The element read is refused.** M0 left this as M1's decision and M1 widened
+`store` and `returned_borrow` to see one. The reason is this RFC's own thesis:
+`let t = xs[i]` already bound a `Borrow::Projection` and rule 2 already refused
+storing `t`, so leaving `out.push(xs[i])` alone would have reproduced, for
+elements, exactly the two-spellings-two-verdicts defect the RFC exists to
+remove. `element_path` also walks a field of an element (`fs[0].key`), which was
+a one-dot-wide escape hatch, and it spells the index back (`xs[i]`, `fs[0]`) so
+the `.copy()` on the menu is text `vyrn fix` can apply.
+
+**Two more spellings the rule had to reach**, neither in M0's count and both
+found by migrating:
+
+- **An assignment did not rebind.** `let t = d.title` was refused at the next
+  store and `let mut t = "" ; t = d.title` was not. `Stmt::Assign` now carries
+  the same answer a `let` does. Four corpus sites.
+- **A `fromJson` decoder is not in the instrument's reading.** It runs on the
+  linked program *before* the checker, and the decoder is synthesized during
+  checking. Every decoder read its value back out of a one-element carrier
+  (`f0[0]`). It takes the element now — `f0.swapRemove(0)`, the primitive
+  RFC-0011 already shipped — so nothing is copied and nothing is allocated.
+
+**The ratio is 116 `.copy()` to 7 shape changes, 1 deletion and ZERO
+`consume`**, across 25 files (the corpus goes from 383 `.copy()` calls to 499;
+about a dozen of the 116 are the bodies of the new `Copy` walks rather than
+migration sites).
+
+**The zero is the finding.** Phase 4b's ratio was 58 `.copy()` to 4 `consume`,
+and it explained the copies by mixed-return functions. That explanation still
+holds — most of these sites are a `match` arm handing back its scrutinee's
+payload beside an arm that yields a fresh value — but it is no longer the
+binding reason. `consume` is a **parameter declaration**, and rule 2 already
+refused a projection of a borrowed parameter before this RFC. So every site
+this rule newly reaches has a root that is a LOCAL or a fresh call result, and
+at none of them is `consume` on the menu at all. A projection of a local has
+exactly one fix in today's language, and it is `.copy()`.
+
+That is why 116 is not a corpus of defensive copies so much as a corpus with one
+missing verb. Each copy is a `String` or a small array — nothing here copies a
+tree — and the seven places where a copy would have been unbounded or absurd
+took a shape change instead: `httpApply` and `httpMaybe404` edit the response
+they were given instead of rebuilding it, `vyxParseElem` and `vyxProcessElem`
+append their node to the caller's list, and `gqlArgList` and `gqlSelSet` do the
+same with their arguments and selections. `vlog`'s `Read` carrier is deleted
+outright — `readLine` already answers an `Option` and RFC-0060's `if let` reads
+one.
+
+`Json` and `Html` gain `impl Copy`, which is what the compiler's own refusal
+names, and it is what makes `r.value.copy()` writable at ten `std/graphql`
+sites. A declared `Copy` answers about the value it is asked about and **not**
+about a part of one, so `Array<Json>` still needs a hand-written walk
+(`copyJsonArray`, `copyJsonFields`, `copyHtmlArray`, `copyGqlErrs`).
+
+**`gqlScanner` needed nothing.** Phase 5 named it as the case "nothing sees as a
+lend at all". It is not one: `std/scan`'s `scanner` copies every String field it
+is handed (`std/scan.vyrn:82-88`), so the `Scanner` owns what it holds and the
+rule finds nothing. RFC-0054's migration closed this before this RFC was
+written, and the worked-examples table above is one step behind the source.
+
+**Seven returns are recorded and not refused, deliberately.** They all read
+`return match hit { Some(r) => r, .. }` on an owned `Option<Response>` (six in
+the `pages` generator's output) or `Option<Cargo>`. `check_return` refuses an
+arm-yielded projection only where the caller RELEASES the result — Phase 4b's
+guard, which this RFC does not move — and a record has no release rule until
+M3. They cannot dangle while nothing frees a `Response`. **M3 closes them, in
+the change that gives the row**; refusing them here would buy nothing and cost a
+copy of a whole HTTP response on every request. The instrument asserts the
+number so it cannot grow.
+
+**What the migration wanted and the language does not have.** There is no way to
+move a field or a payload out of a place the frame owns. `consume` is a
+parameter capability and `for x in consume xs` is a loop form; neither reaches
+`let d = f() ; use(d.title)`. Every shape change above is a way around that one
+gap, and `swapRemove` is the only spelling of it that exists — for a container,
+not for a record or an enum. That is the sibling of the hole Phase 4b closed
+with `for x in consume xs`, and it is filed here rather than forced.
+
+**Not widened.** A `for` variable over a container the loop does not own
+(`Borrow::Element`) is a projection in kind, but it is outside the three sites
+and outside the count that priced them, so it keeps Phase 4b's verdict.
+
+**The leak count moved.** `vyrn why --memory` over the corpus reports 2,127
+bindings not reclaimed, down from 2,230 — 200 files answer, ten need a project
+root and are skipped by the same script both times. The rule refuses programs,
+so the count moving is the visible half of it working.
+
+**One linker bug, found by the migration.** `impl Copy for Json` did not
+resolve: the parser flattens `impl P for T` into a function named `P__T__m`, an
+injected runtime module renames every declaration by prefix (`json$Copy__Json__copy`),
+and the checker resolves the call by mangling the RENAMED type key
+(`Copy__json$Json__copy`). No `std/` module had declared an impl in an injected
+module before, so nothing had looked. Fixed in `loader.rs`.
 
 ### M2 — the three view constructors
 

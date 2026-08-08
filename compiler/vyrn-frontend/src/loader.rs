@@ -2003,11 +2003,8 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             };
             for me in &im.methods {
                 let old = crate::types::impl_method_name(&im.protocol, &k, &me.name);
-                let new = crate::types::impl_method_name(
-                    &im.protocol,
-                    &format!("{prefix}{k}"),
-                    &me.name,
-                );
+                let new =
+                    crate::types::impl_method_name(&im.protocol, &format!("{prefix}{k}"), &me.name);
                 foreign_renames.insert((key.clone(), old), new);
             }
         }
