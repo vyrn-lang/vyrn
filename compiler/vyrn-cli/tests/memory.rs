@@ -47,7 +47,7 @@
 //! | `returnedString` | §9a | steady | Phase 6: a return is owned, so the wrapper frees it after decoding |
 //! | `optionString` | §14 | steady | Phase 10a: an `if let` over a temporary gets the reclamation row a `let` gets, so the arms' escapes are recorded against it |
 //! | `lambdaLoop` | §16 | steady | Phase 10b: a stored closure owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum |
-//! | `elementLeak` | U4 | leaks | a heap element inside a BUILT-IN container; an array cannot say whether it owns its elements |
+//! | `elementLeak` | U4 | steady | RFC-0092 M2: an array owns its elements, because M1's rule proves every route into one is a store |
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
 //!
@@ -453,12 +453,17 @@ const ROWS: &[Row] = &[
     Row {
         export: "elementLeak",
         census: "U4",
-        today: Shape::Leaks,
-        why: "a heap element inside a BUILT-IN container. The array buffer is reclaimed and the \
-              String in it is not — releasing elements would free a `m.keys()` snapshot's \
-              pointers twice, because that snapshot holds the map's own. An `Array<T>` cannot \
-              say whether it owns its elements or views somebody else's. The row below is the \
-              same shape in a container that CAN say",
+        today: Shape::Steady,
+        why: "RFC-0092 M2: an `Array<T>` releases its ELEMENTS as well as its buffer. What was \
+              missing was never a declaration site — built-in rows are seeded — but the PROOF \
+              that the elements are the array's own, and M1's rule supplies it: every route \
+              into an element is a store, and a store of a borrow or of a projection is \
+              refused. What was left was the compiler's own back doors, and there were three, \
+              not the one the census named: `m.keys()` and `sa.toArray()` handed back a fresh \
+              buffer holding somebody else's element WORDS, and `xs.toArray()` on a plain \
+              `Array` handed back the receiver's triple unchanged. All three copy now. An \
+              element is released the way its own type is — so an `Array<Record>` still \
+              releases nothing, and follows the day M3 gives a record its row",
     },
     Row {
         export: "slotsContainer",
@@ -589,14 +594,14 @@ export extern fn lambdaLoop() {{
     }}
 }}
 
-/// Census U4: a heap value inside a container. The array's own buffer is
-/// reclaimed at block exit and the String in it is not — `drop` is
-/// whole-container, and no mechanism in the language reaches an element.
+/// Census U4: a heap value inside a container. Both the array's buffer and the
+/// String in it are reclaimed at block exit since RFC-0092 M2.
 ///
-/// Phase 5 deliberately left it there. A release that walked elements would
-/// free the same pointers twice wherever a shallow view exists: `m.keys()`
-/// hands back a FRESH buffer holding the map's OWN key pointers, so a keys
-/// snapshot released element by element frees what the map still holds.
+/// Phase 5 left it because a release that walked elements would free the same
+/// pointers twice wherever a shallow view exists — `m.keys()` handed back a
+/// FRESH buffer holding the map's OWN key pointers. M2 removed the views: the
+/// three builtins that manufactured one copy their elements now, so the only
+/// route into an element is a store, and rule 2 refuses storing a borrow.
 export extern fn elementLeak() {{
     let mut xs: Array<String> = []
     xs.push(tag() + "!")
