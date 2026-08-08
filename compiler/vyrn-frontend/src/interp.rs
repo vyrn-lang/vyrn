@@ -6721,7 +6721,7 @@ mod tests {
         std::fs::write(&nul, [0x61u8, 0x00, 0x62]).unwrap();
         let src = format!(
             "fn msgOf(r: Result<String, String>) -> String {{ \
-                 return match r {{ Ok(s) => \"ok\", Err(e) => e }} }} \
+                 return match r {{ Ok(s) => \"ok\", Err(e) => e.copy() }} }} \
              fn main() -> Int64 {{ \
                  let a = msgOf(readFile(\"{bad}\")) \
                  let b = msgOf(readFile(\"{nul}\")) \
@@ -7992,7 +7992,7 @@ mod tests {
                        if issues.length > 0 { return Invalid(issues); } \
                        return Valid(P { n: a + b }); } \
                    fn iss(x: Validation<P>) -> Array<Issue> { \
-                       return match x { Valid(p) => [], Invalid(is) => is }; } \
+                       return match x { Valid(p) => [], Invalid(is) => is.copy() }; } \
                    fn main() -> Int64 { return iss(v(0 - 1, 0 - 1)).length; }";
         assert_eq!(run(src).unwrap(), 2);
     }

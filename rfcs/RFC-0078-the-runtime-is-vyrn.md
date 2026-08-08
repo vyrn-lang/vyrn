@@ -509,6 +509,22 @@ The test is the collision: one program declaring `emit`, `hex2`, `emitString`, a
 type `Json` and a `JStr` variant, calling `toJson`, asserting the user's names win
 on every line and the builtin still answers.
 
+**A flattened `impl` method is a third thing that had to be renamed, and it is
+not renamed the same way. Found by RFC-0092 M1, three RFCs later.** The parser
+turns `impl P for T` into a top-level function named `P__T__method`
+(`parser.rs`), before the loader sees it. Prefixing that name like any other
+declaration gives `json$Copy__Json__copy` — and nothing looks it up, because the
+checker resolves a protocol call by mangling the type it sees, which by then is
+the renamed `json$Json`, giving `Copy__json$Json__copy`. The rename has to
+RE-MANGLE from the renamed type key rather than prefix the mangling.
+
+Nothing had reached this because no `std/` module had declared an impl inside an
+injected module until `impl Copy for Json`, which RFC-0092 needed so a caller
+could write `j.copy()` on a self-referring type. The failure was loud (`call to
+unknown function`), not silent, and it fired only through an import chain that
+injected the module — `vyrn check std/json.vyrn` on its own was fine, which is
+what made it look like something else at first.
+
 ### 2. The shared walk generates SOURCE, and that was the right laziness
 
 `vyrn-frontend/src/jsonenc.rs` emits ordinary Vyrn text and hands it to the parser.

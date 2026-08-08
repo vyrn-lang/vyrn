@@ -647,6 +647,24 @@ with `for x in consume xs`, and it is filed here rather than forced.
 (`Borrow::Element`) is a projection in kind, but it is outside the three sites
 and outside the count that priced them, so it keeps Phase 4b's verdict.
 
+**The lend that stops being admitted, and the test that pinned it.**
+`an_export_may_not_lend_its_result` opened by asserting that an ORDINARY
+function may lend an arm-yielded projection — `fn text() -> String { return
+match tag { Word(s) => s, .. } }` over module state — because `lending` records
+it and the Vyrn caller releases nothing. M1 refuses that program, so the
+assertion had to be read before it was changed. It should be refused: Phase 6
+already refused the DIRECT spelling of the same program (`return title` on
+module state, with "which nothing may take" and the same `.copy()` fix), so one
+program had two verdicts one variant apart — this RFC's defect, a third time.
+And the mechanism that made the lend safe is `lending`, which this RFC's
+"Rejected" section names as the guesser it exists to remove.
+
+What is still the export boundary's own is the **wording and the fix**, and M1
+nearly lost it: `Borrow::Projection` fell through to the general refusal, so an
+`export extern fn` stopped being told that its JS caller frees what it is
+handed. `check_return` now asks `exported` **first, for every kind of borrow**,
+and the general refusal is what is left after it.
+
 **The leak count moved.** `vyrn why --memory` over the corpus reports 2,127
 bindings not reclaimed, down from 2,230 — 200 files answer, ten need a project
 root and are skipped by the same script both times. The rule refuses programs,
@@ -657,7 +675,10 @@ resolve: the parser flattens `impl P for T` into a function named `P__T__m`, an
 injected runtime module renames every declaration by prefix (`json$Copy__Json__copy`),
 and the checker resolves the call by mangling the RENAMED type key
 (`Copy__json$Json__copy`). No `std/` module had declared an impl in an injected
-module before, so nothing had looked. Fixed in `loader.rs`.
+module before, so nothing had looked. Fixed in `loader.rs`, and written down
+where the next reader meets it: **RFC-0078 §1** (the reserved-spelling section
+that owns the rename) and the flattening comment in `parser.rs` that mints the
+name.
 
 ### M2 — the three view constructors
 

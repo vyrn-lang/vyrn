@@ -788,6 +788,16 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // the checker rejects the overlap by name and line (RFC-0080 M1) — but
     // flattening both as well would add a `function `Show__Option__show` defined
     // twice` that names an internal symbol the user never wrote.
+    //
+    // **This runs BEFORE the loader renames anything**, so the name minted here
+    // holds the type key as the module spelled it. A module whose declarations
+    // are renamed must therefore re-mangle this name from the RENAMED key rather
+    // than put its prefix in front of the mangling — the checker resolves a call
+    // by mangling the type it sees. `loader.rs`'s injected-module pass does that;
+    // see the note beside it. RFC-0092 M1 found this the first time a `std/`
+    // module declared an impl inside an injected one (`impl Copy for Json`),
+    // which linked as `json$Copy__Json__copy` and was looked up as
+    // `Copy__json$Json__copy`.
     let mut flat = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
     for imp in &program.impls {

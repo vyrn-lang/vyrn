@@ -1302,6 +1302,25 @@ impl MoveCheck<'_> {
         let Some((b, root, path)) = found else {
             return Ok(());
         };
+        // The export boundary first, and for EVERY kind of borrow. A Vyrn caller
+        // reads the lend out of `lending` and releases nothing; a JS caller reads
+        // nothing, and since RFC-0089 M3b `wasi-min.js` frees every String an
+        // export hands back. So an export owns its result or it does not compile,
+        // and it is told so in the words that name the JS caller — which is a
+        // different fact from the general refusal below, and a different fix.
+        if self.exported.contains(&*self.cur_fn.borrow()) {
+            return Err(menu(
+                line,
+                format!(
+                    "`{path}` may not be returned from an exported function — it is {}, \
+                     and the JS caller releases what it is handed",
+                    b.what(&path)
+                ),
+                vec![format!(
+                    "`{path}.copy()` — an `export extern fn` owns its result"
+                )],
+            ));
+        }
         // A borrowed PARAMETER and, since RFC-0092 M1, a PROJECTION. The
         // parameter is the class Phase 4b missed: 4b read `return p` as a
         // statement, and these return a parameter from inside a `match` arm,
@@ -1314,23 +1333,6 @@ impl MoveCheck<'_> {
         // projection of its container in kind, but it is outside this RFC's three
         // sites and outside the count that priced them, so it keeps 4b's verdict.
         if !matches!(b, Borrow::Read(_) | Borrow::Modify(_) | Borrow::Projection) {
-            // …unless the caller is JS. A Vyrn caller reads the lend out of
-            // `lending` and releases nothing; a JS caller reads nothing, and
-            // since RFC-0089 M3b `wasi-min.js` frees every String an export
-            // hands back. So an export owns its result or it does not compile.
-            if self.exported.contains(&*self.cur_fn.borrow()) {
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be returned from an exported function — it is {}, \
-                         and the JS caller releases what it is handed",
-                        b.what(&path)
-                    ),
-                    vec![format!(
-                        "`{path}.copy()` — an `export extern fn` owns its result"
-                    )],
-                ));
-            }
             return Ok(());
         }
         Err(menu(
@@ -3704,18 +3706,34 @@ mod tests {
         .is_ok());
     }
 
-    /// Rule 3 admits a lend where the caller is Vyrn — `ownership` reads the
-    /// `lending` set and releases nothing. A JS caller reads nothing, and since
-    /// RFC-0089 M3b `wasi-min.js` frees every String an export hands back. So an
-    /// export owns its result or it does not compile.
+    /// An arm-yielded projection is refused for EVERY caller since RFC-0092 M1,
+    /// and the export boundary still says something the general rule does not.
+    ///
+    /// This test used to open by asserting that an ordinary function MAY lend
+    /// one — the `lending` set records it and the Vyrn caller releases nothing.
+    /// That is the guesser RFC-0092's "Rejected" section exists to remove, and
+    /// it was Phase 4b's asymmetry written down: Phase 6 already refused the
+    /// direct spelling of the very same program (`return title` on module state,
+    /// `movecheck.rs`'s module-state branch), so `return match tag { Word(s) =>
+    /// s }` on module state was one program with two verdicts. Both are refused
+    /// now, and both name `.copy()`.
+    ///
+    /// What is still the export's own is the WORDING and the FIX: a JS caller
+    /// reads no `lending` set, and since RFC-0089 M3b `wasi-min.js` frees every
+    /// String an export hands back.
     #[test]
     fn an_export_may_not_lend_its_result() {
         let enum_and_state = "type Tag = | Word(String) | Num(Int64) \
                               let mut tag = Word(\"w\") ";
         let body = "return match tag { Word(s) => s, Num(n) => \"num\", } } \
                     fn main() -> Int64 { return 0 }";
-        // An ordinary function may lend: the caller is Vyrn and knows not to free.
-        assert!(run(&format!("{enum_and_state} fn text() -> String {{ {body}")).is_ok());
+        // An ordinary function may not lend one either (RFC-0092 M1), and the
+        // general refusal is what it gets.
+        let e = run(&format!("{enum_and_state} fn text() -> String {{ {body}")).unwrap_err();
+        assert!(e.contains("`s` may not be returned"), "{e}");
+        assert!(e.contains("read out of a place that owns it"), "{e}");
+        assert!(!e.contains("exported function"), "{e}");
+        // The export says the same no in its own words, and offers its own fix.
         let e = run(&format!(
             "{enum_and_state} export extern fn text() -> String {{ {body}"
         ))
@@ -3724,9 +3742,15 @@ mod tests {
             e.contains("may not be returned from an exported function"),
             "{e}"
         );
+        assert!(
+            e.contains("the JS caller releases what it is handed"),
+            "{e}"
+        );
         assert!(e.contains("fix: `s.copy()`"), "{e}");
+        // The one fix both of them name compiles, either side of the boundary.
         let fixed = "return match tag { Word(s) => s.copy(), Num(n) => \"num\", } } \
                      fn main() -> Int64 { return 0 }";
+        assert!(run(&format!("{enum_and_state} fn text() -> String {{ {fixed}")).is_ok());
         assert!(run(&format!(
             "{enum_and_state} export extern fn text() -> String {{ {fixed}"
         ))
