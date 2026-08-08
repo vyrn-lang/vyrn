@@ -794,6 +794,7 @@ impl Emit<'_> {
             }
             | Expr::Unary { expr: inner, .. }
             | Expr::Try { expr: inner, .. }
+            | Expr::Consume { place: inner, .. }
             | Expr::Field { expr: inner, .. } => self.lambdas(inner),
             Expr::Binary { lhs, rhs, .. } => {
                 self.lambdas(lhs);

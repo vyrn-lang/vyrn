@@ -639,6 +639,45 @@ impl Borrow {
     }
 }
 
+/// Which form wrote the `consume` — the two share [`MoveCheck::check_take`] and
+/// differ only in how the first refusal reads.
+#[derive(Clone, Copy)]
+enum TakeForm {
+    /// `for x in consume xs`.
+    Loop,
+    /// `consume p` as a prefix on a place (RFC-0093).
+    Prefix,
+}
+
+impl TakeForm {
+    fn what(self) -> &'static str {
+        match self {
+            TakeForm::Loop => "a `for` loop",
+            TakeForm::Prefix => "a take",
+        }
+    }
+
+    fn nothing_to_take(self) -> String {
+        match self {
+            TakeForm::Loop => "`consume` here has nothing to take — the loop already owns a \
+                               container that is not a binding"
+                .to_string(),
+            TakeForm::Prefix => {
+                "`consume` here has nothing to take — the value is already owned, so there is \
+                 no place to leave a hole in"
+                    .to_string()
+            }
+        }
+    }
+
+    fn drop_it(self) -> String {
+        match self {
+            TakeForm::Loop => "drop the `consume`: the elements are already owned".to_string(),
+            TakeForm::Prefix => "drop the `consume`: the value is already owned".to_string(),
+        }
+    }
+}
+
 /// The base name of a place path: `r.a[0]` is `r`.
 ///
 /// A message names a PATH and a borrow names the PARAMETER it came from, so the
@@ -660,10 +699,66 @@ struct Consumption {
     /// The named fixes. Empty for a `consume` parameter, which keeps its own
     /// historical wording — the capability IS the fix there.
     fixes: Vec<String>,
+    /// Whether this consumption left a HOLE — a take of a projection, and the
+    /// only thing that makes reading the root as a whole an error (RFC-0093).
+    ///
+    /// It is a flag and not a test on the key, because RFC-0082's place desugar
+    /// names its temporaries after the paths they took: `o.i[].xs[]` is one
+    /// binding, moved whole, and reading `o.i[]` afterwards is not a hole. The
+    /// take is the one thing that can make one.
+    hole: bool,
 }
 
-/// Consumed variables: name -> what took it.
+/// Consumed places: PATH -> what took it (RFC-0093).
+///
+/// It was keyed by root name until the take arrived. A take makes a hole in one
+/// path rather than emptying the whole binding, so `consume er.node` records
+/// `er.node` and leaves `er.next` readable. A whole-binding move still records
+/// the bare name, which is the same key it always recorded.
 type Consumed = HashMap<String, Consumption>;
+
+/// Whether two place paths name overlapping storage: equal, or one a prefix of
+/// the other at a `.`/`[` boundary.
+///
+/// This is the whole of the path rule. Reading `er.node` after taking `er` is
+/// the prefix direction; reading `er` whole after taking `er.node` is the other
+/// one, and both are refused for the same reason — the storage they name is not
+/// all there.
+fn overlaps(a: &str, b: &str) -> bool {
+    a == b || under(a, b) || under(b, a)
+}
+
+/// Whether `long` names storage inside `short`: `er.node` is under `er`.
+///
+/// FIELDS ONLY, and a name carrying a `[` relates to nothing but itself. Two
+/// reasons, and `tests/places.rs` found both.
+///
+/// RFC-0082's place desugar names its temporaries after the paths they took, so
+/// `o.i.xs[k] = v` moves through bindings literally called `o.i[]` and
+/// `o.i[].xs[]`. Read as paths, the second is inside the first, and every write
+/// back then reads as a use of something moved. They are not paths; they are one
+/// binding each, and identity is the whole relation they want.
+///
+/// The element case needs nothing more either: a take never reaches an element —
+/// `consume xs[i]` is refused and `swapRemove` is the answer — so no key this
+/// relation has to widen can carry a `[`.
+fn under(long: &str, short: &str) -> bool {
+    !long.contains('[')
+        && !short.contains('[')
+        && long.len() > short.len()
+        && long.starts_with(short)
+        && long.as_bytes()[short.len()] == b'.'
+}
+
+/// A write to `path` revives it and every path inside it.
+///
+/// `movecheck`'s own module comment has said *"reassignment revives a variable"*
+/// since Phase 4b; RFC-0093 makes the same sentence true one dot down. Only
+/// downward: writing `er.node` fills that field, it does not put back an `er`
+/// that was moved away whole.
+fn revive(consumed: &mut Consumed, path: &str) {
+    consumed.retain(|k, _| k != path && !under(k, path));
+}
 
 impl Consumption {
     /// A `consume` capability took it — the wording this pass has always used.
@@ -672,6 +767,7 @@ impl Consumption {
             line,
             by,
             fixes: Vec::new(),
+            hole: false,
         }
     }
 }
@@ -889,6 +985,23 @@ impl MoveCheck<'_> {
                  its JS caller releases"
             )];
         }
+        // RFC-0093: the take is the first answer where it exists. A projection of
+        // a root this frame OWNS may be moved out — that is the case RFC-0092 M1
+        // could only answer with `.copy()`, and the 44 copies it landed are what
+        // this entry removes. A borrowed root, module state and a container
+        // element are all still `.copy()`, so the menu names the take only where
+        // `check_take` would accept it.
+        if matches!(b, Borrow::Projection)
+            && path != root
+            && self.borrow_of(root).is_none()
+            && !self.is_module_state(root)
+        {
+            let mut fixes = vec![format!(
+                "`consume {path}` if `{root}` should give it up — the field is dead afterwards"
+            )];
+            fixes.extend(b.fixes(root, path));
+            return fixes;
+        }
         b.fixes(root, path)
     }
 
@@ -1074,7 +1187,7 @@ impl MoveCheck<'_> {
                     into(),
                     Borrow::Projection.what(&path)
                 ),
-                Borrow::Projection.fixes(&root, &path),
+                self.fixes_here(&Borrow::Projection, &root, &path),
             ));
         }
         self.took(&root, Gone::Moved { line, by: into() });
@@ -1084,6 +1197,7 @@ impl MoveCheck<'_> {
                 line,
                 by: into(),
                 fixes: vec![format!("`{path}.copy()` if both sides need a value")],
+                hole: false,
             },
         );
         Ok(true)
@@ -1169,41 +1283,108 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// `for x in consume xs` — the loop takes the container, so it must be one
-    /// the enclosing function can give away.
-    fn check_consuming_iter(
+    /// Rule 1, asked of a PATH: is the storage `path` names still all there?
+    ///
+    /// It refuses an overlap in either direction. `er.node` after `consume er`
+    /// reads part of something that is gone; `er` after `consume er.node` reads
+    /// a whole record with a hole in it. The second message is RFC-0093's own,
+    /// and it names the take rather than the read, because the take is the line
+    /// the reader has to change.
+    fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), String> {
+        if consumed.is_empty() {
+            return Ok(());
+        }
+        // Deterministic: the earliest consumption wins, ties broken by path, so
+        // one program prints one message however the map is laid out.
+        let Some((key, c)) = consumed
+            .iter()
+            .filter(|(k, _)| overlaps(k, path))
+            .min_by(|(ak, a), (bk, b)| (a.line, *ak).cmp(&(b.line, *bk)))
+        else {
+            return Ok(());
+        };
+        // A hole: the read is the WHOLE of something a take emptied part of.
+        if c.hole && under(key, path) {
+            return Err(menu(
+                c.line,
+                format!(
+                    "`{key}` was taken out of `{path}` here\nline {line}: ... and `{path}` is \
+                     used as a whole here, with the hole still in it"
+                ),
+                vec![
+                    format!(
+                        "`{key}.copy()` on line {} if `{path}` is still needed whole",
+                        c.line
+                    ),
+                    format!("write `{key}` back before this line"),
+                ],
+            ));
+        }
+        // A `consume` capability keeps the wording it has always had: the
+        // capability IS the fix, so there is no menu to print.
+        if c.fixes.is_empty() {
+            let (cline, consumer) = (c.line, &c.by);
+            return Err(format!(
+                "line {line}: `{path}` is used here but was already consumed by \
+                 {consumer} on line {cline}\n  (a `consume` parameter takes \
+                 ownership; the value can't be used afterward)"
+            ));
+        }
+        // RFC-0089 rule 1, worded exactly as Phase 4b left it. Both lines name
+        // the storage that moved rather than the longer path that reads it: the
+        // line number already says which read, and `vyrn fix` looks for the
+        // moved name.
+        Err(menu(
+            c.line,
+            format!(
+                "`{key}` was moved here into {}\nline {line}: ... and `{key}` is \
+                 used again here",
+                c.by
+            ),
+            c.fixes.clone(),
+        ))
+    }
+
+    /// A take: `consume p` as a prefix (RFC-0093), or the `p` of
+    /// `for x in consume p`. Three refusals, and RFC-0093 M1 deleted the fourth.
+    ///
+    /// The deleted one refused a PROJECTION — `consume b.tags` — on the ground
+    /// that it would leave a hole in `b`. It offered `for .. in consume b`
+    /// instead, which does not typecheck when `b` is a record, so the reader was
+    /// sent to a second error. A hole is now a thing the pass can say, so the
+    /// menu no longer has to name the root: the path is the answer.
+    ///
+    /// `by` names the form for the message — a loop and a prefix refuse the same
+    /// three things and word the first one differently.
+    fn check_take(
         &self,
         e: &Expr,
         line: usize,
         scope: &[HashSet<String>],
+        by: TakeForm,
     ) -> Result<(), String> {
         let Some((root, path)) = place_path(e) else {
-            return Err(menu(
-                line,
-                "`consume` here has nothing to take — the loop already owns a container \
-                 that is not a binding"
-                    .to_string(),
-                vec!["drop the `consume`: the elements are already owned".to_string()],
-            ));
+            // A container element is the one place that CAN hold a hole at run
+            // time, and `swapRemove` already spells it (RFC-0011). Naming it
+            // beats "nothing to take", which is true and useless here.
+            if let Some((root, path)) = element_path(e) {
+                return Err(menu(
+                    line,
+                    format!("`{path}` may not be taken — an element is not a place a take reaches"),
+                    vec![format!(
+                        "`{root}.swapRemove(..)` returns the element and leaves the container \
+                         one shorter"
+                    )],
+                ));
+            }
+            return Err(menu(line, by.nothing_to_take(), vec![by.drop_it()]));
         };
-        if root != path {
-            return Err(menu(
-                line,
-                format!(
-                    "`{path}` may not be consumed — a place owns its contents, so taking \
-                     `{path}` out of `{root}` would leave a hole"
-                ),
-                vec![
-                    format!("`for .. in consume {root}` if the loop should take the whole value"),
-                    format!("`{path}.copy()` if `{root}` is still needed"),
-                ],
-            ));
-        }
         if self.globals.contains(&root) && !Self::in_scope(scope, &root) {
             return Err(format!(
-                "line {line}: module state `{root}` may not be consumed by a `for` loop — \
+                "line {line}: module state `{root}` may not be consumed by {} — \
                  nothing may take ownership of module state (it lives for the whole module \
-                 and is never dropped)"
+                 and is never dropped)",
+                by.what()
             ));
         }
         if let Some(b) = self.borrow_of(&root) {
@@ -1758,7 +1939,7 @@ impl MoveCheck<'_> {
                 }
                 self.bind(name, bty, borrow);
                 self.nodes.borrow_mut().bind(name, let_id(s));
-                consumed.remove(name); // a fresh binding is alive again
+                revive(consumed, name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
                 Ok(false)
             }
@@ -1790,7 +1971,7 @@ impl MoveCheck<'_> {
                     let b = self.borrow_from(value);
                     self.borrows.borrow_mut().rebind(name, b);
                 }
-                consumed.remove(name); // reassignment revives it
+                revive(consumed, name); // reassignment revives it
                 Ok(false)
             }
             Stmt::SetField {
@@ -1808,6 +1989,10 @@ impl MoveCheck<'_> {
                     true,
                     consumed,
                 )?;
+                // RFC-0093: a write fills the hole a take left. The same
+                // sentence `Stmt::Assign` has carried since Phase 4b, one dot
+                // down — and the reason no drop flag is needed to say it.
+                revive(consumed, &format!("{name}.{field}"));
                 Ok(false)
             }
             // `a[i] = v` — the stored value is consumed like a `push` argument
@@ -1996,7 +2181,7 @@ impl MoveCheck<'_> {
                 self.expr(iter, consumed, scope)?;
                 self.site("iterate", *line, iter, None);
                 if *consuming {
-                    self.check_consuming_iter(iter, *line, scope)?;
+                    self.check_take(iter, *line, scope, TakeForm::Loop)?;
                 }
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
                 // RFC-0089 rule 2: the loop variable is a borrow only while the
@@ -2023,21 +2208,29 @@ impl MoveCheck<'_> {
                 // The container is dead after a consuming loop: using it again is
                 // the rule 1 error `expr` already reports.
                 if *consuming {
-                    if let Some((root, _)) = place_path(iter) {
-                        let fixes = vec![format!("`{root}.copy()` if both sides need a value")];
-                        self.took(
-                            &root,
-                            Gone::Moved {
-                                line: *line,
-                                by: "the `for .. in consume` loop".into(),
-                            },
-                        );
+                    // RFC-0093: the loop takes the PATH, so `for t in consume
+                    // b.tags` empties that field and leaves the rest of `b`
+                    // readable — the same hole the prefix makes, recorded the
+                    // same way. `own.rs` still hears about a whole binding
+                    // through `took`, which is the only case it has a row for.
+                    if let Some((root, path)) = place_path(iter) {
+                        let fixes = vec![format!("`{path}.copy()` if both sides need a value")];
+                        if root == path {
+                            self.took(
+                                &root,
+                                Gone::Moved {
+                                    line: *line,
+                                    by: "the `for .. in consume` loop".into(),
+                                },
+                            );
+                        }
                         consumed.insert(
-                            root,
+                            path.clone(),
                             Consumption {
                                 line: *line,
                                 by: "the `for .. in consume` loop".into(),
                                 fixes,
+                                hole: root != path,
                             },
                         );
                     }
@@ -2265,36 +2458,59 @@ impl MoveCheck<'_> {
                 self.capture_site(name, *line);
                 self.check_capture(name, *line)?;
                 self.note_capture(name, *line);
-                if let Some(c) = consumed.get(name) {
-                    // A `consume` capability keeps the wording it has always had:
-                    // the capability IS the fix, so there is no menu to print.
-                    if c.fixes.is_empty() {
-                        let (cline, consumer) = (c.line, &c.by);
-                        return Err(format!(
-                            "line {line}: `{name}` is used here but was already consumed by \
-                             {consumer} on line {cline}\n  (a `consume` parameter takes \
-                             ownership; the value can't be used afterward)"
-                        ));
-                    }
-                    // RFC-0089 rule 1. Both lines, then the ways out.
-                    return Err(menu(
-                        c.line,
-                        format!(
-                            "`{name}` was moved here into {}\nline {line}: ... and `{name}` is \
-                             used again here",
-                            c.by
-                        ),
-                        c.fixes.clone(),
-                    ));
-                }
-                Ok(())
+                self.check_use(name, *line, consumed)
             }
             Expr::Unary { expr, .. } => self.expr(expr, consumed, scope),
             Expr::Binary { lhs, rhs, .. } => {
                 self.expr(lhs, consumed, scope)?;
                 self.expr(rhs, consumed, scope)
             }
-            Expr::Field { expr, .. } => self.expr(expr, consumed, scope),
+            // A place chain asks ONE consumption question, of the whole path.
+            // Walking into the root instead would ask it of `er` and refuse
+            // `er.next` after `consume er.node`, which is the case RFC-0093
+            // exists to allow. The root still gets its capture bookkeeping.
+            Expr::Field { expr, line, .. } => match place_path(e) {
+                Some((_, path)) => {
+                    let (root, rline) = root_var(e);
+                    self.capture_site(root, rline);
+                    self.check_capture(root, rline)?;
+                    self.note_capture(root, rline);
+                    self.check_use(&path, *line, consumed)
+                }
+                None => self.expr(expr, consumed, scope),
+            },
+            // RFC-0093 — the take. `check_take` says whether the frame may give
+            // this place away; the record below is what makes a later read of it,
+            // or of anything overlapping it, a rule-1 error.
+            Expr::Consume { place, line } => {
+                self.expr(place, consumed, scope)?;
+                self.check_take(place, *line, scope, TakeForm::Prefix)?;
+                let (root, path) = place_path(place).expect("check_take proved this is a place");
+                // A whole binding writes the same `Gone::Moved` the consuming
+                // loop writes, so `own.rs` suppresses its drop through the two
+                // lines it already has. A PARTIAL take writes nothing: the root
+                // keeps its own fate, and the hole is the leak RFC-0093 M1 ships
+                // with until RFC-0092 M3 gives a record a release to skip it in.
+                if root == path {
+                    self.took(
+                        &root,
+                        Gone::Moved {
+                            line: *line,
+                            by: "`consume`".into(),
+                        },
+                    );
+                }
+                consumed.insert(
+                    path.clone(),
+                    Consumption {
+                        line: *line,
+                        by: "`consume`".into(),
+                        fixes: vec![format!("`{path}.copy()` if both sides need a value")],
+                        hole: root != path,
+                    },
+                );
+                Ok(())
+            }
             Expr::Try { expr, .. } => self.expr(expr, consumed, scope),
             // A literal's operands are places too: `Ring { slots: xs }` puts `xs`
             // where the record owns it, exactly as an argument does.
@@ -2621,6 +2837,7 @@ pub fn mentions_place(e: &Expr, base: &str) -> bool {
             Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
                 go(expr, base)
             }
+            Expr::Consume { place, .. } => go(place, base),
             Expr::Binary { lhs, rhs, .. } => go(lhs, base) || go(rhs, base),
             Expr::Call { args, .. }
             | Expr::Spawn { args, .. }
@@ -3104,6 +3321,7 @@ mod linear {
             Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
                 mentions(expr, name)
             }
+            Expr::Consume { place, .. } => mentions(place, name),
             Expr::Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
             Expr::Call { args, .. }
             | Expr::Spawn { args, .. }
@@ -3162,6 +3380,7 @@ fn reads(e: &Expr) -> Vec<String> {
             Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
                 go(expr, out)
             }
+            Expr::Consume { place, .. } => go(place, out),
             Expr::Binary { lhs, rhs, .. } => {
                 go(lhs, out);
                 go(rhs, out);
@@ -3311,7 +3530,24 @@ fn place_path(e: &Expr) -> Option<(String, String)> {
             let (root, path) = place_path(expr)?;
             Some((root, format!("{path}.{field}")))
         }
+        // RFC-0093: a take is not a place. `consume d.title` names no storage
+        // the frame can still reach, so it is an OWNER at every store, every
+        // return and every pattern position — with no second rule, which is the
+        // whole reason the prefix costs so little.
         _ => None,
+    }
+}
+
+/// The root variable of a place chain, with its own line.
+///
+/// [`MoveCheck::expr`]'s `Field` arm asks the consumption question of the whole
+/// path, so the capture bookkeeping the root would have got from the recursive
+/// walk is done here instead.
+fn root_var(e: &Expr) -> (&str, usize) {
+    match e {
+        Expr::Field { expr, .. } => root_var(expr),
+        Expr::Var { name, line } => (name, *line),
+        _ => ("", 0),
     }
 }
 
@@ -3891,10 +4127,21 @@ mod tests {
         );
         assert!(run("fn go(xs: consume Array<String>) -> Int64 { let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
             .is_ok());
-        // A field is a hole in the record it comes out of (rule 4).
+        // A field of a BORROWED record is still refused, and RFC-0093 moved the
+        // reason to the true one: the frame does not own `r`, so it may not give
+        // any part of it away. The old refusal said "would leave a hole" and
+        // offered `for .. in consume r`, which does not typecheck for a record —
+        // one question, two answers. That branch is gone.
         let src = "type R = { xs: Array<String> }                    fn go(r: R) -> Int64 { let mut out: Array<String> = []                    for x in consume r.xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
-        assert!(e.contains("would leave a hole"), "{e}");
+        assert!(
+            e.contains("`r` may not be consumed — it is a `read` parameter"),
+            "{e}"
+        );
+        assert!(!e.contains("for .. in consume r`"), "{e}");
+        // A field of a record this frame OWNS is the take, and it is legal now.
+        assert!(run("type R = { xs: Array<String> }                      fn make() -> R { return R { xs: [\"a\"] } }                      fn go() -> Int64 { let r = make() let mut out: Array<String> = []                      for x in consume r.xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
+            .is_ok());
         // Module state lives for the whole module and is nobody's to take.
         let src = "let g: Array<String> = []                    fn go() -> Int64 { let mut out: Array<String> = []                    for x in consume g { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();

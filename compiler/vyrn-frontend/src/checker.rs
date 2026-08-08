@@ -3432,6 +3432,9 @@ impl<'a> Checker<'a> {
             }
         }
         match expr {
+            // RFC-0093: `consume p` has the type of `p`. Ownership is movecheck's
+            // question, not the checker's, so this arm is the whole of it here.
+            Expr::Consume { place, .. } => self.expr(place, scope, expected, fn_ret),
             // An integer literal takes the expected sized-integer type if there is
             // one (`let x: Int32 = 5`), otherwise the default `Int` — but only if
             // the value actually fits (`let x: Int8 = 300` is an error, not a
@@ -8233,6 +8236,7 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::ArrayLit { .. } => "[..]".to_string(),
         Expr::MapLit { .. } => "[..:..]".to_string(),
         Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
+        Expr::Consume { place, .. } => format!("consume {}", pred_summary(place)),
         Expr::Lambda { params, .. } => format!("|{}| ..", params.join(", ")),
     }
 }
@@ -9046,6 +9050,7 @@ fn global_ref_expr(
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             global_ref_expr(expr, globals, local)
         }
+        Expr::Consume { place, .. } => global_ref_expr(place, globals, local),
         Expr::Binary { lhs, rhs, .. } => {
             global_ref_expr(lhs, globals, local) || global_ref_expr(rhs, globals, local)
         }
@@ -9136,6 +9141,7 @@ fn init_restrictions(
         }
         Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => recur(expr),
+        Expr::Consume { place, .. } => recur(place),
         Expr::Binary { lhs, rhs, .. } => {
             recur(lhs)?;
             recur(rhs)
@@ -9298,6 +9304,7 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             calls_expr(expr, out)
         }
+        Expr::Consume { place, .. } => calls_expr(place, out),
         Expr::Binary { lhs, rhs, .. } => {
             calls_expr(lhs, out);
             calls_expr(rhs, out);

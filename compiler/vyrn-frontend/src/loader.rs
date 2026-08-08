@@ -2735,6 +2735,7 @@ impl NsResolver<'_> {
                 }
             }
             Expr::Unary { expr, .. } | Expr::Try { expr, .. } => self.walk_expr(expr, locals),
+            Expr::Consume { place, .. } => self.walk_expr(place, locals),
             Expr::Binary { lhs, rhs, .. } => {
                 self.walk_expr(lhs, locals);
                 self.walk_expr(rhs, locals);
@@ -3419,6 +3420,7 @@ fn fn_body_names(b: &Block, ns: &HashSet<String>) -> Vec<(String, usize)> {
             Expr::Var { name, line } => out.push((name.clone(), *line)),
             Expr::Unary { expr: e2, .. } | Expr::Try { expr: e2, .. } => expr(e2, line, out),
             Expr::Field { expr: e2, .. } => expr(e2, line, out),
+            Expr::Consume { place, .. } => expr(place, line, out),
             Expr::Binary { lhs, rhs, line, .. } => {
                 expr(lhs, *line, out);
                 expr(rhs, *line, out);
@@ -3620,6 +3622,7 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
             scope_expr(expr, line, locals, out)
         }
+        Expr::Consume { place, .. } => scope_expr(place, line, locals, out),
         Expr::Binary { lhs, rhs, line, .. } => {
             scope_expr(lhs, *line, locals, out);
             scope_expr(rhs, *line, locals, out);
@@ -3863,6 +3866,7 @@ fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>, ns: &HashSet<String
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
             rewrite_expr(expr, map, ns)
         }
+        Expr::Consume { place, .. } => rewrite_expr(place, map, ns),
         Expr::Binary { lhs, rhs, .. } => {
             rewrite_expr(lhs, map, ns);
             rewrite_expr(rhs, map, ns);
