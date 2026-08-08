@@ -1280,7 +1280,15 @@ impl MoveCheck<'_> {
                 .unwrap_or_else(|| vec![None; n]),
             _ => vec![None; n],
         };
-        let borrow = place_path(scrutinee).map(|_| Borrow::Projection);
+        // A place, and since RFC-0092 M3 an ELEMENT of one. `m[k]` reaches this
+        // pass as `at(m, k)`, which is a call, so `place_path` answered `None`
+        // and the binder was an OWNER — `match ps[k] { Some(v) => v, .. }` handed
+        // out a value the map still held. It leaked while a `Map` gave back only
+        // its two buffers, and frees it twice now that the map releases what is
+        // in them (`examples/rest.vyrn`).
+        let borrow = place_path(scrutinee)
+            .or_else(|| element_path(scrutinee))
+            .map(|_| Borrow::Projection);
         (tys, borrow)
     }
 

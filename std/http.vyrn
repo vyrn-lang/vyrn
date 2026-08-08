@@ -944,7 +944,7 @@ fn httpFresh(req: Request, tag: String, stamp: String) -> Bool {
 /// lowercases at the edge, and a hand-written `Request` literal writes lowercase).
 fn httpHeader(req: Request, name: String) -> String {
     return match req.headers[name] {
-        Some(v) => v,
+        Some(v) => v.copy(),
         None => "",
     }
 }
@@ -1311,7 +1311,7 @@ fn httpListHas(items: Array<String>, needle: String) -> Bool {
 
 fn httpAt(ps: Map<String, String>, k: String) -> String {
     return match ps[k] {
-        Some(v) => v,
+        Some(v) => v.copy(),
         None => "",
     }
 }

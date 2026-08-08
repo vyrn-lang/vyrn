@@ -3386,7 +3386,7 @@ fn main() -> Int64 {
     let mut m = 0
     while m < 200 {
         d = d + match viaTry(m) {
-            Some(v) => v,
+            Some(v) => v.copy(),
             None => 0,
         }
         m = m + 1

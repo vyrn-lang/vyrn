@@ -274,8 +274,34 @@ impl Owned {
                     DropKind::FreeArr
                 },
             ),
-            Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
-            Type::Map(..) => Some(DropKind::FreeMap),
+            // The same recursion, over the two containers with no view
+            // constructor between them and the rule (RFC-0092 M3). A
+            // `SmallArray` releases its inline and spilled slots; a `Map`
+            // releases its keys, which are always `String`, and its values where
+            // the value type has a row.
+            Type::SmallArray(e, n) => {
+                let t = Type::SmallArray(e.clone(), n);
+                Some(
+                    if self_referring(&t, &self.types).is_none() && self.release_kind(&e).is_some()
+                    {
+                        DropKind::Deep(t)
+                    } else {
+                        DropKind::FreeSmallArr
+                    },
+                )
+            }
+            Type::Map(k, v) => {
+                let t = Type::Map(k.clone(), v.clone());
+                Some(
+                    if self_referring(&t, &self.types).is_none()
+                        && (self.release_kind(&k).is_some() || self.release_kind(&v).is_some())
+                    {
+                        DropKind::Deep(t)
+                    } else {
+                        DropKind::FreeMap
+                    },
+                )
+            }
             // A `Stream<T>` is reclaimed too, but through the stream lowering
             // (RFC-0075 M2b), which pushes its own release frame at the binding
             // that produces it. Answering here as well would release it twice.
@@ -1213,16 +1239,16 @@ pub(crate) mod tests {
         // themselves since RFC-0092 M2) and was absent from the same list.
         let src = "fn main() -> Int64 { let m: Map<String, Int64> = [\"a\": 1]; \
                    let ks = m.keys(); return ks.length; }";
-        // The map and the snapshot, in whichever order the map iterates. The
-        // snapshot is `Deep` rather than `FreeArr`: its elements are Strings
-        // with a release row, so releasing it releases them (U4).
+        // The map and the snapshot, in whichever order the map iterates. Both
+        // are `Deep`: the snapshot's elements are Strings with a release row
+        // (U4, M2), and since M3 so are the map's own keys.
         let mut kinds = drop_kinds(src, "main");
         kinds.sort_by_key(|k| format!("{k:?}"));
         assert_eq!(
             kinds,
             vec![
                 DropKind::Deep(Type::Array(Box::new(Type::Str))),
-                DropKind::FreeMap
+                DropKind::Deep(Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
             ]
         );
     }
