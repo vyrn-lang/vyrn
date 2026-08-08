@@ -42,7 +42,7 @@ impl Counting for Tally {
 /// it. This is the spelling that ends that.
 impl Owned for Tally {
     fn release(consume self) {
-        let counts = self.counts
+        let counts = consume self.counts
         drop counts
     }
 }

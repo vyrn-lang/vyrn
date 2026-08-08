@@ -1,11 +1,12 @@
 # RFC-0092 — A Projection Is a Borrow
 
-- **Status:** **M0 measured; M1 and M2 landed; M3 and M4 designed, not built.**
-  The rule is enforced, the corpus is migrated, and census **U4 is closed** — an
-  `Array<T>` releases its elements. See "M1 as landed" and "M2 as landed".
-  Supersedes nothing. Closes named gaps in RFC-0087 (§3,
-  §14's remainder, U4), RFC-0089 rule 4 (the half its own status line says is
-  missing) and RFC-0086 M3 (the recorded storage hole).
+- **Status:** **M0 measured; M1, M2 and M3 landed; M4 designed, not built.**
+  The rule is enforced, the corpus is migrated, census **U4 is closed**, and
+  **every aggregate releases its places** — so RFC-0089 rule 4 is whole and that
+  RFC's status line says so. See "M1 as landed", "M2 as landed" and "M3 as
+  landed". Supersedes nothing. Closes named gaps in RFC-0087 (§3, §14's
+  remainder, U4) and RFC-0089 rule 4. **RFC-0086 M3's storage hole is M4 and is
+  still open**: it needs a recursion in `linear_kind`, which M3 did not touch.
 - **Depends on:** RFC-0089 (rules 1 to 4, all landed), RFC-0086 M1 and M3
   (`Owned`, `MustUse`), RFC-0091 M1 (`Copy` for a self-referring type)
 - **Principle:** RFC-0089's own thesis, applied one level down. *Stop inferring
@@ -309,11 +310,11 @@ gate. The seeded built-in rows are already how `String`, `Array`, `Map`,
 
 | row | today | becomes | needs |
 |---|---|---|---|
-| `Type::Record`, `Type::Enum` | `None` (`own.rs:325`) | `Deep` | the rule |
-| `Type::ArrayN` | `None` (`own.rs:325`) | `Deep` | the rule + `@list` |
+| `Type::Record`, `Type::Enum` | `None` (`own.rs:325`) | `Deep` | the rule — **landed in M3** |
+| `Type::ArrayN` | `None` (`own.rs:325`) | `Deep` | the rule — **landed in M3**; `@list` needed nothing, see "M2 as landed" |
 | `Type::Array` | buffer only (`own.rs:238-241`) | buffer + elements | the rule + the constructors — **landed in M2** |
-| `Type::Map`, `Type::SmallArray` | buffer only | buffer + elements | the rule; no constructor views either |
-| `linear_kind` on a container | reads the container's own key | reads the element's too | the row above |
+| `Type::Map`, `Type::SmallArray` | buffer only | buffer + elements | the rule — **landed in M3**; the view was not a constructor but the map LOOKUP |
+| `linear_kind` on a container | reads the container's own key | reads the element's too | the row above — **still open, it is M4** |
 
 The walk is the one Phase 5 settled: `copy` run backwards, written as one shape
 per engine so the two cannot disagree about a payload encoding. `Option` and
@@ -826,6 +827,106 @@ hands back the one buffer it always did and leaks the elements it held. Freeing
 them means reading a length the store is in the middle of replacing, and the
 snapshot-then-store order the rest of the store path uses does not carry a
 count. It is the same shape the `Map` and `SmallArray` rows will need.
+
+**M3 as landed.** All five rows are in. `Record`, `Enum`, `ArrayN`, `Map` and
+`SmallArray` answer `Deep`, and RFC-0089 rule 4 is whole for the first time
+since Phase 5 wrote it down. Parity is `124 checked, 11 skipped, 0 failed`, the
+memory suite holds all thirteen rows, and the instrument reads
+`stores: 0`, `elem-store: 0`, `elem-return: 0` and — this is the number that
+moved — **`returns: 0`, down from 7**.
+
+**The walk was already written.** Both backends reach a record and a user enum
+through an `Option` payload today, because `release_kind(Option<T>)` has
+answered `Deep` since Phase 5 and the walk is structural. So `Option<Doc>` freed
+a `Doc`'s Strings while `let d: Doc` freed nothing — one type, two verdicts, an
+`Option` apart. What M3 adds is the row, the fixed `[N x T]` arm neither backend
+had, the two container element walks, and one guard.
+
+**The guard is the `Array` row's, one shape over.** A type that reaches ITSELF
+has no bottom to a structural release, and `type Node = { kids: Array<Node> }`
+is ordinary Vyrn. It answers `None` and its places leak. `Json` and `Html` are
+that shape, which is also why M1's `.copy()` menu sent them to a hand-written
+`copyJson` — the same fact refusing the same walk from the other side.
+
+**The seven deferred returns are closed, and not by the copy M1 priced.** M1
+recorded them, refused to migrate them, and asserted the number so it could not
+grow — because `check_return` refuses an arm-yielded projection only where the
+caller RELEASES the result, and a record had no release rule. It has one now and
+all seven refuse. RFC-0093 M1 shipped the take in between, so each of them reads
+`return match consume hit { .. }`: the arm yields a value the frame gave up and
+nothing is copied at all. Six are one line of the `pages` generator; the seventh
+is `examples/genericpayload.vyrn`.
+
+**Three ways to free a place twice, none of which the memory suite could see.**
+A double free frees, so a row watching the steady state cannot see one. Parity
+saw all three, as native exit `0xC0000374`.
+
+- **A `drop` of a projection.** `let owned = box.items ; drop owned` hands back a
+  buffer the record still holds. RFC-0089 recorded that the rule which would
+  refuse it was written in `movecheck` as a COMMENT rather than as a check, and
+  `std/slots` says so in its own doc. It is a check now — rule 2 at the third
+  place a value can leave. Five declared releases take their fields instead
+  (`consume self.vals`), which is what those lines always meant. `consume self`
+  did not parse until this milestone: `self` lexes as its own keyword, and the
+  take's contextual test looked for an identifier.
+- **A store the place desugar hid.** RFC-0082 M2 hoists a place assignment's
+  index and value into temps, and every `[`-named binding was exempt from rule 2
+  — an exemption written for the round-trip ELEMENT temp, which reads a place and
+  writes it straight back. `ps[]val` is not that; it is the statement's
+  right-hand side. So `ps[1].xs = ps[0].xs` was an unchecked store of a
+  projection. `is_place_temp` tells the two apart, and the refusal moved to the
+  hoist so the message names `ps[0].xs`.
+- **A map lookup is a projection of its map, and nothing said so.** `m[k]`
+  reaches `movecheck` as `at(m, k)`, a call, so the binder in
+  `match ps[k] { Some(v) => v, .. }` was an OWNER: `std/http`'s `httpHeader`
+  handed out a String the map still held and `httpHeaders` stored it into a
+  second map. `element_path` is the reading that walks it — the same widening M1
+  gave `store` and `returned_borrow`, arriving at the pattern binder late because
+  the `Map` row is what made it observable. Three corpus sites, three fixtures.
+
+**And one the compiler refused to emit.** `let t1 = Tagged { tag: "ab", .. }`
+records the DECLARED type, parameters and all, so `llt` answered `void` for a
+`Param` and the walk emitted `load { void, { i64, i64 } }`. The slot knows the
+instance — its alloca was built from it — so the drop reads the slot's type. It
+went unseen while only sums reached here, because a generic sum's payload
+travels as a word.
+
+**RFC-0093's hole is a leak, on purpose.** `consume d.title` takes one field and
+leaves the record behind. The release walk is the type and the type does not know
+about the hole, so a binding with one is left **unreclaimed** — the untaken
+places leak too. RFC-0093 M2 is the milestone that carries the hole set through
+to the walk and releases the rest. A documented leak is a task; a double free is
+a bug in a language that promises memory safety.
+
+**The price, measured.**
+
+- **`domdemo.wasm` does not move at all: 28,445 bytes, before and after** — the
+  gate said "less than the String header's 1,664" and the answer is zero.
+  `fib.wasm` is 1,522 either way. Both are records-of-`Html`, and `Html` refers
+  to itself, so the guard keeps the walk out. The two that do grow are
+  `mapdemo.wasm` **36,881 → 37,442** (+561, +1.5%) and `vlog.wasm`
+  **46,252 → 48,609** (+2,357, +5.1%).
+- **`membench`, native, 22 rows, minimum of ~300 samples.** Every row is within
+  ±4% of its baseline except `keys() of a 1000-key map`, which goes
+  **1.256 ms → 1.405 ms (+11.8%)** — the map releasing its 1,000 keys, which is
+  the row that should move and the only one that did. (The medians on that run
+  are noisy — several read 3x their own minimum — so the minimum is the honest
+  floor.)
+- **The keystroke budget is unmoved**: `lspbench` reads 9.7 ms on `vlog.vyrn`
+  and 17.0 ms on `std/graphql.vyrn`, against the 97 ms budget.
+- **`vyrn why --memory` over the corpus: 2,274 bindings not reclaimed of 3,724.**
+  It went UP from M1's 2,127, and the reason is the hole: a record whose field a
+  `consume` took stops being reclaimed, and RFC-0093 M1 landed 45 takes.
+
+**`keysLoop` stays leaking, and M3 is not what closes it.** `for k in m.keys()`
+walks a temporary, and a loop over a temporary releases nothing — the body may
+take an element. The map releasing its own keys does not reach the snapshot. It
+is still Phase 10a's `if let` row, applied to `for` and per element.
+
+**The must-use link is a fourth thing, not this one.** M0 called it "U4 plus a
+recursion in `Owned::linear_kind`". U4 closed in M2 and M3 did not touch
+`linear_kind` — a container's obligation is still read off the container's own
+type key. That recursion is M4, which M3 unblocks and does not do.
 
 ### M4 — the obligation recurses
 

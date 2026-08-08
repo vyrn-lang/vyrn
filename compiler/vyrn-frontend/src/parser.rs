@@ -4122,8 +4122,16 @@ impl Parser {
             // already serves the parameter capability and `for x in consume xs`:
             // `consume` is the word only when another identifier follows it, so
             // `consume(y)` stays a call to a user function named `consume`.
+            //
+            // `self` is a place too, and it lexes as its own keyword rather than
+            // as an identifier — so `consume self.vals` read `consume` as a
+            // variable until RFC-0092 M3 needed it. `std/slots` is the case: a
+            // declared `release(consume self)` gives five buffers back, and
+            // dropping a field READ hands each one back twice now that a record
+            // releases its fields.
             Tok::Ident(id)
-                if id == "consume" && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_)) =>
+                if id == "consume"
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Vself) =>
             {
                 self.advance();
                 Ok(Expr::Consume {

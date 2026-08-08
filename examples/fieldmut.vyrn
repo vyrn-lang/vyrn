@@ -105,13 +105,18 @@ fn main() -> Int64 {
     // reclaiming the buffer with `drop`: every allocation is freed with no leak
     // and no double-free (the native and wasm reclamation paths agree with the
     // interpreter on output and exit). `drop` takes a heap binding, so the field
-    // buffer is pulled out into a local and dropped there.
+    // buffer is TAKEN out into a local and dropped there.
+    //
+    // `let owned = names.items` reads the field without taking it, and a record
+    // releases its fields since RFC-0092 M3 — so dropping that binding hands the
+    // same buffer back twice. `consume` is the verb that says the field leaves
+    // (RFC-0093 M1); `names` keeps its hole and is not reclaimed.
     let mut names: NameBox = NameBox { items: [] }
     names.items.push("ada")
     names.items.push("grace")
     print(names.items.length) // 2
     print(names.items[1]) // grace
-    let owned = names.items // move the field buffer out into a local
+    let owned = consume names.items // take the field buffer out into a local
     drop owned // explicit reclaim of the field-pushed heap buffer
 
     return 0

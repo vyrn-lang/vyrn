@@ -813,7 +813,7 @@ fn once(c: Cursor) -> Option<String> {
 
 fn headerOf(req: Request, name: String) -> String {
     return match req.headers[name] {
-        Some(v) => v,
+        Some(v) => v.copy(),
         None => "",
     }
 }

@@ -237,24 +237,24 @@ impl<T> Iterate for Slots<T> {
 /// of the module. `drop vals` on a `Slots<String>` frees every payload buffer
 /// and then its own; on a `Slots<Int64>` it frees its own and walks nothing.
 ///
-/// **`consume self`, and it had no other spelling until now.** A release moves
-/// five buffers out of the container and gives each one back. RFC-0089 recorded
-/// that this was legal only because the rule that would refuse it — `drop` of a
-/// borrow — was written in `movecheck` as a comment rather than as a check: the
-/// receiver was `read`, so the honest rule would have refused the one mechanism
-/// RFC-0086 M1 shipped. The receiver now says what it always meant, and the
-/// moves below are moves out of a value this method was handed.
+/// **`consume self`, and the moves say so too.** A release moves five buffers
+/// out of the container and gives each one back. RFC-0089 recorded that this was
+/// legal only because the rule that would refuse it — `drop` of a borrow — was
+/// written in `movecheck` as a comment rather than as a check. RFC-0092 M3 wrote
+/// the check, because a record releases its fields now and dropping a field READ
+/// hands one buffer back twice. Each line below takes its field (RFC-0093 M1),
+/// which is what these five always meant.
 impl<T> Owned for Slots<T> {
     fn release(consume self) {
-        let vals = self.vals
+        let vals = consume self.vals
         drop vals
-        let gens = self.gens
+        let gens = consume self.gens
         drop gens
-        let free = self.free
+        let free = consume self.free
         drop free
-        let dense = self.dense
+        let dense = consume self.dense
         drop dense
-        let denseAt = self.denseAt
+        let denseAt = consume self.denseAt
         drop denseAt
     }
 }

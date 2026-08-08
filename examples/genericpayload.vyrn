@@ -43,7 +43,7 @@ fn nested(p: Choice) -> Cargo {
         First => Held(Cargo { weight: 3, label: "three" }),
         Second => Empty,
     }
-    return match boxed {
+    return match consume boxed {
         Empty => Cargo { weight: 99, label: "fallback" },
         Held(s) => s,
     }

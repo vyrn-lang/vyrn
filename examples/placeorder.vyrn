@@ -79,8 +79,12 @@ fn main() -> Int64 {
     print(gt.xs[1]) // 105
 
     // ---- write-through to a field of an element, same rules ------------------
+    // The value is a field of ANOTHER element, so it copies: `ps` releases its
+    // elements and each element releases its field (RFC-0092 M2 and M3), and
+    // storing the read would give one buffer two owners. The rule refuses it and
+    // names `ps[0].xs`, not the temp the desugar hoists it into.
     let mut ps: Array<T> = [T { xs: [1] }, T { xs: [2] }]
-    ps[f()].xs = ps[0].xs
+    ps[f()].xs = ps[0].xs.copy()
     print(ps[1].xs[0]) // 1
 
     return 0

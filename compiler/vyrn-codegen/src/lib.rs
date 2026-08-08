@@ -2981,6 +2981,36 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {data})"));
                 Ok(())
             }
+            // A `SmallArray<T, N>`'s live slots are its inline block while it
+            // fits and its spilled buffer once it does not — the branch
+            // `deep_copy` already takes, run backwards (RFC-0092 M3). `data` is
+            // null while inline, which `free` refuses.
+            Type::SmallArray(inner, n) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
+                let sa_ll = self.sa_ll(&inner, n);
+                let slot = self.fresh_alloca(&sa_ll);
+                self.emit(format!("store {sa_ll} {v}, ptr {slot}"));
+                let (base, len, _, data) = self.sa_slot_base(&slot, &inner, n);
+                self.release_elems(&base, &len, &inner)?;
+                self.emit(format!("call void @free(ptr {data})"));
+                Ok(())
+            }
+            // Two parallel buffers, and the keys are Strings — so a map that
+            // releases anything releases its keys. The elements first, then the
+            // buffers they live in.
+            Type::Map(_, vt) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
+                let m = "{ ptr, ptr, i64, i64 }";
+                let keys = self.fresh_tmp();
+                let vals = self.fresh_tmp();
+                let len = self.fresh_tmp();
+                self.emit(format!("{keys} = extractvalue {m} {v}, 0"));
+                self.emit(format!("{vals} = extractvalue {m} {v}, 1"));
+                self.emit(format!("{len} = extractvalue {m} {v}, 2"));
+                self.release_elems(&keys, &len, &Type::Str)?;
+                self.release_elems(&vals, &len, &vt)?;
+                self.emit(format!("call void @free(ptr {keys})"));
+                self.emit(format!("call void @free(ptr {vals})"));
+                Ok(())
+            }
             Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
                 let snap = self.snap_val(v, ty);
                 self.free_snap(&snap);
@@ -2998,6 +3028,18 @@ impl<'a> Gen<'a> {
                     let fv = self.fresh_tmp();
                     self.emit(format!("{fv} = extractvalue {rll} {v}, {i}"));
                     self.deep_release(&fv, &f.ty)?;
+                }
+                Ok(())
+            }
+            // A fixed `[N x T]` is a value, so the release is unrolled — `N` is a
+            // constant and there is no buffer to free, only the slots
+            // (RFC-0092 M3). The mirror of `deep_copy`'s own unrolled loop.
+            Type::ArrayN(inner, n) => {
+                let all = self.llt(ty);
+                for i in 0..n {
+                    let ev = self.fresh_tmp();
+                    self.emit(format!("{ev} = extractvalue {all} {v}, {i}"));
+                    self.deep_release(&ev, &inner)?;
                 }
                 Ok(())
             }
@@ -3721,9 +3763,19 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {k})"));
                 self.emit(format!("call void @free(ptr {v})"));
             }
-            // Phase 5: an aggregate owns its places. The walk is the type.
+            // Phase 5: an aggregate owns its places. The walk is the type — and
+            // in a generic instantiation the type still carries its parameters,
+            // so it is the SOLVED one. `own` decides against the declaration and
+            // this emits against the instance, exactly as `rel_kind` does one
+            // function down. Without it `llt` answered `void` for a `Param` and
+            // the walk emitted `load { void, { i64, i64 } }`, which clang refuses
+            // (`examples/generics.vyrn`); it went unseen while only an `Option`
+            // and a `Result` reached here, because a generic sum's payload
+            // travels as a word.
             DropKind::Deep(ty) => {
-                let ty = ty.clone();
+                let ty = self
+                    .slot_ty(slot)
+                    .unwrap_or_else(|| vyrn_frontend::types::substitute(ty, self.subst));
                 let ll = self.llt(&ty);
                 let v = self.fresh_tmp();
                 self.emit(format!("{v} = load {ll}, ptr {slot}"));

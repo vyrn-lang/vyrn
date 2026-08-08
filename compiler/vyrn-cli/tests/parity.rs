@@ -2625,7 +2625,7 @@ fn boxedPayload(p: Choice) -> Cargo {
         Second => Empty,
         First => Held(Cargo { weight: 3, label: "three" }),
     }
-    return match boxed {
+    return match consume boxed {
         Empty => Cargo { weight: 99, label: "fallback" },
         Held(s) => s,
     }
@@ -3386,7 +3386,7 @@ fn main() -> Int64 {
     let mut m = 0
     while m < 200 {
         d = d + match viaTry(m) {
-            Some(v) => v,
+            Some(v) => v.copy(),
             None => 0,
         }
         m = m + 1

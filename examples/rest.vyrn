@@ -43,7 +43,7 @@ fn show(label: String, r: Response) {
 /// One response header, `""` when absent.
 fn header(r: Response, name: String) -> String {
     return match r.headers[name] {
-        Some(v) => v,
+        Some(v) => v.copy(),
         None => "",
     }
 }

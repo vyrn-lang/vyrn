@@ -1935,6 +1935,40 @@ impl Fn_<'_> {
         matches!(self.cx.owned.release_kind(arr), Some(DropKind::Deep(_)))
     }
 
+    /// Whether `own` gives `ty` a walking release rather than a buffer one.
+    /// [`Fn_::array_releases_elems`] under its general name, for the `Map` and
+    /// `SmallArray` rows RFC-0092 M3 adds.
+    fn deep_row(&self, ty: &Type) -> bool {
+        self.array_releases_elems(ty)
+    }
+
+    /// The address of a `SmallArray`'s live slots: the inline block while
+    /// `cap == N`, the spilled buffer otherwise. The branch [`Fn_::copy_at`]
+    /// takes, lifted so the release takes the same one.
+    fn sa_base(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<u32, String> {
+        let Type::SmallArray(_, cap_n) = self.cx.resolve(ty) else {
+            return Err(gap("a SmallArray base", line));
+        };
+        let l = self.layout_of(ty, line)?;
+        let base = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I32Const(l.fields[3] as i32));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalSet(base));
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::I64Const(cap_n as i64));
+        b.ins(&Instruction::I64Ne);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I32Load(word_at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(base));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        Ok(base)
+    }
+
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
         // A declared row (RFC-0086 M1) answers before any built-in shape does,
         // and it is keyed by the type's NAME — which resolving away would lose.
@@ -1952,7 +1986,9 @@ impl Fn_<'_> {
             // self-referring element type, whose walk has no bottom. The element
             // walk needs an address, so that answer is `Deep` and the
             // buffer-only one stays a `Buffers`.
-            Type::Array(_) if self.array_releases_elems(&t) => Some(Rel::Deep(t.clone())),
+            Type::Array(_) | Type::Map(..) | Type::SmallArray(..) if self.deep_row(&t) => {
+                Some(Rel::Deep(t.clone()))
+            }
             Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
             Type::Map(..) => {
                 let l = self.layout_of(&t, line)?;
@@ -1965,7 +2001,17 @@ impl Fn_<'_> {
             // Phase 5: an aggregate owns its places. Phase 10b: a stored `fn`
             // value owns its capture block, which is one allocation whatever the
             // tag — so it needs no registry to release, only to copy.
+            //
+            // RFC-0092 M3 adds the record, the user enum and the fixed
+            // `[N x T]`. Whether they go is `own`'s answer, asked rather than
+            // re-derived: it carries the stop for a type that reaches itself,
+            // whose walk has no bottom.
             Type::Option(_) | Type::Result(..) | Type::Fn(..) if self.owns_heap(&t) => {
+                Some(Rel::Deep(t))
+            }
+            Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)
+                if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_))) =>
+            {
                 Some(Rel::Deep(t))
             }
             _ => None,
@@ -2025,6 +2071,51 @@ impl Fn_<'_> {
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
+            // A `SmallArray<T, N>` is `{ i64 len, i64 cap, ptr data, [N x T]
+            // inline }`. The live slots are the inline block while it fits and
+            // `data` once it has spilled, and `sa_base` answers which — the same
+            // branch `copy_at` takes. RFC-0092 M3: the slots go back too, and the
+            // `data` pointer is null while inline, which `free` refuses.
+            Type::SmallArray(inner, _) if self.deep_row(ty) => {
+                let l = self.layout_of(ty, line)?;
+                let stride = self.stride(&inner, line)?;
+                let n = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[0])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(n));
+                let base = self.sa_base(b, a, ty, line)?;
+                self.rel_each(b, base, n, stride, &inner, line)?;
+                b.ins(&Instruction::LocalGet(a))
+                    .ins(&Instruction::I32Load(word_at(l.fields[2])))
+                    .ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            // Two parallel buffers, and the keys are Strings — so a map that
+            // releases anything always releases its keys (RFC-0092 M3). The
+            // elements first, then the buffers they live in.
+            Type::Map(_, vt) if self.deep_row(ty) => {
+                let l = self.layout_of(ty, line)?;
+                let vstride = self.stride(&vt, line)?;
+                let n = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[2])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(n));
+                for (i, (stride, elem)) in [(4u32, Type::Str), (vstride, (*vt).clone())]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let buf = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I32Load(word_at(l.fields[i])));
+                    b.ins(&Instruction::LocalSet(buf));
+                    self.rel_each(b, buf, n, stride, &elem, line)?;
+                    b.ins(&Instruction::LocalGet(buf))
+                        .ins(&Instruction::Call(self.cx.rt.free));
+                }
+                Ok(())
+            }
             Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
                 let offs = match self.rel_for(ty, line)? {
                     Some(Rel::Buffers(o)) => o,
@@ -2055,6 +2146,16 @@ impl Fn_<'_> {
                     self.rel_at(b, p, &f.ty, line)?;
                 }
                 Ok(())
+            }
+            // A fixed `[N x T]` is inline memory, so there is no buffer to hand
+            // back — only its slots (RFC-0092 M3). The mirror of `copy_at`'s own
+            // arm, with the same count in a local.
+            Type::ArrayN(inner, n) => {
+                let stride = self.stride(&inner, line)?;
+                let count = b.local(ValType::I32);
+                b.ins(&Instruction::I32Const(n as i32));
+                b.ins(&Instruction::LocalSet(count));
+                self.rel_each(b, a, count, stride, &inner, line)
             }
             Type::Option(inner) => {
                 let l = self.layout_of(ty, line)?;
@@ -2182,9 +2283,15 @@ impl Fn_<'_> {
             // the elements it held leak, exactly as they did before the row
             // landed, and freeing them here would mean reading a length the
             // store is in the middle of replacing.
-            Some(Rel::Deep(t)) if matches!(self.cx.resolve(&t), Type::Array(_)) => {
-                vec![(self.layout_of(&t, line)?.fields[0], false)]
-            }
+            Some(Rel::Deep(t)) => match self.cx.resolve(&t) {
+                Type::Array(_) => vec![(self.layout_of(&t, line)?.fields[0], false)],
+                Type::Map(..) => {
+                    let l = self.layout_of(&t, line)?;
+                    vec![(l.fields[0], false), (l.fields[1], false)]
+                }
+                Type::SmallArray(..) => vec![(self.layout_of(&t, line)?.fields[2], false)],
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         })
     }

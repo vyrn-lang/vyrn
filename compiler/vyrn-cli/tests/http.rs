@@ -433,7 +433,7 @@ fn hit(method: String, path: String, body: String, headers: Map<String, String>)
 
 fn hdr(r: Response, name: String) -> String {
     return match r.headers[name] {
-        Some(v) => v,
+        Some(v) => v.copy(),
         None => \"\",
     }
 }

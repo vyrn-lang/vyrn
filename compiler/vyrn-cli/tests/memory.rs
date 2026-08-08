@@ -48,6 +48,7 @@
 //! | `optionString` | §14 | steady | Phase 10a: an `if let` over a temporary gets the reclamation row a `let` gets, so the arms' escapes are recorded against it |
 //! | `lambdaLoop` | §16 | steady | Phase 10b: a stored closure owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum |
 //! | `elementLeak` | U4 | steady | RFC-0092 M2: an array owns its elements, because M1's rule proves every route into one is a store |
+//! | `recordFields` | RFC-0089 rule 4 | steady | RFC-0092 M3: an aggregate releases its places, so a record hands its two Strings back with it |
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `keysLoop` | U4's price | leaks | `for k in m.keys()` — the snapshot is a temporary nothing releases, and M2 made its elements copies |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
@@ -463,8 +464,20 @@ const ROWS: &[Row] = &[
               not the one the census named: `m.keys()` and `sa.toArray()` handed back a fresh \
               buffer holding somebody else's element WORDS, and `xs.toArray()` on a plain \
               `Array` handed back the receiver's triple unchanged. All three copy now. An \
-              element is released the way its own type is — so an `Array<Record>` still \
-              releases nothing, and follows the day M3 gives a record its row",
+              element is released the way its own type is, so an `Array<Record>` followed \
+              on its own the day M3 gave a record its row",
+    },
+    Row {
+        export: "recordFields",
+        census: "RFC-0089 rule 4",
+        today: Shape::Steady,
+        why: "RFC-0092 M3: an aggregate releases its PLACES. Phase 5 wrote the rule and left \
+              the row out, because a record hands its insides out as projections and rule 3 \
+              recorded a returned one as a lend rather than refusing it — three parity runs \
+              said so within a minute of each other. M1 refuses all three spellings, so the \
+              row is sayable, and a record built per call gives its two Strings back with \
+              it. A type that reaches ITSELF is still left alone: the walk is structural and \
+              has no bottom, which is the guard the `Array` row already carried",
     },
     Row {
         export: "slotsContainer",
@@ -519,6 +532,8 @@ let mut acc: String = ""
 type Bump = fn(Int64) -> Int64
 
 type Row = {{ name: String, n: Int64 }}
+
+type Doc = {{ title: String, body: String }}
 
 let mut row: Row = Row {{ name: "", n: 0 }}
 
@@ -630,6 +645,17 @@ export extern fn elementLeak() {{
 /// `Array<String>`. The slab is `mut` — `insert` takes `modify self` — so this
 /// row also proves the `mut` half: before Phase 8b a `mut` binding could not take
 /// a declared release at all, and every one of the five buffers stayed out.
+/// RFC-0089 rule 4 through a RECORD, which is RFC-0092 M3's own row.
+///
+/// A record built per call, holding two ~900-byte Strings and never handed on.
+/// Nothing released it until M3: `release_kind(Record)` answered `None`, so both
+/// buffers leaked once per call while the identical `Option<Doc>` one line over
+/// released both — one type, two verdicts, an `Option` apart.
+export extern fn recordFields() {{
+    let d = Doc {{ title: tag() + "t", body: tag() + "b" }}
+    seen = seen + Int64(d.title.byteLength) + Int64(d.body.byteLength)
+}}
+
 export extern fn slotsContainer() {{
     let mut s: Slots<String> = newSlots()
     let h = insert(s, tag() + "!")

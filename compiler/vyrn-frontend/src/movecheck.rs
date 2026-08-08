@@ -156,6 +156,16 @@ pub enum Gone {
     Aliased { line: usize },
     /// It was handed to a declared function, which may keep it.
     Lent { line: usize, to: String },
+    /// A `consume` took one of its PLACES (RFC-0093 M1), so the value has a
+    /// hole in it. Carries the place taken.
+    ///
+    /// The release walk is the type and the type does not know about the hole,
+    /// so releasing this binding would free the field the take already gave
+    /// away. RFC-0092 M3 leaves it unreclaimed instead: the untaken places leak,
+    /// which is the answer this analysis gives wherever it cannot prove
+    /// otherwise, and RFC-0093 M2 is the milestone that carries the hole set
+    /// through and releases the rest.
+    Hole { line: usize, path: String },
 }
 
 /// One `let` binding, as the rules see it: its type and what became of it.
@@ -1038,6 +1048,11 @@ impl MoveCheck<'_> {
                     _ => None,
                 }
             }
+            // A take has the type of the place it takes (RFC-0093 M1). Without
+            // this every `let t = consume d.title` is an unknown type, so
+            // nothing reclaims it — which cost nothing while a record released
+            // nothing, and costs the taken field the day M3 gives one a row.
+            Expr::Consume { place, .. } => self.type_of(place),
             // An element read: `xs[i]` lowers to `at`, and `x.copy()` is already
             // answered by `Declared`. The element type is the container's.
             Expr::Call { name, args, .. } if name == "at" => {
@@ -1225,13 +1240,14 @@ impl MoveCheck<'_> {
             Some((root, path)) if path != root => Some(Borrow::Projection),
             // `let t = s` where `s` is itself a borrow: the borrow travels.
             Some((root, _)) => self.borrow_of(&root),
-            None => match value {
-                Expr::Call { name, args, .. } if name == "at" => args
-                    .first()
-                    .and_then(place_path)
-                    .map(|_| Borrow::Projection),
-                _ => None,
-            },
+            // An ELEMENT read, and a field OF one. [`place_path`] answers `None`
+            // as soon as it meets the `at(..)` call, so `element_path` is what
+            // walks both — the same widening M1 gave `store` and
+            // `returned_borrow`, arriving here late because a `let` of `ps[0].xs`
+            // is written by the RFC-0082 place desugar and never by a person.
+            // Without it that binding was an OWNER, and storing it gave two
+            // elements one buffer.
+            None => element_path(value).map(|_| Borrow::Projection),
         }
     }
 
@@ -1264,7 +1280,15 @@ impl MoveCheck<'_> {
                 .unwrap_or_else(|| vec![None; n]),
             _ => vec![None; n],
         };
-        let borrow = place_path(scrutinee).map(|_| Borrow::Projection);
+        // A place, and since RFC-0092 M3 an ELEMENT of one. `m[k]` reaches this
+        // pass as `at(m, k)`, which is a call, so `place_path` answered `None`
+        // and the binder was an OWNER — `match ps[k] { Some(v) => v, .. }` handed
+        // out a value the map still held. It leaked while a `Map` gave back only
+        // its two buffers, and frees it twice now that the map releases what is
+        // in them (`examples/rest.vyrn`).
+        let borrow = place_path(scrutinee)
+            .or_else(|| element_path(scrutinee))
+            .map(|_| Borrow::Projection);
         (tys, borrow)
     }
 
@@ -1889,23 +1913,51 @@ impl MoveCheck<'_> {
                 // so `let x = x + b` resolves the old `x`.
                 let bty = ty.clone().or_else(|| self.type_of(value));
                 self.site("bind", *line, value, bty.as_ref());
-                // An UNSPELLABLE name (it contains `[`) is the `a[i].f = v`
-                // desugar's element temp: the place is read out, mutated, and
-                // written straight back to where it came from. That round trip
-                // is not a store of a borrow, so rule 2 must not see it — the
-                // parser built both halves and there is no second owner.
-                let borrow = if name.contains('[') {
+                // The `a[i].f = v` desugar's ELEMENT TEMP is exempt from rule 2:
+                // the place is read out, mutated, and written straight back to
+                // where it came from, so the round trip is not a store of a
+                // borrow — the parser built both halves and there is no second
+                // owner. [`is_place_temp`] is what says which: a round-trip temp
+                // ends in `[]`.
+                //
+                // The test used to be `name.contains('[')`, which also caught
+                // `ps[]val` and `ps[]idx` — the operands RFC-0082 M2 hoists so
+                // they run before the move-out. Those are arbitrary expressions,
+                // and `[]val` is the statement's right-hand side, so the exemption
+                // made `ps[1].xs = ps[0].xs` an unchecked store of a projection:
+                // two elements naming one buffer. It leaked while nothing released
+                // an element and corrupts the heap now that RFC-0092 M3 does
+                // (`examples/placeorder.vyrn`, native exit `0xC0000374`).
+                let borrow = if crate::ast::is_place_temp(name) {
                     None
                 } else {
                     self.borrow_from(value)
                 };
                 // A projection is a borrow rather than a move, so only a whole
                 // place moves here — `store` decides which.
+                //
+                // A `let` does not outlive itself, so rule 2 does not fire on
+                // one. RFC-0082 M2's hoisted VALUE temp is the exception: it is
+                // the right-hand side of a place assignment, lifted out so it
+                // runs before the move-out, so it outlives exactly as the store
+                // it feeds does. Refusing it HERE rather than at that store is
+                // what makes the diagnostic name `ps[0].xs`, which the reader
+                // wrote, instead of `ps[]val`, which the parser minted.
+                let hoisted = name.ends_with("[]val");
                 let moved = self.store(
                     value,
-                    &|| format!("the binding `{name}`"),
+                    &|| {
+                        if hoisted {
+                            format!(
+                                "`{}`",
+                                name.trim_end_matches("[]val").trim_end_matches("[]")
+                            )
+                        } else {
+                            format!("the binding `{name}`")
+                        }
+                    },
                     *line,
-                    false,
+                    hoisted,
                     consumed,
                 )?;
                 // Phase 4c: the row this binding is reclaimed by. Written BEFORE
@@ -2262,6 +2314,32 @@ impl MoveCheck<'_> {
                         c.fixes.clone(),
                     ));
                 }
+                // Rule 2 at the drop. `drop x` reclaims storage, and a borrow
+                // names storage somebody else owns — so `let owned = box.items ;
+                // drop owned` hands back a buffer the record still holds. It
+                // leaked one owner short while nothing released a record's
+                // fields; RFC-0092 M3 releases them, and the native binary then
+                // corrupts its heap (`examples/fieldmut.vyrn`, `0xC0000374`).
+                //
+                // The same sentence a store gets, at the third place a value can
+                // leave — which is what stops one program from having two
+                // verdicts a keyword apart.
+                if let Some(b) = self.borrow_of(name) {
+                    return Err(menu(
+                        *line,
+                        format!("`{name}` may not be dropped — it is {}", b.what(name)),
+                        vec![
+                            format!(
+                                "`consume` the place where `{name}` is bound, so `{name}` takes \
+                                 the value rather than naming it"
+                            ),
+                            format!(
+                                "delete the `drop` — the place that owns it releases it \
+                                 (RFC-0089 rule 4)"
+                            ),
+                        ],
+                    ));
+                }
                 self.took(name, Gone::Dropped { line: *line });
                 consumed.insert(
                     name.clone(),
@@ -2488,18 +2566,30 @@ impl MoveCheck<'_> {
                 let (root, path) = place_path(place).expect("check_take proved this is a place");
                 // A whole binding writes the same `Gone::Moved` the consuming
                 // loop writes, so `own.rs` suppresses its drop through the two
-                // lines it already has. A PARTIAL take writes nothing: the root
-                // keeps its own fate, and the hole is the leak RFC-0093 M1 ships
-                // with until RFC-0092 M3 gives a record a release to skip it in.
-                if root == path {
-                    self.took(
-                        &root,
+                // lines it already has.
+                //
+                // A PARTIAL take wrote nothing until RFC-0092 M3, because a
+                // record had no release to collide with. It has one now, and the
+                // release walk is the TYPE — which does not know that one field
+                // left. So the root stops being reclaimed: the hole is what
+                // RFC-0093 M1 shipped with, and the untaken places join it until
+                // RFC-0093 M2 carries the hole set through to the walk. A leak is
+                // a task; a double free is a bug in a language that promises
+                // memory safety.
+                self.took(
+                    &root,
+                    if root == path {
                         Gone::Moved {
                             line: *line,
                             by: "`consume`".into(),
-                        },
-                    );
-                }
+                        }
+                    } else {
+                        Gone::Hole {
+                            line: *line,
+                            path: path.clone(),
+                        }
+                    },
+                );
                 consumed.insert(
                     path.clone(),
                     Consumption {
@@ -3954,8 +4044,21 @@ mod tests {
                      fn main() -> Int64 { return 0 }"
         )
         .is_ok());
-        // A type nobody releases is not a use-after-free, so it is not refused.
-        assert!(run("type R = { s: String } let mut r = R { s: \"x\" } \
+        // A RECORD of module state is refused too since RFC-0092 M3, and the
+        // reason is the row rather than this pass: the gate is "does the caller
+        // release the result", and until M3 a record answered no. Handing one
+        // out was a leak; it is a use-after-free now, and the same sentence
+        // refuses it.
+        let e = run("type R = { s: String } let mut r = R { s: \"x\" } \
+                     fn get() -> R { return r } fn main() -> Int64 { return 0 }")
+        .unwrap_err();
+        assert!(
+            e.contains("`r` may not be returned") && e.contains("module state"),
+            "{e}"
+        );
+        // A type nobody releases is still not a use-after-free, so it is still
+        // not refused: a record of scalars owns no heap and has no row.
+        assert!(run("type R = { n: Int64 } let mut r = R { n: 1 } \
                      fn get() -> R { return r } fn main() -> Int64 { return 0 }")
         .is_ok());
     }
@@ -4903,21 +5006,25 @@ mod tests {
             0,
             "RFC-0092 M1: an element return came back"
         );
-        // The returns that remain are all one shape and it is DELIBERATE.
-        // `check_return` refuses an arm-yielded projection only where the caller
-        // RELEASES the result (Phase 4b's guard, which this RFC does not move),
-        // and a record and a user enum have no release rule until M3. So
-        // `return match hit { Some(r) => r, .. }` on an `Option<Response>` is
-        // recorded and not refused: it cannot dangle while nothing frees a
-        // `Response`, and the day M3 gives `Type::Record` its row it can.
+        // **M1 left seven of these and M3 closed all seven**, in the change that
+        // gave the row — which is what M1 said would happen and why it asserted
+        // the number rather than migrating them early.
         //
-        // **M3 closes these, in the change that gives the row.** Refusing them
-        // here would buy nothing and cost a copy of a whole HTTP response on
-        // every request. The number is asserted so it cannot grow in the
-        // meantime.
+        // They were all one shape: `return match hit { Some(r) => r, .. }` on an
+        // owned `Option<Response>` or `Option<Cargo>`. `check_return` refuses an
+        // arm-yielded projection only where the caller RELEASES the result
+        // (Phase 4b's guard, which this RFC does not move), and a record had no
+        // release rule, so they could not dangle. M3 gives `Type::Record` its
+        // row and they can.
+        //
+        // The fix is not the copy M1 priced and refused to pay. RFC-0093 M1
+        // shipped the take in between, so each of them reads
+        // `match consume hit { .. }`: the arm yields a value the frame gave up,
+        // and nothing is copied at all. Six are one line of the `pages`
+        // generator.
         assert_eq!(
-            returns, 7,
-            "RFC-0092: the returns waiting on M3's release row moved — see the list above"
+            returns, 0,
+            "RFC-0092 M3: a projection return came back — see the list above"
         );
     }
 
