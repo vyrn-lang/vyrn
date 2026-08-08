@@ -2688,6 +2688,48 @@ impl<'a> Gen<'a> {
         buf
     }
 
+    /// Release each of the first `count` elements of `buf` — the mirror of
+    /// [`copy_elems`](Self::copy_elems), and RFC-0092 M2's half of census U4.
+    ///
+    /// The gate is the element's own release ROW, not whether it reaches heap. A
+    /// record reaches two Strings and has no row until M3, and walking into one
+    /// here would free fields no rule says the array owns. A row is the proof;
+    /// `owns_heap` is only a reachability question.
+    fn release_elems(&mut self, buf: &str, count: &str, elem: &Type) -> Result<(), String> {
+        if self.rel_kind(elem).is_none() {
+            return Ok(());
+        }
+        let ell = self.llt(elem);
+        let idx = self.fresh_alloca("i64");
+        self.emit(format!("store i64 0, ptr {idx}"));
+        let cond_l = self.fresh_label("rel.el.cond");
+        let body_l = self.fresh_label("rel.el.body");
+        let end_l = self.fresh_label("rel.el.end");
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&cond_l);
+        let i = self.fresh_tmp();
+        let done = self.fresh_tmp();
+        self.emit(format!("{i} = load i64, ptr {idx}"));
+        self.emit(format!("{done} = icmp uge i64 {i}, {count}"));
+        self.emit_term(format!("br i1 {done}, label %{end_l}, label %{body_l}"));
+        self.emit_label(&body_l);
+        let bi = self.fresh_tmp();
+        let ep = self.fresh_tmp();
+        let ev = self.fresh_tmp();
+        self.emit(format!("{bi} = load i64, ptr {idx}"));
+        self.emit(format!("{ep} = getelementptr {ell}, ptr {buf}, i64 {bi}"));
+        self.emit(format!("{ev} = load {ell}, ptr {ep}"));
+        self.deep_release(&ev, elem)?;
+        let i2 = self.fresh_tmp();
+        let inext = self.fresh_tmp();
+        self.emit(format!("{i2} = load i64, ptr {idx}"));
+        self.emit(format!("{inext} = add i64 {i2}, 1"));
+        self.emit(format!("store i64 {inext}, ptr {idx}"));
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&end_l);
+        Ok(())
+    }
+
     /// Replace each of the first `count` elements of `buf` with a deep copy of
     /// itself. A no-op — and no emitted loop — when the element owns no heap.
     fn copy_elems(&mut self, buf: &str, count: &str, elem: &Type) -> Result<(), String> {
@@ -2904,10 +2946,12 @@ impl<'a> Gen<'a> {
     /// payload — the encoding Phase 3 measured and the one a hand-written release
     /// gets wrong.
     ///
-    /// It does NOT release container ELEMENTS. `m.keys()` hands back a fresh
-    /// buffer holding the map's OWN key pointers, so releasing an
-    /// `Array<String>` element by element would free each of them twice. That is
-    /// census U4, and it stays open.
+    /// It releases an `Array<T>`'s ELEMENTS since RFC-0092 M2 — census U4 — and
+    /// releases each the way that element's own type is released, so an element
+    /// with no row of its own is left alone. The two builtins that used to hand
+    /// back a buffer of somebody else's element words, `m.keys()` and
+    /// `sa.toArray()`, copy them now. A `Map` and a `SmallArray` still give back
+    /// their buffers alone; their element rows are M3.
     fn deep_release(&mut self, v: &str, ty: &Type) -> Result<(), String> {
         // A type that declares its own release keeps it. Reaching past the
         // declaration into its fields would reclaim what the declaration says it
@@ -2919,6 +2963,22 @@ impl<'a> Gen<'a> {
         match self.resolve(ty) {
             Type::Str => {
                 self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+                Ok(())
+            }
+            // The elements first, then the buffer they live in — the reverse of
+            // the order `deep_copy` builds them, and the only order in which the
+            // walk may still read the buffer it is about to free.
+            //
+            // Whether the elements go at all is `own`'s answer, asked rather
+            // than re-derived — it carries the stop for a self-referring element
+            // type, whose walk has no bottom.
+            Type::Array(inner) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
+                let data = self.fresh_tmp();
+                let len = self.fresh_tmp();
+                self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
+                self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {v}, 1"));
+                self.release_elems(&data, &len, &inner)?;
+                self.emit(format!("call void @free(ptr {data})"));
                 Ok(())
             }
             Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
@@ -3762,7 +3822,17 @@ impl<'a> Gen<'a> {
         match self.rel_kind(ty) {
             // A `String` IS its buffer pointer.
             Some(DropKind::FreeStr) => out.push((v.to_string(), true)),
+            // An `Array<T>` answers `FreeArr`, or `Deep` where its elements have
+            // a release row of their own (RFC-0092 M2). A store hands back the
+            // one buffer either way: the elements it held leak, exactly as they
+            // did before the row landed, and freeing them here would mean
+            // reading a length the store is in the middle of replacing.
             Some(DropKind::FreeArr) => {
+                let d = self.fresh_tmp();
+                self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
+                out.push((d, false));
+            }
+            Some(DropKind::Deep(t)) if matches!(self.resolve(&t), Type::Array(_)) => {
                 let d = self.fresh_tmp();
                 self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
                 out.push((d, false));
@@ -9500,14 +9570,23 @@ impl<'a> Gen<'a> {
         // into a fresh heap buffer and wrap it in the growable `{ptr,len,cap}`
         // triple. The one explicit conversion; the interpreter's copy is the
         // identity (both share `Val::Array`).
+        //
+        // The result is a fresh `Array<T>` and an array owns its elements
+        // (RFC-0092 M2), so the words it copies are given their own heap. Before
+        // M2 this handed back the receiver's element POINTERS and the census
+        // counted it as one of the three view constructors.
         if name == "@toArray" {
             let (av, aty) = self.gen_expr(&args[0])?;
             let inner = match self.resolve(&aty) {
                 Type::SmallArray(inner, _) => *inner,
-                // A plain `Array<T>` receiver is a defensive copy-out too.
+                // A plain `Array<T>` receiver. Handing the triple straight back
+                // named ONE buffer from two owned bindings, and both are
+                // released — a double free of the buffer before M2 and of every
+                // element after it. The comment here already said "a defensive
+                // copy-out"; M2 is where the code says it too.
                 Type::Array(inner) => {
-                    // Already a growable triple — hand it straight back.
-                    return Ok((av, Type::Array(inner)));
+                    let c = self.deep_copy(&av, &Type::Array(inner.clone()))?;
+                    return Ok((c, Type::Array(inner)));
                 }
                 other => return Err(format!("`toArray` needs a SmallArray, found {other:?}")),
             };
@@ -9528,6 +9607,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {base}, i64 {nb}, i1 false)"
             ));
+            self.copy_elems(&buf, &len, &inner)?;
             let a = self.fresh_tmp();
             let b = self.fresh_tmp();
             let c = self.fresh_tmp();
@@ -9629,8 +9709,12 @@ impl<'a> Gen<'a> {
             return Ok((found, Type::Bool));
         }
         // `m.keys()` (RFC-0028) — a fresh snapshot `Array<String>` in insertion
-        // order. Copies the key pointers into a new buffer (cap = len); the map
-        // may then be mutated without disturbing the snapshot.
+        // order. Copies the key pointers into a new buffer (cap = len), and
+        // since RFC-0092 M2 the KEYS as well: the snapshot is an `Array<String>`
+        // and an array owns its elements, so a snapshot of the map's own
+        // pointers would be freed twice. The interpreter has copied each key
+        // since RFC-0028 (`Rc::new(k.clone())`), so this is the two compiling
+        // backends catching up with the oracle, not a new cost in the model.
         if name == "@keys" {
             let (mv, _) = self.gen_expr(&args[0])?;
             let keys = self.fresh_tmp();
@@ -9645,6 +9729,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{buf} = call ptr @__vyrn_map_keys_copy(ptr {keys}, i64 {len})"
             ));
+            self.copy_elems(&buf, &len, &Type::Str)?;
             let r0 = self.fresh_tmp();
             let r1 = self.fresh_tmp();
             let r2 = self.fresh_tmp();

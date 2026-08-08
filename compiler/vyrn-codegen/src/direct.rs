@@ -1928,6 +1928,13 @@ impl Fn_<'_> {
     /// same set the textual backend's [`crate::Gen::emit_drop`] frees, minus the
     /// `Stream`, which reaches its release through the stream lowering rather than
     /// through `own`.
+    /// Whether releasing this `Array<T>` releases its elements too (RFC-0092
+    /// M2). `own` decides, and this asks it — the same answer the textual
+    /// backend reads, including the stop for a self-referring element.
+    fn array_releases_elems(&self, arr: &Type) -> bool {
+        matches!(self.cx.owned.release_kind(arr), Some(DropKind::Deep(_)))
+    }
+
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
         // A declared row (RFC-0086 M1) answers before any built-in shape does,
         // and it is keyed by the type's NAME — which resolving away would lose.
@@ -1938,6 +1945,14 @@ impl Fn_<'_> {
         Ok(match &t {
             Type::Str => Some(Rel::Str),
             Type::Stream(i) => Some(Rel::Stream((**i).clone())),
+            // An `Array<T>` gives back its buffer, and its ELEMENTS too where
+            // `own` says so (RFC-0092 M2, census U4). The question is asked of
+            // `own` rather than re-derived from the element, so the guards that
+            // answer live in one file — including the one that stops a
+            // self-referring element type, whose walk has no bottom. The element
+            // walk needs an address, so that answer is `Deep` and the
+            // buffer-only one stays a `Buffers`.
+            Type::Array(_) if self.array_releases_elems(&t) => Some(Rel::Deep(t.clone())),
             Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
             Type::Map(..) => {
                 let l = self.layout_of(&t, line)?;
@@ -1966,10 +1981,12 @@ impl Fn_<'_> {
     /// payload, which is the encoding Phase 3 measured and the one a hand-written
     /// release gets wrong.
     ///
-    /// It does NOT release container ELEMENTS. `m.keys()` hands back a fresh
-    /// buffer holding the map's OWN key pointers, so releasing an `Array<String>`
-    /// element by element would free each of them twice. That is census U4, and
-    /// it stays open for the phase that gives a shallow view a name.
+    /// It releases an `Array<T>`'s ELEMENTS since RFC-0092 M2 — census U4 — each
+    /// the way that element's own type is released, so an element with no row of
+    /// its own is left alone. `m.keys()` and `sa.toArray()`, which used to hand
+    /// back a buffer of somebody else's element words, copy them now. A `Map`
+    /// and a `SmallArray` still give back their buffers alone: their element
+    /// rows are M3.
     fn rel_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
         // A type that declares its own release keeps it. Reaching past the
         // declaration into its fields would reclaim what the declaration says it
@@ -1986,6 +2003,25 @@ impl Fn_<'_> {
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word()));
                 str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
+                Ok(())
+            }
+            // The elements first, then the buffer they live in — the reverse of
+            // the order `copy_at` builds them, and the only order in which the
+            // walk may still read the buffer it is about to free.
+            Type::Array(inner) if self.array_releases_elems(&self.cx.resolve(ty)) => {
+                let l = self.layout_of(ty, line)?;
+                let stride = self.stride(&inner, line)?;
+                let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(n));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+                b.ins(&Instruction::LocalSet(data));
+                self.rel_each(b, data, n, stride, &inner, line)?;
+                b.ins(&Instruction::LocalGet(data));
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
@@ -2141,6 +2177,14 @@ impl Fn_<'_> {
         Ok(match self.rel_for(ty, line)? {
             Some(Rel::Str) => vec![(0, true)],
             Some(Rel::Buffers(offs)) => offs.into_iter().map(|o| (o, false)).collect(),
+            // An `Array<T>` whose elements have a release row answers `Deep`
+            // (RFC-0092 M2). A store hands back the one buffer it always did:
+            // the elements it held leak, exactly as they did before the row
+            // landed, and freeing them here would mean reading a length the
+            // store is in the middle of replacing.
+            Some(Rel::Deep(t)) if matches!(self.cx.resolve(&t), Type::Array(_)) => {
+                vec![(self.layout_of(&t, line)?.fields[0], false)]
+            }
             _ => Vec::new(),
         })
     }
@@ -8918,6 +8962,62 @@ impl Fn_<'_> {
         nb
     }
 
+    /// Release each of the first `count` elements of `buf` — the mirror of
+    /// [`Fn_::copy_each`], and RFC-0092 M2's half of census U4.
+    ///
+    /// The gate is the element's own release ROW, not whether it reaches heap. A
+    /// record reaches two Strings and has no row until M3, and walking into one
+    /// here would free fields no rule says the array owns. A row is the proof;
+    /// `owns_heap` is only a reachability question.
+    fn rel_each(
+        &mut self,
+        b: &mut Frame,
+        buf: u32,
+        count: u32,
+        stride: u32,
+        elem: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        if self.cx.owned.release_kind(elem).is_none() {
+            return Ok(());
+        }
+        let i = b.local(ValType::I32);
+        let p = b.local(ValType::I32);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::LocalSet(i));
+        let out = self.depth;
+        b.ins(&Instruction::Block(BlockType::Empty));
+        self.depth += 1;
+        let again = self.depth;
+        b.ins(&Instruction::Loop(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(i));
+        b.ins(&Instruction::LocalGet(count));
+        b.ins(&Instruction::I32GeU);
+        let leave = self.br_to(out);
+        b.ins(&Instruction::BrIf(leave));
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::LocalGet(i));
+        if stride != 1 {
+            b.ins(&Instruction::I32Const(stride as i32));
+            b.ins(&Instruction::I32Mul);
+        }
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalSet(p));
+        self.rel_at(b, p, elem, line)?;
+        b.ins(&Instruction::LocalGet(i));
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalSet(i));
+        let back = self.br_to(again);
+        b.ins(&Instruction::Br(back));
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        Ok(())
+    }
+
     /// Replace each of the first `count` elements of `buf` with a deep copy of
     /// itself. No loop is emitted at all when the element owns no heap.
     fn copy_each(
@@ -10395,8 +10495,13 @@ impl Fn_<'_> {
         let l = self.layout_of(&mty, line)?;
 
         if name == "@keys" {
-            // A snapshot `Array<String>`: the key POINTERS copied into a buffer of
-            // its own, so the map may be mutated afterwards without disturbing it.
+            // A snapshot `Array<String>`: the key pointers copied into a buffer of
+            // its own, so the map may be mutated afterwards without disturbing it,
+            // and since RFC-0092 M2 the KEYS as well — the snapshot is an
+            // `Array<String>` and an array owns its elements, so a snapshot of
+            // the map's own pointers would be freed twice. The interpreter has
+            // copied each key since RFC-0028, so this is the compiling backend
+            // catching up with the oracle rather than a new cost in the model.
             let aty = Type::Array(Box::new(Type::Str));
             let al = self.layout_of(&aty, line)?;
             let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -10422,6 +10527,7 @@ impl Fn_<'_> {
                 src_mem: 0,
                 dst_mem: 0,
             });
+            self.copy_each(b, buf, len, 4, &Type::Str, line)?;
             let off = b.alloc(al.size, al.align);
             b.slot(off + al.fields[0]);
             b.ins(&Instruction::LocalGet(buf));
@@ -10751,6 +10857,11 @@ impl Fn_<'_> {
             // A fresh growable `Array<T>` holding a copy of the live elements —
             // the one explicit conversion RFC-0056 has, and the interpreter's is
             // the identity because both are `Val::Array`.
+            //
+            // The result is a fresh `Array<T>` and an array owns its elements
+            // (RFC-0092 M2), so the words it copies are given their own heap.
+            // Before M2 it handed back the receiver's element POINTERS and the
+            // census counted it as one of the three view constructors.
             "@toArray" => {
                 let want = Type::Array(Box::new(inner.clone()));
                 let al = self.layout_of(&want, line)?;
@@ -10771,6 +10882,11 @@ impl Fn_<'_> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
+                let count = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(len));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(count));
+                self.copy_each(b, buf, count, stride, inner, line)?;
                 let off = b.alloc(al.size, al.align);
                 b.slot(off + al.fields[0]);
                 b.ins(&Instruction::LocalGet(buf));

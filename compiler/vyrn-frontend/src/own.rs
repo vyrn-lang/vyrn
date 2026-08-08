@@ -245,7 +245,35 @@ impl Owned {
         match crate::types::resolve(ty, &self.types) {
             // ---- the seeded built-in rows ----------------------------------
             Type::Str => Some(DropKind::FreeStr),
-            Type::Array(_) => Some(DropKind::FreeArr),
+            // An `Array<T>` gives back its buffer, and since RFC-0092 M2 the
+            // ELEMENTS in it too — census U4. The proof the elements are the
+            // array's own is M1's rule: every route into an element is a store,
+            // rule 2 refuses storing a borrow, and the rule refuses storing a
+            // projection. What was left was the compiler's own back doors, and
+            // there were three: `m.keys()`, `sa.toArray()` and `xs.toArray()` on
+            // a plain array, which handed the receiver's triple straight back.
+            // All three copy now, and so does the synthesized `fromJson`
+            // decoder, which is Vyrn the rule never got to check.
+            //
+            // The recursion is the row. An element is released the way its own
+            // type is released, so `Array<Record>` releases nothing until M3
+            // gives a record its row, and `Array<Array<String>>` follows the day
+            // this one lands. Answering `Deep` rather than a wider `FreeArr` is
+            // what routes it through the release WALK, which is `copy` run
+            // backwards and already knows every payload encoding.
+            //
+            // An element type that reaches ITSELF (`type L = Array<L>`) answers
+            // the buffer alone. The walk is structural, so a self-referring
+            // element has no bottom — the same crash `copy` met in Phase 4b, and
+            // the same guard. The elements leak, which is what this whole file
+            // does where it cannot prove otherwise.
+            Type::Array(e) => Some(
+                if self_referring(&e, &self.types).is_none() && self.release_kind(&e).is_some() {
+                    DropKind::Deep(Type::Array(e))
+                } else {
+                    DropKind::FreeArr
+                },
+            ),
             Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
             Type::Map(..) => Some(DropKind::FreeMap),
             // A `Stream<T>` is reclaimed too, but through the stream lowering
@@ -326,8 +354,11 @@ impl Owned {
             // that make the wider rule sayable — the same two `check_return`
             // already names.
             //
-            // A fixed `[N x T]` is off for census U4's reason: releasing an
-            // element would free a `m.keys()` snapshot's pointers twice. A `Fn`
+            // A fixed `[N x T]` is off because it has no row of its own yet: M3
+            // gives it one, and until then its elements are unreachable for the
+            // same reason a record's fields are. U4's old reason — that
+            // releasing an element would free a `m.keys()` snapshot's pointers
+            // twice — is gone, because the snapshot copies (M2). A `Fn`
             // is off for the reason `owns_heap` records. A `Task<T>` is a handle
             // to a frame the join owns, and `lazy T` IS `fn() -> T` (RFC-0085
             // M4a) — `resolve` normally answers that, and this is the
@@ -948,12 +979,16 @@ pub(crate) mod tests {
     fn a_value_stored_into_an_outer_container_escapes() {
         // `xs.push(s)` moves `s` into a container that outlives the inner block,
         // so `s` must NOT stay droppable — freeing it would leave the array
-        // holding a dangling buffer. Only the array is released here.
+        // holding a dangling buffer, and the array releases the element itself
+        // since RFC-0092 M2. Only the array is released here.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let mut xs: Array<String> = []; \
                    if true { let s = a + b; xs.push(s); } \
                    return xs.length; }";
-        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
+        assert_eq!(
+            drop_kinds(src, "main"),
+            vec![DropKind::Deep(Type::Array(Box::new(Type::Str)))]
+        );
     }
 
     #[test]
@@ -1156,15 +1191,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_self_referring_array_element_is_not_walked() {
+        // `type L = Array<L>` has no bottom to a structural walk, and both
+        // compiling backends emitted one until they ran out of stack — the same
+        // crash `copy` met in Phase 4b. The row answers the buffer alone, so the
+        // elements leak, which is the answer this file gives wherever it cannot
+        // prove otherwise.
+        let src = "type L = Array<L>; fn main() -> Int64 { let xs: L = []; return xs.length; }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
+    }
+
+    #[test]
     fn a_fresh_key_snapshot_is_released() {
-        // `m.keys()` copies the key pointers into a new buffer (RFC-0028) and was
-        // absent from the same list.
+        // `m.keys()` copies the keys into a new buffer (RFC-0028, and the KEYS
+        // themselves since RFC-0092 M2) and was absent from the same list.
         let src = "fn main() -> Int64 { let m: Map<String, Int64> = [\"a\": 1]; \
                    let ks = m.keys(); return ks.length; }";
-        // The map and the snapshot, in whichever order the map iterates.
+        // The map and the snapshot, in whichever order the map iterates. The
+        // snapshot is `Deep` rather than `FreeArr`: its elements are Strings
+        // with a release row, so releasing it releases them (U4).
         let mut kinds = drop_kinds(src, "main");
         kinds.sort_by_key(|k| format!("{k:?}"));
-        assert_eq!(kinds, vec![DropKind::FreeArr, DropKind::FreeMap]);
+        assert_eq!(
+            kinds,
+            vec![
+                DropKind::Deep(Type::Array(Box::new(Type::Str))),
+                DropKind::FreeMap
+            ]
+        );
     }
 
     #[test]
