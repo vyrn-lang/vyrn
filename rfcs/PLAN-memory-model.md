@@ -3,8 +3,17 @@
 **COMPLETE.** Phases 0 to 9, fifteen PRs; **Phase 10 closes the tail.** The
 census's final state is in RFC-0087, "The census, closed". Phase 9 left nine of
 twelve memory rows steady and three leaking with a named reason each; Phase 10
-took two of the three, so the suite reads **eleven steady of twelve**. `U4` stays
-leaking and correctly so. Four design questions are open and undesigned.
+took two of the three, so the suite read **eleven steady of twelve**. Four design
+questions are open and undesigned.
+
+**The chain continued past this plan.** RFC-0092 (a projection is a borrow) and
+RFC-0093 (a take is a move out of a place) added three memory rows between them —
+`elementLeak` (M2), `recordFields` (M3) and `takenField` (RFC-0093 M2) — so the
+suite now reads **fifteen rows, fourteen steady, `keysLoop` the only leak**. U4
+is closed for an array and open for a snapshot: `for k in m.keys()` walks a
+temporary, and that is Phase 10a's `if let` row applied to `for` and per element.
+`vyrn why --memory` over the corpus reads **1,958 bindings not reclaimed of
+4,335**, against 2,127 when RFC-0092 M1 landed.
 
 Execution plan for delegation. Each phase is one agent arc: one branch, one PR,
 merged on local verification (do not wait for CI). Phases are ordered by

@@ -1289,6 +1289,17 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // which `let` bindings each function must free at block exit (RFC-0004 §4).
     let ownership = vyrn_frontend::own::analyze(program);
     let droppable_map = &ownership.droppable;
+    // RFC-0093 M2: the places a `consume` took out of each droppable `let`,
+    // flattened across functions. The key is the `let`'s node address, which is
+    // unique in the program, so one map answers for every body — the same
+    // flattening the interpreter does with `droppable`.
+    let holes_map: HashMap<usize, Vec<String>> = ownership
+        .holes
+        .values()
+        .flatten()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    let holes_map = &holes_map;
     let owned_proto = &ownership.proto;
 
     let protocol_methods: HashMap<String, String> = program
@@ -1320,6 +1331,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &empty_subst,
             &funcs,
             droppable_map,
+            holes_map,
             owned_proto,
             &regex_globals,
             &program.impls,
@@ -1435,6 +1447,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &empty_subst,
             &funcs,
             droppable_map,
+            holes_map,
             owned_proto,
             &regex_globals,
             &program.impls,
@@ -1483,6 +1496,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &subst,
                 &funcs,
                 droppable_map,
+                holes_map,
                 owned_proto,
                 &regex_globals,
                 &program.impls,
@@ -1519,6 +1533,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &inst.subst,
                 &funcs,
                 droppable_map,
+                holes_map,
                 owned_proto,
                 &regex_globals,
                 &program.impls,
@@ -1563,6 +1578,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &empty_subst,
             &funcs,
             droppable_map,
+            holes_map,
             owned_proto,
             &regex_globals,
             &program.impls,
@@ -1591,6 +1607,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &empty_subst,
             &funcs,
             droppable_map,
+            holes_map,
             owned_proto,
             &regex_globals,
             &program.impls,
@@ -1613,6 +1630,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &empty_subst,
             &funcs,
             droppable_map,
+            holes_map,
             owned_proto,
             &regex_globals,
             &program.impls,
@@ -1726,6 +1744,16 @@ struct Gen<'a> {
     droppable: HashMap<usize, DropKind>,
     /// Per-function droppable maps for the whole program (looked up per emit).
     droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
+    /// RFC-0093 M2: per `let` node, the places a `consume` took out of it. The
+    /// release walk skips them, because the take already gave them away.
+    holes_map: &'a HashMap<usize, Vec<String>>,
+    /// The same, keyed by the slot the `let` declared — what [`Gen::emit_drop`]
+    /// has in its hand. Cleared per function.
+    hole_slots: HashMap<String, Vec<String>>,
+    /// The holes the walk in progress must skip, relative to the place it is
+    /// looking at. Taken at the top of [`Gen::deep_release`], so a walk into
+    /// anything that is not a record starts empty.
+    rel_holes: Vec<String>,
     /// The `Owned` table (RFC-0086 M1) — the one answer to "how is a value of
     /// this type reclaimed", shared with the automatic block-exit path so an
     /// explicit `drop x` cannot free a different set.
@@ -1876,6 +1904,7 @@ impl<'a> Gen<'a> {
         subst: &'a HashMap<String, Type>,
         funcs: &'a HashMap<String, &'a Function>,
         droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
+        holes_map: &'a HashMap<usize, Vec<String>>,
         owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
@@ -1902,6 +1931,9 @@ impl<'a> Gen<'a> {
             region_depth: 0,
             droppable: HashMap::new(),
             droppable_map,
+            holes_map,
+            hole_slots: HashMap::new(),
+            rel_holes: Vec::new(),
             owned,
             impls,
             drop_stack: Vec::new(),
@@ -2953,6 +2985,11 @@ impl<'a> Gen<'a> {
     /// `sa.toArray()`, copy them now. A `Map` and a `SmallArray` still give back
     /// their buffers alone; their element rows are M3.
     fn deep_release(&mut self, v: &str, ty: &Type) -> Result<(), String> {
+        // RFC-0093 M2: the holes belong to the place this call is looking at,
+        // and only the record arm below can be told about them. Taking them here
+        // is what makes every other arm — an element, a payload, a buffer —
+        // start empty, which is right: `own` refuses a hole under any of them.
+        let holes = std::mem::take(&mut self.rel_holes);
         // A type that declares its own release keeps it. Reaching past the
         // declaration into its fields would reclaim what the declaration says it
         // reclaims, in a different order, and without the print a user `release`
@@ -3025,8 +3062,14 @@ impl<'a> Gen<'a> {
                     if !self.owns_heap(&f.ty) {
                         continue;
                     }
+                    // RFC-0093 M2. A `consume` took this field, so it has an
+                    // owner already and this walk is not it.
+                    if holes.iter().any(|h| *h == f.name) {
+                        continue;
+                    }
                     let fv = self.fresh_tmp();
                     self.emit(format!("{fv} = extractvalue {rll} {v}, {i}"));
+                    self.rel_holes = vyrn_frontend::own::holes_under(&holes, &f.name);
                     self.deep_release(&fv, &f.ty)?;
                 }
                 Ok(())
@@ -3516,6 +3559,10 @@ impl<'a> Gen<'a> {
         self.cur_fn_name = f.name.clone();
         self.lambda_counter = 0;
         self.droppable = self.droppable_map.get(&f.name).cloned().unwrap_or_default();
+        // Slot names repeat across functions, and a stale hole would make a walk
+        // skip a place this body owns (RFC-0093 M2). A stale skip only ever
+        // leaks, but the clear costs one line.
+        self.hole_slots.clear();
         self.append_ok = append_candidates(&f.body);
         self.str_append.clear();
         // Module state is an accumulator every body shares, so its flag is seeded
@@ -3779,9 +3826,13 @@ impl<'a> Gen<'a> {
                 let ll = self.llt(&ty);
                 let v = self.fresh_tmp();
                 self.emit(format!("{v} = load {ll}, ptr {slot}"));
+                // RFC-0093 M2: the places a take gave away. Empty for every
+                // binding nothing took from, which is nearly all of them.
+                self.rel_holes = self.hole_slots.get(slot).cloned().unwrap_or_default();
                 // `emit_drop` is infallible by signature and this walk is not:
                 // a type it cannot name is a leak, never a wrong free.
                 let _ = self.deep_release(&v, &ty);
+                self.rel_holes.clear();
             }
             // RFC-0086 M1: the type declared `impl Owned`, so its own `release`
             // is what reclaims it. An ordinary call to an ordinary function —
@@ -3973,6 +4024,12 @@ impl<'a> Gen<'a> {
                 // If ownership analysis proved this heap binding non-escaping,
                 // schedule it to be reclaimed when its block exits.
                 if let Some(kind) = self.droppable.get(&key).cloned() {
+                    // RFC-0093 M2: a take gave one of this binding's places
+                    // away, so the walk must not hand it back. The set is
+                    // remembered by SLOT, which is what `emit_drop` holds.
+                    if let Some(h) = self.holes_map.get(&key) {
+                        self.hole_slots.insert(slot.clone(), h.clone());
+                    }
                     self.drop_stack.last_mut().unwrap().push((slot, kind));
                 }
                 Ok(())
@@ -7544,6 +7601,7 @@ impl<'a> Gen<'a> {
             .get(&inst.name)
             .cloned()
             .unwrap_or_default();
+        self.hole_slots.clear();
         self.append_ok = append_candidates(&callee.body);
         self.str_append.clear();
         self.fn_ret = vyrn_frontend::types::substitute(&callee.ret, &self.subst_clone());
@@ -12046,9 +12104,23 @@ mod tests {
     /// escape the layout check that stands between it and a silent miscompile.
     #[test]
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
-        let (rt, pt, pc, ty, va, sg, sb, fs, dm, rg) = Default::default();
+        let (rt, pt, pc, ty, va, sg, sb, fs, dm, hm, rg) = Default::default();
         let ow = vyrn_frontend::own::Owned::default();
-        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &ow, &rg, &[]);
+        let g = Gen::new(
+            &rt,
+            &pt,
+            &pc,
+            &ty,
+            &va,
+            &sg,
+            &sb,
+            &fs,
+            &dm,
+            &hm,
+            &ow,
+            &rg,
+            &[],
+        );
         let rec = |fs: &[Type]| {
             Type::Record(
                 fs.iter()

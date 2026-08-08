@@ -1219,7 +1219,7 @@ fn why_memory(file: &str) -> ExitCode {
             use vyrn_frontend::own::Fate;
             bindings += 1;
             match &n.fate {
-                Fate::Reclaimed(_) => reclaimed += 1,
+                Fate::Reclaimed(..) => reclaimed += 1,
                 Fate::Moved { .. } => moved += 1,
                 Fate::Dropped { .. } => dropped += 1,
                 Fate::Static => statics += 1,
