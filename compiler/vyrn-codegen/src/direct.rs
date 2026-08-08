@@ -1965,7 +1965,17 @@ impl Fn_<'_> {
             // Phase 5: an aggregate owns its places. Phase 10b: a stored `fn`
             // value owns its capture block, which is one allocation whatever the
             // tag — so it needs no registry to release, only to copy.
+            //
+            // RFC-0092 M3 adds the record, the user enum and the fixed
+            // `[N x T]`. Whether they go is `own`'s answer, asked rather than
+            // re-derived: it carries the stop for a type that reaches itself,
+            // whose walk has no bottom.
             Type::Option(_) | Type::Result(..) | Type::Fn(..) if self.owns_heap(&t) => {
+                Some(Rel::Deep(t))
+            }
+            Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)
+                if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_))) =>
+            {
                 Some(Rel::Deep(t))
             }
             _ => None,
@@ -2055,6 +2065,16 @@ impl Fn_<'_> {
                     self.rel_at(b, p, &f.ty, line)?;
                 }
                 Ok(())
+            }
+            // A fixed `[N x T]` is inline memory, so there is no buffer to hand
+            // back — only its slots (RFC-0092 M3). The mirror of `copy_at`'s own
+            // arm, with the same count in a local.
+            Type::ArrayN(inner, n) => {
+                let stride = self.stride(&inner, line)?;
+                let count = b.local(ValType::I32);
+                b.ins(&Instruction::I32Const(n as i32));
+                b.ins(&Instruction::LocalSet(count));
+                self.rel_each(b, a, count, stride, &inner, line)
             }
             Type::Option(inner) => {
                 let l = self.layout_of(ty, line)?;

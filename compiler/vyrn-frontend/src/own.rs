@@ -325,47 +325,40 @@ impl Owned {
             // therefore still leaks, and `Gone::Captured` already says why
             // nothing else releases it either.
             t @ Type::Fn(..) => Some(DropKind::Deep(t)),
-            // A **record** and a **user enum** are not on the list, and Phase 5
-            // measured why rather than assuming either way.
+            // A **record**, a **user enum** and a fixed **`[N x T]`** release
+            // their places since RFC-0092 M3 — RFC-0089 rule 4 in the words the
+            // rule uses, and the half of it that had been open since Phase 5.
             //
-            // Both hand their insides out as PROJECTIONS, and rule 3 records a
-            // returned projection as a LEND rather than refusing it.
-            // `check_return` says in its own words why: refusing one would demand
-            // `.copy()` from `Json` and `Html`, which refer to themselves and have
-            // no structural copy (M1b). Its note ends "so nothing releases them".
-            // A row here is exactly what releases them, and three parity runs
-            // said so within a minute of each other:
+            // Phase 5 measured why it could not land then. All three hand their
+            // insides out as PROJECTIONS, and rule 3 recorded a returned
+            // projection as a LEND rather than refusing it, so three parity runs
+            // failed within a minute of each other: `std/jsondec`'s `tagOf(v)`
+            // handed back a `String` its `Json` still held, `std/graphql`'s
+            // `gqlScanner(src)` returned a record holding a view of its
+            // argument, and `gqlParseQuery` wrote `GqlQuery { sels: set.sels }`
+            // — a field read stored into a literal.
             //
-            //   * `std/jsondec`'s `tagOf(v)` is `match v { JStr(s) => s, .. }` —
-            //     a `String` the `Json` still holds. The decoder read a freed
-            //     `note` field (`examples/jsondecbytes.vyrn`).
-            //   * `std/graphql`'s `gqlScanner(src)` returns a RECORD holding
-            //     `bytes(src)`, a view of the argument's buffer. Nothing sees
-            //     that lend at all: `returned_borrow` reads a returned place and
-            //     a struct literal is not one. Releasing the scanner freed the
-            //     source String through the wrong pointer (`examples/graphql.vyrn`).
-            //   * `gqlParseQuery` writes `GqlQuery { sels: set.sels }` — a field
-            //     read stored into a literal, which `store` allows and does not
-            //     count as a move, so two records name one buffer.
+            // **M1 refuses all three spellings.** A projection of a place the
+            // frame owns may not be stored and may not be returned, and the
+            // corpus took 116 `.copy()` calls to say so. So a record holds what
+            // it holds, and releasing it releases those places.
             //
-            // The lend is recorded per `let` and not through a store or through a
-            // container, so the analysis cannot answer this today. RFC-0091 M1's
-            // `Copy` protocol and 7a's place projections are the two mechanisms
-            // that make the wider rule sayable — the same two `check_return`
-            // already names.
+            // The guard is the one the `Array` row carries: a type that reaches
+            // ITSELF has no bottom to a structural walk (`type Node = { kids:
+            // Array<Node> }` is ordinary Vyrn). It answers `None` and its places
+            // leak, which is the answer this file gives wherever it cannot prove
+            // otherwise. `Json` and `Html` are that shape, which is also why M1's
+            // `.copy()` menu sent them to a hand-written `copyJson`.
             //
-            // A fixed `[N x T]` is off because it has no row of its own yet: M3
-            // gives it one, and until then its elements are unreachable for the
-            // same reason a record's fields are. U4's old reason — that
-            // releasing an element would free a `m.keys()` snapshot's pointers
-            // twice — is gone, because the snapshot copies (M2). A `Fn`
-            // is off for the reason `owns_heap` records. A `Task<T>` is a handle
-            // to a frame the join owns, and `lazy T` IS `fn() -> T` (RFC-0085
-            // M4a) — `resolve` normally answers that, and this is the
+            // A `Fn` is off for the reason `owns_heap` records. A `Task<T>` is a
+            // handle to a frame the join owns, and `lazy T` IS `fn() -> T`
+            // (RFC-0085 M4a) — `resolve` normally answers that, and this is the
             // depth-limited fallback.
-            Type::Record(_) | Type::Enum(_) | Type::ArrayN(..) | Type::Task(_) | Type::Lazy(_) => {
-                None
+            t @ (Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)) => {
+                (self_referring(ty, &self.types).is_none() && owns_heap(&t, &self.types))
+                    .then(|| DropKind::Deep(t))
             }
+            Type::Task(_) | Type::Lazy(_) => None,
             // ---- shapes that are not a runtime value ------------------------
             // A type operator survives only until `resolve` reaches its base, a
             // `Param` is erased by monomorphization, and an unresolved `Named`
@@ -520,6 +513,10 @@ pub enum Leak {
     Aliased { line: usize },
     /// It reached a call that may retain it.
     Escaped { callee: String, line: usize },
+    /// A `consume` took one of its places (RFC-0093 M1), so the value has a hole
+    /// and the release walk — which is the type — would free what the take gave
+    /// away. Carries the place taken.
+    Hole { path: String, line: usize },
 }
 
 impl Leak {
@@ -537,6 +534,7 @@ impl Leak {
             Leak::Captured { .. } => "captured by a lambda or a spawn",
             Leak::Aliased { .. } => "aliased by another binding",
             Leak::Escaped { .. } => "escaped into a call",
+            Leak::Hole { .. } => "a `consume` took one of its places",
         }
     }
 }
@@ -561,6 +559,10 @@ impl std::fmt::Display for Leak {
             Leak::Escaped { callee, line } => {
                 write!(f, "it escapes into the call to `{callee}` at line {line}")
             }
+            Leak::Hole { path, line } => write!(
+                f,
+                "a `consume` took `{path}` at line {line}, so it has a hole in it"
+            ),
         }
     }
 }
@@ -919,6 +921,10 @@ impl Emit<'_> {
                 line: *line,
             }),
             Some(Gone::Captured { line }) => Fate::Leaked(Leak::Captured { line: *line }),
+            Some(Gone::Hole { line, path }) => Fate::Leaked(Leak::Hole {
+                path: path.clone(),
+                line: *line,
+            }),
             Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
             Some(Gone::Returned { line }) => Fate::Moved {
                 line: *line,
@@ -1279,19 +1285,60 @@ pub(crate) mod tests {
         );
     }
 
-    /// A record is still reclaimed by nothing, and Phase 5 kept it that way with
-    /// a measurement rather than with the old argument. See
-    /// [`Owned::release_kind`] for the three parity failures a row here produced:
-    /// a record hands its insides out as projections, and rule 3 records a
-    /// returned projection as a lend rather than refusing it.
+    /// RFC-0092 M3: a record releases its places. Phase 5 measured that it could
+    /// not, and [`Owned::release_kind`] records the three parity failures a row
+    /// produced then — a record hands its insides out as projections, and rule 3
+    /// recorded a returned projection as a lend rather than refusing it. M1
+    /// refuses all three spellings, so the row is sayable.
     #[test]
-    fn a_record_is_reclaimed_by_nothing() {
+    fn a_record_releases_its_places() {
         let src = "type Ring = { slots: Array<Int64> } \
                    fn make() -> Ring { return Ring { slots: [] } } \
                    fn main() -> Int64 { let r = make(); return 0; }";
         let (o, _) = analyze_src(src);
+        let want = DropKind::Deep(Type::Record(vec![Field {
+            name: "slots".into(),
+            ty: Type::Array(Box::new(Type::Int)),
+
+        }]));
+        assert_eq!(o.owned_fns.get("make"), Some(&want));
+        assert_eq!(drop_kinds(src, "main"), vec![want]);
+    }
+
+    /// And a record of scalars is not, which keeps the rule about heap.
+    #[test]
+    fn a_record_of_scalars_is_reclaimed_by_nothing() {
+        let src = "type Point = { x: Int64, y: Int64 } \
+                   fn make() -> Point { return Point { x: 1, y: 2 } } \
+                   fn main() -> Int64 { let p = make(); return 0; }";
+        let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("make"));
         assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    /// The guard the `Array` row already carried, one shape over. `type Node =
+    /// { kids: Array<Node> }` is ordinary Vyrn, and a structural release walk of
+    /// it has no bottom — the crash `copy` met in Phase 4b, met a third time.
+    /// It answers nothing and its places leak, which is what this file does
+    /// wherever it cannot prove otherwise.
+    #[test]
+    fn a_self_referring_record_is_not_walked() {
+        let src = "type Node = { name: String, kids: Array<Node> } \
+                   fn main() -> Int64 { let n = Node { name: \"a\", kids: [] }; \
+                   return n.kids.length; }";
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    /// RFC-0093 M1's hole. `consume d.title` takes one field and leaves the
+    /// record behind; the release walk is the TYPE and does not know that, so a
+    /// binding with a hole in it is left unreclaimed rather than freed twice.
+    #[test]
+    fn a_record_with_a_taken_field_is_left_alone() {
+        let src = "type Doc = { title: String, body: String } \
+                   fn main() -> Int64 { let d = Doc { title: \"a\" + \"b\", body: \"c\" }; \
+                   let t = consume d.title; return t.byteLength; }";
+        // `t` alone: `d` has a hole, and `t` is the String it gave away.
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
     }
 
     /// Census §14, Phase 5. An `Option` and a `Result` DO own their payload:

@@ -3001,6 +3001,18 @@ impl<'a> Gen<'a> {
                 }
                 Ok(())
             }
+            // A fixed `[N x T]` is a value, so the release is unrolled — `N` is a
+            // constant and there is no buffer to free, only the slots
+            // (RFC-0092 M3). The mirror of `deep_copy`'s own unrolled loop.
+            Type::ArrayN(inner, n) => {
+                let all = self.llt(ty);
+                for i in 0..n {
+                    let ev = self.fresh_tmp();
+                    self.emit(format!("{ev} = extractvalue {all} {v}, {i}"));
+                    self.deep_release(&ev, &inner)?;
+                }
+                Ok(())
+            }
             Type::Option(inner) => self.release_sum(v, &[(Some("1"), *inner)]),
             Type::Result(ok, err) => self.release_sum(v, &[(Some("1"), *ok), (Some("0"), *err)]),
             Type::Enum(vs) => self.release_enum(v, &vs),

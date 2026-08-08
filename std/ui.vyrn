@@ -2227,9 +2227,9 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         // A client page → JSON payload. A valid non-client route (a `.vyrn`/respond
         // page) → its real Response (non-JSON, so the client hard-navs). A true miss
         // → the `@error` payload (client renders the themed error page).
-        out = out + "        return match dhit {\n            Some(r) => r,\n            None => match hit {\n                Some(r) => r,\n                None => uiDataMiss(),\n            },\n        }\n    }\n"
+        out = out + "        return match consume dhit {\n            Some(r) => r,\n            None => match consume hit {\n                Some(r) => r,\n                None => uiDataMiss(),\n            },\n        }\n    }\n"
     }
-    out = out + "    return match hit {\n        Some(r) => r,\n        None => uiRouteNotFound(),\n    }\n}\n"
+    out = out + "    return match consume hit {\n        Some(r) => r,\n        None => uiRouteNotFound(),\n    }\n}\n"
     return out + uiEmitMountable(pages)
 }
 
