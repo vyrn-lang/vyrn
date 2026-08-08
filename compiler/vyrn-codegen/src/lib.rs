@@ -4449,6 +4449,9 @@ impl<'a> Gen<'a> {
     /// `Type::Unit` for value-less calls (`print`, Unit functions).
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         match expr {
+            // RFC-0093: a take is the load the read already emits, without the
+            // `deep_copy` call that used to follow it.
+            Expr::Consume { place, .. } => self.gen_expr(place),
             Expr::Int(n) => Ok((n.to_string(), Type::Int)),
             // A byte literal (RFC-0057) is an integer literal at the IR level; its
             // value flows through unchanged. The checker has already fixed its
@@ -10597,6 +10600,7 @@ fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
             Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
                 in_expr(expr, out)
             }
+            Expr::Consume { place, .. } => in_expr(place, out),
             Expr::Binary { lhs, rhs, .. } => {
                 in_expr(lhs, out);
                 in_expr(rhs, out);
@@ -10864,6 +10868,9 @@ fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, str
             }
         }
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } => ban_append_expr(expr, banned, strict),
+        // A take hands the stored place the buffer itself, so the root is
+        // banned exactly as a bare mention is.
+        Expr::Consume { place, .. } => ban_append_expr(place, banned, strict),
         // An operator's operands are a retaining position only if the LOWERING
         // keeps the pointer. `binop_retains_str` is the decision, exhaustive on
         // `BinOp` so a new operator cannot be added without making one.
@@ -11007,6 +11014,7 @@ fn collect_regex_expr(e: &Expr, out: &mut Vec<String>) {
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             collect_regex_expr(expr, out)
         }
+        Expr::Consume { place, .. } => collect_regex_expr(place, out),
         Expr::Call { args, .. } | Expr::TryConstruct { args, .. } | Expr::Spawn { args, .. } => {
             for a in args {
                 collect_regex_expr(a, out);
@@ -11133,6 +11141,7 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             collect_strings_expr(expr, out, types)
         }
+        Expr::Consume { place, .. } => collect_strings_expr(place, out, types),
         Expr::Binary { lhs, rhs, .. } => {
             collect_strings_expr(lhs, out, types);
             collect_strings_expr(rhs, out, types);

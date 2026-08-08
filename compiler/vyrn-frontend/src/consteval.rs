@@ -189,6 +189,8 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
         | Expr::ArrayLit { .. }
         | Expr::MapLit { .. }
         | Expr::Spawn { .. }
+        // A take is a move, and nothing that moves is a compile-time constant.
+        | Expr::Consume { .. }
         | Expr::Lambda { .. } => None,
     }
 }
@@ -231,6 +233,7 @@ pub fn contains_call(expr: &Expr) -> bool {
             .iter()
             .any(|(k, v)| contains_call(k) || contains_call(v)),
         Expr::Spawn { .. } => true,
+        Expr::Consume { place, .. } => contains_call(place),
         // A lambda literal is not a constant and never appears in a refinement
         // predicate (the checker forbids it outside a call argument).
         Expr::Lambda { .. } => true,

@@ -1,9 +1,9 @@
 # RFC-0093 — A Take Is a Move Out of a Place
 
-- **Status:** **Designed, not built.** The count is measured over the migrated
-  corpus: **44 of the 114 `.copy()` calls RFC-0092 M1 added**, plus four public
-  signatures it distorted. The recommendation is at the bottom and it is "build
-  M1; hold M2 until RFC-0092 M3 starts."
+- **Status:** **M1 landed. M2 waits on RFC-0092 M3.** The design predicted 44
+  copies; the migration removed **45**, and gave four distorted public signatures
+  their return values back. "M1 as landed" at the bottom says what the design got
+  right and the two things it got wrong.
 - **Depends on:** RFC-0089 rules 1, 2 and 4 (landed), RFC-0092 M1 (landed),
   RFC-0011 (`swapRemove`, landed). RFC-0092 M3 is **not** a dependency and this
   RFC states what M3 must do about it.
@@ -722,3 +722,107 @@ moves any of them. `std/http`'s `httpCopy` and `std/ui`'s `Head` builders are th
 two largest clusters of copies in the whole corpus, and the only thing that would
 move them is `consume` on the signature, which is a decision about every caller.
 That is a different question and it deserves its own count, not this one's.
+
+---
+
+## M1 as landed
+
+**The count is 45, against a prediction of 44 and a gate of 40.** The corpus
+holds 454 `.copy()` calls where it held 499. Every site was classified by the
+compiler and not by hand: apply the take, run `vyrn check`, keep what
+`check_take` accepts. The extra copies over the predicted 44 sit inside the four
+restored signatures — `gqlArgList`'s `return v.err.copy()` is one — so they are
+copies the shape change removed rather than copies replaced in place.
+
+**The nine-line drain takes all nine.** `std/vyx.vyrn:1431-1439` is nine
+`consume sc.<field>` lines with `sc` never read as a whole afterwards. That is
+the site answer (a) could not have: under a whole-root move only the ninth is
+legal. The design's central choice survived its own test.
+
+**The four signatures are back.** `vyxParseElem` and `vyxProcessElem` return
+their `{ node, .. }` pairs; `gqlArgList` and `gqlSelSet` return `GqlArgs` and
+`GqlSet`. Each caller writes `consume p.node` or `consume parsed.args`. One thing
+was worse than "a signature": `vyxProcessElem`'s distortion had also turned a
+running error `String` into a caller's `Array<String>`, because the out-parameter
+had nowhere else to put it. Restoring the pair restored the simpler shape too.
+
+**The whole-binding form earned its one site**, exactly where the count said it
+would. `examples/graphql.vyrn:195` is now
+`match consume r { Some(res) => consume res.body }`.
+
+### The two things the design got wrong
+
+**A `[` is not a path boundary, and the take's relation must say so.** The RFC
+said `root_of` already exists to compare a path with its root. It does, and it
+splits on `.` **or** `[` — which is right for a root and wrong for this.
+RFC-0082's place desugar names its temporaries after the paths they took, so
+`o.i.xs[k] = v` moves through bindings literally called `o.i[]` and `o.i[].xs[]`.
+Read as paths, the second is inside the first, and every write-back then reads as
+a use of something moved. They are not paths; they are one binding each. `under`
+therefore relates fields only, and a name carrying a `[` relates to nothing but
+itself. `tests/places.rs` caught this twice, once per direction.
+
+**A hole is a flag, not a shape.** "The root has a hole in it" cannot be decided
+by testing whether some consumed key is longer than the path — for the same
+desugar reason. `Consumption` carries a `hole` bit, set only by a take of a
+projection. Everything else in the map is a whole binding moved whole, whatever
+its name looks like.
+
+### What that changed in the plan, and what it did not
+
+**The loop is path-keyed too.** The RFC described the prefix and left
+`for t in consume b.tags` as a relaxation. It is more than that: the loop must
+record `b.tags` rather than `b`, or the field it took empties the whole record.
+One `if root == path` around the `took` call, and the same `hole` bit.
+
+**A place chain asks ONE question, of the whole path.** The RFC's "a use of `p`
+after a take of `p.f` is checked by prefix" is half the rule. The other half is
+that a use of `p.g` after a take of `p.f` must not be checked at `p` at all, so
+`Expr::Field` stops recursing into its root for the consumption question and asks
+it once, of the path it names. The root still gets its capture bookkeeping.
+
+**Everything else held.** `own.rs` needed nothing. The textual backend and the
+direct wasm backend needed one recursion arm each, and three-way parity is
+byte-identical — 124 checked, 11 skipped, 0 failed. The memory suite is unmoved:
+eleven steady, `elementLeak` leaking. RFC-0092's instrument reads `stores: 0`,
+`elem-store: 0`, `elem-return: 0` and `returns: 7`, without a second mode — a
+take is not a projection, so the zero stayed zero on its own.
+
+### Diagnostics, which were half the deliverable
+
+The refusal that RFC-0092 M1 could only answer with `.copy()` names the take
+first now, and only where `check_take` would accept it — an owned root, not a
+borrowed one and not module state:
+
+```text
+`b.name` may not be stored into `push(..)` — it is read out of a place that owns it
+  fix: `consume b.name` if `b` should give it up — the field is dead afterwards
+  fix: `b.name.copy()` if both sides need a value
+```
+
+Using the root after a take names the take's line, because that is the line the
+reader has to change:
+
+```text
+`b.name` was taken out of `b` here
+line 22: ... and `b` is used as a whole here, with the hole still in it
+  fix: `b.name.copy()` on line 21 if `b` is still needed whole
+  fix: write `b.name` back before this line
+```
+
+And `consume xs[0]` no longer says "nothing to take". A container is the one
+place that can hold a hole at run time, so the menu names the primitive that
+already spells it:
+
+```text
+`xs[0]` may not be taken — an element is not a place a take reaches
+  fix: `xs.swapRemove(..)` returns the element and leaves the container one shorter
+```
+
+### What M1 did not close
+
+Everything under "What this does not close" above still stands. In particular the
+**183 C-bucket copies** off a borrowed parameter or `self` are untouched, and
+`std/http`'s `httpCopy` and `std/ui`'s five `Head` builders are still the two
+largest clusters in the corpus. They want `consume` on the signature, which is a
+decision about every caller and deserves its own count.

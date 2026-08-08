@@ -1204,6 +1204,7 @@ fn mount_calls_expr<'a>(e: &'a Expr, out: &mut Vec<&'a [Expr]>) {
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
             mount_calls_expr(expr, out)
         }
+        Expr::Consume { place, .. } => mount_calls_expr(place, out),
         Expr::Binary { lhs, rhs, .. } => {
             mount_calls_expr(lhs, out);
             mount_calls_expr(rhs, out);
@@ -3551,6 +3552,12 @@ impl<'a> Interp<'a> {
 
     fn expr(&self, expr: &Expr, scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {
         match expr {
+            // RFC-0093: a take reads the place. A `Val` is `Rc`-shared, so the
+            // take clones the handle and the record keeps a word nothing reads
+            // again — movecheck has already proved that. Nothing is released, so
+            // nothing is observable, which is why parity expects byte-identical
+            // output.
+            Expr::Consume { place, .. } => self.expr(place, scope),
             Expr::Int(n) => Ok(Val::Int(*n)),
             // A byte literal (RFC-0057) is an integer value at runtime — the
             // checker has already given it its `UInt8`/coerced type; the raw

@@ -9,6 +9,7 @@
     { "include": "#strings" },
     { "include": "#byte-literal" },
     { "include": "#capabilities" },
+    { "include": "#take" },
     { "include": "#test-bench-keyword" },
     { "include": "#contextual-keywords" },
     { "include": "#keywords" },
@@ -69,6 +70,11 @@
         "1": { "name": "punctuation.separator.vyrn" },
         "3": { "name": "storage.modifier.vyrn" }
       }
+    },
+    "take": {
+      "comment": "`consume` in its two VALUE positions: the loop form `for x in consume xs` (RFC-0089 rule 2) and the take prefix `out.push(consume d.title)` (RFC-0093). Both are contextual in exactly the same way the capability is — `consume` is the word only when another identifier follows it — so the lookahead requires a lowerCamelCase name and nothing else. A call to a user function named `consume` writes `consume(x)` and does not match. Same storage.modifier scope as the capability, because it is the same word saying the same thing.",
+      "match": "\\bconsume(?=\\s+[a-z_][A-Za-z0-9_]*)",
+      "name": "storage.modifier.vyrn"
     },
     "strings": {
       "patterns": [

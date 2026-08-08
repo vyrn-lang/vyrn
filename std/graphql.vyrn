@@ -777,6 +777,9 @@ export type GqlSel = {
     subs: Array<GqlSel>,
 }
 
+/// A parsed selection set, or the reason it would not parse (`err != ""`).
+type GqlSet = { sels: Array<GqlSel>, err: String }
+
 /// A parsed operation: its root (`"query"` / `"mutation"`), its selected fields,
 /// and the reason it would not parse (`err != ""`).
 export type GqlQuery = { root: String, sels: Array<GqlSel>, err: String }
@@ -793,10 +796,18 @@ fn gqlAt(sc: Scanner, b: UInt8) -> Bool {
     return peek(sc) == Int64(b)
 }
 
+/// A failed parse carrying `why`.
+fn gqlSetErr(why: String) -> GqlSet {
+    return GqlSet { sels: [], err: why.copy() }
+}
+
 // ---- argument values -------------------------------------------------------
 
 /// A parsed argument value, or the reason it would not parse (`err != ""`).
 type GqlVal = { value: Json, err: String }
+
+/// A parsed argument list, or the reason it would not parse (`err != ""`).
+type GqlArgs = { args: Array<JsonField>, err: String }
 
 /// A failed value parse carrying `why`.
 fn gqlValErr(why: String) -> GqlVal {
@@ -891,7 +902,7 @@ fn gqlListValue(sc: modify Scanner) -> GqlVal {
         if v.err != "" {
             return v
         }
-        items.push(v.value.copy())
+        items.push(consume v.value)
         skipWs(sc)
     }
     if gqlAt(sc, ']') == false {
@@ -927,7 +938,7 @@ fn gqlObjectValue(sc: modify Scanner) -> GqlVal {
         if v.err != "" {
             return v
         }
-        fields.push(JsonField { key: key, value: v.value.copy() })
+        fields.push(JsonField { key: key, value: consume v.value })
         skipWs(sc)
     }
     if gqlAt(sc, '}') == false {
@@ -937,15 +948,16 @@ fn gqlObjectValue(sc: modify Scanner) -> GqlVal {
     return GqlVal { value: JObj(fields), err: "" }
 }
 
-/// Parse an argument list, the cursor sitting on its opening `(`. The arguments
-/// are appended to `out`; the result is the error, `""` for none.
+/// Parse an argument list, the cursor sitting on its opening `(`.
 ///
-/// It appends rather than returning a `{ args, err }` pair, because reading
-/// `parsed.args` back out of such a pair is a projection of a place the frame
-/// owns (RFC-0092), and `Array<JsonField>` reaches `Json`, which refers to
-/// itself and has no structural copy.
-fn gqlArgList(sc: modify Scanner, out: modify Array<JsonField>) -> String {
+/// It returns the `{ args, err }` pair. The caller writes `consume parsed.args`
+/// to move the list out of it (RFC-0093). RFC-0092 M1 had to make it an
+/// out-parameter, because reading `parsed.args` was a projection and
+/// `Array<JsonField>` reaches `Json`, which refers to itself and has no
+/// structural copy.
+fn gqlArgList(sc: modify Scanner) -> GqlArgs {
     advance(sc)
+    let mut out: Array<JsonField> = []
     skipWs(sc)
     while atEnd(sc) == false && gqlAt(sc, ')') == false {
         if gqlAt(sc, ',') {
@@ -955,39 +967,37 @@ fn gqlArgList(sc: modify Scanner, out: modify Array<JsonField>) -> String {
         }
         let name = ident(sc)
         if name == "" {
-            return "expected an argument name"
+            return GqlArgs { args: [], err: "expected an argument name" }
         }
         skipWs(sc)
         if gqlAt(sc, ':') == false {
-            return "argument `" + name + "`: expected `:`"
+            return GqlArgs { args: [], err: "argument `" + name + "`: expected `:`" }
         }
         advance(sc)
         let v = gqlValue(sc)
         if v.err != "" {
-            return v.err.copy()
+            return GqlArgs { args: [], err: consume v.err }
         }
-        out.push(JsonField { key: name, value: v.value.copy() })
+        out.push(JsonField { key: name, value: consume v.value })
         skipWs(sc)
     }
     if gqlAt(sc, ')') == false {
-        return "unterminated argument list: expected `)`"
+        return GqlArgs { args: [], err: "unterminated argument list: expected `)`" }
     }
     advance(sc)
-    return ""
+    return GqlArgs { args: out, err: "" }
 }
 
 /// Parse a selection set, the cursor sitting on its opening `{`.
 ///
 /// Commas are insignificant in GraphQL — the spec lists them with whitespace —
 /// so they are skipped rather than required.
-fn gqlSelSet(sc: modify Scanner, out: modify Array<GqlSel>) -> String {
+fn gqlSelSet(sc: modify Scanner) -> GqlSet {
     if gqlAt(sc, '{') == false {
-        return "expected `{` to open a selection set"
+        return gqlSetErr("expected `{` to open a selection set")
     }
     advance(sc)
-    // What was already in the list is the caller's, so "selected nothing" is
-    // measured from here rather than from zero.
-    let base = out.length
+    let mut out: Array<GqlSel> = []
     skipWs(sc)
     while atEnd(sc) == false && gqlAt(sc, '}') == false {
         if gqlAt(sc, ',') {
@@ -997,7 +1007,7 @@ fn gqlSelSet(sc: modify Scanner, out: modify Array<GqlSel>) -> String {
         }
         let first = ident(sc)
         if first == "" {
-            return "expected a field name in a selection set"
+            return gqlSetErr("expected a field name in a selection set")
         }
         skipWs(sc)
         // `key: field` — the alias renames the answer and nothing else; the field
@@ -1008,36 +1018,38 @@ fn gqlSelSet(sc: modify Scanner, out: modify Array<GqlSel>) -> String {
             skipWs(sc)
             name = ident(sc)
             if name == "" {
-                return "alias `" + first + "`: expected the field it renames"
+                return gqlSetErr("alias `" + first + "`: expected the field it renames")
             }
             skipWs(sc)
         }
         let mut args: Array<JsonField> = []
         if gqlAt(sc, '(') {
-            let argErr = gqlArgList(sc, args)
-            if argErr != "" {
-                return "field `" + name + "`: " + argErr
+            let parsed = gqlArgList(sc)
+            if parsed.err != "" {
+                return gqlSetErr("field `" + name + "`: " + parsed.err)
             }
+            args = consume parsed.args
             skipWs(sc)
         }
         let mut subs: Array<GqlSel> = []
         if gqlAt(sc, '{') {
-            let innerErr = gqlSelSet(sc, subs)
-            if innerErr != "" {
-                return innerErr
+            let inner = gqlSelSet(sc)
+            if inner.err != "" {
+                return inner
             }
+            subs = consume inner.sels
         }
         out.push(GqlSel { key: first, name: name, args: args, subs: subs })
         skipWs(sc)
     }
     if gqlAt(sc, '}') == false {
-        return "unterminated selection set: expected `}`"
+        return gqlSetErr("unterminated selection set: expected `}`")
     }
     advance(sc)
-    if out.length == base {
-        return "a selection set must select at least one field"
+    if out.length == 0 {
+        return gqlSetErr("a selection set must select at least one field")
     }
-    return ""
+    return GqlSet { sels: out, err: "" }
 }
 
 /// Parse one executable operation: an optional `query`/`mutation` keyword and
@@ -1072,10 +1084,9 @@ export fn gqlParseQuery(src: String) -> GqlQuery {
             return GqlQuery { root: root, sels: [], err: "variable definitions are not supported" }
         }
     }
-    let mut sels: Array<GqlSel> = []
-    let setErr = gqlSelSet(sc, sels)
-    if setErr != "" {
-        return GqlQuery { root: root, sels: [], err: setErr }
+    let set = gqlSelSet(sc)
+    if set.err != "" {
+        return GqlQuery { root: root, sels: [], err: consume set.err }
     }
     skipWs(sc)
     if atEnd(sc) == false {
@@ -1085,7 +1096,7 @@ export fn gqlParseQuery(src: String) -> GqlQuery {
             err: "a document with more than one operation is not supported",
         }
     }
-    return GqlQuery { root: root, sels: sels, err: "" }
+    return GqlQuery { root: root, sels: consume set.sels, err: "" }
 }
 
 // ---- projection ------------------------------------------------------------
@@ -1293,7 +1304,7 @@ fn gqlProjectEach(
         if r.failed {
             failed = true
         }
-        out.push(r.value.copy())
+        out.push(consume r.value)
         i = i + 1
     }
     let v = if failed { JNull } else { JArr(out) }
@@ -1908,7 +1919,7 @@ fn gqlTestProject(query: String) -> String {
     let sels = gqlParseQuery(query).sels
     let r = gqlProject(gqlTestValue(), sels[0].subs, "BookList!", [], gqlTestSchema)
     return emit(JObj([
-                JsonField { key: "value", value: r.value.copy() },
+                JsonField { key: "value", value: consume r.value },
                 JsonField { key: "errors", value: gqlErrJson(r.errs) },
                 JsonField { key: "climbing", value: JBool(r.failed) },
             ]))

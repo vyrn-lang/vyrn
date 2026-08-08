@@ -3415,6 +3415,10 @@ impl Fn_<'_> {
     /// on the stack, and giving the Vyrn type of what it left.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         Ok(match e {
+            // RFC-0093: a take is the load the read already emits. The `.copy()`
+            // that used to follow it is what the take removes, so the emitted
+            // output is strictly smaller and never a new shape.
+            Expr::Consume { place, .. } => self.expr(m, b, place)?,
             Expr::Int(v) => {
                 b.ins(&Instruction::I64Const(*v));
                 Type::Int
@@ -3998,6 +4002,7 @@ impl Fn_<'_> {
     /// arm actually produced, so a wrong prediction is loud rather than silent.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
         Ok(match e {
+            Expr::Consume { place, .. } => self.peek(place, line)?,
             Expr::Int(_) | Expr::Byte(_) => Type::Int,
             Expr::Float(_) => Type::Float,
             Expr::Bool(_) => Type::Bool,

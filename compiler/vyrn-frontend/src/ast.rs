@@ -1187,6 +1187,18 @@ pub enum Expr {
         body: LambdaBody,
         line: usize,
     },
+    /// `consume place` — a take: the value at `place` is moved out and the place
+    /// is dead from that point (RFC-0093). The third position of the word:
+    /// a parameter capability, `for x in consume xs`, and now a prefix on a
+    /// place expression. `place` is a `Var` or a `Field` chain; every other
+    /// shape is refused by `movecheck`, which owns the whole rule.
+    ///
+    /// Every engine below the frontend lowers it as its operand: a take is the
+    /// load the read already emits, without the `.copy()` that used to follow.
+    Consume {
+        place: Box<Expr>,
+        line: usize,
+    },
 }
 
 /// A lambda's body (RFC-0023): a single expression (`|x| x * 2`) or a
@@ -1249,6 +1261,7 @@ impl Expr {
             | Expr::ArrayLit { line, .. }
             | Expr::MapLit { line, .. }
             | Expr::Spawn { line, .. }
+            | Expr::Consume { line, .. }
             | Expr::Lambda { line, .. } => *line,
         }
     }

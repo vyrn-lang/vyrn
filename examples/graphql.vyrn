@@ -191,8 +191,8 @@ fn topResolve(root: String, field: String, args: Array<JsonField>) -> Result<Jso
 /// The reply body for `body`, or "" when nothing routed it.
 fn reply(body: String) -> String {
     let r = graphqlHandle(Request { method: "POST", path: "/graphql", headers: [:], body: body.copy() })
-    return match r {
-        Some(res) => res.body.copy(),
+    return match consume r {
+        Some(res) => consume res.body,
         None => "",
     }
 }

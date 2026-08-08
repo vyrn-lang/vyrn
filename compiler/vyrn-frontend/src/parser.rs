@@ -4118,6 +4118,19 @@ impl Parser {
                     line,
                 })
             }
+            // `consume place` — the take (RFC-0093). Contextual by the test that
+            // already serves the parameter capability and `for x in consume xs`:
+            // `consume` is the word only when another identifier follows it, so
+            // `consume(y)` stays a call to a user function named `consume`.
+            Tok::Ident(id)
+                if id == "consume" && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_)) =>
+            {
+                self.advance();
+                Ok(Expr::Consume {
+                    place: Box::new(self.postfix()?),
+                    line,
+                })
+            }
             _ => self.postfix(),
         }
     }

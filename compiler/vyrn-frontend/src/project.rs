@@ -779,6 +779,7 @@ fn walk_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
             walk_expr(expr, f)
         }
+        Expr::Consume { place, .. } => walk_expr(place, f),
         Expr::Binary { lhs, rhs, .. } => {
             walk_expr(lhs, f);
             walk_expr(rhs, f);
