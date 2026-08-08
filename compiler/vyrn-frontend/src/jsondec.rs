@@ -171,7 +171,7 @@ impl Walk<'_> {
              \x20   if iss.length > 0 {{\n\
              \x20       return Invalid(iss)\n\
              \x20   }}\n\
-             \x20   for x in val {{\n\
+             \x20   for x in consume val {{\n\
              \x20       return Valid(x)\n\
              \x20   }}\n\
              \x20   return Invalid(iss)\n\
@@ -540,7 +540,7 @@ impl Walk<'_> {
              \x20   for f in {fields_of}(v) {{\n\
              \x20       let dv = {d}(f.value, {fpath}(path, f.key), iss)\n\
              \x20       if m.has(f.key) == false {{\n\
-             \x20           for x in dv {{\n\
+             \x20           for x in consume dv {{\n\
              \x20               m[f.key] = x\n\
              \x20           }}\n\
              \x20       }}\n\
