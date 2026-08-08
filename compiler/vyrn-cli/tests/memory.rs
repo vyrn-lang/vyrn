@@ -49,6 +49,7 @@
 //! | `lambdaLoop` | §16 | steady | Phase 10b: a stored closure owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum |
 //! | `elementLeak` | U4 | steady | RFC-0092 M2: an array owns its elements, because M1's rule proves every route into one is a store |
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
+//! | `keysLoop` | U4's price | leaks | `for k in m.keys()` — the snapshot is a temporary nothing releases, and M2 made its elements copies |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
 //!
 //! **§10 does not reach this harness.** The census says a `spawn` frame is
@@ -477,6 +478,19 @@ const ROWS: &[Row] = &[
               opens for a container that knows what it owns, and stays open for one that cannot",
     },
     Row {
+        export: "keysLoop",
+        census: "U4's price",
+        today: Shape::Leaks,
+        why: "RFC-0092 M2's cost, measured and kept. `for k in m.keys()` walks a TEMPORARY, and a \
+              loop over a temporary owns its elements and releases nothing — the body may take one \
+              (`fs.push(Field { key: k, .. })` is what the JSON encoder does), so releasing them \
+              at the loop's end would free what the body kept. Before M2 the snapshot held the \
+              map's own key pointers and only its 4-bytes-per-key buffer leaked; the keys are \
+              copies now, so the leak is the key BYTES. Measured native, 2000 turns over 100 \
+              65-byte keys: 6 MB peak before, 24 MB after. Phase 10a's row for an `if let` over a \
+              temporary is the shape that closes this, applied to `for` and per element",
+    },
+    Row {
         export: "returnedString",
         census: "§9a",
         today: Shape::Steady,
@@ -507,6 +521,8 @@ type Bump = fn(Int64) -> Int64
 type Row = {{ name: String, n: Int64 }}
 
 let mut row: Row = Row {{ name: "", n: 0 }}
+
+let mut keyed: Map<String, Int64> = [:]
 
 /// A ~900-byte literal. It lives in the data segment, so calling this allocates
 /// nothing — every allocation below is the concatenation, and only that.
@@ -618,6 +634,20 @@ export extern fn slotsContainer() {{
     let mut s: Slots<String> = newSlots()
     let h = insert(s, tag() + "!")
     seen = seen + count(s)
+}}
+
+/// RFC-0092 M2's price. `m.keys()` copies its keys now, and a snapshot walked by
+/// `for` is a temporary that nothing reclaims, so every turn leaks one buffer and
+/// one String per key. The map is built once and kept in module state, so the
+/// only allocation per call is the snapshot.
+export extern fn keysLoop() {{
+    if keyed.length == 0 {{
+        keyed[tag() + "a"] = 1
+        keyed[tag() + "b"] = 2
+    }}
+    for k in keyed.keys() {{
+        seen = seen + Int64(k.byteLength)
+    }}
 }}
 
 export extern fn returnedString() -> String {{

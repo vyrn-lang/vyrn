@@ -1,8 +1,9 @@
 # RFC-0092 — A Projection Is a Borrow
 
-- **Status:** **M0 measured; M1 landed; M2 to M4 designed, not built.** The rule
-  is enforced and the corpus is migrated — see "M1 as landed". Supersedes
-  nothing. Closes named gaps in RFC-0087 (§3,
+- **Status:** **M0 measured; M1 and M2 landed; M3 and M4 designed, not built.**
+  The rule is enforced, the corpus is migrated, and census **U4 is closed** — an
+  `Array<T>` releases its elements. See "M1 as landed" and "M2 as landed".
+  Supersedes nothing. Closes named gaps in RFC-0087 (§3,
   §14's remainder, U4), RFC-0089 rule 4 (the half its own status line says is
   missing) and RFC-0086 M3 (the recorded storage hole).
 - **Depends on:** RFC-0089 (rules 1 to 4, all landed), RFC-0086 M1 and M3
@@ -247,6 +248,30 @@ source, there are **three**, and `own.rs`'s comment (`own.rs:319-321`) undercoun
 | `toArray(sa)` | the element words, one `memcpy` (`vyrn-codegen/src/lib.rs:9523-9527`) | every element of a `SmallArray<String, N>` |
 | `@list(fixed)` | the element words, through `array_n_to_heap` (`lib.rs:9684-9693`) | every element of an `[N x String]` |
 
+**M2 re-counted this table and it is wrong in both directions.** There are still
+three, and they are not these three.
+
+- **`@list(fixed)` is not one.** Its only producer is the tagged-template
+  desugar (`parser.rs:4645`), which always hands it an `ArrayLit` — a temporary
+  whose elements are stores, so `@list` MOVES them. Making it copy would have
+  leaked the originals, since a fixed array has no release row to give them
+  back. It is left alone.
+- **`toArray` is two, not one.** On a `SmallArray` it copies the element words,
+  as the table says. On a plain `Array` it returned the receiver's `{ptr, len,
+  cap}` triple **unchanged** (`lib.rs:9576`), so two owned bindings named one
+  buffer — a double free of the buffer before the element row and of every
+  element after it. Its own comment said "a defensive copy-out too" and the code
+  did not. It copies now. (The direct backend refuses that receiver outright —
+  `no lowering for the call @toArray` — so the shape was interpreter-and-native
+  only, and it stays that way.)
+- **The third is not a builtin at all.** It is the compiler's own synthesized
+  `fromJson` decoder, which walked a one-element carrier with `for x in val` and
+  handed the element out — the exact spelling M1's rule refuses in written Vyrn.
+  A synthesized module is never move-checked, so the rule had never been applied
+  to it. Both sites take the element now (`for x in consume val`). M1 found and
+  fixed a third site in the same file (`f0[0]` → `swapRemove(0)`) and these two
+  were the remainder.
+
 A fourth builtin that returns `Array<String>` does **not** alias, and it is the
 one that shows the right shape. `args()` walks argv and builds an owned String
 per element with `__vyrn_str_new` plus a `memcpy` (`lib.rs:352-376`). Its own doc
@@ -286,7 +311,8 @@ gate. The seeded built-in rows are already how `String`, `Array`, `Map`,
 |---|---|---|---|
 | `Type::Record`, `Type::Enum` | `None` (`own.rs:325`) | `Deep` | the rule |
 | `Type::ArrayN` | `None` (`own.rs:325`) | `Deep` | the rule + `@list` |
-| `Type::Array`, `Type::Map`, `Type::SmallArray` | buffer only (`own.rs:238-241`) | buffer + elements | the rule + all three constructors |
+| `Type::Array` | buffer only (`own.rs:238-241`) | buffer + elements | the rule + the constructors — **landed in M2** |
+| `Type::Map`, `Type::SmallArray` | buffer only | buffer + elements | the rule; no constructor views either |
 | `linear_kind` on a container | reads the container's own key | reads the element's too | the row above |
 
 The walk is the one Phase 5 settled: `copy` run backwards, written as one shape
@@ -717,16 +743,81 @@ sixteen-byte keys, before and after, in `examples/membench.vyrn`. The measuremen
 is kept whatever it says: this is a correctness repair, and the interpreter has
 been paying it all along.
 
+**M2 as landed.** The gate is met and it took the `Array` row with it, because a
+constructor that copies is only worth building beside the row that made it
+necessary. `Array<T>` releases its elements, `elementLeak` is **steady**, and
+the memory suite reads twelve steady and one new leaking row. Parity is
+`124 checked, 11 skipped, 0 failed`, and the instrument still reads
+`stores: 0`, `elem-store: 0`, `elem-return: 0`, `returns: 7`.
+
+**The row is a recursion, not a widening.** `release_kind(Array<T>)` answers
+`Deep` where `release_kind(T)` answers anything, and `FreeArr` where it does
+not. So an element is released the way its own type is released: `Array<String>`
+frees its Strings, `Array<Record>` frees nothing until M3 gives a record its
+row, and neither engine needed a second table. The gate on the element loop is
+the element's ROW rather than `owns_heap` — a record reaches two Strings and
+owns them under no rule yet, and walking into one here would have shipped M3
+without measuring it.
+
+**Three back doors, and only one was a builtin the census named.** The
+constructor table above records what M2 found: `@list` never viewed anything,
+`toArray` was two sites rather than one, and the third was not a builtin at all
+but the synthesized `fromJson` decoder, which is the one Vyrn in this repo that
+M1's rule never got to check.
+
+**A declared container had to stop doing it by hand.** `std/slots` released
+every element in a loop and then dropped `vals`, which is the same range. The
+second release is the built-in row now, so the loop is gone — six lines deleted
+from the module whose whole point was that it could say what an array could not.
+The double free showed up as native heap corruption in `examples/genref.vyrn`
+inside the hour, and NOT in the memory suite: a double free frees, so a row that
+watches the steady state cannot see one. Parity is what sees it.
+
+**The price, measured.**
+
+- `keys()` over 1,000 sixteen-byte keys, ten snapshots: **1.24 ms → 1.49 ms**
+  median, native (`examples/membench.vyrn`). One `malloc` and one `memcpy` per
+  key where there was a pointer store: 20% on the row that is all `keys()`, and
+  the interpreter has paid it since RFC-0028.
+- **The keystroke budget is unmoved**: `lspbench` reads 9.9 ms on `vlog.vyrn`
+  and 55.1 → 57.2 ms on `graphql.vyrn`, against the 97 ms budget.
+- **A leak got bigger and it is now a row.** `for k in m.keys()` walks a
+  temporary, and a loop over a temporary releases nothing — it cannot, because
+  the body may take an element, which is exactly what the JSON encoder's
+  `fs.push(Field { key: k, .. })` does. The snapshot used to leak 4 bytes per
+  key; it leaks the key BYTES now. Measured native over 2,000 turns of a
+  100-key map: **6 MB peak → 24 MB**. The memory suite gains `keysLoop`,
+  asserting the leak, so the day it stops is a failure and not a silence.
+  Phase 10a's row for an `if let` over a temporary is the shape that closes it,
+  applied to `for` and per element — and it needs the per-element move tracking
+  a store out of the loop body already relies on.
+
+**One pre-existing double free found and left alone.** `fromArray(xs)` on a
+NAMED array leaves the array and the stream owning one buffer, and the native
+binary corrupts its heap. It reproduces on `Array<Int64>`, so it predates this
+row; no example passes a named array to `fromArray`, which is why parity has
+never seen it. Filed, not fixed here.
+
 ### M3 — the release rows
 
-`Record`, `Enum` and `ArrayN` take `Deep`. `Array`, `Map` and `SmallArray` take a
+`Record`, `Enum` and `ArrayN` take `Deep`. `Map` and `SmallArray` take a
 per-element release. M3 decides the inline-loop against the per-type function by
 measuring both on `domdemo.wasm` and `fib.wasm`.
 
-**Gate.** `elementLeak` flips to steady — the row RFC-0087 has carried since
-Phase 5, asserting its own leak so the day it stops is a failure and not a
-silence. And the emitted size of `domdemo.wasm` grows by less than the String
-header did (1,664 bytes), or the per-type function ships instead.
+**`Array` is done** — M2 took it, because the constructors and the row that
+makes them necessary are one change and shipping either alone proves nothing.
+What is left is the four rows that have no view constructor between them and the
+rule.
+
+**Gate.** `elementLeak` flips to steady — **met in M2**. And the emitted size of
+`domdemo.wasm` grows by less than the String header did (1,664 bytes), or the
+per-type function ships instead.
+
+**What M2 leaves M3 to answer.** A store into an `Array<T>` place — `xs = ys` —
+hands back the one buffer it always did and leaks the elements it held. Freeing
+them means reading a length the store is in the middle of replacing, and the
+snapshot-then-store order the rest of the store path uses does not carry a
+count. It is the same shape the `Map` and `SmallArray` rows will need.
 
 ### M4 — the obligation recurses
 
