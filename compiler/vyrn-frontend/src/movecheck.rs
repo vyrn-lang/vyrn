@@ -3759,6 +3759,14 @@ mod tests {
 
     /// Phase 6's other half of the menu: inside an `export extern fn` the
     /// `consume` fix does not exist, so it is not offered.
+    ///
+    /// It was offered on the RETURN path until RFC-0092 M1, which is the half
+    /// this covers second. `check_return` asked `exported` only for the borrow
+    /// kinds it was NOT going to refuse, so a returned `read` parameter fell
+    /// through to the general menu and was told to `declare the parameter q:
+    /// consume ..` — a fix RFC-0089 M3b refuses at an export signature, which is
+    /// the "wording a reader has to see through" Phase 9 recorded. The `exported`
+    /// question comes first now, for every kind.
     #[test]
     fn an_exports_borrow_menu_names_copy_alone() {
         let src = "let mut kept = \"x\" \
@@ -3766,6 +3774,20 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
         assert!(e.contains("fix: `arg.copy()`"), "{e}");
+        assert!(
+            !e.contains("consume"),
+            "an export may not consume a String: {e}"
+        );
+        // The same, returned out of an arm rather than stored.
+        let e = run("export extern fn pick(p: String, q: String) -> String \
+                     { return if p == \"\" { q } else { p } } \
+                     fn main() -> Int64 { return 0 }")
+        .unwrap_err();
+        assert!(
+            e.contains("may not be returned from an exported function"),
+            "{e}"
+        );
+        assert!(e.contains("an `export extern fn` owns its result"), "{e}");
         assert!(
             !e.contains("consume"),
             "an export may not consume a String: {e}"

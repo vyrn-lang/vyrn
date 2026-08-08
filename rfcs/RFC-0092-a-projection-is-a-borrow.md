@@ -665,6 +665,14 @@ nearly lost it: `Borrow::Projection` fell through to the general refusal, so an
 handed. `check_return` now asks `exported` **first, for every kind of borrow**,
 and the general refusal is what is left after it.
 
+Asking first also fixed a defect that predates this RFC. `check_return` used to
+ask `exported` only for the kinds it was NOT going to refuse, so a returned
+`read` parameter fell through to the general menu and was told to `declare the
+parameter q: consume ..` — a fix RFC-0089 M3b refuses at an export signature,
+which is exactly the "wording a reader has to see through" Phase 9 recorded and
+`fixes_here` already encodes for stores. `an_exports_borrow_menu_names_copy_alone`
+covers the return path now as well as the store.
+
 **The leak count moved.** `vyrn why --memory` over the corpus reports 2,127
 bindings not reclaimed, down from 2,230 — 200 files answer, ten need a project
 root and are skipped by the same script both times. The rule refuses programs,
