@@ -3733,9 +3733,19 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {k})"));
                 self.emit(format!("call void @free(ptr {v})"));
             }
-            // Phase 5: an aggregate owns its places. The walk is the type.
+            // Phase 5: an aggregate owns its places. The walk is the type — and
+            // in a generic instantiation the type still carries its parameters,
+            // so it is the SOLVED one. `own` decides against the declaration and
+            // this emits against the instance, exactly as `rel_kind` does one
+            // function down. Without it `llt` answered `void` for a `Param` and
+            // the walk emitted `load { void, { i64, i64 } }`, which clang refuses
+            // (`examples/generics.vyrn`); it went unseen while only an `Option`
+            // and a `Result` reached here, because a generic sum's payload
+            // travels as a word.
             DropKind::Deep(ty) => {
-                let ty = ty.clone();
+                let ty = self
+                    .slot_ty(slot)
+                    .unwrap_or_else(|| vyrn_frontend::types::substitute(ty, self.subst));
                 let ll = self.llt(&ty);
                 let v = self.fresh_tmp();
                 self.emit(format!("{v} = load {ll}, ptr {slot}"));

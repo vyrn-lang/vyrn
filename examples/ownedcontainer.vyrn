@@ -13,7 +13,7 @@
 
 /// A type that owns heap and can say how to give it back.
 protocol Owned {
-    fn release(self)
+    fn release(consume self)
 }
 
 type Ring = {
@@ -22,11 +22,11 @@ type Ring = {
 }
 
 impl Owned for Ring {
-    fn release(self) {
+    fn release(consume self) {
         // Printing here is what makes the reclamation observable. All three
         // engines run this, at the same point, in the same order.
         print("release " + self.label + " (" + self.slots.length.toString() + ")")
-        let slots = self.slots
+        let slots = consume self.slots
         drop slots // the buffer goes back, once, here and nowhere else
     }
 }
@@ -38,7 +38,7 @@ type Tally = {
 }
 
 impl Owned for Tally {
-    fn release(self) {
+    fn release(consume self) {
         print("tally " + self.total.toString())
     }
 }

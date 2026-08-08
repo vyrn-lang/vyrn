@@ -26,7 +26,7 @@ protocol MustUse {}
 
 /// A type that owns heap and can say how to give it back (RFC-0086 M1).
 protocol Owned {
-    fn release(self)
+    fn release(consume self)
 }
 
 type Txn = {
@@ -37,11 +37,11 @@ type Txn = {
 impl MustUse for Txn {}
 
 impl Owned for Txn {
-    fn release(self) {
+    fn release(consume self) {
         // Printing here is what makes the disposal observable. All three engines
         // run it, at the same point, in the same order.
         print("end " + self.label + " (" + self.ops.length.toString() + ")")
-        let ops = self.ops
+        let ops = consume self.ops
         drop ops
     }
 }

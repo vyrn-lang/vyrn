@@ -2625,7 +2625,7 @@ fn boxedPayload(p: Choice) -> Cargo {
         Second => Empty,
         First => Held(Cargo { weight: 3, label: "three" }),
     }
-    return match boxed {
+    return match consume boxed {
         Empty => Cargo { weight: 99, label: "fallback" },
         Held(s) => s,
     }
