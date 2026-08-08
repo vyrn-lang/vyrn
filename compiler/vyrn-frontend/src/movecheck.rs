@@ -4168,6 +4168,97 @@ mod tests {
         // parameter's capability follows.
         assert!(run("fn consume(n: Int64) -> Array<Int64> { return [n] }                      fn main() -> Int64 { let mut t = 0 for x in consume(1) { t = t + x }                      return t }")
             .is_ok());
+        // The prefix reads the word at a third position and is contextual by the
+        // same test: `consume(1)` in an argument is still a call (RFC-0093).
+        assert!(run("fn consume(n: Int64) -> Array<Int64> { return [n] }                      fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }                      fn main() -> Int64 { return take(consume(1)) }")
+            .is_ok());
+    }
+
+    // ---- RFC-0093: the take ---------------------------------------------
+
+    /// The whole of the path-keyed hole, in the four sentences that define it.
+    #[test]
+    fn a_take_empties_one_path_and_leaves_the_rest() {
+        const DECLS: &str = "type Bag = { a: String, b: String } \
+                             fn make() -> Bag { return Bag { a: \"x\" + \"y\", b: \"p\" + \"q\" } } ";
+        let go = |body: &str| {
+            run(&format!(
+                "{DECLS} fn go() -> Int64 {{ {body} }} fn main() -> Int64 {{ return 0 }}"
+            ))
+        };
+
+        // A sibling field survives the take. This is the sentence a whole-root
+        // move cannot say, and the nine-line drain in `std/vyx` is made of it.
+        assert!(go("let d = make() let mut o: Array<String> = [] o.push(consume d.a) o.push(consume d.b) return o.length").is_ok());
+        // The taken path does not.
+        let e = go("let d = make() let mut o: Array<String> = [] o.push(consume d.a) return d.a.byteLength").unwrap_err();
+        assert!(e.contains("`d.a` was moved here into `consume`"), "{e}");
+        // Nor does the root as a whole: the record has a hole in it.
+        let e = go("let d = make() let mut o: Array<String> = [] o.push(consume d.a) let t = d return t.b.byteLength").unwrap_err();
+        assert!(e.contains("`d.a` was taken out of `d` here"), "{e}");
+        assert!(e.contains("with the hole still in it"), "{e}");
+        // A write fills the hole.
+        assert!(go("let mut d = make() let mut o: Array<String> = [] o.push(consume d.a) d.a = \"z\" return d.a.byteLength").is_ok());
+    }
+
+    /// The union at a branch join: a take on one arm is a take on both, so the
+    /// arm that did not take leaks rather than freeing something twice.
+    #[test]
+    fn a_take_on_one_branch_is_a_take_on_both() {
+        let src = "type Bag = { a: String } \
+                   fn make() -> Bag { return Bag { a: \"x\" + \"y\" } } \
+                   fn go(n: Int64) -> Int64 { let d = make() let mut o: Array<String> = [] \
+                       if n > 0 { o.push(consume d.a) } \
+                       return d.a.byteLength } \
+                   fn main() -> Int64 { return 0 }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("`d.a` was moved here into `consume`"), "{e}");
+    }
+
+    /// The three refusals that stay, each with the menu it prints.
+    #[test]
+    fn a_take_needs_a_place_the_frame_owns() {
+        const DECLS: &str = "type Bag = { a: String } \
+                             let g: String = \"m\" \
+                             fn fresh() -> String { return \"f\" } ";
+        let go = |sig: &str, body: &str| {
+            run(&format!("{DECLS} fn go({sig}) -> Int64 {{ let mut o: Array<String> = [] {body} return o.length }} fn main() -> Int64 {{ return 0 }}"))
+        };
+        // A borrowed root: the frame does not own it, so it may not give it away.
+        let e = go("d: read Bag", "o.push(consume d.a)").unwrap_err();
+        assert!(
+            e.contains("`d` may not be consumed — it is a `read` parameter"),
+            "{e}"
+        );
+        // Module state is nobody's to take.
+        let e = go("", "o.push(consume g)").unwrap_err();
+        assert!(
+            e.contains("module state `g` may not be consumed by a take"),
+            "{e}"
+        );
+        // A fresh value is already owned — there is no place to leave a hole in.
+        let e = go("", "o.push(consume fresh())").unwrap_err();
+        assert!(e.contains("nothing to take"), "{e}");
+        // An element is the one place that CAN hold a hole at run time, and
+        // `swapRemove` already spells it.
+        let e = go("", "let mut xs: Array<String> = [] o.push(consume xs[0])").unwrap_err();
+        assert!(e.contains("`xs.swapRemove(..)`"), "{e}");
+    }
+
+    /// The menu RFC-0092 M1 could only answer with `.copy()` names the take
+    /// first now — and only where `check_take` would accept it.
+    #[test]
+    fn the_projection_menu_offers_the_take_where_it_exists() {
+        const DECLS: &str = "type Bag = { a: String } \
+                             fn make() -> Bag { return Bag { a: \"x\" + \"y\" } } ";
+        let owned = run(&format!("{DECLS} fn go() -> Int64 {{ let d = make() let mut o: Array<String> = [] o.push(d.a) return o.length }} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
+        assert!(
+            owned.contains("fix: `consume d.a` if `d` should give it up"),
+            "{owned}"
+        );
+        // A borrowed root has no take, so the menu must not name one.
+        let borrowed = run(&format!("{DECLS} fn go(d: read Bag) -> Int64 {{ let mut o: Array<String> = [] o.push(d.a) return o.length }} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
+        assert!(!borrowed.contains("`consume d.a`"), "{borrowed}");
     }
 
     #[test]
