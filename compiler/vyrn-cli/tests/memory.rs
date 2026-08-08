@@ -484,7 +484,15 @@ const ROWS: &[Row] = &[
         export: "takenField",
         census: "RFC-0093 M2",
         today: Shape::Steady,
-        why: "RFC-0093 M2: a take moves a field out of a record and leaves a hole, and the               release walk is the TYPE — which does not know the field left. M1 left the whole               binding unreclaimed, because a leak is a task and a double free is a bug; M2               carries the hole set from `movecheck` to `own` to both walks, so the record is               reclaimed MINUS the place it gave away. The row is the arithmetic: N turns               allocate two Strings and free two — N, not 2N and not 0. Where the walk cannot be               told, the binding still leaks whole: a declared `release` is a user function, a               path that is not a chain of record fields is not a place a static walk reaches,               and a write that fills the hole already released what the take gave away",
+        why: "RFC-0093 M2: a take moves a field out of a record and leaves a hole, and the \
+              release walk is the TYPE — which does not know the field left. M1 left the whole \
+              binding unreclaimed, because a leak is a task and a double free is a bug; M2 \
+              carries the hole set from `movecheck` to `own` to both walks, so the record is \
+              reclaimed MINUS the place it gave away. The row is the arithmetic: N turns \
+              allocate two Strings and free two — N, not 2N and not 0. Where the walk cannot be \
+              told, the binding still leaks whole: a declared `release` is a user function, a \
+              path that is not a chain of record fields is not a place a static walk reaches, \
+              and a write that fills the hole already released what the take gave away",
     },
     Row {
         export: "slotsContainer",
