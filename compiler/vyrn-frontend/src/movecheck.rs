@@ -84,14 +84,16 @@ pub fn owning_sites(program: &Program) -> Vec<OwningSite> {
     run(program, Want::Sites).sites
 }
 
-/// One place RFC-0092's rule would reach: a **projection** — a field, an element
-/// or a pattern binder over a place — read out and put somewhere the frame does
-/// not end with.
+/// One place RFC-0092's rule reaches: a **projection** — a field, an element or
+/// a pattern binder over a place — read out and put somewhere the frame does not
+/// end with.
 ///
-/// M0 records these and refuses nothing. The count is the migration this RFC
-/// costs, and it is the gate on M1: over 300 and the store half does not ship.
-/// A site whose type owns no heap costs nothing, so [`ProjectionSite::owns_heap`]
-/// is what separates the bill from the noise.
+/// M0 recorded these and refused nothing; the count was the gate on M1. **M1
+/// refuses them, and this stays as the regression guard**: the two places that
+/// refuse are still the two places that record, so a site that reappears in the
+/// corpus is counted rather than argued about. A site whose type owns no heap
+/// costs nothing, so [`ProjectionSite::owns_heap`] separates the bill from the
+/// noise.
 #[derive(Clone, Debug)]
 pub struct ProjectionSite {
     /// `store` (the value put into a field, an element, a literal, module state
@@ -113,9 +115,10 @@ pub struct ProjectionSite {
     pub owns_heap: bool,
 }
 
-/// Every [`ProjectionSite`] in `program` (RFC-0092 M0).
+/// Every [`ProjectionSite`] in `program` (RFC-0092).
 ///
-/// The same walk [`check_accum`] runs, with recording on and nothing refused.
+/// The same walk [`check_accum`] runs, with recording on. Since M1 the recorded
+/// sites are also refused, so over a corpus that compiles this answers empty.
 /// Pass a **linked** program: a file read alone cannot name an imported type, so
 /// every cross-module result reads as `?` — the error Phase 4b's per-file
 /// measurement made, by 81 sites.
@@ -986,25 +989,43 @@ impl MoveCheck<'_> {
         outlives: bool,
         consumed: &mut Consumed,
     ) -> Result<bool, String> {
-        // RFC-0092 M0. `xs[i]` stored inline, which nothing below sees: the bail
-        // on the next line is where it leaves. Counted whatever the container is,
-        // because a borrowed container's element is no more storable than an
-        // owned one's and neither is refused today.
-        if self.projections.is_some() && outlives {
-            if let Some((_, path)) = element_path(value) {
+        // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
+        // pass as `at(xs, i)`, which is a call, so the `place_path` bail two
+        // blocks down is where it used to leave — invisible to every rule.
+        //
+        // M1 widens `store` to see it, which M0 left as this milestone's
+        // decision. The reason is the RFC's own thesis: `let t = xs[i]` already
+        // binds a `Borrow::Projection` (see [`MoveCheck::borrow_from`]) and rule
+        // 2 already refuses storing `t`. Leaving the inline form alone would
+        // reproduce, for elements, exactly the two-spellings-two-verdicts defect
+        // this RFC exists to remove. Refused whatever the container is, because a
+        // borrowed container's element is no more storable than an owned one's.
+        if let Some((root, path)) = element_path(value) {
+            if self.projections.is_some() && outlives {
                 let ty = self.type_of(value);
                 self.note_projection("elem-store", &path, into(), ty, line);
+            }
+            if outlives && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
+                let b = self.borrow_of(&root).unwrap_or(Borrow::Projection);
+                self.note_retention(value);
+                return Err(menu(
+                    line,
+                    format!(
+                        "`{path}` may not be stored into {} — it is {}",
+                        into(),
+                        b.what(&path)
+                    ),
+                    self.fixes_here(&b, &root, &path),
+                ));
             }
         }
         let Some((root, path)) = place_path(value) else {
             return Ok(false);
         };
-        // RFC-0092 M0. A projection of a place this frame owns, put somewhere
-        // that outlives the frame: exactly what `path != root` below waves
-        // through, and exactly what the rule would refuse. Recorded BEFORE the
-        // `owns_heap` guard, so a scalar field is counted and told apart rather
-        // than lost. `outlives` is false for a rebinding, which rule 2 does not
-        // refuse either; a root that is already a borrow is refused today.
+        // RFC-0092 M0's instrument, kept as M1's regression guard: it records
+        // what the branch below now refuses, so a site that reappears is counted.
+        // Recorded BEFORE the `owns_heap` guard, so a scalar field is counted and
+        // told apart rather than lost.
         if self.projections.is_some() && path != root && outlives && self.borrow_of(&root).is_none()
         {
             let ty = self.type_of(value);
@@ -1031,10 +1052,30 @@ impl MoveCheck<'_> {
                 self.fixes_here(&b, &root, &path),
             ));
         }
-        // Reading a field out of a record does not take the record: the binding
-        // it makes is itself a borrow (recorded by the caller), so nothing moves.
+        // RFC-0092's rule: **a projection is a borrow of its root, whatever the
+        // root is.** Reading a field out of a record does not take the record —
+        // the record still owns the buffer — so putting that buffer anywhere the
+        // frame does not end with gives it two owners. The old bail said the
+        // binding this store makes is "recorded by the caller", which is true of
+        // a `let` and false of `out.push(d.title)`: there is no `let` and no
+        // caller to record anything.
+        //
+        // A rebinding is not a store, and rule 2 does not refuse one either:
+        // `let t = d.title` is fine and [`MoveCheck::borrow_from`] gives `t` the
+        // projection, which rule 2 then enforces on.
         if path != root {
-            return Ok(false);
+            if !outlives {
+                return Ok(false);
+            }
+            return Err(menu(
+                line,
+                format!(
+                    "`{path}` may not be stored into {} — it is {}",
+                    into(),
+                    Borrow::Projection.what(&path)
+                ),
+                Borrow::Projection.fixes(&root, &path),
+            ));
         }
         self.took(&root, Gone::Moved { line, by: into() });
         consumed.insert(
@@ -1188,12 +1229,12 @@ impl MoveCheck<'_> {
     /// caller RELEASES the result — a `String`, an `Array`, a `Map`, a cell, or a
     /// declared `Owned` type. That is where the hole costs a use-after-free.
     ///
-    /// Two reasons to stop there. An enum or a record releases nothing yet, so a
-    /// borrow smuggled out inside one is today's leak and Phase 5's job. And the
-    /// named fix is `.copy()`, which `Html` and `Json` cannot answer at all: a
-    /// type that refers to itself has no structural copy (RFC-0089 M1b), so
-    /// widening this now would refuse programs with no way out. RFC-0091 M1's
-    /// `Copy` protocol is what makes the wider rule sayable.
+    /// **RFC-0092 M1 widened it to a projection.** Phase 4b stopped at a borrowed
+    /// PARAMETER because the named fix is `.copy()`, which `Html` and `Json` could
+    /// not answer: a type that refers to itself had no structural copy (RFC-0089
+    /// M1b). RFC-0091 M1's `Copy` protocol answers it, so `return d.title` out of
+    /// a record this frame owns is refused now, and so is a projection or a
+    /// pattern binder yielded by a `match` arm.
     fn check_return(&self, e: &Expr, line: usize) -> Result<(), String> {
         self.note_returned_projection(e, line);
         if !self.decl.owns_heap(&self.ret.borrow()) {
@@ -1203,14 +1244,7 @@ impl MoveCheck<'_> {
         // every borrow is refused, whatever kind it is.
         if let Some((root, path)) = place_path(e) {
             if let Some(b) = self.borrow_of(&root) {
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be returned — it is {}, and a return is owned",
-                        b.what(&path)
-                    ),
-                    b.fixes(&root, &path),
-                ));
+                return Err(self.refuse_return(&b, &root, &path, line));
             }
             // Module state is not a borrow, and Phase 6 found that this is where
             // that costs a use-after-free. A global lives for the whole module
@@ -1219,6 +1253,13 @@ impl MoveCheck<'_> {
             // caller free it. `examples/` never wrote it, so parity never saw it:
             // the interpreter's values cannot dangle and the wasm allocator
             // handed the block straight back out.
+            //
+            // This one does NOT go through [`MoveCheck::refuse_return`], and the
+            // reason is that it is a different FACT rather than a different
+            // caller: "nothing may take module state" is true of a Vyrn caller
+            // and a JS caller alike, and its menu already names `.copy()` alone.
+            // Routing it through the shared exit would replace a true sentence
+            // with a vaguer one.
             if self.decl.releases(&self.ret.borrow()) && self.is_module_state(&root) {
                 return Err(menu(
                     line,
@@ -1230,6 +1271,14 @@ impl MoveCheck<'_> {
                         "`{path}.copy()` — the caller releases what it is handed"
                     )],
                 ));
+            }
+            // RFC-0092's rule at the return. `return d.title` out of a record
+            // this frame owns hands the caller a buffer `d` still holds, and rule
+            // 3 makes the caller free it. `borrow_of` answers `None` for an owned
+            // local, so this shape reached no reading at all — not refused, and
+            // not even recorded as a lend.
+            if path != root {
+                return Err(self.refuse_return(&Borrow::Projection, &root, &path, line));
             }
             return Ok(());
         }
@@ -1246,43 +1295,72 @@ impl MoveCheck<'_> {
         let Some((b, root, path)) = found else {
             return Ok(());
         };
-        // Only a borrowed PARAMETER is refused here. It is a lifetime error with
-        // a named fix, and it is the class Phase 4b missed: 4b read `return p`
-        // as a statement, and these return a parameter from inside a `match`
-        // arm, which is an expression. A returned PROJECTION is the other half —
-        // `numText(j)` hands back the enum's own text — and refusing it would
-        // demand `.copy()` from `Json` and `Html`, which refer to themselves and
-        // have no structural copy (RFC-0089 M1b). Those are recorded above
-        // instead, so nothing releases them, and RFC-0091 M1's `Copy` protocol
-        // plus 7a's place projections are what make the wider rule sayable.
-        if !matches!(b, Borrow::Read(_) | Borrow::Modify(_)) {
-            // …unless the caller is JS. A Vyrn caller reads the lend out of
-            // `lending` and releases nothing; a JS caller reads nothing, and
-            // since RFC-0089 M3b `wasi-min.js` frees every String an export
-            // hands back. So an export owns its result or it does not compile.
-            if self.exported.contains(&*self.cur_fn.borrow()) {
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be returned from an exported function — it is {}, \
-                         and the JS caller releases what it is handed",
-                        b.what(&path)
-                    ),
-                    vec![format!(
-                        "`{path}.copy()` — an `export extern fn` owns its result"
-                    )],
-                ));
-            }
+        // An export refuses every kind, so it is asked before the narrowing.
+        if self.exported.contains(&*self.cur_fn.borrow()) {
+            return Err(self.refuse_return(&b, &root, &path, line));
+        }
+        // A borrowed PARAMETER and, since RFC-0092 M1, a PROJECTION. The
+        // parameter is the class Phase 4b missed: 4b read `return p` as a
+        // statement, and these return a parameter from inside a `match` arm,
+        // which is an expression. The projection is the other half — `numText(j)`
+        // hands back the enum's own text — and 4b left it recorded as a lend
+        // because the named fix is `.copy()`, which `Json` and `Html` could not
+        // answer. RFC-0091 M1's `Copy` protocol answers it.
+        //
+        // A `for` variable ([`Borrow::Element`]) is NOT widened here. It is a
+        // projection of its container in kind, but it is outside this RFC's three
+        // sites and outside the count that priced them, so it keeps 4b's verdict.
+        if !matches!(b, Borrow::Read(_) | Borrow::Modify(_) | Borrow::Projection) {
             return Ok(());
         }
-        Err(menu(
+        Err(self.refuse_return(&b, &root, &path, line))
+    }
+
+    /// The refusal a returned borrow gets — **the one exit for all three of
+    /// them**.
+    ///
+    /// [`MoveCheck::check_return`] refuses a return from three different places:
+    /// a place named straight at the `return` whose root is a borrow (`return
+    /// q`), a projection of a place the frame owns (`return d.title`), and a
+    /// borrow yielded by a `match` or `if` arm (`return match t { W(s) => s }`).
+    /// They are separate because each answers a different question first, and
+    /// merging them would merge those questions.
+    ///
+    /// What they must NOT differ about is the answer, and they did. The
+    /// `exported` check lived at the arm exit alone, so an `export extern fn`
+    /// that returned a `read` parameter directly was handed the general menu and
+    /// told to ``declare the parameter `q: consume ..` `` — which its own
+    /// signature then refuses: *"the caller across this boundary is JS, and it
+    /// releases the String when the call returns"* (RFC-0089 M3b). One program
+    /// spelled two ways got two menus, one of which sent the reader to a second
+    /// error. Fixing that at one exit fixed two spellings and missed the third,
+    /// twice, which is what this function exists to stop.
+    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> String {
+        // A Vyrn caller reads the lend out of `lending` and releases nothing; a
+        // JS caller reads nothing, and since RFC-0089 M3b `wasi-min.js` frees
+        // every String an export hands back. So an export owns its result or it
+        // does not compile, and `.copy()` is the only fix that exists for it.
+        if self.exported.contains(&*self.cur_fn.borrow()) {
+            return menu(
+                line,
+                format!(
+                    "`{path}` may not be returned from an exported function — it is {}, \
+                     and the JS caller releases what it is handed",
+                    b.what(path)
+                ),
+                vec![format!(
+                    "`{path}.copy()` — an `export extern fn` owns its result"
+                )],
+            );
+        }
+        menu(
             line,
             format!(
                 "`{path}` may not be returned — it is {}, and a return is owned",
-                b.what(&path)
+                b.what(path)
             ),
-            b.fixes(&root, &path),
-        ))
+            b.fixes(root, path),
+        )
     }
 
     /// Note that argument `i` of `callee` was handed a place.
@@ -1377,22 +1455,14 @@ impl MoveCheck<'_> {
 
     /// The first borrow a returned expression yields, looking through the forms
     /// that yield one of their arms.
-    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {
-        self.returned_borrow_with(e, false)
-    }
-
-    /// The same walk under RFC-0092's leaf: a projection is a borrow of its root
-    /// **whatever the root is**, so `d.title` out of a locally built record is a
-    /// borrow too. `borrow_of` answers `None` for an owned local, and `?` then
-    /// drops the whole projection — the hole this RFC names.
     ///
-    /// M0 reads it with `projections = true` to COUNT; nothing calls it that way
-    /// on the check path, so no program's verdict moves. M1 is this flag deleted.
-    fn returned_borrow_with(
-        &self,
-        e: &Expr,
-        projections: bool,
-    ) -> Option<(Borrow, String, String)> {
+    /// It carries RFC-0092's leaf: **a projection is a borrow of its root
+    /// whatever the root is**, so `d.title` out of a locally built record is a
+    /// borrow too, and so is `items[i]`. Before M1 this walk asked
+    /// `borrow_of(&root)?`, and `borrow_of` answers `None` for an owned local, so
+    /// `?` dropped the whole projection — the hole the RFC names. M0 read the
+    /// leaf behind a flag to count it; M1 is that flag deleted.
+    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {
         match e {
             Expr::Match {
                 scrutinee, arms, ..
@@ -1404,7 +1474,7 @@ impl MoveCheck<'_> {
                     for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                     }
-                    let r = self.returned_borrow_with(&arm.body, projections);
+                    let r = self.returned_borrow(&arm.body);
                     self.exit();
                     if r.is_some() {
                         found = r;
@@ -1418,38 +1488,34 @@ impl MoveCheck<'_> {
                 else_branch,
                 ..
             } => self
-                .returned_borrow_with(then_branch, projections)
-                .or_else(|| {
-                    else_branch
-                        .as_ref()
-                        .and_then(|b| self.returned_borrow_with(b, projections))
-                }),
+                .returned_borrow(then_branch)
+                .or_else(|| else_branch.as_ref().and_then(|b| self.returned_borrow(b))),
             _ => {
                 let Some((root, path)) = place_path(e) else {
-                    // An element read is a projection too, and today no reading
-                    // of a `return` sees one — M0 counts them apart.
-                    let (root, path) = projections.then(|| element_path(e)).flatten()?;
+                    // An element read is a projection too, and `place_path`
+                    // answers `None` for the `at(..)` call it lowers to.
+                    let (root, path) = element_path(e)?;
                     return Some((Borrow::Projection, root, path));
                 };
                 match self.borrow_of(&root) {
                     Some(b) => Some((b, root, path)),
-                    None if projections && path != root => Some((Borrow::Projection, root, path)),
+                    None if path != root => Some((Borrow::Projection, root, path)),
                     None => None,
                 }
             }
         }
     }
 
-    /// RFC-0092 M0: record a returned projection the rule would refuse.
+    /// RFC-0092: record a returned projection, for the instrument.
     ///
-    /// Two shapes reach here and neither is refused today. A place named straight
-    /// at the `return` whose root the frame OWNS (`return d.title`) is invisible
-    /// to `check_return` — `borrow_of` answers `None` and `?` drops it. A
-    /// projection or a pattern binder yielded by a `match`/`if` arm is recorded
-    /// as a lend and waved through.
+    /// Two shapes reach here: a place named straight at the `return` whose root
+    /// the frame OWNS (`return d.title`), and a projection or pattern binder
+    /// yielded by a `match`/`if` arm. Before M1 the first was invisible to
+    /// `check_return` and the second was recorded as a lend and waved through. M1
+    /// refuses both, a few lines below this call.
     ///
-    /// A root that is already a borrow is refused today (rule 3, Phase 4b), so it
-    /// is not part of this bill.
+    /// A root that is already a borrow was refused before this RFC (rule 3, Phase
+    /// 4b), so it is not part of this bill.
     fn note_returned_projection(&self, e: &Expr, line: usize) {
         if self.projections.is_none() {
             return;
@@ -1459,7 +1525,7 @@ impl MoveCheck<'_> {
                 return;
             }
         }
-        let Some((b, _, path)) = self.returned_borrow_with(e, true) else {
+        let Some((b, _, path)) = self.returned_borrow(e) else {
             return;
         };
         if b != Borrow::Projection {
@@ -1715,6 +1781,15 @@ impl MoveCheck<'_> {
                     }
                 };
                 let _ = self.store(value, &into, *line, global, consumed)?;
+                // An assignment rebinds, exactly as a `let` does, so it must
+                // carry the same answer: `t = d.title` makes `t` a projection of
+                // `d`. Without this, `let t = d.title` was refused at the next
+                // store and `let mut t = "" ; t = d.title` was not — RFC-0092's
+                // two-spellings-two-verdicts defect, one statement over.
+                if !global {
+                    let b = self.borrow_from(value);
+                    self.borrows.borrow_mut().rebind(name, b);
+                }
                 consumed.remove(name); // reassignment revives it
                 Ok(false)
             }
@@ -3188,18 +3263,44 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
 /// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `at(xs, i)`,
 /// which is a call, so [`place_path`] answers `None` for it.
 ///
-/// RFC-0092 M0 counts these APART. The RFC says an element read is covered "by
-/// the same three lines as a field read", and that is true of `borrow_from`,
-/// which reads `at(..)` itself — but [`MoveCheck::store`] bails at `place_path`
-/// before it decides anything, so `out.push(xs[i])` reaches none of the three
-/// sites. Whether M1 widens `store` is a decision, and the number is here for it.
+/// M0 found that the RFC was wrong to say an element read is covered "by the
+/// same three lines as a field read". It is true of `borrow_from`, which reads
+/// `at(..)` itself, and false of [`MoveCheck::store`] and of
+/// [`MoveCheck::returned_borrow`], both of which bailed at `place_path` before
+/// deciding anything. **M1 took the decision M0 left open and widened both**, so
+/// `out.push(xs[i])` and `return items[i]` are refused like the field they are.
+/// The instrument still counts them apart, under `elem-store` and `elem-return`.
 fn element_path(e: &Expr) -> Option<(String, String)> {
     match e {
         Expr::Call { name, args, .. } if name == "at" => {
-            let (root, path) = place_path(args.first()?)?;
-            Some((root, format!("{path}[..]")))
+            let a = args.first()?;
+            let (root, path) = place_path(a).or_else(|| element_path(a))?;
+            Some((root, format!("{path}[{}]", index_text(args.get(1)))))
+        }
+        // A field OF an element: `fs[0].key`. [`place_path`] walks a `Field` down
+        // to a `Var` and answers `None` as soon as it meets the `at(..)` call, so
+        // without this arm the escape hatch is one dot wide — `let f = fs[0]`
+        // then `return f.key` is refused and `return fs[0].key` is not.
+        Expr::Field { expr, field, .. } => {
+            let (root, path) = element_path(expr)?;
+            Some((root, format!("{path}.{field}")))
         }
         _ => None,
+    }
+}
+
+/// An index as the reader wrote it, for the quoted path in a diagnostic.
+///
+/// A whole name and a whole integer are spelled back, so `xs[i]` and `fs[0]`
+/// print as themselves and the `.copy()` on the menu is text `vyrn fix` can find
+/// in the line. Anything else prints `..`: the message still says which read is
+/// the problem, and `vyrn fix` then refuses rather than guessing where to put the
+/// call — which is the behaviour it already has for a path it cannot locate.
+fn index_text(e: Option<&Expr>) -> String {
+    match e {
+        Some(Expr::Var { name, .. }) => name.clone(),
+        Some(Expr::Int(n)) => n.to_string(),
+        _ => "..".to_string(),
     }
 }
 
@@ -3623,18 +3724,34 @@ mod tests {
         .is_ok());
     }
 
-    /// Rule 3 admits a lend where the caller is Vyrn — `ownership` reads the
-    /// `lending` set and releases nothing. A JS caller reads nothing, and since
-    /// RFC-0089 M3b `wasi-min.js` frees every String an export hands back. So an
-    /// export owns its result or it does not compile.
+    /// An arm-yielded projection is refused for EVERY caller since RFC-0092 M1,
+    /// and the export boundary still says something the general rule does not.
+    ///
+    /// This test used to open by asserting that an ordinary function MAY lend
+    /// one — the `lending` set records it and the Vyrn caller releases nothing.
+    /// That is the guesser RFC-0092's "Rejected" section exists to remove, and
+    /// it was Phase 4b's asymmetry written down: Phase 6 already refused the
+    /// direct spelling of the very same program (`return title` on module state,
+    /// `movecheck.rs`'s module-state branch), so `return match tag { Word(s) =>
+    /// s }` on module state was one program with two verdicts. Both are refused
+    /// now, and both name `.copy()`.
+    ///
+    /// What is still the export's own is the WORDING and the FIX: a JS caller
+    /// reads no `lending` set, and since RFC-0089 M3b `wasi-min.js` frees every
+    /// String an export hands back.
     #[test]
     fn an_export_may_not_lend_its_result() {
         let enum_and_state = "type Tag = | Word(String) | Num(Int64) \
                               let mut tag = Word(\"w\") ";
         let body = "return match tag { Word(s) => s, Num(n) => \"num\", } } \
                     fn main() -> Int64 { return 0 }";
-        // An ordinary function may lend: the caller is Vyrn and knows not to free.
-        assert!(run(&format!("{enum_and_state} fn text() -> String {{ {body}")).is_ok());
+        // An ordinary function may not lend one either (RFC-0092 M1), and the
+        // general refusal is what it gets.
+        let e = run(&format!("{enum_and_state} fn text() -> String {{ {body}")).unwrap_err();
+        assert!(e.contains("`s` may not be returned"), "{e}");
+        assert!(e.contains("read out of a place that owns it"), "{e}");
+        assert!(!e.contains("exported function"), "{e}");
+        // The export says the same no in its own words, and offers its own fix.
         let e = run(&format!(
             "{enum_and_state} export extern fn text() -> String {{ {body}"
         ))
@@ -3643,9 +3760,15 @@ mod tests {
             e.contains("may not be returned from an exported function"),
             "{e}"
         );
+        assert!(
+            e.contains("the JS caller releases what it is handed"),
+            "{e}"
+        );
         assert!(e.contains("fix: `s.copy()`"), "{e}");
+        // The one fix both of them name compiles, either side of the boundary.
         let fixed = "return match tag { Word(s) => s.copy(), Num(n) => \"num\", } } \
                      fn main() -> Int64 { return 0 }";
+        assert!(run(&format!("{enum_and_state} fn text() -> String {{ {fixed}")).is_ok());
         assert!(run(&format!(
             "{enum_and_state} export extern fn text() -> String {{ {fixed}"
         ))
@@ -3654,8 +3777,18 @@ mod tests {
 
     /// Phase 6's other half of the menu: inside an `export extern fn` the
     /// `consume` fix does not exist, so it is not offered.
+    ///
+    /// **Every way of getting the refusal, in one test, because they drifted.**
+    /// `check_return` refuses a return from three places, and RFC-0092 M1 put
+    /// the `exported` question at one of them, then at two. The third —
+    /// `return q`, the plainest spelling there is — kept offering ``declare the
+    /// parameter `q: consume ..` ``, which the same compiler then refuses at the
+    /// signature (RFC-0089 M3b). All three share
+    /// [`MoveCheck::refuse_return`] now, and all three are asserted here so the
+    /// next person to touch one has to look at the others.
     #[test]
     fn an_exports_borrow_menu_names_copy_alone() {
+        // A store into module state.
         let src = "let mut kept = \"x\" \
                    export extern fn set(arg: String) { kept = arg } \
                    fn main() -> Int64 { return 0 }";
@@ -3665,6 +3798,36 @@ mod tests {
             !e.contains("consume"),
             "an export may not consume a String: {e}"
         );
+        // Every spelling of a returned borrow: the parameter named straight at
+        // the `return`, a projection of a place the frame owns, and a borrow
+        // yielded by an arm. Each reaches `check_return` by a different route.
+        let spellings = [
+            "export extern fn plain(q: String) -> String { return q }",
+            "type D = { s: String } \
+             export extern fn field(q: String) -> String \
+             { let d = D { s: q.copy() } return d.s }",
+            "export extern fn pick(p: String, q: String) -> String \
+             { return if p == \"\" { q } else { p } }",
+        ];
+        for s in spellings {
+            let e = run(&format!("{s} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
+            assert!(
+                e.contains("may not be returned from an exported function"),
+                "{s}\n{e}"
+            );
+            assert!(
+                e.contains("the JS caller releases what it is handed"),
+                "{s}\n{e}"
+            );
+            assert!(
+                e.contains("an `export extern fn` owns its result"),
+                "{s}\n{e}"
+            );
+            assert!(
+                !e.contains("consume"),
+                "an export may not consume a String: {s}\n{e}"
+            );
+        }
         assert!(run("let mut kept = \"x\" \
                      export extern fn set(arg: String) { kept = arg.copy() } \
                      fn main() -> Int64 { return 0 }")
@@ -4257,6 +4420,10 @@ mod tests {
     /// projection, returns of a projection, and how many of each name a type that
     /// owns no heap — the rule does not reach those and they cost nothing.
     ///
+    /// M0 measured with this and refused nothing; **M1 refuses, and this is the
+    /// regression guard**. The store classes must read zero. The returns that
+    /// remain are the ones waiting on M3's release row — see the assertions.
+    ///
     /// Ignored by default: it reads the repository and links it. Run it with
     /// `cargo test -p vyrn-frontend --lib rfc0092 -- --ignored --nocapture`.
     #[test]
@@ -4355,7 +4522,7 @@ mod tests {
         for f in &unlinkable {
             println!("    not linked: {f}");
         }
-        println!("RFC-0092 projection sites the rule would refuse");
+        println!("RFC-0092 projection sites over the corpus");
         println!("  stores:  {stores}  (+{} scalar)", count("store", false));
         println!("  returns: {returns}  (+{} scalar)", count("return", false));
         println!("  total:   {}", stores + returns);
@@ -4364,10 +4531,12 @@ mod tests {
             unknown("store"),
             unknown("return")
         );
-        // An element read is a projection the RFC's three sites do not reach —
-        // see [`element_path`]. Reported beside the bill, not inside it.
+        // M1 widened `store` and `returned_borrow` to see an element read, so
+        // these are refused like the field they are. Still counted apart,
+        // because M0 counted them apart and the two numbers have to stay
+        // comparable.
         println!(
-            "  element reads, outside the three sites: {} store (+{} scalar), {} return (+{} scalar)",
+            "  element reads: {} store (+{} scalar), {} return (+{} scalar)",
             count("elem-store", true),
             count("elem-store", false),
             count("elem-return", true),
@@ -4381,10 +4550,36 @@ mod tests {
                 s.kind, s.line, s.func, s.path, s.into, s.ty
             );
         }
-        assert!(
-            stores + returns <= 300,
-            "RFC-0092 M0 gate: {} sites is over 300 — ship the return path only",
-            stores + returns
+        // M1's regression guard. Every store the rule refuses is migrated, and
+        // the corpus compiles, so the instrument reads zero for all three store
+        // classes and for an element return. A site that reappears fails here
+        // with its file and line already printed above.
+        assert_eq!(stores, 0, "RFC-0092 M1: a projection store came back");
+        assert_eq!(
+            count("elem-store", true),
+            0,
+            "RFC-0092 M1: an element store came back"
+        );
+        assert_eq!(
+            count("elem-return", true),
+            0,
+            "RFC-0092 M1: an element return came back"
+        );
+        // The returns that remain are all one shape and it is DELIBERATE.
+        // `check_return` refuses an arm-yielded projection only where the caller
+        // RELEASES the result (Phase 4b's guard, which this RFC does not move),
+        // and a record and a user enum have no release rule until M3. So
+        // `return match hit { Some(r) => r, .. }` on an `Option<Response>` is
+        // recorded and not refused: it cannot dangle while nothing frees a
+        // `Response`, and the day M3 gives `Type::Record` its row it can.
+        //
+        // **M3 closes these, in the change that gives the row.** Refusing them
+        // here would buy nothing and cost a copy of a whole HTTP response on
+        // every request. The number is asserted so it cannot grow in the
+        // meantime.
+        assert_eq!(
+            returns, 7,
+            "RFC-0092: the returns waiting on M3's release row moved — see the list above"
         );
     }
 

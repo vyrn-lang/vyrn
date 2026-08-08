@@ -45,7 +45,7 @@ fn isLoading(d: PageData<Array<Paste>>) -> Bool {
 fn recentRows(d: PageData<Array<Paste>>) -> Array<Paste> {
     return match d {
         Loading => [],
-        Ready(uiPs) => uiPs,
+        Ready(uiPs) => uiPs.copy(),
     }
 }
 

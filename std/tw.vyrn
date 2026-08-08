@@ -575,7 +575,7 @@ fn twBuildVocab(theme: TwTheme) -> Array<TwClassDef> {
 fn twSafelist(theme: TwTheme) -> Array<String> {
     let mut out: Array<String> = []
     for p in twAxisOf(theme, "safelist") {
-        out.push(p.value)
+        out.push(p.value.copy())
     }
     return out
 }

@@ -1989,6 +1989,25 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         for n in names {
             foreign_renames.insert((key.clone(), n.clone()), format!("{prefix}{n}"));
         }
+        // A flattened impl method follows its TYPE's rename rather than taking
+        // the prefix in front of the mangling. The parser turns `impl P for T`
+        // into a function called `P__T__m` (`parser.rs`), and the checker
+        // resolves a call to it by mangling the type key it sees — which here is
+        // the RENAMED `json$Json`. So the definition has to be
+        // `Copy__json$Json__copy`; `json$Copy__Json__copy`, which the loop above
+        // would mint, is a name nothing looks up. Overwrites that entry, so it
+        // runs after it.
+        for im in &m.program.impls {
+            let Some(k) = crate::types::type_key(&im.ty) else {
+                continue;
+            };
+            for me in &im.methods {
+                let old = crate::types::impl_method_name(&im.protocol, &k, &me.name);
+                let new =
+                    crate::types::impl_method_name(&im.protocol, &format!("{prefix}{k}"), &me.name);
+                foreign_renames.insert((key.clone(), old), new);
+            }
+        }
     }
 
     // Pass 1: alias collision checks + decide co-naming renames.

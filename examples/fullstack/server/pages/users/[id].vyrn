@@ -33,7 +33,7 @@ fn fetchUser(p: Params) -> Validation<Data> {
         return Invalid([Issue { key: "user.notFound", path: "id", message: "no user with id \{p.id}" }])
     }
     let u = byId(GetUserReq { id: p.id })
-    return Valid(Data { name: u.name, age: u.age })
+    return Valid(Data { name: u.name.copy(), age: u.age })
 }
 
 export fn page(p: Params, d: Data) -> Html {

@@ -53,8 +53,8 @@ impl Fallible for Http {
     }
     fn success(self) -> Output {
         return match self {
-            Body(b) => b,
-            Created(b) => b,
+            Body(b) => b.copy(),
+            Created(b) => b.copy(),
             NotFound => panic(\"unreachable\"),
             ServerError(m) => panic(\"unreachable\"),
         }

@@ -230,7 +230,7 @@ fn scan(s: String) -> Scanned {
         return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
     }
     let t = tidy(d, dp, trunc)
-    return Scanned { ok: true, neg: neg, d: t.d, dp: t.dp, trunc: t.trunc }
+    return Scanned { ok: true, neg: neg, d: t.d.copy(), dp: t.dp, trunc: t.trunc }
 }
 
 /// `m × 2^ex` as a `Float64`, exactly, for any `m < 2^53` and `ex >= -1074`.

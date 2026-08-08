@@ -39,8 +39,8 @@ impl Fallible for Http {
 
     fn success(self) -> Output {
         return match self {
-            Body(b) => b,
-            Created(b) => b,
+            Body(b) => b.copy(),
+            Created(b) => b.copy(),
             // `?` calls this only after `isSuccess` answered true, so these two
             // arms are unreachable. They still owe a `String`, and `panic`
             // (RFC-0079) is how an arm says it has none.

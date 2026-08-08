@@ -57,6 +57,20 @@ impl<T> Scopes<T> {
         self.0.iter().rev().find_map(|frame| frame.get(name))
     }
 
+    /// Replace the innermost binding of `name`, leaving the frame it lives in
+    /// alone. `bind` would shadow it in the CURRENT frame instead, which an
+    /// assignment inside an `if` must not do.
+    pub fn rebind(&mut self, name: &str, value: T) {
+        if let Some(frame) = self
+            .0
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.contains_key(name))
+        {
+            frame.insert(name.to_string(), value);
+        }
+    }
+
     /// The index of the frame that binds `name`, innermost first.
     ///
     /// A lambda capture is exactly "resolves to a frame below the lambda's own",

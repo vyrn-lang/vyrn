@@ -73,7 +73,7 @@ impl Unwrap for Line {
     fn valueOr(self, fallback: Output) -> Output {
         return match self {
             Blank => fallback.copy(),
-            Words(w) => w,
+            Words(w) => w.copy(),
         }
     }
 }

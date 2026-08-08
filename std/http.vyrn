@@ -36,7 +36,7 @@
 /// there must be a declared type name, which is precisely what a type parameter
 /// is not.
 
-import { Json, JsonField, emit } from "std/json"
+import { Json, JsonField, copyJsonFields, emit } from "std/json"
 import { parseJson } from "std/jsonread"
 import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
 // The ETag hash and the `Last-Modified` calendar, both already in std and both
@@ -847,7 +847,11 @@ fn httpApply(r: Route, req: Request, resp: consume Response) -> Response {
     if r.prefix {
         return resp
     }
-    let answered = httpMapMissing(r, resp)
+    // The answer is EDITED rather than rebuilt. A rebuilt `Response` reads
+    // `answered.body` into a new record, which is a projection of a place the
+    // frame owns and a copy of the whole body (RFC-0092). The bytes are already
+    // in the right place; only the fields the policy decides need writing.
+    let mut answered = httpMapMissing(r, resp)
     // Cache directives and validators describe a representation. A 4xx/5xx is not
     // one, so an error answer leaves with exactly what the codec gave it.
     if answered.status >= 300 {
@@ -857,21 +861,23 @@ fn httpApply(r: Route, req: Request, resp: consume Response) -> Response {
     let stamp = if r.modified == "" { "" } else { httpStamp(answered.body, r.modified) }
     let loc = if r.location == "" { "" } else { httpFill(r.location, answered.body) }
     let hs = httpHeaders(answered.headers, r, tag, stamp, loc)
-    let varyOn = if r.varyOn == "" { answered.vary } else { r.varyOn }
+    if r.varyOn != "" {
+        answered.vary = r.varyOn.copy()
+    }
     // The client already holds this representation. RFC 9110 §15.4.5: a 304 sends
     // the metadata that would have gone with the 200 and NO content — so the
     // validators and `Cache-Control` stay, the body goes, and the media type goes
     // with it (there is nothing left to describe).
     if httpFresh(req, tag, stamp) {
-        return Response { status: 304, contentType: "", body: "", vary: varyOn, headers: hs }
+        answered.status = 304
+        answered.contentType = ""
+        answered.body = ""
+        answered.headers = hs
+        return answered
     }
-    return Response {
-        status: httpStatus(r, answered.status, loc),
-        contentType: answered.contentType,
-        body: answered.body,
-        vary: varyOn,
-        headers: hs,
-    }
+    answered.status = httpStatus(r, answered.status, loc)
+    answered.headers = hs
+    return answered
 }
 
 /// The status a successful answer carries. An explicit `status` wins over
@@ -981,13 +987,10 @@ fn httpMaybe404(r: Route, resp: consume Response, why: String) -> Response {
     }
     // The body stays as the codec wrote it: the client gets the same
     // `{"Err":"…"}` the RPC surface would have given, at the status REST expects.
-    return Response {
-        status: 404,
-        contentType: resp.contentType,
-        body: resp.body,
-        vary: resp.vary,
-        headers: resp.headers,
-    }
+    // Edited, not rebuilt — see `httpApply`.
+    let mut out = resp
+    out.status = 404
+    return out
 }
 
 /// Call the stored predicate. RFC-0037 calls a `fn` value by NAME, so the field
@@ -1062,8 +1065,8 @@ fn httpScalar(body: String, key: String) -> String {
 
 fn httpText(v: Json) -> String {
     return match v {
-        JStr(s) => s,
-        JNum(n) => n,
+        JStr(s) => s.copy(),
+        JNum(n) => n.copy(),
         JBool(b) => b.toString(),
         JNull => "",
         JArr(xs) => "",
@@ -1133,7 +1136,7 @@ fn httpMatch(r: Route, req: Request) -> Option<Map<String, String>> {
     let mut i = 0
     while i < pat.length {
         if httpIsPlaceholder(pat[i]) {
-            ps[httpPlaceholderName(pat[i])] = got[i]
+            ps[httpPlaceholderName(pat[i])] = got[i].copy()
         } else {
             if pat[i] != got[i] {
                 return None
@@ -1325,7 +1328,7 @@ fn httpBodyFields(body: String) -> Array<JsonField> {
 
 fn httpFieldsOf(j: Json) -> Array<JsonField> {
     return match j {
-        JObj(fs) => fs,
+        JObj(fs) => copyJsonFields(fs),
         JNull => [],
         JBool(b) => [],
         JNum(n) => [],

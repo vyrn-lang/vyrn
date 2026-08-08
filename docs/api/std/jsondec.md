@@ -117,6 +117,9 @@ fn keyOf(v: Json) -> String
 The single key of a one-member object (a payload variant's wire form), or
 `""` — including for an object with zero or two or more members, which is the
 "exactly one wire form per value" rule.
+It reads the fields in place rather than through `fieldsOf`, which owes its
+caller a copy of the whole object (RFC-0092). One key is what leaves here, so
+one key is what is copied.
 
 ## valOf
 
@@ -124,7 +127,8 @@ The single key of a one-member object (a payload variant's wire form), or
 fn valOf(v: Json) -> Json
 ```
 
-The single value of a one-member object, or `JNull`.
+The single value of a one-member object, or `JNull`. Reads in place, for
+`keyOf`'s reason.
 
 ## pushType
 

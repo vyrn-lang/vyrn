@@ -202,7 +202,7 @@ export fn headHtml(h: Head) -> Array<Html> {
 /// `uiFirst` composes through the layout chain.
 export fn headTitleOf(h: Head) -> String {
     return match h.title {
-        Some(t) => t,
+        Some(t) => t.copy(),
         None => "",
     }
 }
@@ -255,7 +255,7 @@ export fn query<T>(run: consume fn() -> T) -> Query<T> {
 /// `q` marked lazy: the page renders its shell and a skeleton first, then fills
 /// the data region in. The server always has the data, so SSR is unaffected.
 export fn lazy<T>(q: consume Query<T>) -> Lazy<T> {
-    return Lazy { run: q.run }
+    return Lazy { run: q.run.copy() }
 }
 
 /// A query whose deferred call receives the page's route parameters.
@@ -265,7 +265,7 @@ export fn paramQuery<P, T>(run: consume fn(P) -> T) -> ParamQuery<P, T> {
 
 /// `q` marked lazy — the params-taking counterpart of [`lazy`].
 export fn paramLazy<P, T>(q: consume ParamQuery<P, T>) -> ParamLazy<P, T> {
-    return ParamLazy { run: q.run }
+    return ParamLazy { run: q.run.copy() }
 }
 
 /// Run a query, producing the page's data.
@@ -837,7 +837,7 @@ gen fn uiFieldType(f: UiFields, name: String) -> String {
     let mut i = 0
     while i < f.names.length {
         if f.names[i] == name {
-            return f.types[i]
+            return f.types[i].copy()
         }
         i = i + 1
     }
@@ -1243,7 +1243,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
             let mut ti = 0
             while ti < shape.paramNames.length {
                 if shape.paramNames[ti] == dyns[di] {
-                    dynTypes[di] = shape.paramTypes[ti]
+                    dynTypes[di] = shape.paramTypes[ti].copy()
                 }
                 ti = ti + 1
             }
@@ -2139,7 +2139,7 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         if pages[i].hasData {
             anyQuery = true
             if includes(runners, pages[i].dataRunner) == false {
-                runners.push(pages[i].dataRunner)
+                runners.push(pages[i].dataRunner.copy())
             }
         }
         i = i + 1

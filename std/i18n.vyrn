@@ -512,7 +512,7 @@ gen fn joinSortedSelectors(br: Branches) -> String {
         let mut j = i
         while j > 0 && names[j - 1] > names[j] {
             let tmp = names[j - 1]
-            names[j - 1] = names[j]
+            names[j - 1] = names[j].copy()
             names[j] = tmp.copy()
             j = j - 1
         }
@@ -541,7 +541,7 @@ gen fn scanArgs(msg: String) -> ArgScan {
             let close = matchBrace(ba, i, e)
             let parts = splitTopCommas(ba, i + 1, close - 1)
             if parts.length == 1 {
-                names.push(parts[0])
+                names.push(parts[0].copy())
                 kinds.push("string")
                 branches.push("")
             } else {
@@ -551,7 +551,7 @@ gen fn scanArgs(msg: String) -> ArgScan {
                     // The branch blob is everything after "name, kw,".
                     let blob = branchBlob(ba, blobStart, close - 1)
                     let br = parseBranches(blob)
-                    names.push(parts[0])
+                    names.push(parts[0].copy())
                     if kw == "plural" {
                         kinds.push("plural")
                         branches.push("")
@@ -570,9 +570,9 @@ gen fn scanArgs(msg: String) -> ArgScan {
                             if sub.kinds[si] != "string" {
                                 return argError("nested plural/select is not supported (v1)")
                             }
-                            names.push(sub.names[si])
-                            kinds.push(sub.kinds[si])
-                            branches.push(sub.branches[si])
+                            names.push(sub.names[si].copy())
+                            kinds.push(sub.kinds[si].copy())
+                            branches.push(sub.branches[si].copy())
                             si = si + 1
                         }
                     }
@@ -639,9 +639,9 @@ gen fn dedupeArgs(names: Array<String>, kinds: Array<String>, branches: Array<St
             j = j + 1
         }
         if seen == false {
-            on.push(names[i])
-            ok2.push(kinds[i])
-            ob.push(branches[i])
+            on.push(names[i].copy())
+            ok2.push(kinds[i].copy())
+            ob.push(branches[i].copy())
         }
         i = i + 1
     }
@@ -661,7 +661,7 @@ gen fn argSignature(sc: ArgScan) -> String {
         let mut b = a
         while b > 0 && items[b - 1] > items[b] {
             let tmp = items[b - 1]
-            items[b - 1] = items[b]
+            items[b - 1] = items[b].copy()
             items[b] = tmp.copy()
             b = b - 1
         }

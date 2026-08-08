@@ -123,7 +123,7 @@ export fn positionals(a: Args) -> Array<String> {
     // Everything after the `--` terminator is positional verbatim.
     let mut j = end + 1
     while j < a.argv.length {
-        out.push(a.argv[j])
+        out.push(a.argv[j].copy())
         j = j + 1
     }
     return out
@@ -137,7 +137,7 @@ export fn rest(a: Args, terminator: String) -> Array<String> {
     let mut i = 0
     while i < a.argv.length {
         if seen {
-            out.push(a.argv[i])
+            out.push(a.argv[i].copy())
         } else {
             if a.argv[i] == terminator {
                 seen = true

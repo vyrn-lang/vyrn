@@ -884,7 +884,7 @@ fn show(v: Value) -> String {
     return match v {
         IntVal(n) => n.toString(),
         BoolVal(b) => b.toString(),
-        StrVal(s) => s,
+        StrVal(s) => s.copy(),
     }
 }
 

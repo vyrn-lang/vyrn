@@ -45,13 +45,25 @@ comptime, and raw text makes emit → parse → emit byte-stable.
 fn copyJson(j: Json) -> Json
 ```
 
-A `Json` that shares nothing with `j` — RFC-0089's `copy`, written out.
+A `Json` that shares nothing with `j` — the name this walk had before it was
+a `Copy` impl. `j.copy()` says the same thing and is the one to write.
 
-`j.copy()` is refused for this type and says why: `Json` reaches itself
-through `JArr` and `JObj`, and the builtin is a structural walk with no
-bottom to stop at. Recursion in the value needs recursion in the code, and
-this is that code. Every reader that looks a field out of an object needs it,
-because a field belongs to the object that holds it and a return is owned.
+## copyJsonArray
+
+```vyrn
+fn copyJsonArray(xs: Array<Json>) -> Array<Json>
+```
+
+`copy` over a list of values. Exported because `xs.copy()` cannot be written
+for this element type — see the impl above.
+
+## copyJsonFields
+
+```vyrn
+fn copyJsonFields(fs: Array<JsonField>) -> Array<JsonField>
+```
+
+`copy` over a list of object fields, for `xs.copy()`'s reason.
 
 ## emit
 

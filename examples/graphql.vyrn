@@ -192,7 +192,7 @@ fn topResolve(root: String, field: String, args: Array<JsonField>) -> Result<Jso
 fn reply(body: String) -> String {
     let r = graphqlHandle(Request { method: "POST", path: "/graphql", headers: [:], body: body.copy() })
     return match r {
-        Some(res) => res.body,
+        Some(res) => res.body.copy(),
         None => "",
     }
 }
