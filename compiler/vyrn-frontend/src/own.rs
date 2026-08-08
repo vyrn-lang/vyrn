@@ -969,12 +969,16 @@ pub(crate) mod tests {
     fn a_value_stored_into_an_outer_container_escapes() {
         // `xs.push(s)` moves `s` into a container that outlives the inner block,
         // so `s` must NOT stay droppable — freeing it would leave the array
-        // holding a dangling buffer. Only the array is released here.
+        // holding a dangling buffer, and the array releases the element itself
+        // since RFC-0092 M2. Only the array is released here.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let mut xs: Array<String> = []; \
                    if true { let s = a + b; xs.push(s); } \
                    return xs.length; }";
-        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
+        assert_eq!(
+            drop_kinds(src, "main"),
+            vec![DropKind::Deep(Type::Array(Box::new(Type::Str)))]
+        );
     }
 
     #[test]

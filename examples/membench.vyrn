@@ -389,6 +389,36 @@ fn words(n: Int64) -> Array<String> {
     return out
 }
 
+/// The same 1000 sixteen-byte Strings as keys of a map — the shape `m.keys()`
+/// is asked over in a corpus of names and keys.
+fn keyMap(n: Int64) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    while i < n {
+        m["wordwordword" + i.toString()] = i
+        i = i + 1
+    }
+    return m
+}
+
+/// `m.keys()`, `times` times — RFC-0092 M2's gate.
+///
+/// The snapshot is an `Array<String>` and an array owns its elements, so M2
+/// copies the KEYS where only the key pointers were copied before: one `malloc`
+/// and one `memcpy` per key, so O(total key bytes) rather than O(count). The
+/// interpreter has copied each key since RFC-0028, so this is what the oracle
+/// has been paying all along and the two compiling backends were not.
+fn keysSnapshot(m: Map<String, Int64>, times: Int64) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < times {
+        let ks = m.keys()
+        t = t + ks.length
+        i = i + 1
+    }
+    return t
+}
+
 /// The stream rows (RFC-0090 M3). A cursor was a Path B cell until Phase 8c
 /// and is a slot in `std/stream`'s own `Slots` now, so what changed is what
 /// every element and every release costs. Three shapes, because they are three
@@ -488,6 +518,10 @@ bench "splice 1000 Strings, consuming loop" {
 
 bench "splice 1000 Strings, copying loop" {
     blackBox(spliceCopying(blackBox(words(blackBox(1000)))))
+}
+
+bench "keys() of a 1000-key map, 10 snapshots" {
+    blackBox(keysSnapshot(blackBox(keyMap(blackBox(1000))), blackBox(10)))
 }
 
 bench "array push churn, 1000 pushes" {

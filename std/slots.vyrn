@@ -215,20 +215,27 @@ impl<T> Iterate for Slots<T> {
     }
 }
 
-/// A slab gives back what it took: every element, then the five buffers.
+/// A slab gives back what it took: the five buffers, and the payloads in the
+/// first of them.
 ///
-/// **The elements are census U4, and a declared container is what opens it.**
-/// Nothing in the language releases an element of a built-in `Array<T>`, and
-/// nothing should: an array does not know whether it owns its elements or views
-/// somebody else's — `m.keys()` hands back a fresh buffer holding the map's own
-/// key pointers. This container knows. `insert` takes `consume T`, and the only
-/// other writer is a store, which releases what it replaced. So every slot from
-/// 0 to `vals.length` holds exactly one payload this slab owns, live or removed,
-/// and `drop v` gives each one back.
+/// **The elements were census U4, and this container opened it first.** Until
+/// RFC-0092 M2 nothing in the language released an element of a built-in
+/// `Array<T>`, because an array could not say whether it owned its elements or
+/// viewed somebody else's — `m.keys()` handed back a fresh buffer holding the
+/// map's own key pointers. This container could say, so it said it here, in a
+/// loop over `vals`.
+///
+/// M2 closed U4 and the loop went with it. `drop vals` releases every element
+/// of `vals` and then its buffer, over exactly the range the loop walked —
+/// `insert` takes `consume T`, the only other writer is a store, and a store
+/// releases what it replaced, so every slot from 0 to `vals.length` holds one
+/// payload this slab owns, live or removed. Keeping the loop as well would free
+/// each payload twice, which is what `examples/genref.vyrn` did the hour the
+/// row landed.
 ///
 /// `T` is concrete here, because a declared release monomorphizes with the rest
-/// of the module. `drop v` on a `Slots<String>` frees a buffer; on a
-/// `Slots<Int64>` it emits nothing at all.
+/// of the module. `drop vals` on a `Slots<String>` frees six buffers; on a
+/// `Slots<Int64>` it frees five and walks nothing.
 ///
 /// **`consume self`, and it had no other spelling until now.** A release moves
 /// five buffers out of the container and gives each one back. RFC-0089 recorded
@@ -239,12 +246,6 @@ impl<T> Iterate for Slots<T> {
 /// moves below are moves out of a value this method was handed.
 impl<T> Owned for Slots<T> {
     fn release(consume self) {
-        let mut i = 0
-        while i < self.vals.length {
-            let v = self.vals[i]
-            drop v
-            i = i + 1
-        }
         let vals = self.vals
         drop vals
         let gens = self.gens
