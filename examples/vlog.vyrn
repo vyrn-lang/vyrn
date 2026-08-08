@@ -210,7 +210,7 @@ fn recordsFrom(lines: Array<String>) -> Array<Rec> {
             if d.ok {
                 // `d` owns the decoded record, so the push copies it. The
                 // bool-tagged carrier is what costs this: see `Decoded`.
-                recs.push(Rec { raw: t, line: d.line.copy() })
+                recs.push(Rec { raw: t, line: consume d.line })
             } else {
                 log.warn("line \{lineNo}: \{d.err}")
             }

@@ -255,7 +255,7 @@ export fn query<T>(run: consume fn() -> T) -> Query<T> {
 /// `q` marked lazy: the page renders its shell and a skeleton first, then fills
 /// the data region in. The server always has the data, so SSR is unaffected.
 export fn lazy<T>(q: consume Query<T>) -> Lazy<T> {
-    return Lazy { run: q.run.copy() }
+    return Lazy { run: consume q.run }
 }
 
 /// A query whose deferred call receives the page's route parameters.
@@ -265,7 +265,7 @@ export fn paramQuery<P, T>(run: consume fn(P) -> T) -> ParamQuery<P, T> {
 
 /// `q` marked lazy — the params-taking counterpart of [`lazy`].
 export fn paramLazy<P, T>(q: consume ParamQuery<P, T>) -> ParamLazy<P, T> {
-    return ParamLazy { run: q.run.copy() }
+    return ParamLazy { run: consume q.run }
 }
 
 /// Run a query, producing the page's data.

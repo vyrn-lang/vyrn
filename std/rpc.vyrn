@@ -762,7 +762,7 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
     for f in rpcFieldsOf(rpcMember(doc, "pin")) {
         let v = rpcStrOf(f.value)
         if v != "" {
-            keys.push(f.key.copy())
+            keys.push(consume f.key)
             paths.push(v)
         }
     }

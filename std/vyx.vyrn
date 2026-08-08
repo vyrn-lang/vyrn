@@ -560,10 +560,11 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
                 // A closing `</…>` belongs to the caller.
                 return VyxParse { nodes: nodes, next: j, stop: "close", err: "" }
             } else {
-                let er = vyxParseElem(ba, j, e, fileId, nodes)
+                let er = vyxParseElem(ba, j, e, fileId)
                 if er.err != "" {
-                    return VyxParse { nodes: nodes, next: er.next, stop: "", err: er.err.copy() }
+                    return VyxParse { nodes: nodes, next: er.next, stop: "", err: consume er.err }
                 }
+                nodes.push(consume er.node)
                 j = er.next
             }
         } else if b == '{' && j + 1 < e && ba[j + 1] == '{' {
@@ -603,57 +604,54 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
     return VyxParse { nodes: nodes, next: j, stop: "", err: "" }
 }
 
-/// Where a parsed node ended, and what went wrong. The NODE itself is appended
-/// to the caller's list — reading it back out of a record would be a projection
-/// of a place the frame owns (RFC-0092), and `VyxNode` refers to itself, so the
-/// only way out would be a deep copy of the subtree.
-type VyxNodeR = { next: Int64, err: String }
+/// The parsed node, where it ended, and what went wrong. The node comes back
+/// as a value: the caller writes `consume er.node`, which moves it out of the
+/// pair (RFC-0093). RFC-0092 M1 had to make it an out-parameter, because a
+/// projection was a borrow and `VyxNode` refers to itself, so the only other way
+/// out was a deep copy of the subtree.
+type VyxNodeR = { node: VyxNode, next: Int64, err: String }
 
 /// Parse one element or component starting at `<` (`i`). A `<slot/>` (or
-/// `<slot></slot>`) parses to `VNChildren`. The node is appended to `out` on
-/// success; nothing is appended when `err` is non-empty.
-fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, out: modify Array<VyxNode>) -> VyxNodeR {
+/// `<slot></slot>`) parses to `VNChildren`. On an error the node is `VNText("")`
+/// and `err` says what went wrong.
+fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxNodeR {
     let line = vyxLineAt(ba, i)
     let tag = vyxReadTagName(ba, i + 1, e)
     if tag.name.byteLength == 0 {
-        return VyxNodeR { next: e, err: vyxErr("VYX_BAD_TAG", fileId, line) }
+        return VyxNodeR { node: VNText(""), next: e, err: vyxErr("VYX_BAD_TAG", fileId, line) }
     }
     let pa = vyxParseAttrs(ba, tag.next, e, fileId)
     if pa.err != "" {
-        return VyxNodeR { next: pa.next, err: pa.err.copy() }
+        return VyxNodeR { node: VNText(""), next: pa.next, err: consume pa.err }
     }
     let isSlot = tag.name == "slot"
     if pa.selfClose {
         if isSlot {
-            out.push(VNChildren)
-            return VyxNodeR { next: pa.next, err: "" }
+            return VyxNodeR { node: VNChildren, next: pa.next, err: "" }
         }
-        out.push(VNElem(tag.name, tag.isComp, pa.attrs, [], line))
-        return VyxNodeR { next: pa.next, err: "" }
+        return VyxNodeR { node: VNElem(tag.name, tag.isComp, pa.attrs, [], line), next: pa.next, err: "" }
     }
     // Paired tag: parse children, then require the matching close tag.
     let kids = vyxParseNodes(ba, pa.next, e, fileId)
     if kids.err != "" {
-        return VyxNodeR { next: kids.next, err: kids.err.copy() }
+        return VyxNodeR { node: VNText(""), next: kids.next, err: consume kids.err }
     }
     if kids.stop != "close" {
-        return VyxNodeR { next: kids.next, err: vyxErrDetail("VYX_UNCLOSED_ELEMENT", fileId, line, tag.name) }
+        return VyxNodeR { node: VNText(""), next: kids.next, err: vyxErrDetail("VYX_UNCLOSED_ELEMENT", fileId, line, tag.name) }
     }
     // Consume `</name>`.
     let ct = vyxReadTagName(ba, kids.next + 2, e)
     if ct.name != tag.name {
-        return VyxNodeR { next: kids.next, err: vyxErrDetail("VYX_MISMATCHED_TAG", fileId, line, tag.name + "_vs_" + ct.name) }
+        return VyxNodeR { node: VNText(""), next: kids.next, err: vyxErrDetail("VYX_MISMATCHED_TAG", fileId, line, tag.name + "_vs_" + ct.name) }
     }
     let mut m = ct.next
     while m < e && ba[m] != '>' {
         m = m + 1
     }
     if isSlot {
-        out.push(VNChildren)
-        return VyxNodeR { next: m + 1, err: "" }
+        return VyxNodeR { node: VNChildren, next: m + 1, err: "" }
     }
-    out.push(VNElem(tag.name, tag.isComp, pa.attrs, kids.nodes, line))
-    return VyxNodeR { next: m + 1, err: "" }
+    return VyxNodeR { node: VNElem(tag.name, tag.isComp, pa.attrs, kids.nodes, line), next: m + 1, err: "" }
 }
 
 // ===========================================================================
@@ -760,24 +758,25 @@ fn vyxElemHasDir(n: VyxNode, name: String) -> Bool {
 /// Process ONE raw element into its final node — recurse into children, apply
 /// `v-html`, and wrap a `v-for` element into `VNFor` (its required `:key`).
 ///
-/// It hands the NODE back and appends its errors to `errs`, rather than
-/// returning a `{ node, err }` pair. A pair would make the caller read
-/// `p.node` out of a record the frame owns, which RFC-0092 refuses, and the
-/// only way out for a self-referring `VyxNode` would be a deep copy of the
-/// subtree at every branch of every `v-if`.
-fn vyxProcessElem(n: consume VyxNode, fileId: String, errs: modify Array<String>) -> VyxNode {
+/// It returns the `{ node, err }` pair. The caller writes `consume p.node` to
+/// move the node out of it (RFC-0093). RFC-0092 M1 had to make the node an
+/// out-parameter and the error a caller's list, because reading `p.node` was a
+/// projection of a place the frame owns and `VyxNode` refers to itself — so the
+/// only other way out was a deep copy of the subtree at every branch of every
+/// `v-if`.
+fn vyxProcessElem(n: consume VyxNode, fileId: String) -> VyxOne {
     return match n {
-        VNElem(tag, isComp, attrs, kids, line) => vyxProcessElemInner(tag, isComp, attrs, kids, line, fileId, errs),
-        VNText(s) => n,
-        VNInterp(x, l, c) => n,
-        VNRaw(x, l, c) => n,
-        VNChildren => n,
-        VNIf(cs, cl, cc, bs, e, h) => n,
-        VNFor(v, it, k, bd, l, c) => n,
+        VNElem(tag, isComp, attrs, kids, line) => vyxProcessElemInner(tag, isComp, attrs, kids, line, fileId),
+        VNText(s) => VyxOne { node: n, err: "" },
+        VNInterp(x, l, c) => VyxOne { node: n, err: "" },
+        VNRaw(x, l, c) => VyxOne { node: n, err: "" },
+        VNChildren => VyxOne { node: n, err: "" },
+        VNIf(cs, cl, cc, bs, e, h) => VyxOne { node: n, err: "" },
+        VNFor(v, it, k, bd, l, c) => VyxOne { node: n, err: "" },
     }
 }
 
-fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, fileId: String, errs: modify Array<String>) -> VyxNode {
+fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, fileId: String) -> VyxOne {
     // v-html replaces the element content with a single Raw node.
     let vhtml = vyxDir(attrs, "v-html")
     let mut childNodes = kids
@@ -798,19 +797,15 @@ fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: A
         let h = vyxParseForHead(vfor.value, fileId, vfor.line)
         err = err + h.err
         let elem = VNElem(tag, isComp, vyxStripDirectives(attrs, true), childNodes, line)
-        errs.push(err)
-        return VNFor(h.var, h.iter, key.value, [elem], vfor.line, vfor.col)
+        return VyxOne { node: VNFor(h.var, h.iter, key.value, [elem], vfor.line, vfor.col), err: err }
     }
-    errs.push(err)
-    return VNElem(tag, isComp, vyxStripDirectives(attrs, false), childNodes, line)
+    return VyxOne { node: VNElem(tag, isComp, vyxStripDirectives(attrs, false), childNodes, line), err: err }
 }
 
 /// Group a flat sibling list into the control-flow AST.
 fn vyxGroupNodes(nodes: Array<VyxNode>, fileId: String) -> VyxGroup {
     let mut out: Array<VyxNode> = []
-    // A list rather than a running `String`: `vyxProcessElem` appends to it, so
-    // the order stays the order the nodes are visited in.
-    let mut errs: Array<String> = []
+    let mut err = ""
     let mut i = 0
     while i < nodes.length {
         let n = nodes[i]
@@ -824,11 +819,12 @@ fn vyxGroupNodes(nodes: Array<VyxNode>, fileId: String) -> VyxGroup {
             let mut hasElse = false
             let vif = vyxAttrsOf(n)
             let d = vyxDir(vif, "v-if")
-            conds.push(d.value.copy())
+            conds.push(consume d.value)
             condLines.push(d.line)
             condCols.push(d.col)
-            let n0 = vyxProcessElem(n, fileId, errs)
-            bodies.push(VyxBody { nodes: [n0] })
+            let p0 = vyxProcessElem(n, fileId)
+            err = err + p0.err
+            bodies.push(VyxBody { nodes: [consume p0.node] })
             // Consume following siblings (skipping whitespace-only text) that carry
             // v-else-if / v-else.
             let mut k = i + 1
@@ -838,15 +834,17 @@ fn vyxGroupNodes(nodes: Array<VyxNode>, fileId: String) -> VyxGroup {
                     k = k + 1
                 } else if vyxElemHasDir(nodes[k], "v-else-if") {
                     let de = vyxDir(vyxAttrsOf(nodes[k]), "v-else-if")
-                    conds.push(de.value.copy())
+                    conds.push(consume de.value)
                     condLines.push(de.line)
                     condCols.push(de.col)
-                    let ne = vyxProcessElem(nodes[k], fileId, errs)
-                    bodies.push(VyxBody { nodes: [ne] })
+                    let pe = vyxProcessElem(nodes[k], fileId)
+                    err = err + pe.err
+                    bodies.push(VyxBody { nodes: [consume pe.node] })
                     k = k + 1
                 } else if vyxElemHasDir(nodes[k], "v-else") {
-                    let nl = vyxProcessElem(nodes[k], fileId, errs)
-                    elseBody = VyxBody { nodes: [nl] }
+                    let pl = vyxProcessElem(nodes[k], fileId)
+                    err = err + pl.err
+                    elseBody = VyxBody { nodes: [consume pl.node] }
                     hasElse = true
                     k = k + 1
                     chaining = false
@@ -857,18 +855,19 @@ fn vyxGroupNodes(nodes: Array<VyxNode>, fileId: String) -> VyxGroup {
             out.push(VNIf(conds, condLines, condCols, bodies, elseBody, hasElse))
             i = k
         } else if vyxElemHasDir(n, "v-else-if") {
-            errs.push(vyxErr("VYX_DANGLING_ELSE_IF", fileId, vyxElemLine(n)))
+            err = err + vyxErr("VYX_DANGLING_ELSE_IF", fileId, vyxElemLine(n))
             i = i + 1
         } else if vyxElemHasDir(n, "v-else") {
-            errs.push(vyxErr("VYX_DANGLING_ELSE", fileId, vyxElemLine(n)))
+            err = err + vyxErr("VYX_DANGLING_ELSE", fileId, vyxElemLine(n))
             i = i + 1
         } else {
-            let np = vyxProcessElem(n, fileId, errs)
-            out.push(np)
+            let p = vyxProcessElem(n, fileId)
+            err = err + p.err
+            out.push(consume p.node)
             i = i + 1
         }
     }
-    return VyxGroup { nodes: out, err: joinWith(errs, "") }
+    return VyxGroup { nodes: out, err: err }
 }
 
 /// The attributes of an element node (empty for a non-element).
@@ -1428,15 +1427,15 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
         if sc.err != "" {
             return vyxCompErr(compName, fnName, fileId, srcPath, sc.err)
         }
-        propNames = sc.propNames.copy()
-        propTypes = sc.propTypes.copy()
-        imports = sc.imports.copy()
-        importLines = sc.importLines.copy()
-        importCols = sc.importCols.copy()
-        helpers = sc.helpers.copy()
-        helperTexts = sc.helperTexts.copy()
-        helperLines = sc.helperLines.copy()
-        helperCols = sc.helperCols.copy()
+        propNames = consume sc.propNames
+        propTypes = consume sc.propTypes
+        imports = consume sc.imports
+        importLines = consume sc.importLines
+        importCols = consume sc.importCols
+        helpers = consume sc.helpers
+        helperTexts = consume sc.helperTexts
+        helperLines = consume sc.helperLines
+        helperCols = consume sc.helperCols
     }
 
     // Parse the template (over absolute file offsets, for true line numbers), then
@@ -1824,7 +1823,7 @@ gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, lin
             err = err + vyxErrDetail("VYX_MISSING_PROP", fileId, line, tag + "_" + pn)
             args.push("empty()")
         } else if av.dyn {
-            args.push(av.value.copy())
+            args.push(consume av.value)
         } else {
             args.push(vyxStrLit(av.value))
         }
@@ -1937,7 +1936,7 @@ gen fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line
     code = code + "let mut " + facc + ": Array<Html> = []\n" + inner.code
     code = code + "for vyxN in consume " + facc + " {\n" + acc + ".push(keyed((" + key + ").toString(), vyxN))\n}\n"
     code = code + "}\n"
-    return VyxEmit { code: code, err: inner.err.copy() }
+    return VyxEmit { code: code, err: consume inner.err }
 }
 
 // ---- attributes -------------------------------------------------------------
@@ -1969,7 +1968,7 @@ gen fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, fileId: String, src
                 pre = pre + vyxRegion("let " + slot + ": Attr = " + ev.code + "\n", src, ev.argLine, ev.argCol)
                 parts.push(slot)
             } else {
-                parts.push(ev.code.copy())
+                parts.push(consume ev.code)
             }
         } else if a.name == "class" {
             if reg.themed {
@@ -2181,8 +2180,8 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                     k = k + 1
                 }
                 if found == false {
-                    nsAlias.push(imp.alias.copy())
-                    nsSpec.push(imp.spec.copy())
+                    nsAlias.push(consume imp.alias)
+                    nsSpec.push(consume imp.spec)
                     nsSrc.push(c.srcPath.copy())
                     nsLine.push(oL)
                     nsCol.push(oC)
@@ -2219,7 +2218,7 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                 }
                 if si < 0 {
                     selSpecs.push(imp.spec.copy())
-                    selNames.push(imp.names.copy())
+                    selNames.push(consume imp.names)
                     selSrc.push(c.srcPath.copy())
                     selLine.push(oL)
                     selCol.push(oC)
@@ -2302,7 +2301,7 @@ gen fn vyxEmitComponent(comp: VyxComp, reg: VyxRegistry) -> VyxEmit {
     let mut out = vyxEmitSignature(comp)
     let rootEmit = vyxEmitRoot(comp.root, reg, comp.fileId, comp.srcPath)
     out = out + rootEmit.code + "}\n"
-    return VyxEmit { code: out, err: rootEmit.err.copy() }
+    return VyxEmit { code: out, err: consume rootEmit.err }
 }
 
 /// Emit the root node as `let …; return <expr>` (the view fn returns one `Html`).
@@ -2323,7 +2322,7 @@ gen fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: A
     if isComp {
         let pushed = vyxEmitComp(tag, attrs, kids, line, "kr", "r", reg, fileId, src)
         let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return kr[0]\n"
-        return VyxEmit { code: code, err: pushed.err.copy() }
+        return VyxEmit { code: code, err: consume pushed.err }
     }
     let kids2 = vyxEmitChildren(kids, "kr", "r", reg, fileId, src)
     let ae = vyxEmitAttrs(attrs, reg, fileId, src, "kr")
@@ -2336,7 +2335,7 @@ gen fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: A
 gen fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     let pushed = vyxEmitPush(root, "kr", "r", reg, fileId, src)
     let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return el(\"div\", [], kr)\n"
-    return VyxEmit { code: code, err: pushed.err.copy() }
+    return VyxEmit { code: code, err: consume pushed.err }
 }
 
 /// Assemble the whole synthesized module from the compiled components. When
@@ -2368,7 +2367,7 @@ import * as vyxTheme from tw(\{theme})
     // Merged pass-through imports from every component (RFC-0039 §3).
     let merged = vyxMergeImports(reg.comps)
     if merged.err != "" {
-        return merged.err.copy()
+        return consume merged.err
     }
     out = out + merged.block
 
@@ -3005,7 +3004,7 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
             }
         }
     }
-    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: ds.hasData, loadHasParams: ds.hasParams, loadLazy: ds.lazy, loadRet: ds.ret.copy(), layoutNone: layoutNone, err: ds.err.copy() }
+    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: ds.hasData, loadHasParams: ds.hasParams, loadLazy: ds.lazy, loadRet: consume ds.ret, layoutNone: layoutNone, err: consume ds.err }
 }
 
 /// The private name a page's contract accessor is compiled under.
@@ -3787,7 +3786,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     let hasHeadFn = vyxScriptHasDecl(script, "head")
     let ds = vyxDataShapeOf(script)
     if ds.err != "" {
-        return ds.err.copy()
+        return consume ds.err
     }
     let hasLoad = ds.hasData
     // The `data` prop's type is the loader's data type — the inner of
@@ -3847,7 +3846,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     let synthSource = synthPrefix + templateBody + "\n</template>\n"
     let comp0 = vyxCompileComponent("UiPageBody", synthSource, dir)
     if comp0.err != "" {
-        return comp0.err.copy()
+        return consume comp0.err
     }
     // RFC-0048 §2: retarget origins at the real route file (real line:col) when the
     // caller threaded its path; the synthetic-source origins are kept otherwise.
@@ -4089,13 +4088,13 @@ export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: Strin
     // Pull the head block; the rest is imports + helpers (passed through).
     let hs = vyxStripHead(script, "vyx_layout")
     if hs.head.err != "" {
-        return hs.head.err.copy()
+        return consume hs.head.err
     }
     let synthPrefix = "<script>\n" + hs.rest + "\n</script>\n<template>\n"
     let synthSource = synthPrefix + templateBody + "\n</template>\n"
     let comp0 = vyxCompileComponent("UiLayoutBody", synthSource, dir)
     if comp0.err != "" {
-        return comp0.err.copy()
+        return consume comp0.err
     }
     let mut comp = comp0
     if srcPath != "" {
@@ -4168,14 +4167,14 @@ export gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String
     // head), then inject the `error: PageError` prop and its import.
     let hs = vyxStripHead(script, "vyx_error")
     if hs.head.err != "" {
-        return hs.head.err.copy()
+        return consume hs.head.err
     }
     let synthScript = "import { PageError } from \"std/ui\"\n" + hs.rest + "\nprops { error: PageError }\n"
     let synthPrefix = "<script>\n" + synthScript + "\n</script>\n<template>\n"
     let synthSource = synthPrefix + templateBody + "\n</template>\n"
     let comp0 = vyxCompileComponent("UiErrorBody", synthSource, dir)
     if comp0.err != "" {
-        return comp0.err.copy()
+        return consume comp0.err
     }
     let mut comp = comp0
     if srcPath != "" {
