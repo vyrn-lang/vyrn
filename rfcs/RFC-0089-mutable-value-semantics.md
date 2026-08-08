@@ -1,12 +1,15 @@
 # RFC-0089 — Mutable Value Semantics
 
-- **Status:** **Implemented.** M0, M1a, M1b, M2 (both parts) and M3b are landed;
-  M3a is half landed. Read the "as landed" sections — they are the truth where
-  they and the design differ. A store releases the old value; an aggregate
-  releases its places for `Option` and `Result` and for nothing else yet, and
-  "M3a as landed" carries the measurement that says why. M3b closed the boundary
-  in Phase 6 by removing the question rather than answering it, and the type hint
-  it left behind is closed by RFC-0012 M3 (the `vyrn:exports` section).
+- **Status:** **Implemented.** M0, M1a, M1b, M2 (both parts), M3a and M3b are all
+  landed. Read the "as landed" sections — they are the truth where they and the
+  design differ. A store releases the old value, and **an aggregate releases its
+  places**: `Option` and `Result` since Phase 5, and every other one —
+  `Array`, `Record`, `Enum`, `ArrayN`, `Map`, `SmallArray` — since RFC-0092 M2
+  and M3. "M3a as landed" carries the measurement that said why it could not
+  land in Phase 5, and RFC-0092 M1 is the rule that removed the reason. M3b
+  closed the boundary in Phase 6 by removing the question rather than answering
+  it, and the type hint it left behind is closed by RFC-0012 M3 (the
+  `vyrn:exports` section).
   Supersedes RFC-0088; RFC-0088's M1 (make it visible) survives unchanged as this
   RFC's M0.
 - **Depends on:** RFC-0004 §1 (the capability surface — this RFC finishes it),
