@@ -659,19 +659,38 @@ program had two verdicts one variant apart — this RFC's defect, a third time.
 And the mechanism that made the lend safe is `lending`, which this RFC's
 "Rejected" section names as the guesser it exists to remove.
 
-What is still the export boundary's own is the **wording and the fix**, and M1
-nearly lost it: `Borrow::Projection` fell through to the general refusal, so an
-`export extern fn` stopped being told that its JS caller frees what it is
-handed. `check_return` now asks `exported` **first, for every kind of borrow**,
-and the general refusal is what is left after it.
+What is still the export boundary's own is the **wording and the fix**, and it
+took three tries to get there. That is worth writing down, because the shape of
+the mistake is the RFC's own thesis pointed at the compiler.
 
-Asking first also fixed a defect that predates this RFC. `check_return` used to
-ask `exported` only for the kinds it was NOT going to refuse, so a returned
-`read` parameter fell through to the general menu and was told to `declare the
-parameter q: consume ..` — a fix RFC-0089 M3b refuses at an export signature,
-which is exactly the "wording a reader has to see through" Phase 9 recorded and
-`fixes_here` already encodes for stores. `an_exports_borrow_menu_names_copy_alone`
-covers the return path now as well as the store.
+**`check_return` refuses a return from three places**, and each is reached by a
+different question:
+
+| spelling | how it reaches a refusal |
+|---|---|
+| `return q` | a place named straight at the `return` whose root is a borrow |
+| `return d.title` | a place named straight at the `return` whose root the frame OWNS — this RFC's rule |
+| `return match t { W(s) => s }` | a borrow yielded by an arm, found by `returned_borrow` |
+
+They are separate on purpose: each asks a different question first, and merging
+the questions would merge three different reasons into one vaguer one. **What
+they must not differ about is the answer**, and they did. The `exported` check
+lived at the arm exit alone, so an `export extern fn` returning a `read`
+parameter directly was handed the general menu and told to `declare the
+parameter q: consume ..` — which its own signature then refuses: *"the caller
+across this boundary is JS, and it releases the String when the call returns"*
+(RFC-0089 M3b). One program spelled two ways got two menus, and one of them
+sent the reader to a second error.
+
+**Fixing it at one exit fixed two spellings and missed the third, twice.** All
+three call `refuse_return` now, which asks `exported` before anything else. The
+module-state refusal deliberately does not: "nothing may take module state" is a
+different FACT rather than a different caller — it is true of a Vyrn caller and
+a JS caller alike, and its menu already names `.copy()` alone. A comment says
+so where a reader will meet it.
+
+`an_exports_borrow_menu_names_copy_alone` asserts the store and all three
+returns in one test, so the next person to touch one has to look at the others.
 
 **The leak count moved.** `vyrn why --memory` over the corpus reports 2,127
 bindings not reclaimed, down from 2,230 — 200 files answer, ten need a project

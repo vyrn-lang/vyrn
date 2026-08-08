@@ -1244,14 +1244,7 @@ impl MoveCheck<'_> {
         // every borrow is refused, whatever kind it is.
         if let Some((root, path)) = place_path(e) {
             if let Some(b) = self.borrow_of(&root) {
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be returned — it is {}, and a return is owned",
-                        b.what(&path)
-                    ),
-                    b.fixes(&root, &path),
-                ));
+                return Err(self.refuse_return(&b, &root, &path, line));
             }
             // Module state is not a borrow, and Phase 6 found that this is where
             // that costs a use-after-free. A global lives for the whole module
@@ -1260,6 +1253,13 @@ impl MoveCheck<'_> {
             // caller free it. `examples/` never wrote it, so parity never saw it:
             // the interpreter's values cannot dangle and the wasm allocator
             // handed the block straight back out.
+            //
+            // This one does NOT go through [`MoveCheck::refuse_return`], and the
+            // reason is that it is a different FACT rather than a different
+            // caller: "nothing may take module state" is true of a Vyrn caller
+            // and a JS caller alike, and its menu already names `.copy()` alone.
+            // Routing it through the shared exit would replace a true sentence
+            // with a vaguer one.
             if self.decl.releases(&self.ret.borrow()) && self.is_module_state(&root) {
                 return Err(menu(
                     line,
@@ -1278,14 +1278,7 @@ impl MoveCheck<'_> {
             // local, so this shape reached no reading at all — not refused, and
             // not even recorded as a lend.
             if path != root {
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be returned — it is {}, and a return is owned",
-                        Borrow::Projection.what(&path)
-                    ),
-                    Borrow::Projection.fixes(&root, &path),
-                ));
+                return Err(self.refuse_return(&Borrow::Projection, &root, &path, line));
             }
             return Ok(());
         }
@@ -1302,24 +1295,9 @@ impl MoveCheck<'_> {
         let Some((b, root, path)) = found else {
             return Ok(());
         };
-        // The export boundary first, and for EVERY kind of borrow. A Vyrn caller
-        // reads the lend out of `lending` and releases nothing; a JS caller reads
-        // nothing, and since RFC-0089 M3b `wasi-min.js` frees every String an
-        // export hands back. So an export owns its result or it does not compile,
-        // and it is told so in the words that name the JS caller — which is a
-        // different fact from the general refusal below, and a different fix.
+        // An export refuses every kind, so it is asked before the narrowing.
         if self.exported.contains(&*self.cur_fn.borrow()) {
-            return Err(menu(
-                line,
-                format!(
-                    "`{path}` may not be returned from an exported function — it is {}, \
-                     and the JS caller releases what it is handed",
-                    b.what(&path)
-                ),
-                vec![format!(
-                    "`{path}.copy()` — an `export extern fn` owns its result"
-                )],
-            ));
+            return Err(self.refuse_return(&b, &root, &path, line));
         }
         // A borrowed PARAMETER and, since RFC-0092 M1, a PROJECTION. The
         // parameter is the class Phase 4b missed: 4b read `return p` as a
@@ -1335,14 +1313,54 @@ impl MoveCheck<'_> {
         if !matches!(b, Borrow::Read(_) | Borrow::Modify(_) | Borrow::Projection) {
             return Ok(());
         }
-        Err(menu(
+        Err(self.refuse_return(&b, &root, &path, line))
+    }
+
+    /// The refusal a returned borrow gets — **the one exit for all three of
+    /// them**.
+    ///
+    /// [`MoveCheck::check_return`] refuses a return from three different places:
+    /// a place named straight at the `return` whose root is a borrow (`return
+    /// q`), a projection of a place the frame owns (`return d.title`), and a
+    /// borrow yielded by a `match` or `if` arm (`return match t { W(s) => s }`).
+    /// They are separate because each answers a different question first, and
+    /// merging them would merge those questions.
+    ///
+    /// What they must NOT differ about is the answer, and they did. The
+    /// `exported` check lived at the arm exit alone, so an `export extern fn`
+    /// that returned a `read` parameter directly was handed the general menu and
+    /// told to ``declare the parameter `q: consume ..` `` — which its own
+    /// signature then refuses: *"the caller across this boundary is JS, and it
+    /// releases the String when the call returns"* (RFC-0089 M3b). One program
+    /// spelled two ways got two menus, one of which sent the reader to a second
+    /// error. Fixing that at one exit fixed two spellings and missed the third,
+    /// twice, which is what this function exists to stop.
+    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> String {
+        // A Vyrn caller reads the lend out of `lending` and releases nothing; a
+        // JS caller reads nothing, and since RFC-0089 M3b `wasi-min.js` frees
+        // every String an export hands back. So an export owns its result or it
+        // does not compile, and `.copy()` is the only fix that exists for it.
+        if self.exported.contains(&*self.cur_fn.borrow()) {
+            return menu(
+                line,
+                format!(
+                    "`{path}` may not be returned from an exported function — it is {}, \
+                     and the JS caller releases what it is handed",
+                    b.what(path)
+                ),
+                vec![format!(
+                    "`{path}.copy()` — an `export extern fn` owns its result"
+                )],
+            );
+        }
+        menu(
             line,
             format!(
                 "`{path}` may not be returned — it is {}, and a return is owned",
-                b.what(&path)
+                b.what(path)
             ),
-            b.fixes(&root, &path),
-        ))
+            b.fixes(root, path),
+        )
     }
 
     /// Note that argument `i` of `callee` was handed a place.
@@ -3760,15 +3778,17 @@ mod tests {
     /// Phase 6's other half of the menu: inside an `export extern fn` the
     /// `consume` fix does not exist, so it is not offered.
     ///
-    /// It was offered on the RETURN path until RFC-0092 M1, which is the half
-    /// this covers second. `check_return` asked `exported` only for the borrow
-    /// kinds it was NOT going to refuse, so a returned `read` parameter fell
-    /// through to the general menu and was told to `declare the parameter q:
-    /// consume ..` — a fix RFC-0089 M3b refuses at an export signature, which is
-    /// the "wording a reader has to see through" Phase 9 recorded. The `exported`
-    /// question comes first now, for every kind.
+    /// **Every way of getting the refusal, in one test, because they drifted.**
+    /// `check_return` refuses a return from three places, and RFC-0092 M1 put
+    /// the `exported` question at one of them, then at two. The third —
+    /// `return q`, the plainest spelling there is — kept offering ``declare the
+    /// parameter `q: consume ..` ``, which the same compiler then refuses at the
+    /// signature (RFC-0089 M3b). All three share
+    /// [`MoveCheck::refuse_return`] now, and all three are asserted here so the
+    /// next person to touch one has to look at the others.
     #[test]
     fn an_exports_borrow_menu_names_copy_alone() {
+        // A store into module state.
         let src = "let mut kept = \"x\" \
                    export extern fn set(arg: String) { kept = arg } \
                    fn main() -> Int64 { return 0 }";
@@ -3778,20 +3798,36 @@ mod tests {
             !e.contains("consume"),
             "an export may not consume a String: {e}"
         );
-        // The same, returned out of an arm rather than stored.
-        let e = run("export extern fn pick(p: String, q: String) -> String \
-                     { return if p == \"\" { q } else { p } } \
-                     fn main() -> Int64 { return 0 }")
-        .unwrap_err();
-        assert!(
-            e.contains("may not be returned from an exported function"),
-            "{e}"
-        );
-        assert!(e.contains("an `export extern fn` owns its result"), "{e}");
-        assert!(
-            !e.contains("consume"),
-            "an export may not consume a String: {e}"
-        );
+        // Every spelling of a returned borrow: the parameter named straight at
+        // the `return`, a projection of a place the frame owns, and a borrow
+        // yielded by an arm. Each reaches `check_return` by a different route.
+        let spellings = [
+            "export extern fn plain(q: String) -> String { return q }",
+            "type D = { s: String } \
+             export extern fn field(q: String) -> String \
+             { let d = D { s: q.copy() } return d.s }",
+            "export extern fn pick(p: String, q: String) -> String \
+             { return if p == \"\" { q } else { p } }",
+        ];
+        for s in spellings {
+            let e = run(&format!("{s} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
+            assert!(
+                e.contains("may not be returned from an exported function"),
+                "{s}\n{e}"
+            );
+            assert!(
+                e.contains("the JS caller releases what it is handed"),
+                "{s}\n{e}"
+            );
+            assert!(
+                e.contains("an `export extern fn` owns its result"),
+                "{s}\n{e}"
+            );
+            assert!(
+                !e.contains("consume"),
+                "an export may not consume a String: {s}\n{e}"
+            );
+        }
         assert!(run("let mut kept = \"x\" \
                      export extern fn set(arg: String) { kept = arg.copy() } \
                      fn main() -> Int64 { return 0 }")
