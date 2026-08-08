@@ -250,8 +250,10 @@ impl Owned {
             // array's own is M1's rule: every route into an element is a store,
             // rule 2 refuses storing a borrow, and the rule refuses storing a
             // projection. What was left was the compiler's own back doors, and
-            // there were two: `m.keys()` and `sa.toArray()` handed back a fresh
-            // buffer holding somebody else's element words. Both copy now.
+            // there were three: `m.keys()`, `sa.toArray()` and `xs.toArray()` on
+            // a plain array, which handed the receiver's triple straight back.
+            // All three copy now, and so does the synthesized `fromJson`
+            // decoder, which is Vyrn the rule never got to check.
             //
             // The recursion is the row. An element is released the way its own
             // type is released, so `Array<Record>` releases nothing until M3
@@ -259,11 +261,19 @@ impl Owned {
             // this one lands. Answering `Deep` rather than a wider `FreeArr` is
             // what routes it through the release WALK, which is `copy` run
             // backwards and already knows every payload encoding.
-            Type::Array(e) => Some(if self.release_kind(&e).is_some() {
-                DropKind::Deep(Type::Array(e))
-            } else {
-                DropKind::FreeArr
-            }),
+            //
+            // An element type that reaches ITSELF (`type L = Array<L>`) answers
+            // the buffer alone. The walk is structural, so a self-referring
+            // element has no bottom — the same crash `copy` met in Phase 4b, and
+            // the same guard. The elements leak, which is what this whole file
+            // does where it cannot prove otherwise.
+            Type::Array(e) => Some(
+                if self_referring(&e, &self.types).is_none() && self.release_kind(&e).is_some() {
+                    DropKind::Deep(Type::Array(e))
+                } else {
+                    DropKind::FreeArr
+                },
+            ),
             Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
             Type::Map(..) => Some(DropKind::FreeMap),
             // A `Stream<T>` is reclaimed too, but through the stream lowering
@@ -1178,6 +1188,17 @@ pub(crate) mod tests {
         // `Array` for every literal freed a stack address and corrupted the heap.
         let src = "fn main() -> Int64 { let a = [1, 2, 3]; return a[0]; }";
         assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    #[test]
+    fn a_self_referring_array_element_is_not_walked() {
+        // `type L = Array<L>` has no bottom to a structural walk, and both
+        // compiling backends emitted one until they ran out of stack — the same
+        // crash `copy` met in Phase 4b. The row answers the buffer alone, so the
+        // elements leak, which is the answer this file gives wherever it cannot
+        // prove otherwise.
+        let src = "type L = Array<L>; fn main() -> Int64 { let xs: L = []; return xs.length; }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
     }
 
     #[test]

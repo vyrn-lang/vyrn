@@ -2968,7 +2968,11 @@ impl<'a> Gen<'a> {
             // The elements first, then the buffer they live in — the reverse of
             // the order `deep_copy` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.
-            Type::Array(inner) => {
+            //
+            // Whether the elements go at all is `own`'s answer, asked rather
+            // than re-derived — it carries the stop for a self-referring element
+            // type, whose walk has no bottom.
+            Type::Array(inner) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
                 let data = self.fresh_tmp();
                 let len = self.fresh_tmp();
                 self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
@@ -2977,7 +2981,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {data})"));
                 Ok(())
             }
-            Type::SmallArray(..) | Type::Map(..) => {
+            Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
                 let snap = self.snap_val(v, ty);
                 self.free_snap(&snap);
                 Ok(())

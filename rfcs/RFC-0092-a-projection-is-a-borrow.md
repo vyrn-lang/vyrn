@@ -792,6 +792,14 @@ watches the steady state cannot see one. Parity is what sees it.
   applied to `for` and per element — and it needs the per-element move tracking
   a store out of the loop body already relies on.
 
+**A self-referring element type stops the walk.** `type L = Array<L>` has no
+bottom to a structural release, and the row overflowed the stack on the
+interpreter and both compiling backends before the guard went in — the same
+crash `copy` met in Phase 4b, met again by its mirror. It answers the buffer
+alone, and `own` is the one place that answers: both backends ask
+`release_kind` for the array rather than re-deriving it from the element, so the
+guard cannot be forgotten in one engine and kept in the other.
+
 **One pre-existing double free found and left alone.** `fromArray(xs)` on a
 NAMED array leaves the array and the stream owning one buffer, and the native
 binary corrupts its heap. It reproduces on `Array<Int64>`, so it predates this

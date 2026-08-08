@@ -1928,6 +1928,13 @@ impl Fn_<'_> {
     /// same set the textual backend's [`crate::Gen::emit_drop`] frees, minus the
     /// `Stream`, which reaches its release through the stream lowering rather than
     /// through `own`.
+    /// Whether releasing this `Array<T>` releases its elements too (RFC-0092
+    /// M2). `own` decides, and this asks it — the same answer the textual
+    /// backend reads, including the stop for a self-referring element.
+    fn array_releases_elems(&self, arr: &Type) -> bool {
+        matches!(self.cx.owned.release_kind(arr), Some(DropKind::Deep(_)))
+    }
+
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
         // A declared row (RFC-0086 M1) answers before any built-in shape does,
         // and it is keyed by the type's NAME — which resolving away would lose.
@@ -1938,12 +1945,14 @@ impl Fn_<'_> {
         Ok(match &t {
             Type::Str => Some(Rel::Str),
             Type::Stream(i) => Some(Rel::Stream((**i).clone())),
-            // An `Array<T>` gives back its buffer, and its ELEMENTS too where the
-            // element type has a release row of its own (RFC-0092 M2, census
-            // U4). The element walk needs an address, so that answer is `Deep`
-            // and the buffer-only one stays a `Buffers` — the shape `own`
-            // reports as `Deep` and `FreeArr` for the same two cases.
-            Type::Array(e) if self.cx.owned.release_kind(e).is_some() => Some(Rel::Deep(t.clone())),
+            // An `Array<T>` gives back its buffer, and its ELEMENTS too where
+            // `own` says so (RFC-0092 M2, census U4). The question is asked of
+            // `own` rather than re-derived from the element, so the guards that
+            // answer live in one file — including the one that stops a
+            // self-referring element type, whose walk has no bottom. The element
+            // walk needs an address, so that answer is `Deep` and the
+            // buffer-only one stays a `Buffers`.
+            Type::Array(_) if self.array_releases_elems(&t) => Some(Rel::Deep(t.clone())),
             Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
             Type::Map(..) => {
                 let l = self.layout_of(&t, line)?;
@@ -2000,7 +2009,7 @@ impl Fn_<'_> {
             // The elements first, then the buffer they live in — the reverse of
             // the order `copy_at` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.
-            Type::Array(inner) => {
+            Type::Array(inner) if self.array_releases_elems(&self.cx.resolve(ty)) => {
                 let l = self.layout_of(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -2016,7 +2025,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
-            Type::SmallArray(..) | Type::Map(..) => {
+            Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
                 let offs = match self.rel_for(ty, line)? {
                     Some(Rel::Buffers(o)) => o,
                     _ => return Ok(()),
