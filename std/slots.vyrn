@@ -234,8 +234,8 @@ impl<T> Iterate for Slots<T> {
 /// row landed.
 ///
 /// `T` is concrete here, because a declared release monomorphizes with the rest
-/// of the module. `drop vals` on a `Slots<String>` frees six buffers; on a
-/// `Slots<Int64>` it frees five and walks nothing.
+/// of the module. `drop vals` on a `Slots<String>` frees every payload buffer
+/// and then its own; on a `Slots<Int64>` it frees its own and walks nothing.
 ///
 /// **`consume self`, and it had no other spelling until now.** A release moves
 /// five buffers out of the container and gives each one back. RFC-0089 recorded
