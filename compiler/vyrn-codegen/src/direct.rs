@@ -1945,13 +1945,7 @@ impl Fn_<'_> {
     /// The address of a `SmallArray`'s live slots: the inline block while
     /// `cap == N`, the spilled buffer otherwise. The branch [`Fn_::copy_at`]
     /// takes, lifted so the release takes the same one.
-    fn sa_base(
-        &mut self,
-        b: &mut Frame,
-        a: u32,
-        ty: &Type,
-        line: usize,
-    ) -> Result<u32, String> {
+    fn sa_base(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<u32, String> {
         let Type::SmallArray(_, cap_n) = self.cx.resolve(ty) else {
             return Err(gap("a SmallArray base", line));
         };

@@ -1325,7 +1325,6 @@ pub(crate) mod tests {
         let want = DropKind::Deep(Type::Record(vec![Field {
             name: "slots".into(),
             ty: Type::Array(Box::new(Type::Int)),
-
         }]));
         assert_eq!(o.owned_fns.get("make"), Some(&want));
         assert_eq!(drop_kinds(src, "main"), vec![want]);

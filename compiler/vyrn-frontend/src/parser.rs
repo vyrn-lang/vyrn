@@ -4131,10 +4131,7 @@ impl Parser {
             // releases its fields.
             Tok::Ident(id)
                 if id == "consume"
-                    && matches!(
-                        self.tokens[self.pos + 1].tok,
-                        Tok::Ident(_) | Tok::Vself
-                    ) =>
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Vself) =>
             {
                 self.advance();
                 Ok(Expr::Consume {

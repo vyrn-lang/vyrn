@@ -5006,21 +5006,25 @@ mod tests {
             0,
             "RFC-0092 M1: an element return came back"
         );
-        // The returns that remain are all one shape and it is DELIBERATE.
-        // `check_return` refuses an arm-yielded projection only where the caller
-        // RELEASES the result (Phase 4b's guard, which this RFC does not move),
-        // and a record and a user enum have no release rule until M3. So
-        // `return match hit { Some(r) => r, .. }` on an `Option<Response>` is
-        // recorded and not refused: it cannot dangle while nothing frees a
-        // `Response`, and the day M3 gives `Type::Record` its row it can.
+        // **M1 left seven of these and M3 closed all seven**, in the change that
+        // gave the row — which is what M1 said would happen and why it asserted
+        // the number rather than migrating them early.
         //
-        // **M3 closes these, in the change that gives the row.** Refusing them
-        // here would buy nothing and cost a copy of a whole HTTP response on
-        // every request. The number is asserted so it cannot grow in the
-        // meantime.
+        // They were all one shape: `return match hit { Some(r) => r, .. }` on an
+        // owned `Option<Response>` or `Option<Cargo>`. `check_return` refuses an
+        // arm-yielded projection only where the caller RELEASES the result
+        // (Phase 4b's guard, which this RFC does not move), and a record had no
+        // release rule, so they could not dangle. M3 gives `Type::Record` its
+        // row and they can.
+        //
+        // The fix is not the copy M1 priced and refused to pay. RFC-0093 M1
+        // shipped the take in between, so each of them reads
+        // `match consume hit { .. }`: the arm yields a value the frame gave up,
+        // and nothing is copied at all. Six are one line of the `pages`
+        // generator.
         assert_eq!(
-            returns, 7,
-            "RFC-0092: the returns waiting on M3's release row moved — see the list above"
+            returns, 0,
+            "RFC-0092 M3: a projection return came back — see the list above"
         );
     }
 
