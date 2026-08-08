@@ -51,6 +51,13 @@ where marked parallel.
     released, the Linux job is the gate, and "flaky on one platform" is a
     diagnosis to disprove rather than accept.
 
+13. **Do not wait for CI. Push, report, and stop.** An agent cannot read a run
+    that has not concluded, so "check CI before you finish" makes every task as
+    long as the queue. The operator checks CI at the merge gate, which is where
+    rule 12 is enforced — once, not twice. The one exception is a failure that
+    reproduces **only** on CI: then the run is the agent's own test and waiting
+    is the work, not overhead. Say which case you are in.
+
 **Both rules came from one bug.** Phase 10a gave an `if let` scrutinee a
 reclamation row when `place_key` answered 0, and `place_key` answers 0 for two
 different questions — an expression that names no place, and a place with no
