@@ -1,8 +1,9 @@
 # RFC-0093 — A Take Is a Move Out of a Place
 
-- **Status:** **Designed, not built.** The count is measured. The recommendation
-  is at the bottom and it is "build M1 and M2, and stop there until the gate at
-  M3 is read."
+- **Status:** **Designed, not built.** The count is measured over the migrated
+  corpus: **44 of the 114 `.copy()` calls RFC-0092 M1 added**, plus four public
+  signatures it distorted. The recommendation is at the bottom and it is "build
+  M1; hold M2 until RFC-0092 M3 starts."
 - **Depends on:** RFC-0089 rules 1, 2 and 4 (landed), RFC-0092 M1 (landed),
   RFC-0011 (`swapRemove`, landed). RFC-0092 M3 is **not** a dependency and this
   RFC states what M3 must do about it.
@@ -41,7 +42,7 @@ hole2.vyrn:10:0: `b.tags` may not be consumed — a place owns its contents, so 
 ```
 
 The second one is `check_consuming_iter`
-(`compiler/vyrn-frontend/src/movecheck.rs:1190-1201`). It is the whole design in
+(`compiler/vyrn-frontend/src/movecheck.rs:1193-1201`). It is the whole design in
 one refusal: the language knows what the reader wants, names the hole as the
 reason it will not do it, and offers taking the **whole root** instead.
 
@@ -61,25 +62,85 @@ there being no take.
 
 ## The count
 
-Measured over the corpus at `f7a37e8`: **230 `.vyrn`/`.vyx` files, 448 `.copy()`
-calls**, of which PR #109 added 114 and removed 7.
+The corpus is migrated, so this is a measurement and not an estimate. Every
+`.copy()` PR #109 added is in the tree, and every one was read in its enclosing
+function.
 
-Split by the shape of what is copied, over the lines PR #109 **added**:
+Measured at `f7a37e8` over 230 `.vyrn`/`.vyx` files: **499 `.copy()` occurrences,
+up from 383 at `6a8db90`** — the net 116 PR #109's body reports. 123 occurrences
+were added and 7 removed; 114 of the added ones are code rather than a comment.
+475 of the 499 are code, and 470 of those are hand-written rather than inside an
+emitted string.
 
-| shape of the copied expression | count |
+Each of the 114 was classified by whether a take could replace it:
+
+| bucket | what it means | count |
+|---|---|---|
+| **A** | the root is frame-owned and is **never read again** | **22** |
+| **B-disjoint** | frame-owned root, read again only through **other** fields | **22** |
+| B-whole | frame-owned root, the same path or the whole value read again | 16 |
+| C | the root is a borrowed parameter, `self`, or module state | 50 |
+| D | a whole value or a loop variable, not a projection | 4 |
+
+**A + B-disjoint is 44, and the design decides which of the two numbers applies.**
+A whole-root take buys 22. The path-keyed hole — answer (c) above — buys 44.
+
+That is the same conclusion the worked examples reach from the other side, and it
+is worth seeing why the two halves are the same shape. B-disjoint is dominated by
+a single record literal that reads one field by take and the others by name:
+
+```vyrn
+return Scanned { ok: true, neg: neg, d: t.d.copy(), dp: t.dp, trunc: t.trunc }
+```
+
+(`std/num.vyrn:233`). And by the nine-line block at `std/vyx.vyrn:1431-1439`,
+where nine identical field copies drain one record and **only the ninth is A**,
+because it is the last. A rule where the ninth line is legal and the first eight
+are not is not a rule anybody can teach.
+
+**Three more sites are within reach and are not counted.** `std/vyx.vyrn:1827`,
+`:2185` and `:2222` re-read the root only on the **other** branch of an `if`.
+`movecheck` clones its consumption map per branch already
+(`movecheck.rs:1865-1867`), so the read check is per-branch and these convert; the
+union rule below is about the drop set, not the read set. They are left out of
+44 because counting a case the migration has not run is how a number stops being
+a measurement.
+
+### Per kind, and this is what decides "one mechanism or three"
+
+| kind of place | A sites |
 |---|---|
-| a field of a place — `er.err.copy()` | 54 |
-| an element or a field of one — `xs[i].copy()`, `fs[0].key.copy()` | 22 |
-| a plain name — `s.copy()` | 46 |
+| a record field | **20** |
+| a container element | 2 |
+| an enum payload | **0** |
 
-The 46 are not one thing. About thirty are a `match` arm binder — `JStr(s) =>
-s.copy()` — which is an **enum payload** wearing a plain name, and the rest are
-loop variables and whole locals. A dozen of the plain names are the bodies of
-the new `impl Copy` walks: a copy walk must copy, and no take reaches it.
+**The enum payload is zero, and it is zero for a good reason.** A `match` over a
+fresh call result already binds owners — `pattern_binders` asks
+`place_path(scrutinee)` (`movecheck.rs:1153`) and a call is not a place. So the
+payload copies that remain are all matches over a **borrowed** parameter or
+`self`, which no take rule reaches. This RFC's M1 buys zero copies by itself,
+and the milestone section says so rather than hiding it.
 
-The count that decides this RFC is not "how many copies exist". It is **how many
-copies have a root the frame owns and does not read again**, because only those
-can become a take. That census is in "What it buys, counted" below.
+**The container element is two**, and both are `names.push(parts[0].copy())` in
+`std/i18n` over a `split` result that dies after. `parts.swapRemove(0)` writes
+them **today**. That is the element case answering for itself.
+
+### Two things the 44 does not include
+
+**183 of the 470 hand-written copies are C**, off a borrowed parameter or `self`,
+and no rule in this RFC moves any of them. The two biggest clusters in the whole
+corpus are `std/http`'s `httpCopy` (nine field copies off `r: Route`) and
+`std/ui`'s five `Head` builders (twenty copies off `h: Head`). They need
+`consume` on the **signature**, which is a decision about the caller and not
+about this RFC.
+
+**Fourteen copies live inside generated code and are not in the 470.** Nine sit
+in emitted string literals (`std/rpc.vyrn:308` alone emits three into every
+client and every server module a project generates) and five in `vyrn"""` code
+quotes in `std/ui`. They expand per generated module, so their real multiplicity
+is a property of the project being built. **They are deliberately not counted**,
+because a number that depends on which project you compile is not a corpus
+measurement — but they point the same way.
 
 ---
 
@@ -103,7 +164,7 @@ Three reasons, in order of weight.
    the menu can say, not what vocabulary the reader has to learn.
 3. **The parse is the trick that already works twice.** `consume` is contextual:
    a capability when an identifier follows it, a call to a user function named
-   `consume` when `(` follows it (`parser.rs:2537`, `parser.rs:3634-3638`). A
+   `consume` when `(` follows it (`parser.rs:2544`, `parser.rs:3638-3642`). A
    third position is the same test.
 
 It reads correctly because the sentence is the same in all three positions: *the
@@ -134,18 +195,21 @@ method reads as an operation on a value, and this is an operation on a place.
 
 ## The rule
 
-> **`consume p` yields the value at place `p` as an owned value, and `p` is dead
-> from that point.**
+> **`consume p` yields the value at place `p` as an owned value. The place `p`
+> is dead from that point. Its root is not — only the path taken.**
+
+That second sentence is the whole design decision, and "What happens to the place
+afterwards" below is where it is argued and priced.
 
 Three refusals, and all three are already written. `check_consuming_iter` is the
 function; a take reuses it with one branch deleted.
 
 | refusal | today's site | why it stays |
 |---|---|---|
-| `consume` on something that is not a place | `movecheck.rs:1180` | there is nothing to take from; the value is already owned |
-| `consume` of a borrowed root | `movecheck.rs:1208` | the frame does not own it, so it may not give it away |
-| `consume` of module state | `movecheck.rs:1202` | nothing may take module state, and that is true of every caller |
-| ~~`consume` of a projection (`path != root`)~~ | `movecheck.rs:1190` | **this is the branch that goes** |
+| `consume` on something that is not a place | `movecheck.rs:1183` | there is nothing to take from; the value is already owned |
+| `consume` of a borrowed root | `movecheck.rs:1212` | the frame does not own it, so it may not give it away |
+| `consume` of module state | `movecheck.rs:1204` | nothing may take module state, and that is true of every caller |
+| ~~`consume` of a projection (`path != root`)~~ | `movecheck.rs:1193` | **this is the branch that goes** |
 
 The fourth refusal is the gap. Deleting it makes `for t in consume b.tags`
 legal, which is a relaxation of an existing error rather than a new form, and it
@@ -159,7 +223,7 @@ two for measured reasons.
 **(a) The take is a move of the whole root.** `consume d.title` kills `d`.
 Cheapest to implement — `took(&root, ..)` and `consumed.insert(root, ..)` are two
 lines that already exist and are already called by the consuming loop
-(`movecheck.rs:2025-2035`). **Refused, because it does not fix the corpus.** The
+(`movecheck.rs:2027-2042`). **Refused, because it does not fix the corpus.** The
 sites that want a take read another field afterwards. `std/vyx`'s caller reads
 `er.next` after it wants `er.node`; `std/graphql`'s caller reads `parsed.err`
 after it wants `parsed.args`. Under (a) both are a use-after-move and the copy
@@ -176,7 +240,7 @@ Taken. The rule:
 - **The taken PATH is dead, not the root.** `consume er.node` refuses a later
   `er.node` and allows a later `er.next`. The consumption record is keyed by
   path rather than by root; `Consumed` is already a `String`-keyed map and
-  `root_of` (`movecheck.rs:645`) already exists to compare the two.
+  `root_of` (`movecheck.rs:646`) already exists to compare the two.
 - **A reassignment revives the path.** `er.node = v` makes `er.node` readable
   again. `movecheck` already does this for a whole variable — its own module
   comment says *"reassignment revives a variable"* (`movecheck.rs:12`).
@@ -195,8 +259,9 @@ that difference is not symmetric.
 A record, a user enum and a fixed array **release nothing**
 (`own.rs:335`, `Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)` → no row).
 So a hole in a record has no runtime consequence at all today: the field's word
-stays in the slot, nothing walks it, and nothing frees it twice. The take is a
-load, exactly as the copy's argument is a load before it calls `__vyrn_str_copy`.
+stays in the slot, nothing walks it, and nothing frees it twice. The take is the
+load the copy already emits, without the `deep_copy` that follows it
+(`vyrn-codegen/src/lib.rs:9545-9558`).
 
 Read back through the compiler at `f7a37e8`:
 
@@ -206,9 +271,8 @@ line 8     d                NOT reclaimed — nothing releases the type Doc yet
 
 **This is the same shape as `for x in consume xs`, and the loop already shows
 where the wiring goes.** `Stmt::ForIn`'s `consuming` flag reaches no engine, but
-the loop is not invisible to `own.rs`: `movecheck` writes
-`Gone::Moved { line, by: "the `for .. in consume` loop" }`
-(`movecheck.rs:2030`), `own.rs` imports `Gone` (`own.rs:46`) and turns it into
+the loop is not invisible to `own.rs`: `movecheck` writes a `Gone::Moved` row
+(`movecheck.rs:2032`), `own.rs` imports `Gone` (`own.rs:46`) and turns it into
 `Fate::Moved` (`own.rs:895`), and the drop is not emitted. Checked:
 
 ```text
@@ -230,16 +294,18 @@ discovered.
 
 ## Is it one mechanism or three?
 
-**It is two, and one of them already shipped.** Saying that early is what made
-RFC-0092's milestones honest, and the same is true here.
+**It is one, and the count says so before the argument does.** Of the 22
+takeable sites: **20 are a record field, 2 are a container element, 0 are an enum
+payload.** Saying that early is what made RFC-0092's milestones honest, and the
+same is true here.
 
 The dividing line is whether the container can represent the hole at run time.
 
-| the place | can it hold a hole? | the answer |
-|---|---|---|
-| a container element | **yes** — a container has a runtime length | `swapRemove`, RFC-0011, shipped |
-| a record field | no — a record has a fixed set of fields and no runtime mark | the new rule |
-| an enum payload | no — an enum has a tag for the variant, not for the payload | the new rule, at `path == root` |
+| the place | can it hold a hole? | the answer | A sites |
+|---|---|---|---|
+| a container element | **yes** — a container has a runtime length | `swapRemove`, RFC-0011, shipped | 2 |
+| a record field | no — a record has a fixed set of fields and no runtime mark | the new rule | 20 |
+| an enum payload | no — an enum has a tag for the variant, not for the payload | already owned where it matters | 0 |
 
 **The element case is closed and this RFC does not touch it.** `swapRemove`
 returns the element and leaves the container one shorter, which is a hole a
@@ -250,38 +316,58 @@ compiles, it allocates nothing, and it needed no new syntax. A hypothetical
 `consume xs[i]` would have to invent a hole semantics that `swapRemove` already
 answers, and would then have two spellings for one operation.
 
-**The record field and the enum payload are one mechanism, not two.** They differ
-only in where the path stops:
+**The enum payload is zero and it is not a milestone.** A `match` over a fresh
+call result already binds owners: `pattern_binders` asks
+`place_path(scrutinee)` (`movecheck.rs:1153`) and a call is not a place, so the
+binders are owned today. Every payload copy left in the corpus matches on a
+borrowed parameter or on `self`, which no take rule reaches. The design's first
+draft made this a milestone of its own — the easy half, `path == root`, no hole
+rule — and the count deleted it.
 
-- `consume d.title` has `path != root`. It leaves a hole, and the hole rule
-  above governs it.
-- `match consume e { Word(s) => s }` has `path == root`. It takes the whole enum,
-  so there is no hole — the existing whole-variable move covers it, and the
-  binders become owners for free. `movecheck.rs:1153` reads
-  `place_path(scrutinee).map(|_| Borrow::Projection)`, and `place_path` answers
-  `None` for anything that is not a `Var` or a `Field`. A `consume` prefix is
-  neither, so the binders bind owners with no second rule. The same holds for
-  `if let Some(x) = consume opt`.
+**The whole-binding form still ships, as a form and not as a milestone.** It
+costs one line, because a `consume` prefix is neither a `Var` nor a `Field` and
+`place_path` therefore answers `None` for it. It earns its place at one site:
+`examples/graphql.vyrn:195` matches an **owned local** `Option<Response>`, so
+the binder is a projection, and `match consume r { Some(res) => consume res.body }`
+is what makes it writable. One site is a reason to include a form and not a
+reason to gate a milestone on it.
 
 So the chain is: **the prefix is the mechanism; the record field is the case that
-needs the hole; the enum payload is the case that does not; the element is
-already done.** A milestone can stop after the payload and still be honest,
-because the payload case is the smaller half and it closes on its own.
+needs the hole and holds 20 of the 22 sites; the enum payload holds none; the
+element is already done.** There is no honest place to stop before the hole.
 
 ---
 
 ## What it buys, counted
 
-The corpus is migrated, so this is a measurement and not an estimate. Every
-`.copy()` PR #109 added is in the tree.
+**44 of the 114 copies PR #109 added, and 44 of the 470 hand-written copies in
+the corpus.** The table is in "The count" above. Three things about that number
+are worth stating separately, because each of them could have gone the other way.
 
-<!--COUNT-->
+**All 22 A sites were added by PR #109.** The 383 copies that existed before it
+contain **zero** takeable sites. RFC-0092 M1 did not expose a latent class; it
+created one. That is the strongest single argument that the copies are the
+symptom and this is the cause — nobody was writing this shape until the rule made
+them.
+
+**The design choice is worth 22 copies on its own.** A whole-root take gets 22
+and a path-keyed hole gets 44. The 22 in between are the same programs, one field
+later.
+
+**And it is worth four public signatures.** `vyxParseElem`, `vyxProcessElem`,
+`gqlArgList` and `gqlSelSet` each grew a `modify Array<..>` out-parameter and lost
+their return value, because there was no way for the caller to read one field out
+of a returned pair. Those four are not in any copy count. They are the cost that
+does not show up as a copy, and they are why the seven shape changes are in this
+RFC's evidence at all.
 
 ---
 
 ## Worked examples
 
-All seven are the real shape changes PR #109 landed, read back through the rule.
+Seven of the eight are the real shape changes PR #109 landed, read back through
+the rule. The eighth is not a shape change and it is the one that decides the
+design.
 
 ### 1. `std/vyx` — the pair that had to become an out-parameter
 
@@ -364,6 +450,36 @@ and the take does not argue for bringing it back. `vlog`'s other carrier,
 
 Already takes: `f0.swapRemove(0)`. Nothing to change, and it is the evidence that
 the element case needs no new mechanism.
+
+### 8. `std/vyx` — the nine-line drain, and why the hole rule is not optional
+
+Not one of the seven. It is the site the count keeps pointing at
+(`std/vyx.vyrn:1431-1439`). One record is built by a call and immediately emptied
+into nine locals:
+
+```vyrn
+let sc = vyxParseScriptAt(ba, scriptSec.start, scriptSec.end, dir, fileId)
+if sc.err != "" {
+    return vyxCompErr(compName, fnName, fileId, srcPath, sc.err)
+}
+propNames = sc.propNames.copy()
+propTypes = sc.propTypes.copy()
+imports = sc.imports.copy()
+importLines = sc.importLines.copy()
+importCols = sc.importCols.copy()
+helpers = sc.helpers.copy()
+helperTexts = sc.helperTexts.copy()
+helperLines = sc.helperLines.copy()
+helperCols = sc.helperCols.copy()
+```
+
+Nine array copies, and `sc` is dead on the next line. **Under a whole-root take
+only the last of the nine is legal**, because the first eight are followed by a
+read of `sc`. Under the path-keyed hole all nine are `consume sc.propNames` and
+so on, and the record is empty rather than moved.
+
+This is the site that decides between answers (a) and (c), and it is why the
+count is 44 rather than 22.
 
 ---
 
@@ -470,48 +586,62 @@ path and the milestone should stop.
 
 ## Milestones
 
-### M1 — the prefix, at `path == root`
+**There is no gate phase, and the reason is that the gate already ran.** Every
+other RFC in this chain opened with a measurement milestone because the corpus
+had not been read. This one opens after RFC-0092 M1 migrated it, so the count is
+in "The count" above and the decision it gates is made below.
 
-`consume p` where `p` is a whole binding, in every expression position:
-scrutinee, argument, store, return, `let`. This is the enum payload half, and it
-needs **no hole rule at all** — it is the whole-variable move `movecheck` already
-performs for the consuming loop, at a new position.
+**There is also no separate `path == root` milestone, and that is the count
+talking.** The design's first draft had one: the whole-binding prefix, the enum
+payload half, no hole rule. The census says the enum payload is **zero copies**,
+because a `match` over a fresh call result already binds owners. A milestone that
+buys nothing is not a milestone. The whole-binding form still ships — it is what
+makes `match consume r { Some(res) => consume res.body }` writable at
+`examples/graphql.vyrn:195`, where the payload binder is a projection of an owned
+local — but it ships **inside** M1 as a form, not as a milestone with its own
+gate.
 
-Deliverables: the parse, `place_path` answering `None`, `check_take` (the
-existing `check_consuming_iter` minus one branch), `fmt`, and the diagnostics for
-the three refusals that stay.
+### M1 — the prefix and the hole
 
-**Gate.** Three-way parity byte-identical including traps. The memory suite
-unmoved — eleven steady of twelve with `elementLeak` still leaking. The
-`borrow_store_sites` instrument still zero. **M1 changes what a program may say
-and must move no row.**
-
-### M2 — the hole, at `path != root`
-
-`consume d.title`. Path-keyed `Consumed`, revival on reassignment, union at
-joins. `check_consuming_iter`'s `path != root` refusal is deleted, so
+`consume p` as a prefix on any place, in every expression position: scrutinee,
+argument, store, return, `let`. Path-keyed `Consumed`, revival on reassignment,
+union at joins. `check_consuming_iter`'s `path != root` refusal is deleted, so
 `for t in consume b.tags` becomes legal in the same change — and the menu that
-sends a record root to `for .. in consume b` goes with it, because it no longer
-has anything to say.
+sends a record root to `for .. in consume b`, which does not typecheck, goes with
+it, because it no longer has anything to say.
 
-The corpus migrates in this change, module by module, as every phase in this
+Deliverables: the parse, `place_path` answering `None` for `Expr::Consume`,
+`check_take` (the existing `check_consuming_iter` minus one branch), path-keyed
+consumption, `fmt`, the LSP token, and the diagnostics for the three refusals
+that stay.
+
+The corpus migrates in the same change, module by module, as every phase in this
 chain has done.
 
-**Gate.** The same three, plus: the number of `.copy()` calls in the corpus falls
-by at least the A-count measured above, and no site converts to a take that the
-census called B or C. If the migration finds fewer than that, **stop and write
-the number** — that is the same gate RFC-0092 M0 used and it is the one that has
-stopped work three times in this chain.
+**Gate, and it has two halves.**
 
-### M3 — the release, jointly with RFC-0092 M3
+*Correctness.* Three-way parity byte-identical including traps. The memory suite
+unmoved — eleven steady of twelve with `elementLeak` still leaking. The
+`borrow_store_sites` instrument still zero, without a second mode. **M1 changes
+what a program may say and must move no row.**
 
-Not a milestone of this RFC alone. The hole set travels from `movecheck` to
-`own.rs`, and RFC-0092 M3's record release skips it. **The consuming loop's
-unpaid bill is fixed in the same change**, because it is the same mechanism.
+*The count.* The migration must remove **at least 40 `.copy()` calls**, against
+the 44 measured. **Below 30, stop and write the number**, and the RFC's "as
+landed" section says which sites refused to convert and why. That is the gate
+that stopped RFC-0082 M2 three times and refused RFC-0091 M4, and it is meant to
+be able to stop this.
 
-**Gate.** RFC-0092 M3's gate — `elementLeak` flips to steady — plus a memory row
-for a taken field: a record whose `String` field is taken N times allocates
-N and frees N, not 2N and not 0.
+### M2 — the release, jointly with RFC-0092 M3
+
+Not a milestone of this RFC alone, and it does not start until RFC-0092 M3 does.
+The hole set travels from `movecheck` to `own.rs` beside the `Gone` map it
+already hands over, `Fate` gains its partial arm, and M3's record release skips
+the hole.
+
+**Gate.** RFC-0092 M3's own gate — `elementLeak` flips to steady — plus one new
+memory row: a record whose `String` field is taken in a loop of N iterations
+allocates N and frees N. Not 2N, which is the double free, and not 0, which is
+the leak this RFC ships with until M2.
 
 ---
 
@@ -552,4 +682,43 @@ N and frees N, not 2N and not 0.
 
 ## The recommendation
 
-<!--RECOMMENDATION-->
+**Build M1. Hold M2 until RFC-0092 M3 starts.**
+
+The reasons, in order of weight.
+
+1. **It is not a keyword.** The brief for this design asked whether the count
+   justifies a keyword. It does not have to: `consume` is an existing word at a
+   third position, which is the decision PR #74 made deliberately for the second
+   position and wrote down as the reason it cost so little. The question this
+   count has to answer is smaller — whether 44 copies and four distorted
+   signatures justify **one prefix, one deleted refusal, and a path-keyed map**.
+   They do.
+2. **44 of 114, and every one of them created by the previous milestone.** The
+   383 copies that predate RFC-0092 M1 contain zero takeable sites. This is not a
+   pre-existing sloppiness the language could keep tolerating; it is a class M1
+   opened, and PR #109 filed it rather than forcing it.
+3. **It costs the two compiling backends nothing and the interpreter nothing.**
+   M1 is a frontend change, exactly as `for x in consume xs` was, and for the same
+   reason: nothing releases a record's fields yet. Parity's expected result is
+   byte-identical output.
+4. **It does not reopen RFC-0092.** A take is not a projection, so the rule M1
+   just turned on is neither weakened nor conditioned, and the instrument that
+   guards it needs no second mode.
+5. **It removes a diagnostic that sends the reader to a second error.** The
+   consuming menu offers `for .. in consume b` for a record root, which does not
+   typecheck. That is this chain's own defect — one question, two answers — and
+   the take is what lets the menu stop saying it.
+
+**The gate that changes the answer is M1's own migration count.** If the
+migration removes fewer than 30 copies, the design was wrong about the corpus and
+the right response is to keep the number, keep the four out-parameters, and close
+this RFC with the measurement attached. The most likely way that happens is a
+site where the take is legal but the reviewer prefers the copy, and the honest
+place to find that out is the migration rather than this document.
+
+**And one thing this RFC is deliberately not recommending.** 183 of the corpus's
+470 copies — 39% — are projections of a **borrowed** parameter, and no rule here
+moves any of them. `std/http`'s `httpCopy` and `std/ui`'s `Head` builders are the
+two largest clusters of copies in the whole corpus, and the only thing that would
+move them is `consume` on the signature, which is a decision about every caller.
+That is a different question and it deserves its own count, not this one's.
