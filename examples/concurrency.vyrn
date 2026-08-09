@@ -22,6 +22,12 @@ fn fib(n: Int64) -> Int64 {
     return fib(n - 1) + fib(n - 2)
 }
 
+/// A task result that OWNS heap, so that dropping the task has something to
+/// release besides the frame it sits in.
+fn label(n: Int64) -> String {
+    return "task \{n}"
+}
+
 fn main() -> Int64 {
     let cfg = Config { base: 100, scale: 3 }
 
@@ -33,6 +39,15 @@ fn main() -> Int64 {
 
     let total = a.join() + b.join() + c.join() + f.join()
     print(total) // 103 + 106 + 130 + 6765 = 7104
+
+    // The other discharge (RFC-0095 M1). A `Task<T>` is linear, so a task whose
+    // answer the program does not want is still owned: `drop` waits for it,
+    // releases the result by its type — a `Task<String>` has a String in its
+    // frame that nothing else will ever free — and then gives back the frame,
+    // the record and the operating-system handle. Saying nothing is refused.
+    let unwanted = spawn label(7)
+    drop unwanted
+
     // Exit codes are portable only in 0..126 (WASI's rule); print the result
     // and return a small success/failure indicator instead.
     if total == 7104 { return 0 }

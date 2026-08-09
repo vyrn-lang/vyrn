@@ -1,7 +1,8 @@
 # RFC-0095 — A Task Is Owned
 
-- **Status:** **Designed. Not built.** RFC-0087 §10 is the last census row with a
-  measurement behind it and no mechanism pointed at it.
+- **Status:** **M1 built** (see "M1 as landed" at the end). RFC-0087 §10 was the
+  last census row with a measurement behind it and no mechanism pointed at it,
+  and it is closed.
 - **Depends on:** RFC-0086 M1 (`impl Owned`), RFC-0092 M4 (a container carries
   its element's obligation), RFC-0093 M1 (`consume` as a prefix), RFC-0025
   (`spawn`), RFC-0004 Q4 (`Task<T>`).
@@ -128,7 +129,7 @@ task must still be able to do that.
 
 ## Milestones
 
-### M1 — the obligation
+### M1 — the obligation — **BUILT**
 
 `Task<T>` becomes must-use. `join` consumes. `drop t` is legal on a task and
 releases it. `examples/branchtypes.vyrn` gains its `drop task`.
@@ -143,11 +144,12 @@ flat.
 **A trapping task that is dropped rather than joined must still print its line
 and exit 1.** That is a test, not a hope.
 
-### M2 — the handle, if M1 leaves it
+### M2 — the handle, if M1 leaves it — **NOT NEEDED**
 
 Only if M1 finds the handle cannot be closed at the same site. Splitting it is
 not expected; the milestone exists so that discovering it does not become a
-reason to widen M1.
+reason to widen M1. **M1 closed the handle at the same site**, so this milestone
+is closed unbuilt.
 
 ---
 
@@ -167,6 +169,109 @@ reason to widen M1.
   `String` result, which rule 1 exists to prevent.
 - **Leaving it, and documenting harder.** A per-process handle ceiling is not a
   documentation problem.
+
+---
+
+## M1 as landed
+
+**Built. §10 is closed.** The same loop, native, `let t = spawn work(i)` then
+`t.join()`:
+
+| spawns | peak, before | handles, before | peak, after | handles, after |
+|---|---|---|---|---|
+| 1,000 | 4,248 KiB | 853 | 3,860 KiB | 71 |
+| 20,000 | 5,924 KiB | 20,076 | 4,332 KiB | 72 |
+| 50,000 | 8,312 KiB | 50,076 | 3,880 KiB | 72 |
+| 200,000 | 20,252 KiB | 200,076 | 3,880 KiB | 72 |
+
+The before column reproduces the RFC's own numbers (4,392 / 8,332 / 20,120 KiB,
+19,946 handles at 20,000) to within measurement noise, and the handle column
+reproduces exactly: one per spawn. After M1 both are flat. The same holds under
+`VYRN_SEQUENTIAL_SPAWN=1`: 3,872 KiB and 70 handles at 200,000 spawns.
+
+### The shape it took
+
+`Task<T>` joins `Stream<T>` on the must-use row and stays off the automatic
+reclamation table, for the reason `Stream` is off it: the release is emitted by
+the construct that DISCHARGES the value, so a block-exit row would release it a
+second time. `own::release_kind` answers `None` for a `Task`, `own::linear_kind`
+answers `Linear::Task`, and `own::owns_heap` answers `true` for every `Task<T>`
+including `Task<Unit>` — the handle is there whatever `T` is.
+
+The shim gained one function. `__vyrn_task_release` waits, unlinks the record from
+the exit-time registry, closes the event handle (or destroys the mutex and
+condition variable), and frees the frame and the record. The two discharges call
+it:
+
+- **`t.join()`** loads the result out of the frame and then releases the task. The
+  order is the safety argument: `__vyrn_join` answers with the frame's ADDRESS.
+- **`drop t`** joins (which waits), releases the result **by its type** through the
+  ordinary `emit_drop` — the frame pointer IS a slot holding the result, so no
+  second walk was needed — and then releases the task.
+
+The registry is now doubly linked, so a record can leave it, with a `listed` flag
+that makes the unlink idempotent. `__vyrn_join_all` DETACHES each record before
+waiting on it, so a release running on another thread cannot free the pointer the
+exit walk is holding. The registry is empty in every program the checker accepts;
+it is kept as the net under a hole in that proof, because what it protects is a
+trap that would otherwise be lost.
+
+wasm has no threads, so the whole task is one heap box: the join frees it after
+reading, and `drop` releases the result by its type and then frees it. The
+interpreter runs tasks eagerly over Rust values, and its `drop` already released
+the value by its type, so it needed no change at all.
+
+### Three things this RFC had wrong
+
+**The corpus DID join one task twice.** `examples/parallel.vyrn` did it
+deliberately, with the comment "join is idempotent — a second join re-reads the
+settled result". It reads each result once now, into a `let`, and prints the same
+four numbers.
+
+**`examples/branchtypes.vyrn` could not be given a `drop`.** Its leaking path is a
+`match` ARM, `drop` is a statement, and an arm is an expression — so `drop task`
+is unwritable there. Both arms join instead, which discharges the task on every
+path and prints the same line.
+
+**The obligation does not catch the branchtypes shape anyway.** The must-use scan
+is statement-granular: a mention anywhere in a statement is a disposal on every
+path through it, so a join inside one arm of a `match` expression reads as a
+disposal on both. That is a limit `Stream` has had since RFC-0075 and this
+milestone did not widen. What the obligation does catch is the plain shape —
+spawned and never mentioned, joined twice, or joined on one branch of an `if`
+STATEMENT — which is `examples/task_abandoned.vyrn`, three refusals in one file.
+
+### The known limit it leaves
+
+An `Array<Task<T>>` carries the obligation (RFC-0092 M4), but `drop ts` on one
+frees the buffer and leaks the tasks in it: a task's release is a wait and three
+frees at a site holding the frame pointer, not a walk over bytes, and the deep
+release walk has no arm for it. The diagnostic therefore names the discharge that
+works — `for t in consume ts`, joining each element — rather than the `drop` menu
+a container usually gets. `Array<Stream<T>>` has had the identical hole since
+RFC-0075, so this is one shape of one open question and not a new one.
+
+**M2 is not needed.** The handle closes at the same site as the frame and the
+record, which is what the milestone expected.
+
+### What proves it
+
+- Three-way parity byte-identical including traps, 36 tests, wasm column live.
+- `a_dropped_task_that_traps_still_prints_once_and_exits_1` — a DROPPED trapping
+  task prints the canonical line once and exits 1, on all three engines, and the
+  line printed before the drop survives. This is the risk the RFC named, as a
+  test.
+- The memory suite reads 15 rows, all steady. `spawnFrame` measures the release
+  rather than an absence now: it is a `Task<String>` that is dropped, plus 64
+  joined tasks a call, and removing either release makes the row grow (589,824
+  bytes at 500 calls against 2,162,688 at 2,000 — verified by removing each).
+- `the_spawn_handles_go_back_natively`, beside the table, is the native
+  measurement the wasm harness cannot make: the handle count after 8,000 spawns
+  equals the count after 2,000. Removing the `CloseHandle` makes it read 2,088
+  against 8,088 — verified.
+- `examples/task_abandoned.vyrn` is an expected-check-failure corpus file.
+- `borrow_store_sites` reads 0 across the corpus; the projection census reads
+  `stores: 0`, `returns: 0`, `elem-store: 0`, `elem-return: 0`.
 
 ---
 

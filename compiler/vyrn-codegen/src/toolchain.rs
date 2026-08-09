@@ -395,22 +395,35 @@ long long __vyrn_random_seed(void) {
    never joined are joined at process exit (below, in spawn order): the eager
    semantics ran every task, so a trap in a leaked task must not be lost.
 
-   Ownership: task records and frames are never freed — a task may be joined
-   more than once (join is idempotent), and the count is bounded by the number
-   of spawns (the "unproven ownership leaks, which is always safe" rule).
+   Ownership: a Task<T> is LINEAR (RFC-0095 M1). It is discharged by exactly
+   one of two constructs, and both wait: `t.join()` takes the result, and
+   `drop t` releases the result by its type. Each then calls
+   __vyrn_task_release, which frees the frame, frees the record and closes the
+   event object. That closes RFC-0087 §10 — 81 bytes and one operating-system
+   handle per spawn, both linear in the spawn count.
 
-   Read that as a decision, not an omission (RFC-0087 §10). __vyrn_join hands
-   the frame POINTER back and the caller loads the result off it, so a free at
-   the first join gives the second join a dangling read — and `t.join()` twice
-   is a legal program on all three engines. Copying the result into the record
-   at completion would let the frame go, but the record cannot go with it: any
-   surviving Task value may still be joined, so the growth stays linear and only
-   the constant moves. Measured at 81 bytes per spawn, plus one event handle.
+   The rule this replaces was "task records and frames are never freed, because
+   a task may be joined more than once". __vyrn_join hands the frame POINTER
+   back and the caller loads the result off it, so a free at the first join gave
+   the second join a dangling read. What closed it was knowing that no further
+   join can happen, which is ownership of the Task value, so a second
+   `t.join()` is now a compile error and there is only ever one join.
 
-   What closes it is knowing that no further join can happen — ownership of the
-   Task value, which is RFC-0091's declared release pointed at a task. Then the
-   frame, the record and the event object all go at one site. Until then this
-   leak is deliberate: a use-after-free on a joined task is the worse answer. */
+   Two invariants the release depends on, in the order they are needed:
+
+     - __vyrn_task_release WAITS first. `drop t` reaches it without a join, and
+       freeing the frame while the worker still writes the result into it would
+       corrupt the heap. The wait is also what keeps the trap protocol: a
+       dropped task that traps still prints its line and exits 1.
+     - The registry entry goes with the record. The exit walk below reads
+       `next`, so a freed record left on the list would be a use-after-free in
+       __vyrn_join_all. The list is doubly linked for that, and `listed` makes
+       the unlink idempotent — the exit walk detaches what it takes.
+
+   The registry itself is kept, and is empty in every program the checker
+   accepts: linearity discharges every task before its owner's scope ends. It
+   stays as the net under a hole in that proof, because what it protects is a
+   trap that would otherwise be lost. */
 #if defined(__wasi__)
 typedef struct VTask { void* frame; } VTask;
 void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
@@ -420,6 +433,12 @@ void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
     return t;
 }
 void* __vyrn_join(void* task) { return ((VTask*)task)->frame; }
+/* No threads, so the wait is nothing and the release is two frees. */
+void __vyrn_task_release(void* task) {
+    VTask* t = (VTask*)task;
+    free(t->frame);
+    free(t);
+}
 static void __vyrn_join_all(void) {}
 #else
 #ifdef _WIN32
@@ -428,7 +447,9 @@ typedef struct VTask {
     void (*thunk)(void*);
     void* frame;
     HANDLE done; /* manual-reset event, signaled when the task completed */
+    struct VTask* prev;
     struct VTask* next;
+    int listed;
 } VTask;
 static DWORD WINAPI __vyrn_task_main(LPVOID p) {
     VTask* t = (VTask*)p;
@@ -448,7 +469,9 @@ typedef struct VTask {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     int done;
+    struct VTask* prev;
     struct VTask* next;
+    int listed;
 } VTask;
 static void* __vyrn_task_main(void* p) {
     VTask* t = (VTask*)p;
@@ -468,18 +491,32 @@ static void __vyrn_task_wait(VTask* t) {
     pthread_mutex_unlock(&t->mu);
 }
 #endif
-/* Registry of every spawned task, appended in spawn order (a task may itself
-   spawn — the list is append-only under the lock, so the exit-time walk below
-   observes children its waits allowed to be registered). */
+/* Registry of every spawned task that is still outstanding, appended in spawn
+   order (a task may itself spawn — the list is edited under the lock, so the
+   exit-time walk below observes children its waits allowed to be registered). */
 static VTask* __vyrn_task_head = 0;
 static VTask* __vyrn_task_tail = 0;
+
+/* Take `t` off the registry. Under the lock, and idempotent: __vyrn_join_all
+   detaches what it takes, so a record may reach here already off the list. */
+static void __vyrn_task_unlist(VTask* t) {
+    __vyrn_tasks_acquire();
+    if (t->listed) {
+        if (t->prev) t->prev->next = t->next; else __vyrn_task_head = t->next;
+        if (t->next) t->next->prev = t->prev; else __vyrn_task_tail = t->prev;
+        t->listed = 0;
+    }
+    __vyrn_tasks_release();
+}
 
 void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
     int started = 0;
     VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
     t->thunk = thunk;
     t->frame = frame;
+    t->prev = 0;
     t->next = 0;
+    t->listed = 0;
 #ifdef _WIN32
     t->done = CreateEvent(0, TRUE, FALSE, 0);
 #else
@@ -509,8 +546,10 @@ void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
         __vyrn_task_main(t);
     }
     __vyrn_tasks_acquire();
+    t->prev = __vyrn_task_tail;
     if (__vyrn_task_tail) __vyrn_task_tail->next = t; else __vyrn_task_head = t;
     __vyrn_task_tail = t;
+    t->listed = 1;
     __vyrn_tasks_release();
     return t;
 }
@@ -521,18 +560,52 @@ void* __vyrn_join(void* task) {
     return t->frame;
 }
 
+/* RFC-0095 M1: give back everything one task owns. The caller has already taken
+   or released the RESULT — this cannot, because the shim's ABI does not know
+   the result's type — so what is left is the frame, the record and the event.
+
+   The wait comes first and is not optional. `drop t` arrives here without a
+   join, and the worker may still be storing the result into the frame. */
+void __vyrn_task_release(void* task) {
+    VTask* t = (VTask*)task;
+    __vyrn_task_wait(t);
+    __vyrn_task_unlist(t);
+#ifdef _WIN32
+    CloseHandle(t->done);
+#else
+    pthread_cond_destroy(&t->cv);
+    pthread_mutex_destroy(&t->mu);
+#endif
+    free(t->frame);
+    free(t);
+}
+
 /* Join every task that is still outstanding when the program returns from
    `main` — under eager semantics every spawned task ran, so a leaked task's
-   work (and, if it traps, its canonical trap + exit(1)) must still happen. */
+   work (and, if it traps, its canonical trap + exit(1)) must still happen.
+
+   Since RFC-0095 M1 a task is linear, so an accepted program leaves this list
+   empty and this walk does nothing. It is kept as the net under a hole in that
+   proof, because what it protects is a trap that would otherwise be lost. Each
+   record is DETACHED before the wait, so a release running concurrently on
+   another thread cannot free the pointer this walk is holding; the detached
+   record is then left alone, which is a bounded leak on a path no accepted
+   program reaches. */
 static void __vyrn_join_all(void) {
-    __vyrn_tasks_acquire();
-    VTask* t = __vyrn_task_head;
-    __vyrn_tasks_release();
-    while (t) {
-        __vyrn_task_wait(t);
+    for (;;) {
+        VTask* t;
         __vyrn_tasks_acquire();
-        t = t->next;
+        t = __vyrn_task_head;
+        if (t) {
+            __vyrn_task_head = t->next;
+            if (t->next) t->next->prev = 0; else __vyrn_task_tail = 0;
+            t->prev = 0;
+            t->next = 0;
+            t->listed = 0;
+        }
         __vyrn_tasks_release();
+        if (!t) return;
+        __vyrn_task_wait(t);
     }
 }
 #endif

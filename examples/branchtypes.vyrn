@@ -66,13 +66,20 @@ fn main() -> Int64 {
     print("narrow \{narrow}")
 
     // `spawn` in an arm, and the `join` that reads it in another.
+    //
+    // EVERY arm joins, since RFC-0095 M1. A task is linear: it is discharged
+    // exactly once, the join is the discharge, and an arm that returned a plain
+    // number left the task undischarged — which leaked a frame, a record and an
+    // operating-system handle on that path. `drop task` is the other discharge
+    // and cannot be written here, because `drop` is a statement and an arm is an
+    // expression; joining in both arms is what this shape says instead.
     let task: Task<Int64> = match pick {
         Some(n) => spawn addOne(n),
         None => spawn addOne(0),
     }
     let joined = match pick {
         Some(n) => task.join(),
-        None => 0 - 1,
+        None => task.join() - 1,
     }
     print("joined \{joined}")
 

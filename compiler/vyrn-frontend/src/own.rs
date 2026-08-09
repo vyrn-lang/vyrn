@@ -117,6 +117,15 @@ pub enum Linear {
     /// The seeded row: a `Stream<T>`, consumed with `for … in`, forwarded by
     /// returning it, or released with `close(s)`.
     Stream,
+    /// The other seeded row (RFC-0095 M1): a `Task<T>`, joined with `t.join()`,
+    /// which yields the result, forwarded by returning it, or released with
+    /// `drop t`, which waits for the task and then throws the result away.
+    ///
+    /// A task owns a frame, a record and an operating-system handle, and the
+    /// handle is why the obligation is worth its line: bytes are a leak a
+    /// program can live with, and a per-process handle ceiling is a server that
+    /// stops.
+    Task,
     /// A declared `impl MustUse for T` row. The value is handed on by name — to
     /// a call, or to the return — or released with `drop t`, which runs whatever
     /// `impl Owned for T` declared.
@@ -225,6 +234,11 @@ impl Owned {
         }
         match crate::types::resolve(ty, &self.types) {
             Type::Stream(_) => Some(Linear::Stream),
+            // RFC-0095 M1. The same obligation, one type over, for the same
+            // reason: a `join` that may run twice cannot free anything, so
+            // "free at the last join" needs to know there is only one join —
+            // and that is ownership of the `Task` value.
+            Type::Task(_) => Some(Linear::Task),
             // RFC-0092 M4: a container answers what its ELEMENT answers. A `Txn`
             // put in an array is still a `Txn`, and reading the obligation off
             // the container's own type key let a program park one in a container
@@ -345,7 +359,15 @@ impl Owned {
             // A `Stream<T>` is reclaimed too, but through the stream lowering
             // (RFC-0075 M2b), which pushes its own release frame at the binding
             // that produces it. Answering here as well would release it twice.
-            Type::Stream(_) => None,
+            //
+            // A `Task<T>` is the same shape since RFC-0095 M1, and the same
+            // answer for the same reason. A task is reclaimed by the construct
+            // that DISCHARGES it — `t.join()` takes the result and frees, `drop
+            // t` waits, releases the result by its type and frees — and an
+            // automatic block-exit row would free it a second time. Both
+            // constructs need the frame pointer and the result's type, neither
+            // of which this table carries, so both lowerings emit it directly.
+            Type::Stream(_) | Type::Task(_) => None,
             // ---- everything the language stores by value --------------------
             Type::Int
             | Type::IntN { .. }
@@ -416,15 +438,14 @@ impl Owned {
             // otherwise. `Json` and `Html` are that shape, which is also why M1's
             // `.copy()` menu sent them to a hand-written `copyJson`.
             //
-            // A `Fn` is off for the reason `owns_heap` records. A `Task<T>` is a
-            // handle to a frame the join owns, and `lazy T` IS `fn() -> T`
-            // (RFC-0085 M4a) — `resolve` normally answers that, and this is the
-            // depth-limited fallback.
+            // A `Fn` is off for the reason `owns_heap` records, and `lazy T` IS
+            // `fn() -> T` (RFC-0085 M4a) — `resolve` normally answers that, and
+            // this is the depth-limited fallback.
             t @ (Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)) => {
                 (self_referring(ty, &self.types).is_none() && owns_heap(&t, &self.types))
                     .then(|| DropKind::Deep(t))
             }
-            Type::Task(_) | Type::Lazy(_) => None,
+            Type::Lazy(_) => None,
             // ---- shapes that are not a runtime value ------------------------
             // A type operator survives only until `resolve` reaches its base, a
             // `Param` is erased by monomorphization, and an unresolved `Named`
@@ -504,10 +525,18 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
         }
         let deeper = |t: &Type| go(t, types, depth + 1);
         match crate::types::resolve(ty, types) {
-            Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Stream(_) => {
-                true
-            }
-            Type::Option(t) | Type::ArrayN(t, _) | Type::Lazy(t) | Type::Task(t) => deeper(&t),
+            // A `Task<T>` owns a frame, a record and an operating-system handle
+            // whatever `T` is (RFC-0095 M1), so it answers `true` for `Task<Unit>`
+            // as much as for `Task<String>`. It answered `deeper(T)` until M1,
+            // which is what let a `Task<Int64>` be copied, stored and abandoned
+            // as if it were a number.
+            Type::Str
+            | Type::Array(_)
+            | Type::SmallArray(..)
+            | Type::Map(..)
+            | Type::Stream(_)
+            | Type::Task(_) => true,
+            Type::Option(t) | Type::ArrayN(t, _) | Type::Lazy(t) => deeper(&t),
             Type::Result(a, b) => deeper(&a) || deeper(&b),
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
             Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(&deeper)),
@@ -1647,6 +1676,25 @@ pub(crate) mod tests {
         assert_eq!(
             Owned::default().linear_kind(&Type::Stream(Box::new(Type::Int))),
             Some(Linear::Stream)
+        );
+        // RFC-0095 M1's seeded row, and the two facts a task adds. It is linear
+        // whatever it carries, and it OWNS HEAP whatever it carries — the frame,
+        // the record and the operating-system handle are there for a
+        // `Task<Unit>` exactly as for a `Task<String>`. Neither is reclaimed by
+        // the automatic path: `release_kind` answers `None`, because the
+        // construct that discharges a task is what releases it.
+        let bare = Owned::default();
+        for inner in [Type::Int, Type::Str, Type::Unit] {
+            let t = Type::Task(Box::new(inner));
+            assert_eq!(bare.linear_kind(&t), Some(Linear::Task));
+            assert!(bare.owns_heap(&t));
+            assert_eq!(bare.release_kind(&t), None);
+        }
+        // And a container carries it, which is RFC-0092 M4's rule reaching one
+        // type further.
+        assert_eq!(
+            bare.linear_kind(&Type::Array(Box::new(Type::Task(Box::new(Type::Int))))),
+            Some(Linear::Task)
         );
     }
 

@@ -312,11 +312,16 @@ fn task_trap_prints_once_and_exits_1_threaded() {
     // A long task in flight while a second task traps: the trapping task
     // performs the standard trap protocol itself (stderr + exit(1)) from its
     // own thread — the locked RFC-0025 semantics.
+    //
+    // `w` is DROPPED rather than joined since RFC-0095 M1: a task is linear, so
+    // a program that walks away from one no longer compiles. The drop is after
+    // the join on purpose — the trap normally ends the process first, and the
+    // shape being pinned is a live task in flight when another one traps.
     let src = "fn boom(n: Int64) -> Int64 {\n    let z = n - n\n    return n / z\n}\n\n\
                fn fib(n: Int64) -> Int64 {\n    if n < 2 { return n }\n    \
                return fib(n - 1) + fib(n - 2)\n}\n\n\
                fn main() -> Int64 {\n    let w = spawn fib(30)\n    \
-               let t = spawn boom(3)\n    return t.join()\n}\n";
+               let t = spawn boom(3)\n    let r = t.join()\n    drop w\n    return r\n}\n";
     let file = out_dir.join("taskboom.vyrn");
     std::fs::write(&file, src).unwrap();
     let exe = out_dir.join("taskboom.exe");
@@ -347,6 +352,72 @@ fn task_trap_prints_once_and_exits_1_threaded() {
     ] {
         assert_eq!(run.status.code(), Some(1), "{label}: task trap must exit 1");
         assert_eq!(norm(&run.stdout), "", "{label}: no stdout");
+        assert_eq!(
+            norm(&run.stderr),
+            "error: division by zero\n",
+            "{label}: canonical wording, printed exactly once"
+        );
+    }
+}
+
+/// RFC-0095 M1: a task that is **dropped** rather than joined keeps the trap
+/// protocol.
+///
+/// This is the milestone's own risk, written as a test. `drop t` gives the
+/// task's storage back, and the RFC says plainly that a drop which skipped the
+/// WAIT would swallow the trap and one which freed the frame early would corrupt
+/// the heap. So the drop waits first, and the trapping task then prints the
+/// canonical line once and exits 1 — from its own thread, from the main thread
+/// under `VYRN_SEQUENTIAL_SPAWN=1`, and from the interpreter's eager call.
+///
+/// The program prints BEFORE the drop, and that line must survive: `exit()`
+/// flushes stdout, so the trap is not allowed to lose it.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
+    let out_dir = std::env::temp_dir().join("vyrn-parity");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let src = "fn boom(n: Int64) -> Int64 {\n    let z = n - n\n    return n / z\n}\n\n\
+               fn main() -> Int64 {\n    print(\"before\")\n    \
+               let t = spawn boom(3)\n    drop t\n    return 0\n}\n";
+    let file = out_dir.join("taskdropboom.vyrn");
+    std::fs::write(&file, src).unwrap();
+    let exe = out_dir.join("taskdropboom.exe");
+    let build = vyrn()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "native build failed:\n{}",
+        norm(&build.stderr)
+    );
+
+    let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
+    let threaded = Command::new(&exe).output().expect("run threaded");
+    let sequential = Command::new(&exe)
+        .env("VYRN_SEQUENTIAL_SPAWN", "1")
+        .output()
+        .expect("run sequential");
+
+    for (label, run) in [
+        ("interp", &interp),
+        ("threaded", &threaded),
+        ("VYRN_SEQUENTIAL_SPAWN=1", &sequential),
+    ] {
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{label}: a dropped task's trap must exit 1"
+        );
+        assert_eq!(
+            norm(&run.stdout),
+            "before\n",
+            "{label}: the line printed before the drop survives the trap"
+        );
         assert_eq!(
             norm(&run.stderr),
             "error: division by zero\n",
@@ -2262,6 +2333,16 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
     for (what, src) in [
         // Four tasks spawned in a loop and all joined afterwards, so four boxes
         // have to coexist.
+        //
+        // The joins walk the array with `for … in consume` since RFC-0095 M1. A
+        // `Task<T>` is linear and RFC-0092 M4 carries that obligation through
+        // the container, so the array must be handed on by name: `consume` gives
+        // the loop the array, and every element is joined once inside it. Four
+        // `ts[i].join()` reads left the container undischarged and read one
+        // element four times over — which is also what a second join of one
+        // element would be, now that a join frees the box. The loop variable is
+        // not `t`: `Consumed` is keyed by NAME, so an inner `t` shadowing the
+        // `t` that was pushed reads as a use after that move.
         (
             "escaping",
             "fn fib(n: Int64) -> Int64 {\n if n < 2 { return n }\n \
@@ -2269,17 +2350,24 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
              fn main() -> Int64 {\n let mut ts: Array<Task<Int64>> = []\n \
              let mut i = 0\n while i < 4 {\n let t = spawn fib(i + 10)\n \
              ts = ts.push(t)\n i = i + 1\n }\n \
-             print(ts[0].join())\n print(ts[1].join())\n print(ts[2].join())\n \
-             print(ts[3].join())\n return 0\n}\n",
+             for one in consume ts {\n print(one.join())\n }\n return 0\n}\n",
         ),
-        // Two joins of one aggregate task, with the first one's copy mutated in
-        // between: a `join` that aliased the box would show 99 twice.
+        // An aggregate result must be COPIED out of the box, not aliased into.
+        //
+        // It used to be two joins of one task, with the first result mutated in
+        // between. A task is linear now, so the second join is a compile error
+        // and the hazard is pinned with a second task instead: the first box is
+        // freed at its join, an allocator hands the same address to the second
+        // spawn, and a `p` that aliased the first box would follow the second
+        // task's result. That is both faults at once — the alias and the read of
+        // a freed box.
         (
             "aggregate",
             "type P = { a: Int64, b: Int64 }\n\
              fn mk(x: Int64) -> P {\n return P { a: x, b: x * 2 }\n}\n\
              fn main() -> Int64 {\n let t = spawn mk(5)\n let mut p = t.join()\n \
-             p.a = 99\n let q = t.join()\n print(p.a)\n print(q.a)\n print(q.b)\n \
+             p.a = 99\n let u = spawn mk(7)\n let q = u.join()\n \
+             print(p.a)\n print(p.b)\n print(q.a)\n print(q.b)\n \
              return 0\n}\n",
         ),
         (

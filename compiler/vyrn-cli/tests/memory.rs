@@ -52,16 +52,23 @@
 //! | `takenField` | RFC-0093 M2 | steady | the walk skips the place a `consume` took, so N turns allocate N and free N — not 2N, which is the double free, and not 0, which is the leak M1 shipped |
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `keysLoop` | U4's price | steady | RFC-0092 M5: a `for` over a temporary owns the snapshot, so it releases it — Phase 10a's row, at the second statement that walks one |
-//! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
+//! | `spawnFrame` | §10 | steady | RFC-0095 M1: a task is linear, and both discharges give its storage back |
 //!
 //! **Fifteen rows, fifteen steady.** RFC-0092 M5 closed the last leaking one.
 //!
-//! **§10 does not reach this harness.** The census says a `spawn` frame is
-//! malloc'd and never freed. On wasm there are no threads, so the direct backend
-//! lowers `spawn f(a)` to `f(a)` at the spawn point and allocates no frame at
-//! all. The row is here and steady to record that: §10 is a native-only leak,
-//! and this file cannot see it. It still guards the lowering — a wasm `spawn`
-//! that starts allocating shows up as a row that moved.
+//! **§10 reaches this harness in half.** A task owns a frame, a task record and
+//! an operating-system handle. On wasm there are no threads, so the direct
+//! backend runs the thunk at the spawn point and the whole task is one heap box:
+//! the frame, with no record and no handle beside it. RFC-0095 M1 frees that box
+//! at the join and at the `drop`, and the row is sized so a missed release shows
+//! — a `Task<String>` carrying ~900 bytes, dropped rather than joined, where the
+//! old row leaked 8 bytes a call and hid inside a page.
+//!
+//! **The handle is native-only, and it is the part that matters.** Bytes are a
+//! leak a program can live with; one operating-system handle per spawn is a
+//! server that meets a per-process ceiling and stops.
+//! [`the_spawn_handles_go_back_natively`] is that measurement, beside this table
+//! rather than in it, because it needs clang and a real process.
 //!
 //! Two rows carry a finding the census did not have:
 //!
@@ -534,8 +541,18 @@ const ROWS: &[Row] = &[
         export: "spawnFrame",
         census: "§10",
         today: Shape::Steady,
-        why: "wasm has no threads, so `spawn f(a)` IS `f(a)` and allocates no frame — \
-              §10's leak is native-only and this harness cannot see it",
+        why: "RFC-0095 M1: a `Task<T>` is linear, so `t.join()` consumes it and `drop t` \
+              discharges it without taking the result, and both give the task's storage \
+              back. wasm has no threads, so `spawn f(a)` runs at the spawn point and the \
+              whole task IS one heap box — the frame with no record and no handle beside \
+              it. The row used to say this harness could not see §10, and it was right \
+              about the reason and wrong about the fix: the box was allocated per call \
+              and never freed, 8 bytes at a time, which hides inside one 64 KiB page at \
+              500 calls. It is a `Task<String>` now, dropped rather than joined, so a \
+              missed release is ~900 bytes a call and the row moves. What this harness \
+              still cannot see is the OPERATING-SYSTEM HANDLE, which is the part of §10 \
+              that matters and exists only natively — \
+              `the_spawn_handles_go_back_natively` below is the measurement beside it",
     },
 ];
 
@@ -720,9 +737,35 @@ fn work(n: Int64) -> Int64 {{
     return n + 1
 }}
 
+/// A task result that OWNS heap, so a dropped task has something to release
+/// besides the box it sits in — and something this harness can SEE, which 8
+/// bytes of box per call was not.
+fn tagged(n: Int64) -> String {{
+    if n < 0 {{
+        return "-"
+    }}
+    return tag() + "!"
+}}
+
+/// Census §10, both discharges (RFC-0095 M1). The join takes the result and
+/// gives the frame back; the `drop` waits, releases the result BY ITS TYPE, and
+/// gives the frame back. The second one is why the row is worth ~900 bytes a
+/// call: a `Task<String>` the program drops holds a String the task allocated
+/// and nothing else will ever free.
 export extern fn spawnFrame() {{
     let t = spawn work(seen)
     seen = t.join()
+    // The FRAME on its own is 8 bytes here, which hides inside a 64 KiB page at
+    // one per call — which is exactly how the old row read steady while leaking.
+    // Sixty-four a call is 512 bytes a call, and the row sees that.
+    let mut i = 0
+    while i < 64 {{
+        let u = spawn work(i)
+        seen = seen + u.join()
+        i = i + 1
+    }}
+    let d = spawn tagged(seen)
+    drop d
 }}
 
 fn main() -> Int64 {{
@@ -827,5 +870,148 @@ fn the_census_shapes_hold_their_measured_baseline() {
             r.why
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0095 M1 / census §10 — the native half, which is where the handle lives.
+// ---------------------------------------------------------------------------
+
+// How many handles a live process holds. The one Win32 call this file makes,
+// because it names the resource census §10 is about.
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetProcessHandleCount(process: *mut std::ffi::c_void, count: *mut u32) -> i32;
+}
+
+#[cfg(windows)]
+fn spawn_loop_source(turns: usize, marker: &str) -> String {
+    format!(
+        r#"fn work(n: Int64) -> Int64 {{
+    return n + 1
+}}
+
+fn main() -> Int64 {{
+    let mut i = 0
+    let mut acc = 0
+    while i < {turns} {{
+        let t = spawn work(i)
+        acc = acc + t.join()
+        i = i + 1
+    }}
+    let parked = match writeFile("{marker}", "spawned \{{acc}}") {{
+        Ok(b) => b,
+        Err(e) => false,
+    }}
+    if parked {{
+        if let Some(line) = readLine() {{
+            print(line)
+        }}
+    }}
+    return 0
+}}
+"#
+    )
+}
+
+/// The measurement the table above cannot make (RFC-0095 M1).
+///
+/// A task owns three things: a frame, a task record, and an operating-system
+/// handle — a Win32 event object, or a pthread mutex and condition variable. On
+/// wasm the first is all there is, so `spawnFrame` measures that one. Here the
+/// handle is measured, and it is the reason the milestone was worth building:
+/// RFC-0087 §10 recorded 81 bytes AND one handle per spawn, and bytes are a leak
+/// a program can live with while a per-process handle ceiling is a server that
+/// stops.
+///
+/// **A relation, not a number**, exactly as the table above asserts one: the
+/// handle count after 8,000 spawns equals the count after 2,000. Before M1 it
+/// was 20,076 handles at 20,000 spawns and 200,076 at 200,000 — one per spawn,
+/// on the nose.
+///
+/// The program parks on `readLine()` after its loop, so the count is read at a
+/// synchronisation point rather than by polling a process that may already have
+/// exited. Closing its stdin lets it finish. It announces the park by WRITING A
+/// FILE rather than by printing: a piped stdout is block-buffered, so a line
+/// printed before the park does not arrive until the process ends, and waiting
+/// for it would deadlock against the process waiting for stdin.
+///
+/// Skips, loudly, without clang — the same posture this file takes for node —
+/// and compiles only on Windows, because `GetProcessHandleCount` is what names
+/// the resource. A pthread task leaks a mutex and a condition variable, which
+/// are memory rather than a handle, and the wasm row sees the shape of that.
+#[cfg(windows)]
+#[test]
+fn the_spawn_handles_go_back_natively() {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Stdio;
+
+    if vyrn_codegen::toolchain::find_clang().is_none() {
+        eprintln!("NOTE: no clang — RFC-0095 M1's handle release is unverified on this machine");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vyrn-spawn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 2,000 and 8,000. The leak was one handle per spawn, so one order of
+    // magnitude between the two runs is unmistakable and neither takes a second.
+    let mut counts = Vec::new();
+    for turns in [2000usize, 8000] {
+        let marker = dir.join(format!("ready{turns}.txt"));
+        let src = dir.join(format!("spawn{turns}.vyrn"));
+        std::fs::write(
+            &src,
+            spawn_loop_source(turns, &marker.display().to_string().replace('\\', "/")),
+        )
+        .unwrap();
+        let exe = dir.join(format!("spawn{turns}.exe"));
+        let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .arg("build")
+            .arg(&src)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("vyrn build");
+        assert!(
+            build.status.success(),
+            "native build failed:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let mut child = Command::new(&exe)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("run the spawn loop");
+        // Wait for the park. Sixty seconds is a ceiling, not a timing
+        // assumption: 8,000 spawns take well under a second.
+        let start = std::time::Instant::now();
+        while !marker.exists() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(60),
+                "the spawn loop never reached its park at {turns} turns"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let mut n: u32 = 0;
+        let ok = unsafe { GetProcessHandleCount(child.as_raw_handle(), &mut n) };
+        assert_ne!(ok, 0, "GetProcessHandleCount failed");
+        counts.push(n);
+
+        drop(child.stdin.take());
+        let status = child.wait().expect("wait");
+        assert!(status.success(), "the spawn loop exited {status}");
+    }
+
+    assert_eq!(
+        counts[0], counts[1],
+        "the handle count grew with the spawn count: {} handles after 2,000 spawns, {} after \
+         8,000. A task owns an operating-system handle, and RFC-0095 M1 gives it back at the \
+         one join or at the `drop` — one per spawn is census §10, which measured 200,076 \
+         handles at 200,000 spawns.",
+        counts[0], counts[1]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
