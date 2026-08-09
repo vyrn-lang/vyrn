@@ -787,8 +787,54 @@ handing an `Int64` to a String path.
   new information.
 - **`declared::builtin_returns` is still 4 rows.** M1 said merging it needs M3.
   It needs the scalar half of `@str` to be a row, and that half is staying.
+  (Closed later — see "The residue, closed" below. The second sentence is true
+  and the conclusion did not follow.)
 - **The editor gained nothing**, as in M1. `.show()` completion already worked
   through `method_impls`; hover over `print` still comes from `MACRO_BUILTINS`.
 - **`schemaOf` and `toJson` do not see `Show`**, deliberately. Rendering and
   serialization are different questions and the tables stay apart.
 - **Effects.** 29 rows, unchanged, in all three milestones.
+
+---
+
+## The residue, closed
+
+M1 left `declared::builtin_returns` open and M3 said merging it "needs the
+scalar half of `@str` to be a row, and that half is staying". Both halves of
+that sentence are true and the conclusion does not follow. A prelude row carries
+a `ret` already, and `@str`'s scalar rendering is a PARAMETER fact rather than a
+return fact. So the four rows became three new signatures — `@concat`, `@str`
+and `@keys` — beside the `@push` row M1 wrote, and `Declared::new` reads
+`prelude::returns()`. **`builtin_returns` is deleted.**
+
+`@str` spells its parameter `Unit` and says on its own row that the parameter is
+inert: it takes a number, a `Bool`, a `String` or a type with `impl Show`, and
+this language cannot spell that union. No rule reads it, because arity and
+parameter types stay in the checker's hand-written arms — M1's own decision, for
+M1's own reason. Two kinds of row are held back from the reading, and each is
+inert for a stated reason: a **lending** row cannot name its result, because one
+`at` pair serves every container; and a row returning a bare type parameter
+names a type the program never wrote. The two lists had already drifted —
+`builtin_returns` said `@push` returns `Array<Unit>` and the row says
+`Array<T>` — which is the drift the principle predicts, and the reason to keep
+one answer.
+
+`join` got its row in the same change. RFC-0095 M1 made `t.join()` consume the
+task, which is a `consume` receiver on a signature; it lived instead as a
+property of the must-use WALK, where every mention of a linear binding is a
+disposal. So `join` consumed by being written, and no line said so. `@join` now
+declares `consume Task<T> -> T`, and `movecheck::sinks` reads it. **There was no
+special case to delete.** Rule 1 stands aside for the reason it stands aside for
+`close`, `boxStream` and `serveStream`: the obligation on the linear TYPE
+refuses a second join first, with better words. Two parts of `join`'s contract a
+row cannot carry stay hand-written, and both are about a NAME rather than a
+signature — which producer pairs with it, since `spawn` is a keyword and not a
+callable name, and the wording of the disposal menu.
+
+**What it cost**, counted the way M1 and M2 counted — lines that are neither
+blank nor a `//` comment: `declared.rs` **−9** production, `prelude.rs` **+32**
+production and **+21** test. So the fold does not pay in lines, and it was not
+expected to: four rows in a list become four signatures plus the reading that
+holds two kinds of row back. What it buys is one deleted fact fork and the drift
+it was already carrying. **No engine changed.** `checker.rs` and both backends
+are byte-identical in this change, so no builtin refusal moved a word.

@@ -403,6 +403,24 @@ RFC-0087 U1 exists because the model needed a window. The window is wrong about
 both types, and the printer can ask it — but it is a change to the reporter, and
 this census does not make one.
 
+**Closed.** `own::fate` asks `linear_kind` where `release_kind` answered `None`,
+and a must-use binding gets `Fate::Discharged` instead of a leak. The sentence is
+categorical, and it may be: a value of a linear type that is not discharged on
+every path is a compile error (RFC-0075 M1 for a stream, RFC-0095 M1 for a task),
+so a program that reaches this analysis has been proved to discharge every one.
+A `drop` and a move still answer for themselves, because each names a line a
+reader can go to, and a line beats a category. Over the corpus the "not
+reclaimed" total falls **2292 to 2267** — 25 bindings, against the 21 measured
+here: the extra four are `Stream` bindings that had no declared type at all until
+RFC-0094's return-type fold gave the stream producers one, and they were counted
+under "the type owns no heap" rather than under "no release rule". By bucket,
+"the type has no release rule" falls **85 to 63** and "the type owns no heap"
+falls **2055 to 2052**. `examples/concurrency.vyrn` reads 7 bindings not
+reclaimed before and 2 after: its four tasks are discharged and `unwanted` reads
+"reclaimed by `drop` at line 49". **Nothing gained a free** — `Fate::Discharged`
+mints no `droppable` row, so both backends emit what they emitted, and the
+memory suite is 16 rows and 16 steady.
+
 ---
 
 ## 9. Recommendation

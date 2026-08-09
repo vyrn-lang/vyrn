@@ -3504,6 +3504,27 @@ mod linear {
             // `let t = s` moves the value; `t` inherits both the obligation and
             // the rendering, and the mention of `s` discharges `s`'s.
             Expr::Var { name, .. } => live.iter().find(|(l, _)| l == name).map(|(_, o)| o.clone()),
+            // An arm is a path here as much as it is in [`scan`] (RFC-0095 M3,
+            // which recorded this one as open). A branch hands on whichever arm
+            // ran, so the binding inherits the obligation ANY arm carries: the
+            // union is what makes `let t2 = match c { A => t, B => u }` a task
+            // `t2` answers for, where before it was a task nothing answered for.
+            //
+            // The first arm that carries one answers for the rendering as well.
+            // The checker has already made the arms agree on the type, so a
+            // second arm would quote the same spelling.
+            Expr::Match { arms, .. } => arms
+                .iter()
+                .find_map(|a| owed_let(None, &a.body, live, producers, decl)),
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => owed_let(None, then_branch, live, producers, decl).or_else(|| {
+                else_branch
+                    .as_ref()
+                    .and_then(|e| owed_let(None, e, live, producers, decl))
+            }),
             _ => None,
         }
     }
@@ -4091,9 +4112,11 @@ mod tests {
             !sinks(&decl, "@push", 0),
             "the receiver is rebuilt, not taken"
         );
-        // The three linear ones declare `consume` too, and the must-use walk
-        // owns them — see [`sinks`].
-        for name in ["close", "boxStream", "serveStream"] {
+        // The four linear ones declare `consume` too, and the must-use walk
+        // owns them — see [`sinks`]. `@join` is the fourth (RFC-0095 M1): a
+        // `Task<T>` is linear exactly as a `Stream<T>` is, so the obligation on
+        // the TYPE refuses a second join and rule 1 stands aside.
+        for name in ["close", "boxStream", "serveStream", "@join"] {
             assert_eq!(
                 crate::prelude::capability(name, 0),
                 Some(Capability::Consume)
@@ -5139,6 +5162,38 @@ mod tests {
                     return n"
         )
         .is_ok());
+    }
+
+    /// The limit RFC-0095 M3 recorded and did not close: a branch ACQUIRES in
+    /// each arm, and the binding it acquires into inherited nothing.
+    ///
+    /// The RFC wrote the shape as `let t2 = match c { A => t, B => u }` over two
+    /// live bindings, and that spelling is already refused — at `t`, which one
+    /// arm hands on and the other does not, which is M3's own rule. The shape
+    /// that reaches the hole acquires in the arm instead, so no earlier binding
+    /// is there to answer, and the program was accepted with a stream nobody
+    /// answered for.
+    #[test]
+    fn a_branch_acquires_into_the_binding() {
+        let pick = "let o: Option<Int64> = Some(1) ";
+        let e = stream(&format!(
+            "{pick} let t = match o {{ Some(k) => feed(), None => feed() }} return 0"
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("`t` is a `Stream<Int64>` and is never disposed"),
+            "{e}"
+        );
+        // Disposing it is the fix, and it is accepted.
+        assert!(stream(&format!(
+            "{pick} let t = match o {{ Some(k) => feed(), None => feed() }} close(t) return 0"
+        ))
+        .is_ok());
+        // The if-expression spelling of the same program.
+        let e = stream("let t = if true { feed() } else { feed() } return 0").unwrap_err();
+        assert!(e.contains("is never disposed"), "{e}");
+        // An arm that acquires nothing leaves the binding alone.
+        assert!(stream("let n = if true { 1 } else { 2 } return n").is_ok());
     }
 
     #[test]
