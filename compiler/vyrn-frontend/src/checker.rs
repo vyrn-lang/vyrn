@@ -143,20 +143,15 @@ pub const RESERVED: &[&str] = &[
     "parse",
     "join",
     "logger",
-    "contains",
-    "startsWith",
-    "endsWith",
-    "slice",
+    // RFC-0094 M2 removed eleven rows here: `contains`, `startsWith`,
+    // `endsWith`, `slice`, `chars` and the six codecs. Each was reserved so the
+    // routed call could not be captured by a user declaration; each is now an
+    // ordinary exported function of `std/strpred`, `std/text` or `std/codecs`,
+    // imported like any other. [`MOVED_TO_STD`] is what a caller who does not
+    // import one is told.
     "bytes",
-    "chars",
     "floatBits",
     "floatFromBits",
-    "hexEncode",
-    "hexDecode",
-    "base64Encode",
-    "base64Decode",
-    "urlEncode",
-    "urlDecode",
     "args",
     "readLine",
     "readFile",
@@ -224,6 +219,42 @@ pub const RESERVED: &[&str] = &[
     "UInt32",
     "UInt64",
 ];
+
+/// The names RFC-0094 M2 took out of [`RESERVED`], and the `std/` module each
+/// one lives in now.
+///
+/// A reader who writes `contains(s, "x")` has written a call that was legal in
+/// every earlier version of the language. "call to unknown function" is true and
+/// useless; this table is what turns it into the import line the program needs.
+/// It is a MIGRATION table, in the shape the six `was removed` hints already
+/// have, and it is read at exactly one place — the unknown-name fallthrough of
+/// [`Checker::call`] — so a name that resolves never consults it.
+///
+/// `every_moved_name_is_gone_from_reserved` is what keeps it honest in the one
+/// direction that can rot: a name here that came BACK into `RESERVED` would send
+/// a reader to an import that cannot be written.
+pub const MOVED_TO_STD: &[(&str, &str)] = &[
+    ("contains", "std/strpred"),
+    ("startsWith", "std/strpred"),
+    ("endsWith", "std/strpred"),
+    ("slice", "std/strpred"),
+    ("chars", "std/text"),
+    ("hexEncode", "std/codecs"),
+    ("hexDecode", "std/codecs"),
+    ("base64Encode", "std/codecs"),
+    ("base64Decode", "std/codecs"),
+    ("urlEncode", "std/codecs"),
+    ("urlDecode", "std/codecs"),
+];
+
+/// The module a moved builtin lives in now, or `None` for a name that never was
+/// one.
+pub fn moved_to_std(name: &str) -> Option<&'static str> {
+    MOVED_TO_STD
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, m)| *m)
+}
 
 use crate::types::INT32;
 
@@ -5873,74 +5904,12 @@ impl<'a> Checker<'a> {
         // (`len(String)` was removed — see the migration hint above; its byte
         // length now lives on the `String.length` field, resolved at `Expr::Field`.)
 
-        // built-in string predicates: contains / startsWith / endsWith (via UFCS
-        // also `s.contains(sub)` etc.). Each takes two Strings and yields a Bool.
-        if matches!(name, "contains" | "startsWith" | "endsWith") {
-            if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `{name}` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if t != Type::Str {
-                    return Err(format!(
-                        "line {line}: `{name}` needs String arguments, found {t}"
-                    ));
-                }
-            }
-            return Ok(Type::Bool);
-        }
-
-        // built-in: slice(s, start, end) (RFC-0046, routed by RFC-0079 M3). A
-        // byte-range substring — the primitive `std/strings` builds on.
-        // `start`/`end` are byte offsets (Int64), and the RESULT is whatever
-        // `std/strpred`'s `sliceV` says it is (`Result<String, SliceError>`),
-        // read out of the link below rather than restated here: the error enum is
-        // a std declaration, and a second spelling of it in the checker is exactly
-        // the multiplicity this routing exists to remove.
-        if name == "slice" {
-            if args.len() != 3 {
-                return Err(format!(
-                    "line {line}: `slice` takes 3 arguments (s, start, end), got {}",
-                    args.len()
-                ));
-            }
-            let s = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(s, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if s != Type::Str {
-                return Err(format!("line {line}: `slice` needs a String, found {s}"));
-            }
-            for a in &args[1..] {
-                let t = self.base(&self.expr(a, scope, Some(&Type::Int), fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if !matches!(t, Type::Int) {
-                    return Err(format!(
-                        "line {line}: `slice` needs Int64 offsets, found {t}"
-                    ));
-                }
-            }
-            // The engines refuse a routed builtin by name when its module is not in
-            // the link; the checker can say the same thing earlier and with a line
-            // number, and it has to — there is no return type to invent, since the
-            // one that exists names a type only the link supplies.
-            let rt = crate::loader::routed_builtin("slice").expect("`slice` is routed");
-            return match self.sigs.get(rt) {
-                Some((_, ret)) => Ok(ret.clone()),
-                None => Err(format!(
-                    "line {line}: `slice` is implemented in Vyrn and its module is not in \
-                     the link — a std root is needed to call it"
-                )),
-            };
-        }
+        // (RFC-0094 M2 deleted the arms for `contains`, `startsWith`, `endsWith`
+        // and `slice` here. Their bodies were already `std/strpred`'s, so the
+        // arms held nothing but an arity and a String check that the declaration
+        // states. `slice` carried one line more — it read its return type out of
+        // the link, because the type it answers is a std declaration — and that
+        // reading is what an ordinary imported call does for free.)
 
         // The two IEEE-754 bit views (RFC-0078 M4a). `floatBits` is a `Float64`
         // read as its 64 raw bits and `floatFromBits` is the inverse — not a
@@ -5987,48 +5956,18 @@ impl<'a> Checker<'a> {
             return Ok(got);
         }
 
-        // Text encodings. Encoders: String -> String. Decoders: String ->
-        // Option<String> (None on malformed input or a non-UTF-8 result).
-        if matches!(name, "hexEncode" | "base64Encode" | "urlEncode") {
-            if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `{name}` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(format!("line {line}: `{name}` needs a String, found {t}"));
-            }
-            return Ok(Type::Str);
-        }
-        if matches!(name, "hexDecode" | "base64Decode" | "urlDecode") {
-            if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `{name}` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(format!("line {line}: `{name}` needs a String, found {t}"));
-            }
-            return Ok(Type::Option(Box::new(Type::Str)));
-        }
+        // (RFC-0094 M2 deleted the two codec arms here — three encoders and three
+        // decoders, all routed to `std/codecs` since RFC-0078 M4b — and the
+        // `chars` half of the arm below.)
 
         // built-in: bytes(String) -> Array<UInt8> (the raw UTF-8 bytes — RFC-0014
-        // M2; `stringFromBytes` is the fallible inverse) and chars(String) ->
-        // Array<Int> (the Unicode scalar values / code points).
-        if matches!(name, "bytes" | "chars") {
+        // M2; `stringFromBytes` is the fallible inverse). `chars` was its pair
+        // until M2; it is `std/text`'s declaration now, and `bytes` stays because
+        // it is the VIEW every runtime module stands on (`prelude::lends`).
+        if name == "bytes" {
             if args.len() != 1 {
                 return Err(format!(
-                    "line {line}: `{name}` takes 1 argument, got {}",
+                    "line {line}: `bytes` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -6037,17 +5976,12 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `{name}` needs a String, found {t}"));
+                return Err(format!("line {line}: `bytes` needs a String, found {t}"));
             }
-            let elem = if name == "bytes" {
-                Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }
-            } else {
-                Type::Int
-            };
-            return Ok(Type::Array(Box::new(elem)));
+            return Ok(Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            })));
         }
 
         // Internal string concat (`a + b` on Strings, and interpolation): the
@@ -7076,7 +7010,13 @@ impl<'a> Checker<'a> {
         let (params, ret) = self
             .sigs
             .get(name)
-            .ok_or_else(|| format!("line {line}: call to unknown function `{name}`"))?;
+            .ok_or_else(|| match moved_to_std(name) {
+                Some(module) => format!(
+                    "line {line}: `{name}` is `{module}`'s — add \
+                 `import {{ {name} }} from \"{module}\"`"
+                ),
+                None => format!("line {line}: call to unknown function `{name}`"),
+            })?;
         if params.len() != args.len() {
             return Err(format!(
                 "line {line}: `{name}` expects {} argument(s), got {}",
@@ -10050,42 +9990,48 @@ mod tests {
         assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
     }
 
-    /// `slice`'s ARGUMENT diagnostics, which stayed in the checker when RFC-0079
-    /// M3 routed the builtin: the three-argument shape is fixed, and saying so by
-    /// name is better than "no function `strpred$sliceV`".
+    /// The eleven names RFC-0094 M2 gave back, and what a caller who spells one
+    /// without importing it is told.
     ///
-    /// Its RESULT is not checked here and cannot be — see
-    /// `slice_without_its_module_refuses_at_the_check` below. The return type is
-    /// `std/strpred`'s, so a bare source has nothing to read it from;
-    /// `examples/strpredbytes.vyrn` is where the type is exercised.
+    /// The old arms refused on arity and parameter type by name. The declaration
+    /// refuses on both once the module is in the link, so what is left to check
+    /// here is the one thing no declaration can say: where the name went. A bare
+    /// source has no `std/strpred` in it at all, so this is also the bare-file
+    /// answer.
     #[test]
-    fn slice_builtin_signature() {
-        let e = check_src("fn main() -> Int64 { let x = slice(\"hi\") return 0 }").unwrap_err();
-        assert!(e.contains("`slice` takes 3 arguments"), "{e}");
-        let e = check_src("fn main() -> Int64 { let x = slice(42, 0, 1) return 0 }").unwrap_err();
-        assert!(e.contains("`slice` needs a String"), "{e}");
-        let e = check_src("fn main() -> Int64 { let x = slice(\"hi\", \"a\", 1) return 0 }")
-            .unwrap_err();
-        assert!(e.contains("`slice` needs Int64 offsets"), "{e}");
+    fn a_moved_builtin_names_the_module_it_moved_to() {
+        for (call, want) in [
+            ("slice(\"hi\", 0, 1)", "`slice` is `std/strpred`'s"),
+            ("contains(\"hi\", \"h\")", "`contains` is `std/strpred`'s"),
+            ("chars(\"hi\")", "`chars` is `std/text`'s"),
+            ("hexEncode(\"hi\")", "`hexEncode` is `std/codecs`'s"),
+        ] {
+            let e = check_src(&format!("fn main() -> Int64 {{ let x = {call} return 0 }}"))
+                .unwrap_err();
+            assert!(e.contains(want), "{e}");
+            assert!(e.contains("import {"), "the fix is an import line: {e}");
+        }
     }
 
-    /// The seam every routed builtin has, and `slice` is the first one to reach it
-    /// at CHECK time rather than at emit (RFC-0079 M3).
-    ///
-    /// The other eleven are typed by a fixed answer the checker can write down —
-    /// `Bool`, `Result<String, String>` — so a bare source with no resolver checks
-    /// clean and each engine refuses by name when it lowers the call. `slice`
-    /// answers `Result<String, SliceError>`, and `SliceError` is a `std/strpred`
-    /// declaration: there is no type to invent, so the refusal moves one phase
-    /// earlier and gains a line number. Loudly rather than silently, which is the
-    /// same requirement `a_routed_builtin_without_its_module_refuses_by_name`
-    /// states for the rest.
+    /// The table only fires where the name does not resolve. A user function of
+    /// that name is an ordinary declaration now, and it wins.
     #[test]
-    fn slice_without_its_module_refuses_at_the_check() {
-        let e =
-            check_src("fn main() -> Int64 { let x = slice(\"hi\", 0, 1) return 0 }").unwrap_err();
-        assert!(e.contains("`slice` is implemented in Vyrn"), "{e}");
-        assert!(e.contains("a std root is needed"), "{e}");
+    fn a_moved_name_is_declarable_again() {
+        let src = "fn contains(s: String, n: String) -> Bool { return s == n } \
+                   fn main() -> Int64 { if contains(\"a\", \"a\") { return 1 } return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// No name may sit in both tables: a reader sent to an import that
+    /// `RESERVED` forbids declaring has been sent nowhere.
+    #[test]
+    fn every_moved_name_is_gone_from_reserved() {
+        for (n, _) in MOVED_TO_STD {
+            assert!(
+                !RESERVED.contains(n),
+                "`{n}` is both reserved and said to live in a std module"
+            );
+        }
     }
 
     #[test]

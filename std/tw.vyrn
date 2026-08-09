@@ -59,6 +59,7 @@ import { parseJson } from "std/jsonread"
 // twSliceStr, twContains copies now live once in std.
 import { joinWith, substring, fromBytesOr } from "std/strings"
 import { includes } from "std/arrays"
+import { contains, startsWith } from "std/strpred"
 
 // ===========================================================================
 // Byte / string helpers — comptime-pure, so legal in a `gen fn` and its callees.

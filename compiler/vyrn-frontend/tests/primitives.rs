@@ -662,8 +662,19 @@ fn the_refusals_keep_their_reasons() {
     let by_name: BTreeMap<&str, Why> = CENSUS.iter().map(|(n, w, _)| (*n, *w)).collect();
     assert!(
         !by_name.contains_key("slice"),
-        "`slice` is `std/strpred`'s `sliceV` since RFC-0079 M3 — a census row for it          is a Rust implementation nobody reaches"
+        "`slice` is `std/strpred`'s since RFC-0079 M3 — a census row for it \
+         is a Rust implementation nobody reaches"
     );
+    // RFC-0094 M2: a name that left `RESERVED` for a `std/` module may not have a
+    // Rust arm either. Same failure as a routed name with a census row — an
+    // engine holding a second opinion — reached by the other door.
+    for (name, module) in vyrn_frontend::checker::MOVED_TO_STD {
+        assert!(
+            !by_name.contains_key(name),
+            "`{name}` is `{module}`'s declaration now; a census row for it is a \
+             Rust implementation nobody reaches"
+        );
+    }
     for (name, why) in [
         ("logger", Syscall),
         ("stringFromBytes", View),

@@ -38,6 +38,7 @@
 import { graphqlServer, gqlAnswer } from "std/graphql"
 import { graphqlHandle } from graphqlServer("./shelf/server/api/books")
 import { Json, JsonField } from "std/json"
+import { contains } from "std/strpred"
 
 /// `POST /graphql` with `body`, printed with its status.
 fn ask(label: String, body: String) {

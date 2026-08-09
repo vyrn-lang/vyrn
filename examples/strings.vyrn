@@ -10,6 +10,7 @@
 /// Multi-byte UTF-8 (`é` is two bytes) runs through `lines`/`slice`/`indexOf`/
 /// `substring` throughout, proving the byte-offset ops stay codepoint-safe.
 
+import { slice } from "std/strpred"
 import {
     split,
     lines,

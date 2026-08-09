@@ -39,6 +39,7 @@ import { parseJson } from "std/jsonread"
 // listContains, and manual-join copies now live once in std.
 import { joinWith, substring, fromBytesOr, trim } from "std/strings"
 import { includes } from "std/arrays"
+import { contains, endsWith } from "std/strpred"
 
 // ===========================================================================
 // Byte helpers — all parsing runs over Array<UInt8> so element math stays UInt8.

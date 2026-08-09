@@ -1,7 +1,7 @@
 # RFC-0094 — A Builtin Is a Declaration
 
-- **Status:** **M1 landed. M2 and M3 are on hold — M1's line gate failed, and
-  the recommendation below says what that means.** M0 measured and merged
+- **Status:** **M1 and M2 landed. M2 carried M1's line gate and passed it:
+  −109 production lines. M3 may follow; see "M2 as landed".** M0 measured and merged
   (`rfcs/census-builtins.md`, `26469be`). The census refuted a third of the brief
   that asked for it, and this RFC is written from the census rather than from the
   brief; M1 then refuted two rows of the census. See "M1 as landed".
@@ -182,7 +182,7 @@ M5 test passing unchanged, same refusals. The three lists gone, proved by
 `git grep`. A net line reduction, reported — **and if the count goes up, that is
 the milestone failing, not a detail.**
 
-### M2 — the routed names become imports
+### M2 — the routed names become imports — **landed; see "M2 as landed"**
 
 Sixteen names leave the global namespace: nine string and codec names whose
 bodies are already in `std/`, `lineAt`/`colAt`, and the four stream primitives,
@@ -392,3 +392,196 @@ RFC-0092 M5 test passing unchanged with the same refusals.
   hover from the prelude is a separate change and is worth its own measurement.
 - **Effects.** 29 rows, unchanged, as stated.
 - **The two meanings of `consume`**, above.
+
+---
+
+## M2 as landed
+
+**Eleven names left `RESERVED`, not sixteen.** Each one had its body in `std/`
+already, so the compiler's whole residue was a checker arm, a `RESERVED` row and
+a route:
+
+| the name | its module now |
+|---|---|
+| `contains` `startsWith` `endsWith` `slice` | `std/strpred` |
+| `chars` | `std/text` |
+| `hexEncode` `hexDecode` `base64Encode` `base64Decode` `urlEncode` `urlDecode` | `std/codecs` |
+
+`RESERVED` fell from 83 rows to 72. `RT_MODULES` fell from six modules to four
+and from twelve routes to **one**: `@charCount`, which stays because
+`s.charCount()` is method-only and no import can bring an `@`-name into scope.
+`std/strpred` and `std/codecs` are no longer injected at all — they are ordinary
+modules a program imports.
+
+The `V` suffix went with them. It existed for exactly one reason — the name was
+reserved, so the module could not declare it — so `containsV` is `contains`,
+`sliceV` is `slice`, `charsV` is `chars`, and the six `*V` codecs carry the names
+their callers write. `byteLengthV` keeps its suffix: `byteLength` is a field.
+
+### The line gate
+
+Measured the way M1 measured, over every `.rs` file under `compiler/`, counting
+lines that are neither blank nor a `//` comment, against `main` at `d4e15ab`:
+
+| file | production | test |
+|---|---|---|
+| `checker.rs` | **−77** | +12 |
+| `loader.rs` | **−24** | +9 |
+| `symbols.rs` | **−8** | 0 |
+| `codegen/lib.rs` | 0 | −13 |
+| `interp.rs` | 0 | +9 |
+| the five CLI test files and `tests/primitives.rs` | — | +29 |
+| **net** | **−109** | **+46** |
+
+**The bar the RFC moved here is met.** M1 measured +149 and said the deletion the
+census counted was M2's; it was. The 109 lines are the dispatch chains: two
+checker arms for the codecs, one for the three predicates, one for `slice`
+(including the return type it read out of the link), and the `chars` half of the
+`bytes | chars` arm — plus two `RT_MODULES` rows and eleven entries each in
+`RESERVED` and `MACRO_BUILTINS`.
+
+The +46 test lines are not overhead the mechanism imposes. 29 of them are import
+lines and fixtures in test files, and 11 are one new test
+(`a_name_returned_by_m2_may_be_declared`) that proves the deletion from the
+surface: `fn slice(..)` compiles now.
+
+### What the census got wrong, measured
+
+**The import cost was 28 file-import pairs, not 16.** Q5 counted 7 files for
+`std/strpred` and this milestone touched **23**. The census counted the FREE
+spelling — `contains(s, n)` — and the corpus almost never writes it. A method
+call is universal sugar for a free call (`parser.rs`: "`recv.name(args)` is sugar
+for the free call `name(recv, args)`"), so `s.contains(n)` is a call to
+`contains` and needs the same import. Nothing else changed: the receiver syntax
+still works, unchanged, on an imported function.
+
+Against the census's own totals: 16 predicted for these three groups, 28
+measured. The whole bucket's "40 file-import pairs" is therefore an under-count
+of the same kind, and any later milestone that reads it should count method calls
+first.
+
+**Two generators emit a moved name.** `std/rpc`'s router and `std/connect`'s ask
+`req.path.startsWith(prefix)` in emitted source, and `std/rpc` does it twice
+(`rpcServer` and `rpc`). Generated source is source: each generator emits its own
+`import { startsWith } from "std/strpred"` line now. Nothing else in the corpus
+emitted a moved name, and no `vyrn"…"` code quote spells one.
+
+### Three names refused, each for a measured reason
+
+**`lineAt` and `colAt` do not move.** RFC-0078 M4c already refused them and
+`std/text.vyrn` carries the number: `lineAt` is a builtin *because* the obvious
+loop is O(off) and a scanner asks once per node, "which cost `std/vyx` 122 ms of
+a 291 ms page compile". The interpreter memoizes a line-start table per buffer
+and a Vyrn library cannot — a generator may not touch module state. The Vyrn
+bodies (`lineAtV`, `colAtV`) stay beside the builtins as the live oracle they
+already were. This is a decision about that cache, and this milestone does not
+change it.
+
+**`serveStream` does not move.** The census called the four stream primitives
+internal plumbing. `serveStream` is not: it is the handoff to the serving HOST,
+and `compiler/vyrn-cli/tests/serve.rs` spells it **below** `std/http` on purpose
+— "precisely so a second adapter would have nothing to rewrite". M3b then proved
+that by rewriting nothing. Scoping the name to `std/http` would delete exactly
+the property those conformance tests exist to hold.
+
+**`boxStream`, `unboxStream` and `pullAt` do not move, and this is the milestone
+refusing a gate item.** The brief asked for them to become non-exported
+declarations in `std/stream`, and for a bare file spelling `unboxStream(0)` to
+get an ordinary unknown-name error. Three findings stopped it:
+
+1. **They have no Vyrn body.** They are the type-erasure primitives
+   `std/stream`'s cursor slab is built on, so they cannot be a declaration in a
+   `.vyrn` file the way the eleven above can. Scoping them needs a NEW mechanism
+   — a module owner on a prelude row, read by a new pass — that deletes zero
+   lines and adds about thirty-five. That is the shape M1's gate refused, applied
+   a second time.
+2. **The safety argument is already spent.** M1 measured that `Stream<T>` is
+   linear and the must-use walk refuses a second hand-over whatever the callee is
+   named. The census's claim that these carry their fact nowhere was wrong, and
+   M1 wrote that down. What is left is a namespace argument, not a soundness one.
+3. **The backend's own pins spell all three on an unlinked source.**
+   `codegen/lib.rs` builds a lazy combinator (`LMAP`) and a
+   `pullAt(24)`-traps-on-a-bare-address test through `check(src)`, which does not
+   run the loader. A loader-level scope leaves those pins standing and a
+   checker-level one deletes them, so the mechanism would be honest in one engine
+   and not in the other.
+
+The three names stay reserved and stay global. Moving them is a separate change
+with its own measurement, and it should be taken together with `close`,
+`fromArray` and `fromStep` — the rest of the stream surface — rather than alone.
+
+### The seeded rows
+
+No migrated name has a seeded row, so nothing had to be re-keyed. `prelude.rs` is
+unchanged: its eighteen rows cover `at`/`atSet`, the views, the control names, the
+array methods and the six stream names, and every one of those is still reserved.
+`prelude::every_seeded_name_is_reserved_or_unspellable` therefore still holds,
+and it is what would have caught the mistake.
+
+### The diagnostics
+
+A caller who writes `contains(s, "x")` without the import is told where it lives:
+
+```
+line 1: `contains` is `std/strpred`'s — add `import { contains } from "std/strpred"`
+```
+
+`checker::MOVED_TO_STD` is the one table behind that, read at exactly one place —
+the unknown-name fallthrough of `Checker::call` — so a name that resolves never
+consults it. It is the shape the six `was removed` hints already have.
+`every_moved_name_is_gone_from_reserved` pins the one direction that can rot: a
+name in both tables would send a reader to an import `RESERVED` forbids writing.
+
+Three older diagnostics improved by deletion. `slice` used to refuse with "its
+module is not in the link — a std root is needed to call it", which named a
+condition a reader could not act on; it names an import now. The other ten used
+to check clean on a bare source and refuse in the emitter by an internal
+`codecs$hexEncodeV` spelling; they refuse at the check, by their own name, with a
+line number.
+
+A caller who imports the module and then misspells an argument gets the
+declaration's diagnostic rather than the arm's. That is a real change in wording
+— "expects 2 argument(s), got 1" where the arm said "`contains` takes 2
+arguments, got 1" — and it is the trade the RFC states: one refusal, from the
+signature, for every function in the language.
+
+### The gate
+
+- Three-way parity byte-identical including traps: **35 tests, green**
+  (`--release --test parity -- --ignored --test-threads=1`, with `VYRN_WASMTIME`,
+  `WASI_SYSROOT` and `WASI_BUILTINS` set — one parity fixture needed the import).
+- Workspace `cargo test --workspace --no-fail-fast`: **52 test binaries, green**.
+  `vyrn-lsp` separately: **69 green, 2 ignored**.
+- Memory suite: **15 rows, 15 steady**.
+- `genwasm` (`--features wasm-gen`): **11 green, 1 ignored**.
+- RFC-0092's instrument: `stores: 0`, `elem-store: 0`, `elem-return: 0`,
+  `returns: 0`, `total: 0` over 212 files, all 212 linked.
+- A bare file spelling a moved name gets an ordinary refusal naming the module
+  (`a_moved_builtin_names_the_module_it_moved_to`,
+  `a_moved_builtin_without_a_std_root_names_its_module`).
+- `RESERVED` shrank by exactly eleven, and `every_moved_name_is_gone_from_reserved`
+  is the check.
+- `cargo fmt --check`, `vyrn fmt --check` over 212 corpus files, and
+  `vyrn doc --std --verify`: all clean.
+- Every stream example and `std/stream`'s own tests: **unchanged**, because no
+  stream name moved.
+
+### Should M3 follow?
+
+**Yes, and the gate is the reason.** M2 was asked to show the mechanism pays for
+itself in lines, and it did: −109 production, against M1's +149, for a net of −40
+over the two milestones with a closed bug class in between.
+
+Two cautions the numbers put on it.
+
+**M3 will not repay lines the way M2 did.** M2 deleted arms whose bodies already
+existed elsewhere. `print`, `@str` and `value` have no `std/` body waiting for
+them; M3 writes a protocol and seeds impls, which is closer to M1's shape than to
+M2's. The RFC should say so before M3 starts rather than after, and the honest
+bar for M3 is the one its own milestone already states — a user `impl Show`
+working in both `"\{x}"` and `.toString()`, identical on three engines — not a
+line count.
+
+**Do `value` first, as written.** It has one hand-written call site, it closes
+RFC-0007 §v2 by name, and it is the only one of the three whose blast radius is
+smaller than `print`'s 140 files.

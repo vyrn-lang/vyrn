@@ -18,6 +18,7 @@
 import { el, text, toHtmlString } from "std/html"
 import { tw } from "std/tw"
 import * as theme from tw("./twdemo/theme.json")
+import { contains } from "std/strpred"
 
 /// A styled badge, built with checked utility classes. The classes — including a
 /// `md:` responsive variant and a `hover:` state variant — are all proven members

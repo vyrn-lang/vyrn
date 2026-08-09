@@ -2928,17 +2928,13 @@ static MACRO_BUILTINS: &[&str] = &[
     "print",
     "len",
     "concat",
-    "slice",
     "bytes",
-    "chars",
     "floatBits",
     "floatFromBits",
-    "hexEncode",
-    "hexDecode",
-    "base64Encode",
-    "base64Decode",
-    "urlEncode",
-    "urlDecode",
+    // (RFC-0094 M2: `slice`, `chars` and the six codecs left this list with
+    // `RESERVED`. They are ordinary imported functions now, and the editor
+    // colours them the way it colours every other import — which is the point:
+    // a builtin coloured as a macro is a builtin a reader cannot look up.)
     "args",
     "readLine",
     "readFile",

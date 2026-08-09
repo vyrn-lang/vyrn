@@ -112,7 +112,7 @@ fn run_lines(dir: &str, src: &str) -> Vec<String> {
 /// The oracle is all-or-nothing: `stringFromBytes` either builds a `String` (and
 /// then `chars` is the truth about its codepoints) or refuses. `decodeUtf8` must
 /// make the same call on the same bytes.
-const DECODE_HARNESS: &str = r#"import { charsV, decodeUtf8, showCps } from "std/text"
+const DECODE_HARNESS: &str = r#"import { chars, decodeUtf8, showCps } from "std/text"
 
 fn mine(b: Array<UInt8>) -> String {
     return match decodeUtf8(b) {
@@ -121,12 +121,12 @@ fn mine(b: Array<UInt8>) -> String {
     }
 }
 
-/// The builtin's answer, twice: `chars` on the String the builtin validator built,
-/// and `charsV` on the same String. They must agree with each other and with
-/// `mine`.
+/// The other side: `chars` on the String the builtin validator built. One
+/// spelling since RFC-0094 M2 — `charsV` and `chars` were the same function
+/// under two names, so the second call compared `chars` with itself.
 fn theirs(b: Array<UInt8>) -> String {
     return match stringFromBytes(b) {
-        Ok(s) => showCps(chars(s)) + "|" + showCps(charsV(s)),
+        Ok(s) => showCps(chars(s)),
         Err(e) => "reject",
     }
 }
@@ -140,7 +140,7 @@ fn row(b: Array<UInt8>) -> String {
         }
         return "MISMATCH builtin rejected, decodeUtf8 gave " + m
     }
-    if t == m + "|" + m {
+    if t == m {
         return "ok"
     }
     return "MISMATCH decodeUtf8 " + m + " vs builtin " + t
@@ -190,7 +190,7 @@ fn the_chars_builtin_decodes_the_codepoint_space_exactly_as_it_did() {
     // the `String` (it did not move, so this is still the only route from bytes) and
     // `showCps` renders the scalar values rather than the text — a wrong codepoint
     // that still renders would otherwise hide.
-    let harness = r#"import { showCps } from "std/text"
+    let harness = r#"import { chars, showCps } from "std/text"
 
 fn row(b: Array<UInt8>) -> String {
     return match stringFromBytes(b) {
@@ -459,7 +459,8 @@ fn charcount_agrees_with_chars_over_the_codepoint_corpus() {
         buffers.push(w.iter().flat_map(|c| utf8_of(*c)).collect());
     }
 
-    let harness = r#"
+    let harness = r#"import { chars } from "std/text"
+
 /// `charCount` beside `chars(s).length` and `byteLength`, so a mismatch says which
 /// of the three disagreed rather than just that something did.
 fn cmp(s: String) -> String {

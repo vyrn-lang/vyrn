@@ -12,6 +12,7 @@ import { Html, toHtmlString, diff } from "std/html"
 // itself (vyrn-nav v3) instead of fetching HTML.
 import { pagesClientThemed } from "std/ui"
 import { renderPage, resolvePage } from pagesClientThemed("../app/routes", "../theme.json")
+import { contains } from "std/strpred"
 
 /// An unvalidated mirror of CreateReq — constructing it never traps, so a bad
 /// draft can be encoded and run through fromJson to surface Issues instead.

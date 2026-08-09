@@ -65,6 +65,7 @@ import { validateContract } from "std/rpc"
 // facts, because a projection's paths are written in the projection file rather
 // than derived here.
 import { Symbol, symbol, symbolMapFn } from "std/symbolmap"
+import { endsWith, startsWith } from "std/strpred"
 
 // ---- the values ------------------------------------------------------------
 

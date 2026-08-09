@@ -5,12 +5,14 @@
 /// routed the three builtins into the module, deleting the Rust arms and ~50 lines
 /// of `strstr`/`strncmp` IR. So those rows are **pinned as literals** here — a
 /// comparison against the builtin would be the same function on both sides.
+/// RFC-0094 M2 then took the names out of `RESERVED`, which is why the import line
+/// below names four functions the language used to hand out for free.
 ///
 /// **`slice` moved too** — RFC-0079 M3, and it is a pin now for the same reason the
-/// predicates are. Its refusal was that it TRAPPED, so `sliceV` could only answer
-/// `None` where the builtin ended the process; `slice` returns
-/// `Result<String, SliceError>` today, `sliceV` IS that function, and asking both
-/// would be asking one function twice. What replaced the oracle is better than the
+/// predicates are. Its refusal was that it TRAPPED, so the Vyrn version could only
+/// answer `None` where the builtin ended the process; `slice` returns
+/// `Result<String, SliceError>` today and there is one function under the name, so
+/// asking both would be asking one function twice. What replaced the oracle is better than the
 /// oracle was: the failing ranges are VALUES now, so they print in the same process
 /// as the legal ones and go through parity with them, and each names WHICH cut
 /// failed and at which byte — neither of which a trap with two fixed strings could
@@ -31,7 +33,7 @@
 /// (C2 A9) against `"é"` (C3 A9), same trailing byte — is the closest a String can
 /// get, and both implementations say no.
 
-import { byteLengthV, SliceError } from "std/strpred"
+import { byteLengthV, SliceError, contains, endsWith, slice, startsWith } from "std/strpred"
 
 fn bit(b: Bool) -> String {
     return if b { "1" } else { "0" }

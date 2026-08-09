@@ -972,7 +972,7 @@ fn the_string_builtins_agree_with_the_interpreter_about_their_failures() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let show = "\
-import { SliceError } from \"std/strpred\"
+import { SliceError, slice } from \"std/strpred\"
 fn show(r: Result<String, String>) -> String {
     return match r {
         Ok(s) => \"ok:\" + s,

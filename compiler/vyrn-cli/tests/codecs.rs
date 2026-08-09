@@ -306,7 +306,9 @@ fn decoder_corpus() -> Vec<String> {
 /// `hexEncode` — the point of a pin is that its reporting does not depend on the
 /// code it is pinning, and after M4c `hexEncode` is the code under test. `bytes`
 /// is the irreducible view, so this is four lines and no builtin under question.
-const PREAMBLE: &str = r#"fn nib(n: UInt8) -> UInt8 {
+const PREAMBLE: &str = r#"import { base64Decode, base64Encode, hexDecode, hexEncode, urlDecode, urlEncode } from "std/codecs"
+
+fn nib(n: UInt8) -> UInt8 {
     if n < 10 {
         return '0' + n
     }
@@ -358,7 +360,9 @@ fn dec(x: String, label: String) {
 }
 "#;
 
-/// The whole corpus, as one program calling only the BUILTINS.
+/// The whole corpus, as one program calling `std/codecs` through its imports.
+/// The calls were builtins until RFC-0094 M2; the digest below is what proves
+/// the move changed no answer.
 fn corpus_program(enc: &[String], dec: &[String]) -> String {
     let mut body = String::new();
     for (i, s) in enc.iter().enumerate() {
@@ -468,26 +472,33 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
     );
 }
 
-/// The two things M4c's injection does that M2b's never did (RFC-0078).
+/// Four `std/` modules in one link, and the user's own names still win.
 ///
 /// M2b injected exactly ONE module, for one builtin, and proved the reserved `$`
-/// spellings make a collision unreachable. M4c turned that into a table, so two
-/// properties are new and neither follows from M2b's test:
+/// spellings make a collision unreachable. M4c turned that into a table.
+/// RFC-0094 M2 then took `std/codecs` and `std/strpred` off it and made `chars`
+/// an ordinary import of the still-injected `std/text`, so this program now
+/// reaches all four modules by three different routes at once:
 ///
-/// 1. **Four runtime modules in one link.** A program mentioning `toJson`,
-///    `hexEncode`, `chars` and `contains` injects `std/json`, `std/codecs`,
-///    `std/text` and `std/strpred` at once, each renamed to its own prefix. A single
-///    `injected` flag — which is what the loader held before M4c — could not have
-///    represented that.
-/// 2. **A new module's PRIVATE names.** `std/codecs` declares `hexDigit`, `hexVal`,
-///    `decoded`, `ascii`, `b64Val`; `std/text` declares nothing private but exports
-///    `showCps`; `std/strpred` exports `byteLengthV`. A user program is free to
-///    declare any of those, and the reserved spellings are what keeps its own
-///    definitions winning. The renaming is unconditional, so this is a regression
-///    pin rather than a hope.
+/// 1. **`std/json` by injection** (`toJson` desugars into it), renamed to `json$`.
+/// 2. **`std/text` injected AND hand-imported** — `s.charCount()` injects it and
+///    `import { chars }` names it, which is the case the rename map has to get
+///    right in both directions.
+/// 3. **`std/codecs` and `std/strpred` by plain import.**
+///
+/// The property under test is the same either way: `std/codecs` declares
+/// `hexDigit`, `hexVal`, `decoded`, `ascii`, `b64Val` privately, `std/text`
+/// exports `showCps` and `std/strpred` exports `byteLengthV`, and a user program
+/// declaring any of those must keep its own. Injection does that with the `$`
+/// prefix; a plain import does it with name-privacy renaming (RFC-0046 §3). Both
+/// are unconditional, so this is a regression pin rather than a hope.
 #[test]
 fn four_runtime_modules_link_at_once_and_the_users_names_win() {
-    let src = r#"type Point = { x: Int64, y: Int64 }
+    let src = r#"import { hexEncode } from "std/codecs"
+import { chars } from "std/text"
+import { contains, startsWith } from "std/strpred"
+
+type Point = { x: Int64, y: Int64 }
 
 /// Every name `std/codecs` declares privately, plus one each from `std/text` and
 /// `std/strpred`. All of them must mean THESE functions here.
@@ -528,10 +539,12 @@ fn main() -> Int64 {
     print(b64Val(1))
     print(showCps(7))
     print(byteLengthV("anything"))
-    // And all four runtime modules answering in the same program.
+    // And all four runtime modules answering in the same program — `std/text`
+    // both hand-imported (`chars`) and injected (`charCount`).
     print(toJson(Point { x: 1, y: 2 }))
     print(hexEncode("Hi"))
     print(chars("é").length)
+    print("é".charCount())
     print(contains("hello", "ell"))
     print(startsWith("hello", "he"))
     return 0
@@ -551,6 +564,6 @@ fn main() -> Int64 {
     assert_eq!(
         got,
         "1001\n2001\nmine:x\nascii:x\n3001\ncps:7\n42\n\
-         {\"x\":1,\"y\":2}\n4869\n1\ntrue\ntrue\n"
+         {\"x\":1,\"y\":2}\n4869\n1\n1\ntrue\ntrue\n"
     );
 }

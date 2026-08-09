@@ -10,18 +10,24 @@ M4c routed `chars` into `charsV`, deleting Rust's `str::chars` from the
 interpreter and 82 lines of two-pass decoder from the textual emitter, and the
 census that followed routed `charCount` into `charCountV`, deleting a Rust arm,
 a C shim function, a line of emitted IR and ~30 lines of hand-written
-`wasm-encoder`. `lineAt` and `colAt` are NOT: the interpreter memoizes a
-line-start table per buffer and a Vyrn library cannot (a generator may not touch
-module state — comptime purity), so retiring them is a decision about that cache,
-which is M5's question rather than this milestone's. They stay builtins and
-`lineAtV`/`colAtV` stay the thing they are proved against.
+`wasm-encoder`. **RFC-0094 M2 then took `chars` one step further**: it has a free
+spelling, so it is an ordinary export named `chars` and a caller imports it.
+`charCount` cannot follow — `s.charCount()` is method-only, so the name the
+engines look up is `@charCount`, which no import can bring into scope.
+
+`lineAt` and `colAt` moved neither time: the interpreter memoizes a line-start
+table per buffer and a Vyrn library cannot (a generator may not touch module
+state — comptime purity), and the loop below is O(off) where the memo is O(1).
+That is worth 122 ms of a 291 ms `std/vyx` page compile, measured, so retiring
+them is a decision about that cache rather than about capability. They stay
+builtins and `lineAtV`/`colAtV` stay the thing they are proved against.
 
 `tests/text.rs` is what proves it: the `chars` half is now a pinned digest over
-~2,000 codepoints (a comparison against the builtin would compare `charsV` with
+~2,000 codepoints (a comparison against the builtin would compare `chars` with
 itself), while the malformed table and the line/column table are still live
 oracles against `stringFromBytes` and `lineAt`/`colAt`, neither of which moved.
 `charCount` needed no new digest and that is the interesting part: `charCountV`
-is a byte scan and `charsV` is a full decode, so the two are independent
+is a byte scan and `chars` is a full decode, so the two are independent
 implementations of one fact, and `chars`'s side of that comparison is already
 pinned to the pre-swap C and Rust.
 
@@ -66,10 +72,10 @@ same ranges the codepoint arithmetic uses, so checking and building are one
 pass. Bails at the first bad byte — a partial decode has no caller, and
 `stringFromBytes`, the oracle, is all-or-nothing too.
 
-## charsV
+## chars
 
 ```vyrn
-fn charsV(s: String) -> Array<Int64>
+fn chars(s: String) -> Array<Int64>
 ```
 
 The codepoints of `s` — the `chars` builtin, in Vyrn.

@@ -43,6 +43,7 @@ import {
     toHex,
 } from "std/strings"
 import { cli, cliOf, flag, opt, positionals, Args } from "std/args"
+import { contains } from "std/strpred"
 
 logging { level: warn, sink: stderr }
 

@@ -36,28 +36,28 @@ that byte. No example decodes a NUL, so parity had never looked. Measured across
 the swap, that is **16 of 6,354 rows** and every one of the 16 is a NUL row —
 `tests/codecs.rs` records both digests and pins the rows individually.
 
-## hexEncodeV
+## hexEncode
 
 ```vyrn
-fn hexEncodeV(s: String) -> String
+fn hexEncode(s: String) -> String
 ```
 
 A string's UTF-8 bytes as lowercase hex, two digits per byte.
 
-## hexDecodeV
+## hexDecode
 
 ```vyrn
-fn hexDecodeV(s: String) -> Option<String>
+fn hexDecode(s: String) -> Option<String>
 ```
 
 Hex text back to a `String` — `None` on an odd length, a non-hex digit, or
 bytes that are not valid UTF-8. Case-insensitive, as the encoder's inverse
 has to be to read anyone else's output.
 
-## base64EncodeV
+## base64Encode
 
 ```vyrn
-fn base64EncodeV(s: String) -> String
+fn base64Encode(s: String) -> String
 ```
 
 A string's UTF-8 bytes as base64: three bytes to four digits, with `=`
@@ -73,28 +73,28 @@ The same, over bytes that are not text. A digest is the case this exists for
 (RFC-0074 M3b's handshake base64s twenty SHA-1 bytes): it can hold a NUL and
 need not be UTF-8, so it cannot make the trip through a `String` first.
 
-## base64DecodeV
+## base64Decode
 
 ```vyrn
-fn base64DecodeV(s: String) -> Option<String>
+fn base64Decode(s: String) -> Option<String>
 ```
 
 Base64 text back to a `String` — `None` unless the length is a multiple of
 four, every digit is in the alphabet, the padding is confined to the final
 group and is `=` or `==` (never `=X`), and the bytes are valid UTF-8.
 
-## urlEncodeV
+## urlEncode
 
 ```vyrn
-fn urlEncodeV(s: String) -> String
+fn urlEncode(s: String) -> String
 ```
 
 A string's UTF-8 bytes percent-encoded, uppercase hex.
 
-## urlDecodeV
+## urlDecode
 
 ```vyrn
-fn urlDecodeV(s: String) -> Option<String>
+fn urlDecode(s: String) -> Option<String>
 ```
 
 Percent-encoded text back to a `String` — `None` on a truncated or non-hex

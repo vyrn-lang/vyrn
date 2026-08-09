@@ -44,6 +44,7 @@
 // the infallible `stringFromBytes` fallbacks route through `fromBytesOr`.
 import { includes } from "std/arrays"
 import { fromBytesOr } from "std/strings"
+import { endsWith } from "std/strpred"
 
 // ---- comptime-pure helpers -------------------------------------------------
 

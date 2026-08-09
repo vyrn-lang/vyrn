@@ -73,6 +73,7 @@ import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } f
 // `std/http` do, so it is governed by the same predicate they are. `std/http`
 // imports it for the same reason.
 import { validateContract } from "std/rpc"
+import { contains, endsWith, slice, startsWith } from "std/strpred"
 
 /// The bytes `ba[s..e)` as a String ("" on the impossible non-UTF-8 slice).
 fn gqlSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
