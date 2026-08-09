@@ -24,14 +24,19 @@ That is not, by itself, an argument. Lists are cheap and a compiler is allowed
 to have them. The argument is what the lists **hold**:
 
 > **Eleven builtins carry an ownership or capability fact that no signature
-> holds, and two of them carry it nowhere at all.**
+> holds.**
 
-`boxStream` and `serveStream` each hand a `Stream` away for good. Neither is in
-`RESERVED_SINKS`. Neither is anywhere. Each has exactly one caller in the whole
-corpus, and that is the only reason no heap has been corrupted over them.
+The census said two of them — `boxStream` and `serveStream` — carry it nowhere
+at all, and this paragraph said so. **M1 measured it and both were wrong.** A
+`Stream<T>` is linear, and the must-use walk counts every mention of a stream
+binding as a disposal, so a second hand-over is refused whatever the callee is
+named. RFC-0075's linearity was protecting those two, not their caller count.
+The census read the side tables and did not ask the type; "M1 as landed" below
+carries the measurement. The eleven still hold their fact in a place no
+signature reads, and that is the argument.
 
-We know it is the only reason, because the same shape corrupted one three days
-ago. `fromArray` moved its argument, said so **in a doc string**, and no rule
+The cost of that arrangement is not hypothetical. `fromArray` moved its
+argument, said so **in a doc string**, and no rule
 read the doc string. The native binary exited `0xC0000374`; the interpreter
 printed `1 2 3` by refcounting rather than by having the rule; parity saw
 nothing, because all three engines agreed on the wrong answer. PR #118 fixed it
@@ -189,6 +194,15 @@ excluded — 14 files and an effect gate are a different argument.
 
 **Gate.** The standard block, plus: a bare file spelling `unboxStream(0)` gets an
 ordinary unknown-name error; `RESERVED` shrinks by exactly the migrated names.
+
+**And the line gate moves here, because M1 proved it was written at the wrong
+milestone.** M1's gate demanded a net reduction and measured **+149**. The
+prediction was not wrong about the compiler; it was wrong about which milestone
+pays. M1 replaced scattered `if name ==` checks with one documented table, and a
+table that states a fact is longer than a check that assumes it. **The lines the
+census counted are the dispatch chains, and M2 is what deletes them.** So M2
+carries the bar M1 could not: a net reduction, reported, and if the count rises
+again the mechanism is not paying for itself and M3 does not follow.
 
 ### M3 — the union parameter becomes a protocol
 
