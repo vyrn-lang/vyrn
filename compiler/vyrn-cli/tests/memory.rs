@@ -244,6 +244,10 @@ fn borrow(s: String) -> String {
     return s.copy()
 }
 
+fn score(n: Int64) -> Int64 {
+    return n * 2
+}
+
 fn main() -> Int64 {
     let a = "a"
     let b = "b"
@@ -260,6 +264,8 @@ fn main() -> Int64 {
     let ticket = mint(1)
     let second = ticket
     let held = a + b
+    let job = spawn score(2)
+    let doubled = job.join()
     let f: Sizer = |x| x + held.byteLength
     region {
         let arena = a + b
@@ -270,7 +276,7 @@ fn main() -> Int64 {
     print(branch)
     print(alias)
     print(given)
-    return n + second.id + f(1)
+    return n + second.id + f(1) + doubled
 }
 "#;
 
@@ -363,6 +369,13 @@ fn why_memory_counts_the_whole_file() {
     assert!(text.contains("  summary: "), "{text}");
     assert!(text.contains(" reclaimed, "), "{text}");
     assert!(text.contains("not reclaimed"), "{text}");
+    // `rfcs/census-regions.md` defect 2: a task is discharged where it is
+    // joined, so the report may not call it a leak. It has its own column.
+    assert!(text.contains(" discharged, "), "{text}");
+    assert!(
+        text.contains("discharged, not leaked — a task is joined, forwarded or dropped"),
+        "{text}"
+    );
     assert!(text.contains("aliased by another binding"), "{text}");
     assert!(text.contains("captured by a lambda or a spawn"), "{text}");
     assert!(text.contains("it names somebody else's value"), "{text}");

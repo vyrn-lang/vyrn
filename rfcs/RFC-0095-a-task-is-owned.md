@@ -311,6 +311,28 @@ the three. Both arms dispose, so the program is accepted and `t2` is a task
 nothing answers for. It is the same shape one level up, and closing it needs a
 type this walk does not have.
 
+**Closed, and the spelling above was wrong.** `owed_let` reads a `match` and an
+if-expression now: the binding inherits the obligation ANY arm carries, which is
+the union, and the first arm that carries one answers for the rendering because
+the checker has already made the arms agree. Closing it needed no type. What the
+paragraph above got wrong is the example: `let t2 = match c { A => t, B => u }`
+over two live bindings is **already refused**, at `t`, which one arm hands on and
+the other does not — M3's own arm-granular scan. The shape that reaches the hole
+ACQUIRES in each arm, where no earlier binding is there to answer:
+`let t = match o { Some(k) => feed(), None => feed() }` was accepted and left a
+stream nobody answered for. It is refused now, and
+`a_branch_acquires_into_the_binding` is the test. The corpus cost is zero: `vyrn
+check` over all 216 files refuses exactly the files `EXPECTED_CHECK_FAILURE`
+already lists.
+
+**And `join` got its seeded row** (RFC-0094's residue, closed with this change).
+M1 made `t.join()` consume the task, and that fact lived as a property of the
+must-use walk rather than as a line: every mention of a linear binding is a
+disposal there. `@join` declares `consume Task<T> -> T` in `prelude.rs` now, and
+`movecheck::sinks` reads it. There was no hand-written special case to delete,
+and rule 1 stands aside as it does for `close` — the obligation on the linear
+TYPE refuses a second join first, with the better words.
+
 **And a leaking row nobody had filed.** `for x in consume xs` took the buffer and
 nothing released it — RFC-0092 M5's row with one keyword written on it, which
 that milestone recorded as open because the census does not name it. The loop

@@ -32,6 +32,7 @@
 //! | the result points into an argument | a body yielding [`ELEM`] of a parameter | `movecheck::views` |
 //! | the result must be disposed | the return type, through `Owned` | `movecheck::linear` |
 //! | the receiver is written through | `Capability::Modify` on parameter 0 | `checker::mut_array_receiver` |
+//! | what the result IS | the return type | `declared::Declared::new` |
 //! | the access site's lowering | the whole row | `crate::project::inline` |
 //!
 //! A row is keyed by the name the **call site carries**, because that is what
@@ -49,6 +50,20 @@
 //!   refuse on both, with hand-written wording that reads better than anything
 //!   a generic signature check would print. The declared types below are the
 //!   census's, and they are read only where the table above says so.
+//!
+//! ## Where a declared type is INERT, and how a reader tells
+//!
+//! Two rows spell a type they do not mean. A **lending** row (`at`, `atSet`,
+//! `bytes`) cannot name its result: the type is the receiver's element or the
+//! receiver's representation, and one row serves every container. `@str` cannot
+//! name its parameter: it takes a number, a `Bool`, a `String` or a type with
+//! `impl Show`, which is a union this language does not spell. Each inert type
+//! is spelled `Unit` and says so on its own row.
+//!
+//! [`crate::declared`] therefore reads the return type of every row EXCEPT a
+//! lending one, and except a row that returns a bare type parameter — `T` names
+//! a type the program never wrote, and that reading has no types with which to
+//! solve it.
 
 use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type};
 use crate::project::ELEM;
@@ -246,6 +261,62 @@ fn rows() -> Vec<Function> {
         // disposal obligation on its result, which the return type now says and a
         // three-name `match` in `movecheck` used to.
         row("unboxStream", &["T"], &[("a", Read, Int)], stm(t()), &[]),
+        // ---- the task primitive (RFC-0095 M1) -------------------------------
+        // `t.join()` awaits a task and takes it for good, which is a `consume`
+        // receiver and nothing else. The fact lived as a property of the WALK
+        // until now: every mention of a linear binding is a disposal there, so
+        // `join` consumed by being written, and no line said it.
+        //
+        // Rule 1 stands aside here for the reason it stands aside for `close`
+        // — see [`crate::movecheck::sinks`]. What a row cannot carry is the rest
+        // of `join`'s contract: which producer pairs with it (`spawn` is a
+        // keyword, not a callable name) and the disposal menu the diagnostic
+        // prints. Both stay hand-written, and both are about a NAME rather than
+        // about a signature.
+        row(
+            "@join",
+            &["T"],
+            &[("self", Consume, Type::Task(Box::new(t())))],
+            t(),
+            &[],
+        ),
+        // ---- the four return types (RFC-0094, `declared::builtin_returns`) ---
+        // Each of these was a row in a second list that recorded ONE fact: what
+        // the call gives back. A row here already carries that fact, so the
+        // second list is gone and these three joined the first. `@push` needed
+        // no new row — it has had one since M1, and its `Array<T>` releases the
+        // way the `Array<Unit>` in the old list did.
+        //
+        // `@concat` is the `a + b` lowering on Strings and the interpolation
+        // spine; it copies out of both arguments and allocates.
+        row(
+            "@concat",
+            &[],
+            &[("a", Read, Str), ("b", Read, Str)],
+            Str,
+            &[],
+        ),
+        // `@str` renders one value. Its parameter is a union — a number, a
+        // `Bool`, a `String`, or a type with `impl Show` — and this language
+        // cannot spell one, so the parameter is INERT and is spelled `Unit` for
+        // the reason `at`'s is. No rule reads it: RFC-0094 M1 deliberately left
+        // arity and parameter types in the checker's hand-written arms, which
+        // refuse a bad receiver with better words than a signature check could.
+        // What the row carries is the RETURN.
+        row("@str", &[], &[("x", Read, Unit)], Str, &[]),
+        // `m.keys()` copies the key pointers into a new buffer (RFC-0028), so
+        // the result is the caller's and the map keeps its own.
+        row(
+            "@keys",
+            &["V"],
+            &[(
+                "m",
+                Read,
+                Type::Map(Box::new(Str), Box::new(Type::Param("V".to_string()))),
+            )],
+            arr(Str),
+            &[],
+        ),
     ]
 }
 
@@ -269,6 +340,21 @@ pub fn signature(name: &str) -> Option<&'static Function> {
         name
     };
     all().iter().find(|f| f.name == name)
+}
+
+/// What each seeded builtin gives back, for the declared-types reading
+/// ([`crate::declared`]) — the name a call site carries, and the row's `ret`.
+///
+/// Two kinds of row are held back, and the module comment says why each is
+/// inert: a **lending** row cannot name its result, and a row returning a bare
+/// type **parameter** names a type the program never wrote. A reading with no
+/// types must answer `None` for both, which is what it answered before there
+/// were rows at all.
+pub fn returns() -> impl Iterator<Item = (&'static str, &'static Type)> {
+    all()
+        .iter()
+        .filter(|f| !lends(&f.name) && !matches!(f.ret, Type::Param(_)))
+        .map(|f| (f.name.as_str(), &f.ret))
 }
 
 /// The capability parameter `i` of `name` declares.
@@ -341,7 +427,35 @@ mod tests {
         );
     }
 
-    /// The eleven facts the census counted, and the two that lived nowhere.
+    /// The four return types RFC-0094's residue held in `declared`, and the two
+    /// kinds of row that may not answer.
+    #[test]
+    fn the_folded_return_types_are_on_the_rows() {
+        let rets: Vec<(&str, String)> = returns().map(|(n, t)| (n, t.to_string())).collect();
+        let of = |n: &str| {
+            rets.iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("`{n}` answers no return type"))
+        };
+        assert_eq!(of("@concat"), "String");
+        assert_eq!(of("@str"), "String");
+        assert_eq!(of("@keys"), "Array<String>");
+        // `@push` needed no new row. The old list said `Array<Unit>` and the row
+        // says `Array<T>`; both release the array's buffer.
+        assert_eq!(of("@push"), "Array<T>");
+        // A lending row cannot name its result, and a bare type parameter names
+        // a type the program never wrote.
+        for held in ["at", "atSet", "bytes", "blackBox", "@swapRemove", "@join"] {
+            assert!(
+                !rets.iter().any(|(k, _)| *k == held),
+                "`{held}` declares an inert return type and may not answer for a call"
+            );
+        }
+    }
+
+    /// The eleven facts the census counted, the two that lived nowhere, and
+    /// `join`'s, which lived as a property of the must-use walk (RFC-0095 M1).
     #[test]
     fn the_census_facts_are_on_the_signatures() {
         for (name, i) in [
@@ -351,6 +465,7 @@ mod tests {
             ("close", 0),
             ("boxStream", 0),
             ("serveStream", 0),
+            ("@join", 0),
         ] {
             assert_eq!(
                 capability(name, i),

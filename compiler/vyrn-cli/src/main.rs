@@ -1182,6 +1182,7 @@ fn why_memory(file: &str) -> ExitCode {
     let mut moved = 0usize;
     let mut dropped = 0usize;
     let mut statics = 0usize;
+    let mut discharged = 0usize;
     // Reason -> count, kept in first-seen order so the report is stable.
     let mut leaked: Vec<(&'static str, usize)> = Vec::new();
 
@@ -1223,6 +1224,7 @@ fn why_memory(file: &str) -> ExitCode {
                 Fate::Moved { .. } => moved += 1,
                 Fate::Dropped { .. } => dropped += 1,
                 Fate::Static => statics += 1,
+                Fate::Discharged(_) => discharged += 1,
                 Fate::Leaked(reason) => {
                     let key = reason.kind();
                     match leaked.iter_mut().find(|(k, _)| *k == key) {
@@ -1239,7 +1241,7 @@ fn why_memory(file: &str) -> ExitCode {
     println!();
     println!(
         "  summary: {bindings} bindings — {reclaimed} reclaimed, {moved} moved out, \
-         {dropped} dropped, {statics} static, {leaks} not reclaimed"
+         {dropped} dropped, {discharged} discharged, {statics} static, {leaks} not reclaimed"
     );
     leaked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     for (reason, count) in &leaked {

@@ -91,30 +91,6 @@ impl<T> Scopes<T> {
     }
 }
 
-/// The **return type** of the built-ins this reading can name.
-///
-/// It was `builtin_producers` until Phase 4c, and it decided ownership: a call
-/// listed here transferred and every other call leaked. That shape was wrong
-/// twice over. It cannot express `copy`, whose result type is its receiver's
-/// (Phase 3 recorded this), and ownership is not a property of a name — a
-/// return is owned because RFC-0089 rule 3 says so, and a builtin that reads a
-/// place is a borrow because rule 2 says so. What survives is the part that was
-/// only ever about types.
-///
-/// It still under-approximates. A builtin missing from here has no type this
-/// reading can name, so a binding to it is left alone.
-fn builtin_returns() -> impl Iterator<Item = (&'static str, Type)> {
-    [
-        // `a + b` on Strings, and `"..\{x}"` interpolation.
-        ("@concat", Type::Str),
-        ("@str", Type::Str),
-        ("@push", Type::Array(Box::new(Type::Unit))),
-        // `m.keys()` copies the key pointers into a new buffer (RFC-0028).
-        ("@keys", Type::Array(Box::new(Type::Str))),
-    ]
-    .into_iter()
-}
-
 /// The program-level tables the declared-types reading needs: what each named
 /// type is, what each callable returns, and what each module-state binding holds.
 ///
@@ -123,8 +99,18 @@ pub struct Declared {
     /// Every `type X = ..`, so a nominal type answers as its base does.
     decls: HashMap<String, TypeDecl>,
     /// The declared return type of every callable this can name: the program's
-    /// functions plus the built-in producers. A user declaration wins, though
+    /// functions plus the seeded builtins. A user declaration wins, though
     /// `checker::RESERVED` already forbids taking one of these names.
+    ///
+    /// The builtin half was `builtin_returns`, four hand-written rows that said
+    /// what a call gives back — beside eighteen seeded signatures each already
+    /// carrying a `ret`. It was the last of RFC-0094's second lists, and the
+    /// two forks had drifted: the list said `@push` returns `Array<Unit>` and
+    /// the row says `Array<T>`, which release the same way and read differently.
+    /// [`crate::prelude::returns`] is the one answer now.
+    ///
+    /// It still under-approximates. A builtin whose row is held back has no
+    /// type this reading can name, so a binding to it is left alone.
     rets: HashMap<String, Type>,
     /// Module state (RFC-0013), with its declared type where it has one. Seeded
     /// into the outermost scope frame by a pass that wants globals typed.
@@ -140,8 +126,8 @@ pub struct Declared {
 impl Declared {
     pub fn new(program: &Program) -> Self {
         let mut rets: HashMap<String, Type> = HashMap::new();
-        for (n, t) in builtin_returns() {
-            rets.insert(n.to_string(), t);
+        for (n, t) in crate::prelude::returns() {
+            rets.insert(n.to_string(), t.clone());
         }
         for f in &program.functions {
             rets.insert(f.name.clone(), f.ret.clone());

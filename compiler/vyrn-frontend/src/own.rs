@@ -712,6 +712,21 @@ pub enum Fate {
     /// It is static data in the module's data segment. Nothing reclaims it,
     /// and nothing needs to (census §1).
     Static,
+    /// It carries a must-use obligation, and the construct that DISCHARGES it
+    /// reclaims it (`rfcs/census-regions.md`, defect 2). Carries the row.
+    ///
+    /// [`Owned::release_kind`] answers `None` for a `Stream<T>` and a `Task<T>`
+    /// on purpose — an automatic block-exit row would free each a second time —
+    /// and this analysis read that `None` as "nothing reclaims it". The report
+    /// then said "nothing releases the type `Task<Int64>` yet" about a task
+    /// `examples/concurrency.vyrn` joins on the next line, which is 21 of the
+    /// bindings the corpus census flagged.
+    ///
+    /// The claim is CATEGORICAL rather than per binding. A must-use value that
+    /// is not discharged on every path is a compile error (RFC-0075 M1 for a
+    /// stream, RFC-0095 M1 for a task), so a program that reaches this analysis
+    /// has already been proved to discharge every one of them.
+    Discharged(Linear),
     /// Nothing reclaims it.
     Leaked(Leak),
 }
@@ -734,6 +749,20 @@ impl Fate {
             Fate::Moved { line, into } => format!("moved at line {line} into {into}"),
             Fate::Dropped { line } => format!("reclaimed by `drop` at line {line}"),
             Fate::Static => "static data — nothing reclaims it, and nothing needs to".into(),
+            // The three menus are the ones `movecheck` prints, one tense over.
+            // There the reader is told what to write; here the reader is told
+            // what the program already wrote, so the sentence names the same
+            // three discharges and says which lowering does the freeing.
+            Fate::Discharged(Linear::Stream) => "discharged, not leaked — a stream is consumed, \
+                 forwarded or closed on every path, and that lowering frees it"
+                .into(),
+            Fate::Discharged(Linear::Task) => "discharged, not leaked — a task is joined, \
+                 forwarded or dropped on every path, and that lowering frees it"
+                .into(),
+            Fate::Discharged(Linear::Declared(by)) => format!(
+                "discharged, not leaked — `{by}` declares `impl MustUse`, so it is handed on \
+                 or dropped on every path"
+            ),
             Fate::Leaked(reason) => format!("NOT reclaimed — {reason}"),
         }
     }
@@ -1119,13 +1148,32 @@ impl Emit<'_> {
         let row = self.lets.get(&id(s));
         let bty = row.and_then(|r| r.ty.as_ref());
         let Some(kind) = bty.and_then(|t| self.proto.release_kind(t)) else {
-            return Fate::Leaked(Leak::NoRelease {
-                ty: match bty {
-                    Some(t) => t.to_string(),
-                    None => "unknown".into(),
+            // A must-use type reaches here BECAUSE it is discharged elsewhere,
+            // so "nothing reclaims it" is the wrong sentence about it — see
+            // [`Fate::Discharged`]. A `drop` and a move still answer for
+            // themselves: each names a line, and a line the reader can go to is
+            // worth more than the categorical sentence.
+            let Some(linear) = bty.and_then(|t| self.proto.linear_kind(t)) else {
+                return Fate::Leaked(Leak::NoRelease {
+                    ty: match bty {
+                        Some(t) => t.to_string(),
+                        None => "unknown".into(),
+                    },
+                    owns_heap: bty.is_some_and(|t| self.proto.owns_heap(t)),
+                });
+            };
+            return match row.and_then(|r| r.gone.as_ref()) {
+                Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
+                Some(Gone::Returned { line }) => Fate::Moved {
+                    line: *line,
+                    into: "the return".into(),
                 },
-                owns_heap: bty.is_some_and(|t| self.proto.owns_heap(t)),
-            });
+                Some(Gone::Moved { line, by }) => Fate::Moved {
+                    line: *line,
+                    into: by.clone(),
+                },
+                _ => Fate::Discharged(linear),
+            };
         };
         // A string literal lives in the data segment. Nothing allocated it and
         // nothing reclaims it (census §1).
@@ -1801,6 +1849,25 @@ pub(crate) mod tests {
         );
     }
 
+    /// `rfcs/census-regions.md` defect 2. A `Task<T>` has no release row on
+    /// purpose, and the report read that as a leak — about a task the next line
+    /// joins. The obligation is proved elsewhere, so the sentence is
+    /// categorical; a `drop` still answers with its own line.
+    #[test]
+    fn a_discharged_task_is_not_a_leak() {
+        let src = "fn work(n: Int64) -> Int64 { return n + 1 } \
+                   fn main() -> Int64 { let t = spawn work(1) let u = spawn work(2) \
+                   let n = t.join() drop u return n }";
+        let f = fates(src, "main");
+        assert_eq!(f[0], Fate::Discharged(Linear::Task), "{f:?}");
+        assert!(matches!(f[1], Fate::Dropped { .. }), "{f:?}");
+        assert_eq!(
+            f[0].words(),
+            "discharged, not leaked — a task is joined, forwarded or dropped on every path, \
+             and that lowering frees it"
+        );
+    }
+
     /// Census §14, Phase 5. An `Option` and a `Result` DO own their payload:
     /// the recommended way to write a fallible function was also the leaking one.
     #[test]
@@ -1955,7 +2022,8 @@ pub(crate) mod tests {
         }
         println!("move surface: {}", param_returns.len() + aliases.len());
         println!(
-            "bindings: {total} — {kept} reclaimed/moved/dropped/static, {leaks} not reclaimed"
+            "bindings: {total} — {kept} reclaimed/moved/dropped/discharged/static, \
+             {leaks} not reclaimed"
         );
         for (reason, count) in rows {
             println!("  {count:>5}  {reason}");
