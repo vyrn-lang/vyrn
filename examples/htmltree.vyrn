@@ -47,7 +47,21 @@ fn cartBody() -> Html {
         ])
 }
 
+/// A self-referring type declares its copy AND its release — `impl Copy for Html`
+/// (RFC-0089 M1b) beside `impl Owned for Html` (RFC-0096 M2). The two rules have
+/// to compose: a copy shares nothing, so the tree and its copy are released once
+/// each. A shared buffer released twice is a double free, which the memory suite
+/// cannot see and a run on three engines can. `examples/copy.vyrn` holds the
+/// same pair on `Json`.
+fn declaredCopies() {
+    let view: Html = cartBody()
+    let mirror = view.copy()
+    print(toHtmlString(view))
+    print(toHtmlString(mirror))
+}
+
 fn main() -> Int64 {
+    declaredCopies()
     // The body on its own.
     print(toHtmlString(cartBody()))
     print("----")

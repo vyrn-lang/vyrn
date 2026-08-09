@@ -18,6 +18,7 @@
 // Every pair below mutates one side and prints both.
 
 import { Slots, newSlots, insert } from "std/slots"
+import { Json, JsonField, emit } from "std/json"
 
 type Inner = { tag: String }
 
@@ -166,6 +167,22 @@ fn handles() {
     print(numbers[h])
 }
 
+/// A self-referring type declares its copy AND its release — `impl Copy for Json`
+/// (RFC-0091 M1) beside `impl Owned for Json` (RFC-0096 M2). The two rules have
+/// to compose: a copy shares nothing, so the original and the copy are two trees
+/// and each is released exactly once. A shared buffer released twice is a double
+/// free, which the memory suite cannot see — a double free frees — and which a
+/// run on three engines can. `examples/htmltree.vyrn` holds the same pair one
+/// type over.
+fn declaredCopies() {
+    let mut fs: Array<JsonField> = []
+    fs.push(JsonField { key: built("k"), value: JStr(built("v")) })
+    let doc: Json = JObj(fs)
+    let clone = doc.copy()
+    print(emit(doc))
+    print(emit(clone))
+}
+
 /// A scalar copies to itself, and that is what makes `copy` usable in generic
 /// code: this same body is monomorphized per element type.
 fn twice<T>(x: T) -> Array<T> {
@@ -183,6 +200,7 @@ fn main() -> Int64 {
     records()
     sums()
     handles()
+    declaredCopies()
     let numbers = twice(9)
     print(numbers[0] + numbers[1])
     let words = twice(built("word"))

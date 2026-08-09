@@ -440,9 +440,18 @@ memory suite is 16 rows and 16 steady.
 
 **The 63 that were left are 0 (RFC-0096).** Two `impl Owned` rows — on `VyxNode`
 and on `GqlSel` — closed the row this census called the hunting ground. The
-memory suite is 17 rows and 17 steady. What is left is `Json` and `Html`: 31
+memory suite is 17 rows and 17 steady. What was left is `Json` and `Html`: 31
 bindings by the linked reading, invisible to the unlinked harness, and the same
 declaration one module over.
+
+**The linked reading is 0 too (RFC-0096 M2).** Re-derived at `12255e4` the
+number is **33** rather than 31 — `Html` had risen from 10 to 12 over the two
+commits between the measurements, and every other family matched. Two more
+`impl Owned` rows — on `Json` and on `Html` — closed all 33, and the memory
+suite is 18 rows and 18 steady. Over the same files the unlinked harness reads
+3778 bindings and **2204** not reclaimed, down from 2207, with "the type has no
+release rule" still 0; the two parity examples M2 adds take it to 3783 and 2208,
+because the harness parses each file alone and cannot name an imported `Json`.
 
 ---
 

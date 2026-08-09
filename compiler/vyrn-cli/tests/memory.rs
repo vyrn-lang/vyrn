@@ -55,11 +55,13 @@
 //! | `spawnFrame` | §10 | steady | RFC-0095 M1: a task is linear, and both discharges give its storage back |
 //! | `consumingLoop` | U4's price, one keyword over | steady | RFC-0092 M5's row for `for x in consume xs`: the loop is the buffer's last owner, so it releases it at every exit |
 //! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
+//! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
 //!
-//! **Seventeen rows, seventeen steady.** RFC-0092 M5 closed the last leaking
+//! **Eighteen rows, eighteen steady.** RFC-0092 M5 closed the last leaking
 //! one, and the row beside it — the same statement with `consume` written on it
 //! — was not in the census at all. RFC-0096 closed the last CLASS: the corpus
-//! reading "the type has no release rule" fell from 63 to 0 on two `impl`s.
+//! reading "the type has no release rule" fell from 63 to 0 on two `impl`s, and
+//! M2 took the linked reading from 33 to 0 on two more.
 //!
 //! **§10 reaches this harness in half.** A task owns a frame, a task record and
 //! an operating-system handle. On wasm there are no threads, so the direct
@@ -592,6 +594,23 @@ const ROWS: &[Row] = &[
               the same chain overflows at 20,000",
     },
     Row {
+        export: "injectedJson",
+        census: "RFC-0096 M2",
+        today: Shape::Steady,
+        why: "RFC-0096 M2: the declaration is in an INJECTED module. `std/json` is linked by \
+              the `toJson` desugar rather than by an import, and the linker renames its every \
+              declaration by prefix — so the type key this row's bindings carry is \
+              `json$Json`, and the declared row has to be keyed by the renamed spelling too. \
+              It is, and by the patch RFC-0092 M3 landed for `impl Copy for Json`: the impl \
+              method follows its TYPE's rename, and `rewrite_module_refs` rewrites the impl \
+              HEAD, so one link has one key. The row also runs the composition RFC-0092 M3 \
+              and this milestone each half of: `Json` declares `Copy` as well, and a copy \
+              shares nothing, so the tree and its copy are released once each. It builds one \
+              object of two ~900-byte Strings a turn, copies it, and emits both — a leak \
+              grows it, and a double free traps rather than reading steady, which is why \
+              `examples/copy.vyrn` runs the same shape on three engines",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -614,6 +633,7 @@ fn shapes_fixture() -> String {
     let pad = "x".repeat(900);
     format!(
         r#"import {{ Slots, newSlots, insert, count }} from "std/slots"
+import {{ Json, JsonField, emit }} from "std/json"
 
 let mut seen: Int64 = 0
 
@@ -841,6 +861,41 @@ export extern fn selfReferring() {{
     kids.push(Tip(tag() + "b"))
     let b = Bough {{ root: Fork(tag() + "r", kids), label: tag() + "l" }}
     seen = seen + Int64(b.label.byteLength)
+}}
+
+/// RFC-0096 M2. The declared release of a type declared in an INJECTED module,
+/// reached through the reserved spelling the linker renames it to.
+///
+/// `toJson` below is what injects `std/json`, and the import beside it is a HAND
+/// import of the same module — both link modes in one program, which is the
+/// arrangement that had to have one type key rather than two. It also runs the
+/// composition: `Json` declares `Copy` too, so `doc` and `mirror` are two trees
+/// and each is released exactly once.
+/// What INJECTS `std/json`. The loader links the module because this function
+/// MENTIONS `toJson`; nothing calls it, so the row below measures the tree and
+/// not the encoder.
+fn jsonAnchor() -> String {{
+    return toJson(Doc {{ title: "", body: "" }})
+}}
+
+export extern fn injectedJson() {{
+    let mut fs: Array<JsonField> = []
+    fs.push(JsonField {{ key: tag() + "k", value: JStr(tag() + "v") }})
+    // Sixteen short nodes beside the two ~900-byte ones. A `Json` payload is
+    // WIDE, so it travels in a heap block no Vyrn surface names, and a declared
+    // release leaks one block per node unless `free_declared_boxes` runs after
+    // the call (RFC-0096 defect 1). Two nodes would be 32 bytes a call and hide
+    // inside a page; thirty-six are a kilobyte a call and do not.
+    let mut xs: Array<Json> = []
+    let mut i = 0
+    while i < 16 {{
+        xs.push(JStr("node"))
+        i = i + 1
+    }}
+    fs.push(JsonField {{ key: "kids", value: JArr(xs) }})
+    let doc: Json = JObj(fs)
+    let mirror = doc.copy()
+    seen = seen + 1
 }}
 
 export extern fn returnedString() -> String {{

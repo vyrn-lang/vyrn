@@ -201,3 +201,80 @@ fn fromjson_byte_pins_hold() {
         "expected 10 green pins:\n{combined}"
     );
 }
+
+/// RFC-0096 M2 — an `impl` DECLARED in an injected module is reached in both link
+/// modes, because a link has ONE type key for `Json` rather than two.
+///
+/// `std/json` is linked two ways. A program that says `toJson` gets it INJECTED,
+/// and the linker renames its every declaration to a reserved spelling, so the
+/// type key is `json$Json`. A program that only imports it by hand gets the
+/// unrenamed `Json`. A declared row — `impl Owned for Json`, `impl Copy for Json`
+/// — is keyed by ONE type key, so a rename that reached the type and not the
+/// impl would bind the row to a spelling nothing looks up.
+///
+/// The rename does reach it, by the patch RFC-0092 M3 landed in `loader.rs` for
+/// `Copy`: a flattened impl method follows its TYPE's rename rather than taking
+/// the module prefix in front of the mangling, and `rewrite_module_refs` rewrites
+/// the impl HEAD along with every other reference. That patch is general over
+/// protocols, so `Owned` needed nothing added — and nothing pinned it either.
+/// This is the pin. Reverting the patch makes the injected halves fail.
+///
+/// The third program is the one that makes a single key necessary rather than
+/// merely tidy: it does BOTH — a hand import beside a `toJson` — and the reserved
+/// spellings apply to the module either way.
+#[test]
+fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
+    let dir = std::env::temp_dir().join("vyrn-0096-keys");
+    std::fs::create_dir_all(&dir).unwrap();
+    // (file, source, the release the binding must be reclaimed by)
+    let cases = [
+        (
+            "handonly.vyrn",
+            "import { Json, emit } from \"std/json\"\n\
+             fn main() -> Int64 {\n\
+             let v: Json = JStr(\"a\" + \"b\")\n\
+             print(emit(v))\n\
+             return 0\n\
+             }\n",
+            "Owned__Json__release",
+        ),
+        (
+            "both.vyrn",
+            "import { Json, emit } from \"std/json\"\n\
+             type P = { n: Int64 }\n\
+             fn main() -> Int64 {\n\
+             let v: Json = JStr(\"a\" + \"b\")\n\
+             print(emit(v))\n\
+             print(toJson(P { n: 5 }))\n\
+             return 0\n\
+             }\n",
+            "Owned__json$Json__release",
+        ),
+    ];
+    for (name, src, release) in cases {
+        let file = dir.join(name);
+        std::fs::write(&file, src).unwrap();
+        // It runs: an unresolved flattened `release` is a check failure, and a
+        // release that frees the wrong thing is a trap.
+        let run = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+        assert!(
+            run.status.success(),
+            "{name} did not run:\n{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        // And the row the binding got is the DECLARED one, under the key this
+        // link mode gives the type.
+        let why = vyrn()
+            .arg("why")
+            .arg("--memory")
+            .arg(&file)
+            .output()
+            .expect("vyrn why");
+        let report = String::from_utf8_lossy(&why.stdout).to_string();
+        assert!(
+            report.contains(&format!("calling `{release}`")),
+            "{name}: expected the declared release `{release}`:\n{report}"
+        );
+    }
+}

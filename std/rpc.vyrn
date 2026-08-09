@@ -1286,7 +1286,10 @@ export gen fn client(dir: String) -> String {
     out = out + "type RpcIssues = { issues: Array<RpcIssue> }\n"
     out = out + "extern fn vyrnRpcCall(proc: String, path: String, body: String) -> Int64\n"
     out = out + "fn rpcIgnoreReply() {\n}\n"
-    let mut syms: Array<Symbol> = types.symbols
+    // `consume`, and it is load-bearing: `types` is released now that
+    // `RpcClientTypes` has a rule (RFC-0096 M2), so reading the field out and
+    // then handing `syms` to `symbolMapFn` would free the same buffer twice.
+    let mut syms: Array<Symbol> = consume types.symbols
     for m in mods {
         let iface = moduleInterface(m.modPath)
         for f in iface.functions {
