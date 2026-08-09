@@ -67,6 +67,7 @@ import { includes } from "std/arrays"
 // generated module's own `std/html` import is separate, emitted text.
 import { checkContract } from "std/contract"
 import { Html } from "std/html"
+import { contains, endsWith, startsWith } from "std/strpred"
 
 // ===========================================================================
 // The `Component` contract (RFC-0071 M2).

@@ -7,10 +7,11 @@
 /// engine calls now is `std/codecs` — one definition, in ordinary Vyrn, over
 /// `bytes` and `stringFromBytes`.
 ///
-/// This file is the three-way half of the pin, and it calls the BUILTIN spelling on
-/// purpose. Parity runs the whole thing on the interpreter, the native backend and
-/// wasm, so "the routed builtin answers the same on all three engines" is the
-/// statement `main` makes. It used to print `mine == builtin` beside each value;
+/// This file is the three-way half of the pin. Parity runs the whole thing on the
+/// interpreter, the native backend and wasm, so "the six answer the same on all
+/// three engines" is the statement `main` makes. RFC-0094 M2 took the names out of
+/// `RESERVED`, so the import line below is the only change the move cost a caller.
+/// It used to print `mine == builtin` beside each value;
 /// after the swap those are the same function, so a comparison row would read
 /// `true` by construction and the rows are the values instead.
 ///
@@ -24,6 +25,8 @@
 /// `Some` and its engines then disagreed with each other — the interpreter kept the
 /// byte in a Rust `String`, native truncated the `char*` at it. That is the swap's
 /// one behavioural change, measured at 16 of 6,354 rows, and it is a fix.
+
+import { base64Decode, base64Encode, hexDecode, hexEncode, urlDecode, urlEncode } from "std/codecs"
 
 /// Every ASCII byte a `String` can hold, `0x01` through `0x7F` — which is the
 /// encoders' whole input alphabet on one line, since they work a byte at a time.

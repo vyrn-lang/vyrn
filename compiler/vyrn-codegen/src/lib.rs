@@ -14155,10 +14155,9 @@ mod tests {
     /// module that reaches the string runtime, because a deleted lowering whose
     /// dead globals stay behind is the shape RFC-0078 exists to catch.
     ///
-    /// The refusal-by-name that every OTHER routed builtin gets (below) is not
-    /// available to `slice`: its return type names a `std/strpred` declaration, so
-    /// the checker refuses first and `check(src)` never yields a program to emit.
-    /// `slice_without_its_module_refuses_at_the_check` in `vyrn-frontend` is that
+    /// Since RFC-0094 M2 the refusal for `slice` is the ordinary one every moved
+    /// name gets — the checker does not resolve it and says which module has it.
+    /// `a_moved_builtin_names_the_module_it_moved_to` in `vyrn-frontend` is that
     /// half.
     #[test]
     fn the_slice_lowering_and_its_traps_are_gone() {
@@ -14178,58 +14177,48 @@ mod tests {
         );
     }
 
-    /// RFC-0078 M4c: the three tests that used to pin `@__vyrn_hex_encode`,
-    /// `@__vyrn_str_chars` and `@strstr` are gone with the lowerings they pinned.
-    /// What replaces them is the refusal, because these `check(source)` helpers take
-    /// a bare source with no resolver and therefore have no runtime module to link —
-    /// the seam M2b named for `toJson`, now shared by ten more builtins.
+    /// RFC-0078 M4c deleted the lowerings for `@__vyrn_hex_encode`,
+    /// `@__vyrn_str_chars` and `@strstr`, and pinned the ABSENCE with a
+    /// refusal-by-name at emit. RFC-0094 M2 moved that refusal one phase earlier
+    /// for ten of the eleven: they are declarations now, so a bare source with no
+    /// resolver does not resolve the NAME and never reaches the emitter.
     ///
-    /// Loudly rather than silently: an emitter that dropped the call, or emitted one
-    /// to a function nobody defines, is the failure mode this pins against.
+    /// One row still routes. `s.charCount()` is method-only, so the AST call name
+    /// is `@charCount`, which no import can bring into scope — and its seam is
+    /// still the emitter's. Loudly rather than silently: an emitter that dropped
+    /// the call, or emitted one to a function nobody defines, is the failure mode
+    /// this pins against.
     #[test]
-    fn a_routed_builtin_without_its_module_refuses_by_name() {
-        for (src, builtin, reserved) in [
+    fn the_one_routed_builtin_without_its_module_refuses_by_name() {
+        let src = "fn main() -> Int64 { return \"hi\".charCount() }";
+        let e = emit(&check(src).unwrap()).unwrap_err();
+        assert!(
+            e.contains("@charCount") && e.contains("text$charCountV"),
+            "{e}"
+        );
+    }
+
+    /// The ten that moved, refused at the CHECK instead — and the emitter is not
+    /// reached, which is the point: there is no lowering left to drop.
+    #[test]
+    fn a_moved_builtin_never_reaches_the_emitter() {
+        for (src, want) in [
             (
                 "fn main() -> Int64 { let a = hexEncode(\"x\"); return 0 }",
-                "hexEncode",
-                "codecs$hexEncodeV",
-            ),
-            (
-                "fn main() -> Int64 { let a = base64Decode(\"QQ==\"); return 0 }",
-                "base64Decode",
-                "codecs$base64DecodeV",
+                "`hexEncode` is `std/codecs`'s",
             ),
             (
                 "fn main() -> Int64 { return chars(\"hi\").length }",
-                "chars",
-                "text$charsV",
+                "`chars` is `std/text`'s",
             ),
             (
                 "fn f(s: String) -> Bool { return contains(s, \"x\") } \
                  fn main() -> Int64 { return 0 }",
-                "contains",
-                "strpred$containsV",
-            ),
-            (
-                "fn f(s: String) -> Bool { return endsWith(s, \"x\") } \
-                 fn main() -> Int64 { return 0 }",
-                "endsWith",
-                "strpred$endsWithV",
-            ),
-            // `@charCount` is spelled with the `@` because the parser produces it:
-            // `s.charCount()` is method-only, so the AST call name — and the string
-            // every engine routes on — is the internal one.
-            (
-                "fn main() -> Int64 { return \"hi\".charCount() }",
-                "@charCount",
-                "text$charCountV",
+                "`contains` is `std/strpred`'s",
             ),
         ] {
-            let e = emit(&check(src).unwrap()).unwrap_err();
-            assert!(
-                e.contains(builtin) && e.contains(reserved),
-                "{builtin}: {e}"
-            );
+            let e = check(src).unwrap_err();
+            assert!(e.contains(want), "{e}");
         }
     }
 

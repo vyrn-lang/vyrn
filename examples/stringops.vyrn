@@ -17,6 +17,8 @@
 ///                              never a silent 0 or a crash. Strict: optional
 ///                              leading `-`, then digits, nothing else.
 
+import { contains, endsWith, startsWith } from "std/strpred"
+
 /// A hand-written check: every character at an even 1-based position is 'a'.
 fn everyEvenIsA(s: String) -> Bool {
     let mut i = 1

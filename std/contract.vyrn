@@ -55,6 +55,7 @@
 
 import { editDistance } from "std/strings"
 import { includes } from "std/arrays"
+import { slice } from "std/strpred"
 
 /// The "did you mean" threshold: Damerau-Levenshtein distance <= 2, measured
 /// against every member name. This is what makes typo detection on a CLOSED

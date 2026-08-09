@@ -60,6 +60,7 @@ import { el, empty, Html, Attr } from "std/html"
 // RFC-0071: a page's exports are checked against the `Page` contract declared
 // below, instead of hunted for by name.
 import { checkContract, matchedMember } from "std/contract"
+import { endsWith, startsWith } from "std/strpred"
 
 // ===========================================================================
 // PageError (RFC-0041 §3) — the failure a page's `data` may carry. `data ->

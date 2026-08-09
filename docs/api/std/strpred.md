@@ -14,10 +14,11 @@ to know anything a Vyrn program cannot see.
 
 **Three moved. Two did not, and both refusals are measured rather than deferred.**
 
-- `containsV`, `startsWithV` and `endsWithV` ARE the builtins now: every engine
+- `contains`, `startsWith` and `endsWith` ARE the builtins now: every engine
   calls them, and `strstr` plus two `strncmp` shapes are gone from the emitted
-  IR along with three Rust one-liners.
-- **`sliceV` IS `slice` now too** (RFC-0079 M3). It was refused by M4c because
+  IR along with three Rust one-liners. Since RFC-0094 M2 they are not builtins
+  at all — the four names below are ordinary exports and a caller imports them.
+- **`slice` moved too** (RFC-0079 M3). It was refused by M4c because
   the builtin TRAPPED — `error: slice index out of range` or
   `error: slice splits a UTF-8 character` — and Vyrn had no expression that
   aborts, so the Vyrn version could only say `None` where the builtin ended the
@@ -34,13 +35,13 @@ to know anything a Vyrn program cannot see.
   would make an O(1) read an O(n) heap copy and take that folding away — the
   opposite trade from the one this RFC exists to make.
 
-Every function is still `V`-suffixed, and for the four routed ones the suffix is
-now just a second spelling of the same function (the builtin resolves to it
-after linking). `sliceV` in particular keeps its name rather than becoming a
-bare `slice`: `slice` is a RESERVED word, so a module cannot declare it, which
-is the whole reason this convention exists. For `byteLengthV` the suffix is
-what keeps it callable beside the builtin it is proved against, which
-`examples/strpredbytes.vyrn` still does.
+**The `V` suffix is gone from the four that moved** (RFC-0094 M2). It existed
+for one reason: `contains`, `startsWith`, `endsWith` and `slice` were RESERVED
+words, so a module could not declare them, and the routed builtin resolved to
+the suffixed spelling after linking. M2 took the four names out of `RESERVED`,
+so the declaration can carry the name the caller writes and there is one
+spelling again. `byteLengthV` keeps its suffix: `byteLength` is a FIELD and
+stays one, so the function beside it needs a name of its own.
 
 **Bytes, not characters.** A `String` is UTF-8 bytes and every offset and
 length here is a byte offset, matching the builtins. That is also why the
@@ -69,27 +70,27 @@ The byte length of `s` — the `s.byteLength` field, as a function.
 `bytes` hands over the byte view and an array knows its own length, so this
 is the whole thing.
 
-## startsWithV
+## startsWith
 
 ```vyrn
-fn startsWithV(s: String, needle: String) -> Bool
+fn startsWith(s: String, needle: String) -> Bool
 ```
 
 Does `s` begin with `needle`? An empty needle is a prefix of everything
 (including `""`), matching the builtin.
 
-## endsWithV
+## endsWith
 
 ```vyrn
-fn endsWithV(s: String, needle: String) -> Bool
+fn endsWith(s: String, needle: String) -> Bool
 ```
 
 Does `s` end with `needle`? An empty needle is a suffix of everything.
 
-## containsV
+## contains
 
 ```vyrn
-fn containsV(s: String, needle: String) -> Bool
+fn contains(s: String, needle: String) -> Bool
 ```
 
 Does `needle` occur anywhere in `s`? An empty needle occurs at 0, so this is
@@ -113,13 +114,13 @@ pattern is meant to take: a small per-operation enum, not one shared error type.
 across a value — and is not being replaced.
 
 This is strictly more than the builtin could say. `slice` had two fixed strings
-and no way to name the index; `sliceV` had one `None` for both. A caller that
+and no way to name the index; `slice` had one `None` for both. A caller that
 wants neither writes `?? panic("…")` or `?? fallback`.
 
-## sliceV
+## slice
 
 ```vyrn
-fn sliceV(s: String, start: Int64, end: Int64) -> Result<String, SliceError>
+fn slice(s: String, start: Int64, end: Int64) -> Result<String, SliceError>
 ```
 
 The bytes of `s` from `start` up to `end`. `start`/`end` are BYTE offsets, and
@@ -156,8 +157,8 @@ place in this module where the difference was measured and mattered. Both of
 those allocate a copy of the WHOLE string, and `slice` is called once per token
 by `std/scan`, so a scanner over a large source would copy that source once per
 token. That is quadratic, and it is the shape of the 240x string-append bug
-RFC-0076 found. The byte read `s[i]` is the same O(1) view `startsWithV` and
-`containsV` are written on, and `s.byteLength` is `strlen` (and folds).
+RFC-0076 found. The byte read `s[i]` is the same O(1) view `startsWith` and
+`contains` are written on, and `s.byteLength` is `strlen` (and folds).
 
 What remains is a real cost and is recorded rather than chased: the builtin's
 body was one `memcpy`, and this is a push loop plus `stringFromBytes`, which

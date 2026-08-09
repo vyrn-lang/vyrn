@@ -7,6 +7,9 @@
 ///
 /// A `gen fn` is comptime-pure: it may read (mediated `readFile`/`listDir`) but
 /// not write, spawn, use module state, or call an `extern`.
+
+import { chars } from "std/text"
+
 export gen fn palette(dir: String) -> String {
     // Count colors in the CSV by counting commas (immune to trailing newlines
     // and CRLF, so the emitted source is reproducible across checkouts).

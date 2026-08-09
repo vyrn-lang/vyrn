@@ -14,6 +14,7 @@
 /// after it is positional/`rest` verbatim (including `-x` tokens).
 
 import { indexOf, substring } from "std/strings"
+import { contains, startsWith } from "std/strpred"
 
 /// A snapshot of the command-line arguments — argv AFTER the program name, the
 /// same slice every backend's `args()` returns. Build it with `cli()` (the live

@@ -14,6 +14,8 @@
 /// scan early. Block comments are non-nesting (the CSS/C rule: the first
 /// `blockClose` after a `blockOpen` closes it), which is exactly what CSS needs.
 
+import { slice } from "std/strpred"
+
 /// A cursor over `src`, with 1-based `line`/`col` and its lexical config.
 export type Scanner = {
     src: String,

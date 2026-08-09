@@ -16,6 +16,7 @@
 /// Inspect the synthesized router with:  vyrn emit-gen examples/pagesdemo.vyrn
 import { pages } from "std/ui"
 import { route, hrefUsers, hrefItems, rootPath, itemsPath } from pages("./pages")
+import { contains } from "std/strpred"
 
 /// Drive one request through the router and print its status.
 fn show(method: String, path: String) {

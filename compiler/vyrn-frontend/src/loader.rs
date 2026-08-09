@@ -583,57 +583,23 @@ pub const RT_MODULES: &[RtModule] = &[
         desugared: &["fromJson"],
         routes: &[],
     },
-    // RFC-0078 M4b(1)/M4c: the six codecs. They had no C shim at all — ~520 lines
-    // of hand-written LLVM IR in the textual emitter and 159 lines of Rust in the
-    // interpreter — and needed no primitive to write in Vyrn.
-    RtModule {
-        spec: "std/codecs",
-        prefix: "codecs$",
-        desugared: &[],
-        routes: &[
-            ("hexEncode", "codecs$hexEncodeV"),
-            ("hexDecode", "codecs$hexDecodeV"),
-            ("base64Encode", "codecs$base64EncodeV"),
-            ("base64Decode", "codecs$base64DecodeV"),
-            ("urlEncode", "codecs$urlEncodeV"),
-            ("urlDecode", "codecs$urlDecodeV"),
-        ],
-    },
-    // RFC-0078 M4b(2)/M4c: `chars`, and `@charCount` — the census's one builtin with
-    // no justification for being one, added on an existing row rather than a new
-    // one. It is spelled with the `@` because that is what the parser produces:
-    // `s.charCount()` is method-only, so the AST call name is `@charCount` and that
-    // is the string every engine looks up. `lineAt`/`colAt` are deliberately NOT
-    // here — see the M4c note in RFC-0078: the interpreter memoizes a line-start
-    // table that a Vyrn library cannot, and retiring them is a decision about that
-    // cache (M5) rather than about capability.
+    // RFC-0078 M4b(2)/M4c: `@charCount` — the census's one builtin with no
+    // justification for being one. It is spelled with the `@` because that is what
+    // the parser produces: `s.charCount()` is method-only, so the AST call name is
+    // `@charCount` and that is the string every engine looks up. A method spelling
+    // has no free form, so it could not become an import and it stays routed.
+    //
+    // `chars` was the other route here and RFC-0094 M2 took it: it has a free
+    // spelling, so `import { chars } from "std/text"` is the whole of what routing
+    // was doing for it. `lineAt`/`colAt` never routed at all, and M2 left them
+    // alone — see the M4c note in RFC-0078 and the doc on `lineAtV`: the
+    // interpreter memoizes a line-start table that a Vyrn library cannot, worth
+    // 122 ms of a 291 ms `std/vyx` page compile.
     RtModule {
         spec: "std/text",
         prefix: "text$",
         desugared: &[],
-        routes: &[("chars", "text$charsV"), ("@charCount", "text$charCountV")],
-    },
-    // RFC-0078 M4b(3)/M4c: the three string predicates — and `slice`, which M4c
-    // refused and RFC-0079 M3 took. The refusal was "it TRAPS, and Vyrn has no
-    // expression that aborts, so `sliceV` can only answer `None` where the builtin
-    // ends the process". M3 did not add the abort to `slice`; it made the failure a
-    // VALUE (`Result<String, SliceError>`) and let the caller choose, which deleted
-    // an interpreter arm, ~50 lines of emitted IR and a wasm runtime function
-    // instead of adding a fourth copy of the range check.
-    //
-    // `byteLength` is still not here: it is a VIEW (`strlen`), it folds at compile
-    // time inside refinement predicates, and the byte view is what this module is
-    // built on.
-    RtModule {
-        spec: "std/strpred",
-        prefix: "strpred$",
-        desugared: &[],
-        routes: &[
-            ("contains", "strpred$containsV"),
-            ("startsWith", "strpred$startsWithV"),
-            ("endsWith", "strpred$endsWithV"),
-            ("slice", "strpred$sliceV"),
-        ],
+        routes: &[("@charCount", "text$charCountV")],
     },
     // RFC-0081 M2: the six decimal places. Listed as DESUGARED rather than routed
     // for the same reason `toJson` is — `@str` is type-directed and only its float
@@ -4227,14 +4193,24 @@ mod tests {
             routed_builtin("lineAt").is_none(),
             "`lineAt` keeps its interpreter cache"
         );
-        // RFC-0079 M3: `slice` was the one refusal on this list that a language
-        // change could retire, and it did. The row is inverted rather than deleted
-        // — the reason it moved is the milestone.
-        assert_eq!(
-            routed_builtin("slice"),
-            Some("strpred$sliceV"),
-            "`slice` returns its failure now; RFC-0079 M3 routed it"
-        );
+        // RFC-0094 M2: a routed builtin with a FREE spelling needs no route — an
+        // import does the same work and costs the compiler nothing. Eleven rows
+        // left this table; `@charCount` is what remains, because a method-only
+        // name has no spelling an import can bring into scope.
+        for gone in crate::checker::MOVED_TO_STD {
+            assert!(
+                routed_builtin(gone.0).is_none(),
+                "`{}` moved to `{}`; a route for it would shadow the import",
+                gone.0,
+                gone.1
+            );
+        }
+        let routes: Vec<&str> = RT_MODULES
+            .iter()
+            .flat_map(|rt| rt.routes)
+            .map(|(b, _)| *b)
+            .collect();
+        assert_eq!(routes, vec!["@charCount"]);
     }
 
     /// RFC-0081 M2: [`F64_STR`] is a name two backends emit a call to, so the

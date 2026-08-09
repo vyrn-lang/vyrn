@@ -182,6 +182,7 @@ const ROOT: &str = "\
 import { mount, surface, Route } from \"std/http\"
 import * as api from \"./notes.http\"
 import * as stream from \"std/stream\"
+import { startsWith } from \"std/strpred\"
 
 fn under(req: Request) -> Option<Response> {
     return if req.path.startsWith(\"/_/\") { Some(Response { status: 200, contentType: \"text/plain\", body: \"surface\", vary: \"\", headers: [:] }) } else { None }

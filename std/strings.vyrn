@@ -23,12 +23,12 @@
 /// that can genuinely receive a bad range — `substring`, `padStart`, `padEnd` —
 /// say so in their own words.
 
-/// `substring` matches on the two variants by name, and a variant of an INJECTED
-/// runtime module is renamed to a reserved spelling unless the module is imported
-/// by hand (`strpred$OutOfRange`). So this import is not decoration: it is what
-/// makes `OutOfRange` and `SplitsCharacter` writable here. The `slice` call itself
-/// needs no import — it is a builtin, routed.
-import { SliceError } from "std/strpred"
+/// `substring` matches on the two variants by name, so importing `SliceError` is
+/// what makes `OutOfRange` and `SplitsCharacter` writable here. Since RFC-0094 M2
+/// the FUNCTIONS are on the same line for the ordinary reason: `slice` and the
+/// three predicates are `std/strpred` exports, not builtins, and a caller imports
+/// what it calls.
+import { SliceError, contains, endsWith, slice, startsWith } from "std/strpred"
 
 /// `stringFromBytes(b)` where the bytes are KNOWN to be valid UTF-8 — an ASCII
 /// transform of, or an ASCII-boundary slice/rebuild of, already-valid text — so

@@ -7580,12 +7580,14 @@ mod tests {
         // "café": 5 UTF-8 bytes but 4 code points; `é` is U+00E9 = 233.
         let bytes = "fn main() -> Int64 { return bytes(\"caf\\u{e9}\").length; }";
         assert_eq!(run(bytes).unwrap(), 5);
-        // `chars` is `std/text` since RFC-0078 M4c, so it needs the loader path.
-        // `bytes` and `byteLength` are the views that stayed, so `run` still serves them.
-        let chars = "fn main() -> Int64 { return chars(\"caf\\u{e9}\").length; }";
-        assert_eq!(run_json(chars).unwrap(), 4);
-        let cp = "fn main() -> Int64 { return chars(\"caf\\u{e9}\")[3]; }";
-        assert_eq!(run_json(cp).unwrap(), 233);
+        // `chars` is `std/text`'s declaration since RFC-0094 M2, so it needs the
+        // loader path AND an import. `bytes` and `byteLength` are the views that
+        // stayed, so `run` still serves them.
+        let imp = "import { chars } from \"std/text\" ";
+        let chars = format!("{imp}fn main() -> Int64 {{ return chars(\"caf\\u{{e9}}\").length; }}");
+        assert_eq!(run_json(&chars).unwrap(), 4);
+        let cp = format!("{imp}fn main() -> Int64 {{ return chars(\"caf\\u{{e9}}\")[3]; }}");
+        assert_eq!(run_json(&cp).unwrap(), 233);
     }
 
     #[test]
@@ -7593,10 +7595,11 @@ mod tests {
         // A 4-byte emoji is a single code point.
         let len = "fn main() -> Int64 { return \"\\u{1F600}\".byteLength; }"; // 4 bytes
         assert_eq!(run(len).unwrap(), 4);
-        let one = "fn main() -> Int64 { return chars(\"\\u{1F600}\").length; }"; // 1 char
-        assert_eq!(run_json(one).unwrap(), 1);
-        let val = "fn main() -> Int64 { return chars(\"\\u{1F600}\")[0]; }";
-        assert_eq!(run_json(val).unwrap(), 128512);
+        let imp = "import { chars } from \"std/text\" ";
+        let one = format!("{imp}fn main() -> Int64 {{ return chars(\"\\u{{1F600}}\").length; }}");
+        assert_eq!(run_json(&one).unwrap(), 1); // 1 char
+        let val = format!("{imp}fn main() -> Int64 {{ return chars(\"\\u{{1F600}}\")[0]; }}");
+        assert_eq!(run_json(&val).unwrap(), 128512);
     }
 
     #[test]
@@ -7613,24 +7616,24 @@ mod tests {
         );
     }
 
-    /// The six codecs, end to end (checker + loader + interpreter), on the routed
-    /// path (RFC-0078 M4c). There are no Rust helpers left to unit-test: the
-    /// implementation is `std/codecs`, so what is worth asserting here is that the
-    /// builtin still answers through the injected module — a round trip, and the
-    /// three refusals the deleted helper tests covered.
+    /// The six codecs, end to end (checker + loader + interpreter). RFC-0078 M4c
+    /// routed them into `std/codecs` and RFC-0094 M2 made them ordinary imports,
+    /// so what is worth asserting is unchanged and the import line is the only
+    /// difference: a round trip, and the three refusals the deleted Rust helper
+    /// tests covered.
     #[test]
-    fn encoding_builtins_route_through_std_codecs() {
-        let src = "fn main() -> Int64 {                    let d = base64Decode(base64Encode(\"hey\"))                    if match d { Some(s) => s, None => \"\" } != \"hey\" { return 1 }                    if hexEncode(\"Hi\") != \"4869\" { return 2 }                    if urlEncode(\"a b&c\") != \"a%20b%26c\" { return 3 }                    if match hexDecode(\"zz\") { Some(s) => 1, None => 0 } != 0 { return 4 }                    if match base64Decode(\"bad\") { Some(s) => 1, None => 0 } != 0 { return 5 }                    if match urlDecode(\"%ZZ\") { Some(s) => 1, None => 0 } != 0 { return 6 }                    return 0 }";
+    fn the_codecs_answer_through_std_codecs() {
+        let src = "import { base64Decode, base64Encode, hexDecode, hexEncode, urlDecode, urlEncode } from \"std/codecs\"                    fn main() -> Int64 {                    let d = base64Decode(base64Encode(\"hey\"))                    if match d { Some(s) => s, None => \"\" } != \"hey\" { return 1 }                    if hexEncode(\"Hi\") != \"4869\" { return 2 }                    if urlEncode(\"a b&c\") != \"a%20b%26c\" { return 3 }                    if match hexDecode(\"zz\") { Some(s) => 1, None => 0 } != 0 { return 4 }                    if match base64Decode(\"bad\") { Some(s) => 1, None => 0 } != 0 { return 5 }                    if match urlDecode(\"%ZZ\") { Some(s) => 1, None => 0 } != 0 { return 6 }                    return 0 }";
         assert_eq!(run_json(src).unwrap(), 0);
     }
 
-    /// The seam M2b named, restated for M4c's builtins: a bare source with no
-    /// resolver has no runtime library to inject, so a routed builtin refuses
-    /// loudly instead of silently answering from a second definition.
+    /// The seam M2b named, as RFC-0094 M2 leaves it: a bare source with no
+    /// resolver has no `std/codecs` in the link, so the name does not resolve at
+    /// all and the diagnostic says where it lives rather than that it is missing.
     #[test]
-    fn a_routed_builtin_without_a_std_root_refuses_by_name() {
+    fn a_moved_builtin_without_a_std_root_names_its_module() {
         let e = run("fn main() -> Int64 { return hexEncode(\"hi\").byteLength }").unwrap_err();
-        assert!(e.contains("implemented in Vyrn"), "{e}");
+        assert!(e.contains("`hexEncode` is `std/codecs`'s"), "{e}");
     }
 
     #[test]
@@ -7643,17 +7646,24 @@ mod tests {
 
     #[test]
     fn string_predicate_methods() {
-        // Routed to `std/strpred` since RFC-0078 M4c, so this goes through the
-        // loader — `run` has no resolver and therefore no module to inject.
-        let c = "fn main() -> Int64 { if contains(\"hello\", \"ell\") { return 1 } return 0 }";
-        assert_eq!(run_json(c).unwrap(), 1);
-        let s = "fn main() -> Int64 { if startsWith(\"hello\", \"he\") { return 1 } return 0 }";
-        assert_eq!(run_json(s).unwrap(), 1);
-        let e = "fn main() -> Int64 { if endsWith(\"hello\", \"lo\") { return 1 } return 0 }";
-        assert_eq!(run_json(e).unwrap(), 1);
+        // `std/strpred` exports since RFC-0094 M2, so this goes through the loader
+        // and carries an import — `run` has no resolver and no module to link.
+        let imp = "import { contains, endsWith, startsWith } from \"std/strpred\" ";
+        let c = format!(
+            "{imp}fn main() -> Int64 {{ if contains(\"hello\", \"ell\") {{ return 1 }} return 0 }}"
+        );
+        assert_eq!(run_json(&c).unwrap(), 1);
+        let s = format!("{imp}fn main() -> Int64 {{ if startsWith(\"hello\", \"he\") {{ return 1 }} return 0 }}");
+        assert_eq!(run_json(&s).unwrap(), 1);
+        let e = format!(
+            "{imp}fn main() -> Int64 {{ if endsWith(\"hello\", \"lo\") {{ return 1 }} return 0 }}"
+        );
+        assert_eq!(run_json(&e).unwrap(), 1);
         // `endsWith` guards against a suffix longer than the string.
-        let g = "fn main() -> Int64 { if endsWith(\"hi\", \"ahoy\") { return 1 } return 0 }";
-        assert_eq!(run_json(g).unwrap(), 0);
+        let g = format!(
+            "{imp}fn main() -> Int64 {{ if endsWith(\"hi\", \"ahoy\") {{ return 1 }} return 0 }}"
+        );
+        assert_eq!(run_json(&g).unwrap(), 0);
     }
 
     #[test]

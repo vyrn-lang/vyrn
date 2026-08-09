@@ -12,8 +12,10 @@
 
 use std::process::Command;
 
-fn check(src: &str) -> String {
-    let dir = std::env::temp_dir().join("vyrn-reserved");
+/// `slot` names a directory of this test's own: two tests run in parallel in one
+/// binary, and one file for both is one file being rewritten under the other.
+fn check_in(slot: &str, src: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("vyrn-reserved-{slot}"));
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("r.vyrn");
     std::fs::write(&f, src).unwrap();
@@ -33,15 +35,16 @@ fn check(src: &str) -> String {
 fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
     // `get`, `set`, `cell` and `release` left this list with Path B (RFC-0090 M4).
     // A user owns those four names now, which is the deletion visible from the
-    // surface: `fn get(..)` compiles.
-    for name in ["at", "push", "slice", "len", "pop", "toString"] {
+    // surface: `fn get(..)` compiles. RFC-0094 M2 did the same for eleven more,
+    // `slice` among them — see `a_name_returned_by_m2_may_be_declared` below.
+    for name in ["at", "push", "len", "pop", "toString"] {
         // The `print` is load-bearing: it is what links `std/num`, and linking a
         // std module that uses the builtin is what used to trigger the flood.
         let src = format!(
             "fn {name}(v: Int64) -> Int64 {{ return v }}\n\
              fn main() -> Int64 {{ print({name}(1)) return 0 }}\n"
         );
-        let got = check(&src);
+        let got = check_in(name, &src);
         let first = got.lines().next().unwrap_or("");
         assert!(
             first.contains(&format!("`{name}` is a reserved name")),
@@ -57,5 +60,23 @@ fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
             got.lines().filter(|l| !l.trim().is_empty()).count() <= 2,
             "`{name}`: expected at most 2 diagnostics, got:\n{got}"
         );
+    }
+}
+
+/// The other half of the same rule, and RFC-0094 M2's visible deletion: a name
+/// the compiler gave back may be declared, and the declaration wins.
+///
+/// The flood this file exists to prevent came from a reserved name entering the
+/// loader's `owner` map. A name that is no longer reserved must not produce one
+/// either — so the `print` stays load-bearing here for the same reason.
+#[test]
+fn a_name_returned_by_m2_may_be_declared() {
+    for name in ["slice", "contains", "chars", "hexEncode"] {
+        let src = format!(
+            "fn {name}(v: Int64) -> Int64 {{ return v }}\n\
+             fn main() -> Int64 {{ print({name}(1)) return 0 }}\n"
+        );
+        let got = check_in(name, &src);
+        assert_eq!(got.trim(), "ok", "`{name}` must be declarable, got:\n{got}");
     }
 }

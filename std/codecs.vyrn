@@ -90,7 +90,7 @@ fn ascii(b: Array<UInt8>) -> String {
 }
 
 /// A string's UTF-8 bytes as lowercase hex, two digits per byte.
-export fn hexEncodeV(s: String) -> String {
+export fn hexEncode(s: String) -> String {
     let b = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = 0
@@ -105,7 +105,7 @@ export fn hexEncodeV(s: String) -> String {
 /// Hex text back to a `String` — `None` on an odd length, a non-hex digit, or
 /// bytes that are not valid UTF-8. Case-insensitive, as the encoder's inverse
 /// has to be to read anyone else's output.
-export fn hexDecodeV(s: String) -> Option<String> {
+export fn hexDecode(s: String) -> Option<String> {
     let b = bytes(s)
     if b.length % 2 != 0 {
         return None
@@ -154,7 +154,7 @@ fn b64Val(c: UInt8) -> Int64 {
 
 /// A string's UTF-8 bytes as base64: three bytes to four digits, with `=`
 /// padding for a final group of one or two.
-export fn base64EncodeV(s: String) -> String {
+export fn base64Encode(s: String) -> String {
     return base64EncodeBytes(bytes(s))
 }
 
@@ -195,7 +195,7 @@ export fn base64EncodeBytes(b: Array<UInt8>) -> String {
 /// Base64 text back to a `String` — `None` unless the length is a multiple of
 /// four, every digit is in the alphabet, the padding is confined to the final
 /// group and is `=` or `==` (never `=X`), and the bytes are valid UTF-8.
-export fn base64DecodeV(s: String) -> Option<String> {
+export fn base64Decode(s: String) -> Option<String> {
     let b = bytes(s)
     if b.length % 4 != 0 {
         return None
@@ -250,7 +250,7 @@ fn urlUnreserved(c: UInt8) -> Bool {
 }
 
 /// A string's UTF-8 bytes percent-encoded, uppercase hex.
-export fn urlEncodeV(s: String) -> String {
+export fn urlEncode(s: String) -> String {
     let b = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = 0
@@ -270,7 +270,7 @@ export fn urlEncodeV(s: String) -> String {
 /// Percent-encoded text back to a `String` — `None` on a truncated or non-hex
 /// escape, or bytes that are not valid UTF-8. Any byte that is not `%` passes
 /// through, so a raw space or `+` decodes to itself.
-export fn urlDecodeV(s: String) -> Option<String> {
+export fn urlDecode(s: String) -> Option<String> {
     let b = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = 0
@@ -295,52 +295,52 @@ export fn urlDecodeV(s: String) -> Option<String> {
 }
 
 test "hex is two lowercase digits a byte, and reads either case back" {
-    assertEq(hexEncodeV(""), "")
-    assertEq(hexEncodeV("Hi"), "4869")
+    assertEq(hexEncode(""), "")
+    assertEq(hexEncode("Hi"), "4869")
     // A multi-byte character is encoded as its UTF-8 bytes, not its code point.
-    assertEq(hexEncodeV("é"), "c3a9")
-    assertEq(match hexDecodeV("4869") { Some(s) => s, None => "None" }, "Hi")
-    assertEq(match hexDecodeV("C3A9") { Some(s) => s, None => "None" }, "é")
-    assertEq(match hexDecodeV("") { Some(s) => s, None => "None" }, "")
+    assertEq(hexEncode("é"), "c3a9")
+    assertEq(match hexDecode("4869") { Some(s) => s, None => "None" }, "Hi")
+    assertEq(match hexDecode("C3A9") { Some(s) => s, None => "None" }, "é")
+    assertEq(match hexDecode("") { Some(s) => s, None => "None" }, "")
     // Odd length, a non-hex digit, and bytes that are not text.
-    assertEq(match hexDecodeV("486") { Some(s) => s, None => "None" }, "None")
-    assertEq(match hexDecodeV("zz") { Some(s) => s, None => "None" }, "None")
-    assertEq(match hexDecodeV("80") { Some(s) => s, None => "None" }, "None")
+    assertEq(match hexDecode("486") { Some(s) => s, None => "None" }, "None")
+    assertEq(match hexDecode("zz") { Some(s) => s, None => "None" }, "None")
+    assertEq(match hexDecode("80") { Some(s) => s, None => "None" }, "None")
 }
 
 test "base64 pads at all three residues, and refuses misplaced padding" {
-    assertEq(base64EncodeV(""), "")
-    assertEq(base64EncodeV("A"), "QQ==")
-    assertEq(base64EncodeV("AB"), "QUI=")
-    assertEq(base64EncodeV("ABC"), "QUJD")
-    assertEq(base64EncodeV("Hello, Vyrn!"), "SGVsbG8sIFZ5cm4h")
+    assertEq(base64Encode(""), "")
+    assertEq(base64Encode("A"), "QQ==")
+    assertEq(base64Encode("AB"), "QUI=")
+    assertEq(base64Encode("ABC"), "QUJD")
+    assertEq(base64Encode("Hello, Vyrn!"), "SGVsbG8sIFZ5cm4h")
     // The two alphabet entries above 61, which a naive table gets wrong.
-    assertEq(base64EncodeV("~~~"), "fn5+")
-    assertEq(base64EncodeV("ÿÿ"), "w7/Dvw==")
-    assertEq(match base64DecodeV("SGVsbG8=") { Some(s) => s, None => "None" }, "Hello")
-    assertEq(match base64DecodeV("") { Some(s) => s, None => "None" }, "")
+    assertEq(base64Encode("~~~"), "fn5+")
+    assertEq(base64Encode("ÿÿ"), "w7/Dvw==")
+    assertEq(match base64Decode("SGVsbG8=") { Some(s) => s, None => "None" }, "Hello")
+    assertEq(match base64Decode("") { Some(s) => s, None => "None" }, "")
     // Length not a multiple of four, a digit outside the alphabet, `=X`, padding
     // before the last group, and a group whose bytes are not UTF-8.
-    assertEq(match base64DecodeV("QQ=") { Some(s) => s, None => "None" }, "None")
-    assertEq(match base64DecodeV("QQ*=") { Some(s) => s, None => "None" }, "None")
-    assertEq(match base64DecodeV("Q=QQ") { Some(s) => s, None => "None" }, "None")
-    assertEq(match base64DecodeV("QQ==QQ==") { Some(s) => s, None => "None" }, "None")
-    assertEq(match base64DecodeV("////") { Some(s) => s, None => "None" }, "None")
+    assertEq(match base64Decode("QQ=") { Some(s) => s, None => "None" }, "None")
+    assertEq(match base64Decode("QQ*=") { Some(s) => s, None => "None" }, "None")
+    assertEq(match base64Decode("Q=QQ") { Some(s) => s, None => "None" }, "None")
+    assertEq(match base64Decode("QQ==QQ==") { Some(s) => s, None => "None" }, "None")
+    assertEq(match base64Decode("////") { Some(s) => s, None => "None" }, "None")
 }
 
 test "percent-encoding keeps the unreserved set and nothing else" {
-    assertEq(urlEncodeV("aZ09-_.~"), "aZ09-_.~")
-    assertEq(urlEncodeV("name=a b&x"), "name%3Da%20b%26x")
+    assertEq(urlEncode("aZ09-_.~"), "aZ09-_.~")
+    assertEq(urlEncode("name=a b&x"), "name%3Da%20b%26x")
     // `+` is a reserved character here, not a space.
-    assertEq(urlEncodeV("a+b"), "a%2Bb")
-    assertEq(urlEncodeV("é"), "%C3%A9")
-    assertEq(match urlDecodeV("%C3%A9") { Some(s) => s, None => "None" }, "é")
-    assertEq(match urlDecodeV("%c3%a9") { Some(s) => s, None => "None" }, "é")
-    assertEq(match urlDecodeV("a+b") { Some(s) => s, None => "None" }, "a+b")
-    assertEq(match urlDecodeV("%") { Some(s) => s, None => "None" }, "None")
-    assertEq(match urlDecodeV("%4") { Some(s) => s, None => "None" }, "None")
-    assertEq(match urlDecodeV("%zz") { Some(s) => s, None => "None" }, "None")
-    assertEq(match urlDecodeV("%80") { Some(s) => s, None => "None" }, "None")
+    assertEq(urlEncode("a+b"), "a%2Bb")
+    assertEq(urlEncode("é"), "%C3%A9")
+    assertEq(match urlDecode("%C3%A9") { Some(s) => s, None => "None" }, "é")
+    assertEq(match urlDecode("%c3%a9") { Some(s) => s, None => "None" }, "é")
+    assertEq(match urlDecode("a+b") { Some(s) => s, None => "None" }, "a+b")
+    assertEq(match urlDecode("%") { Some(s) => s, None => "None" }, "None")
+    assertEq(match urlDecode("%4") { Some(s) => s, None => "None" }, "None")
+    assertEq(match urlDecode("%zz") { Some(s) => s, None => "None" }, "None")
+    assertEq(match urlDecode("%80") { Some(s) => s, None => "None" }, "None")
 }
 
 /// The NUL rows, pinned as a divergence from the builtin rather than hidden.
@@ -351,9 +351,9 @@ test "percent-encoding keeps the unreserved set and nothing else" {
 /// interpreter, a `char*` truncated at it natively. When the swap lands, `None`
 /// is the answer that is the same on all three.
 test "a decoded NUL is refused, because a Vyrn String cannot hold one" {
-    assertEq(match hexDecodeV("00") { Some(s) => s, None => "None" }, "None")
-    assertEq(match hexDecodeV("004100") { Some(s) => s, None => "None" }, "None")
-    assertEq(match base64DecodeV("AA==") { Some(s) => s, None => "None" }, "None")
-    assertEq(match urlDecodeV("%00") { Some(s) => s, None => "None" }, "None")
-    assertEq(match urlDecodeV("a%00b") { Some(s) => s, None => "None" }, "None")
+    assertEq(match hexDecode("00") { Some(s) => s, None => "None" }, "None")
+    assertEq(match hexDecode("004100") { Some(s) => s, None => "None" }, "None")
+    assertEq(match base64Decode("AA==") { Some(s) => s, None => "None" }, "None")
+    assertEq(match urlDecode("%00") { Some(s) => s, None => "None" }, "None")
+    assertEq(match urlDecode("a%00b") { Some(s) => s, None => "None" }, "None")
 }

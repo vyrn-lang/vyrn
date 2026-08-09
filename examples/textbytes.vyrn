@@ -2,9 +2,10 @@
 /// converted by M4c).
 ///
 /// Three builtins written as ordinary Vyrn: `chars`, `lineAt`, `colAt`. **One of
-/// the three moved.** `chars` IS `std/text`'s `charsV` now — Rust's `str::chars` in
-/// the interpreter and 82 lines of emitted IR are both gone — so its rows are
-/// pinned as LITERALS, captured before the swap. `lineAt` and `colAt` did not move:
+/// the three moved.** `chars` IS `std/text`'s declaration now — Rust's `str::chars`
+/// in the interpreter and 82 lines of emitted IR are both gone, and RFC-0094 M2
+/// made the name an ordinary import — so its rows are pinned as LITERALS, captured
+/// before the swap. `lineAt` and `colAt` did not move:
 /// the interpreter memoizes a line-start table that a Vyrn library cannot (a
 /// generator may not touch module state), so retiring them is a decision about that
 /// cache rather than about capability. Their rows therefore stay a live oracle,
@@ -24,9 +25,9 @@
 /// legitimately differ is NUL: it is valid UTF-8, and a Vyrn `String` still cannot
 /// carry it (RFC-0014).
 
-import { colAtV, decodeUtf8, lineAtV, showCps } from "std/text"
+import { chars, colAtV, decodeUtf8, lineAtV, showCps } from "std/text"
 
-/// One codepoint row. `chars` is `std/text`'s `charsV` after M4c, so printing both
+/// One codepoint row. `chars` is `std/text`'s own function, so printing both
 /// spellings would print one answer twice; the literals in the `test` block below
 /// are the pin, and parity is what checks the routed builtin decodes identically on
 /// the interpreter, the native backend and wasm.

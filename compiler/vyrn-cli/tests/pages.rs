@@ -406,7 +406,8 @@ fn vyx_page_with_loader_routes_through_pages_themed() {
     );
     write(
         &dir.join("app.vyrn"),
-        "import { pagesThemed } from \"std/ui\"\n\
+        "import { contains } from \"std/strpred\"\n\
+         import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
          fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
@@ -618,7 +619,8 @@ fn layout_head_and_error_pages_route_end_to_end() {
     );
     write(
         &dir.join("app.vyrn"),
-        "import { pagesThemed } from \"std/ui\"\n\
+        "import { contains } from \"std/strpred\"\n\
+         import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
          fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
@@ -726,7 +728,8 @@ fn the_page_contract_members_route_end_to_end() {
     );
     write(
         &dir.join("app.vyrn"),
-        "import { pages } from \"std/ui\"\n\
+        "import { contains } from \"std/strpred\"\n\
+         import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
          fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
@@ -1166,7 +1169,8 @@ fn a_layout_head_block_still_works() {
     );
     write(
         &dir.join("app.vyrn"),
-        "import { pages } from \"std/ui\"\n\
+        "import { contains } from \"std/strpred\"\n\
+         import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
          fn main() -> Int64 {\n\
          let r = route(Request { method: \"GET\", path: \"/\", headers: [:], body: \"\" })\n\
