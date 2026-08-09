@@ -122,8 +122,8 @@ tests). Highlights:
   source files are read as UTF-8. One consequence: JSON-Schema
   `minLength`/`maxLength` bounds count bytes, not UTF-16 code units — a
   deliberate, documented divergence. See [`examples/stringops.vyrn`](examples/stringops.vyrn).
-- **Arrays** — growable `Array<T>` (a `Vec`: `array()` / `push` / `at` / `alen`,
-  a doubling heap buffer, bounds-checked, reclaimed at scope exit or by `drop`) and
+- **Arrays** — growable `Array<T>` (a `Vec`: `[]` / `xs.push(v)` / `xs[i]` /
+  `xs.length`, a doubling heap buffer, bounds-checked, reclaimed at scope exit or by `drop`) and
   **fixed-size `Array<T, N>`** (a const generic: the stack value aggregate `[N x T]`,
   no heap, written with an array literal `[a, b, c]`). See
   [`examples/arrays.vyrn`](examples/arrays.vyrn) and

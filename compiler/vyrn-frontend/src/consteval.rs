@@ -165,10 +165,10 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
             ConstVal::Str(s) => Some(ConstVal::Int(s.len() as i64)),
             _ => None,
         },
-        // `s[i]` (which desugars to `at(s, i)`) folds to the byte value when both
+        // `s[i]` (which desugars to `@at(s, i)`) folds to the byte value when both
         // the string and index are constants and the index is in bounds — this is
         // what lets a refinement predicate inspect individual characters.
-        Expr::Call { name, args, .. } if name == "at" && args.len() == 2 => {
+        Expr::Call { name, args, .. } if name == crate::project::AT && args.len() == 2 => {
             match (eval(&args[0], env)?, eval(&args[1], env)?) {
                 (ConstVal::Str(s), ConstVal::Int(i)) if i >= 0 => s
                     .as_bytes()
@@ -207,9 +207,11 @@ pub fn contains_call(expr: &Expr) -> bool {
         | Expr::Var { .. } => false,
         Expr::Unary { expr, .. } => contains_call(expr),
         Expr::Binary { lhs, rhs, .. } => contains_call(lhs) || contains_call(rhs),
-        // Indexing (`s[i]` = `at(s, i)`) is a pure, const-foldable builtin, so it
+        // Indexing (`s[i]` = `@at(s, i)`) is a pure, const-foldable builtin, so it
         // is permitted in a refinement predicate; only its arguments are scanned.
-        Expr::Call { name, args, .. } if name == "at" => args.iter().any(contains_call),
+        Expr::Call { name, args, .. } if name == crate::project::AT => {
+            args.iter().any(contains_call)
+        }
         Expr::Call { .. } => true,
         Expr::Match {
             scrutinee, arms, ..

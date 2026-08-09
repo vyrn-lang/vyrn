@@ -2646,7 +2646,7 @@ impl Fn_<'_> {
                     }
                 }
                 // RFC-0089 rule 4: the store releases what the place held. Not
-                // when the new value names the place — `a = push(a, i)` grows the
+                // when the new value names the place — `a = @push(a, i)` grows the
                 // old buffer and hands it back, so freeing it would be a double
                 // free. That shape is the self-append above where it is a String,
                 // and a recorded leak everywhere else.
@@ -4475,9 +4475,10 @@ impl Fn_<'_> {
                     _ => Type::Float32,
                 },
                 "@anyTrue" | "@allTrue" => Type::Bool,
-                // `@slot` is `vyrn_frontend::project::ELEM`, spelled out because
-                // a match pattern cannot name it through the path.
-                "at" | "@slot" | "@swapRemove" if args.len() == 2 => {
+                // `@at` is `vyrn_frontend::project::AT` and `@slot` is
+                // `vyrn_frontend::project::ELEM`, both spelled out because a
+                // match pattern cannot name them through the path.
+                "@at" | "@slot" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
                         Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
@@ -4551,16 +4552,7 @@ impl Fn_<'_> {
                         _ => t,
                     }
                 }
-                // `array()` IS `[]` — one spelling, one lowering (`call`), and so
-                // one prediction: peek the literal rather than repeat its rule.
-                "array" if args.is_empty() => self.peek(
-                    &Expr::ArrayLit {
-                        elems: Vec::new(),
-                        line,
-                    },
-                    line,
-                )?,
-                "push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
+                "@push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
                     t => match self.cx.resolve(&t) {
                         // A `SmallArray` push yields a `SmallArray`, inline state
                         // or spilled — it never becomes a growable Array.
@@ -6170,7 +6162,7 @@ impl Fn_<'_> {
             // container takes the seeded row, whose body is `yield @slot(self,
             // i)`, so the element lowering below is reached through the same
             // table a user container reaches its own through.
-            "at" if args.len() == 2 => return self.project_at(m, b, args, line),
+            "@at" if args.len() == 2 => return self.project_at(m, b, args, line),
             n if n == vyrn_frontend::project::ELEM && args.len() == 2 => {
                 return self.at(m, b, args, line)
             }
@@ -6192,10 +6184,7 @@ impl Fn_<'_> {
                 self.copy_stack(b, &ty, line)?;
                 return Ok(ty);
             }
-            // `array()` IS `[]` — an empty growable array taking its element type
-            // from the position. One spelling, one lowering.
-            "array" if args.is_empty() => return self.array_lit(m, b, &[], line),
-            "push" if args.len() == 2 => return self.push(m, b, args, line),
+            "@push" if args.len() == 2 => return self.push(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
             // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
@@ -8637,7 +8626,7 @@ impl Fn_<'_> {
     }
 
     /// `xs.push(v)` — the value, and a NEW triple describing the array with it
-    /// in. The parser turns the statement into `xs = push(xs, v)`, so the
+    /// in. The parser turns the statement into `xs = @push(xs, v)`, so the
     /// write-back is an ordinary assignment and this never touches the binding.
     fn push(
         &mut self,
@@ -10923,7 +10912,7 @@ impl Fn_<'_> {
     /// the heap — smallvec semantics, and what the example prints.
     ///
     /// Returns the whole reshaped value, like the `Array` path: the parser turned
-    /// the statement into `xs = push(xs, v)`, so the write-back is an assignment.
+    /// the statement into `xs = @push(xs, v)`, so the write-back is an assignment.
     fn sa_push(
         &mut self,
         m: &mut Module,
@@ -15024,10 +15013,10 @@ mod tests {
                 "a join",
                 "fn work(n: Int64) -> Int64 { return n + 1 }                  fn main() -> Int64 { let t = spawn work(1) let o: Option<Int64> = Some(1)                      return match o { Some(n) => t.join(), None => 0 } }",
             ),
-            // `array()` IS `[]`, so it is typed by the position like the literal.
+            // An empty `[]` is typed by the position, in an arm like anywhere.
             (
                 "an empty array",
-                "fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let a: Array<Int64> = match o { Some(n) => array(), None => array() }                      return a.length }",
+                "fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let a: Array<Int64> = match o { Some(n) => [], None => [] }                      return a.length }",
             ),
             // `?` in an arm — the sum's success half.
             (

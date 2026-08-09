@@ -20,8 +20,8 @@ clang-compiled native binary:
 - **Structural records** with width subtyping, **intersection** `A & B`, and the
   **`Omit`/`Pick`/`Merge`/`Partial`/`Readonly`** transformers (RFC-0002).
 - **Enums / sum types** with multi-payload variants and exhaustive `match`.
-- **Arrays** — growable `Array<T>` (a `Vec`: `array` / `push` / `at` / `alen`,
-  a doubling heap buffer) and fixed-size `Array<T, N>` (a const generic,
+- **Arrays** — growable `Array<T>` (a `Vec`: `[]` / `xs.push(v)` / `xs[i]` /
+  `xs.length`, a doubling heap buffer) and fixed-size `Array<T, N>` (a const generic,
   the stack `[N x T]` with array-literal `[a, b, c]` syntax); both bounds-checked.
 - **Generics** — functions, records, enums — with inference, monomorphization,
   and **built-in bounds** `Eq`/`Ord`/`Num` (RFC-0002 §6).

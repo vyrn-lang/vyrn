@@ -9,10 +9,10 @@
 ///
 /// RFC-0078 M2a moved the reader to `std/jsonread`, which imports this module —
 /// one direction only. This file therefore imports NOTHING, so a caller that only
-/// serializes links only the writer. That matters because `toJson` is to become
-/// exactly such a caller: it can link the tree and `emit` without dragging in a
-/// parser, and the direct wasm backend compiles this half today (the reader still
-/// wants `?` and `if let`, RFC-0077's own rows).
+/// serializes links only the writer. That matters because `toJson` became
+/// exactly such a caller in RFC-0078 M2b: it links the tree and `emit` without
+/// dragging in a parser, and the direct wasm backend compiles this half today
+/// (the reader still wants `?` and `if let`, RFC-0077's own rows).
 ///
 /// A `String` is UTF-8 bytes; all offsets are BYTE offsets (like `std/strings`).
 /// `JNum` holds raw validated number text, so `emit` is byte-stable through a

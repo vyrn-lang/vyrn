@@ -790,7 +790,7 @@ pub enum Type {
     /// A type of its own rather than an `Array<T>` with an attribute, and rather
     /// than a library type, for one reason each: an attribute on `Array<T>`
     /// would leave `at`/`push`/`.length` applicable to a stream (a consumed
-    /// stream would still answer `alen`), and a library type would have to be
+    /// stream would still answer `.length`), and a library type would have to be
     /// spelled with an `Array` base, so `let a: Array<T> = s` would launder the
     /// obligation away. Neither is a runtime concern — both are about what the
     /// checker will accept — so the *lowering* is `Array<T>`'s exactly, in all
@@ -960,7 +960,7 @@ pub enum Stmt {
     /// `name[index] = value` — store `value` into element `index` of a `mut`
     /// array binding (RFC-0011). `name` must be a plain array binding (v1
     /// restriction, like `Assign`/`SetField`); the read form `a[i]` desugars
-    /// to `at(a, i)`, so a trailing `=` on it becomes this in-place store.
+    /// to `@at(a, i)`, so a trailing `=` on it becomes this in-place store.
     IndexSet {
         name: String,
         index: Expr,

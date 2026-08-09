@@ -127,3 +127,32 @@ interp==native==wasm parity green; 0 new clippy warnings.
 **LSP redeploy.** `editor/vscode/server/vyrn-lsp.exe` rebuilt (release) and
 hash-verified equal to the build output:
 `349340C826D71BE9631F5623E7D15CF2102C6A3DD608BEEB8A8DF8AD3E562633`.
+
+---
+
+## Addendum — the collection verbs went the same way (2026-08-09)
+
+The surface redesign moved collections to `[]`, `xs.push(v)`, `xs[i]` and
+`xs.length`, and removed `str`/`concat`/`len`/`list`/`join` with a migration
+hint. Four verb forms stayed behind and still compiled: `array()`, `push(xs, v)`,
+`at(xs, i)` and `alen(xs)`. Two spellings for one operation is the defect this
+document family exists to remove, so all four are now checker errors with the
+pinned wording ``` `push(xs, v)` was removed; push with `xs.push(v)` ```,
+``` `at(xs, i)` was removed; index with `xs[i]` ```, ``` `alen(xs)` was removed;
+a collection's length is `xs.length` ``` and ``` `array()` was removed; write the
+array literal `[]` ```. `array()` and `alen(xs)` had no other job — `[]` was
+always the literal and `.length` was always a field read — so their two rows left
+the primitive census (91 → 89). `push` and `at` are still the sugar's lowering,
+so they moved to the unspellable internal names `@push` and `@at`, exactly as
+`toString` moved to `@str`; the `at` an `impl Index` declares in `place at` keeps
+its name, because that is the method the site dispatches TO, not the site itself.
+All four stay in `checker::RESERVED`, which is what makes the hint fire instead
+of a user `fn push` silently taking the name. A diagnostic that names one of the
+sinks renders the surface spelling (`parser::method_surface`), so no message
+prints `@push`. Migration: three example call sites (`region`, `branchtypes`,
+`aliascontext`) and about forty Rust fixtures; every example's output stayed
+byte-identical and three-way parity proves it. Verified: workspace **1516**
+passing with `--no-fail-fast`, `vyrn-lsp` **75** passing, interp==native==wasm
+parity green including traps, memory suite 15 rows / 15 steady, genwasm green,
+the RFC-0092 instrument still reading zero for all four store classes, and both
+`cargo fmt --check` and `vyrn fmt --check` clean.

@@ -3771,9 +3771,9 @@ impl<'a> Checker<'a> {
                     // A recovered `Err` receiver yields `Err` — no spurious
                     // "cannot access field" cascade (mirrors the binop guard).
                     Type::Err => Ok(Type::Err),
-                    // `arr.length` is the element count (like TS). Sugar for the
-                    // `alen` builtin, resolved here so it doesn't shadow record
-                    // fields (a `.length` on a record still reads its field).
+                    // `arr.length` is the element count (like TS). Resolved here
+                    // so it doesn't shadow record fields (a `.length` on a
+                    // record still reads its field).
                     Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
                         if field == "length" =>
                     {
@@ -3885,8 +3885,7 @@ impl<'a> Checker<'a> {
                 let expected = expected.map(|t| self.base(t));
                 let expected = expected.as_ref();
                 // An empty `[]` has no elements to infer from — it is a growable
-                // empty array (like `array()`), with its element type taken from
-                // the expected type.
+                // empty array, with its element type taken from the expected type.
                 if elems.is_empty() {
                     return match expected {
                         Some(Type::Array(t)) => Ok(Type::Array(t.clone())),
@@ -5252,7 +5251,8 @@ impl<'a> Checker<'a> {
         // Removed free-function builtins → their method/operator replacements.
         // These fire only for the *bare* user-written spelling; the desugaring
         // and method forms use the unspellable `@`-prefixed internal names
-        // (`@str`/`@concat`/`@list`/`@join`), which flow past this guard.
+        // (`@str`/`@concat`/`@list`/`@join`/`@push`/`@at`), which flow past this
+        // guard.
         match name {
             "str" => {
                 return Err(format!(
@@ -5283,6 +5283,29 @@ impl<'a> Checker<'a> {
             "toString" => {
                 return Err(format!(
                     "line {line}: `toString` is a method; write `x.toString()`"
+                ))
+            }
+            // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]`
+            // are the whole surface; the verb forms were the second spelling of
+            // each, which is what this repo removes.
+            "push" => {
+                return Err(format!(
+                    "line {line}: `push(xs, v)` was removed; push with `xs.push(v)`"
+                ))
+            }
+            "at" => {
+                return Err(format!(
+                    "line {line}: `at(xs, i)` was removed; index with `xs[i]`"
+                ))
+            }
+            "alen" => {
+                return Err(format!(
+                    "line {line}: `alen(xs)` was removed; a collection's length is `xs.length`"
+                ))
+            }
+            "array" => {
+                return Err(format!(
+                    "line {line}: `array()` was removed; write the array literal `[]`"
                 ))
             }
             _ => {}
@@ -6128,34 +6151,10 @@ impl<'a> Checker<'a> {
             return Ok(Type::Option(Box::new(Type::Int)));
         }
 
-        // Growable arrays: array() -> Array<T> (T from context), push(Array<T>, T)
-        // -> Array<T>, at(Array<T>, Int) -> T, alen(Array<T>) -> Int.
-        if name == "array" {
-            if !args.is_empty() {
-                return Err(format!(
-                    "line {line}: `array` takes no arguments, got {}",
-                    args.len()
-                ));
-            }
-            // Resolved: `array()` takes its element type from the annotation, and
-            // the annotation may be `type Nums = Array<Int64>` (as for `[]`).
-            match expected.map(|t| self.base(t)) {
-                Some(Type::Array(t)) => return Ok(Type::Array(t)),
-                Some(_) => {
-                    return Err(format!(
-                        "line {line}: `array()` builds an array, but {} is not an array type",
-                        expected.unwrap()
-                    ))
-                }
-                None => {
-                    return Err(format!(
-                        "line {line}: cannot infer the element type of `array()`; annotate it, \
-                         e.g. `let a: Array<Int64> = array();`"
-                    ))
-                }
-            }
-        }
-        if name == "push" {
+        // Growable arrays. `[]` builds one, `xs.push(v)` (`@push`) appends and
+        // `xs[i]` (`@at`) reads an element; `xs.length` is a field access, so it
+        // never arrives here at all.
+        if name == "@push" {
             if args.len() != 2 {
                 return Err(format!(
                     "line {line}: `push` takes 2 arguments, got {}",
@@ -6185,9 +6184,9 @@ impl<'a> Checker<'a> {
                 ));
             }
             self.prove_coercion(&args[1], &elem, line)?;
-            // `push(outer, <heap elem>)` inside a `region` stores a value that
+            // `@push(outer, <heap elem>)` inside a `region` stores a value that
             // dies with the region into a buffer that outlives it (the rebind
-            // form `a = push(a, ..)` is caught by the Assign guard; this catches
+            // form `a = @push(a, ..)` is caught by the Assign guard; this catches
             // the statement/method form). The buffer itself is malloc'd, so
             // pushing a non-heap element is fine.
             if let Expr::Var { name: aname, .. } = &args[0] {
@@ -6195,12 +6194,12 @@ impl<'a> Checker<'a> {
             }
             return Ok(rebuild(elem));
         }
-        // `a[i]` parses to `at(a, i)` and is the DISPATCH site (RFC-0091 M2):
+        // `a[i]` parses to `@at(a, i)` and is the DISPATCH site (RFC-0091 M2):
         // it asks the receiver's type for a `place at` projection. `@slot` is
         // the element-place primitive the seeded row bottoms out in, and it is
         // the only indexing this compiler still knows about by name. The two
-        // type alike; only `at` dispatches.
-        if name == "at" || name == crate::project::ELEM {
+        // type alike; only `@at` dispatches.
+        if name == crate::project::AT || name == crate::project::ELEM {
             if args.len() != 2 {
                 return Err(format!(
                     "line {line}: `at` takes 2 arguments, got {}",
@@ -6211,7 +6210,7 @@ impl<'a> Checker<'a> {
             // A container of the user's own: the projection's declared return
             // type, with the impl head's type variables solved from the
             // receiver. Lowering inlines the body; the type is the declaration.
-            if name == "at" {
+            if name == crate::project::AT {
                 if let Some(t) = self.place_result(&at, "at", args, scope, fn_ret, line)? {
                     return Ok(t);
                 }
@@ -6259,23 +6258,6 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(elem);
-        }
-        if name == "alen" {
-            if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `alen` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if !matches!(at, Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)) {
-                return Err(format!("line {line}: `alen` needs an Array, found {at}"));
-            }
-            return Ok(Type::Int);
         }
         // RFC-0075. `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
         // `fromStep(seed, f)` (M2b) hands over a producer instead; `close(s)` is
@@ -8222,8 +8204,8 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
             };
             format!("{} {o} {}", pred_summary(lhs), pred_summary(rhs))
         }
-        // `at(s, i)` is the desugaring of indexing — render it back as `s[i]`.
-        Expr::Call { name, args, .. } if name == "at" && args.len() == 2 => {
+        // `@at(s, i)` is the desugaring of indexing — render it back as `s[i]`.
+        Expr::Call { name, args, .. } if name == crate::project::AT && args.len() == 2 => {
             format!("{}[{}]", pred_summary(&args[0]), pred_summary(&args[1]))
         }
         Expr::Call { name, .. } => format!("{name}(..)"),
@@ -9394,6 +9376,24 @@ mod tests {
         .is_ok());
     }
 
+    /// The verb form `at(xs, i)` was removed, and `at` is still the name a user
+    /// writes in `place at`. The method form is the same projection as `r[0]`,
+    /// so both must reach the impl — only the free call is refused.
+    #[test]
+    fn a_projection_answers_the_method_form_too() {
+        let head = format!(
+            "{RING}\
+             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
+             {{ yield self.data[i] }} }}\n\
+             fn main() -> Int64 {{ let mut d: Array<Int64> = []\n d.push(7)\n \
+             let r = Ring {{ data: d }}\n"
+        );
+        assert!(check_src(&format!("{head} return r.at(0) }}")).is_ok());
+        // The same container, called the removed way.
+        let e = check_src(&format!("{head} return at(r, 0) }}")).unwrap_err();
+        assert!(e.contains("`at(xs, i)` was removed"), "{e}");
+    }
+
     /// RFC-0091 M3. `place atSet` is the writing half, and the element type a
     /// store coerces into is what it yields.
     #[test]
@@ -9625,7 +9625,6 @@ mod tests {
         // which the `let` then rejected.
         ok("let a: Nums = [1, 2, 3]");
         ok("let m: IntMap = [\"a\": 1]");
-        ok("let a: Nums = array()");
         ok("let m: MaybeAge = None");
         ok("let m: MaybeAge = Some(21)");
         // The payload's refinement travels with the alias: this is a predicate
@@ -9650,8 +9649,6 @@ mod tests {
         assert!(a.contains("Ring is not an array type"), "{a}");
         let m = err("let r: Ring = [:]");
         assert!(m.contains("Ring is not a map type"), "{m}");
-        let f = err("let r: Ring = array()");
-        assert!(f.contains("Ring is not an array type"), "{f}");
         // With no annotation at all the advice to add one still stands.
         let none = check_src("fn main() -> Int64 { let a = [] return 0 }").unwrap_err();
         assert!(none.contains("annotate it"), "{none}");
@@ -10498,8 +10495,8 @@ mod tests {
         // `drop` reclaims storage the spawning frame may still name, so a task
         // must not contain it — even though `drop` is a statement, not a call.
         let e = check_src(
-            "fn work(n: Int64) -> Int64 { let mut a: Array<Int64> = array() \
-             a = push(a, n) let v = at(a, 0) drop a return v } \
+            "fn work(n: Int64) -> Int64 { let mut a: Array<Int64> = [] \
+             a.push(n) let v = a[0] drop a return v } \
              fn main() -> Int64 { let t = spawn work(1); return t.join(); }",
         )
         .unwrap_err();
@@ -10569,16 +10566,16 @@ mod tests {
 
     #[test]
     fn accepts_array_operations() {
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   a = push(a, 1); return at(a, 0) + alen(a); }";
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   a.push(1); return a[0] + a.length; }";
         assert!(check_src(src).is_ok());
     }
 
     #[test]
     fn rejects_push_wrong_element_type() {
         let e = check_src(
-            "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                           a = push(a, \"x\"); return 0; }",
+            "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                           a.push(\"x\"); return 0; }",
         )
         .unwrap_err();
         assert!(e.contains("the array holds"), "{e}");
@@ -10586,7 +10583,7 @@ mod tests {
 
     #[test]
     fn rejects_array_without_element_annotation() {
-        let e = check_src("fn main() -> Int64 { let a = array(); return 0; }").unwrap_err();
+        let e = check_src("fn main() -> Int64 { let a = []; return 0; }").unwrap_err();
         assert!(e.contains("cannot infer the element type"), "{e}");
     }
 
@@ -10722,8 +10719,8 @@ mod tests {
     fn rejects_heap_escaping_region_via_push() {
         // Pushing an arena string into an outer array outlives the region.
         let src = "fn main() -> Int64 { \
-                       let mut a: Array<String> = array() \
-                       region { a = push(a, \"x\" + \"y\") } \
+                       let mut a: Array<String> = [] \
+                       region { a.push(\"x\" + \"y\") } \
                        return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("outlives the enclosing `region`"), "{e}");
@@ -10734,9 +10731,9 @@ mod tests {
         // Ints carry no arena memory, so pushing one into an outer Array<Int64>
         // from inside a region is fine.
         let src = "fn main() -> Int64 { \
-                       let mut a: Array<Int64> = array() \
-                       region { a = push(a, 2) } \
-                       return at(a, 0) }";
+                       let mut a: Array<Int64> = [] \
+                       region { a.push(2) } \
+                       return a[0] }";
         assert!(check_src(src).is_ok());
     }
 
@@ -11305,6 +11302,24 @@ mod tests {
             (
                 "fn main() -> Int64 { let s = toString(1); return 0; }",
                 "`toString` is a method",
+            ),
+            // The collection verbs. Each still parses — they are RESERVED, so
+            // no declaration can take the name and the hint is what answers.
+            (
+                "fn main() -> Int64 { let mut xs: Array<Int64> = [] xs = push(xs, 1) return 0 }",
+                "`push(xs, v)` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let xs: Array<Int64> = [1] return at(xs, 0) }",
+                "`at(xs, i)` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let xs: Array<Int64> = [1] return alen(xs) }",
+                "`alen(xs)` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let xs: Array<Int64> = array() return 0 }",
+                "`array()` was removed",
             ),
         ];
         for (src, want) in cases {

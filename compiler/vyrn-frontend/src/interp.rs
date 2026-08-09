@@ -2693,7 +2693,7 @@ impl<'a> Interp<'a> {
                     }),
                 )
             }
-            Expr::Call { name: f, args, .. } if f == "at" && args.len() == 2 => {
+            Expr::Call { name: f, args, .. } if f == crate::project::AT && args.len() == 2 => {
                 let Expr::Var { name: parent, .. } = &args[0] else {
                     return Ok(None);
                 };
@@ -2735,7 +2735,7 @@ impl<'a> Interp<'a> {
     /// because the index-store desugar had already split the statement in three,
     /// so the container HAD to live in a temp and the move-out has to leave a
     /// `Val::Unit` hole behind it for the rest of the group. An append is ONE
-    /// statement (`place = push(place, v)`), so the array never has to leave its
+    /// statement (`place = @push(place, v)`), so the array never has to leave its
     /// home and a snapshot does that job instead: the caller clones the place's
     /// `Rc` *before* this runs, this evaluates the item, and only then does
     /// `drop_place_ref` release the place's own reference — which is what puts
@@ -2829,7 +2829,7 @@ impl<'a> Interp<'a> {
                 // `xs.push(v)` on a local Array: append IN PLACE.
                 //
                 // `push` clones the whole array to return a grown copy, and the
-                // statement form desugars to `xs = push(xs, v)`, so building an
+                // statement form desugars to `xs = @push(xs, v)`, so building an
                 // array is quadratic: 3,000 pushes measured 251 ms against
                 // 19,270 ms for 30,000. std/vyx builds its output as
                 // `Array<UInt8>` buffers, which is what makes compiling one .vyx
@@ -2850,7 +2850,7 @@ impl<'a> Interp<'a> {
                     name: fname, args, ..
                 } = value
                 {
-                    if fname == "push"
+                    if fname == "@push"
                         && args.len() == 2
                         && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
                     {
@@ -3004,7 +3004,7 @@ impl<'a> Interp<'a> {
                 // `append_snapshot`, which carries the mechanism and its rules —
                 // the same fix as `xs.push(v)` above, one level down.
                 //
-                // The statement desugars to `t.xs = push(t.xs, v)`, so the
+                // The statement desugars to `t.xs = @push(t.xs, v)`, so the
                 // general path evaluates `t.xs` into a second `Rc` while the
                 // field still holds the first, and `push`'s `Rc::make_mut` then
                 // copies the whole vector: measured 135 / 310 / 1,705 / 10,704 ms
@@ -3031,7 +3031,7 @@ impl<'a> Interp<'a> {
                     name: fname, args, ..
                 } = value
                 {
-                    if fname == "push"
+                    if fname == "@push"
                         && args.len() == 2
                         && matches!(&args[0], Expr::Field { expr, field: f, .. }
                             if f == field
@@ -3102,7 +3102,7 @@ impl<'a> Interp<'a> {
                         // the compiled backends' own rule, not a shortcut of
                         // the interpreter's — `validation_required` returns
                         // `None` when `from == to`, so they emit nothing here
-                        // either. Deliberately variables only: `push(t.xs, v)`
+                        // either. Deliberately variables only: `@push(t.xs, v)`
                         // is ALSO statically `Array<Age>` and its element has
                         // been validated by nothing at this point (the
                         // backends validate it inside `push`; the fast path
@@ -3237,7 +3237,7 @@ impl<'a> Interp<'a> {
                 // The third and last receiver form, and the SAME snapshot as
                 // `t.xs.push(v)` rather than a third copy of it — because the
                 // shape is the same shape. The parser emits one `Stmt::IndexSet`
-                // for this statement (`rows[i] = push(rows[i], v)`), exactly as
+                // for this statement (`rows[i] = @push(rows[i], v)`), exactly as
                 // it emits one `Stmt::SetField` for the field form; nothing is
                 // split into a temp, so nothing has to be taken. It was the last
                 // quadratic left: 211 / 401 / 1,744 / 9,420 ms at
@@ -3263,14 +3263,14 @@ impl<'a> Interp<'a> {
                     true,
                 ) = (value, matches!(index, Expr::Var { .. } | Expr::Int(_)))
                 {
-                    if fname == "push" && args.len() == 2 {
+                    if fname == "@push" && args.len() == 2 {
                         if let Expr::Call {
                             name: at,
                             args: iargs,
                             ..
                         } = &args[0]
                         {
-                            if at == "at"
+                            if at == "@at"
                                 && iargs.len() == 2
                                 && matches!(&iargs[0], Expr::Var { name: n, .. } if n == name)
                                 && matches!(&iargs[1], Expr::Var { .. } | Expr::Int(_))
@@ -3752,7 +3752,7 @@ impl<'a> Interp<'a> {
             }
             // `xs[i]` on a local Array or String, read WITHOUT copying `xs`.
             //
-            // `xs[i]` parses as `at(xs, i)`, and evaluating the `xs` argument
+            // `xs[i]` parses as `@at(xs, i)`, and evaluating the `xs` argument
             // clones the whole collection so the index can throw it away: an
             // array read cost ~24 us against ~0.7 us for a loop doing no array
             // work, and the gap scaled with the collection's LENGTH rather than
@@ -3761,24 +3761,27 @@ impl<'a> Interp<'a> {
             //
             // The guard matches only when it will succeed — a local holding an
             // Array or a String — so there is no fallback to get wrong. An
-            // earlier version fell back to `self.call("at", ..)`, which is not
+            // earlier version fell back to `self.call("@at", ..)`, which is not
             // where that builtin is dispatched; every Map and record receiver
-            // took the fallback and died with "unknown function `at`". Parity
+            // took the fallback and died with "unknown function `@at`". Parity
             // caught it, which is what parity is for.
             //
             // Restricted to a local receiver so nothing evaluated for the index
             // can reach it — the same reason the in-place append above is safe.
             Expr::Call { name, args, .. }
-                if name == "at" && args.len() == 2 && matches!(&args[0], Expr::Var { .. }) && {
-                    let Expr::Var { name: v, .. } = &args[0] else {
-                        unreachable!()
-                    };
-                    scope
-                        .iter()
-                        .rev()
-                        .find_map(|f| f.get(v))
-                        .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Str(_)))
-                } =>
+                if name == crate::project::AT
+                    && args.len() == 2
+                    && matches!(&args[0], Expr::Var { .. })
+                    && {
+                        let Expr::Var { name: v, .. } = &args[0] else {
+                            unreachable!()
+                        };
+                        scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(v))
+                            .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Str(_)))
+                    } =>
             {
                 let Expr::Var { name: v, .. } = &args[0] else {
                     unreachable!()
@@ -3816,10 +3819,10 @@ impl<'a> Interp<'a> {
             Expr::Call { name, args, line } => {
                 // `a[i]` on a container of the user's own (RFC-0091 M2): inline
                 // the `place at` projection here and read the place it yields.
-                // A builtin container falls through to `at` below, which is the
-                // element-place primitive under its old name — the interpreter
-                // has no lowering to delete, so it keeps one spelling.
-                if name == "at" && args.len() == 2 {
+                // A builtin container falls through to `@at` below, which reads
+                // the element directly — the interpreter has no lowering to
+                // delete, so it keeps one spelling.
+                if name == crate::project::AT && args.len() == 2 {
                     if let Some(v) = self.project_read(args, scope, *line)? {
                         return Ok(v);
                     }
@@ -4990,8 +4993,7 @@ impl<'a> Interp<'a> {
                             Err(format!("{name} takes an Array<UInt8>, found {other:?}").into())
                         }
                     },
-                    "array" => Ok(Val::Array(std::rc::Rc::new(Vec::new()))),
-                    "push" => match &vals[0] {
+                    "@push" => match &vals[0] {
                         Val::Array(elems) => {
                             let mut next = elems.clone();
                             let v = std::rc::Rc::make_mut(&mut next);
@@ -5001,7 +5003,10 @@ impl<'a> Interp<'a> {
                         }
                         other => Err(format!("push of non-Array {other:?}").into()),
                     },
-                    "at" => match (&vals[0], &vals[1]) {
+                    // Spelled out rather than named through `project::AT`
+                    // because `primitives::the_census_is_the_code` reads these
+                    // arms as literals.
+                    "@at" => match (&vals[0], &vals[1]) {
                         (Val::Array(elems), Val::Int(i)) => elems
                             .get(*i as usize)
                             .cloned()
@@ -5045,10 +5050,6 @@ impl<'a> Interp<'a> {
                                 .into(),
                         )),
                         other => Err(format!("`keys` needs a Map, found {other:?}").into()),
-                    },
-                    "alen" => match &vals[0] {
-                        Val::Array(elems) => Ok(Val::Int(elems.len() as i64)),
-                        other => Err(format!("alen of non-Array {other:?}").into()),
                     },
                     // RFC-0075. The two producers and the release. `close` is
                     // variant-aware (M2b): a buffer stream has nothing the host
@@ -5395,7 +5396,7 @@ impl<'a> Interp<'a> {
             Expr::Field { expr, field, .. } => {
                 let v = self.expr(expr, scope)?;
                 match v {
-                    // `arr.length` is the element count (sugar for `alen`).
+                    // `arr.length` is the element count.
                     Val::Array(items) if field == "length" => Ok(Val::Int(items.len() as i64)),
                     // `map.length` is the entry count (RFC-0028).
                     Val::Map(pairs) if field == "length" => Ok(Val::Int(pairs.len() as i64)),
@@ -5476,7 +5477,7 @@ impl<'a> Interp<'a> {
     ///
     /// The predicate is evaluated by the *runtime* evaluator with `value` bound
     /// — not by consteval — so every value kind the interpreter has (Float,
-    /// sized ints, strings, `at()`, `=~`) validates with exactly its runtime
+    /// sized ints, strings, indexing, `=~`) validates with exactly its runtime
     /// semantics, and a predicate that traps (division by zero) traps the same
     /// way an ordinary expression does.
     fn validates(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
@@ -6309,7 +6310,7 @@ impl<'a> Interp<'a> {
                 if name == "Some" {
                     return Some(Type::Option(Box::new(self.type_of(args.first()?, scope)?)));
                 }
-                if name == "at" && args.len() == 2 {
+                if name == crate::project::AT && args.len() == 2 {
                     let at = self.type_of(&args[0], scope)?;
                     return match crate::types::resolve(&at, &self.type_map) {
                         Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => Some(*i),
@@ -6969,11 +6970,11 @@ mod tests {
         let src = "
             fn lookup(k: Int64) -> Result<Array<Int64>, String> {
                 if k == 0 { return Err(\"nope\"); }
-                let mut a: Array<Int64> = array(); a = push(a, k * 10); return Ok(a);
+                let mut a: Array<Int64> = []; a.push(k * 10); return Ok(a);
             }
             fn main() -> Int64 {
-                let a = match lookup(5) { Ok(r) => at(r, 0), Err(e) => 0 - e.byteLength };
-                let b = match lookup(0) { Ok(r) => at(r, 0), Err(e) => 0 - e.byteLength };
+                let a = match lookup(5) { Ok(r) => r[0], Err(e) => 0 - e.byteLength };
+                let b = match lookup(0) { Ok(r) => r[0], Err(e) => 0 - e.byteLength };
                 return a + b;  // 50 + (-4)
             }
         ";
@@ -6984,32 +6985,32 @@ mod tests {
     fn fixed_array_literal_and_index() {
         let src = "fn main() -> Int64 { let a: Array<Int64, 4> = [10, 20, 30, 40]; \
                    let mut s = 0; let mut i = 0; \
-                   while i < alen(a) { s = s + at(a, i); i = i + 1; } return s; }";
+                   while i < a.length { s = s + a[i]; i = i + 1; } return s; }";
         assert_eq!(run(src).unwrap(), 100);
     }
 
     #[test]
     fn fixed_array_out_of_bounds_errors() {
-        let src = "fn main() -> Int64 { let a: Array<Int64, 2> = [1, 2]; return at(a, 4); }";
+        let src = "fn main() -> Int64 { let a: Array<Int64, 2> = [1, 2]; return a[4]; }";
         assert!(run(src).unwrap_err().contains("out of bounds"));
     }
 
     #[test]
     fn growable_array_push_and_read() {
         let src = "fn main() -> Int64 { \
-                       let mut a: Array<Int64> = array(); \
+                       let mut a: Array<Int64> = []; \
                        let mut i = 0; \
-                       while i < 6 { a = push(a, i * i); i = i + 1; } \
+                       while i < 6 { a.push(i * i); i = i + 1; } \
                        let mut s = 0; let mut j = 0; \
-                       while j < alen(a) { s = s + at(a, j); j = j + 1; } \
+                       while j < a.length { s = s + a[j]; j = j + 1; } \
                        return s; }"; // 0+1+4+9+16+25 = 55
         assert_eq!(run(src).unwrap(), 55);
     }
 
     #[test]
     fn array_index_out_of_bounds_errors() {
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   a = push(a, 1); return at(a, 3); }";
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   a.push(1); return a[3]; }";
         assert!(run(src).unwrap_err().contains("out of bounds"));
     }
 
@@ -7022,15 +7023,15 @@ mod tests {
 
     #[test]
     fn for_over_growable_array() {
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   let mut i = 0; while i < 6 { a = push(a, i * i); i = i + 1; } \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   let mut i = 0; while i < 6 { a.push(i * i); i = i + 1; } \
                    let mut s = 0; for x in a { s = s + x; } return s; }"; // 0+1+4+9+16+25
         assert_eq!(run(src).unwrap(), 55);
     }
 
     #[test]
     fn for_over_empty_array_runs_zero_times() {
-        let src = "fn main() -> Int64 { let a: Array<Int64> = array(); \
+        let src = "fn main() -> Int64 { let a: Array<Int64> = []; \
                    let mut s = 7; for x in a { s = s + x; } return s; }";
         assert_eq!(run(src).unwrap(), 7);
     }
@@ -7061,7 +7062,8 @@ mod tests {
 
     #[test]
     fn method_index_and_length_surface() {
-        // `[]`, `.push`, `.length`, and `[i]` desugar to array()/push/alen/at.
+        // `[]` is a literal, `.length` is a field, and `.push` / `[i]` desugar
+        // to the internal `@push` / `@at`. There is no other spelling.
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
                    a.push(10); a.push(20); a.push(30); \
                    return a.length + a[0] + a[2]; }"; // 3 + 10 + 30

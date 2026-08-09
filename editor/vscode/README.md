@@ -110,7 +110,7 @@ Hover / go-to-definition / completion cover **top-level** functions, types, and
 variants; **locals/params** (with inferred `let` types, so hovering an
 unannotated `let x = 5` shows `let x: Int64`); and **built-in method calls**
 (`arr.push`, `log.info`, `Ref.get`, …) for hover plus **`.foo` member
-completion** keyed off the receiver's type (`arr.` → `push`/`at`/`alen`/`pop`/
+completion** keyed off the receiver's type (`arr.` → `push`/`at`/`pop`/
 `length`; `log.` → `trace`/`debug`/`info`/`warn`/`error`). **Document symbols**
 (outline / breadcrumbs / Ctrl-Shift-O) list the document's own top-level
 functions, methods, types, and variants (imported symbols are excluded).

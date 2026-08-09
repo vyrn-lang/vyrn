@@ -73,7 +73,7 @@ fn main() -> Int64 {
     // container's own type key and `Array` has no row. It reads the element's
     // row now, so the container carries it and the diagnostic names both.
     //
-    // `pool.push(..)` is not the discharge. It is parsed as `pool = push(pool,
+    // `pool.push(..)` is not the discharge. It is parsed as `pool = @push(pool,
     // ..)`, a write back into the binding, and a binding that still holds its
     // value has handed nothing on.
     let mut pool: Array<Txn> = []

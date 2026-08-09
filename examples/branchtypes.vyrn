@@ -76,10 +76,10 @@ fn main() -> Int64 {
     }
     print("joined \{joined}")
 
-    // `array()` is `[]`, so an arm types it from the position.
+    // An empty `[]` takes its type from the position, in an arm like anywhere.
     let empty: Array<Int64> = match pick {
-        Some(n) => array(),
-        None => array(),
+        Some(n) => [],
+        None => [],
     }
     print("empty \{empty.length}")
 

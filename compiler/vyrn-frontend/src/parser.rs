@@ -103,6 +103,16 @@ fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {
 pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     ("toString", "@str"),
     ("join", "@join"),
+    // The collection surface (RFC-0011, and the surface redesign that made it
+    // method form). `xs.push(v)` appends and `xs[i]` / `xs.at(i)` reads an
+    // element. Both were removed in their free verb spellings, so the internal
+    // name is what every engine dispatches on, and a free call written `push(xs,
+    // v)` or `at(xs, i)` is a distinct node the checker refuses with a hint.
+    // `@at` is also what the `[` index arm below produces; the IMPL method it
+    // dispatches to keeps the name `at`, which is what a user writes in
+    // `place at`.
+    ("push", "@push"),
+    ("at", "@at"),
     // `s.charCount()` (RFC-0058) — Unicode scalar count.
     ("charCount", "@charCount"),
     // In-place array mutation (RFC-0011).
@@ -129,6 +139,18 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     ("anyTrue", "@anyTrue"),
     ("allTrue", "@allTrue"),
 ];
+
+/// The surface spelling of an internal method-builtin name, for a DIAGNOSTIC.
+/// `@push` is what the engines dispatch on; `push` is what the programmer
+/// wrote, and a message naming the internal spelling names something no source
+/// can contain. Any other name is returned unchanged.
+pub fn method_surface(internal: &str) -> &str {
+    METHOD_BUILTINS
+        .iter()
+        .find(|(_, i)| *i == internal)
+        .map(|(surface, _)| *surface)
+        .unwrap_or(internal)
+}
 
 /// The internal name `recv.name(..)` defaults to, if any.
 pub fn method_builtin(name: &str) -> Option<&'static str> {
@@ -864,13 +886,13 @@ struct Parser {
     errors: Vec<Diagnostic>,
 }
 
-/// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `at(a, i)`),
+/// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `@at(a, i)`),
 /// e.g. `a[i].f` or `a[i].f.g`. Used to distinguish a too-deep array-element
 /// write-through (`a[i].f.g = v`, rejected) from an ordinary nested record-field
 /// write (`a.b.c = v`, handled elsewhere).
 fn is_index_field_chain(e: &Expr) -> bool {
     match e {
-        Expr::Call { name, args, .. } => name == "at" && args.len() == 2,
+        Expr::Call { name, args, .. } => name == "@at" && args.len() == 2,
         Expr::Field { expr, .. } => is_index_field_chain(expr),
         _ => false,
     }
@@ -949,7 +971,7 @@ pub fn place_receiver(
         // as `a[i].push(v)`, which has always written back this way. The index
         // is hoisted into its own temp because the load and the write-back both
         // need it and it must be evaluated exactly once.
-        Expr::Call { name, args, .. } if name == "at" && args.len() == 2 => {
+        Expr::Call { name, args, .. } if name == "@at" && args.len() == 2 => {
             let (parent, mut hoists, mut pre, mut post) = place_receiver(&args[0], line)?;
             let tmp = format!("{parent}[]");
             let idx = format!("{tmp}idx");
@@ -962,7 +984,7 @@ pub fn place_receiver(
             });
             let index = Expr::Var { name: idx, line };
             let load = Expr::Call {
-                name: "at".to_string(),
+                name: "@at".to_string(),
                 args: vec![
                     Expr::Var {
                         name: parent.clone(),
@@ -3693,12 +3715,12 @@ impl Parser {
             _ => {
                 let e = self.expr()?;
                 // `a[i] = v` — element store into a `mut` array binding
-                // (RFC-0011). `a[i]` parsed as `at(a, i)` in `postfix`; a
+                // (RFC-0011). `a[i]` parsed as `@at(a, i)` in `postfix`; a
                 // trailing `=` turns that read into an in-place store. The array
                 // must be a plain identifier binding (v1 restriction).
                 if *self.peek() == Tok::Eq {
                     if let Expr::Call { name, args, .. } = &e {
-                        if name == "at" && args.len() == 2 {
+                        if name == "@at" && args.len() == 2 {
                             // The array may live in a slot already, or in a
                             // record field / array element that `place_receiver`
                             // moves out and back around the store (RFC-0082 M1).
@@ -3753,7 +3775,7 @@ impl Parser {
                     }
                     // `a[i].f = v` — write-through to a record field of an array
                     // element (RFC-0011 addendum). `a[i].f` parsed as
-                    // `Field { at(a, i), f }`; a trailing `=` makes it a
+                    // `Field { @at(a, i), f }`; a trailing `=` makes it a
                     // copy-modify-store: load element `i`, set field `f` on the
                     // copy, store it back into slot `i`. Desugars to the exact
                     // idiom `let mut @tmp = a[i]  @tmp.f = v  a[i] = @tmp`, so it
@@ -3762,7 +3784,7 @@ impl Parser {
                     // backends.
                     if let Expr::Field { expr, field, .. } = &e {
                         if let Expr::Call { name, args, .. } = expr.as_ref() {
-                            if name == "at" && args.len() == 2 {
+                            if name == "@at" && args.len() == 2 {
                                 if let Some((recv, mut hoists, mut pre, post)) =
                                     place_receiver(&args[0], line)
                                 {
@@ -3804,7 +3826,7 @@ impl Parser {
                                         mutable: true,
                                         ty: None,
                                         value: Expr::Call {
-                                            name: "at".to_string(),
+                                            name: "@at".to_string(),
                                             args: vec![
                                                 Expr::Var {
                                                     name: recv.clone(),
@@ -3861,12 +3883,12 @@ impl Parser {
                 // receiver PLACE: `push` reallocates (grows) its array and returns
                 // the new one, so a statement-position `x.push(v)` must store that
                 // result back into wherever `x` lives — otherwise the push lands on
-                // a copy and silently vanishes. The receiver (parsed as `push(recv,
+                // a copy and silently vanishes. The receiver (parsed as `@push(recv,
                 // v)`) may be any assignable place the language already supports,
                 // and each maps to the matching in-place store:
-                //   `sq.push(v)`      (a variable)       -> `sq = push(sq, v)`
-                //   `r.f.push(v)`     (a record field)   -> `r.f = push(r.f, v)`
-                //   `a[i].push(v)`    (an array element) -> `a[i] = push(a[i], v)`
+                //   `sq.push(v)`      (a variable)       -> `sq = @push(sq, v)`
+                //   `r.f.push(v)`     (a record field)   -> `r.f = @push(r.f, v)`
+                //   `a[i].push(v)`    (an array element) -> `a[i] = @push(a[i], v)`
                 // Any other receiver (a temporary, or a deeper chain like
                 // `r.a.b.push(v)` / `a[i].f.push(v)` beyond one level of write-back)
                 // cannot be stored back and would silently drop the push, so it is a
@@ -3881,7 +3903,7 @@ impl Parser {
                     return Ok(self.spliced(pre));
                 }
                 if let Expr::Call { name, args, .. } = &e {
-                    if name == "push" {
+                    if name == "@push" {
                         match args.first() {
                             // `sq.push(v)` — a plain array variable.
                             Some(Expr::Var { name: recv, .. }) => {
@@ -3908,7 +3930,7 @@ impl Parser {
                                 });
                             }
                             // `a[i].push(v)` — an array ELEMENT that is itself an
-                            // array (`a[i]` parsed as `at(a, i)`). Writes back via
+                            // array (`a[i]` parsed as `@at(a, i)`). Writes back via
                             // `IndexSet`, mirroring `a[i] = ..`; the index is
                             // evaluated on both the read and the store, exactly like
                             // the `a[i].field = v` desugar.
@@ -3916,7 +3938,7 @@ impl Parser {
                                 name: at,
                                 args: iargs,
                                 ..
-                            }) if at == "at"
+                            }) if at == "@at"
                                 && iargs.len() == 2
                                 && matches!(&iargs[0], Expr::Var { .. }) =>
                             {
@@ -4267,7 +4289,7 @@ impl Parser {
                     }
                 }
                 Tok::LBracket => {
-                    // Index `recv[i]` is sugar for the bounds-checked `at(recv, i)`.
+                    // Index `recv[i]` is sugar for the bounds-checked `@at(recv, i)`.
                     self.advance();
                     let saved = self.no_struct;
                     self.no_struct = false;
@@ -4275,7 +4297,7 @@ impl Parser {
                     self.no_struct = saved;
                     self.eat(&Tok::RBracket)?;
                     e = Expr::Call {
-                        name: "at".to_string(),
+                        name: "@at".to_string(),
                         args: vec![e, idx],
                         line,
                     };
@@ -5833,7 +5855,7 @@ mod tests {
     #[test]
     fn gteq_splits_when_closing_a_generic() {
         // `Array<Int>= []` — the lexer max-munches `>=`; the parser splits it.
-        let src = "fn main() -> Int64 { let x: Array<Int64>= array() return alen(x) }";
+        let src = "fn main() -> Int64 { let x: Array<Int64>= [] return x.length }";
         let p = parse_src(src);
         assert!(matches!(
             p.functions[0].body.stmts[0],
@@ -6184,7 +6206,7 @@ mod tests {
             } => {
                 assert_eq!(name, "a[]");
                 assert!(mutable, "the element copy must be mut so SetField applies");
-                assert_eq!(c, "at");
+                assert_eq!(c, "@at");
                 assert!(matches!(args[0], Expr::Var { .. }));
             }
             other => panic!("expected `let mut a[] = a[0]`, got {other:?}"),
@@ -6412,7 +6434,7 @@ mod tests {
 
     #[test]
     fn push_on_variable_desugars_to_assign() {
-        // `sq.push(x)` -> `sq = push(sq, x)` (the reallocated array sticks).
+        // `sq.push(x)` -> `sq = @push(sq, x)` (the reallocated array sticks).
         let p =
             parse_src("fn main() -> Int64 { let mut sq: Array<Int64> = []  sq.push(1)  return 0 }");
         let stmts = &p.functions[0].body.stmts;
@@ -6423,15 +6445,15 @@ mod tests {
                 ..
             } => {
                 assert_eq!(name, "sq");
-                assert_eq!(c, "push");
+                assert_eq!(c, "@push");
             }
-            other => panic!("expected `sq = push(sq, 1)`, got {other:?}"),
+            other => panic!("expected `sq = @push(sq, 1)`, got {other:?}"),
         }
     }
 
     #[test]
     fn push_on_record_field_desugars_to_setfield() {
-        // `r.xs.push(x)` -> `r.xs = push(r.xs, x)` — the fix for the silent
+        // `r.xs.push(x)` -> `r.xs = @push(r.xs, x)` — the fix for the silent
         // global/local record-field `.push` no-op.
         let p =
             parse_src("fn main() -> Int64 { let mut r: R = R { xs: [] }  r.xs.push(1)  return 0 }");
@@ -6445,15 +6467,15 @@ mod tests {
             } => {
                 assert_eq!(name, "r", "writes back through the record binding");
                 assert_eq!(field, "xs");
-                assert_eq!(c, "push");
+                assert_eq!(c, "@push");
             }
-            other => panic!("expected `r.xs = push(r.xs, 1)`, got {other:?}"),
+            other => panic!("expected `r.xs = @push(r.xs, 1)`, got {other:?}"),
         }
     }
 
     #[test]
     fn push_on_array_element_desugars_to_indexset() {
-        // `a[i].push(x)` -> `a[i] = push(a[i], x)` (an array element that is
+        // `a[i].push(x)` -> `a[i] = @push(a[i], x)` (an array element that is
         // itself an array), mirroring `a[i] = ..`.
         let p = parse_src(
             "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].push(1)  return 0 }",
@@ -6466,9 +6488,9 @@ mod tests {
                 ..
             } => {
                 assert_eq!(name, "a", "writes back into the array slot");
-                assert_eq!(c, "push");
+                assert_eq!(c, "@push");
             }
-            other => panic!("expected `a[0] = push(a[0], 1)`, got {other:?}"),
+            other => panic!("expected `a[0] = @push(a[0], 1)`, got {other:?}"),
         }
     }
 

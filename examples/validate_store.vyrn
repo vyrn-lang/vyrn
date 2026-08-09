@@ -8,7 +8,7 @@
 //
 // The interpreter accepted every store below without checking anything until
 // RFC-0082 M3, while both compiled backends trapped: `t.xs.push(v)` desugars to
-// `t.xs = push(t.xs, v)`, and that field assignment was the one typed boundary
+// `t.xs = @push(t.xs, v)`, and that field assignment was the one typed boundary
 // with no coercion behind it. A literal would have been caught at compile time
 // by `consteval` on all three engines, so only a value the compiler cannot fold
 // — `rt(6)` here — reaches the runtime check, which is why nothing said.

@@ -28,10 +28,10 @@ fn main() -> Int64 {
     let mut n = 0
     region {
         let mut a: Array<Int64> = [1, 2]
-        a = push(a, 3)
-        a = push(a, 4)
-        a = push(a, 5)
-        n = at(a, 4)
+        a.push(3)
+        a.push(4)
+        a.push(5)
+        n = a[4]
     }
     print(n) // 5
 
