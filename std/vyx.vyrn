@@ -382,6 +382,52 @@ type VyxNode =
 /// payload (an if-chain's per-branch bodies) without an `Array<Array<…>>`.
 type VyxBody = { nodes: Array<VyxNode> }
 
+/// Give one payload back. One helper for every place the release below hands a
+/// value over, because a `match` arm is an expression and `drop` is a statement.
+///
+/// `drop v` reads the row the INSTANCE has (RFC-0090 M1, Phase 8b), so this one
+/// function releases a `String`, an `Array<String>`, an `Array<VyxAttr>` and an
+/// `Array<VyxNode>` — and the last of those calls the release below once per
+/// element, which is where the recursion lives.
+fn vyxGive<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+/// A node owns its subtree, and says so — RFC-0096.
+///
+/// `VyxNode` reaches itself through `VNElem`'s children, so the structural
+/// release walk has no bottom to stop at and left every node of every parsed
+/// template allocated. A declared release IS that bottom: the walk emits a CALL
+/// here instead of expanding, and this function makes the recursion the walk
+/// cannot make.
+///
+/// It closes far more than its own type. Every type that merely REACHES
+/// `VyxNode` — `VyxComp`, `VyxRegistry`, `VyxParse`, `VyxGroup`, `VyxBody`,
+/// `VyxOne`, `VyxNodeR` — was refused a structural row for the same missing
+/// bottom, and gets it back with this declaration: 56 of the corpus's 63
+/// unreclaimed bindings, on one `impl`.
+///
+/// **The depth is the language's, not this function's.** A release of a tree
+/// 10,000 nodes deep is 10,000 native frames. Measured on Windows with the
+/// default 1 MiB stack: a release survives 10,000 and overflows at 11,000, where
+/// an ordinary recursive Vyrn walk over the same chain survives 15,000 and
+/// overflows at 20,000. A `.vyx` template nests as deep as its author's markup,
+/// which is two orders of magnitude under that.
+impl Owned for VyxNode {
+    fn release(consume self) {
+        let given = match consume self {
+            VNText(s) => vyxGive(s),
+            VNInterp(s, l, c) => vyxGive(s),
+            VNRaw(s, l, c) => vyxGive(s),
+            VNChildren => 0,
+            VNElem(tag, isComp, attrs, kids, l) => vyxGive(tag) + vyxGive(attrs) + vyxGive(kids),
+            VNIf(conds, cl, cc, bodies, els, has) => vyxGive(conds) + vyxGive(cl) + vyxGive(cc) + vyxGive(bodies) + vyxGive(els),
+            VNFor(v, it, key, body, l, c) => vyxGive(v) + vyxGive(it) + vyxGive(key) + vyxGive(body),
+        }
+    }
+}
+
 // ===========================================================================
 // Interpolation reader — a `{{ expr }}` token (quote-aware, so a `}}` inside an
 // expression string literal does not close the interpolation early).
@@ -788,7 +834,7 @@ fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: c
         childNodes = [VNRaw(vhtml.value, vhtml.line, vhtml.col)]
     } else {
         let g = vyxGroupNodes(kids, fileId)
-        childNodes = g.nodes
+        childNodes = consume g.nodes
         err = err + g.err
     }
     let vfor = vyxDir(attrs, "v-for")

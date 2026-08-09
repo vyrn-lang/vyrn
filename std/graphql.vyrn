@@ -778,6 +778,33 @@ export type GqlSel = {
     subs: Array<GqlSel>,
 }
 
+/// A selection owns what it selects, and says so — RFC-0096.
+///
+/// `GqlSel` reaches itself through `subs`, so the structural release walk has no
+/// bottom and every parsed selection stayed allocated for the life of the
+/// process. A declared release IS the bottom: the walk emits a call here, and
+/// this function makes the recursion the walk cannot. `drop subs` releases each
+/// element by calling this again, one level down.
+///
+/// The shape is `std/slots`'s. Each line TAKES its field (RFC-0093 M1) rather
+/// than reading it, because a release moves the buffer out and gives it back,
+/// and dropping a field READ would hand one buffer back twice.
+///
+/// `args` gives back its buffer alone. `JsonField` reaches `Json`, which
+/// declares nothing, so its elements are the leak `std/json` still carries.
+impl Owned for GqlSel {
+    fn release(consume self) {
+        let key = consume self.key
+        drop key
+        let name = consume self.name
+        drop name
+        let args = consume self.args
+        drop args
+        let subs = consume self.subs
+        drop subs
+    }
+}
+
 /// A parsed selection set, or the reason it would not parse (`err != ""`).
 type GqlSet = { sels: Array<GqlSel>, err: String }
 

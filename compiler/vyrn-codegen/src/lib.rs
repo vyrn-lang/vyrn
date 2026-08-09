@@ -3062,7 +3062,8 @@ impl<'a> Gen<'a> {
         // is observable — a container carries its element's obligation now, so
         // the compiler demands a discharge the discharge did not perform.
         if matches!(self.rel_kind(ty), Some(DropKind::Release(_))) {
-            return self.call_release(v, ty);
+            self.call_release(v, ty)?;
+            return self.free_declared_boxes(v, ty);
         }
         if !self.owns_heap(ty) {
             return Ok(());
@@ -3169,7 +3170,7 @@ impl<'a> Gen<'a> {
             }
             Type::Option(inner) => self.release_sum(v, &[(Some("1"), *inner)]),
             Type::Result(ok, err) => self.release_sum(v, &[(Some("1"), *ok), (Some("0"), *err)]),
-            Type::Enum(vs) => self.release_enum(v, &vs),
+            Type::Enum(vs) => self.release_enum(v, &vs, true),
             // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
             // The captures are one heap block, read by value at the construction
             // site, and 0 when there are none — which `free` refuses. Census §16.
@@ -3238,11 +3239,36 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// Free the payload BOXES of an enum whose release the type declared, and
+    /// nothing else — RFC-0096.
+    ///
+    /// A declared `release` takes the enum BY VALUE and gives its payloads back
+    /// by name. The BLOCK a wide payload travels in is the enum's own
+    /// representation: `unbox_payload` loads out of it, no Vyrn surface names it,
+    /// and the structural walk is the only thing that ever freed it. So a
+    /// declared release leaked one block per boxed payload per value — 48 bytes
+    /// a node over a released tree, which is the whole of a leak that looked
+    /// steady until it was measured against four times the calls.
+    ///
+    /// It answers `Ok(())` for everything that is not a user enum, which is
+    /// every other declared row: a record, a container and a generic container
+    /// carry their storage inline or in a buffer the declaration itself frees.
+    fn free_declared_boxes(&mut self, v: &str, ty: &Type) -> Result<(), String> {
+        let Type::Enum(vs) = self.resolve(ty) else {
+            return Ok(());
+        };
+        self.release_enum(v, &vs, false)
+    }
+
     /// The release of a user enum: the payload slots of the live variant, and
     /// only the ones whose declared type owns something. A wide payload is BOXED
     /// here where an `Option`'s is not, so the block behind it is freed too —
     /// `unbox_payload` is what says which.
-    fn release_enum(&mut self, v: &str, vs: &[EnumVariant]) -> Result<(), String> {
+    ///
+    /// `payloads` is false for an enum that DECLARED its release: the payload
+    /// values are that function's to give back, and only the boxes they
+    /// travelled in are left for this walk (RFC-0096).
+    fn release_enum(&mut self, v: &str, vs: &[EnumVariant], payloads: bool) -> Result<(), String> {
         let arity = vs.iter().map(|x| x.payload.len()).max().unwrap_or(0);
         let ell = enum_ll(arity);
         let tag = self.fresh_tmp();
@@ -3268,7 +3294,9 @@ impl<'a> Gen<'a> {
                 let w = self.fresh_tmp();
                 self.emit(format!("{w} = extractvalue {ell} {v}, {}", j + 1));
                 let pv = self.unbox_payload(&w, pty);
-                self.deep_release(&pv, pty)?;
+                if payloads {
+                    self.deep_release(&pv, pty)?;
+                }
                 // A boxed payload's block is the enum's too.
                 if pv != w {
                     let q = self.fresh_tmp();
@@ -3951,13 +3979,17 @@ impl<'a> Gen<'a> {
                     if let Some(ty) = self.slot_ty(slot) {
                         let f = f.clone();
                         self.scope
-                            .push(vec![(REL_RECV.to_string(), slot.to_string(), ty)]);
+                            .push(vec![(REL_RECV.to_string(), slot.to_string(), ty.clone())]);
                         let recv = [Expr::Var {
                             name: REL_RECV.to_string(),
                             line: 0,
                         }];
                         let _ = self.gen_call(&f, &recv);
                         self.scope.pop();
+                        let ll = self.llt(&ty);
+                        let v = self.fresh_tmp();
+                        self.emit(format!("{v} = load {ll}, ptr {slot}"));
+                        let _ = self.free_declared_boxes(&v, &ty);
                     }
                     return;
                 }
@@ -3971,6 +4003,11 @@ impl<'a> Gen<'a> {
                 let v = self.fresh_tmp();
                 self.emit(format!("{v} = load {ll}, ptr {slot}"));
                 self.emit(format!("call void @vyrn_{f}({ll} {v})"));
+                // RFC-0096: the payload boxes are the enum's own storage, and
+                // the declaration cannot reach them. Errors swallowed for the
+                // reason above: a drop this cannot emit is a leak, never a
+                // wrong free.
+                let _ = self.free_declared_boxes(&v, &pty);
             }
         }
     }

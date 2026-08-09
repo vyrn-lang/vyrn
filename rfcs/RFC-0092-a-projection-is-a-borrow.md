@@ -899,6 +899,17 @@ is ordinary Vyrn. It answers `None` and its places leak. `Json` and `Html` are
 that shape, which is also why M1's `.copy()` menu sent them to a hand-written
 `copyJson` — the same fact refusing the same walk from the other side.
 
+**RFC-0096 moved that guard one word and closed the leak it left.** The question
+is not whether the type reaches itself; it is whether the cycle has a
+DECLARATION on it, because the walk emits a call at a declared type rather than
+expanding into it, and a call is a bottom. `impl Owned for VyxNode` and
+`impl Owned for GqlSel` therefore gave every type ABOVE them its structural row
+back, and the corpus row this guard was leaving open — 63 bindings — reads 0. It
+also found what a declared release on a user ENUM had been leaking since
+RFC-0086 M1: the payload boxes, which no Vyrn surface names and only the
+structural walk ever freed, 16 bytes a node on both compiling backends. `Json`
+and `Html` stay open, for the two reasons RFC-0096 records.
+
 **The seven deferred returns are closed, and not by the copy M1 priced.** M1
 recorded them, refused to migrate them, and asserted the number so it could not
 grow — because `check_return` refuses an arm-yielded projection only where the

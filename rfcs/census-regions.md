@@ -184,6 +184,11 @@ The 79 bindings with no release rule, grouped by their type:
 **Every one of the 79 reaches an allocation the arena refuses.** The candidate
 count is **0**.
 
+**All but `Html`, `Json` and what reaches them are reclaimed now** (RFC-0096, and
+the paragraph at the end of this section). That changes nothing about the region
+question: the reclamation is a declared `release`, and an arena was refused for
+being slower than the walk it would replace, not for the walk's coverage.
+
 ### Two facts inside that table
 
 **21 of the 79 are not leaks at all.** `release_kind`
@@ -201,6 +206,18 @@ of the three. The declared answer already exists: `release_kind` reads `impl Own
 for T` **before** the self-referring guard (`own.rs:296`), so a hand-written
 release closes all 58 the way `std/json`'s `copyJson` closes the `copy` side. It is
 a declaration, and it is not a region.
+
+**The declaration was written, and the number is two.** RFC-0096 closed this row.
+By the time it ran the harness read 63 rather than 79 (RFC-0094 and RFC-0095 M1
+had landed), and **all 63 were self-referring** — 56 in `std/vyx.vyrn`, 7 in
+`std/graphql.vyrn`. This section expected one `impl Owned` per leaking type and
+measured wrong: the guard's question was "does this type reach itself", and the
+question a release wants is "is there a declaration ON the cycle", because the
+walk emits a CALL at a declared type instead of expanding. So `impl Owned for
+VyxNode` and `impl Owned for GqlSel` — two declarations, on the two types the
+cycles run through — gave every type above them its structural row back. The
+harness row **falls 63 to 0** and the "not reclaimed" total **2267 to 2207**. The
+sentence held; the count did not.
 
 ---
 
@@ -420,6 +437,12 @@ reclaimed before and 2 after: its four tasks are discharged and `unwanted` reads
 "reclaimed by `drop` at line 49". **Nothing gained a free** — `Fate::Discharged`
 mints no `droppable` row, so both backends emit what they emitted, and the
 memory suite is 16 rows and 16 steady.
+
+**The 63 that were left are 0 (RFC-0096).** Two `impl Owned` rows — on `VyxNode`
+and on `GqlSel` — closed the row this census called the hunting ground. The
+memory suite is 17 rows and 17 steady. What is left is `Json` and `Html`: 31
+bindings by the linked reading, invisible to the unlinked harness, and the same
+declaration one module over.
 
 ---
 
