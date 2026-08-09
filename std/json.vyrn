@@ -63,6 +63,40 @@ impl Copy for Json {
     }
 }
 
+/// Hands one payload back to its own release row, so an arm can be an
+/// EXPRESSION. `drop v` is a statement and a `match` arm is an expression, so
+/// the release below cannot write `drop` in an arm. The row read is the row the
+/// INSTANCE has (RFC-0090 M1) — one helper releases a `String`, an
+/// `Array<Json>` and an `Array<JsonField>`, and the last two are where the
+/// recursion lives. The twin of `std/vyx`'s `vyxGive`.
+fn jsonGive<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+/// A `Json` owns its subtree, and says so — RFC-0096 M2.
+///
+/// `Json` reaches itself through `JArr` and `JObj`, so the structural release
+/// walk has no bottom and left every `Json` binding in the corpus unreclaimed.
+/// A declaration IS a bottom: the walk emits a CALL here rather than expanding,
+/// so every type ABOVE this one — `Array<Json>`, `JsonField`, `GqlVal`,
+/// `RpcClientTypes` — gets its structural row back too.
+///
+/// It composes with `impl Copy for Json` above: a copy shares nothing, so
+/// releasing both the original and the copy frees two distinct trees.
+impl Owned for Json {
+    fn release(consume self) {
+        match consume self {
+            JNull => 0,
+            JBool(b) => 0,
+            JNum(s) => jsonGive(s),
+            JStr(s) => jsonGive(s),
+            JArr(xs) => jsonGive(xs),
+            JObj(fs) => jsonGive(fs),
+        }
+    }
+}
+
 /// A `Json` that shares nothing with `j` — the name this walk had before it was
 /// a `Copy` impl. `j.copy()` says the same thing and is the one to write.
 export fn copyJson(j: Json) -> Json {

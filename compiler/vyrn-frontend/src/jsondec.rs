@@ -520,6 +520,14 @@ impl Walk<'_> {
     /// becomes insertion order, each value is decoded at `path.<key>`, and a
     /// repeated key keeps the first — which `std/jsonread` makes unreachable, since
     /// it rejects duplicates outright.
+    ///
+    /// **The key is COPIED into the map.** A map takes its key (RFC-0092 M5 —
+    /// both compiling backends write the key pointer in and copy nothing), and
+    /// `f` is an element of the snapshot `fieldsOf(v)` returns. While `Json` had
+    /// no release rule that snapshot leaked and the sharing was invisible; since
+    /// RFC-0096 M2 it is released, so the map and the snapshot both owned one
+    /// buffer and the map's key came back freed — `fromJson(Map<String, Int64>,
+    /// "{"apple":3,"pear":5}")` summed to 4 rather than 8 on wasm.
     fn map_body(&mut self, t: &str, val: &Type) -> Result<String, String> {
         let d = self.decoder(val)?;
         let (kind, ptype, fields_of, fpath) = (
@@ -541,7 +549,7 @@ impl Walk<'_> {
              \x20       let dv = {d}(f.value, {fpath}(path, f.key), iss)\n\
              \x20       if m.has(f.key) == false {{\n\
              \x20           for x in consume dv {{\n\
-             \x20               m[f.key] = x\n\
+             \x20               m[f.key.copy()] = x\n\
              \x20           }}\n\
              \x20       }}\n\
              \x20   }}\n\

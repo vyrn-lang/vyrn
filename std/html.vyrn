@@ -108,6 +108,31 @@ impl Copy for Html {
     }
 }
 
+/// Hands one payload back to its own release row, so an arm can be an
+/// EXPRESSION — `drop v` is a statement and a `match` arm is not. The twin of
+/// `std/json`'s `jsonGive` and `std/vyx`'s `vyxGive`.
+fn htmlGive<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+/// A node owns its subtree, and says so — RFC-0096 M2.
+///
+/// `Html` reaches itself through `El`, so the structural release walk has no
+/// bottom. A declaration IS one: the walk emits a CALL here, and every type
+/// above — `Array<Html>`, a record holding a view — gets its structural row
+/// back.
+impl Owned for Html {
+    fn release(consume self) {
+        match consume self {
+            Empty => 0,
+            Text(s) => htmlGive(s),
+            Raw(s) => htmlGive(s),
+            El(tag, attrs, kids) => htmlGive(tag) + htmlGive(attrs) + htmlGive(kids),
+        }
+    }
+}
+
 /// `copy` over a list of nodes. Exported because `ks.copy()` cannot be written
 /// for this element type — a declared `Copy` answers about the value it is asked
 /// about, not about a part of one.
@@ -505,7 +530,7 @@ fn childPath(p: Array<Int64>, i: Int64) -> Array<Int64> {
 /// Diff one node against another at `path`.
 fn diffNode(path: Array<Int64>, old: Html, new: Html) -> Array<PatchOp> {
     if !sameKind(old, new) {
-        return [OpReplace(path, new)]
+        return [OpReplace(path.copy(), new.copy())]
     }
     return match old {
         Empty => noOps(),
@@ -520,7 +545,7 @@ fn diffText(path: Array<Int64>, oldS: String, new: Html) -> Array<PatchOp> {
     if oldS == newS {
         return noOps()
     }
-    return [OpSetText(path, newS)]
+    return [OpSetText(path.copy(), newS)]
 }
 
 fn diffRaw(path: Array<Int64>, oldS: String, new: Html) -> Array<PatchOp> {
@@ -528,7 +553,7 @@ fn diffRaw(path: Array<Int64>, oldS: String, new: Html) -> Array<PatchOp> {
     if oldS == newS {
         return noOps()
     }
-    return [OpReplace(path, new)]
+    return [OpReplace(path.copy(), new.copy())]
 }
 
 fn diffEl(path: Array<Int64>, oldAttrs: Array<Attr>, oldKids: Array<Html>, new: Html) -> Array<PatchOp> {
@@ -536,7 +561,7 @@ fn diffEl(path: Array<Int64>, oldAttrs: Array<Attr>, oldKids: Array<Html>, new: 
     let newKids = htmlKids(new)
     let mut ops: Array<PatchOp> = []
     if !attrsEqual(oldAttrs, newAttrs) {
-        ops.push(OpSetAttrs(path, newAttrs))
+        ops.push(OpSetAttrs(path.copy(), newAttrs))
     }
     for o in diffChildren(path, oldKids, newKids) {
         ops.push(o)
@@ -584,12 +609,12 @@ fn diffPositional(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>
     }
     let mut r = oldLen - 1
     while r >= common {
-        ops.push(OpRemove(path, r))
+        ops.push(OpRemove(path.copy(), r))
         r = r - 1
     }
     let mut k = common
     while k < newLen {
-        ops.push(OpInsert(path, k, newKids[k]))
+        ops.push(OpInsert(path.copy(), k, newKids[k].copy()))
         k = k + 1
     }
     return ops
@@ -622,7 +647,7 @@ fn diffKeyed(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> 
     let mut r = oldLen - 1
     while r >= 0 {
         if !used[r] {
-            ops.push(OpRemove(path, r))
+            ops.push(OpRemove(path.copy(), r))
         }
         r = r - 1
     }
@@ -642,12 +667,12 @@ fn diffKeyed(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> 
     while i < newLen {
         let m = matchOf[i]
         if m < 0 {
-            ops.push(OpInsert(path, i, newKids[i]))
+            ops.push(OpInsert(path.copy(), i, newKids[i].copy()))
             cur = listInsert(cur, i, -2)
         } else {
             let j = listIndexOf(cur, m)
             if j != i {
-                ops.push(OpMove(path, j, i))
+                ops.push(OpMove(path.copy(), j, i))
                 cur = listMove(cur, j, i)
             }
         }
