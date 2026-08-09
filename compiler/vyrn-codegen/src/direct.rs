@@ -2930,6 +2930,49 @@ impl Fn_<'_> {
                 if let Type::Stream(inner) = self.cx.resolve(&it) {
                     return self.for_stream(m, b, var, body, &inner, *line);
                 }
+                // RFC-0092 M5, census "U4's price": an iterable that is a
+                // TEMPORARY owns what it holds and has no name, so `own` gives
+                // the STATEMENT the reclamation row — the same row Phase 10a
+                // gives an `if let`'s scrutinee. A release frame of its own is
+                // what makes the release survive a `return` out of the body, and
+                // it is pushed BEFORE the loop's boundary so `break` and
+                // `continue` leave it to the fall-through below.
+                self.releases.push(Vec::new());
+                let iter_boundary = self.releases.len() - 1;
+                if self.drops.contains_key(&(s as *const Stmt as usize)) {
+                    if let Some(r) = self.rel_for(&it, *line)? {
+                        // `expr` leaves one I32 — an aggregate's address or a
+                        // String's pointer — and `walk` wants it back, so it is
+                        // stashed rather than teed into two shapes.
+                        let src = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(src));
+                        let rr = self.cx.repr(&it, *line)?;
+                        let place = self.place_for(b, &rr, *line)?;
+                        match (place, &rr) {
+                            // A copy of its own, and it has to be one: `expr`
+                            // left the aggregate wherever it built it, and the
+                            // body can build over that. The copy is by value, so
+                            // it holds the same buffer pointers the walk reads
+                            // and releasing it releases exactly those.
+                            (Place::Slot(own), Repr::Agg(l)) => {
+                                b.slot(own);
+                                b.ins(&Instruction::LocalGet(src));
+                                b.ins(&Instruction::I32Const(l.size as i32));
+                                b.ins(&Instruction::MemoryCopy {
+                                    src_mem: 0,
+                                    dst_mem: 0,
+                                });
+                            }
+                            (Place::Local(l), _) => {
+                                b.ins(&Instruction::LocalGet(src));
+                                b.ins(&Instruction::LocalSet(l));
+                            }
+                            _ => return unsupported("a `for` over a Unit value", *line),
+                        }
+                        self.releases.last_mut().unwrap().push((place, r));
+                        b.ins(&Instruction::LocalGet(src));
+                    }
+                }
                 let w = self.walk(b, &it, *line)?;
                 let i = b.local(ValType::I64);
                 b.ins(&Instruction::I64Const(0));
@@ -2992,6 +3035,10 @@ impl Fn_<'_> {
                 b.ins(&Instruction::End);
                 self.depth -= 1;
                 b.ins(&Instruction::End);
+                // The fall-through release (RFC-0092 M5), after every exit path
+                // has rejoined. A body that returned already ran it and branched.
+                self.emit_releases_above(m, b, iter_boundary)?;
+                self.releases.pop();
             }
             Stmt::IndexSet {
                 name,

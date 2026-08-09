@@ -8,12 +8,24 @@ questions are open and undesigned.
 
 **The chain continued past this plan.** RFC-0092 (a projection is a borrow) and
 RFC-0093 (a take is a move out of a place) added three memory rows between them —
-`elementLeak` (M2), `recordFields` (M3) and `takenField` (RFC-0093 M2) — so the
-suite now reads **fifteen rows, fourteen steady, `keysLoop` the only leak**. U4
-is closed for an array and open for a snapshot: `for k in m.keys()` walks a
-temporary, and that is Phase 10a's `if let` row applied to `for` and per element.
-`vyrn why --memory` over the corpus reads **1,958 bindings not reclaimed of
-4,336**, against 2,127 when RFC-0092 M1 landed.
+`elementLeak` (M2), `recordFields` (M3) and `takenField` (RFC-0093 M2). RFC-0092
+M5 then closed the last one: `for k in m.keys()` walks a temporary, and the loop
+owns it, so the suite reads **fifteen rows, fifteen steady — the census has no
+leaking row**. U4 is closed for an array and for a snapshot.
+
+**The row that closed it was Phase 10a's, and M2 read half of it right.** M2 said
+the fix was that row "applied to `for` and per element". The row and the
+`names_a_place` guard are exactly Phase 10a's; per element is not what landed.
+The loop VARIABLE is bound to the snapshot's row, so a body that moves an element
+out — `fs.push(Field { key: k, .. })`, a `return`, a `drop`, a capture — marks
+the whole row and the loop releases nothing. That leaks the elements the body did
+not keep, which is the direction this analysis may be wrong in. Measured native,
+2,000 turns over 100 65-byte keys: **24 MB peak → 4 MB**, and 4 MB again at four
+times the turns. One rule came with it: **a map takes its KEY**, because both
+backends write the key pointer into `keys[len]` and copy nothing, so
+`for k in base.keys() { hs[k] = .. }` (`httpHeaders`) is a move nothing recorded.
+`vyrn why --memory` over the corpus is unmoved at **2,258 not reclaimed of
+3,726** — a `for` row has no name to print, so it does not reach that report.
 
 **RFC-0092 is COMPLETE.** M4 landed the `linear_kind` recursion, so a container
 carries its element's must-use obligation and RFC-0086 M3's storage hole is

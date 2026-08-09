@@ -1,13 +1,14 @@
 # RFC-0092 — A Projection Is a Borrow
 
-- **Status:** **COMPLETE. M0 measured; M1, M2, M3 and M4 landed.**
+- **Status:** **COMPLETE. M0 measured; M1, M2, M3, M4 and M5 landed.**
   The rule is enforced, the corpus is migrated, census **U4 is closed**,
   **every aggregate releases its places** — so RFC-0089 rule 4 is whole and that
-  RFC's status line says so — and **a container carries its element's must-use
-  obligation**, which closes RFC-0086 M3's storage hole. See "M1 as landed",
-  "M2 as landed", "M3 as landed" and "M4 as landed". Supersedes nothing. Closes
-  named gaps in RFC-0087 (§3, §14's remainder, U4), RFC-0089 rule 4 and
-  RFC-0086 M3.
+  RFC's status line says so — **a container carries its element's must-use
+  obligation**, which closes RFC-0086 M3's storage hole, and **a `for` over a
+  temporary owns the snapshot**, which pays M2's own price and leaves the memory
+  census with **fifteen rows and no leaking one**. See "M1 as landed" through
+  "M5 as landed". Supersedes nothing. Closes named gaps in RFC-0087 (§3, §14's
+  remainder, U4), RFC-0089 rule 4 and RFC-0086 M3.
 - **Depends on:** RFC-0089 (rules 1 to 4, all landed), RFC-0086 M1 and M3
   (`Owned`, `MustUse`), RFC-0091 M1 (`Copy` for a self-referring type)
 - **Principle:** RFC-0089's own thesis, applied one level down. *Stop inferring
@@ -794,6 +795,15 @@ watches the steady state cannot see one. Parity is what sees it.
   applied to `for` and per element — and it needs the per-element move tracking
   a store out of the loop body already relies on.
 
+  **M5 paid this, and the reading of it was half right.** The row is Phase 10a's
+  and the guard is Phase 10a's, but "per element" is not what closed it: the
+  loop VARIABLE is bound to the snapshot's row, so a body that moves an element
+  out marks the whole row and the loop releases nothing. That is a leak of the
+  elements the body did NOT keep, which is the direction this analysis is
+  allowed to be wrong in, and it costs nothing on the row that was measured.
+  The measurement now reads **4 MB**, and 4 MB again at four times the turns.
+  See M5.
+
 **A self-referring element type stops the walk.** `type L = Array<L>` has no
 bottom to a structural release, and the row overflowed the stack on the
 interpreter and both compiling backends before the guard went in — the same
@@ -922,7 +932,7 @@ a bug in a language that promises memory safety.
 **`keysLoop` stays leaking, and M3 is not what closes it.** `for k in m.keys()`
 walks a temporary, and a loop over a temporary releases nothing — the body may
 take an element. The map releasing its own keys does not reach the snapshot. It
-is still Phase 10a's `if let` row, applied to `for` and per element.
+is still Phase 10a's `if let` row, applied to `for`. **M5 is what closed it.**
 
 **The must-use link is a fourth thing, not this one.** M0 called it "U4 plus a
 recursion in `Owned::linear_kind`". U4 closed in M2 and M3 did not touch
@@ -1037,6 +1047,96 @@ MustUse`"*, which names a row no program wrote. It reads:
   Slots<T>` inside a container is emitted rather than skipped. It is untested by
   the corpus, which stores no `Slots` in an `Array`.
 - Everything under "What it does not close" stands unchanged.
+
+### M5 — a `for` over a temporary owns the snapshot
+
+M2 booked a cost and named the shape that pays it. This is the payment.
+
+`for k in m.keys()` walks a value with no name. Nothing released it, and since
+M2 the snapshot holds COPIES of the keys rather than the map's own pointers, so
+the leak is the key bytes.
+
+**The row is Phase 10a's, at the second statement that can walk a temporary.**
+`movecheck` gives the `Stmt::ForIn` node the row a `let` gets, keyed by the
+statement address, and `own.rs` reads it exactly as it reads an `if let`'s. The
+guard is Phase 10a's guard, unchanged and asked again: `place_key` answers 0
+both for an expression that names no place and for a place with no `let` row,
+and `names_a_place` is what tells them apart. Minting a row for the second kind
+releases somebody else's value, which is the use-after-free that turned CI red
+for twenty-four runs.
+
+**`keys()` is not a view, and that was already right.** `RESERVED_VIEWS` holds
+`at` and `bytes` and never held `keys`. `at` reads an element out of a container
+and `bytes` is a view of a String's buffer; both still own nothing, so
+`for b in bytes(s)` gets no row and must not. `m.keys()` allocates, and since M2
+what it allocates is the keys as well as the buffer — so the loop is the only
+owner there is.
+
+**The loop VARIABLE is bound to the row.** That is what makes an escape from the
+body visible: a store (`fs.push(Field { key: k, .. })`, which `httpInput` does),
+a `return`, a `drop`, a capture, a handover to a position that retains — every
+one of them runs through `took`, and `took` writes the row. A row that says the
+value left is a row `own.rs` reclaims nothing from, so the elements the body
+kept stay allocated and the buffer stays with them.
+
+M2 said the fix would be "per element". It is not, and the whole-row answer is
+the honest one: a move on one branch only is still a move, an element the body
+kept and an element it did not are not told apart by anything this pass records,
+and the direction that leaks is the direction that is allowed to be wrong. On
+the row that was measured — a body that reads and keeps nothing — the whole
+snapshot goes back and the number is the same either way.
+
+**One rule had to be added: a map takes its KEY.** `map_set` writes the key
+pointer into `keys[len]` and copies nothing, in both compiling backends. So
+`hs[k] = v` moves `k`, and no rule said so. `httpHeaders` in `std/http` is
+`for k in base.keys() { hs[k] = httpAt(base, k) }` — a loop that released its
+snapshot would hand back a key the map still holds, and the map releases its
+keys since M2. `Stmt::IndexSet` records the index as a store now, AFTER the
+value (which may read the key) and with `outlives` FALSE: recording the move is
+what this milestone needs, and refusing a BORROWED key is a rule of its own with
+a corpus behind it. The instruments M0 keeps are gated on `outlives`, so their
+counts do not move.
+
+**A stream is refused.** `for x in pull()` already closes its producer on every
+exit path in all three engines (RFC-0075 M2b), so a row there would close it
+twice. `own.rs` names the exclusion rather than leaving it to the backends'
+early returns.
+
+**M5 as landed.**
+
+- **The memory suite reads 15 rows, 15 steady.** `keysLoop` flips, every other
+  row is unmoved. The census has no leaking row for the first time.
+- **Measured native, 2,000 turns over 100 65-byte keys: 24.12 MB peak → 4.22
+  MB**, and 4 MB again at 8,000 turns. The "before" number was reproduced on
+  this machine before anything was changed.
+- **Three-way parity: 124 checked, 11 skipped, 0 failed**, byte-identical
+  including traps. **`genwasm`: 11 passed, plus the `--ignored` corpus test.**
+  **Workspace: 1,514 passed, 0 failed** over 52 binaries with `--no-fail-fast`,
+  plus 69 in `vyrn-lsp`.
+- **`vyrn why --memory` over the corpus is unmoved: 2,258 not reclaimed of
+  3,726** — the same two numbers `main` reads. A `for` row carries no
+  `BindingNote`, because the snapshot is a temporary with no name to print, so
+  it does not reach that report at all.
+- **The instrument is unmoved**: `stores: 0`, `elem-store: 0`, `elem-return: 0`,
+  `returns: 0` over 210 files.
+
+**What M5 does not close.**
+
+- **A body that keeps one element leaks all of them.** The whole row goes, not
+  the buffer alone. Releasing the buffer and not the elements is expressible —
+  `FreeArr` beside `Deep` — and it buys 8 bytes per element on the loops that
+  keep one. It was not worth a second verdict per row.
+- **`for x in consume xs` still leaks its container.** The take marks the source
+  place moved and nothing releases what the loop then owns. It is the same shape
+  as this row, one keyword over, and it was left alone because the census does
+  not name it.
+- **The interpreter runs no `for` release**, exactly as it runs no `if let`
+  release (Phase 10a). It reclaims by dropping the Rust value, and the only
+  reclamation it has to run is a DECLARED one, because that is ordinary Vyrn and
+  may print. A `for` over a temporary `Array<T>` where `T` declares `Owned`
+  would therefore print on the two compiling backends and not here. No corpus
+  program is that shape, and the same gap has been open at `if let` since
+  Phase 10a.
 
 ---
 

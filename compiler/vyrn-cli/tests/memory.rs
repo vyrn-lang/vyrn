@@ -51,8 +51,10 @@
 //! | `recordFields` | RFC-0089 rule 4 | steady | RFC-0092 M3: an aggregate releases its places, so a record hands its two Strings back with it |
 //! | `takenField` | RFC-0093 M2 | steady | the walk skips the place a `consume` took, so N turns allocate N and free N — not 2N, which is the double free, and not 0, which is the leak M1 shipped |
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
-//! | `keysLoop` | U4's price | leaks | `for k in m.keys()` — the snapshot is a temporary nothing releases, and M2 made its elements copies |
+//! | `keysLoop` | U4's price | steady | RFC-0092 M5: a `for` over a temporary owns the snapshot, so it releases it — Phase 10a's row, at the second statement that walks one |
 //! | `spawnFrame` | §10 | steady | see below — on wasm there is no frame to leak |
+//!
+//! **Fifteen rows, fifteen steady.** RFC-0092 M5 closed the last leaking one.
 //!
 //! **§10 does not reach this harness.** The census says a `spawn` frame is
 //! malloc'd and never freed. On wasm there are no threads, so the direct backend
@@ -508,15 +510,19 @@ const ROWS: &[Row] = &[
     Row {
         export: "keysLoop",
         census: "U4's price",
-        today: Shape::Leaks,
-        why: "RFC-0092 M2's cost, measured and kept. `for k in m.keys()` walks a TEMPORARY, and a \
-              loop over a temporary owns its elements and releases nothing — the body may take one \
-              (`fs.push(Field { key: k, .. })` is what the JSON encoder does), so releasing them \
-              at the loop's end would free what the body kept. Before M2 the snapshot held the \
-              map's own key pointers and only its 4-bytes-per-key buffer leaked; the keys are \
-              copies now, so the leak is the key BYTES. Measured native, 2000 turns over 100 \
-              65-byte keys: 6 MB peak before, 24 MB after. Phase 10a's row for an `if let` over a \
-              temporary is the shape that closes this, applied to `for` and per element",
+        today: Shape::Steady,
+        why: "RFC-0092 M5: a `for` over a TEMPORARY owns the snapshot, so it releases it — Phase \
+              10a's row for an `if let` over a temporary, at the second statement that can walk \
+              one, with the same `names_a_place` guard. The loop VARIABLE is bound to that row, so \
+              every way an element can leave the body writes on it: a store \
+              (`fs.push(Field { key: k, .. })`, which `httpInput` does), a `return`, a `drop`, a \
+              capture. A row that says the value left is reclaimed from not at all — the elements \
+              the body kept stay allocated and the buffer with them, which is a leak and not a \
+              double free. One rule had to be added for it: a map takes its KEY, because both \
+              backends write the key pointer into `keys[len]` and copy nothing, so \
+              `for k in base.keys() { hs[k] = .. }` (`httpHeaders`) is a move nothing recorded. \
+              Measured native, 2000 turns over 100 65-byte keys: 6 MB peak before M2, 24 MB after \
+              it, 4 MB now — and 4 MB again at four times the turns",
     },
     Row {
         export: "returnedString",
@@ -692,10 +698,10 @@ export extern fn slotsContainer() {{
     seen = seen + count(s)
 }}
 
-/// RFC-0092 M2's price. `m.keys()` copies its keys now, and a snapshot walked by
-/// `for` is a temporary that nothing reclaims, so every turn leaks one buffer and
-/// one String per key. The map is built once and kept in module state, so the
-/// only allocation per call is the snapshot.
+/// RFC-0092 M2's price, paid by M5. `m.keys()` copies its keys, and the snapshot
+/// a `for` walks is a temporary — which now owns what it holds, so the loop gives
+/// back one buffer and one String per key. The map is built once and kept in
+/// module state, so the only allocation per call is the snapshot.
 export extern fn keysLoop() {{
     if keyed.length == 0 {{
         keyed[tag() + "a"] = 1

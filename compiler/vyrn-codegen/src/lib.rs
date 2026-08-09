@@ -4508,6 +4508,26 @@ impl<'a> Gen<'a> {
                     let elem = (**inner).clone();
                     return self.gen_for_stream(var, body, &av, &elem);
                 }
+                // RFC-0092 M5, census "U4's price": an iterable that is a
+                // TEMPORARY owns what it holds and has no name, so `own` gives
+                // the STATEMENT the reclamation row — the same row Phase 10a
+                // gives an `if let`'s scrutinee, and read the same way. The
+                // value goes into a slot and the slot onto a drop frame of its
+                // own, which is what makes the release survive a `return` out of
+                // the body: `emit_all_drops` walks the frames, and this one is
+                // on the stack for the whole statement.
+                //
+                // The frame is pushed BEFORE the loop's, so `drop_boundary`
+                // sits above it and `break`/`continue` leave it alone — both
+                // land on code that runs the fall-through release below.
+                let iter_drop = self.droppable.get(&(stmt as *const Stmt as usize)).cloned();
+                self.drop_stack.push(Vec::new());
+                if let Some(kind) = iter_drop {
+                    let ty = self.llt(&resolved).clone();
+                    let slot = self.fresh_alloca(&ty);
+                    self.emit(format!("store {ty} {av}, ptr {slot}"));
+                    self.drop_stack.last_mut().unwrap().push((slot, kind));
+                }
                 // Iterating a String yields each byte as an Int (loaded as i8 and
                 // zero-extended); arrays load their element type directly.
                 let byte_elem = resolved == Type::Str;
@@ -4621,6 +4641,15 @@ impl<'a> Gen<'a> {
                 self.emit_term(format!("br label %{cond_l}"));
 
                 self.emit_label(&end_l);
+                // The fall-through release (RFC-0092 M5). A body that returned
+                // already ran it through `emit_all_drops`; this label is still
+                // reached from the condition, so the normal exit runs it once.
+                let drops = self.drop_stack.pop().unwrap();
+                if !self.terminated {
+                    for (slot, kind) in drops.iter().rev() {
+                        self.emit_drop(slot, kind);
+                    }
+                }
                 Ok(())
             }
             Stmt::Drop { name, .. } => {
