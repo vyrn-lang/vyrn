@@ -188,6 +188,71 @@ pub const COPY: &str = "Copy";
 /// The one method [`COPY`] declares.
 pub const COPY_COPY: &str = "copy";
 
+/// The protocol a type implements to say **how it renders as text** (RFC-0094
+/// M3). RFC-0007 §v2 wrote this deferral by name: "letting user types be
+/// interpolable via a `Display` protocol".
+///
+/// `print`, `x.toString()` (`@str`) and every interpolation hole (`value`) took
+/// a union of the scalars the compiler renders, and refused everything else. A
+/// type outside that union now asks its declaration.
+///
+/// **The seed is the existing lowering, not a row, and that is the one place
+/// this differs from [`COPY`] and [`OWNED`].** A scalar never reaches the
+/// dispatch, so no `impl Show for Int64` can change what `7` prints as. Two
+/// measured reasons, not one preference:
+///
+/// 1. `examples/protocol.vyrn` declares `impl Show for Int64` whose body is
+///    `self.toString()`. Under "the declaration always wins" that is infinite
+///    recursion, in a file that compiles today.
+/// 2. Parity compares bytes, and float rendering is where it breaks. One
+///    lowering renders a `Float64` in three engines (`std/num`'s `f64Str`); a
+///    seeded row a program could replace would be a second answer to keep in
+///    step with it.
+///
+/// So the rule is additive: **a scalar renders by the language's lowering, and
+/// a type the language cannot render asks its declaration.** Nothing that
+/// compiles today changes what it prints.
+///
+/// Known by name for the reason [`OWNED`] is: `vyrn run` on a bare file has no
+/// resolver, so `print` may not depend on a module lookup.
+pub const SHOW: &str = "Show";
+
+/// The one method [`SHOW`] declares.
+pub const SHOW_SHOW: &str = "show";
+
+/// Whether the language renders `t` itself.
+///
+/// These are exactly the scalars `print`, `@str` and the three backends already
+/// lower, and they are the union RFC-0094 calls "the union parameter". A type
+/// here never reaches [`show_impl`]; everything else may.
+pub fn renders(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
+    )
+}
+
+/// The `impl Show for T` method a value of type `ty` renders through, or `None`
+/// where nothing declared one. The caller has already established that
+/// [`renders`] is false for the resolved type.
+pub fn show_impl(impls: &[ImplBlock], ty: &Type) -> Option<String> {
+    show_impl_by_key(impls, &type_key(ty)?)
+}
+
+/// [`show_impl`], by type key. The interpreter reaches this one, for the reason
+/// [`copy_impl_by_key`] exists: it dispatches on a runtime value, whose key is
+/// the name stamped on it.
+pub fn show_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
+    impls
+        .iter()
+        .any(|i| {
+            i.protocol == SHOW
+                && type_key(&i.ty).as_deref() == Some(key)
+                && i.methods.iter().any(|m| m.name == SHOW_SHOW)
+        })
+        .then(|| impl_method_name(SHOW, key, SHOW_SHOW))
+}
+
 /// The protocol a container implements to say **how it is iterated** (RFC-0091
 /// M3): `type Item`, `fn size(read self) -> Int64`, and
 /// `place nth(read self, i: Int64) -> Item`.

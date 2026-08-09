@@ -1,0 +1,88 @@
+// Rendering is a declaration — RFC-0094 M3, and the deferral RFC-0007 §v2 wrote
+// by name: "letting user types be interpolable".
+//
+// `print`, `x.toString()` and every interpolation hole took a union of every
+// scalar the compiler renders, and refused everything else. A union parameter is
+// what a language writes when it has no protocol. A type outside that union now
+// asks its own declaration instead.
+//
+// The compiler knows the NAME `Show` and the one method name, and nothing else
+// about it — the same bootstrap answer `Owned` and `Copy` give, for the same
+// reason: `vyrn run` on a bare file has no resolver, so `print` may not depend
+// on a module lookup. This file declares the protocol itself.
+
+protocol Show {
+    fn show(self) -> String
+}
+
+type Point = { x: Int64, y: Int64 }
+
+impl Show for Point {
+    fn show(self) -> String { return "(\{self.x}, \{self.y})" }
+}
+
+// The seed is the EXISTING lowering, not a row, and this impl is the evidence.
+// A scalar never reaches the dispatch, so `n.show()` calls this and `print(n)`
+// does not. Two measured reasons: the body below is `self.toString()` in
+// `examples/protocol.vyrn`, which under "the declaration always wins" is
+// infinite recursion; and one lowering renders a number in three engines, where
+// a row a program could replace would be a second answer to keep in step.
+impl Show for Int64 {
+    fn show(self) -> String { return "the number " + self.toString() }
+}
+
+// A tag is an ordinary function over the literal parts and the boxed holes
+// (RFC-0007). A `Point` reaches it as the `StrVal` it renders to, so a hole is
+// still data and still cannot become the tag's own structure.
+fn tag(parts: Array<String>, values: Array<Value>) -> String {
+    let mut out = parts[0]
+    let mut i = 0
+    for v in values {
+        out = out + "[" + showValue(v) + "]"
+        i = i + 1
+        if i < parts.length {
+            out = out + parts[i]
+        }
+    }
+    return out
+}
+
+// A generic bounded by `Show` renders its argument. The impl is not selected at
+// the check — it is selected per specialization, exactly as `x.show()` is inside
+// the same generic (RFC-0002 §5). A scalar instance still takes the language's
+// lowering, so `label(7)` is `[7]` and not what `impl Show for Int64` says.
+fn label<T: Show>(x: T) -> String {
+    return "[\{x}]"
+}
+
+fn showValue(v: Value) -> String {
+    return match v {
+        IntVal(n) => n.toString(),
+        BoolVal(b) => b.toString(),
+        StrVal(s) => s.copy(),
+    }
+}
+
+fn main() -> Int64 {
+    let p = Point { x: 3, y: 4 }
+
+    // The three renderers, one declaration.
+    print("\{p}") // (3, 4)
+    print(p.toString()) // (3, 4)
+    print(p) // (3, 4)
+
+    // And the hole of a tagged template — RFC-0007 §v2, closed.
+    print(tag"at \{p} and \{7}") // at [(3, 4)] and [7]
+
+    // A scalar renders by the language's lowering, whatever a program declares.
+    let n = 7
+    print(n) // 7
+    print("\{n}") // 7
+    print(n.show()) // the number 7
+
+    // The same rule inside a `<T: Show>` bound, at two instances.
+    print(label(p)) // [(3, 4)]
+    print(label(n)) // [7]
+
+    return 0
+}

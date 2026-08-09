@@ -1,10 +1,11 @@
 # RFC-0094 — A Builtin Is a Declaration
 
-- **Status:** **M1 and M2 landed. M2 carried M1's line gate and passed it:
-  −109 production lines. M3 may follow; see "M2 as landed".** M0 measured and merged
+- **Status:** **Complete. M1, M2 and M3 landed.** M0 measured and merged
   (`rfcs/census-builtins.md`, `26469be`). The census refuted a third of the brief
   that asked for it, and this RFC is written from the census rather than from the
-  brief; M1 then refuted two rows of the census. See "M1 as landed".
+  brief; M1 then refuted two rows of the census, M2 refuted one of the census's
+  counts, and M3 refuted its own brief about which side of the dispatch the seed
+  goes on. See the three "as landed" sections. RFC-0007 §v2 is closed by M3.
 - **Depends on:** RFC-0086 (seeded rows, `impl`, "no second list"), RFC-0091 M2
   (`place` projections — `at` is already dispatch), RFC-0092 M5 / PR #118 (the
   bug class this closes), RFC-0007 §v2 (the deferral M3 collects).
@@ -204,7 +205,7 @@ census counted are the dispatch chains, and M2 is what deletes them.** So M2
 carries the bar M1 could not: a net reduction, reported, and if the count rises
 again the mechanism is not paying for itself and M3 does not follow.
 
-### M3 — the union parameter becomes a protocol
+### M3 — the union parameter becomes a protocol — **landed; see "M3 as landed"**
 
 `value` first — it has **one** hand-written call site, and closing it closes
 RFC-0007 §v2, which deferred "the extensible value set" by name. Then `print` and
@@ -585,3 +586,184 @@ line count.
 **Do `value` first, as written.** It has one hand-written call site, it closes
 RFC-0007 §v2 by name, and it is the only one of the three whose blast radius is
 smaller than `print`'s 140 files.
+
+---
+
+## M3 as landed
+
+`protocol Show { fn show(self) -> String }` is a protocol the compiler knows by
+**name only** — the same bootstrap answer `Owned`, `Copy` and `Fallible` give,
+for the same reason: `vyrn run` on a bare file has no resolver, so `print` may
+not depend on a module lookup. `examples/show.vyrn` declares the protocol
+itself, and nothing was added to `std/`.
+
+`print`, `@str` and `value` now dispatch to `impl Show for T` where they used to
+refuse. One declaration serves all three, because `"\{x}"` desugars to `@str`
+and `x.toString()` desugars to `@str`.
+
+### The brief was wrong about which side the seed goes on
+
+The brief asked for "seeded impls for every type `@str` renders today", with a
+declared `impl Show for T` winning over the seed, exactly as a declared
+`impl Owned` wins over the release seed. **That is the one thing M3 did not
+build, and two measurements say it must not.**
+
+**`examples/protocol.vyrn` would stop terminating.** It declares
+`impl Show for Int64` and the body is `self.toString()`. Under "the declaration
+always wins", `self.toString()` is a call to the function it sits in. That file
+compiles today and is in the parity corpus.
+
+**A replaceable row would be a second float formatter.** RFC-0081 M2 spent a
+milestone making `std/num`'s `f64Str` the ONE implementation that renders a
+`Float64`, in three engines, because parity compares bytes. A seeded row a
+program could replace puts a second answer back in reach of the path that was
+hardest to make agree.
+
+So the rule M3 shipped is one sentence and it is additive:
+
+> **A scalar renders by the language's lowering. A type the language cannot
+> render asks its declaration.**
+
+Nothing that compiles today prints anything different. The dispatch reaches
+exactly the types the three renderers used to refuse. `examples/show.vyrn`
+declares `impl Show for Int64` on purpose and asserts the consequence: `n.show()`
+is `the number 7` and `print(n)` is `7`.
+
+This is a real difference from `Copy` and `Owned` and it is worth naming.
+Duplicating and releasing have no built-in answer for a record — the compiler
+derives one, and a type may say the derivation is wrong. Rendering a number is
+not a derivation; it is a decision the language already made, in three engines,
+byte for byte.
+
+### `value` first, and it fits
+
+The milestone was ordered `value` first with a stop point after it. `value` has
+one hand-written call site and the parser emits it for every hole of every
+tagged template. It fit with no argument: the checker types the `show` call, and
+the box is the `StrVal` the rendering produces.
+
+**The `Value` enum did not change.** RFC-0007 §v2 predicted `Value` would be
+"replaced by a protocol bound", and that shape is not available: Vyrn
+monomorphizes and has no function pointers (RFC-0037), so `Array<Value>` cannot
+hold one element per declared type. Rendering at the box is what a language
+without existentials can do, and it is what §v2 asked for — a user type in a
+hole. The safety property is unchanged and is arguably clearer: a tag receives
+data, and a rendered String is data.
+
+**RFC-0007 §v2 is closed**, and RFC-0007's status line, its §v2 section and its
+Q5 now say so.
+
+### `<T: Show>` renders, and the checker had to defer
+
+`fn label<T: Show>(x: T) -> String { return "[\{x}]" }` works. The checker
+cannot select the impl there — the receiver is `Type::Param`, not `Type::Named`
+— so it agrees the bound exists and defers, which is the answer `x.show()`
+already gives inside the same generic (RFC-0002 §5).
+
+The backends then had to be told to substitute BEFORE taking the type key. A
+specialization still spells the parameter `T` in the AST, and `T` names no impl.
+This cost one line in each compiling backend and was caught by the native column
+of a two-line test program, not by review.
+
+An **unbounded** `<T>` is refused, with the refusal it always had.
+
+### `assertEq` is not here, as stated
+
+It compares rather than renders. Comparing needs an `Eq` protocol the language
+does not have, and inventing one to finish a bucket is the shape M1's gate
+refused. `@join` is task ownership. `@concat` is an operator on String, and no
+operator-protocol RFC exists. `at`, `push`, `@has`, `@remove` and `@keys` have
+been dispatch since RFC-0091 M2.
+
+No record derives `Show`. That is a derive, it has i18n consequences, and it is
+a separate decision.
+
+### The numbers
+
+Measured the way M1 and M2 measured, over every `.rs` file under `compiler/`,
+counting lines that are neither blank nor a `//` comment, against `main` at
+`fcc24a8`:
+
+| file | production | test |
+|---|---|---|
+| `types.rs` | +21 | 0 |
+| `checker.rs` | +43 | +68 |
+| `interp.rs` | +19 | +19 |
+| `codegen/lib.rs` | +23 | 0 |
+| `codegen/direct.rs` | +25 | 0 |
+| **net** | **+131** | **+87** |
+
+**The deleted type-switch lines, per engine: zero. In every engine.** That is
+the number the gate asked for and it is the honest one. M3 deletes no type
+switch because the type switch IS the seed: the scalar arms of `print`, `@str`
+and `value` are the rendering a declaration overrides, and the section above is
+why they stay. What M3 adds is one dispatch around each — a helper and a guard
+per engine, five in total.
+
+**So M3 does not pay in lines and was not asked to.** M2 carried that bar and
+passed it at −109, and M2's own report said M3 would not repay the same way
+because `print`, `@str` and `value` have no `std/` body waiting for them. Over
+the three milestones the compiler is +171 production lines, and what it bought
+is one closed bug class (M1), eleven routed names that are now ordinary imports
+(M2), and a capability that was impossible at any price before this milestone
+(M3).
+
+### The gate
+
+- **A user type renders.** `examples/show.vyrn` — a record with `impl Show`,
+  used in `"\{p}"`, `p.toString()`, `print(p)`, a tagged template's hole, and a
+  `<T: Show>` generic at two instances. Byte-identical on interpreter, native
+  and wasm.
+- Three-way parity byte-identical including traps: **35 tests, green**
+  (`--release --test parity -- --ignored --test-threads=1`, with
+  `VYRN_WASMTIME`, `WASI_SYSROOT` and `WASI_BUILTINS` set).
+- Workspace `cargo test --workspace --no-fail-fast`: **52 test binaries, green**.
+  `vyrn-lsp` separately: **69 green, 2 ignored**.
+- Memory suite: **15 rows, 15 steady**.
+- `genwasm` (`--features wasm-gen`): **11 green, 1 ignored**.
+- RFC-0092's instrument: `stores: 0`, `returns: 0`, `elem-store: 0`,
+  `elem-return: 0`, `total: 0` over 213 files, all 213 linked.
+- **Wasm sizes unmoved where no user impl exists** — and byte-identical, not
+  merely equal: `domdemo.wasm` 28,445, `fib.wasm` 1,522, `mapdemo.wasm` 37,794,
+  `vlog.wasm` 48,729, each hashing the same as `fcc24a8`'s. Monomorphization
+  costs nothing to a program that declares nothing.
+- Tagged templates unchanged: the parser still emits `value` for every hole of
+  every template, and `examples/tagged.vyrn` and `examples/templates.vyrn` are
+  untouched.
+- `cargo fmt --check`, `vyrn fmt --check` over the corpus (`corpus_fmt`, 4
+  tests), and `vyrn doc --std --verify` (33 files): all clean.
+
+### The diagnostics
+
+A type with no `impl Show` is refused as before, plus the sentence that says what
+to write:
+
+```
+line 3: print needs a number, Bool, or String, found { x: Int64 } — say how it
+renders with `impl Show for P`
+```
+
+The hint names the type the way a reader can WRITE it. A type the loader
+prefixed with its module has no spelling at the call site, so it gets no hint
+rather than an unspellable one — PR #120's lesson, applied here.
+
+The protocol is an ordinary declaration, so a program may declare
+`fn show(self) -> Int64`. The three renderers refuse it by name rather than
+handing an `Int64` to a String path.
+
+### What M3 did not close
+
+- **The method-builtin full move is still blocked, and now by a decision rather
+  than by a missing mechanism.** `toString` is still intercepted into `@str` by
+  `parser::METHOD_BUILTINS`, because `@str` is still the lowering for every
+  scalar. Taking `toString` out of that table means seeding `impl Show for Int64`
+  and the rest, which is precisely what the two measurements above refuse. The
+  mechanism it was waiting for exists now; the reason not to use it on scalars is
+  new information.
+- **`declared::builtin_returns` is still 4 rows.** M1 said merging it needs M3.
+  It needs the scalar half of `@str` to be a row, and that half is staying.
+- **The editor gained nothing**, as in M1. `.show()` completion already worked
+  through `method_impls`; hover over `print` still comes from `MACRO_BUILTINS`.
+- **`schemaOf` and `toJson` do not see `Show`**, deliberately. Rendering and
+  serialization are different questions and the tables stay apart.
+- **Effects.** 29 rows, unchanged, in all three milestones.

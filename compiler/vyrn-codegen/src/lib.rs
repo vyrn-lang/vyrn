@@ -3550,6 +3550,20 @@ impl<'a> Gen<'a> {
     /// binding, a field of one, an element of one, a call result — and answers
     /// `None` for the rest, which then takes the seeded row exactly as it did
     /// before projections existed.
+    /// The `impl Show for T` a value of type `ty` renders through (RFC-0094
+    /// M3), or `None` where the language renders it itself.
+    /// The key is taken from the SUBSTITUTED type, not the written one: inside a
+    /// `<T: Show>` specialization the parameter is still spelled `T` here, and
+    /// `T` names no impl. Substituting is what selects the impl per instance,
+    /// which is what the checker deferred to this point.
+    fn show_dispatch(&self, ty: &Type) -> Option<String> {
+        let t = vyrn_frontend::types::substitute(ty, self.subst);
+        match vyrn_frontend::types::renders(&self.resolve(&t)) {
+            true => None,
+            false => vyrn_frontend::types::show_impl(self.impls, &t),
+        }
+    }
+
     fn static_ty(&self, e: &Expr) -> Option<Type> {
         match e {
             // The DECLARED type, never its base: an `impl` head names `Window`,
@@ -7773,6 +7787,26 @@ impl<'a> Gen<'a> {
                 ));
             }
             return self.gen_call(rt, args);
+        }
+        // RFC-0094 M3: a type the language cannot render renders itself. `@str`
+        // BECOMES the `show` call — its result is the fresh owned String
+        // `toString` promises — while `print` and `value` take that String as
+        // their argument and keep their one lowering.
+        if matches!(name, "print" | "@str" | "value") && args.len() == 1 {
+            if let Some(m) = self
+                .static_ty(&args[0])
+                .and_then(|t| self.show_dispatch(&t))
+            {
+                if name == "@str" {
+                    return self.gen_call(&m, args);
+                }
+                let rendered = [Expr::Call {
+                    name: m,
+                    args: args.to_vec(),
+                    line: 0,
+                }];
+                return self.gen_call(name, &rendered);
+            }
         }
         // Calling a `fn`-typed parameter inside a specialized instance (RFC-0023):
         // a direct call to the monomorphized target with the captured values (this

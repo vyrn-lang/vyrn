@@ -4173,6 +4173,16 @@ impl<'a> Interp<'a> {
                     }
                     return self.call(rt, &vals);
                 }
+                // RFC-0094 M3: the three renderers take a union of the scalars
+                // the language renders. A value outside that union renders
+                // through its own `impl Show`, and what the arms below then see
+                // is the String it handed back — so `print`, `@str` and `value`
+                // each keep exactly one lowering.
+                if matches!(name.as_str(), "print" | "@str" | "value") && vals.len() == 1 {
+                    if let Some(m) = self.show_dispatch(&vals[0]) {
+                        vals[0] = self.call(&m, &vals[0..1])?;
+                    }
+                }
                 match name.as_str() {
                     // RFC-0079: `panic(msg)` is a trap whose text the caller
                     // wrote. Same channel as every `@.trap.*` — the CLI prefixes
@@ -5930,6 +5940,27 @@ impl<'a> Interp<'a> {
     ///
     /// Read this together with `ok_target` in the checker: it returns `None` for
     /// exactly the targets that one refuses.
+    /// The `impl Show for T` this value renders through (RFC-0094 M3), or
+    /// `None` where the language renders it itself.
+    ///
+    /// Dispatched on the runtime value's stamp, which is the route
+    /// [`Interp::val_type_key`] exists for. The scalar guard is first, and it is
+    /// what keeps an `impl Show for Int64` from redefining the digits of `7`.
+    fn show_dispatch(&self, v: &Val) -> Option<String> {
+        if matches!(
+            v,
+            Val::Int(_)
+                | Val::IntN { .. }
+                | Val::Float(_)
+                | Val::Float32(_)
+                | Val::Bool(_)
+                | Val::Str(_)
+        ) {
+            return None;
+        }
+        crate::types::show_impl_by_key(self.impls, &self.val_type_key(v)?)
+    }
+
     fn val_type_key(&self, v: &Val) -> Option<String> {
         match v {
             Val::Int(_) => Some("Int64".to_string()),
@@ -8144,6 +8175,34 @@ mod tests {
                    let b = match value(\"hey\") { IntVal(n) => 0, BoolVal(x) => 0, StrVal(s) => s.byteLength }; \
                    return a + b; }"; // 7 + 3
         assert_eq!(run(src).unwrap(), 10);
+    }
+
+    /// RFC-0094 M3, and RFC-0007 §v2 with it: a hole may carry any type that
+    /// says how it renders, and it reaches the tag as the `StrVal` it rendered
+    /// to — so a hole is still data and still cannot become the tag's structure.
+    #[test]
+    fn value_boxes_a_declared_type_as_the_string_it_renders_to() {
+        let src = "protocol Show { fn show(self) -> String }\n\
+                   type P = { x: Int64 }\n\
+                   impl Show for P { fn show(self) -> String { return \"pt\" } }\n\
+                   fn main() -> Int64 { let p = P { x: 1 }\n \
+                   return match value(p) { IntVal(n) => 0, BoolVal(b) => 0, \
+                   StrVal(s) => s.byteLength } }";
+        assert_eq!(run(src).unwrap(), 2);
+    }
+
+    /// The scalar guard, at runtime. `impl Show for Int64` is callable by name
+    /// and does NOT redefine the digits: `7.toString()` is `7`, not what the
+    /// impl says. The impl's own body is `self.toString()`, so a dispatch that
+    /// took a scalar would not return at all.
+    #[test]
+    fn a_scalar_never_renders_through_a_declaration() {
+        let src = "protocol Show { fn show(self) -> String }\n\
+                   impl Show for Int64 { fn show(self) -> String { \
+                   return \"n\" + self.toString() } }\n\
+                   fn main() -> Int64 { let n = 7\n \
+                   return n.toString().byteLength + n.show().byteLength }";
+        assert_eq!(run(src).unwrap(), 3); // "7" is 1, "n7" is 2
     }
 
     #[test]

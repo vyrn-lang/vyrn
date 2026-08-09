@@ -1,7 +1,9 @@
 # RFC-0007 — String Templates & Safe Interpolation
 
-- **Status:** Draft — **plain interpolation and tagged templates both implemented
-  (closed `Value` set); extensible/protocol values not yet**
+- **Status:** **Implemented, §v2 included.** Plain interpolation and tagged
+  templates both shipped in Phase 1. **§v2 — the extensible value set — closed by
+  RFC-0094 M3:** a type that declares `impl Show for T` is interpolable, in a
+  hole and in `x.toString()` alike.
 - **Depends on:** RFC-0002 (enums, generics), RFC-0004 (`String` heap values)
 - **Enables:** RFC-0008 (Logging), safe `sql`/`latex`/`html` interpolation
 
@@ -28,9 +30,12 @@
 > the growable arrays the tag takes. **A tagged template requires ≥1 interpolation**
 > (a hole-less tag is pointless — use a plain string).
 >
-> **Not yet:** the **extensible** value set (§v2) — letting user types be
-> interpolable via a `Display`/`ToParam` protocol. That waits on user-defined
-> protocols/methods. The closed `Value` set is forward-compatible with it.
+> **§v2 (implemented — RFC-0094 M3).** The extensible value set is closed. A
+> type that declares `impl Show for T` is interpolable: `value(x)` boxes it as
+> the `StrVal` its `show` renders to, and `"\{x}"` renders it the same way. The
+> `Value` enum stays the closed three, which is deliberate — a tag still reads a
+> hole as data and still cannot be handed the user's value itself, so the safety
+> property is exactly the one v1 had.
 
 ---
 
@@ -124,13 +129,27 @@ This needs **no new type-system machinery** — enums + arrays already exist
 (RFC-0002). It covers the scalar cases SQL/LaTeX care about. Limitation: only the
 built-in scalars are interpolable.
 
-### v2 — open/extensible (after protocols)
+### v2 — open/extensible (after protocols) — **landed, RFC-0094 M3**
 
-Any type implementing a `Display` / `ToParam` protocol becomes interpolable, and
-`Value` is replaced by a protocol bound. This **depends on user-defined
-protocols/methods**, which Vyrn does not have yet (the outstanding roadmap item),
-so it is explicitly deferred. v1 is forward-compatible: the same `parts/values`
-shape, with a wider element type.
+Any type implementing a rendering protocol becomes interpolable. The protocol is
+`Show`, with one method `fn show(self) -> String`.
+
+The shape this section predicted is **not quite the shape that landed**, and the
+difference is worth recording. It expected `Value` to be "replaced by a protocol
+bound" — a wider element type. What landed keeps the element type exactly as it
+was: a hole of a declared type reaches the tag as the `StrVal` its `show`
+rendered to. Two reasons, and both are properties this RFC already argued for.
+
+1. **The safety property is about what a tag can be handed.** A tag receives
+   data, never structure. A `StrVal` is data. Widening the array to hold the
+   user's own value would give a tag something to reach into.
+2. **A wider element type has nowhere to live.** Vyrn monomorphizes and has no
+   function pointers (RFC-0037), so `Array<Value>` cannot hold one element per
+   declared type. Rendering at the box is what a language without existentials
+   can do, and it is enough for what §v2 asked for.
+
+So v1 was forward-compatible in the way that mattered: the `parts/values` shape
+did not change at all.
 
 ## Tags
 
@@ -215,5 +234,6 @@ falls out of the same mechanism instead of needing its own format language.
   the signature; no new keyword.)*
 - **Q4 — nesting.** Interpolations containing templates (`"\{ cond ? a"…" }"`).
   Falls out of "the hole is an ordinary expression," but worth a test.
-- **Q5 — extensible `Value`.** The v2 protocol bound — deferred to whenever
-  user-defined protocols land; recorded here so v1's shape stays compatible.
+- **Q5 — extensible `Value`.** **Answered by RFC-0094 M3.** The protocol is
+  `Show`; the box stays the closed three and a declared type renders into
+  `StrVal`. v1's shape did not have to change.

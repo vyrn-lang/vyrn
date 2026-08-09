@@ -250,7 +250,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("schemaOf", Compiler, "reflects a type DECLARATION into a Schema literal"),
     ("contractOf", Compiler, "RFC-0071: reflects a module contract"),
     ("jsonSchema", Compiler, "renders a declaration as JSON Schema at compile time"),
-    ("value", Compiler, "boxes a scalar into the interpolation enum by its type"),
+    ("value", Compiler, "boxes a scalar by its type; RFC-0094 M3 routes anything else to `impl Show`"),
     ("blackBox", Compiler, "RFC-0055: an optimizer barrier is a backend property"),
     ("raw", Compiler, "RFC-0054: builds a code-quote value"),
     ("rawAt", Compiler, "RFC-0054: a code quote carrying an origin directive"),
@@ -283,6 +283,9 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // interpreter's `{:.6}` — kept deliberately as the differential ORACLE, not
     // as a third peer, since exact decimal formatting cannot be pinned
     // exhaustively over 2^64 inputs.
+    // RFC-0094 M3 did NOT move this arm and could not: the scalar rendering IS
+    // the seed a declaration overrides, and it must stay one lowering per engine
+    // because parity compares bytes. What M3 adds is the dispatch around it.
     ("@str", Measured, "integer rendering: a Vyrn digit loop is 150 ns against 60 ns (2.5x), on every print"),
     ("@concat", Measured, "9.7x native / 11x wasm (580 ns against 60 ns): a Vyrn join must revalidate UTF-8"),
     // RFC-0083 M2. All three ARE movable — `examples/simdbench.vyrn` holds the

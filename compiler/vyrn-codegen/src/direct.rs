@@ -5428,6 +5428,28 @@ impl Fn_<'_> {
             // Otherwise fall through to `unsupported("the call \`{name}\`")` below,
             // which is this backend's own wording for something it cannot reach.
         }
+        // RFC-0094 M3: a type the language cannot render renders itself. `@str`
+        // BECOMES the `show` call; `print` and `value` take the String it hands
+        // back, so each keeps the one lowering below. Dispatched on `peek`
+        // rather than on an emitted type, exactly as `@copy` is, because the
+        // choice has to be made before anything reaches the stack.
+        if matches!(name, "print" | "@str" | "value") && args.len() == 1 {
+            if let Some(f) = self
+                .peek(&args[0], line)
+                .ok()
+                .and_then(|t| self.show_dispatch(&t))
+            {
+                if name == "@str" {
+                    return self.call(m, b, &f, args, line);
+                }
+                let rendered = [Expr::Call {
+                    name: f,
+                    args: args.to_vec(),
+                    line,
+                }];
+                return self.call(m, b, name, &rendered, line);
+            }
+        }
         // RFC-0076 M7: the builtins that exist only while a generator runs — the
         // `Code` handle operations, M3b's atom stream, and `listDir`, none of which
         // has a row in the table below because none of them has a runtime meaning
@@ -6565,8 +6587,26 @@ impl Fn_<'_> {
             } => "IntVal",
             Type::Bool => "BoolVal",
             Type::Str => "StrVal",
+            // RFC-0094 M3: a type that says how it renders boxes as the String
+            // it renders to. The emitting path rewrites the argument into that
+            // `show` call, so both halves name one variant.
+            _ if self.show_dispatch(&t).is_some() => "StrVal",
             other => return unsupported(&format!("`value` of `{other}`"), line),
         })
+    }
+
+    /// The `impl Show for T` a value of type `ty` renders through (RFC-0094 M3),
+    /// or `None` where the language renders it itself.
+    /// The key is taken from the SUBSTITUTED type, not the written one: inside a
+    /// `<T: Show>` specialization the parameter is still spelled `T` here, and
+    /// `T` names no impl. Substituting is what selects the impl per instance,
+    /// which is what the checker deferred to this point.
+    fn show_dispatch(&self, ty: &Type) -> Option<String> {
+        let t = self.cx.sub(ty);
+        match ftypes::renders(&self.cx.resolve(&t)) {
+            true => None,
+            false => ftypes::show_impl(&self.cx.impls, &t),
+        }
     }
 
     /// The concrete type of each argument, WITHOUT emitting it.

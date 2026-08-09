@@ -5230,6 +5230,76 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The `impl Show for T` a value of type `t` renders through (RFC-0094 M3),
+    /// or `None` where the language renders `t` itself or nothing declared one.
+    ///
+    /// `t` is the type as WRITTEN, not the resolved base: the impl is keyed by
+    /// the declared name, and `renders` asks the base. So `type Email = String`
+    /// renders as a String — the seed — and a record asks its declaration.
+    fn show_dispatch(&self, t: &Type) -> Option<String> {
+        if crate::types::renders(&self.base(t)) {
+            return None;
+        }
+        let key = crate::types::type_key(t)?;
+        self.impls
+            .contains(&(crate::types::SHOW.to_string(), key.clone()))
+            .then(|| {
+                crate::types::impl_method_name(crate::types::SHOW, &key, crate::types::SHOW_SHOW)
+            })
+    }
+
+    /// What to add to a refusal from `print`, `toString` or `value` when the
+    /// argument's type could carry an `impl Show` and does not.
+    ///
+    /// The name is the one a reader can WRITE. A type the loader prefixed with
+    /// its module has no spelling at this call site, so it gets no hint rather
+    /// than an unspellable one (PR #120's lesson).
+    fn show_hint(&self, t: &Type) -> String {
+        match crate::types::type_key(t) {
+            Some(k) if !k.contains('$') => format!(
+                " — say how it renders with `impl {} for {k}`",
+                crate::types::SHOW
+            ),
+            _ => String::new(),
+        }
+    }
+
+    /// Whether a declaration renders `args[0]`, whose written type is `t` and
+    /// which the language does not render itself.
+    ///
+    /// Two ways it can. A concrete type names its `impl Show`, and the call is
+    /// checked here. A **type parameter bounded by `Show`** does not: the impl
+    /// is selected per specialization, exactly as `x.show()` is inside the same
+    /// generic (RFC-0002 §5), so this only agrees that one exists.
+    ///
+    /// The protocol is an ordinary declaration — the compiler knows only the
+    /// name — so a program is free to declare `fn show(self) -> Int64`, and the
+    /// three renderers must not then be handed one.
+    fn renders_by_declaration(
+        &self,
+        t: &Type,
+        args: &[Expr],
+        line: usize,
+        scope: &Vec<HashMap<String, Binding>>,
+        fn_ret: Option<&Type>,
+    ) -> Result<bool, String> {
+        if let Type::Param(p) = t {
+            return Ok(self.param_has_bound(p, crate::types::SHOW));
+        }
+        let Some(m) = self.show_dispatch(t) else {
+            return Ok(false);
+        };
+        let r = self.call(&m, args, line, scope, Some(&Type::Str), fn_ret)?;
+        match self.base(&r) {
+            Type::Str | Type::Err => Ok(true),
+            other => Err(format!(
+                "line {line}: `{}`'s `show` must hand back a String to render through, found \
+                 {other}",
+                crate::types::SHOW
+            )),
+        }
+    }
+
     fn call(
         &self,
         name: &str,
@@ -5453,21 +5523,19 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
-            let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+            let written = self.expr(&args[0], scope, None, fn_ret)?;
+            let t = self.base(&written);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
-            if !matches!(
-                t,
-                Type::Int
-                    | Type::Float
-                    | Type::Float32
-                    | Type::IntN { .. }
-                    | Type::Bool
-                    | Type::Str
-            ) {
+            if !crate::types::renders(&t) {
+                // RFC-0094 M3: the type answers where the language cannot.
+                if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
+                    return Ok(Type::Unit);
+                }
                 return Err(format!(
-                    "line {line}: print needs a number, Bool, or String, found {t}"
+                    "line {line}: print needs a number, Bool, or String, found {t}{}",
+                    self.show_hint(&written)
                 ));
             }
             return Ok(Type::Unit);
@@ -6031,21 +6099,20 @@ impl<'a> Checker<'a> {
             }
             // `str` renders a scalar to a fresh String — Int, sized IntN, Float,
             // Bool, or String (String is copied). Interpolation lowers to this.
-            let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+            let written = self.expr(&args[0], scope, None, fn_ret)?;
+            let t = self.base(&written);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
-            if !matches!(
-                t,
-                Type::Int
-                    | Type::IntN { .. }
-                    | Type::Float
-                    | Type::Float32
-                    | Type::Bool
-                    | Type::Str
-            ) {
+            if !crate::types::renders(&t) {
+                // RFC-0094 M3. `"\{x}"` desugars to this call, so one dispatch
+                // serves interpolation and `x.toString()` both.
+                if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
+                    return Ok(Type::Str);
+                }
                 return Err(format!(
-                    "line {line}: `toString` renders a number, Bool, or String, found {t}"
+                    "line {line}: `toString` renders a number, Bool, or String, found {t}{}",
+                    self.show_hint(&written)
                 ));
             }
             return Ok(Type::Str);
@@ -6753,13 +6820,23 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
-            let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+            let written = self.expr(&args[0], scope, None, fn_ret)?;
+            let t = self.base(&written);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if !matches!(t, Type::Int | Type::Bool | Type::Str) {
+                // RFC-0094 M3, and RFC-0007 §v2 with it: a hole may now carry
+                // any type that says how it renders. The box stays the closed
+                // three-variant `Value` — a tag reads `StrVal` and can only ever
+                // bind it as a parameter, which is the safety argument the
+                // closed set was there to make.
+                if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
+                    return Ok(Type::Named("Value".to_string()));
+                }
                 return Err(format!(
-                    "line {line}: `value` boxes an Int64, Bool, or String, found {t}"
+                    "line {line}: `value` boxes an Int64, Bool, or String, found {t}{}",
+                    self.show_hint(&written)
                 ));
             }
             return Ok(Type::Named("Value".to_string()));
@@ -9452,6 +9529,98 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.contains("String"), "{e}");
+    }
+
+    // ---- RFC-0094 M3: `impl Show` --------------------------------------------
+
+    /// The header of a program that renders a record through its declaration.
+    /// The protocol is the program's own — the compiler knows the name and
+    /// nothing else, which is what keeps `print` off a module lookup.
+    const SHOW_SRC: &str = "protocol Show { fn show(self) -> String }\n\
+                            type P = { x: Int64 }\n\
+                            impl Show for P {\n\
+                            fn show(self) -> String { return \"p\" }\n\
+                            }\n";
+
+    /// The milestone. One declaration serves all three renderers.
+    #[test]
+    fn a_declared_show_renders_in_all_three_renderers() {
+        for call in [
+            "print(p)",
+            "let s: String = p.toString()",
+            "let s: String = \"\\{p}\"",
+            "let v: Value = value(p)",
+        ] {
+            assert!(
+                check_src(&format!(
+                    "{SHOW_SRC}fn main() -> Int64 {{ let p = P {{ x: 1 }}\n {call}\n return 0 }}"
+                ))
+                .is_ok(),
+                "`{call}` should render through `impl Show for P`"
+            );
+        }
+    }
+
+    /// The seed is the existing lowering, so a scalar never reaches the
+    /// dispatch. `examples/protocol.vyrn` declares exactly this impl and its
+    /// body is `self.toString()`; if the dispatch took a scalar, that file would
+    /// be infinite recursion.
+    #[test]
+    fn a_scalar_renders_by_the_language_whatever_is_declared() {
+        assert!(check_src(
+            "protocol Show { fn show(self) -> String }\n\
+             impl Show for Int64 { fn show(self) -> String { return self.toString() } }\n\
+             fn main() -> Int64 { print(7)\n let s: String = \"\\{7}\"\n return 0 }"
+        )
+        .is_ok());
+    }
+
+    /// A `<T: Show>` bound renders too, and the impl is selected per
+    /// specialization rather than here — the answer `.show()` already gives
+    /// inside the same generic (RFC-0002 §5). An unbounded parameter is refused.
+    #[test]
+    fn a_bounded_type_parameter_renders_and_an_unbounded_one_does_not() {
+        assert!(check_src(
+            "protocol Show { fn show(self) -> String }\n\
+             impl Show for Int64 { fn show(self) -> String { return \"n\" } }\n\
+             fn label<T: Show>(x: T) -> String { return \"[\\{x}]\" }\n\
+             fn main() -> Int64 { return label(1).byteLength }"
+        )
+        .is_ok());
+        let e = check_src(
+            "protocol Show { fn show(self) -> String }\n\
+             fn label<T>(x: T) -> String { return \"[\\{x}]\" }\n\
+             fn main() -> Int64 { return label(1).byteLength }",
+        )
+        .unwrap_err();
+        assert!(e.contains("`toString` renders"), "{e}");
+    }
+
+    /// A type with no `impl Show` is refused as before, and the refusal names
+    /// the declaration that would fix it — spelled the way a reader can write
+    /// it.
+    #[test]
+    fn a_type_that_declares_nothing_is_told_what_to_declare() {
+        let e = check_src(
+            "type P = { x: Int64 }\n\
+             fn main() -> Int64 { let p = P { x: 1 }\n print(p)\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("impl Show for P"), "{e}");
+    }
+
+    /// The protocol is an ordinary declaration, so a program may declare a
+    /// `show` that hands back something else. The renderers must not take it.
+    #[test]
+    fn a_show_that_is_not_a_string_is_refused() {
+        let e = check_src(
+            "protocol Show { fn show(self) -> Int64 }\n\
+             type P = { x: Int64 }\n\
+             impl Show for P { fn show(self) -> Int64 { return 1 } }\n\
+             fn main() -> Int64 { let p = P { x: 1 }\n print(p)\n return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("must hand back a String"), "{e}");
     }
 
     // ---- RFC-0089 M1b: `x.copy()` ------------------------------------------
