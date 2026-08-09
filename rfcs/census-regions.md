@@ -367,6 +367,29 @@ census changes no engine code — and it is one more count against the mechanism
 the arena's routing is a second owner for allocations the walk already owns, and
 the two disagree.
 
+**Fixed.** The diagnosis above names one of the two sites, and `copy` is not the
+mechanism. `Gen::copy_buf` is the first site: it calls `__vyrn_malloc` directly
+now, which is the rule `Gen::array_n_to_heap` states, because `push` grows a
+copied buffer with `realloc` and the walk hands it back with `free`. The second
+site has no `copy` in it. `Gen::str_alloc` routes through `Gen::heap_alloc` too,
+so **every** `String` built inside a region comes from the arena — including a
+`String` the walk reaches one level down. `own.rs` suppresses by the binding's
+own `DropKind`, so it sees `let s = a + b` and it does not see the `String` under
+an `Array<String>`, in a record field, or under a `Map` key. All three corrupted
+the native heap at `259330b` with no `copy` written. The fix gives the release
+side the key the allocation side already uses: `Gen::deep_release` frees no
+`String` while `region_depth > 0`, exactly as `Gen::heap_alloc` draws from the
+arena while `region_depth > 0`. The two sides now partition the same way at every
+depth. `own.rs` does not change — its rule was right about what it can see, and
+the asymmetry was between codegen's two halves. One shape leaks where it freed
+before: a `String` allocated outside a region and moved into a container declared
+inside one. The arena does not own that buffer and the walk no longer hands it
+back. A leak is not a corruption, and `region_store_guard` refuses the reverse
+shape (a store out of the region) at compile time. `examples/region.vyrn` carries
+both halves now — an `Array` copy and a `String` copy, then a `String` reached
+through a container and through a record field — so the corpus gates the shape on
+all three engines.
+
 ### Defect 2 — `vyrn why --memory` reports 21 discharged bindings as leaks
 
 `release_kind` answers `None` for `Stream<T>` and `Task<T>` deliberately, because

@@ -2247,6 +2247,13 @@ impl<'a> Gen<'a> {
     /// Allocate `size` bytes on the heap, routed through the active region arena
     /// when one is on the stack (so region examples reclaim it) or plain `malloc`
     /// otherwise. Returns the buffer pointer.
+    ///
+    /// A `String` buffer is the ONLY thing that may come here, and
+    /// [`Gen::str_alloc`] is the only caller. The arena frees what it allocated
+    /// at the closing brace, so a second owner is a double free — and the walk
+    /// stands off exactly one thing: a `String`, at the binding (`own.rs`'s
+    /// `Leak::Region`) and one level down ([`Gen::deep_release`]). A buffer that
+    /// `realloc` may move or that the walk hands back is `__vyrn_malloc`'s.
     fn heap_alloc(&mut self, size: &str) -> String {
         let buf = self.fresh_tmp();
         if self.region_depth > 0 {
@@ -2706,13 +2713,23 @@ impl<'a> Gen<'a> {
     /// Copy `count` elements of `ll` out of `src` into a fresh buffer of `room`
     /// elements, and return the buffer. One byte of slack, so a copy of an empty
     /// container never asks the allocator for nothing.
+    ///
+    /// Always plain `malloc`, never the region arena — the rule
+    /// [`Gen::array_n_to_heap`] states, for the same reason: an `Array`, a `Map`
+    /// and a spilled `SmallArray` grow their buffer with `realloc` and hand it
+    /// back with `free`, both undefined on an arena interior pointer. This used
+    /// to route through [`Gen::heap_alloc`], so a copy made inside a `region`
+    /// drew from the arena and was then freed twice — once by the block-exit
+    /// walk, which suppresses only a `String`, and once by the arena's own exit
+    /// walk (`rfcs/census-regions.md` defect 1).
     fn copy_buf(&mut self, src: &str, count: &str, room: &str, ll: &str) -> String {
         let esz = self.size_of_ll(ll);
         let want = self.fresh_tmp();
         let tot = self.fresh_tmp();
+        let buf = self.fresh_tmp();
         self.emit(format!("{want} = mul i64 {room}, {esz}"));
         self.emit(format!("{tot} = add i64 {want}, 1"));
-        let buf = self.heap_alloc(&tot);
+        self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {tot})"));
         let live = self.fresh_tmp();
         self.emit(format!("{live} = mul i64 {count}, {esz}"));
         self.emit(format!(
@@ -3051,10 +3068,21 @@ impl<'a> Gen<'a> {
             return Ok(());
         }
         match self.resolve(ty) {
-            Type::Str => {
+            // A `String` buffer allocated inside a `region` belongs to the arena
+            // — [`Gen::str_alloc`] routes it there, and `__vyrn_region_exit`
+            // hands it back. `own` states the same exception one binding at a
+            // time (`Fate::Leaked(Leak::Region)` for `DropKind::FreeStr`), and it
+            // can only see the binding's OWN type: the `String` under an
+            // `Array<String>`, under a record field, under a `Map` key was
+            // allocated by the arena and freed by this walk as well, which is a
+            // double free (`rfcs/census-regions.md` defect 1). The key here is
+            // the key `heap_alloc` allocates by, so the two sides now partition
+            // the same way at every depth.
+            Type::Str if self.region_depth == 0 => {
                 self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
                 Ok(())
             }
+            Type::Str => Ok(()),
             // The elements first, then the buffer they live in — the reverse of
             // the order `deep_copy` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.

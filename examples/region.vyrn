@@ -6,6 +6,8 @@
 // produces a non-heap result (a length), so nothing escapes to dangle; storing
 // an arena value into a binding that outlives the region is a compile error.
 
+type Tagged = { label: String, size: Int64 }
+
 fn main() -> Int64 {
     let hello = "Hello, "
     let world = "world!"
@@ -34,6 +36,36 @@ fn main() -> Int64 {
         n = a[4]
     }
     print(n) // 5
+
+    // The arena and the ownership walk partition the heap: the arena owns every
+    // String buffer allocated inside the block, and the walk owns everything
+    // else. A `copy` made here is the case that used to break the partition —
+    // the copied buffer came from the arena and the walk freed it as well, which
+    // corrupted the native heap (`rfcs/census-regions.md` defect 1). Both halves
+    // are pinned here: an Array copy, whose buffer is ordinary heap, and a
+    // String copy, whose buffer is the arena's.
+    let mut copied = 0
+    region {
+        let a: Array<Int64> = [1, 2, 3]
+        let b = a.copy()
+        let s = hello + world
+        let t = s.copy()
+        copied = b.length + t.byteLength
+    }
+    print(copied) // 16
+
+    // The same partition, one level down: a String the arena allocated, reached
+    // by the walk through a container and through a record field. The walk frees
+    // the buffer that holds them and leaves the Strings to the arena.
+    let mut held = 0
+    region {
+        let mut names: Array<String> = []
+        names.push(hello + world)
+        names.push(hello + "again")
+        let tagged = Tagged { label: hello + world, size: names.length }
+        held = names.length + tagged.label.byteLength
+    }
+    print(held) // 15
 
     // `total` is a plain Int64 computed inside the region — safe to carry out.
     print(total) // 13
