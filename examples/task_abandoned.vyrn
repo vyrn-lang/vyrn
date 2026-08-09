@@ -1,0 +1,46 @@
+// A `Task` acquired and abandoned, and one joined twice (RFC-0095 M1).
+//
+// `vyrn check` must REFUSE this file. It is the task half of
+// `stream_abandoned.vyrn`, and the reason it is worth a file of its own is the
+// resource it leaks: a task owns a frame, a task record and one
+// operating-system handle. Bytes are a leak a program can live with. A
+// per-process handle ceiling is a server that stops — RFC-0087 §10 measured one
+// handle per spawn, 200,076 of them at 200,000 spawns.
+//
+// Three refusals, the same three a `Stream` gets.
+
+fn work(n: Int64) -> Int64 {
+    return n + 1
+}
+
+// 1. Spawned and never discharged. The result is never wanted, and until M1
+//    that was written by saying nothing at all.
+fn abandoned() -> Int64 {
+    let t = spawn work(1)
+    return 0
+}
+
+// 2. Joined twice. This used to be a legal program on all three engines: the
+//    join was idempotent because the frame was never freed. Now the join
+//    CONSUMES the task, so there is exactly one of them.
+fn joinedTwice() -> Int64 {
+    let t = spawn work(2)
+    let first = t.join()
+    let second = t.join()
+    return first + second
+}
+
+// 3. Discharged on one path only. The `if` takes the result; the fall-through
+//    walks away from a live thread handle.
+fn oneBranch(c: Bool) -> Int64 {
+    let t = spawn work(3)
+    if c {
+        return t.join()
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    print("\{abandoned()} \{joinedTwice()} \{oneBranch(true)}")
+    return 0
+}

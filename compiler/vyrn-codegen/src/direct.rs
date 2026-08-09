@@ -3145,6 +3145,40 @@ impl Fn_<'_> {
             }
             Stmt::Drop { name, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
+                // RFC-0095 M1. A task is linear, and `drop t` is the discharge
+                // that does not want the result. `rel_for` does not answer for a
+                // `Task` — an automatic block-exit row would free what the join
+                // already freed — so the release is emitted here, exactly as the
+                // textual backend emits it.
+                //
+                // There is no wait: this target has no threads, so the thunk ran
+                // at the spawn point and the box holds a finished result. What is
+                // left is the half a `Task<Int64>` makes invisible — the RESULT
+                // is released by its type before the box goes, because a dropped
+                // `Task<String>` has a String in that box and nothing else will
+                // ever free it.
+                if let Type::Task(inner) = self.cx.resolve(&ty) {
+                    let box_ = b.local(ValType::I32);
+                    // A `Task` is one word, so it is a scalar: a local holds the
+                    // box address itself, and every other place holds it at an
+                    // address (`Rel::Str` reads its own place the same way).
+                    match place {
+                        Place::Local(l) => {
+                            b.ins(&Instruction::LocalGet(l));
+                        }
+                        _ => {
+                            place
+                                .addr(b, 0)
+                                .ok_or_else(|| gap("a Task with no place", *line))?;
+                            b.ins(&Instruction::I32Load(word()));
+                        }
+                    }
+                    b.ins(&Instruction::LocalSet(box_));
+                    self.rel_at(m, b, box_, &inner, *line)?;
+                    b.ins(&Instruction::LocalGet(box_));
+                    b.ins(&Instruction::Call(self.cx.rt.free));
+                    return Ok(());
+                }
                 if let Some(r) = self.rel_for(&ty, *line)? {
                     self.emit_rel(m, b, place, &r, *line)?;
                 }
@@ -6137,8 +6171,13 @@ impl Fn_<'_> {
             }
             // `t.join()` (RFC-0025). The task already ran, at the spawn point, so
             // there is nothing to wait for: this is a read out of its heap box.
-            // Idempotent for the same reason a second `__vyrn_join` is — the box
-            // is written once and never freed.
+            //
+            // Since RFC-0095 M1 the join CONSUMES the task, so the box goes back
+            // here — the wasm half of "free the frame, free the record, close the
+            // handle", of which this target has only the first: there are no
+            // threads, so `VTask` is the box and there is no handle. The read
+            // happens before the free, and a second `t.join()` is a compile
+            // error, so nothing reads the box afterwards.
             "@join" if args.len() == 1 => {
                 let t = self.expr(m, b, &args[0])?;
                 let Type::Task(inner) = self.cx.resolve(&t) else {
@@ -6146,6 +6185,10 @@ impl Fn_<'_> {
                     // defensive identity rather than inventing a diagnostic.
                     return Ok(t);
                 };
+                // The box's address, kept: every arm below consumes it off the
+                // stack, and the free needs it again.
+                let box_ = b.local(ValType::I32);
+                b.ins(&Instruction::LocalTee(box_));
                 match self.cx.repr(&inner, line)? {
                     Repr::Scalar(_) => {
                         b.ins(&load_of(&self.cx.ll(&inner), 0, self.cx.signed(&inner)));
@@ -6153,7 +6196,8 @@ impl Fn_<'_> {
                     // A copy, where the LLVM backend emits `load {ll}`. Handing
                     // out the box's own address would make a joined aggregate an
                     // alias into the task's result — M2l's `get` hazard, one
-                    // container along.
+                    // container along. Since M1 it would also be a read of freed
+                    // memory, because the box goes back three instructions later.
                     Repr::Agg(l) => {
                         let src = b.local(ValType::I32);
                         b.ins(&Instruction::LocalSet(src));
@@ -6173,6 +6217,10 @@ impl Fn_<'_> {
                         b.ins(&Instruction::Drop);
                     }
                 }
+                // The result is already an operand (or a slot address of this
+                // frame's own), so freeing the box now cannot invalidate it.
+                b.ins(&Instruction::LocalGet(box_));
+                b.ins(&Instruction::Call(self.cx.rt.free));
                 return Ok(*inner);
             }
             "@has" | "@remove" if args.len() == 2 => {
@@ -7633,10 +7681,11 @@ impl Fn_<'_> {
     /// `Expr::Spawn`), so all three engines run one schedule.
     ///
     /// What survives of the machinery is the **frame**: a `Task<T>` outlives the
-    /// shadow-stack frame that made it and `join` is idempotent, so the result is
-    /// boxed on the heap and the `Task` is that address — the shim's
-    /// `VTask { frame }` minus the thunk field it no longer needs. Never freed,
-    /// which is the shim's own stated ownership rule for a task.
+    /// shadow-stack frame that made it, so the result is boxed on the heap and
+    /// the `Task` is that address — the shim's `VTask { frame }` minus the thunk
+    /// field it no longer needs. Since RFC-0095 M1 the box is freed by whichever
+    /// construct discharges the task, `t.join()` or `drop t`, because a task is
+    /// linear and there is exactly one of them.
     ///
     /// Isolation is NOT enforced here, and must not be: the checker proves it
     /// transitively (`checker.rs`, `spawn_safe`) for every engine, so a second

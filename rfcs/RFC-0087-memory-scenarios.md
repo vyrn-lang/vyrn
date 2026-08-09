@@ -310,16 +310,36 @@ buffer the page frees when the call returns.
 
 ---
 
-## 10. Concurrency
+## 10. Concurrency — **CLOSED** by RFC-0095 M1
 
 `spawn` mallocs a frame holding the result slot and the arguments, and hands it to
-a thread. **The frame is never freed** — stated in the lowering, because `join` is
-idempotent and may run more than once. One leak per `spawn`, bounded by the number
-of spawns.
+a thread. The frame **was** never freed — stated in the lowering, because `join`
+was idempotent and might run more than once. One leak per `spawn`, plus one Win32
+event handle per `spawn`, bounded by the number of spawns:
+
+| spawns | peak, before | handles, before | peak, after | handles, after |
+|---|---|---|---|---|
+| 1,000 | 4,248 KiB | 853 | 3,860 KiB | 71 |
+| 20,000 | 5,924 KiB | 20,076 | 4,332 KiB | 72 |
+| 50,000 | 8,312 KiB | 50,076 | 3,880 KiB | 72 |
+| 200,000 | 20,252 KiB | 200,076 | 3,880 KiB | 72 |
+
+**What closed it is ownership of the `Task<T>` value.** A `Task<T>` is linear
+(RFC-0095 M1): `t.join()` consumes it and yields the result, `drop t` waits for it
+and releases the result by its type, and a task that is never discharged is
+refused. Because there is exactly one join, the join is where the storage goes
+back — the frame, the task record and the event object, at one site. Both columns
+above are now flat in the spawn count rather than linear in it.
 
 The arena stack is `thread_local`, so a region inside a task is correct. A heap
-value moved into a spawn escapes at the call site, so it is never double-freed —
-and never freed.
+value moved into a spawn escapes at the call site, so it is never double-freed.
+
+**One row stays open under this heading, and it is not §10's.** An
+`Array<Task<T>>` carries the obligation (RFC-0092 M4) but `drop ts` on one frees
+the buffer and leaks the tasks in it, because a task's release is a wait and three
+frees at a site holding the frame pointer, not a walk over bytes. The discharge
+that works is `for t in consume ts`, joining each element, which is what the
+diagnostic names. `Array<Stream<T>>` has had the identical hole since RFC-0075.
 
 ---
 
@@ -572,7 +592,7 @@ names a test.
 | 7 | **§2a** six expression forms never transfer | leak | **CLOSED**, Phase 4c — the expression's form stopped deciding; the type decides |
 | 8 | **§15** `bytes` and friends are not producers | leak | **CLOSED**, Phase 4c — same deletion; `views` is the remaining hand-written list, and it is the opposite direction |
 | 9 | **§16** a closure capture block is never freed | leak per lambda evaluation | **CLOSED.** Phase 10b: a `fn` value owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum. `lambdaLoop` is steady |
-| 10 | **§10** a spawn frame is never freed | bounded leak | **OPEN on native, absent on wasm.** The direct backend lowers `spawn f(a)` to `f(a)` and allocates no frame, so this harness cannot see it. Measured and diagnosed below |
+| 10 | **§10** a spawn frame is never freed | bounded leak | **CLOSED**, RFC-0095 M1 — a `Task<T>` is linear, so `join` consumes it and `drop t` waits and discharges it, and the frame, the record and the operating-system handle go back at that one site. 200,000 spawns: 20,252 KiB and 200,076 handles before, 3,880 KiB and 72 handles after |
 | 11 | **§5** regions are hand-placed | the model's best tool is rarely reachable | **OPEN.** RFC-0004 Q3, still undesigned. The arena survived Path B's deletion as Path A's second half |
 | 12 | **§6** use-after-release traps at run time | not compile-time | **STRUCK.** Path B is deleted (RFC-0090 M4); there is no `release` to use after |
 
@@ -1241,14 +1261,16 @@ key pointers, which a per-element release would free twice. The answer moved fro
 has nothing to declare it with" — and `slotsContainer` is the row that proves the
 declaration works. This is a restriction, recorded, not a defect to chase.
 
-Beside the three rows, two design questions are open and undesigned: **§5/U6**
-inferred regions (RFC-0004 Q3) and **§10** the native spawn frame. **§7/U7** was
-the third and is closed: linearity is a declaration (RFC-0086 M3), and `consume`
-and the obligation stay two declarations because a calling convention and a
-property of a type are not the same fact. **U5** was the fourth and is closed
-too: `panic` names the file and line it is written at, on all three engines.
+Beside the three rows, **one** design question is open and undesigned: **§5/U6**
+inferred regions (RFC-0004 Q3). **§10** the native spawn frame was the second and
+is closed by RFC-0095 M1 — see below, where the measurement that kept it open now
+carries its after column. **§7/U7** was the third and is closed: linearity is a
+declaration (RFC-0086 M3), and `consume` and the obligation stay two declarations
+because a calling convention and a property of a type are not the same fact.
+**U5** was the fourth and is closed too: `panic` names the file and line it is
+written at, on all three engines.
 
-### §10, measured
+### §10, measured — and closed by RFC-0095 M1
 
 A loop of `let t = spawn work(i)` then `t.join()`, native, peak working set:
 1000 spawns 4392 KiB, 50000 spawns 8332 KiB, 200000 spawns 20120 KiB. That is
@@ -1271,14 +1293,23 @@ Two shapes were considered and neither closes the row:
   runtime the reader has to hold two lifetimes for.
 * **Free at the last join.** This is the one that works, and it is the design
   change: it needs to know that no further join can happen, which is ownership
-  of the `Task<T>` value. Today `drop t` on a task is refused — "`drop` needs a
-  heap value ... but `t` is `Task<Int64>`" — so the mechanism RFC-0091 built for
-  a declared container has not been pointed at a task.
+  of the `Task<T>` value.
 
-So §10 stays open, and it is one question rather than two: give `Task<T>` a
-declared release and the frame, the record and the event handle all go with it.
-A documented bounded leak is the right state until then, because the failure
-mode of guessing is a use-after-free on a joined task.
+**RFC-0095 M1 took the second one and the row is closed.** A `Task<T>` is linear,
+so "free at the last join" is "free at *the* join": `t.join()` consumes the task
+and a second one is a compile error, `drop t` waits and releases the result by its
+type, and `drop t` is accepted where it used to be refused. Re-measured on the
+same loop: 3,880 KiB and 72 handles at 200,000 spawns, against 20,252 KiB and
+200,076 before — flat in both columns rather than linear in either.
+
+Two facts the earlier reading had wrong, both found by building it:
+
+* **The corpus DID join one task twice.** `examples/parallel.vyrn` said so in a
+  comment — "join is idempotent — a second join re-reads the settled result" —
+  and this section verified it. It reads each result once now.
+* **`examples/branchtypes.vyrn` could not be fixed with a `drop`.** Its `None`
+  arm leaked a handle, and `drop` is a statement while a `match` arm is an
+  expression. Both arms join instead.
 
 ## What the model is now, in one paragraph
 

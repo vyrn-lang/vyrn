@@ -30,6 +30,8 @@ clang-compiled native binary:
 - **Structured concurrency**: `spawn f(args) -> Task<T>` / `join` — a deterministic
   fork-join. The compiler *proves* a spawned function is isolated (no I/O, no shared
   mutable state, transitively), so it's data-race-free; `share` = concurrent read.
+  A `Task<T>` is linear (RFC-0095): the join consumes it, `drop t` waits and
+  discharges it, and its frame, record and OS handle go back at that one site.
 - **Heap + deterministic reclamation** (RFC-0004 §4, no GC): dynamic strings
   (`concat`/`len`), a `region { .. }` block that frees a whole group of
   allocations at exit (escaping a heap value from a region is a compile error),

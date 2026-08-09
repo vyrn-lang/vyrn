@@ -3384,6 +3384,23 @@ mod linear {
                 "a stream must be consumed with `for … in`, forwarded by returning it, \
                  or released with `close({name})` — on every path"
             ),
+            // RFC-0095 M1. `drop` is named last because it throws the result
+            // away: a task is normally discharged by reading it.
+            Linear::Task if ty == "Task" || ty.starts_with("Task<") => format!(
+                "a task must be joined with `{name}.join()`, which yields its result, \
+                 forwarded by returning it, or released with `drop {name}`, which waits \
+                 for it and discards the result — on every path"
+            ),
+            // The container case (RFC-0092 M4), and the menu is not the one
+            // above: `{name}.join()` is not a thing a container has, and a
+            // `drop` of one frees the buffer and NOT the tasks in it. Walking it
+            // with `for … in consume` is the discharge that works — the loop
+            // takes the container and every element is joined by name.
+            Linear::Task => format!(
+                "a `{ty}` holds a task, so the container must be handed on by name — walked \
+                 with `for t in consume {name}`, joining each element, passed to a call, or \
+                 forwarded by returning it — on every path"
+            ),
             Linear::Declared(by) if by == ty => format!(
                 "`{ty}` declares `impl MustUse`, so a value of it must be handed on by \
                  name — passed to a call, forwarded by returning it, or released with \
@@ -3459,6 +3476,15 @@ mod linear {
             // declared one — RFC-0094 M1 deleted the three-name `match` that
             // stood in front of this arm.
             Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
+            // `spawn f(x)` is the one producer that is a KEYWORD rather than a
+            // named function, so it cannot arrive through `producers`
+            // (RFC-0095 M1). The type is quoted as the constructor, `Task`, for
+            // the reason [`owed`] gives: this pass has no types, and `spawn`'s
+            // result type is the callee's return type in a `Task`.
+            Expr::Spawn { .. } => Some(Owed {
+                ty: "Task".into(),
+                row: Linear::Task,
+            }),
             // `let t = s` moves the value; `t` inherits both the obligation and
             // the rendering, and the mention of `s` discharges `s`'s.
             Expr::Var { name, .. } => live.iter().find(|(l, _)| l == name).map(|(_, o)| o.clone()),

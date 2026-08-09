@@ -3330,12 +3330,20 @@ impl<'a> Checker<'a> {
                 {
                     return Ok(false);
                 }
+                // RFC-0095 M1. A `Task<T>` is linear, and `drop t` is how a path
+                // that does not want the result discharges it: it waits for the
+                // task, releases the result by its type, and gives back the
+                // frame, the record and the operating-system handle. `Task<Unit>`
+                // passes with the rest — the handle is there whatever `T` is,
+                // which is why this arm is a type match and not an `owns_heap`
+                // question.
                 if matches!(
                     t,
                     Type::Str
                         | Type::Array(_)
                         | Type::SmallArray(..)
                         | Type::Map(..)
+                        | Type::Task(_)
                         | Type::Param(_)
                 ) || (matches!(t, Type::Option(_) | Type::Result(..))
                     && crate::own::owns_heap(&t, &self.types))

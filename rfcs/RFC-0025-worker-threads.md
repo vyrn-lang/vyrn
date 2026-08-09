@@ -96,9 +96,12 @@ what ships:
   and holds unchanged — a new test re-runs the same scan over a spawn-heavy
   module), and Vyrn code adds no indirect-call table entry to the wasm module.
 - **`Task<T>` is now a real handle** (`ptr` at runtime, previously the eager
-  result value itself). `join` is idempotent — task records and frames are
-  never freed (a task may be joined again; the count is bounded by the number
-  of spawns — the "unproven ownership leaks, which is always safe" rule).
+  result value itself). `join` was idempotent, and task records and frames were
+  never freed (the "unproven ownership leaks, which is always safe" rule).
+  **Superseded by RFC-0095 M1:** a `Task<T>` is linear, `t.join()` consumes it
+  and a second join is a compile error, `drop t` waits and discharges it without
+  taking the result, and the frame, the record and the operating-system handle
+  go back at that one site.
 - **A trapping task** performs the standard trap protocol itself — the one
   canonical `error: ...` line to stderr, then `exit(1)` — from whichever
   thread it runs on: same wording, same exit code, printed once (stdout is
@@ -107,7 +110,10 @@ what ships:
   (and trap) is never lost — eager semantics ran every task. Interleaving of
   a leaked trapping task's exit with stdout the program printed AFTER the
   spawn is the one schedule-dependent corner; no corpus example has that
-  shape, and joining the task pins it.
+  shape, and joining the task pins it. Since RFC-0095 M1 an accepted program
+  leaves no task outstanding at all, and a task the program abandons on purpose
+  is `drop t`, which WAITS — so a dropped task that traps still prints its line
+  and exits 1.
 - **The region arena stack became `thread_local`** — `region { .. }` is
   memory management, not an effect, so isolated tasks may use it; per-thread
   stacks keep it race-free. Single-threaded targets (wasm32-wasip1) lower TLS

@@ -99,6 +99,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "`ys` may not be passed to a `consume` parameter via `take(..)`",
     ),
     (
+        "task_abandoned.vyrn",
+        "a `Task` acquired and abandoned, one joined twice, and one discharged on a \
+         single branch (RFC-0095 M1) — the three refusals a `Stream` gets, over the \
+         type that leaks an operating-system handle rather than bytes",
+        "`t` is a `Task` and is never disposed",
+    ),
+    (
         "mustuse_abandoned.vyrn",
         "a USER type's must-use obligation, abandoned (RFC-0086 M3) — the same three \
          rejections `Stream` gets, reached through `impl MustUse for Txn` and naming \

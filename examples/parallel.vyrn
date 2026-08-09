@@ -18,13 +18,22 @@ fn main() -> Int64 {
     let c = spawn fib(26)
     let d = spawn fib(27)
 
-    print("joined in order:")
-    print(a.join())
-    print(b.join())
-    print(c.join())
-    print(d.join())
+    // A task is LINEAR (RFC-0095 M1): the join consumes it and yields the
+    // result, and the task's frame, record and operating-system handle go back
+    // at that one site. So each result is read once and kept — a second
+    // `a.join()` is a compile error, where it used to re-read a settled result
+    // off a frame nothing ever freed.
+    let ra = a.join()
+    let rb = b.join()
+    let rc = c.join()
+    let rd = d.join()
 
-    // join is idempotent — a second join re-reads the settled result.
-    if a.join() + b.join() == c.join() { return 0 }
+    print("joined in order:")
+    print(ra)
+    print(rb)
+    print(rc)
+    print(rd)
+
+    if ra + rb == rc { return 0 }
     return 1
 }

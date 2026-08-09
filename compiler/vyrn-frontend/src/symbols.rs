@@ -3512,7 +3512,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "copy", detail: "x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural (RFC-0089). A handle copies as the value it is, so the copy names the same thing" },
     BuiltinMethod { name: "toString", detail: "x.toString() -> String — render a number, Bool, or String" },
     BuiltinMethod { name: "charCount", detail: "s.charCount() -> Int64 — number of Unicode scalar values (O(n); counts non-continuation bytes)" },
-    BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result" },
+    BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result. It CONSUMES the task (RFC-0095 M1): a task is discharged once, by this or by `drop t`, and the frame, the record and the operating-system handle go back here" },
     BuiltinMethod { name: "trace", detail: "trace(logger, message) -> Unit — log at trace level" },
     BuiltinMethod { name: "debug", detail: "debug(logger, message) -> Unit — log at debug level" },
     BuiltinMethod { name: "info", detail: "info(logger, message) -> Unit — log at info level" },

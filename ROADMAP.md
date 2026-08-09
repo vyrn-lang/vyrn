@@ -521,6 +521,11 @@ none blocks the core loop.
   transitively), so tasks are data-race-free and the result is schedule-independent
   — which is what keeps interpreter == native. `share` is the concurrent-read
   capability.
+- **A task is owned (RFC-0095 M1).** `Task<T>` is linear: `t.join()` consumes it
+  and yields the result, `drop t` waits for it and discharges it without taking
+  the result, and a task that is never discharged is refused. The frame, the task
+  record and the operating-system handle go back at that one site — census §10,
+  which was 81 bytes and one handle per spawn.
 - **Real threads natively (RFC-0025).** The native binary runs each task on an
   OS thread (Win32/pthreads, entirely inside the C shim: the IR packs arguments
   into a heap frame and passes a per-callee thunk symbol to `__vyrn_spawn`;

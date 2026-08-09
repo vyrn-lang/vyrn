@@ -832,6 +832,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // not a Vyrn-level function value: every `call` still names a symbol.
     out.push_str("declare ptr @__vyrn_spawn(ptr, ptr)\n");
     out.push_str("declare ptr @__vyrn_join(ptr)\n");
+    out.push_str("declare void @__vyrn_task_release(ptr)\n");
     out.push_str("declare i32 @__vyrn_snprintf(ptr, i64, ptr, ...)\n");
     // Logging (RFC-0008) and traps: fprintf/fputs to stderr. `stderr` is a C
     // macro with no portable symbol, so the stream handles come from a tiny C
@@ -4682,6 +4683,37 @@ impl<'a> Gen<'a> {
                 // by the NAME, which resolving away would lose), then its
                 // structural form (which is where a generic substitution lands).
                 let rty = self.resolve(&ty);
+                // RFC-0095 M1. A task is linear and `drop t` is one of its two
+                // discharges, so it is emitted here rather than read off
+                // `release_kind` — which answers `None` for a `Task`, because an
+                // automatic block-exit row would free what the join already
+                // freed.
+                //
+                // Three things happen, in this order. **Wait**, because the
+                // worker may still be storing the result into the frame and
+                // because the trap protocol says a trapping task prints its line
+                // and exits 1 from whichever thread it runs on — a drop that
+                // skipped the wait would swallow that. **Release the result by
+                // its type**, which is the half that is easy to miss: a dropped
+                // `Task<String>` has a String in its frame that the worker
+                // allocated and nothing else will ever free. **Then release the
+                // task**, which frees the frame, frees the record and closes the
+                // handle.
+                //
+                // The frame pointer IS a slot holding the result — the leading
+                // frame field is the result slot — so the release of the result
+                // is the ordinary `emit_drop`, with no second walk.
+                if let Type::Task(inner) = &rty {
+                    let t = self.fresh_tmp();
+                    self.emit(format!("{t} = load ptr, ptr {slot}"));
+                    let frame = self.fresh_tmp();
+                    self.emit(format!("{frame} = call ptr @__vyrn_join(ptr {t})"));
+                    if let Some(kind) = self.rel_kind(inner) {
+                        self.emit_drop(&frame, &kind);
+                    }
+                    self.emit(format!("call void @__vyrn_task_release(ptr {t})"));
+                    return Ok(());
+                }
                 // A type with no row releases nothing, and this is not an error:
                 // since Phase 8b the checker admits `drop v` where `v: T`, and
                 // the instance decides. `Slots<String>` frees a buffer here and
@@ -9983,15 +10015,19 @@ impl<'a> Gen<'a> {
             }
         }
         // @join (`t.join()`), RFC-0025: block until the task completes, then
-        // load its result from the frame's leading slot. Idempotent — a task
-        // may be joined more than once (the shim only waits the first time and
-        // the frame is never freed), exactly like the eager value semantics.
+        // load its result from the frame's leading slot.
         //
-        // The load below is why the frame cannot be freed here: `join` answers
-        // with the frame's ADDRESS and the result is read after the call, so a
-        // free at the first join would leave the second one reading freed
-        // memory. `toolchain::RUNTIME_SHIM` carries the rest of that reasoning
-        // and RFC-0087 §10 the measurement.
+        // Since RFC-0095 M1 the join CONSUMES the task, so this is the one join
+        // and the task's storage goes back here: the result is loaded out of the
+        // frame first, then `__vyrn_task_release` frees the frame, frees the
+        // record and closes the event handle. The order is the whole safety
+        // argument — `__vyrn_join` answers with the frame's ADDRESS, so the load
+        // has to happen before the free, and a second `t.join()` is refused at
+        // compile time rather than reading freed memory.
+        //
+        // The result is a VALUE in a register after the load, which is what makes
+        // the free safe for a `Task<String>` too: the frame held the pointer, and
+        // the caller now owns the buffer it points at.
         if name == "@join" {
             let (v, ty) = self.gen_expr(&args[0])?;
             let inner = match self.resolve(&ty) {
@@ -10004,10 +10040,12 @@ impl<'a> Gen<'a> {
             self.emit(format!("{frame} = call ptr @__vyrn_join(ptr {v})"));
             let retll = self.llt(&inner);
             if retll == "void" {
+                self.emit(format!("call void @__vyrn_task_release(ptr {v})"));
                 return Ok((String::new(), Type::Unit));
             }
             let t = self.fresh_tmp();
             self.emit(format!("{t} = load {retll}, ptr {frame}"));
+            self.emit(format!("call void @__vyrn_task_release(ptr {v})"));
             return Ok((t, inner));
         }
 
