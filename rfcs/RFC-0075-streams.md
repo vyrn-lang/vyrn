@@ -507,7 +507,20 @@ and where two branches disagree about whether a stream was disposed, the
 *acquisition* is reported rather than waiting for a later statement to make the
 merge look clean: whatever follows, one of those two paths is wrong.
 
-Two limits, stated so they are not mistaken for coverage. Bindings are keyed by
+**A third limit, and RFC-0095 M3 closed it.** The walk read one STATEMENT at a
+time: a mention anywhere in a statement's expressions was a disposal on every
+path through it. An `if` statement never had the hole, because the walk descends
+into its two blocks and merges them — but a `match` is an expression, so
+`let n = match p { Some(k) => drain(s), None => 0 }` read as a disposal on both
+paths and the `None` path abandoned the producer. One `||` over the arms was the
+whole difference between the two spellings of one program. The walk now answers
+two questions of an expression instead of one — does SOME path name the binding,
+does EVERY path — and the two differ at exactly the two shapes that skip a
+sub-expression, a `match` and an `if` used as an expression. Where they disagree
+the acquisition is reported, which is the merge rule the statement form already
+used. `examples/stream_abandoned.vyrn` carries the arm case.
+
+Two more limits, stated so they are not mistaken for coverage. Bindings are keyed by
 **name**, exactly as the `Consumed` map above them is, so an inner `let s = 1`
 shadowing an outer stream `s` reads as a disposal of the outer one; fixing that
 means giving both analyses a scope-id key at once. And the `close` on the direct

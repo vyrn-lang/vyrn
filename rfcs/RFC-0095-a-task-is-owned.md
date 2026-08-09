@@ -1,8 +1,9 @@
 # RFC-0095 — A Task Is Owned
 
-- **Status:** **M1 built** (see "M1 as landed" at the end). RFC-0087 §10 was the
-  last census row with a measurement behind it and no mechanism pointed at it,
-  and it is closed.
+- **Status:** **M1 and M3 built** (see "As landed" at the end; M2 was priced and
+  refused). RFC-0087 §10 was the last census row with a measurement behind it and
+  no mechanism pointed at it, and it is closed. M3 made the must-use scan
+  arm-granular and gave `for x in consume xs` the release RFC-0092 M5 left open.
 - **Depends on:** RFC-0086 M1 (`impl Owned`), RFC-0092 M4 (a container carries
   its element's obligation), RFC-0093 M1 (`consume` as a prefix), RFC-0025
   (`spawn`), RFC-0004 Q4 (`Task<T>`).
@@ -240,6 +241,8 @@ disposal on both. That is a limit `Stream` has had since RFC-0075 and this
 milestone did not widen. What the obligation does catch is the plain shape —
 spawned and never mentioned, joined twice, or joined on one branch of an `if`
 STATEMENT — which is `examples/task_abandoned.vyrn`, three refusals in one file.
+**M3 widened it** — see "As landed — M3" below — so the sentence above is now
+history: an arm is a path, and `task_abandoned.vyrn` has a fourth refusal.
 
 ### The known limit it leaves
 
@@ -272,6 +275,67 @@ record, which is what the milestone expected.
 - `examples/task_abandoned.vyrn` is an expected-check-failure corpus file.
 - `borrow_store_sites` reads 0 across the corpus; the projection census reads
   `stores: 0`, `returns: 0`, `elem-store: 0`, `elem-return: 0`.
+
+## As landed — M3
+
+M2 was priced and refused above, so this is the next number. It is the limit M1
+recorded and did not widen, plus the leaking row beside it in RFC-0092 M5.
+
+**An arm is a path.** The scan asked its expressions one question — does this
+name the binding — and read the answer as a disposal on every path. It asks two
+now: does SOME path name it, and does EVERY path. The two differ at exactly the
+expressions that can skip a sub-expression — a `match`, and an `if` used as an
+expression — and everywhere else they are the same answer, because everything
+else evaluates all of its parts. Where they disagree the acquisition is reported,
+which is the merge rule the `if` STATEMENT has used since RFC-0075. So this is
+one walk learning what the other already knew, not a second mechanism: `mentions`
+is the first component of the new one, and the arms merge with `all` where the
+statement form merges two blocks. The `return` arm reads the second component
+too, so `return match p { Some(n) => t, None => 0 }` is refused for the same
+reason the `let` form is. `Stream` and every `impl MustUse` row are covered at
+once, because the three share the walk.
+
+**The corpus cost was one test fixture and no program.** `vyrn check` over all of
+`std/` and `examples/` — 216 files — refuses exactly the 13 files
+`EXPECTED_CHECK_FAILURE` already lists, and `examples/branchtypes.vyrn`, which
+joins in both arms, still compiles. One site was newly refused, and it is not a
+Vyrn program: the `a join` case of `direct.rs`'s branch-lowering table was
+`return match o { Some(n) => t.join(), None => 0 }` — the abandoned shape, in a
+fixture that exists to check a lowering. It joins in both arms now and lowers the
+same join.
+
+**A limit this milestone does NOT close.** `let t2 = match c { A => t, B => u }`
+hands the obligation on and `t2` inherits nothing: `owed_let` reads a `let` whose
+value is a `Var`, a `Call` or a `spawn`, and a branching expression is none of
+the three. Both arms dispose, so the program is accepted and `t2` is a task
+nothing answers for. It is the same shape one level up, and closing it needs a
+type this walk does not have.
+
+**And a leaking row nobody had filed.** `for x in consume xs` took the buffer and
+nothing released it — RFC-0092 M5's row with one keyword written on it, which
+that milestone recorded as open because the census does not name it. The loop
+gets M5's row now, and the early-exit argument is written where the gap was, in
+RFC-0092 M5's "What M5 does not close": a row that survives to the exit is a body
+that moved nothing out, so `break`, a `return` out of the body and the
+fall-through each give back the visited and the unvisited elements alike, exactly
+once. No index is counted, and a double free is not expressible on any path. A
+body that keeps one element, or drops one by hand, leaks the buffer whole — the
+allowed direction.
+
+### What proves M3
+
+- The match-arm task repro is refused, as `examples/task_abandoned.vyrn`'s fourth
+  function; `examples/stream_abandoned.vyrn` carries the stream half.
+- **The memory suite reads 16 rows, 16 steady.** The new row, `consumingLoop`, is
+  negative-tested: with the release not minted it reads 1,114,112 bytes at 500
+  calls against 4,259,840 at 2,000.
+- Three-way parity byte-identical including traps, 36 tests, wasm column live.
+  `genwasm`: 11 passed. Workspace green with `--no-fail-fast`, plus 75 in
+  `vyrn-lsp`.
+- `examples/consumeloop.vyrn` gained the two early exits — a `break` and a
+  `return` out of a consuming loop — and prints the same bytes on all three
+  engines.
+- `borrow_store_sites` reads 0 across 216 files.
 
 ---
 

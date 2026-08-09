@@ -2456,13 +2456,29 @@ impl MoveCheck<'_> {
                 // COPIES of the keys rather than the map's own pointers, so the
                 // loop is the only owner there is.
                 //
-                // A CONSUMING loop is excluded. Its iterable is a place the take
-                // already emptied, and the row that place has is where its fate
-                // is written.
+                // A CONSUMING loop gets the SAME row (RFC-0092 M5's other half,
+                // RFC-0095 M3). `for x in consume xs` takes the buffer, and the
+                // row the place has says `Moved` — which is the truth about the
+                // place and the end of the matter for it, so nothing freed the
+                // buffer at all. The loop is its last owner: `check_take` has
+                // already refused a borrowed root and refused module state, so
+                // the value is this frame's, and the take (whole binding) or the
+                // hole (one field) is what stops anything else from releasing it
+                // too.
+                //
+                // The elements are the loop's on the same terms as a snapshot's:
+                // the loop variable binds to this row below, so a body that
+                // hands one on marks the row gone and the whole container leaks.
+                // That is the direction this analysis is allowed to be wrong in,
+                // and it is what makes an early `break` safe — a row that
+                // survives is a body that kept nothing, so the release at the
+                // exit gives back the visited and the unvisited elements alike,
+                // each exactly once.
                 let key = match self.place_key(iter) {
                     0 if !*consuming && self.names_a_place(iter).is_none() => {
                         self.note_temporary(s, iter)
                     }
+                    _ if *consuming => self.note_temporary(s, iter),
                     _ => 0,
                 };
                 let mut body_c = consumed.clone();
@@ -3504,6 +3520,10 @@ mod linear {
             // statement's own expressions moves it (`close(s)`, `for x in s`,
             // `sink(s)`, `let t = s`). A second mention anywhere in the rest of the
             // list is then a double disposal on this path.
+            // `.0` is "some path through this statement disposes it", `.1` is
+            // "every path does". They differ only where a `match` or an
+            // if-expression branches (RFC-0095 M3).
+            let none = (false, false);
             let moved = match st {
                 // A write back INTO the binding is not a disposal: whatever the
                 // right-hand side did with the value, the binding holds one
@@ -3514,21 +3534,31 @@ mod linear {
                 // mutation of the pool read as "handed on by name" and the
                 // obligation evaporated at the one statement the milestone
                 // exists to catch.
-                Stmt::Assign { name: n, value, .. } => n != name && mentions(value, name),
-                Stmt::Let { value, .. } | Stmt::SetField { value, .. } | Stmt::Expr(value) => {
-                    mentions(value, name)
-                }
+                Stmt::Assign { name: n, value, .. } if n == name => none,
+                Stmt::Assign { value, .. }
+                | Stmt::Let { value, .. }
+                | Stmt::SetField { value, .. }
+                | Stmt::Expr(value) => paths(value, name),
                 Stmt::IndexSet { index, value, .. } => {
-                    mentions(index, name) || mentions(value, name)
+                    let (i, v) = (paths(index, name), paths(value, name));
+                    (i.0 || v.0, i.1 || v.1)
                 }
-                Stmt::If { cond, .. } | Stmt::While { cond, .. } => mentions(cond, name),
-                Stmt::IfLet { scrutinee, .. } => mentions(scrutinee, name),
-                Stmt::ForIn { iter, .. } => mentions(iter, name),
-                Stmt::Drop { name: n, .. } => n == name,
-                Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => false,
-                Stmt::Region { .. } => false,
+                Stmt::If { cond, .. } | Stmt::While { cond, .. } => paths(cond, name),
+                Stmt::IfLet { scrutinee, .. } => paths(scrutinee, name),
+                Stmt::ForIn { iter, .. } => paths(iter, name),
+                Stmt::Drop { name: n, .. } => (n == name, n == name),
+                Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => none,
+                Stmt::Region { .. } => none,
             };
-            if moved {
+            // One arm disposes it and another does not. Whatever follows, one of
+            // the two paths is wrong — the same authoring mistake two disagreeing
+            // `if` blocks make below, reported the same way and at the same
+            // point, rather than left to a later statement to make look fine.
+            if moved.0 && !moved.1 {
+                acc.leaked = true;
+                return acc;
+            }
+            if moved.1 {
                 acc.disposed = true;
                 acc.doubled = stmts[i + 1..].iter().any(|s| stmt_mentions(s, name));
                 // The disposal settles `disposed`, but the caller's branch merge
@@ -3542,9 +3572,12 @@ mod linear {
             match st {
                 Stmt::Return { value, .. } => {
                     // Forwarding by returning it is a disposal; returning anything
-                    // else leaves the function still owning it.
+                    // else leaves the function still owning it. `paths` and not
+                    // `mentions`, for the reason it exists: `return match p {
+                    // Some(n) => t, None => 0 }` forwards the task on one path
+                    // and abandons it on the other (RFC-0095 M3).
                     acc.diverges = true;
-                    acc.leaked |= !value.as_ref().is_some_and(|e| mentions(e, name));
+                    acc.leaked |= !value.as_ref().is_some_and(|e| paths(e, name).1);
                     return acc;
                 }
                 // Inside a loop below the declaring block, `break`/`continue` land
@@ -3708,39 +3741,87 @@ mod linear {
     /// move — a `Stream` has no field, no length, and no indexing — so this needs
     /// no notion of position, which is what keeps it a dozen lines.
     pub(super) fn mentions(e: &Expr, name: &str) -> bool {
+        paths(e, name).0
+    }
+
+    /// How the paths through `e` treat the binding: `.0` where SOME path names
+    /// it, `.1` where EVERY path does.
+    ///
+    /// The two answers differ at exactly two shapes — a `match` and an `if` used
+    /// as an expression — because those are the only expressions with a path
+    /// that skips a sub-expression. Everything else evaluates all of its parts,
+    /// so a mention in one part is a mention on every path through the whole.
+    ///
+    /// This is RFC-0095 M3. [`scan`] read a statement's expressions with
+    /// [`mentions`] alone, which answers "some path", and then treated the answer
+    /// as a disposal on every path — so `match p { Some(n) => t.join(), None => 0 }`
+    /// discharged a task the `None` path abandons. The `if` STATEMENT never had
+    /// the hole: `scan` walks its two blocks and merges them. The merge is
+    /// unchanged; what changed is that a branching EXPRESSION now reaches it.
+    fn paths(e: &Expr, name: &str) -> (bool, bool) {
+        // Two sub-expressions that both run: a mention in either is a mention,
+        // and a disposal on every path through either is one through the pair.
+        let seq = |a: (bool, bool), b: (bool, bool)| (a.0 || b.0, a.1 || b.1);
+        let all = |m: bool| (m, m);
         match e {
-            Expr::Var { name: n, .. } => n == name,
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                mentions(expr, name)
+            Expr::Var { name: n, .. } => all(n == name),
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
+                (false, false)
             }
-            Expr::Consume { place, .. } => mentions(place, name),
-            Expr::Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                paths(expr, name)
+            }
+            Expr::Consume { place, .. } => paths(place, name),
+            Expr::Binary { lhs, rhs, .. } => seq(paths(lhs, name), paths(rhs, name)),
             Expr::Call { args, .. }
             | Expr::Spawn { args, .. }
             | Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| mentions(a, name)),
-            Expr::MapLit { entries, .. } => entries
+            | Expr::ArrayLit { elems: args, .. } => args
                 .iter()
-                .any(|(k, v)| mentions(k, name) || mentions(v, name)),
-            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| mentions(v, name)),
+                .fold((false, false), |acc, a| seq(acc, paths(a, name))),
+            Expr::MapLit { entries, .. } => entries.iter().fold((false, false), |acc, (k, v)| {
+                seq(seq(acc, paths(k, name)), paths(v, name))
+            }),
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .fold((false, false), |acc, (_, v)| seq(acc, paths(v, name))),
+            // The scrutinee runs whatever arm is taken, so it is sequenced with
+            // the arms rather than merged into them. An arm list that is empty
+            // has no path of its own to say anything about.
             Expr::Match {
                 scrutinee, arms, ..
-            } => mentions(scrutinee, name) || arms.iter().any(|a| mentions(&a.body, name)),
+            } => {
+                let s = paths(scrutinee, name);
+                if arms.is_empty() {
+                    return s;
+                }
+                let any = arms.iter().any(|a| paths(&a.body, name).0);
+                let every = arms.iter().all(|a| paths(&a.body, name).1);
+                seq(s, (any, every))
+            }
+            // A missing `else` is a path that names nothing. The checker refuses
+            // an if-expression without one, so this is the incomplete tree and
+            // not a shape a program can write.
             Expr::IfExpr {
                 cond,
                 then_branch,
                 else_branch,
                 ..
             } => {
-                mentions(cond, name)
-                    || mentions(then_branch, name)
-                    || else_branch.as_ref().is_some_and(|e| mentions(e, name))
+                let t = paths(then_branch, name);
+                let e = match else_branch {
+                    Some(b) => paths(b, name),
+                    None => (false, false),
+                };
+                seq(paths(cond, name), (t.0 || e.0, t.1 && e.1))
             }
-            Expr::Lambda { body, .. } => match body {
+            // A lambda body may never run, and reading it as a disposal on every
+            // path is the answer this walk has always given. Narrowing it would
+            // widen what compiles, which is not this milestone.
+            Expr::Lambda { body, .. } => all(match body {
                 LambdaBody::Expr(e) => mentions(e, name),
                 LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
-            },
+            }),
         }
     }
 }
@@ -4905,9 +4986,12 @@ mod tests {
 
     // ---- RFC-0075: the disposal obligation -------------------------------
 
-    /// The producer every stream case below acquires from.
+    /// The producer every stream case below acquires from, and a consumer that
+    /// discharges one — a call, so it fits in an expression position.
     const FEED: &str = "fn feed() -> Stream<Int64> { let xs: Array<Int64> = [1, 2] \
-                        return fromArray(xs) } ";
+                        return fromArray(xs) } \
+                        fn drain(s: Stream<Int64>) -> Int64 { let mut t = 0 \
+                        for v in s { t = t + v } return t } ";
 
     fn stream(body: &str) -> Result<(), String> {
         run(&format!("{FEED} fn main() -> Int64 {{ {body} }}"))
@@ -5003,6 +5087,58 @@ mod tests {
         // Both branches, or a branch that leaves, are fine.
         assert!(stream("let s = feed() if true { close(s) } else { close(s) } return 0").is_ok());
         assert!(stream("let s = feed() if true { close(s) return 1 } close(s) return 0").is_ok());
+    }
+
+    /// RFC-0095 M3. "Every path" now reaches into an ARM.
+    ///
+    /// The `if` STATEMENT was refused from RFC-0075 M1, because [`scan`] walks
+    /// its two blocks. A `match` is an expression, so the walk read the whole
+    /// statement at once with `mentions` — "some path names it" — and treated
+    /// that as a disposal on all of them. One `||` was the difference between
+    /// the two spellings of one program.
+    #[test]
+    fn an_arm_is_a_path_like_a_branch_is() {
+        let pick = "let o: Option<Int64> = Some(1) ";
+        // Disposed in one arm and not the other: refused, both spellings.
+        let e = stream(&format!(
+            "{pick} let s = feed() let n = match o {{ Some(k) => drain(s) + k, None => 0 }} \
+             return n"
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("`s` is a `Stream<Int64>` and is never disposed"),
+            "{e}"
+        );
+        let e = stream(&format!(
+            "{pick} let s = feed() let n = if true {{ drain(s) }} else {{ 0 }} return n"
+        ))
+        .unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        // The same shape returned rather than bound — the `return` reads its
+        // expression the same way.
+        let e = stream(&format!(
+            "{pick} let s = feed() return match o {{ Some(k) => drain(s), None => 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("never disposed"), "{e}");
+        // EVERY arm disposes: accepted. `examples/branchtypes.vyrn` is this
+        // shape, and it must keep compiling.
+        assert!(stream(&format!(
+            "{pick} let s = feed() let n = match o {{ Some(k) => drain(s) + k, \
+                 None => drain(s) }} return n"
+        ))
+        .is_ok());
+        assert!(stream(&format!(
+            "{pick} let s = feed() let n = if true {{ drain(s) }} else {{ drain(s) }} return n"
+        ))
+        .is_ok());
+        // The scrutinee runs whatever arm is taken, so a disposal there is one
+        // on every path.
+        assert!(stream(
+            "let s = feed() let n = match Some(drain(s)) { Some(k) => k, None => 0 } \
+                    return n"
+        )
+        .is_ok());
     }
 
     #[test]

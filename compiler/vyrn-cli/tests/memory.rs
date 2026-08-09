@@ -53,8 +53,11 @@
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `keysLoop` | U4's price | steady | RFC-0092 M5: a `for` over a temporary owns the snapshot, so it releases it — Phase 10a's row, at the second statement that walks one |
 //! | `spawnFrame` | §10 | steady | RFC-0095 M1: a task is linear, and both discharges give its storage back |
+//! | `consumingLoop` | U4's price, one keyword over | steady | RFC-0092 M5's row for `for x in consume xs`: the loop is the buffer's last owner, so it releases it at every exit |
 //!
-//! **Fifteen rows, fifteen steady.** RFC-0092 M5 closed the last leaking one.
+//! **Sixteen rows, sixteen steady.** RFC-0092 M5 closed the last leaking one,
+//! and the row beside it — the same statement with `consume` written on it —
+//! was not in the census at all.
 //!
 //! **§10 reaches this harness in half.** A task owns a frame, a task record and
 //! an operating-system handle. On wasm there are no threads, so the direct
@@ -554,6 +557,21 @@ const ROWS: &[Row] = &[
               that matters and exists only natively — \
               `the_spawn_handles_go_back_natively` below is the measurement beside it",
     },
+    Row {
+        export: "consumingLoop",
+        census: "U4's price, one keyword over",
+        today: Shape::Steady,
+        why: "RFC-0095 M3: `for x in consume xs` takes the buffer, and the row the PLACE has \
+              says `Moved` — which is the truth about the place and was the end of the matter, \
+              so nothing freed the buffer at all. The loop is its last owner and releases it at \
+              every exit, the way M5's loop over a temporary releases its snapshot. `check_take` \
+              has already refused a borrowed root and refused module state, so the value is this \
+              frame's; the take is what stops the `let` from releasing it too. An early `break` \
+              is safe for the reason the whole row is: the loop variable binds to this row, so a \
+              body that hands ONE element on marks the row gone and the container leaks whole — \
+              a row that survives to the exit is a body that kept nothing, and the release then \
+              gives back the visited and the unvisited elements alike, each exactly once",
+    },
 ];
 
 /// One export per row. The strings are ~900 bytes so one leaked buffer is
@@ -726,6 +744,19 @@ export extern fn keysLoop() {{
     }}
     for k in keyed.keys() {{
         seen = seen + Int64(k.byteLength)
+    }}
+}}
+
+/// RFC-0095 M3, and the row `keysLoop` is one keyword away from. The loop TAKES
+/// the array, so the binding's row says it moved and nothing else will ever free
+/// it. Two ~900-byte elements and one buffer per call, and the loop hands all
+/// three back at its exit.
+export extern fn consumingLoop() {{
+    let mut xs: Array<String> = []
+    xs.push(tag() + "a")
+    xs.push(tag() + "b")
+    for x in consume xs {{
+        seen = seen + Int64(x.byteLength)
     }}
 }}
 

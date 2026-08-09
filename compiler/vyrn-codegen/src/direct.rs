@@ -15097,10 +15097,13 @@ mod tests {
                 "a numeric conversion",
                 "fn main() -> Int64 { let o: Option<Int64> = Some(1)                      let x: Int32 = match o { Some(n) => Int32(n), None => Int32(0) } return 0 }",
             ),
-            // `t.join()` — the task's payload.
+            // `t.join()` — the task's payload. Joined in EVERY arm: RFC-0095 M3
+            // made the walk arm-granular, so a join in one arm and nothing in
+            // the other is a task the other path abandons, and this case was
+            // written that way while nothing could see it.
             (
                 "a join",
-                "fn work(n: Int64) -> Int64 { return n + 1 }                  fn main() -> Int64 { let t = spawn work(1) let o: Option<Int64> = Some(1)                      return match o { Some(n) => t.join(), None => 0 } }",
+                "fn work(n: Int64) -> Int64 { return n + 1 }                  fn main() -> Int64 { let t = spawn work(1) let o: Option<Int64> = Some(1)                      return match o { Some(n) => t.join() + n, None => t.join() } }",
             ),
             // An empty `[]` is typed by the position, in an arm like anywhere.
             (
