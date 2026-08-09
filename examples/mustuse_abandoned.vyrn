@@ -67,5 +67,17 @@ fn main() -> Int64 {
         finish(c)
     }
 
+    // Rejected: a pool of transactions is a `Txn` too, as far as the obligation
+    // is concerned — RFC-0092 M4. Putting one in a container was the way to make
+    // the obligation evaporate, because `linear_kind` read it off the
+    // container's own type key and `Array` has no row. It reads the element's
+    // row now, so the container carries it and the diagnostic names both.
+    //
+    // `pool.push(..)` is not the discharge. It is parsed as `pool = push(pool,
+    // ..)`, a write back into the binding, and a binding that still holds its
+    // value has handed nothing on.
+    let mut pool: Array<Txn> = []
+    pool.push(begin("batch"))
+
     return 0
 }

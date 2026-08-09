@@ -112,7 +112,7 @@ impl DropKind {
 /// wrong menu is worse than a vague one — `drop s` on a `Stream` reclaims
 /// nothing, because a stream's release is pushed by its own lowering
 /// (RFC-0075 M2b) and [`Owned::release_kind`] answers `None` for it on purpose.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Linear {
     /// The seeded row: a `Stream<T>`, consumed with `for … in`, forwarded by
     /// returning it, or released with `close(s)`.
@@ -120,7 +120,12 @@ pub enum Linear {
     /// A declared `impl MustUse for T` row. The value is handed on by name — to
     /// a call, or to the return — or released with `drop t`, which runs whatever
     /// `impl Owned for T` declared.
-    Declared,
+    ///
+    /// It carries the type key that DECLARED the row, which since RFC-0092 M4 is
+    /// not always the type asked about: an `Array<Txn>` is obliged because `Txn`
+    /// is, and a note that said `Array<Txn>` declares it would name a row no
+    /// program wrote.
+    Declared(String),
 }
 
 /// The `Owned` protocol: **how a type is released**, and the only place that
@@ -207,10 +212,45 @@ impl Owned {
     /// its base does. The seed is in the compiler rather than in `std/` for the
     /// reason [`crate::types::MUST_USE`] records.
     pub fn linear_kind(&self, ty: &Type) -> Option<Linear> {
-        if crate::types::type_key(ty).is_some_and(|k| self.linear.contains(&k)) {
-            return Some(Linear::Declared);
+        if let Some(k) = crate::types::type_key(ty).filter(|k| self.linear.contains(k)) {
+            return Some(Linear::Declared(k));
         }
-        matches!(crate::types::resolve(ty, &self.types), Type::Stream(_)).then_some(Linear::Stream)
+        // A type that reaches ITSELF has no bottom to a structural walk, and
+        // `type Node = { kids: Array<Node> }` is ordinary Vyrn. The guard is
+        // [`Owned::release_kind`]'s, for the same reason and in the same words:
+        // the answer is `None`, so the obligation is not seen rather than the
+        // compiler not returning.
+        if self_referring(ty, &self.types).is_some() {
+            return None;
+        }
+        match crate::types::resolve(ty, &self.types) {
+            Type::Stream(_) => Some(Linear::Stream),
+            // RFC-0092 M4: a container answers what its ELEMENT answers. A `Txn`
+            // put in an array is still a `Txn`, and reading the obligation off
+            // the container's own type key let a program park one in a container
+            // and walk away from it. What makes the answer safe to give is M2 and
+            // M3: an `Array`, a `SmallArray`, a `Map` and a fixed array release
+            // their elements now, so `drop pool` runs the declared `release` per
+            // element and the discharge is real rather than nominal.
+            //
+            // A **record field** is left alone. RFC-0092 says *container*, and a
+            // record is a type a program names — `impl MustUse for Order` is how
+            // its author says an `Order` holding a `Txn` must be discharged, and
+            // is one line where an inferred obligation would be a rule nobody
+            // wrote. The corpus agrees: it stores no must-use type in a record.
+            //
+            // A type PARAMETER answers `None`, which is what keeps every generic
+            // container working: `resolve` leaves a `Param` alone and leaves an
+            // undeclared `Named` as `Unit`, so `Array<T>` in `map`, `filter`,
+            // `fold` and `std/slots` carries no obligation.
+            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Option(e) => {
+                self.linear_kind(&e)
+            }
+            Type::Map(a, b) | Type::Result(a, b) => {
+                self.linear_kind(&a).or_else(|| self.linear_kind(&b))
+            }
+            _ => None,
+        }
     }
 
     /// Whether a value of `ty` has to be handed on by name — letting it go out
@@ -1540,11 +1580,35 @@ pub(crate) mod tests {
                    fn main() -> Int64 { return 0 }";
         let (_, p) = analyze_src(src);
         let owned = Owned::new(&p);
+        let txn = Type::Named("Txn".into());
         assert_eq!(
-            owned.linear_kind(&Type::Named("Txn".into())),
-            Some(Linear::Declared)
+            owned.linear_kind(&txn),
+            Some(Linear::Declared("Txn".into()))
         );
         assert_eq!(owned.linear_kind(&Type::Named("Plain".into())), None);
+        // RFC-0092 M4: a container answers what its element answers, and the row
+        // still names the type that DECLARED it rather than the container.
+        assert_eq!(
+            owned.linear_kind(&Type::Array(Box::new(txn.clone()))),
+            Some(Linear::Declared("Txn".into()))
+        );
+        assert_eq!(
+            owned.linear_kind(&Type::Option(Box::new(Type::Map(
+                Box::new(Type::Str),
+                Box::new(txn)
+            )))),
+            Some(Linear::Declared("Txn".into()))
+        );
+        assert_eq!(
+            owned.linear_kind(&Type::Array(Box::new(Type::Named("Plain".into())))),
+            None
+        );
+        // A type PARAMETER is not an obligation, which is what keeps every
+        // generic container in the corpus working.
+        assert_eq!(
+            owned.linear_kind(&Type::Array(Box::new(Type::Param("T".into())))),
+            None
+        );
         // And the seeded row is still there for a program that declares nothing,
         // which is the bootstrap answer `Owned` gives above: a bare file has no
         // resolver, so `Stream` may not depend on one.

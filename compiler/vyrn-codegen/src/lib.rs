@@ -2984,17 +2984,69 @@ impl<'a> Gen<'a> {
     /// back a buffer of somebody else's element words, `m.keys()` and
     /// `sa.toArray()`, copy them now. A `Map` and a `SmallArray` still give back
     /// their buffers alone; their element rows are M3.
+    /// Call the `release` a type declared (RFC-0086 M1), on a value the release
+    /// walk is holding.
+    ///
+    /// [`Gen::emit_drop`]'s `Release` arm reached from inside the walk rather
+    /// than at the top of a drop. An element and a field are values, not slots,
+    /// so a generic declared release — which solves its type arguments from the
+    /// receiver, exactly as a written call does — gets one to read.
+    fn call_release(&mut self, v: &str, ty: &Type) -> Result<(), String> {
+        let Some(DropKind::Release(f)) = self.rel_kind(ty) else {
+            return Ok(());
+        };
+        if self
+            .funcs
+            .get(f.as_str())
+            .is_some_and(|c| !c.type_params.is_empty())
+        {
+            let ty = vyrn_frontend::types::substitute(ty, self.subst);
+            let ll = self.llt(&ty);
+            let slot = self.fresh_alloca(&ll);
+            self.emit(format!("store {ll} {v}, ptr {slot}"));
+            self.scope
+                .push(vec![(REL_RECV.to_string(), slot, ty.clone())]);
+            let recv = [Expr::Var {
+                name: REL_RECV.to_string(),
+                line: 0,
+            }];
+            let r = self.gen_call(&f, &recv);
+            self.scope.pop();
+            return r.map(|_| ());
+        }
+        let pty = self
+            .param_types
+            .get(&f)
+            .and_then(|p| p.first())
+            .cloned()
+            .unwrap_or(Type::Unit);
+        let ll = self.llt(&pty);
+        self.emit(format!("call void @vyrn_{f}({ll} {v})"));
+        Ok(())
+    }
+
     fn deep_release(&mut self, v: &str, ty: &Type) -> Result<(), String> {
         // RFC-0093 M2: the holes belong to the place this call is looking at,
         // and only the record arm below can be told about them. Taking them here
         // is what makes every other arm — an element, a payload, a buffer —
         // start empty, which is right: `own` refuses a hole under any of them.
         let holes = std::mem::take(&mut self.rel_holes);
-        // A type that declares its own release keeps it. Reaching past the
-        // declaration into its fields would reclaim what the declaration says it
-        // reclaims, in a different order, and without the print a user `release`
-        // may do.
-        if matches!(self.rel_kind(ty), Some(DropKind::Release(_))) || !self.owns_heap(ty) {
+        // A type that declares its own release keeps it, so the walk CALLS that
+        // release rather than reaching past the declaration into its fields —
+        // which would reclaim what the declaration says it reclaims, in a
+        // different order, and without the print a user `release` may do.
+        //
+        // It used to return here and call nothing, which was right at the top
+        // of a drop (`emit_drop` takes its own `Release` arm) and wrong for
+        // every place under one: an element of an `Array<Txn>` and a field of a
+        // record both reached this line and were skipped, so `impl Owned for
+        // Txn` never ran for a `Txn` inside anything. RFC-0092 M4 is where that
+        // is observable — a container carries its element's obligation now, so
+        // the compiler demands a discharge the discharge did not perform.
+        if matches!(self.rel_kind(ty), Some(DropKind::Release(_))) {
+            return self.call_release(v, ty);
+        }
+        if !self.owns_heap(ty) {
             return Ok(());
         }
         match self.resolve(ty) {

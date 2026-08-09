@@ -13,7 +13,20 @@ suite now reads **fifteen rows, fourteen steady, `keysLoop` the only leak**. U4
 is closed for an array and open for a snapshot: `for k in m.keys()` walks a
 temporary, and that is Phase 10a's `if let` row applied to `for` and per element.
 `vyrn why --memory` over the corpus reads **1,958 bindings not reclaimed of
-4,335**, against 2,127 when RFC-0092 M1 landed.
+4,336**, against 2,127 when RFC-0092 M1 landed.
+
+**RFC-0092 is COMPLETE.** M4 landed the `linear_kind` recursion, so a container
+carries its element's must-use obligation and RFC-0086 M3's storage hole is
+closed. It cost more than the recursion, and both extras were defects M2 and M3
+had left behind rather than costs M4 created: `pool.push(t)` parses as
+`pool = push(pool, t)` and the must-use scan read that write-back as a disposal,
+and the element walk in all three engines SKIPPED a declared `release` instead of
+calling it — so `impl Owned for T` never ran for a `T` inside anything. The
+census number does not move, because M4 changes what a release does rather than
+which bindings get one. One hole is named and left open: a read through the
+obliged name (`pool.length`, `pool[i]`, `for t in pool`) still launders the
+obligation, and telling a read from a hand-on needs the capability table, which
+carries no row for a builtin.
 
 Execution plan for delegation. Each phase is one agent arc: one branch, one PR,
 merged on local verification (do not wait for CI). Phases are ordered by

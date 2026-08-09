@@ -1921,6 +1921,13 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     };
     let interp = Interp {
         funcs,
+        // RFC-0092 M4: whether the release walk can find anything at all. A
+        // program with no `impl Owned` in it declares no reclamation this engine
+        // has to run, so the walk over what a binding holds is never made.
+        has_owned: program
+            .impls
+            .iter()
+            .any(|i| i.protocol == crate::types::OWNED),
         impls: &program.impls,
         types,
         contracts,
@@ -1961,6 +1968,9 @@ struct Interp<'a> {
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `funcs` cannot answer for it.
     impls: &'a [crate::ast::ImplBlock],
+    /// Whether the program declares any `impl Owned` at all — the gate on the
+    /// RFC-0092 M4 walk over what a binding holds.
+    has_owned: bool,
     types: HashMap<&'a str, &'a TypeDecl>,
     /// Module contracts (RFC-0071), keyed by name — the source `contractOf`
     /// reflects. Comptime-only, so this is read by exactly one builtin.
@@ -2497,6 +2507,11 @@ impl<'a> Interp<'a> {
                             // only auto-reclamation that is observable from inside
                             // the language.
                             Some(crate::own::DropKind::Release(f)) => Some(Some(f.clone())),
+                            // RFC-0092 M4: the binding declares no release, and
+                            // what it HOLDS may. `Some(None)` asks `run_drops`
+                            // for the walk. A program with no `impl Owned` in it
+                            // has nothing the walk could find, so it is not made.
+                            Some(crate::own::DropKind::Deep(_)) if self.has_owned => Some(None),
                             _ => None,
                         };
                         if let Some(f) = release {
@@ -2545,8 +2560,74 @@ impl<'a> Interp<'a> {
                 Some(f) => {
                     self.call(f, std::slice::from_ref(&v))?;
                 }
-                None => {}
+                // The binding declared no release of its own, so what it HOLDS
+                // may declare one — RFC-0092 M4.
+                None => self.release_nested(&v)?,
             }
+        }
+        Ok(())
+    }
+
+    /// Call every declared `release` (RFC-0086 M1) that a value reaching the end
+    /// of its scope holds — RFC-0092 M4.
+    ///
+    /// The two compiling backends walk a release by TYPE. Here the value carries
+    /// what the walk needs, because `coerce` stamps a record with the name it
+    /// crossed its boundary as, and that name is the key a declared row is read
+    /// by. A declared row STOPS the walk at the place that declared it, exactly
+    /// as `deep_release` and `rel_at` stop: the declaration says what it
+    /// reclaims, and reaching past it would reclaim the same storage twice.
+    ///
+    /// Order is the other two engines' order and is load-bearing, because a user
+    /// `release` prints: an array's elements go in index order, and a record's
+    /// fields go in DECLARED order, which is not the order a `HashMap` yields.
+    /// A scalar and a `String` declare nothing and are most of what a container
+    /// holds, so the walk stops on them without asking the table at all.
+    fn release_nested(&self, v: &Val) -> Result<(), Ctrl> {
+        match v {
+            Val::Array(xs) => {
+                for x in xs.iter() {
+                    self.release_nested(x)?;
+                }
+            }
+            // A map's keys are Strings and declare nothing; its values are the
+            // half that can.
+            Val::Map(kv) => {
+                for (_, x) in kv {
+                    self.release_nested(x)?;
+                }
+            }
+            Val::Option(Some(x)) => self.release_nested(x)?,
+            Val::Result(_, x) => self.release_nested(x)?,
+            Val::Enum(n, ps) => {
+                if let Some(f) = self
+                    .variant_enum
+                    .get(n)
+                    .and_then(|k| crate::types::owned_impl_by_key(self.impls, k))
+                {
+                    self.call(&f, std::slice::from_ref(v))?;
+                    return Ok(());
+                }
+                for p in ps {
+                    self.release_nested(p)?;
+                }
+            }
+            // An unnamed record has no declaration to read a field order out of.
+            // Its fields are left alone rather than released in an order the
+            // other two engines would not use.
+            Val::Record(fs, Some(n)) => {
+                if let Some(f) = crate::types::owned_impl_by_key(self.impls, n) {
+                    self.call(&f, std::slice::from_ref(v))?;
+                    return Ok(());
+                }
+                let ty = Type::Named(n.to_string());
+                for f in crate::types::record_fields(&ty, &self.type_map).unwrap_or_default() {
+                    if let Some(x) = fs.get(&f.name) {
+                        self.release_nested(x)?;
+                    }
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -3427,11 +3508,17 @@ impl<'a> Interp<'a> {
                 // engine that did not, and it went unseen while the checker
                 // refused `drop` on every type that could declare one.
                 if let Some(v) = v {
-                    if let Some(f) = self
+                    match self
                         .val_type_key(&v)
                         .and_then(|k| crate::types::owned_impl_by_key(self.impls, &k))
                     {
-                        self.call(&f, std::slice::from_ref(&v))?;
+                        Some(f) => {
+                            self.call(&f, std::slice::from_ref(&v))?;
+                        }
+                        // RFC-0092 M4: `drop pool` releases what the pool holds,
+                        // which is what makes the obligation the pool now carries
+                        // a discharge rather than a demand.
+                        None => self.release_nested(&v)?,
                     }
                 }
                 Ok(Flow::Normal)
