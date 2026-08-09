@@ -3198,10 +3198,17 @@ mod linear {
         module: &Option<String>,
     ) {
         let ty = &o.ty;
+        // `Array<Txn>` reads as "an" and `Stream<Int64>` reads as "a". The
+        // container spellings arrived with RFC-0092 M4, and the sentence has said
+        // "is a" since RFC-0075.
+        let art = match ty.chars().next() {
+            Some('A' | 'E' | 'I' | 'O' | 'U' | 'a' | 'e' | 'i' | 'o' | 'u') => "an",
+            _ => "a",
+        };
         let msg = if s.doubled {
-            format!("`{name}` is a `{ty}` and is disposed more than once")
+            format!("`{name}` is {art} `{ty}` and is disposed more than once")
         } else if s.leaked || !(s.disposed || s.diverges) {
-            format!("`{name}` is a `{ty}` and is never disposed")
+            format!("`{name}` is {art} `{ty}` and is never disposed")
         } else {
             return;
         };
