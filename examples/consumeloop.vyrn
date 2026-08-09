@@ -60,6 +60,32 @@ fn joinTemporary(prefix: String, n: Int64) -> String {
     return out
 }
 
+/// Leaves the loop half way (RFC-0095 M3). The buffer still holds the elements
+/// the loop never reached, and the release at the exit gives back all of them
+/// with it — the visited ones too, because a body that keeps nothing has moved
+/// nothing out.
+fn firstShort(xs: consume Array<String>, limit: Int64) -> Int64 {
+    let mut n = 0
+    for x in consume xs {
+        if Int64(x.byteLength) > limit {
+            break
+        }
+        n = n + 1
+    }
+    return n
+}
+
+/// The other early exit: leaving the FUNCTION from inside the body. The release
+/// runs on a drop frame of its own, so this path gives the buffer back as well.
+fn firstLong(xs: consume Array<String>, limit: Int64) -> Int64 {
+    for x in consume xs {
+        if Int64(x.byteLength) > limit {
+            return Int64(x.byteLength)
+        }
+    }
+    return 0
+}
+
 fn show(label: String, xs: Array<String>) {
     let mut line = label + ":"
     for x in xs {
@@ -96,5 +122,9 @@ fn main() -> Int64 {
         none.push(e)
     }
     print("none " + none.length.toString())
+
+    // The two early exits out of a consuming loop.
+    print("short " + firstShort(make("s", 12), 2).toString())
+    print("long " + firstLong(make("l", 12), 2).toString())
     return 0
 }

@@ -525,7 +525,12 @@ none blocks the core loop.
   and yields the result, `drop t` waits for it and discharges it without taking
   the result, and a task that is never discharged is refused. The frame, the task
   record and the operating-system handle go back at that one site — census §10,
-  which was 81 bytes and one handle per spawn.
+  which was 81 bytes and one handle per spawn. **An arm is a path (M3):** the
+  must-use walk merges the arms of a `match` and of an `if` used as an
+  expression, so a join in one arm and nothing in the other is refused — the
+  limit `Stream` had carried since RFC-0075, closed for every must-use type at
+  once. The same milestone gave `for x in consume xs` the release RFC-0092 M5
+  left open: the loop is the buffer's last owner and hands it back at every exit.
 - **Real threads natively (RFC-0025).** The native binary runs each task on an
   OS thread (Win32/pthreads, entirely inside the C shim: the IR packs arguments
   into a heap frame and passes a per-callee thunk symbol to `__vyrn_spawn`;

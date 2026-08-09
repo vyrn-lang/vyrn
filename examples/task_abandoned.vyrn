@@ -7,7 +7,8 @@
 // per-process handle ceiling is a server that stops — RFC-0087 §10 measured one
 // handle per spawn, 200,076 of them at 200,000 spawns.
 //
-// Three refusals, the same three a `Stream` gets.
+// Four refusals. The first three are the three a `Stream` gets; the fourth is
+// the same one branch over, in a `match` arm (RFC-0095 M3).
 
 fn work(n: Int64) -> Int64 {
     return n + 1
@@ -40,7 +41,21 @@ fn oneBranch(c: Bool) -> Int64 {
     return 0
 }
 
+// 4. Discharged in one match ARM. The `if` above was refused from the day M1
+//    landed; this one compiled clean until RFC-0095 M3, because the walk read a
+//    whole statement at a time and a join anywhere in it discharged the task on
+//    every path. On the `None` path the handle, the frame and the record leak
+//    until the process exits.
+fn oneArm(pick: Option<Int64>) -> Int64 {
+    let t = spawn work(4)
+    let r = match pick {
+        Some(n) => t.join() + n,
+        None => 0,
+    }
+    return r
+}
+
 fn main() -> Int64 {
-    print("\{abandoned()} \{joinedTwice()} \{oneBranch(true)}")
+    print("\{abandoned()} \{joinedTwice()} \{oneBranch(true)} \{oneArm(Some(1))}")
     return 0
 }

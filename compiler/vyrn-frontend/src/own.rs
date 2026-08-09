@@ -1597,6 +1597,35 @@ pub(crate) mod tests {
         );
     }
 
+    /// RFC-0095 M3, and RFC-0092 M5's row one keyword over.
+    ///
+    /// `for x in consume xs` takes the buffer, so the binding's row says `Moved`
+    /// and the block releases nothing — which was the truth and the whole leak.
+    /// The LOOP is the last owner and gets the row a snapshot gets.
+    #[test]
+    fn a_consuming_loop_releases_what_it_took() {
+        let src = "fn make() -> Array<String> { let mut o: Array<String> = []; \
+                   o.push(\"a\"); return o; } \
+                   fn main() -> Int64 { let xs = make(); let mut n = 0; \
+                   for x in consume xs { n = n + Int64(x.byteLength); } return n; }";
+        // One row, and it is the loop's: the `let` is `Moved`, so it has none.
+        assert_eq!(
+            drop_kinds(src, "main"),
+            vec![DropKind::Deep(Type::Array(Box::new(Type::Str)))]
+        );
+        // A body that hands an element on marks the row gone, and the whole
+        // container leaks — a leak, never a double free.
+        let src = "fn make() -> Array<String> { let mut o: Array<String> = []; \
+                   o.push(\"a\"); return o; } \
+                   fn main() -> Int64 { let xs = make(); let mut out: Array<String> = []; \
+                   for x in consume xs { out.push(x); } return out.length; }";
+        assert_eq!(
+            drop_kinds(src, "main"),
+            vec![DropKind::Deep(Type::Array(Box::new(Type::Str)))],
+            "only `out` may be released here"
+        );
+    }
+
     #[test]
     fn a_bare_file_with_no_imports_still_frees_its_string() {
         // The bootstrap answer. `vyrn run` on a bare file has no resolver and

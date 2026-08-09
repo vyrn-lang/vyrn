@@ -31,6 +31,15 @@ fn feed() -> Stream<Int64> {
     return fromArray(xs)
 }
 
+/// Takes the stream and consumes it, so a call is a disposal.
+fn drain(s: Stream<Int64>) -> Int64 {
+    let mut total = 0
+    for v in s {
+        total = total + v
+    }
+    return total
+}
+
 fn main() -> Int64 {
     // Rejected: acquired here, never consumed and never closed.
     let events = feed()
@@ -49,6 +58,18 @@ fn main() -> Int64 {
         return 1
     }
     close(early)
+
+    // Rejected: disposed in ONE ARM of a `match` (RFC-0095 M3). The `if` above
+    // was refused from RFC-0075 M1; this shape compiled clean until M3, because
+    // the walk read a whole statement at a time and a disposal anywhere in one
+    // counted on every path through it. The `None` path abandons the producer.
+    let armed = feed()
+    let pick: Option<Int64> = Some(1)
+    let n = match pick {
+        Some(k) => drain(armed) + k,
+        None => 0,
+    }
+    print(n)
 
     return 0
 }

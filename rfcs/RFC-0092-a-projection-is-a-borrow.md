@@ -1170,6 +1170,25 @@ early returns.
   place moved and nothing releases what the loop then owns. It is the same shape
   as this row, one keyword over, and it was left alone because the census does
   not name it.
+
+  **Closed by RFC-0095 M3.** The loop gets the row this milestone gives a
+  snapshot, minted at the same site with the `consuming` case no longer excluded
+  — a one-line change, because the rest of the mechanism did not care which
+  keyword put the value in the loop's hands. `check_take` has already refused a
+  borrowed root and refused module state, so a consuming loop's iterable is
+  always this frame's; the take (a whole binding) or the hole (one field) is what
+  stops the source place from releasing it too, which is the same argument that
+  made a snapshot safe. The elements go with it on the same terms: the loop
+  variable binds to the row, so a body that keeps ONE element marks the row gone
+  and the whole container leaks — the limit above, unchanged. **An early exit is
+  therefore safe without counting anything.** A row that survives to the exit is
+  a body that moved nothing out, so the release at `break`, at a `return` out of
+  the body, and at the fall-through gives back the visited and the unvisited
+  elements alike, each exactly once — no index, no partial walk, and no path on
+  which a double free is expressible. A body that DOES hand one on, or drops one
+  by hand, leaks the buffer whole, which is the direction this analysis is
+  allowed to be wrong in. The new memory row `consumingLoop` measures it, and it
+  grows when the row is not minted.
 - **The interpreter runs no `for` release**, exactly as it runs no `if let`
   release (Phase 10a). It reclaims by dropping the Rust value, and the only
   reclamation it has to run is a DECLARED one, because that is ordinary Vyrn and
