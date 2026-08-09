@@ -922,7 +922,39 @@ impl Emit<'_> {
                     self.block(eb);
                 }
             }
-            Stmt::While { body, .. } | Stmt::ForIn { body, .. } => self.block(body),
+            Stmt::While { body, .. } => self.block(body),
+            // RFC-0092 M5, census "U4's price". `for k in m.keys()` walks a
+            // temporary, and `movecheck` gives that temporary the row Phase 10a
+            // gave an `if let`'s. The row answers the same question: did an
+            // ELEMENT leave the loop. A row with no `gone` is a snapshot the
+            // body kept nothing out of, and releasing it — buffer and elements —
+            // is what closes the row.
+            //
+            // A STREAM is refused. `for x in pull()` already closes its producer
+            // on every exit path in all three engines (RFC-0075 M2b), so a row
+            // here would close it twice.
+            Stmt::ForIn { iter, body, .. } => {
+                let streaming = self
+                    .lets
+                    .get(&id(s))
+                    .and_then(|r| r.ty.as_ref())
+                    .map(|t| crate::types::resolve(t, &self.proto.types))
+                    .is_some_and(|t| matches!(t, Type::Stream(_)));
+                if !streaming {
+                    // A hole is a path relative to a RECORD, and nothing a `for`
+                    // walks is one — `skippable` therefore answers false and
+                    // `fate` says `Leaked` before this ever sees a hole. The
+                    // guard says so rather than depending on it.
+                    if let Fate::Reclaimed(kind, holes) = self.fate(s, iter) {
+                        if holes.is_empty() {
+                            self.droppable.insert(id(s), kind);
+                        }
+                    }
+                }
+                // No `BindingNote`: the snapshot is a temporary with no name to
+                // print, exactly as an `if let`'s scrutinee is.
+                self.block(body)
+            }
             Stmt::Region { body, .. } => {
                 self.region_depth += 1;
                 self.block(body);

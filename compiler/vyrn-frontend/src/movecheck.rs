@@ -894,8 +894,8 @@ impl MoveCheck<'_> {
         self.nodes.borrow().get(&root).copied().unwrap_or(0)
     }
 
-    /// Give an `if let` whose scrutinee is a TEMPORARY a row of its own, keyed by
-    /// the statement's node address, and hand back that key (Phase 10a).
+    /// Give a statement that walks a TEMPORARY a row of its own, keyed by the
+    /// statement's node address, and hand back that key (Phase 10a).
     ///
     /// The temporary owns what it holds and has no name, so the row is what makes
     /// it releasable at all: the binders bind to this key, and the ordinary
@@ -904,16 +904,18 @@ impl MoveCheck<'_> {
     /// reason a `let`'s is — a call to a LENDER hands back storage nobody here
     /// owns, and [`ownership`] reads that after every body.
     ///
-    /// The key is the `Stmt::IfLet` address, which is the key `own.rs` reads.
-    fn note_scrutinee(&self, s: &Stmt, scrutinee: &Expr) -> usize {
+    /// Two statements ask for one: `if let PAT = f()` (Phase 10a) and
+    /// `for x in f()` (RFC-0092 M5). The key is the statement address, which is
+    /// the key `own.rs` reads.
+    fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize {
         let Some(sink) = &self.lets else { return 0 };
         let key = let_id(s);
         sink.borrow_mut().insert(
             key,
             LetOwnership {
-                ty: self.type_of(scrutinee),
+                ty: self.type_of(value),
                 gone: None,
-                from_call: match scrutinee {
+                from_call: match value {
                     Expr::Call { name, .. } => Some(name.clone()),
                     _ => None,
                 },
@@ -2145,6 +2147,19 @@ impl MoveCheck<'_> {
                 self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
                 let _ = self.store(value, &|| format!("`{name}`"), *line, true, consumed)?;
+                // A map takes its KEY. Both backends write the key pointer into
+                // `keys[len]` and copy nothing, so `hs[k] = v` moves `k` — and
+                // no rule said so until RFC-0092 M5 needed it to. `httpHeaders`
+                // (`std/http`) is `for k in base.keys() { hs[k] = .. }`, and a
+                // loop that released its snapshot would hand back a key the map
+                // still holds.
+                //
+                // Recorded AFTER the value, because the value may read the key,
+                // and with `outlives` FALSE, because recording the move is this
+                // milestone's job and refusing a BORROWED key is a rule of its
+                // own with a corpus behind it. The instruments RFC-0092 M0 keeps
+                // are gated on `outlives` too, so their counts do not move.
+                let _ = self.store(index, &|| format!("`{name}`"), *line, false, consumed)?;
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
             }
@@ -2257,7 +2272,7 @@ impl MoveCheck<'_> {
                 // nothing this block may release.
                 let key = match self.place_key(scrutinee) {
                     0 if self.names_a_place(scrutinee).is_none() => {
-                        self.note_scrutinee(s, scrutinee)
+                        self.note_temporary(s, scrutinee)
                     }
                     k => k,
                 };
@@ -2329,9 +2344,45 @@ impl MoveCheck<'_> {
                     && self.iterable_is_a_place(iter)
                     && elem.as_ref().is_some_and(|t| self.decl.owns_heap(t)))
                 .then(|| Borrow::Element(place_path(iter).map(|(r, _)| r).unwrap_or_default()));
+                // RFC-0092 M5, census "U4's price". `for k in m.keys()` walks a
+                // TEMPORARY, and until here nothing released it. It is Phase
+                // 10a's row for an `if let` over a temporary, at the second
+                // statement that can walk one, and it is guarded the same way:
+                // `place_key` answers 0 both for an expression that names no
+                // place and for a place with no `let` row, and minting a row for
+                // the second kind releases somebody else's value. That mistake
+                // turned CI red for twenty-four runs — see the `if let` arm.
+                //
+                // `names_a_place` is the guard, unchanged and asked again. It
+                // reads `m.keys()` as a temporary, which is right: `keys` is not
+                // in `RESERVED_VIEWS`, and since RFC-0092 M2 the snapshot holds
+                // COPIES of the keys rather than the map's own pointers, so the
+                // loop is the only owner there is.
+                //
+                // A CONSUMING loop is excluded. Its iterable is a place the take
+                // already emptied, and the row that place has is where its fate
+                // is written.
+                let key = match self.place_key(iter) {
+                    0 if !*consuming && self.names_a_place(iter).is_none() => {
+                        self.note_temporary(s, iter)
+                    }
+                    _ => 0,
+                };
                 let mut body_c = consumed.clone();
                 self.enter();
                 self.bind(var, elem, borrow);
+                // The loop variable is bound to the snapshot's row, so every way
+                // an ELEMENT can leave the loop is written on it: a store
+                // (`fs.push(Field { key: k, .. })`, which is what `httpInput`
+                // does), a `return`, a `drop`, a capture, a handover to a
+                // position that retains. A row that says the value left is a row
+                // `own.rs` reclaims nothing from — the elements the body kept
+                // stay allocated, and so does the buffer with them. That is a
+                // leak and not a double free, which is the direction this
+                // analysis is allowed to be wrong in.
+                if key != 0 {
+                    self.nodes.borrow_mut().bind(var, key);
+                }
                 let body_div = self.block(body, &mut body_c, scope);
                 self.exit();
                 // The loop variable is fresh on every iteration, so a move of it
