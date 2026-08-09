@@ -1926,7 +1926,7 @@ impl Fn_<'_> {
                 // RFC-0093 M2: the places a take gave away. Empty for every
                 // binding nothing took from, which is nearly all of them.
                 self.rel_holes = holes.clone();
-                let r = self.rel_at(b, a, &t, line);
+                let r = self.rel_at(m, b, a, &t, line);
                 self.rel_holes.clear();
                 r
             }
@@ -2059,18 +2059,33 @@ impl Fn_<'_> {
     /// back a buffer of somebody else's element words, copy them now. A `Map`
     /// and a `SmallArray` still give back their buffers alone: their element
     /// rows are M3.
-    fn rel_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
+    fn rel_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         // RFC-0093 M2: the holes belong to the place this call is looking at,
         // and only the record arm below can be told about them. Taking them here
         // is what makes every other arm — an element, a payload, a buffer —
         // start empty, which is right: `own` refuses a hole under any of them.
         let holes = std::mem::take(&mut self.rel_holes);
-        // A type that declares its own release keeps it. Reaching past the
-        // declaration into its fields would reclaim what the declaration says it
-        // reclaims, in a different order, and without the print a user `release`
-        // may do — and the interpreter runs the declared one only at a `let`.
-        if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Release(_))) {
-            return Ok(());
+        // A type that declares its own release keeps it, so the walk CALLS that
+        // release rather than reaching past the declaration into its fields —
+        // which would reclaim what the declaration says it reclaims, in a
+        // different order, and without the print a user `release` may do.
+        //
+        // It used to return here and call nothing, which was right at the top of
+        // a drop (`emit_rel` has its own `Rel::Call` arm) and wrong for every
+        // place under one. An aggregate in a wasm local IS its address, so the
+        // place a walk holds is exactly what that arm parks under `@rel`.
+        // RFC-0092 M4 is where the gap is observable: a container carries its
+        // element's obligation now, so the compiler demands a discharge the
+        // discharge did not perform.
+        if let Some(DropKind::Release(f)) = self.cx.owned.release_kind(ty) {
+            return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
         }
         if !self.owns_heap(ty) {
             return Ok(());
@@ -2097,7 +2112,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
                 b.ins(&Instruction::LocalSet(data));
-                self.rel_each(b, data, n, stride, &inner, line)?;
+                self.rel_each(m, b, data, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(data));
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
@@ -2116,7 +2131,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(n));
                 let base = self.sa_base(b, a, ty, line)?;
-                self.rel_each(b, base, n, stride, &inner, line)?;
+                self.rel_each(m, b, base, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word_at(l.fields[2])))
                     .ins(&Instruction::Call(self.cx.rt.free));
@@ -2141,7 +2156,7 @@ impl Fn_<'_> {
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
-                    self.rel_each(b, buf, n, stride, &elem, line)?;
+                    self.rel_each(m, b, buf, n, stride, &elem, line)?;
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
                 }
@@ -2180,7 +2195,7 @@ impl Fn_<'_> {
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
                     self.rel_holes = vyrn_frontend::own::holes_under(&holes, &f.name);
-                    self.rel_at(b, p, &f.ty, line)?;
+                    self.rel_at(m, b, p, &f.ty, line)?;
                 }
                 Ok(())
             }
@@ -2192,7 +2207,7 @@ impl Fn_<'_> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.rel_each(b, a, count, stride, &inner, line)
+                self.rel_each(m, b, a, count, stride, &inner, line)
             }
             Type::Option(inner) => {
                 let l = self.layout_of(ty, line)?;
@@ -2201,7 +2216,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32Load8U(byte()));
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.rel_word(b, a, l.fields[1], &inner, w, line)?;
+                self.rel_word(m, b, a, l.fields[1], &inner, w, line)?;
                 self.depth -= 1;
                 b.ins(&Instruction::End);
                 Ok(())
@@ -2213,9 +2228,9 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32Load8U(byte()));
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.rel_word(b, a, l.fields[1], &ok, wo, line)?;
+                self.rel_word(m, b, a, l.fields[1], &ok, wo, line)?;
                 b.ins(&Instruction::Else);
-                self.rel_word(b, a, l.fields[1], &err, we, line)?;
+                self.rel_word(m, b, a, l.fields[1], &err, we, line)?;
                 self.depth -= 1;
                 b.ins(&Instruction::End);
                 Ok(())
@@ -2237,7 +2252,7 @@ impl Fn_<'_> {
                             continue;
                         }
                         let w = self.word1(pty);
-                        self.rel_word(b, a, l.fields[j + 1], pty, w, line)?;
+                        self.rel_word(m, b, a, l.fields[j + 1], pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -2270,6 +2285,7 @@ impl Fn_<'_> {
     /// release that knew only one of them would free a stack address or leak.
     fn rel_word(
         &mut self,
+        m: &mut Module,
         b: &mut Frame,
         a: u32,
         off: u32,
@@ -2292,7 +2308,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I64Load(at(off)));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(p));
-                self.rel_at(b, p, pty, line)?;
+                self.rel_at(m, b, p, pty, line)?;
                 b.ins(&Instruction::LocalGet(p))
                     .ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
@@ -9124,6 +9140,7 @@ impl Fn_<'_> {
     /// `owns_heap` is only a reachability question.
     fn rel_each(
         &mut self,
+        m: &mut Module,
         b: &mut Frame,
         buf: u32,
         count: u32,
@@ -9157,7 +9174,7 @@ impl Fn_<'_> {
         }
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalSet(p));
-        self.rel_at(b, p, elem, line)?;
+        self.rel_at(m, b, p, elem, line)?;
         b.ins(&Instruction::LocalGet(i));
         b.ins(&Instruction::I32Const(1));
         b.ins(&Instruction::I32Add);

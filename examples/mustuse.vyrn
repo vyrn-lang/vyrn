@@ -18,6 +18,11 @@
 // wherever it goes. A `String` is consumable and carries no obligation; a `Txn`
 // carries one however any particular function takes it.
 //
+// A CONTAINER of a must-use type carries the obligation too, since RFC-0092 M4:
+// `Array<Txn>` must be discharged wherever a `Txn` must be, and `drop` on it
+// runs the declared `release` per element. Before M4 a program could put an
+// obligation in an array and walk away from it.
+//
 // Compare mustuse_abandoned.vyrn, which is the same declarations with every
 // discharge removed.
 
@@ -71,7 +76,24 @@ fn carry(t: consume Txn) -> Txn {
     return t
 }
 
+/// A pool of transactions is a `Txn` too, as far as the obligation is concerned
+/// — RFC-0092 M4. `Owned::linear_kind` reads a container's obligation off its
+/// ELEMENT, so `Array<Txn>` must be discharged by name wherever a `Txn` must be,
+/// and `drop pool` runs each element's declared `release`.
+fn pool() {
+    let mut pool: Array<Txn> = []
+    pool.push(begin("orders"))
+    pool.push(begin("invoices"))
+    // Each element ends, oldest first, and then the buffer goes back. Adding to
+    // the pool is not a discharge — a write back into the binding leaves the
+    // binding holding it — so this `drop` is the only statement here that ends
+    // anything.
+    drop pool
+}
+
 fn main() -> Int64 {
+    pool()
+
     // Released by name, here and nowhere else.
     let a = begin("orders")
     drop a

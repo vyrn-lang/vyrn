@@ -1,12 +1,13 @@
 # RFC-0092 — A Projection Is a Borrow
 
-- **Status:** **M0 measured; M1, M2 and M3 landed; M4 designed, not built.**
-  The rule is enforced, the corpus is migrated, census **U4 is closed**, and
+- **Status:** **COMPLETE. M0 measured; M1, M2, M3 and M4 landed.**
+  The rule is enforced, the corpus is migrated, census **U4 is closed**,
   **every aggregate releases its places** — so RFC-0089 rule 4 is whole and that
-  RFC's status line says so. See "M1 as landed", "M2 as landed" and "M3 as
-  landed". Supersedes nothing. Closes named gaps in RFC-0087 (§3, §14's
-  remainder, U4) and RFC-0089 rule 4. **RFC-0086 M3's storage hole is M4 and is
-  still open**: it needs a recursion in `linear_kind`, which M3 did not touch.
+  RFC's status line says so — and **a container carries its element's must-use
+  obligation**, which closes RFC-0086 M3's storage hole. See "M1 as landed",
+  "M2 as landed", "M3 as landed" and "M4 as landed". Supersedes nothing. Closes
+  named gaps in RFC-0087 (§3, §14's remainder, U4), RFC-0089 rule 4 and
+  RFC-0086 M3.
 - **Depends on:** RFC-0089 (rules 1 to 4, all landed), RFC-0086 M1 and M3
   (`Owned`, `MustUse`), RFC-0091 M1 (`Copy` for a self-referring type)
 - **Principle:** RFC-0089's own thesis, applied one level down. *Stop inferring
@@ -314,7 +315,7 @@ gate. The seeded built-in rows are already how `String`, `Array`, `Map`,
 | `Type::ArrayN` | `None` (`own.rs:325`) | `Deep` | the rule — **landed in M3**; `@list` needed nothing, see "M2 as landed" |
 | `Type::Array` | buffer only (`own.rs:238-241`) | buffer + elements | the rule + the constructors — **landed in M2** |
 | `Type::Map`, `Type::SmallArray` | buffer only | buffer + elements | the rule — **landed in M3**; the view was not a constructor but the map LOOKUP |
-| `linear_kind` on a container | reads the container's own key | reads the element's too | the row above — **still open, it is M4** |
+| `linear_kind` on a container | reads the container's own key | reads the element's too | the row above — **landed in M4**; and the element's declared release had to start being CALLED, see "M4 as landed" |
 
 The walk is the one Phase 5 settled: `copy` run backwards, written as one shape
 per engine so the two cannot disagree about a payload encoding. `Option` and
@@ -936,6 +937,106 @@ and one example: `examples/mustuse.vyrn` gains the pool.
 **Gate.** The pool program prints `end orders` before `done` on all three
 engines, and `examples/mustuse_abandoned.vyrn` gains the case where the pool is
 abandoned, under `EXPECTED_CHECK_FAILURE`.
+
+**M4 as landed.** The recursion is in, both examples have their pool, and
+RFC-0086 M3's storage hole is closed. Parity is `124 checked, 11 skipped, 0
+failed`, the workspace is `1,514 passed, 0 failed` over 52 binaries, the memory
+suite holds its 15 rows with `keysLoop` the only leak, `genwasm` is `11 passed`,
+and the instrument still reads `stores: 0`, `elem-store: 0`, `elem-return: 0`,
+`returns: 0` over 210 files.
+
+**The design got the recursion right and the price wrong.** The recursion itself
+is what this section said it was: `linear_kind` asks its element, over `Array`,
+`ArrayN`, `SmallArray`, `Map`, `Option` and `Result`, with `release_kind`'s own
+`self_referring` guard in front of it and no second guard written. A type
+PARAMETER answers `None` for free, because `resolve` leaves a `Param` alone and
+answers `Unit` for an undeclared `Named` — so `map`, `filter`, `fold` and
+`std/slots` never see the question. A **record field** was left alone: this RFC
+says *container*, `impl MustUse for Order` is one line where an inferred
+obligation would be a rule nobody wrote, and the corpus stores no must-use type
+in a record. The corpus check found **no new refusal at all** — the ten files
+that fail `vyrn check` are the ten that already did, all listed under
+`EXPECTED_CHECK_FAILURE`.
+
+**The price was two lines and it was three changes.** Each was found by the
+gate, not by review, and each was a defect the recursion made visible rather
+than one it introduced.
+
+1. **`pool.push(t)` laundered the obligation.** The must-use scan calls any
+   mention of the name a disposal, which was exact for a `Stream` — a stream has
+   no field, no length and no indexing, so every mention IS a hand-on. A
+   container has all three. Worse, the parser turns `pool.push(t)` into
+   `pool = push(pool, t)`, so the very statement M4 exists to catch read as
+   "handed on by name" and the obligation evaporated. **This RFC's own
+   motivating program — `pool.push(begin("orders"))` with no discharge — still
+   compiled after the recursion landed.** The fix is one arm: a write back INTO
+   the binding is not a disposal, because the binding holds a value again when
+   the statement ends.
+2. **A nested declared `release` was never called, in any of the three
+   engines.** M2 and M3 gave `Array`, `Map`, `SmallArray`, the record and the
+   user enum an element walk, and both compiling backends' walks opened with
+   *"a type that declares its own release keeps it"* and then returned without
+   calling it. That is right at the top of a drop, where `emit_drop` and
+   `emit_rel` have their own arms for it, and wrong for every place underneath
+   one. So `impl Owned for Txn` never ran for a `Txn` inside anything, and the
+   interpreter agreed by having no walk at all. The three engines were
+   consistently wrong, which is why nothing observed it: parity compares them to
+   each other. M4 is where it becomes intolerable — the compiler would demand a
+   discharge and then not perform it.
+3. **The interpreter needed a walk it did not have.** The two compiling backends
+   walk a release by TYPE; the interpreter reclaims through the host and runs
+   only what is observable. A declared `release` is ordinary Vyrn and prints, so
+   it is observable, and the interpreter now walks the VALUE for one — the value
+   carries what the walk needs, because `coerce` stamps a record with the name it
+   crossed its boundary as. Order is the other two engines' order and is
+   load-bearing: an array's elements go in index order, and a record's fields go
+   in DECLARED order, which is not the order a `HashMap` yields. An unnamed
+   record has no declaration to read that order out of, so its fields are left
+   alone rather than released in an order the other two would not use. The walk
+   is gated on the program declaring any `impl Owned` at all, so a program
+   without one pays nothing.
+
+**The diagnostic names both types, and that cost a field.** `Linear::Declared`
+carries the type key that declared the row, because since M4 that is not always
+the type asked about. Without it the note read *"`Array<Txn>` declares `impl
+MustUse`"*, which names a row no program wrote. It reads:
+
+```text
+`pool` is a `Array<Txn>` and is never disposed
+  note: `Txn` declares `impl MustUse` and a `Array<Txn>` holds one, so the
+  container must be handed on by name — passed to a call, forwarded by
+  returning it, or released with `drop pool`, which releases each element —
+  on every path
+```
+
+**The price, measured.**
+
+- **No wasm grows.** `domdemo.wasm` is 28,445 bytes, `fib.wasm` 1,522,
+  `mapdemo.wasm` 37,442 and `vlog.wasm` 48,609 — every one byte-identical to M3.
+  None of the four holds a declared release inside a container, and the walk
+  emits a call only where one is.
+- **`vyrn why --memory` over `examples/` and `std/`: 1,958 bindings not
+  reclaimed of 4,336, against 1,958 of 4,335 before.** The one binding is the
+  `pool` this milestone added, and it is reclaimed. M4 changes what a release
+  DOES, not which bindings get one, so the census is the right number to be
+  unmoved.
+
+**What M4 does not close, and one of them is new.**
+
+- **A read through the obliged name still launders it.** `pool.length`,
+  `pool[i]` and `for t in pool` are all mentions, and the scan calls a mention a
+  disposal. The Assign arm fixes the one spelling that is unambiguously not a
+  hand-on; the rest needs a notion of POSITION the pass cannot have, because
+  after the method-call desugar `pool.push(t)` and `finish(t)` are the same
+  `Call` shape and only the CAPABILITY tells them apart — and the capability
+  table has no row for a builtin. This is the same answer §16 gets: the mechanism
+  exists one pass over, and reaching it is its own milestone.
+- **A record field carries no obligation.** Deliberate, above.
+- **A nested GENERIC declared release** reaches the walk through the ordinary
+  call route in the textual backend and the direct one, so `impl<T> Owned for
+  Slots<T>` inside a container is emitted rather than skipped. It is untested by
+  the corpus, which stores no `Slots` in an `Array`.
+- Everything under "What it does not close" stands unchanged.
 
 ---
 

@@ -3198,10 +3198,17 @@ mod linear {
         module: &Option<String>,
     ) {
         let ty = &o.ty;
+        // `Array<Txn>` reads as "an" and `Stream<Int64>` reads as "a". The
+        // container spellings arrived with RFC-0092 M4, and the sentence has said
+        // "is a" since RFC-0075.
+        let art = match ty.chars().next() {
+            Some('A' | 'E' | 'I' | 'O' | 'U' | 'a' | 'e' | 'i' | 'o' | 'u') => "an",
+            _ => "a",
+        };
         let msg = if s.doubled {
-            format!("`{name}` is a `{ty}` and is disposed more than once")
+            format!("`{name}` is {art} `{ty}` and is disposed more than once")
         } else if s.leaked || !(s.disposed || s.diverges) {
-            format!("`{name}` is a `{ty}` and is never disposed")
+            format!("`{name}` is {art} `{ty}` and is never disposed")
         } else {
             return;
         };
@@ -3209,15 +3216,23 @@ mod linear {
         // The two menus differ because the two disposals do. A stream's release
         // is pushed by its own lowering, so `drop` on one reclaims nothing; a
         // declared type has no `close` and is not iterable unless it says so.
-        d.note = Some(match o.row {
+        d.note = Some(match &o.row {
             Linear::Stream => format!(
                 "a stream must be consumed with `for … in`, forwarded by returning it, \
                  or released with `close({name})` — on every path"
             ),
-            Linear::Declared => format!(
+            Linear::Declared(by) if by == ty => format!(
                 "`{ty}` declares `impl MustUse`, so a value of it must be handed on by \
                  name — passed to a call, forwarded by returning it, or released with \
                  `drop {name}` — on every path"
+            ),
+            // The container case (RFC-0092 M4). Naming both types is the whole
+            // point: the reader wrote `Array<Txn>` and the row is `Txn`'s, and a
+            // note that named only one of them sends them to the wrong file.
+            Linear::Declared(by) => format!(
+                "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the container \
+                 must be handed on by name — passed to a call, forwarded by returning it, \
+                 or released with `drop {name}`, which releases each element — on every path"
             ),
         });
         d.file = module.clone();
@@ -3306,10 +3321,19 @@ mod linear {
             // `sink(s)`, `let t = s`). A second mention anywhere in the rest of the
             // list is then a double disposal on this path.
             let moved = match st {
-                Stmt::Let { value, .. }
-                | Stmt::Assign { value, .. }
-                | Stmt::SetField { value, .. }
-                | Stmt::Expr(value) => mentions(value, name),
+                // A write back INTO the binding is not a disposal: whatever the
+                // right-hand side did with the value, the binding holds one
+                // again when the statement ends. RFC-0092 M4 is what made this
+                // matter. `pool.push(t)` is parsed as `pool = push(pool, t)`
+                // (see `hoist_mutating_receiver` and the `push` arm beside it),
+                // so with a container carrying its element's obligation, every
+                // mutation of the pool read as "handed on by name" and the
+                // obligation evaporated at the one statement the milestone
+                // exists to catch.
+                Stmt::Assign { name: n, value, .. } => n != name && mentions(value, name),
+                Stmt::Let { value, .. } | Stmt::SetField { value, .. } | Stmt::Expr(value) => {
+                    mentions(value, name)
+                }
                 Stmt::IndexSet { index, value, .. } => {
                     mentions(index, name) || mentions(value, name)
                 }
