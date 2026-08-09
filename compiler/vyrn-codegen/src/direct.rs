@@ -1942,9 +1942,71 @@ impl Fn_<'_> {
                 }];
                 let r = self.call(m, b, f, &recv, line);
                 self.scope.truncate(mark);
-                r.map(|_| ())
+                r?;
+                // RFC-0096: the payload boxes are the enum's own storage and the
+                // declaration cannot reach them. Only a user enum has any, and
+                // only it gets an address taken for one.
+                let ty = ty.clone();
+                if !matches!(self.cx.resolve(&ty), Type::Enum(_)) {
+                    return Ok(());
+                }
+                let a = self.addr_local(b, p, 0);
+                self.free_declared_boxes(b, a, &ty, line)
             }
         }
+    }
+
+    /// Free the payload BOXES of an enum whose release the type declared, and
+    /// nothing else — RFC-0096.
+    ///
+    /// A declared `release` takes the enum BY VALUE and gives its payloads back
+    /// by name. The BLOCK a wide payload travels in is the enum's own
+    /// representation: the match that reads the payload loads out of it, no Vyrn
+    /// surface names it, and the structural walk was the only thing that ever
+    /// freed it. So a declared release leaked one block per boxed payload per
+    /// value — 16 bytes a node over a released tree, small enough to read steady
+    /// against 500 calls and plain against 32,000.
+    ///
+    /// Everything that is not a user enum answers `Ok(())`, which is every other
+    /// declared row: a record and a container carry their storage inline or in a
+    /// buffer the declaration itself hands back.
+    fn free_declared_boxes(
+        &mut self,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        let Type::Enum(vs) = self.cx.resolve(ty) else {
+            return Ok(());
+        };
+        let l = self.layout_of(ty, line)?;
+        for (tag, var) in vs.iter().enumerate() {
+            let mut boxed = Vec::new();
+            for (j, pty) in var.payload.clone().iter().enumerate() {
+                if self.owns_heap(pty) && matches!(self.word1(pty), Word::Boxed) {
+                    boxed.push(j);
+                }
+            }
+            if boxed.is_empty() {
+                continue;
+            }
+            b.ins(&Instruction::LocalGet(a));
+            b.ins(&Instruction::I64Load(word8()));
+            b.ins(&Instruction::I64Const(tag as i64));
+            b.ins(&Instruction::I64Eq);
+            b.ins(&Instruction::If(BlockType::Empty));
+            self.depth += 1;
+            for j in boxed {
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(l.fields[j + 1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::Call(self.cx.rt.free));
+            }
+            self.depth -= 1;
+            b.ins(&Instruction::End);
+        }
+        Ok(())
     }
 
     /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
@@ -2085,6 +2147,8 @@ impl Fn_<'_> {
         // element's obligation now, so the compiler demands a discharge the
         // discharge did not perform.
         if let Some(DropKind::Release(f)) = self.cx.owned.release_kind(ty) {
+            // `emit_rel`'s `Rel::Call` arm frees the payload boxes after the
+            // call (RFC-0096), so this reaches them too.
             return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
         }
         if !self.owns_heap(ty) {

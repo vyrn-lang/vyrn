@@ -283,6 +283,24 @@ impl Owned {
         owns_heap(ty, &self.types)
     }
 
+    /// The name `ty` reaches from itself with **no declared release between** —
+    /// the only self-reference a structural release walk cannot bottom out in.
+    ///
+    /// [`self_referring`] answers about the TYPE and is what `copy` asks.
+    /// This answers about the WALK, and the two differ by one fact: a type that
+    /// declared `impl Owned` is released by a CALL, so the walk stops at the
+    /// declaration and the cycle behind it is that function's business.
+    /// `type Node = { kids: Array<Node> }` has no bottom; the same type with
+    /// `impl Owned for Node` written on it has one, and every type that merely
+    /// REACHES it gets its structural row back — `{ root: Node, err: String }`
+    /// releases both places again.
+    ///
+    /// It is the whole of RFC-0096: the declaration closes what the walk cannot,
+    /// and it closes it for the types above as well as for itself.
+    pub fn unbounded(&self, ty: &Type) -> Option<String> {
+        self_referring_past(ty, &self.types, &|n| self.impls.contains_key(n))
+    }
+
     /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
     ///
     /// A **declared** row wins over the seed, so `impl Owned for T` is what `T`
@@ -321,8 +339,13 @@ impl Owned {
             // element has no bottom — the same crash `copy` met in Phase 4b, and
             // the same guard. The elements leak, which is what this whole file
             // does where it cannot prove otherwise.
+            //
+            // Unless the cycle has a DECLARATION on it (RFC-0096). The guard is
+            // [`Owned::unbounded`] rather than [`self_referring`]: a declared
+            // release is a call, so the walk stops there and `Array<Node>` gets
+            // its element row back the day `impl Owned for Node` is written.
             Type::Array(e) => Some(
-                if self_referring(&e, &self.types).is_none() && self.release_kind(&e).is_some() {
+                if self.unbounded(&e).is_none() && self.release_kind(&e).is_some() {
                     DropKind::Deep(Type::Array(e))
                 } else {
                     DropKind::FreeArr
@@ -336,8 +359,7 @@ impl Owned {
             Type::SmallArray(e, n) => {
                 let t = Type::SmallArray(e.clone(), n);
                 Some(
-                    if self_referring(&t, &self.types).is_none() && self.release_kind(&e).is_some()
-                    {
+                    if self.unbounded(&t).is_none() && self.release_kind(&e).is_some() {
                         DropKind::Deep(t)
                     } else {
                         DropKind::FreeSmallArr
@@ -347,7 +369,7 @@ impl Owned {
             Type::Map(k, v) => {
                 let t = Type::Map(k.clone(), v.clone());
                 Some(
-                    if self_referring(&t, &self.types).is_none()
+                    if self.unbounded(&t).is_none()
                         && (self.release_kind(&k).is_some() || self.release_kind(&v).is_some())
                     {
                         DropKind::Deep(t)
@@ -438,11 +460,16 @@ impl Owned {
             // otherwise. `Json` and `Html` are that shape, which is also why M1's
             // `.copy()` menu sent them to a hand-written `copyJson`.
             //
+            // RFC-0096 moved the guard one word: a cycle with `impl Owned` on it
+            // is bounded, because the walk emits a CALL at the declaration. So a
+            // record holding a declared self-referring type is walked again, and
+            // 63 corpus bindings closed on two declarations rather than eleven.
+            //
             // A `Fn` is off for the reason `owns_heap` records, and `lazy T` IS
             // `fn() -> T` (RFC-0085 M4a) — `resolve` normally answers that, and
             // this is the depth-limited fallback.
             t @ (Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)) => {
-                (self_referring(ty, &self.types).is_none() && owns_heap(&t, &self.types))
+                (self.unbounded(ty).is_none() && owns_heap(&t, &self.types))
                     .then(|| DropKind::Deep(t))
             }
             Type::Lazy(_) => None,
@@ -475,8 +502,31 @@ impl Owned {
 /// needs recursion in the code, and `std/json`'s `copyJson` is the worked
 /// example. RFC-0091 M1's `Copy` protocol is where a type declares its own.
 pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<String> {
-    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> Option<String> {
+    self_referring_past(ty, types, &|_| false)
+}
+
+/// [`self_referring`], with the names a walk STOPS at removed from the question.
+///
+/// One walk, two readers. `copy` stops at nothing, so it passes a predicate that
+/// is never true and reads the type's own shape. A release stops at every type
+/// that declared `impl Owned`, because the walk emits a CALL there rather than
+/// expanding — see [`Owned::unbounded`].
+fn self_referring_past(
+    ty: &Type,
+    types: &HashMap<String, TypeDecl>,
+    stops: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    fn go(
+        ty: &Type,
+        types: &HashMap<String, TypeDecl>,
+        stops: &dyn Fn(&str) -> bool,
+        seen: &mut Vec<String>,
+    ) -> Option<String> {
         if let Type::Named(n) | Type::App(n, _) = ty {
+            // The walk ends here, so nothing behind this name is on it.
+            if stops(n) {
+                return None;
+            }
             if seen.iter().any(|s| s == n) {
                 return Some(n.clone());
             }
@@ -485,11 +535,11 @@ pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<St
                 return None;
             }
             seen.push(n.clone());
-            let r = go(&crate::types::resolve(ty, types), types, seen);
+            let r = go(&crate::types::resolve(ty, types), types, stops, seen);
             seen.pop();
             return r;
         }
-        let mut deeper = |t: &Type| go(t, types, seen);
+        let mut deeper = |t: &Type| go(t, types, stops, seen);
         match ty {
             Type::Option(t)
             | Type::Array(t)
@@ -499,14 +549,14 @@ pub fn self_referring(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<St
             | Type::Task(t)
             | Type::Stream(t) => deeper(t),
             Type::Result(a, b) | Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
-            Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, seen)),
+            Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, stops, seen)),
             Type::Enum(vs) => vs
                 .iter()
-                .find_map(|v| v.payload.iter().find_map(|p| go(p, types, seen))),
+                .find_map(|v| v.payload.iter().find_map(|p| go(p, types, stops, seen))),
             _ => None,
         }
     }
-    go(ty, types, &mut Vec::new())
+    go(ty, types, stops, &mut Vec::new())
 }
 
 /// Whether a value of `ty` transitively owns heap, under RFC-0089 rule 1.
@@ -1816,6 +1866,41 @@ pub(crate) mod tests {
                    fn main() -> Int64 { let n = Node { name: \"a\", kids: [] }; \
                    return n.kids.length; }";
         assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    /// RFC-0096. The same shape with a DECLARATION on the cycle is walked
+    /// again: the release emits a call at `Node`, and a call is the bottom the
+    /// structural walk lacked. The record above it — which only REACHES the
+    /// self-referring type — gets its row back with it, which is 63 corpus
+    /// bindings on two `impl`s.
+    #[test]
+    fn a_declaration_on_the_cycle_gives_the_types_above_it_their_row_back() {
+        let decl = "type Node = { name: String, kids: Array<Node> } \
+                    type Doc = { root: Node, title: String } \
+                    impl Owned for Node { fn release(consume self) { \
+                    let name = consume self.name; drop name; \
+                    let kids = consume self.kids; drop kids; } } ";
+        let src = format!(
+            "{decl} fn main() -> Int64 {{ \
+             let d = Doc {{ root: Node {{ name: \"a\", kids: [] }}, title: \"t\" }}; \
+             return d.root.kids.length; }}"
+        );
+        let (o, _) = analyze_src(&src);
+        assert_eq!(
+            o.proto.release_kind(&Type::Named("Node".into())),
+            Some(DropKind::Release("Owned__Node__release".to_string()))
+        );
+        // The container and the record above the declaration walk again.
+        assert!(matches!(
+            o.proto
+                .release_kind(&Type::Array(Box::new(Type::Named("Node".into())))),
+            Some(DropKind::Deep(_))
+        ));
+        assert!(matches!(
+            o.proto.release_kind(&Type::Named("Doc".into())),
+            Some(DropKind::Deep(_))
+        ));
+        assert_eq!(drop_count(&src, "main"), 1);
     }
 
     /// RFC-0093's hole. `consume d.title` takes one field and leaves the record

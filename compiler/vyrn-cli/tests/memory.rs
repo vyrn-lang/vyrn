@@ -54,10 +54,12 @@
 //! | `keysLoop` | U4's price | steady | RFC-0092 M5: a `for` over a temporary owns the snapshot, so it releases it — Phase 10a's row, at the second statement that walks one |
 //! | `spawnFrame` | §10 | steady | RFC-0095 M1: a task is linear, and both discharges give its storage back |
 //! | `consumingLoop` | U4's price, one keyword over | steady | RFC-0092 M5's row for `for x in consume xs`: the loop is the buffer's last owner, so it releases it at every exit |
+//! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
 //!
-//! **Sixteen rows, sixteen steady.** RFC-0092 M5 closed the last leaking one,
-//! and the row beside it — the same statement with `consume` written on it —
-//! was not in the census at all.
+//! **Seventeen rows, seventeen steady.** RFC-0092 M5 closed the last leaking
+//! one, and the row beside it — the same statement with `consume` written on it
+//! — was not in the census at all. RFC-0096 closed the last CLASS: the corpus
+//! reading "the type has no release rule" fell from 63 to 0 on two `impl`s.
 //!
 //! **§10 reaches this harness in half.** A task owns a frame, a task record and
 //! an operating-system handle. On wasm there are no threads, so the direct
@@ -571,6 +573,25 @@ const ROWS: &[Row] = &[
               `the_spawn_handles_go_back_natively` below is the measurement beside it",
     },
     Row {
+        export: "selfReferring",
+        census: "RFC-0096",
+        today: Shape::Steady,
+        why: "RFC-0096: a type that reaches ITSELF is released by DECLARATION. The release walk \
+              is structural, so `type Twig = | Fork(String, Array<Twig>)` has no bottom to stop \
+              at, and `release_kind` answered `None` — for the type, for `Array<Twig>`, and for \
+              every record that merely REACHES one. That was 63 of the corpus's unreclaimed \
+              bindings, all of them in `std/vyx` and `std/graphql`. A declared `release` IS the \
+              bottom: the walk emits a call there rather than expanding, so the guard now asks \
+              whether the cycle has a declaration ON it rather than whether a cycle exists, and \
+              the rows above the declaration come back with it. Two `impl`s closed all 63. The \
+              row is four ~900-byte Strings a call in a tree, under a record that only reaches \
+              one: removing the `impl` makes it grow, and so does removing the declared stop \
+              from the guard — verified by removing each. The depth is the language's own: a \
+              release of a chain 10,000 deep is 10,000 native frames, measured to overflow the \
+              default 1 MiB Windows stack at 11,000, where an ordinary recursive Vyrn walk over \
+              the same chain overflows at 20,000",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -603,6 +624,37 @@ type Bump = fn(Int64) -> Int64
 type Row = {{ name: String, n: Int64 }}
 
 type Doc = {{ title: String, body: String }}
+
+/// A type that reaches ITSELF — `Twig` holds `Array<Twig>`. The shape the
+/// release walk refused to enter until RFC-0096, and the shape `std/vyx`'s
+/// `VyxNode` and `std/graphql`'s `GqlSel` have.
+type Twig =
+    | Tip(String)
+    | Fork(String, Array<Twig>)
+
+/// A record that merely REACHES the self-referring type. It had no row either,
+/// for the same missing bottom, and gets its structural one back with the
+/// declaration below.
+type Bough = {{ root: Twig, label: String }}
+
+/// One helper for every payload the release hands back, because a `match` arm
+/// is an expression and `drop` is a statement. `drop v` reads the row the
+/// INSTANCE has, so this one function releases a `String` and an `Array<Twig>`.
+fn give<T>(v: consume T) -> Int64 {{
+    drop v
+    return 0
+}}
+
+/// The declaration that IS the bottom. The walk emits a call here rather than
+/// expanding, and this function makes the recursion the walk cannot.
+impl Owned for Twig {{
+    fn release(consume self) {{
+        let given = match consume self {{
+            Tip(s) => give(s),
+            Fork(s, kids) => give(s) + give(kids),
+        }}
+    }}
+}}
 
 let mut row: Row = Row {{ name: "", n: 0 }}
 
@@ -771,6 +823,24 @@ export extern fn consumingLoop() {{
     for x in consume xs {{
         seen = seen + Int64(x.byteLength)
     }}
+}}
+
+/// RFC-0096. Four ~900-byte Strings a call, in a tree that refers to itself,
+/// under a record that only reaches one.
+///
+/// Nothing released any of them until the declaration: `release_kind` answered
+/// `None` for `Twig` because a structural walk of a self-referring type has no
+/// bottom, and `None` for `Bough` and for `Array<Twig>` for the same reason one
+/// hop away. `impl Owned for Twig` supplies the bottom — the walk emits a CALL
+/// there — and the three rows above it come back with it. Removing the `impl`
+/// makes this row grow; so does removing the declared stop from the guard, and
+/// then only `label` is reclaimed.
+export extern fn selfReferring() {{
+    let mut kids: Array<Twig> = []
+    kids.push(Tip(tag() + "a"))
+    kids.push(Tip(tag() + "b"))
+    let b = Bough {{ root: Fork(tag() + "r", kids), label: tag() + "l" }}
+    seen = seen + Int64(b.label.byteLength)
 }}
 
 export extern fn returnedString() -> String {{
