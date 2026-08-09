@@ -593,8 +593,8 @@ fn main() -> Int64 { return 0; }
 }
 
 /// `textDocument/completion` at a `.foo` member-access position returns the
-/// built-in methods for the receiver's type (here `Array<Int>` → push/at/alen/
-/// pop/length), NOT the top-level symbol list. Guards the `is_member_context`
+/// built-in methods for the receiver's type (here `Array<Int>` → push/at/pop/
+/// length), NOT the top-level symbol list. Guards the `is_member_context`
 /// routing → `member_completions` → receiver-type resolution path over the wire.
 #[test]
 fn member_completion_after_dot_lists_array_methods() {
@@ -643,7 +643,7 @@ fn main() -> Int64 {
         .iter()
         .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
         .collect();
-    for expected in ["push", "at", "alen", "pop", "length"] {
+    for expected in ["push", "at", "pop", "length"] {
         assert!(
             labels.contains(&expected),
             "array member {expected} missing: {labels:?}"

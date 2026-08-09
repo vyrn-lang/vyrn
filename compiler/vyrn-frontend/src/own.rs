@@ -1250,7 +1250,7 @@ pub(crate) mod tests {
     #[test]
     fn a_loop_binder_shadowing_a_string_is_not_a_string() {
         let src = "fn main() -> Int64 { let s = \"x\"; print(s); \
-                   let ns: Array<Int64> = array(); \
+                   let ns: Array<Int64> = []; \
                    for s in ns { let t = s + 1; print(t); } return 0; }";
         // The array, and only the array: `s` is a literal, and `t` is the
         // integer add this test is about. A String `t` here freed an integer.
@@ -1493,23 +1493,23 @@ pub(crate) mod tests {
 
     #[test]
     fn mut_array_with_self_update_is_auto_freed() {
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   let mut i = 0; while i < 3 { a = push(a, i); i = i + 1; } \
-                   return at(a, 0); }";
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   let mut i = 0; while i < 3 { a.push(i); i = i + 1; } \
+                   return a[0]; }";
         assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
     }
 
     #[test]
     fn explicitly_dropped_array_is_not_auto_freed() {
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   a = push(a, 1); let v = at(a, 0); drop a; return v; }";
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   a.push(1); let v = a[0]; drop a; return v; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
     #[test]
     fn returned_array_is_not_auto_freed() {
-        let src = "fn build() -> Array<Int64> { let mut a: Array<Int64> = array(); \
-                   a = push(a, 1); return a; } fn main() -> Int64 { return 0; }";
+        let src = "fn build() -> Array<Int64> { let mut a: Array<Int64> = []; \
+                   a.push(1); return a; } fn main() -> Int64 { return 0; }";
         // `a` is moved out by the return, so it is not freed inside `build`.
         assert_eq!(drop_count(src, "build"), 0);
     }
@@ -1523,7 +1523,7 @@ pub(crate) mod tests {
         // `array()` call did not. Nothing forced the two to agree, because the
         // list was what decided.
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
-                   a = push(a, 1); return at(a, 0); }";
+                   a.push(1); return a[0]; }";
         assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
     }
 

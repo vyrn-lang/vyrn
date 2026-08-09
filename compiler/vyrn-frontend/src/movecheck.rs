@@ -104,7 +104,7 @@ pub struct ProjectionSite {
     /// The function it is in.
     pub func: String,
     pub line: usize,
-    /// The projection as written: `d.title`, `at(xs, i)`.
+    /// The projection as written: `d.title`, `@at(xs, i)`.
     pub path: String,
     /// The destination in words, for a store; the return type, for a return.
     pub into: String,
@@ -288,7 +288,7 @@ fn let_id(s: &Stmt) -> usize {
 ///
 /// A builtin has no signature to carry a capability, so the ones that read a
 /// place rather than allocate are named here — the same gap `sinks` fills for
-/// the opposite direction (RFC-0087 §2b). `at` reads an element out of a
+/// the opposite direction (RFC-0087 §2b). `@at` reads an element out of a
 /// container; `bytes` is a view of a String's buffer, which is what
 /// `std/codecs` and `std/text` are written on. A binding to one of these owns
 /// nothing, so nothing may release it.
@@ -300,11 +300,12 @@ fn let_id(s: &Stmt) -> usize {
 /// handed back a view that owns nothing. `std/slots`' own reader copies its
 /// element out. A `Slots<String>` read through it leaked, silently.
 ///
-/// [`RESERVED_VIEWS`] and [`RESERVED_SINKS`] are checked against `RESERVED` by
-/// `every_view_and_sink_name_is_reserved`. Being reserved is what makes a name
-/// here mean the builtin and nothing else, and it is the invariant `get` lost
+/// [`RESERVED_VIEWS`] and [`RESERVED_SINKS`] are checked by
+/// `every_view_and_sink_name_is_reserved`. A name here must be reserved OR
+/// unspellable (`@`-prefixed, so no source can write it). Either one makes the
+/// name mean the builtin and nothing else, and it is the invariant `get` lost
 /// without anybody noticing.
-const RESERVED_VIEWS: &[&str] = &["at", "bytes"];
+const RESERVED_VIEWS: &[&str] = &[crate::project::AT, "bytes"];
 
 /// The builtins that take ownership of an argument, by name and position.
 ///
@@ -322,7 +323,7 @@ const RESERVED_VIEWS: &[&str] = &["at", "bytes"];
 /// binding of that type carries a release, so it has nothing to double free —
 /// and a second `unboxStream` of one address is the magic-word trap, not a use
 /// after free.
-const RESERVED_SINKS: &[(&str, usize)] = &[("push", 1), ("fromArray", 0), ("fromStep", 2)];
+const RESERVED_SINKS: &[(&str, usize)] = &[("@push", 1), ("fromArray", 0), ("fromStep", 2)];
 
 fn views(name: &str) -> bool {
     RESERVED_VIEWS.contains(&name)
@@ -1151,9 +1152,9 @@ impl MoveCheck<'_> {
             // nothing reclaims it — which cost nothing while a record released
             // nothing, and costs the taken field the day M3 gives one a row.
             Expr::Consume { place, .. } => self.type_of(place),
-            // An element read: `xs[i]` lowers to `at`, and `x.copy()` is already
+            // An element read: `xs[i]` lowers to `@at`, and `x.copy()` is already
             // answered by `Declared`. The element type is the container's.
-            Expr::Call { name, args, .. } if name == "at" => {
+            Expr::Call { name, args, .. } if name == crate::project::AT => {
                 let c = self.type_of(args.first()?)?;
                 self.decl.elem_of(&c)
             }
@@ -1216,7 +1217,7 @@ impl MoveCheck<'_> {
         consumed: &mut Consumed,
     ) -> Result<bool, String> {
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
-        // pass as `at(xs, i)`, which is a call, so the `place_path` bail two
+        // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
         //
         // M1 widens `store` to see it, which M0 left as this milestone's
@@ -1339,7 +1340,7 @@ impl MoveCheck<'_> {
             // `let t = s` where `s` is itself a borrow: the borrow travels.
             Some((root, _)) => self.borrow_of(&root),
             // An ELEMENT read, and a field OF one. [`place_path`] answers `None`
-            // as soon as it meets the `at(..)` call, so `element_path` is what
+            // as soon as it meets the `@at(..)` call, so `element_path` is what
             // walks both — the same widening M1 gave `store` and
             // `returned_borrow`, arriving here late because a `let` of `ps[0].xs`
             // is written by the RFC-0082 place desugar and never by a person.
@@ -1379,7 +1380,7 @@ impl MoveCheck<'_> {
             _ => vec![None; n],
         };
         // A place, and since RFC-0092 M3 an ELEMENT of one. `m[k]` reaches this
-        // pass as `at(m, k)`, which is a call, so `place_path` answered `None`
+        // pass as `@at(m, k)`, which is a call, so `place_path` answered `None`
         // and the binder was an OWNER — `match ps[k] { Some(v) => v, .. }` handed
         // out a value the map still held. It leaked while a `Map` gave back only
         // its two buffers, and frees it twice now that the map releases what is
@@ -1393,12 +1394,12 @@ impl MoveCheck<'_> {
     /// Whether iterating `e` reads a container somebody else still owns.
     ///
     /// A variable and a field are places. A call is a fresh value — except
-    /// `at(..)`, which is what `xs[i]` lowers to and is a projection of its
+    /// `@at(..)`, which is what `xs[i]` lowers to and is a projection of its
     /// receiver. The same judgment [`MoveCheck::borrow_from`] makes for a `let`.
     fn iterable_is_a_place(&self, e: &Expr) -> bool {
         match e {
             Expr::Var { .. } | Expr::Field { .. } => true,
-            Expr::Call { name, args, .. } if name == "at" => {
+            Expr::Call { name, args, .. } if name == crate::project::AT => {
                 args.first().is_some_and(|a| self.iterable_is_a_place(a))
             }
             _ => false,
@@ -1796,7 +1797,7 @@ impl MoveCheck<'_> {
             _ => {
                 let Some((root, path)) = place_path(e) else {
                     // An element read is a projection too, and `place_path`
-                    // answers `None` for the `at(..)` call it lowers to.
+                    // answers `None` for the `@at(..)` call it lowers to.
                     let (root, path) = element_path(e)?;
                     return Some((Borrow::Projection, root, path));
                 };
@@ -2871,14 +2872,14 @@ impl MoveCheck<'_> {
                                 v,
                                 Gone::Moved {
                                     line: *line,
-                                    by: format!("`{name}(..)`"),
+                                    by: format!("`{}(..)`", crate::parser::method_surface(name)),
                                 },
                             );
                             consumed
                                 .entry(v.clone())
                                 .or_insert(Consumption::by_capability(
                                     *line,
-                                    format!("`{name}(..)`"),
+                                    format!("`{}(..)`", crate::parser::method_surface(name)),
                                 ));
                         }
                     } else if self.decl.constructs(name) {
@@ -2897,7 +2898,10 @@ impl MoveCheck<'_> {
                                     &root,
                                     Gone::Moved {
                                         line: *line,
-                                        by: format!("`{name}(..)`"),
+                                        by: format!(
+                                            "`{}(..)`",
+                                            crate::parser::method_surface(name)
+                                        ),
                                     },
                                 );
                             }
@@ -2907,8 +2911,13 @@ impl MoveCheck<'_> {
                         // `consume` parameter that has no signature to say so
                         // (RFC-0087 §2b). Rule 1 governs it exactly as it governs
                         // `xs = [.., v]`, which is what it means.
-                        let _ =
-                            self.store(arg, &|| format!("`{name}(..)`"), *line, true, consumed)?;
+                        let _ = self.store(
+                            arg,
+                            &|| format!("`{}(..)`", crate::parser::method_surface(name)),
+                            *line,
+                            true,
+                            consumed,
+                        )?;
                     }
                 }
                 Ok(())
@@ -3058,7 +3067,7 @@ impl MoveCheck<'_> {
 ///
 /// The store half of RFC-0089 rule 4 asks this: a store releases what the place
 /// held, and the old value is usually an operand of the new one — `acc = acc +
-/// x` reads the old buffer and `a = push(a, i)` grows it. A value that names the
+/// x` reads the old buffer and `a = @push(a, i)` grows it. A value that names the
 /// place therefore releases nothing. The self-append spine reclaims that shape
 /// by not allocating at all; every other shape is a recorded leak, which is the
 /// side of the trade a language that promises memory safety takes.
@@ -3390,8 +3399,8 @@ mod linear {
                 // A write back INTO the binding is not a disposal: whatever the
                 // right-hand side did with the value, the binding holds one
                 // again when the statement ends. RFC-0092 M4 is what made this
-                // matter. `pool.push(t)` is parsed as `pool = push(pool, t)`
-                // (see `hoist_mutating_receiver` and the `push` arm beside it),
+                // matter. `pool.push(t)` is parsed as `pool = @push(pool, t)`
+                // (see `hoist_mutating_receiver` and the `@push` arm beside it),
                 // so with a container carrying its element's obligation, every
                 // mutation of the pool read as "handed on by name" and the
                 // obligation evaporated at the one statement the milestone
@@ -3754,25 +3763,25 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
 /// takes, the path is what the diagnostic quotes. Anything else (a call, a
 /// literal, an operator) is not a place and answers `None`: it has no earlier
 /// owner, so nothing about it can be a move.
-/// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `at(xs, i)`,
+/// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `@at(xs, i)`,
 /// which is a call, so [`place_path`] answers `None` for it.
 ///
 /// M0 found that the RFC was wrong to say an element read is covered "by the
 /// same three lines as a field read". It is true of `borrow_from`, which reads
-/// `at(..)` itself, and false of [`MoveCheck::store`] and of
+/// `@at(..)` itself, and false of [`MoveCheck::store`] and of
 /// [`MoveCheck::returned_borrow`], both of which bailed at `place_path` before
 /// deciding anything. **M1 took the decision M0 left open and widened both**, so
 /// `out.push(xs[i])` and `return items[i]` are refused like the field they are.
 /// The instrument still counts them apart, under `elem-store` and `elem-return`.
 fn element_path(e: &Expr) -> Option<(String, String)> {
     match e {
-        Expr::Call { name, args, .. } if name == "at" => {
+        Expr::Call { name, args, .. } if name == crate::project::AT => {
             let a = args.first()?;
             let (root, path) = place_path(a).or_else(|| element_path(a))?;
             Some((root, format!("{path}[{}]", index_text(args.get(1)))))
         }
         // A field OF an element: `fs[0].key`. [`place_path`] walks a `Field` down
-        // to a `Var` and answers `None` as soon as it meets the `at(..)` call, so
+        // to a `Var` and answers `None` as soon as it meets the `@at(..)` call, so
         // without this arm the escape hatch is one dot wide — `let f = fs[0]`
         // then `return f.key` is refused and `return fs[0].key` is not.
         Expr::Field { expr, field, .. } => {
@@ -3875,18 +3884,21 @@ mod tests {
     /// was introduced and the only place it is cheap to see.
     #[test]
     fn every_view_and_sink_name_is_reserved() {
+        // An `@`-prefixed name is unspellable — no source token lexes to it —
+        // which is a stronger guarantee than reservation, not a weaker one.
+        let owned = |n: &str| n.starts_with('@') || crate::checker::RESERVED.contains(&n);
         for name in RESERVED_VIEWS {
             assert!(
-                crate::checker::RESERVED.contains(name),
-                "`{name}` is a view builtin but not reserved, so a user function \
-                 of that name would be treated as a view and never released"
+                owned(name),
+                "`{name}` is a view builtin but neither reserved nor unspellable, so a \
+                 user function of that name would be treated as a view and never released"
             );
         }
         for (name, _) in RESERVED_SINKS {
             assert!(
-                crate::checker::RESERVED.contains(name),
-                "`{name}` is a sink builtin but not reserved, so a user function \
-                 of that name would be treated as taking ownership"
+                owned(name),
+                "`{name}` is a sink builtin but neither reserved nor unspellable, so a \
+                 user function of that name would be treated as taking ownership"
             );
         }
     }
@@ -4838,14 +4850,16 @@ mod tests {
         // array went.
         let e = run("fn main() -> Int64 { let xs: Array<Int64> = [1, 2] \
                      let s = fromArray(xs) close(s) return xs.length }")
-            .unwrap_err();
+        .unwrap_err();
         assert!(e.contains("moved here into `fromArray(..)`"), "{e}");
 
         // A `read` parameter's buffer may not go into a stream: the caller still
         // owns it, and the stream's close would free it.
-        let e = run("fn mk(xs: Array<Int64>) -> Stream<Int64> { return fromArray(xs) } \
-                     fn main() -> Int64 { return 0 }")
-            .unwrap_err();
+        let e = run(
+            "fn mk(xs: Array<Int64>) -> Stream<Int64> { return fromArray(xs) } \
+                     fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
         assert!(e.contains("may not be stored into `fromArray(..)`"), "{e}");
     }
 

@@ -547,7 +547,7 @@ fn main() -> Int64 {
     assert_eq!(r.kind, SymbolKind::Method);
     assert_eq!(r.name, "push");
     assert!(!r.definition, "a built-in method has no source declaration");
-    assert!(r.hover.contains("push(array, value)"), "hover: {}", r.hover);
+    assert!(r.hover.contains("array.push(value)"), "hover: {}", r.hover);
 }
 
 /// A built-in method called on a Logger (`log.info(..)`) hovers with the log
@@ -615,7 +615,7 @@ fn main() -> Int64 {
         .into_iter()
         .map(|c| c.label)
         .collect();
-    for expected in ["push", "at", "alen", "pop", "length"] {
+    for expected in ["push", "at", "pop", "length"] {
         assert!(
             labels.contains(expected),
             "array member {expected} missing: {:?}",
@@ -625,6 +625,8 @@ fn main() -> Int64 {
     // `afree` was removed. Completion must not offer a name that no longer
     // resolves — the reclamation an array still has is `drop a`.
     assert!(!labels.contains("afree"), "afree is gone: {labels:?}");
+    // `alen` went the same way: an array's length is the `length` field above.
+    assert!(!labels.contains("alen"), "alen is gone: {labels:?}");
     // A Logger method must NOT appear for an array receiver.
     assert!(
         !labels.contains("info"),

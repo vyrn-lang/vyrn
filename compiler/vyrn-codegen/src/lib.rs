@@ -3564,7 +3564,8 @@ impl<'a> Gen<'a> {
                 }
             }
             Expr::Call { name, args, .. }
-                if (name == "at" || name == vyrn_frontend::project::ELEM) && args.len() == 2 =>
+                if (name == vyrn_frontend::project::AT || name == vyrn_frontend::project::ELEM)
+                    && args.len() == 2 =>
             {
                 let base = self.static_ty(&args[0])?;
                 match self.resolve(&base) {
@@ -4116,7 +4117,7 @@ impl<'a> Gen<'a> {
                 let (v, vty) = r?;
                 let (v, _) = self.coerce(v, &vty, &tty)?;
                 // RFC-0089 rule 4: the store releases what the place held. Not when
-                // the new value names the place — `a = push(a, i)` grows the old
+                // the new value names the place — `a = @push(a, i)` grows the old
                 // buffer and hands it back, so freeing it would be a double free.
                 // That shape is the self-append above where it is a String, and a
                 // recorded leak everywhere else. The release runs AFTER the value
@@ -4861,8 +4862,8 @@ impl<'a> Gen<'a> {
                         return Ok((len, Type::Int));
                     }
                 }
-                // `arr.length` is the element count (sugar for `alen`): a constant
-                // for a fixed array, field 1 of the `{ptr,len,cap}` triple otherwise.
+                // `arr.length` is the element count: a constant for a fixed
+                // array, field 1 of the `{ptr,len,cap}` triple otherwise.
                 if field == "length" {
                     match self.resolve(&ety) {
                         Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
@@ -4919,8 +4920,9 @@ impl<'a> Gen<'a> {
             Expr::Spawn { name, args, .. } => self.gen_spawn(name, args),
             Expr::ArrayLit { elems, .. } => {
                 // An empty `[]` is a growable empty array — the same `{ptr,len,cap}`
-                // triple `array()` produces (the element type is placeholder; the
-                // representation is type-independent and the annotation fixes it).
+                // triple an empty `[]` produces (the element type is a
+                // placeholder; the representation is type-independent and the
+                // annotation fixes it).
                 if elems.is_empty() {
                     // An empty `[]` against a `SmallArray<T, N>` slot (RFC-0056)
                     // is the empty small-buffer array in the inline state:
@@ -9091,13 +9093,7 @@ impl<'a> Gen<'a> {
         // `Some(x)` / `Ok(x)` / `Err(e)` — build a { i1 tag, i64 payload } value.
         // Growable arrays. An `Array<T>` is { ptr data, i64 len, i64 cap }; used
         // linearly (`push` returns the updated triple, reallocating on growth).
-        if name == "array" {
-            return Ok((
-                "{ ptr null, i64 0, i64 0 }".into(),
-                Type::Array(Box::new(Type::Int)),
-            ));
-        }
-        if name == "push" {
+        if name == "@push" {
             let (av, aty) = self.gen_expr(&args[0])?;
             // `SmallArray<T, N>.push(v)` (RFC-0056): store into the live buffer
             // (inline while `cap == N`, else heap). A push at `len == cap`
@@ -9185,7 +9181,7 @@ impl<'a> Gen<'a> {
         // through the same table a user container reaches its own through, and
         // the emitted IR is the same text it was when this block was named
         // `at`.
-        if name == "at" && args.len() == 2 {
+        if name == vyrn_frontend::project::AT && args.len() == 2 {
             let line = args[0].line();
             let recv = self.static_ty(&args[0]);
             let Some(f) = vyrn_frontend::project::for_site(self.impls, recv.as_ref(), "at") else {
@@ -9374,25 +9370,6 @@ impl<'a> Gen<'a> {
                     return Ok((r, Type::Option(Box::new(val))));
                 }
                 _ => return Err("at on a non-Array value".into()),
-            }
-        }
-        if name == "alen" {
-            let (av, aty) = self.gen_expr(&args[0])?;
-            match self.resolve(&aty) {
-                // Fixed array: the length is the constant N.
-                Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
-                // SmallArray (RFC-0056): the length is header field 0.
-                Type::SmallArray(inner, n) => {
-                    let sa_ll = self.sa_ll(&inner, n);
-                    let len = self.fresh_tmp();
-                    self.emit(format!("{len} = extractvalue {sa_ll} {av}, 0"));
-                    return Ok((len, Type::Int));
-                }
-                _ => {
-                    let len = self.fresh_tmp();
-                    self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
-                    return Ok((len, Type::Int));
-                }
             }
         }
         // RFC-0075 M2b: `close(s)` is the explicit half of the disposal
@@ -13608,8 +13585,8 @@ mod tests {
     }
 
     #[test]
-    fn length_and_index_surface_lower_to_alen_and_at() {
-        // `a.length` -> extractvalue field 1; `a[i]` -> bounds-checked `at`.
+    fn length_and_index_surface_lower_to_a_load_and_a_checked_read() {
+        // `a.length` -> extractvalue field 1; `a[i]` -> bounds-checked `@at`.
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(5); \
                    return a.length + a[0]; }";
         let ir = emit(&check(src).unwrap()).unwrap();
@@ -13624,8 +13601,8 @@ mod tests {
     fn for_loop_lowers_to_indexed_walk() {
         // A `for` over a growable array reads the length once and walks it with a
         // bounds-comparison branch, accumulating into the total.
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   a = push(a, 3); a = push(a, 4); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   a.push(3); a.push(4); \
                    let mut s = 0; for x in a { s = s + x; } return s; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
@@ -13716,8 +13693,8 @@ mod tests {
 
     /// A producer whose buffer is a real heap allocation, so the release below is
     /// a real `free` rather than a no-op on a static.
-    const FEED: &str = "fn feed() -> Stream<Int64> { let mut xs: Array<Int64> = array() \
-                        xs = push(xs, 1) return fromArray(xs) }";
+    const FEED: &str = "fn feed() -> Stream<Int64> { let mut xs: Array<Int64> = [] \
+                        xs.push(1) return fromArray(xs) }";
 
     /// The block a label introduces, up to the next label. Used instead of a bare
     /// free COUNT because a count cannot tell "released on the break path" from
@@ -13855,8 +13832,8 @@ mod tests {
     /// parameter, discharges it with its own `for … in`, and hands back a new
     /// stream. std/stream's `map`/`filter`/`take`/`merge` are all this shape.
     const TWICE: &str = "fn twice(s: Stream<Int64>) -> Stream<Int64> { \
-                         let mut out: Array<Int64> = array() \
-                         for x in s { out = push(out, x * 2) } return fromArray(out) }";
+                         let mut out: Array<Int64> = [] \
+                         for x in s { out.push(x * 2) } return fromArray(out) }";
 
     #[test]
     fn stream_combinator_chain_releases_once_per_stream() {
@@ -14655,8 +14632,8 @@ mod tests {
     fn mut_array_is_auto_freed() {
         // No explicit `drop`, yet the non-escaping mutable array is freed at
         // scope end (inferred by the ownership analysis).
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                   a = push(a, 1); return at(a, 0); }";
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
+                   a.push(1); return a[0]; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
             ir.contains("call void @free(ptr"),

@@ -108,8 +108,7 @@ fn builtin_returns() -> impl Iterator<Item = (&'static str, Type)> {
         // `a + b` on Strings, and `"..\{x}"` interpolation.
         ("@concat", Type::Str),
         ("@str", Type::Str),
-        ("array", Type::Array(Box::new(Type::Unit))),
-        ("push", Type::Array(Box::new(Type::Unit))),
+        ("@push", Type::Array(Box::new(Type::Unit))),
         // `m.keys()` copies the key pointers into a new buffer (RFC-0028).
         ("@keys", Type::Array(Box::new(Type::Str))),
     ]

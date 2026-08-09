@@ -3,9 +3,9 @@
 /// and returns the new one, so a statement-position `x.push(v)` must store that
 /// result back into wherever `x` actually lives. `x` may be:
 ///
-///   - a variable        `xs.push(v)`   -> `xs = push(xs, v)`
-///   - a record field     `r.xs.push(v)` -> `r.xs = push(r.xs, v)`
-///   - an array element   `a[i].push(v)` -> `a[i] = push(a[i], v)`
+///   - a variable        `xs.push(v)`   -> `xs = @push(xs, v)`
+///   - a record field     `r.xs.push(v)` -> `r.xs = @push(r.xs, v)`
+///   - an array element   `a[i].push(v)` -> `a[i] = @push(a[i], v)`
 ///
 /// Before the fix, only the variable form wrote back; a field/element `.push`
 /// silently mutated a copy and vanished, while a sibling scalar field assign

@@ -1,9 +1,9 @@
 /// A type alias is a NAME for a type, so every place that reads an annotation
-/// must read what the name resolves to. Five expressions take their type *from*
+/// must read what the name resolves to. Four expressions take their type *from*
 /// the annotation instead of from their own contents — an empty `[]`, an empty
-/// `[:]`, `array()`, `None` and `Some(x)` — and each one used to match the
-/// annotation as written. Under an alias the match missed and the compiler said
-/// it could not infer a type that was written down.
+/// `[:]`, `None` and `Some(x)` — and each one used to match the annotation as
+/// written. Under an alias the match missed and the compiler said it could not
+/// infer a type that was written down.
 ///
 /// Everything here is annotated. Nothing here should need inference.
 
@@ -56,10 +56,10 @@ fn main() -> Int64 {
     let prices: IntMap = ["usd": 1, "eur": 2]
     print("filled map alias: json=\{toJson(prices)}")
 
-    // --- `array()` under an alias --------------------------------------
-    let mut grown: Nums = array()
+    // --- an empty `[]` under an alias ----------------------------------
+    let mut grown: Nums = []
     grown.push(7)
-    print("array() alias: sum=\{sum(grown)}")
+    print("empty array alias: sum=\{sum(grown)}")
 
     // --- `None` and `Some` under an alias ------------------------------
     let nobody: MaybeAge = None

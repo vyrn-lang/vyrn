@@ -791,7 +791,7 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
 ///
 /// Configuration is JSON rather than a Vyrn declaration because a generator can
 /// only REFLECT over a module, never evaluate one — see the same section for why
-/// scanning a module's source for an `at(..)` call was the wrong shape.
+/// scanning a module's source for an index call was the wrong shape.
 gen fn rpcConfig(dir: String) -> RpcConfig {
     let cfg = RpcConfig { prefix: "/_", path: "{module}/{name}", pinKeys: [], pinPaths: [] }
     let doc = rpcReadJson(dir + "/rpc.json")

@@ -3496,9 +3496,8 @@ struct BuiltinMethod {
 /// Looked up by name for hover on a bare method-name token. Order is irrelevant
 /// for lookup; it only matters that each name maps to one entry.
 static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
-    BuiltinMethod { name: "push", detail: "push(array, value) -> Array<T> — append to a growable array" },
-    BuiltinMethod { name: "at", detail: "at(array, index) -> T — read an element by index" },
-    BuiltinMethod { name: "alen", detail: "alen(array) -> Int64 — element count" },
+    BuiltinMethod { name: "push", detail: "array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver" },
+    BuiltinMethod { name: "at", detail: "array.at(index) -> T — read an element by index; `array[index]` is the same call" },
     // RFC-0075. `close` is offered on a `Stream<T>` below; `fromArray` is here
     // for hover only, since it takes an Array and produces the stream.
     BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
@@ -3566,7 +3565,6 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
         Type::Array(_) => vec![
             by_name("push"),
             by_name("at"),
-            by_name("alen"),
             by_name("pop"),
             by_name("swapRemove"),
         ]
@@ -3574,10 +3572,10 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
         .flatten()
         .collect(),
         // A `Stream<T>` (RFC-0075) offers exactly one method, which is the point:
-        // no `at`, no `alen`, no `push`. It is read by `for … in` or released.
+        // no `at`, no `push`. It is read by `for … in` or released.
         Type::Stream(_) => vec![by_name("close")].into_iter().flatten().collect(),
         // A fixed-size `Array<T, N>` cannot shrink — no `pop`/`swapRemove`.
-        Type::ArrayN(..) => vec![by_name("push"), by_name("at"), by_name("alen")]
+        Type::ArrayN(..) => vec![by_name("push"), by_name("at")]
             .into_iter()
             .flatten()
             .collect(),
@@ -3586,7 +3584,6 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
         Type::SmallArray(..) => vec![
             by_name("push"),
             by_name("at"),
-            by_name("alen"),
             by_name("pop"),
             by_name("swapRemove"),
             by_name("toArray"),

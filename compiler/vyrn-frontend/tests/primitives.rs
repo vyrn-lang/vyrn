@@ -129,10 +129,8 @@ use Why::*;
 /// things nobody can explain.
 const CENSUS: &[(&str, Why, &str)] = &[
     // ---- Memory: the allocator and the containers standing on it ------------
-    ("array", Memory, "Array: a heap triple {ptr,len,cap}"),
-    ("push", Memory, "Array: append, reallocating"),
-    ("at", Memory, "Array: indexed read; also traps out of bounds"),
-    ("alen", Memory, "Array: the length word"),
+    ("@push", Memory, "Array: append, reallocating"),
+    ("@at", Memory, "Array: indexed read; also traps out of bounds"),
     ("@list", Memory, "a fixed and a growable array share one representation"),
     ("@toArray", Memory, "SmallArray (RFC-0056): copy the inline/spilled buffer out"),
     ("@pop", Memory, "Array: shrink by one, writing back through the binding"),
@@ -548,7 +546,12 @@ fn the_census_is_the_code() {
     // is here because the surface `panic` must stay a one-argument builtin, and
     // an unspellable second name is how a compiler-written argument arrives
     // without becoming an undocumented one users can write.
-    assert_eq!(found.len(), 91, "the primitive core changed size");
+    // 91 -> 89 when the verb forms `array()` and `alen(xs)` were removed. `[]`
+    // was always the array literal and `.length` was always a field read, so
+    // both rows were a second spelling of something the language already had.
+    // `push` and `at` stayed, under the unspellable names `@push` and `@at`,
+    // because the method and index forms need them.
+    assert_eq!(found.len(), 89, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."

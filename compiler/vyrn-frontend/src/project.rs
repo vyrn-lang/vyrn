@@ -13,7 +13,7 @@
 //! [`lookup`] answers "does this receiver type declare a projection under this
 //! name". [`inline`] answers "what does the access site become". Every engine
 //! calls exactly those two, at the two sites the source can spell: `a[i]`
-//! ([`Expr::Call`] named `at`) and `a[i] = v` ([`Stmt::IndexSet`]).
+//! ([`Expr::Call`] named [`AT`]) and `a[i] = v` ([`Stmt::IndexSet`]).
 //!
 //! ## The seeded row, and what the dogfood proof really deletes
 //!
@@ -37,8 +37,21 @@ use std::collections::HashMap;
 
 /// The element-place primitive: `@slot(container, index)`. Unspellable (no
 /// source token lexes to it), and the only indexing the backends still know
-/// about by name. `at` — what `a[i]` parses to — is now the *dispatch* site.
+/// about by name. [`AT`] — what `a[i]` parses to — is now the *dispatch* site.
 pub const ELEM: &str = "@slot";
+
+/// The element-access **dispatch** site: `@at(container, index)`. What `a[i]`
+/// and `x.at(i)` parse to.
+///
+/// Unspellable for the same reason `@str` is: the free verb form `at(xs, i)`
+/// was removed, so a source-written `at(..)` must arrive as a DIFFERENT node
+/// than the sugar, or the checker cannot tell the two apart and cannot report
+/// the one it refuses.
+///
+/// The **impl method** this dispatches to is still named `at` — that is what a
+/// user writes in `place at`, and what [`SEEDED`] declares. Only the call site
+/// moved.
+pub const AT: &str = "@at";
 
 /// One access site's lowering: statements to run first, then the place.
 #[derive(Debug, Clone)]
@@ -409,7 +422,7 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
         }
         // An element of a place: `yield self.data[j]`, and the seeded row's
         // `yield @slot(self, i)`.
-        Expr::Call { name, args, .. } if (name == "at" || name == ELEM) && args.len() == 2 => {
+        Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
             let (recv, mut out, moves, post) = crate::parser::place_receiver(&args[0], line)?;
             // With a move-out in play the index and the value run before it, in
             // source order: nothing may read the place while it is out.
@@ -889,7 +902,7 @@ pub fn is_place(e: &Expr) -> bool {
     match e {
         Expr::Var { .. } => true,
         Expr::Field { expr, .. } => is_place(expr),
-        Expr::Call { name, args, .. } if (name == "at" || name == ELEM) && args.len() == 2 => {
+        Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
             is_place(&args[0])
         }
         _ => false,
@@ -901,7 +914,7 @@ pub fn place_root(e: &Expr) -> Option<String> {
     match e {
         Expr::Var { name, .. } => Some(name.clone()),
         Expr::Field { expr, .. } => place_root(expr),
-        Expr::Call { name, args, .. } if (name == "at" || name == ELEM) && args.len() == 2 => {
+        Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
             place_root(&args[0])
         }
         _ => None,
@@ -989,7 +1002,7 @@ mod tests {
         let Expr::Call { name, args, .. } = &pr.place else {
             panic!("expected the yielded place to stay a call")
         };
-        assert_eq!(name, "at");
+        assert_eq!(name, "@at");
         assert!(matches!(&args[0], Expr::Field { field, .. } if field == "data"));
         assert_eq!(args[1], idx, "the index substituted in place");
     }

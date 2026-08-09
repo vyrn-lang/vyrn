@@ -288,7 +288,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     }
     let mut p = program.clone();
     // `args()[i]` — the parser's own desugar for indexing.
-    let argv = |i: usize| call("at", vec![call("args", vec![]), Expr::Int(i as i64)]);
+    let argv = |i: usize| call("@at", vec![call("args", vec![]), Expr::Int(i as i64)]);
     let mut body = vec![Stmt::Let {
         name: "g".into(),
         mutable: false,
@@ -575,7 +575,7 @@ impl Decoders {
                                 // triple, so it must be stored back.
                                 Stmt::Assign {
                                     name: "xs".into(),
-                                    value: call("push", vec![var("xs"), elem]),
+                                    value: call("@push", vec![var("xs"), elem]),
                                     line: 0,
                                 },
                                 Stmt::Assign {
