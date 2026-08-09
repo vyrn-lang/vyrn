@@ -801,6 +801,45 @@ fn is_dev_entry(source: &str) -> bool {
     imports_rpc && calls_server
 }
 
+/// Fence a hover's signature line as ` ```vyrn `, so the editor highlights it
+/// with the grammar the extension already ships. `symbols.rs` builds hover text
+/// as PLAIN prose — its own tests pin those strings exactly, so the fence is
+/// presentation and lives here, at the adapter, like every other LSP concern.
+///
+/// The hover convention is "signature, blank line, docs". Two shapes carry a
+/// signature: a first paragraph that starts with a declaration keyword
+/// (`fn tally(..) -> Int64\n\nwhat it does`), and a builtin method's one-liner
+/// whose prose follows an em dash (`x.copy() -> T — a deep copy ..`). Anything
+/// else — a Tw class note, a contract note, plain prose — is left alone.
+fn fence_signature(hover: &str) -> String {
+    let (head, rest) = match hover.find("\n\n") {
+        Some(i) => (&hover[..i], &hover[i..]),
+        None => (hover, ""),
+    };
+    const DECL: &[&str] = &[
+        "fn ",
+        "gen fn ",
+        "mut fn ",
+        "type ",
+        "let ",
+        "protocol ",
+        "impl ",
+        "place ",
+        "contract ",
+    ];
+    if DECL.iter().any(|d| head.starts_with(d)) {
+        return format!("```vyrn\n{head}\n```{rest}");
+    }
+    // A builtin method detail: `x.copy() -> T — a deep copy of ..`. The dash
+    // separates signature from prose, so the fence takes the left half only.
+    if let Some((sig, doc)) = head.split_once(" — ") {
+        if !sig.contains('\n') && sig.contains('(') && sig.contains("->") {
+            return format!("```vyrn\n{sig}\n```\n\n{doc}{rest}");
+        }
+    }
+    hover.to_string()
+}
+
 fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     let p: HoverParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document_position_params.text_document.uri;
@@ -846,6 +885,7 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
             }
         })
     };
+    let ordinary = ordinary.map(|o| fence_signature(&o));
     let value = match (ordinary, note) {
         (Some(o), Some(n)) => format!("{o}\n\n---\n\n{n}"),
         (Some(o), None) => o,

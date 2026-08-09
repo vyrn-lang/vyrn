@@ -2812,9 +2812,11 @@ fn main() -> Int64 { return bump(1) }
     // Imported: hover `bump` at its use site.
     let (l, c) = at(app, 3, "bump(1)");
     let h = hover_value(&mut client, &uri, l, c).expect("hover on imported fn");
+    // The signature comes first, fenced as ```vyrn so the editor highlights it
+    // with the grammar the extension ships (`fence_signature`).
     assert!(
-        h.starts_with("fn bump(n: Int64) -> Int64"),
-        "signature first: {h}"
+        h.starts_with("```vyrn\nfn bump(n: Int64) -> Int64\n```"),
+        "fenced signature first: {h}"
     );
     assert!(
         h.contains("Adds one. A parity citizen: pure."),
