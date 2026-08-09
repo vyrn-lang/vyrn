@@ -93,80 +93,6 @@ impl Projection {
     }
 }
 
-/// The seeded `impl Index for <builtin container>` — what a builtin container's
-/// `place at` would say if it could be written:
-///
-/// ```text
-/// impl<T> Index for Array<T> {
-///     place at(read self, i: Int64) -> T      { yield @slot(self, i) }
-///     place atSet(modify self, i: Int64) -> T { yield @slot(self, i) }
-/// }
-/// ```
-///
-/// Built as AST rather than parsed from source, because `@slot` is deliberately
-/// unlexable — the lexer rejects `@`, and that is what makes the primitive
-/// unspellable in a user's program.
-///
-/// One row serves every builtin container. The body names no type, so
-/// `Array<T>`, `SmallArray<T, N>`, `Array<T, N>`, `String` and `Map<String, V>`
-/// all project the same way and each backend types [`ELEM`] for itself. The
-/// declared return type is therefore inert; it is spelled `Unit` and never read.
-fn seeded_rows() -> Vec<Function> {
-    use crate::ast::{Capability, Param};
-    ["at", "atSet"]
-        .into_iter()
-        .map(|name| Function {
-            name: name.to_string(),
-            exported: false,
-            module: None,
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params: vec![
-                Param {
-                    name: "self".to_string(),
-                    capability: if name == "at" {
-                        Capability::Read
-                    } else {
-                        Capability::Modify
-                    },
-                    ty: Type::Unit,
-                },
-                Param {
-                    name: "i".to_string(),
-                    capability: Capability::Read,
-                    ty: Type::Int,
-                },
-            ],
-            ret: Type::Unit,
-            body: Block {
-                stmts: vec![Stmt::Return {
-                    value: Some(Expr::Call {
-                        name: ELEM.to_string(),
-                        args: vec![
-                            Expr::Var {
-                                name: "self".to_string(),
-                                line: 0,
-                            },
-                            Expr::Var {
-                                name: "i".to_string(),
-                                line: 0,
-                            },
-                        ],
-                        line: 0,
-                    }),
-                    line: 0,
-                }],
-            },
-            line: 0,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        })
-        .collect()
-}
-
 /// Does `ty` index through the seeded row rather than through a user `impl`?
 ///
 /// `pub` because it is the early-out on the hottest path in the checker: every
@@ -244,11 +170,13 @@ pub fn lookup_impl_by_key<'a>(
 }
 
 /// The seeded projection named `method`, for a builtin container.
+///
+/// The rows moved to [`crate::prelude`] with RFC-0094 M1's, because they are the
+/// same kind of thing — a declaration the compiler seeds because no source can
+/// write its body — and two tables of seeded declarations is the shape that RFC
+/// exists to remove.
 pub fn seeded(method: &str) -> Option<&'static Function> {
-    use std::sync::OnceLock;
-    static ROWS: OnceLock<Vec<Function>> = OnceLock::new();
-    let rows = ROWS.get_or_init(seeded_rows);
-    rows.iter().find(|f| f.name == method)
+    crate::prelude::all().iter().find(|f| f.name == method)
 }
 
 /// The projection an access site resolves to: a user `impl`'s, or the seeded

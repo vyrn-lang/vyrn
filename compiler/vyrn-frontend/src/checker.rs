@@ -6477,7 +6477,7 @@ impl<'a> Checker<'a> {
             if args.len() != 1 {
                 return Err(format!("line {line}: `pop` takes no arguments"));
             }
-            let elem = self.mut_array_receiver(&args[0], scope, line, "pop")?;
+            let elem = self.mut_array_receiver(&args[0], scope, line, name, "pop")?;
             return Ok(match elem {
                 Type::Err => Type::Err,
                 t => Type::Option(Box::new(t)),
@@ -6494,7 +6494,7 @@ impl<'a> Checker<'a> {
                     args.len() - 1
                 ));
             }
-            let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove")?;
+            let elem = self.mut_array_receiver(&args[0], scope, line, name, "swapRemove")?;
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
                 return Err(format!(
@@ -8124,14 +8124,22 @@ impl<'a> Checker<'a> {
     }
 
     /// The element type of the array a `pop`/`swapRemove` receiver names, after
-    /// checking it is a plain `mut` `Array<T>` binding (RFC-0011). A fixed-size
-    /// `Array<T, N>` cannot shrink, so it is rejected with a message naming
-    /// `Array<T>`. Returns `Type::Err` (already reported upstream) transparently.
+    /// checking it is a plain `Array<T>` binding the operation may write through
+    /// (RFC-0011). A fixed-size `Array<T, N>` cannot shrink, so it is rejected
+    /// with a message naming `Array<T>`. Returns `Type::Err` (already reported
+    /// upstream) transparently.
+    ///
+    /// `call` is the name the CALL carries (`@pop`), `op` the surface spelling a
+    /// diagnostic quotes (`pop`). The `mut` requirement is not written here any
+    /// more: it is `Capability::Modify` on parameter 0 of the seeded signature
+    /// (RFC-0094 M1), which is the same fact `movecheck` reads for `consume` and
+    /// `read`. A builtin whose receiver is only `read` asks for no `mut`.
     fn mut_array_receiver(
         &self,
         recv: &Expr,
         scope: &Vec<HashMap<String, Binding>>,
         line: usize,
+        call: &str,
         op: &str,
     ) -> Result<Type, String> {
         let Expr::Var { name, .. } = recv else {
@@ -8142,7 +8150,8 @@ impl<'a> Checker<'a> {
         let b = self
             .lookup(scope, name)
             .ok_or_else(|| format!("line {line}: `{op}` on unknown variable `{name}`"))?;
-        if !b.mutable {
+        let writes_back = crate::prelude::capability(call, 0) == Some(Capability::Modify);
+        if writes_back && !b.mutable {
             return Err(format!(
                 "line {line}: cannot `{op}` from `{name}` (declared without `mut`)"
             ));
@@ -10860,6 +10869,25 @@ mod tests {
                 RESERVED.contains(n),
                 "`{n}` is forbidden inside a task but is not a name the compiler \
                  owns — it now forbids any user function spelled that way"
+            );
+        }
+    }
+
+    /// The same check for the second forbid list, and it had none (RFC-0094 M1).
+    ///
+    /// The asymmetry is not a tidiness point: it is the exact shape that let
+    /// `get` rot out of `movecheck`'s view list. One list was updated when a
+    /// builtin was deleted, a second was not, and a `Slots<String>` leaked
+    /// silently for two milestones. `SPAWN_FORBIDDEN` has been pinned since
+    /// `afree` left; `COMPTIME_FORBIDDEN` reads the same way and was pinned by
+    /// nothing.
+    #[test]
+    fn comptime_forbidden_names_are_reserved() {
+        for n in COMPTIME_FORBIDDEN {
+            assert!(
+                RESERVED.contains(n),
+                "`{n}` is forbidden inside a `gen fn` but is not a name the \
+                 compiler owns — it now forbids any user function spelled that way"
             );
         }
     }

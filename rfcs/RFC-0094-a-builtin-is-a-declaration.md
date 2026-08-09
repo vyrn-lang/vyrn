@@ -1,8 +1,10 @@
 # RFC-0094 — A Builtin Is a Declaration
 
-- **Status:** **Designed. M0 measured and merged (`rfcs/census-builtins.md`,
-  `26469be`). M1 next.** The census refuted a third of the brief that asked for
-  it, and this RFC is written from the census rather than from the brief.
+- **Status:** **M1 landed. M2 and M3 are on hold — M1's line gate failed, and
+  the recommendation below says what that means.** M0 measured and merged
+  (`rfcs/census-builtins.md`, `26469be`). The census refuted a third of the brief
+  that asked for it, and this RFC is written from the census rather than from the
+  brief; M1 then refuted two rows of the census. See "M1 as landed".
 - **Depends on:** RFC-0086 (seeded rows, `impl`, "no second list"), RFC-0091 M2
   (`place` projections — `at` is already dispatch), RFC-0092 M5 / PR #118 (the
   bug class this closes), RFC-0007 §v2 (the deferral M3 collects).
@@ -22,14 +24,19 @@ That is not, by itself, an argument. Lists are cheap and a compiler is allowed
 to have them. The argument is what the lists **hold**:
 
 > **Eleven builtins carry an ownership or capability fact that no signature
-> holds, and two of them carry it nowhere at all.**
+> holds.**
 
-`boxStream` and `serveStream` each hand a `Stream` away for good. Neither is in
-`RESERVED_SINKS`. Neither is anywhere. Each has exactly one caller in the whole
-corpus, and that is the only reason no heap has been corrupted over them.
+The census said two of them — `boxStream` and `serveStream` — carry it nowhere
+at all, and this paragraph said so. **M1 measured it and both were wrong.** A
+`Stream<T>` is linear, and the must-use walk counts every mention of a stream
+binding as a disposal, so a second hand-over is refused whatever the callee is
+named. RFC-0075's linearity was protecting those two, not their caller count.
+The census read the side tables and did not ask the type; "M1 as landed" below
+carries the measurement. The eleven still hold their fact in a place no
+signature reads, and that is the argument.
 
-We know it is the only reason, because the same shape corrupted one three days
-ago. `fromArray` moved its argument, said so **in a doc string**, and no rule
+The cost of that arrangement is not hypothetical. `fromArray` moved its
+argument, said so **in a doc string**, and no rule
 read the doc string. The native binary exited `0xC0000374`; the interpreter
 printed `1 2 3` by refcounting rather than by having the rule; parity saw
 nothing, because all three engines agreed on the wrong answer. PR #118 fixed it
@@ -158,7 +165,7 @@ Three consequences, and each is a deletion:
 
 ## Milestones
 
-### M1 — the ownership facts become capabilities
+### M1 — the ownership facts become capabilities — **landed; see "M1 as landed"**
 
 Seed signatures for the 14 prelude-extern names. Delete `RESERVED_SINKS`,
 `RESERVED_VIEWS`, the stream-producer match, and `mut_array_receiver`'s
@@ -187,6 +194,15 @@ excluded — 14 files and an effect gate are a different argument.
 
 **Gate.** The standard block, plus: a bare file spelling `unboxStream(0)` gets an
 ordinary unknown-name error; `RESERVED` shrinks by exactly the migrated names.
+
+**And the line gate moves here, because M1 proved it was written at the wrong
+milestone.** M1's gate demanded a net reduction and measured **+149**. The
+prediction was not wrong about the compiler; it was wrong about which milestone
+pays. M1 replaced scattered `if name ==` checks with one documented table, and a
+table that states a fact is longer than a check that assumes it. **The lines the
+census counted are the dispatch chains, and M2 is what deletes them.** So M2
+carries the bar M1 could not: a net reduction, reported, and if the count rises
+again the mechanism is not paying for itself and M3 does not follow.
 
 ### M3 — the union parameter becomes a protocol
 
@@ -243,3 +259,136 @@ unmoved where no user impl exists; tagged templates unchanged.
    lines, the mechanism is not paying for itself and M2 and M3 should not follow.
    RFC-0091 M4 was refused by its own measurement, and that was the system
    working.
+
+**The gate did refuse it, on point 4.** See "M1 as landed" below for the number
+and for what it does and does not settle.
+
+---
+
+## M1 as landed
+
+`compiler/vyrn-frontend/src/prelude.rs` holds **18 seeded rows**. Each is an
+`ast::Function` built in Rust, with a capability on every parameter, a declared
+return type, and — for the three that lend — a body that yields the place the
+result names. A row is keyed by the name the **call site** carries, because that
+is what every pass matches on.
+
+### What held
+
+The mechanism works exactly as Q2 said it would. No grammar changed. No file is
+embedded and nothing is parsed. Nothing is imported, so a bare file still runs.
+Four hand lists became four readings of one row:
+
+| deleted | replaced by |
+|---|---|
+| `movecheck::RESERVED_VIEWS` (2 rows) | a body that yields `@slot` of a parameter |
+| `movecheck::RESERVED_SINKS` (3 rows) | `Capability::Consume` on the parameter |
+| the three-name producer `match` | the declared return type, read through `Owned` |
+| `mut_array_receiver`'s `mut` clause | `Capability::Modify` on parameter 0 |
+| `project::seeded_rows` (58 lines) | the same table — `at` and `atSet` moved into it |
+
+The fifth deletion is the one the RFC did not plan. `project::seeded_rows` built
+`at` and `atSet` for RFC-0091 M2, in Rust, for the same reason: `@slot` does not
+lex. Two tables of seeded declarations is the shape this RFC exists to remove, so
+the two rows moved and `project::seeded` became a lookup.
+
+**The diagnostics did not move.** 32 builtin refusals — wrong arity, wrong type,
+a `pop` on a binding without `mut`, a moved array read again, a stream disposed
+twice — were run under `main` and under this branch and compared byte for byte.
+**Zero differences.**
+
+### What the census got wrong
+
+**`boxStream` and `serveStream` do not carry their fact nowhere.** Q1 said they
+do, and the RFC's opening paragraph repeats it. Both take a `Stream<T>`, and a
+`Stream<T>` is linear: the must-use walk counts *every* mention of a stream
+binding as a disposal, so a second hand-over is refused whatever the name is.
+Measured on `main`, before any change:
+
+```
+fn twice(s: Stream<Int64>) -> Int64 { let a = boxStream(s) let b = boxStream(s) … }
+→ `s` is a `Stream<Int64>` and is disposed more than once
+```
+
+The census read the side tables and did not ask the type. One caller is not what
+was protecting these two; RFC-0075's linearity was.
+
+**That correction changed the design.** A `consume` parameter whose type already
+carries a disposal obligation must **not** also go through rule 1. Two rules over
+one value refuse the same program twice with the worse words: rule 1's menu
+offers `.copy()`, and a stream has no answer for that. So `movecheck::sinks`
+reads `consume` off the row and stands aside where `linear_kind` answers. That is
+one sentence, at type level, with no name in it — not a special case for three
+names. The rows still say `consume`, which is the point: the fact is written
+where hover, the LSP and every later rule can read it.
+
+**A third finding, and it is open.** The word `consume` means two different rules
+in this compiler. A user `fn take(xs: consume Array<Int64>)` accepts a `read`
+parameter's array today; `fromArray` refuses the same shape, because the builtin
+path goes through rule 1 and the declared path does not. M1 put both readings on
+one page for the first time. It did not unify them, and unifying them is a
+language change, not a milestone of this RFC.
+
+### The two pins
+
+**The direct wasm backend now has a coverage assertion**
+(`the_direct_backend_carries_the_census_too`). It compares `CENSUS` against
+`direct.rs` and allows four absences, each with a written reason. Three are the
+test and bench paths, which run on the interpreter. The fourth is `fsyncFile`,
+and the census asked why:
+
+> **`fsyncFile` has no caller.** Zero in `std/`, zero in `examples/` — one doc
+> mention in `std/storage.vyrn` and one interpreter unit test. No parity program
+> ever asked the wasm column for it, so the absence could not be seen. It is the
+> `alen` shape one step short of it: `alen` had a replacement and was deleted,
+> `fsyncFile` has none and is a gap. It fails loudly rather than silently —
+> `vyrn build --target wasm` prints `error: direct backend: no lowering for the
+> call \`fsyncFile\``.
+
+**`COMPTIME_FORBIDDEN ⊆ RESERVED` is pinned** beside the `SPAWN_FORBIDDEN` test
+that already existed. Both pins fail when their row is reverted; both were
+checked that way.
+
+### The numbers
+
+Measured over every `.rs` file under `compiler/`, counting lines that are neither
+blank nor a `//` comment, against `main` at `2af7fa0`:
+
+| file | production | test |
+|---|---|---|
+| `prelude.rs` (new) | **+165** | +48 |
+| `project.rs` | **−58** | 0 |
+| `movecheck.rs` | −3 | +29 |
+| `checker.rs` | +2 | +10 |
+| `lib.rs` | +1 | 0 |
+| `tests/primitives.rs` | — | +42 |
+| **net** | **+149** | +129 |
+
+**The line gate failed, and the RFC says what that means.** The lists M1 deletes
+are five rows of data. The deletion the census counted — "the per-builtin
+arity/type checks in four engines", roughly 260 lines for the routed names alone
+— is M2's and M3's, and M1 was never going to reach it. So the honest reading is
+not "the mechanism is wrong" but "M1 alone does not pay for itself in lines". It
+pays in one closed bug class and in eleven facts a reader can now find in one
+file.
+
+Everything else in the gate passed: three-way parity byte-identical including
+traps (35 tests), the workspace green over 52 test binaries, `vyrn-lsp` green
+(75), the memory suite at 15 rows and 15 steady, `genwasm` green, RFC-0092's
+instrument at `total: 0`, `corpus_fmt` and `cargo fmt --check` clean, and every
+RFC-0092 M5 test passing unchanged with the same refusals.
+
+### What M1 did not close
+
+- **`Checker::call` is still 1,894 lines.** Arity and parameter-type refusals
+  stay hand-written on purpose: they read better than a generic signature check,
+  and the 32-case diff is what proves it.
+- **`declared::builtin_returns` is still 4 rows.** Three of them (`@concat`,
+  `@str`, `@keys`) are M3's names, and its types are deliberately erased where
+  the prelude's are not. Merging it needs M3.
+- **The editor gained nothing.** The census says a declaration is what the LSP
+  already knows how to serve, and that is true of a *declared* function. The
+  seeded rows are not in `Program`, so `symbols.rs` does not see them. Serving
+  hover from the prelude is a separate change and is worth its own measurement.
+- **Effects.** 29 rows, unchanged, as stated.
+- **The two meanings of `consume`**, above.
