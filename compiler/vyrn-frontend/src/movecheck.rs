@@ -284,49 +284,25 @@ fn let_id(s: &Stmt) -> usize {
     s as *const Stmt as usize
 }
 
-/// The builtins that hand back a pointer **into** their argument.
+/// Whether the builtin `name` hands back a pointer **into** its argument.
 ///
-/// A builtin has no signature to carry a capability, so the ones that read a
-/// place rather than allocate are named here — the same gap `sinks` fills for
-/// the opposite direction (RFC-0087 §2b). `@at` reads an element out of a
-/// container; `bytes` is a view of a String's buffer, which is what
-/// `std/codecs` and `std/text` are written on. A binding to one of these owns
-/// nothing, so nothing may release it.
+/// It was `RESERVED_VIEWS`, two names in a hand list. RFC-0094 M1 moved the
+/// fact onto the seeded signature: a row whose body yields a place inside a
+/// parameter lends its result, and `crate::prelude` holds the rows. `@at` reads
+/// an element out of a container; `bytes` is a view of a String's buffer, which
+/// is what `std/codecs` and `std/text` are written on. A binding to one of these
+/// owns nothing, so nothing may release it.
 ///
-/// `get` was here for Path B's cell read. RFC-0090 M4 deleted that builtin AND
-/// took `cell`/`get`/`set` out of [`crate::checker::RESERVED`] in the same
-/// stroke, which handed the names to users — and this list matches on the CALL,
-/// not on a builtin table. So `get` stayed, and any user function called `get`
-/// handed back a view that owns nothing. `std/slots`' own reader copies its
-/// element out. A `Slots<String>` read through it leaked, silently.
-///
-/// [`RESERVED_VIEWS`] and [`RESERVED_SINKS`] are checked by
-/// `every_view_and_sink_name_is_reserved`. A name here must be reserved OR
-/// unspellable (`@`-prefixed, so no source can write it). Either one makes the
-/// name mean the builtin and nothing else, and it is the invariant `get` lost
-/// without anybody noticing.
-const RESERVED_VIEWS: &[&str] = &[crate::project::AT, "bytes"];
-
-/// The builtins that take ownership of an argument, by name and position.
-///
-/// The two stream producers are here because the stream's own close frees what
-/// they were handed: `__vyrn_stream_close` frees the array buffer for a
-/// buffer-tagged stream, and the step's capture block for a stepped one. Every
-/// call site in the corpus writes `return fromArray(xs)`, where the `return`
-/// already records the move — so on a NAMED array or a NAMED step that the same
-/// frame consumes, the frame released the buffer a second time and the native
-/// binary corrupted its heap. Recording the move at the call is what stops the
-/// second release, and a later use of the name is then the rule 1 error that
-/// names `fromArray(..)` as where the value went.
-///
-/// `unboxStream` frees a box too, but its argument is an `Int64` address. No
-/// binding of that type carries a release, so it has nothing to double free —
-/// and a second `unboxStream` of one address is the magic-word trap, not a use
-/// after free.
-const RESERVED_SINKS: &[(&str, usize)] = &[("@push", 1), ("fromArray", 0), ("fromStep", 2)];
-
+/// `get` was in the old list, for Path B's cell read. RFC-0090 M4 deleted that
+/// builtin AND took `cell`/`get`/`set` out of [`crate::checker::RESERVED`] in
+/// the same stroke, which handed the names to users — and the list matched on
+/// the CALL, not on a builtin table. So `get` stayed, and any user function
+/// called `get` handed back a view that owns nothing. `std/slots`' own reader
+/// copies its element out. A `Slots<String>` read through it leaked, silently.
+/// The pin that stops that is now `prelude`'s own
+/// `every_seeded_name_is_reserved_or_unspellable`.
 fn views(name: &str) -> bool {
-    RESERVED_VIEWS.contains(&name)
+    crate::prelude::lends(name)
 }
 
 /// Check every function for use-after-consume, returning **all** problems found
@@ -1205,6 +1181,28 @@ impl MoveCheck<'_> {
     /// today's engines already leak rather than free twice.
     /// Answers whether the store **took** the source place, which is what
     /// Phase 4c reads: a place that did not move is still somebody else's.
+    /// Whether parameter `i` of the builtin `name` takes its argument for good,
+    /// under **rule 1**.
+    ///
+    /// It was `RESERVED_SINKS`, three rows in a hand list (RFC-0087 §2b).
+    /// RFC-0094 M1 reads `consume` off the seeded signature instead
+    /// ([`crate::prelude`]), so the fact is written once where every rule sees
+    /// it. Everything else a builtin does with a heap argument is a read:
+    /// `print` formats it, `@concat` copies out of it, `at` looks inside it.
+    ///
+    /// **A linear parameter is not rule 1's.** `close`, `boxStream` and
+    /// `serveStream` each declare `consume Stream<T>`, and a `Stream<T>` already
+    /// carries a disposal obligation the [`linear`] walk proves: every mention
+    /// of a stream binding is a disposal there, so a second one is refused
+    /// before rule 1 is asked. Two rules over one value would refuse the same
+    /// program twice with the worse words — rule 1's menu offers `.copy()`,
+    /// which a stream has no answer for. So the obligation on the TYPE wins, and
+    /// the census's claim that these three had a rule "nowhere at all" is
+    /// corrected rather than acted on.
+    fn sinks(&self, name: &str, i: usize) -> bool {
+        sinks(self.decl, name, i)
+    }
+
     fn store(
         &self,
         value: &Expr,
@@ -2370,8 +2368,9 @@ impl MoveCheck<'_> {
                 // turned CI red for twenty-four runs — see the `if let` arm.
                 //
                 // `names_a_place` is the guard, unchanged and asked again. It
-                // reads `m.keys()` as a temporary, which is right: `keys` is not
-                // in `RESERVED_VIEWS`, and since RFC-0092 M2 the snapshot holds
+                // reads `m.keys()` as a temporary, which is right: `@keys` has
+                // no seeded row and no `place` body, and since RFC-0092 M2 the
+                // snapshot holds
                 // COPIES of the keys rather than the map's own pointers, so the
                 // loop is the only owner there is.
                 //
@@ -2906,11 +2905,10 @@ impl MoveCheck<'_> {
                                 );
                             }
                         }
-                    } else if sinks(name, i) {
-                        // A builtin that STORES its argument in a container is a
-                        // `consume` parameter that has no signature to say so
-                        // (RFC-0087 §2b). Rule 1 governs it exactly as it governs
-                        // `xs = [.., v]`, which is what it means.
+                    } else if self.sinks(name, i) {
+                        // A builtin whose parameter declares `consume`. Rule 1
+                        // governs it exactly as it governs `xs = [.., v]`, which
+                        // is what it means.
                         let _ = self.store(
                             arg,
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),
@@ -3178,12 +3176,18 @@ mod linear {
 
     pub fn check(program: &Program, decl: &Declared) -> Vec<Diagnostic> {
         // Functions whose return type carries the obligation, with the rendering
-        // the diagnostic quotes. `fromArray`/`fromStep` are the builtin stream
-        // producers and carry no element type here — this pass has no types — so
-        // a stream from one of them is spelled plainly `Stream`.
+        // the diagnostic quotes.
+        //
+        // The seeded rows are read the same way as the declared ones, which is
+        // RFC-0094 M1's whole change here: `fromArray`, `fromStep` and
+        // `unboxStream` were a three-name `match` in `owed_let`, and they are now
+        // three return types. Each is `Stream<T>` over a bound `T`, so [`owed`]
+        // quotes the type CONSTRUCTOR — plainly `Stream` — which is what the
+        // `match` said and what this pass can say without types.
         let producers: HashMap<&str, Owed> = program
             .functions
             .iter()
+            .chain(crate::prelude::all())
             .filter_map(|f| {
                 Some((
                     f.name.as_str(),
@@ -3367,14 +3371,9 @@ mod linear {
             return Some(o);
         }
         match value {
-            Expr::Call { name, .. }
-                if name == "fromArray" || name == "fromStep" || name == "unboxStream" =>
-            {
-                Some(Owed {
-                    ty: "Stream".to_string(),
-                    row: Linear::Stream,
-                })
-            }
+            // The builtin producers arrive here through `producers` like every
+            // declared one — RFC-0094 M1 deleted the three-name `match` that
+            // stood in front of this arm.
             Expr::Call { name, .. } => producers.get(name.as_str()).cloned(),
             // `let t = s` moves the value; `t` inherits both the obligation and
             // the rendering, and the mention of `s` discharges `s`'s.
@@ -3636,19 +3635,28 @@ mod linear {
     }
 }
 
-/// Whether parameter `i` of the builtin `name` **stores** its argument.
+/// Whether parameter `i` of the builtin `name` takes its argument for good,
+/// under **rule 1**.
 ///
-/// A builtin has no signature to carry a capability, so the one that puts a
-/// value somewhere it outlives the call is listed here (RFC-0087 §2b — the
-/// hand list this replaces was the producer half of the same gap). Everything
-/// else a builtin does with a heap argument is a read: `print` formats it,
-/// `@concat` copies out of it, `at` looks inside it.
+/// It was `RESERVED_SINKS`, three rows in a hand list (RFC-0087 §2b). RFC-0094
+/// M1 reads `consume` off the seeded signature instead ([`crate::prelude`]), so
+/// the fact is written once where every rule sees it. Everything else a builtin
+/// does with a heap argument is a read: `print` formats it, `@concat` copies out
+/// of it, `at` looks inside it.
 ///
-/// It was three until RFC-0090 M4 deleted `set` and `cell` with Path B. Unlike
-/// the view half, that deletion took the names out of here as well — which is
-/// why this list is the one that did not go stale.
-fn sinks(name: &str, i: usize) -> bool {
-    RESERVED_SINKS.contains(&(name, i))
+/// **A linear parameter is not rule 1's.** `close`, `boxStream` and
+/// `serveStream` each declare `consume Stream<T>`, and a `Stream<T>` already
+/// carries a disposal obligation the [`linear`] walk proves: every mention of a
+/// stream binding is a disposal there, so a second one is refused before rule 1
+/// is asked. Two rules over one value would refuse the same program twice with
+/// the worse words — rule 1's menu offers `.copy()`, which a stream has no
+/// answer for. The obligation on the TYPE wins, and the census's claim that
+/// these three carry a rule "nowhere at all" is corrected rather than acted on.
+fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
+    let Some(p) = crate::prelude::signature(name).and_then(|f| f.params.get(i)) else {
+        return false;
+    };
+    p.capability == Capability::Consume && decl.linear_kind(&p.ty).is_none()
 }
 
 /// Every name `e` reads, root names only, in no particular order.
@@ -3868,38 +3876,38 @@ mod tests {
         super::check(&program)
     }
 
-    /// `views` and `sinks` match on a CALL NAME. That only means "the builtin"
-    /// while no user function can carry the name, and `crate::checker::RESERVED`
-    /// is what stops one.
+    /// What `views` and `sinks` answer, now that both read a signature.
     ///
-    /// RFC-0090 M4 deleted the `cell`/`get`/`set` builtins and took all three
-    /// out of `RESERVED`, handing the names to users. `sinks` gave `set` and
-    /// `cell` up with them. `views` kept `get`, so a user function called `get`
-    /// handed back a view that owns nothing — and `std/slots`' reader, which
-    /// copies its element out, was renamed to `get` two phases later. A
-    /// `Slots<String>` read through it leaked with no diagnostic.
-    ///
-    /// This is the check that was missing. It fails on the commit that drops a
-    /// name from `RESERVED` without dropping it here, which is where the leak
-    /// was introduced and the only place it is cheap to see.
+    /// The lists they read are gone (RFC-0094 M1) and the reservation check
+    /// moved to `prelude` with the rows. What is pinned here is the READING: a
+    /// row's `consume` must reach `sinks` and a row's projection body must reach
+    /// `views`, or the passes are back to knowing nothing.
     #[test]
-    fn every_view_and_sink_name_is_reserved() {
-        // An `@`-prefixed name is unspellable — no source token lexes to it —
-        // which is a stronger guarantee than reservation, not a weaker one.
-        let owned = |n: &str| n.starts_with('@') || crate::checker::RESERVED.contains(&n);
-        for name in RESERVED_VIEWS {
+    fn the_passes_read_the_seeded_capabilities() {
+        assert!(views(crate::project::AT) && views("bytes"));
+        assert!(!views("stringFromBytes"), "its inverse allocates");
+
+        let p = crate::parser::parse(crate::lexer::lex("fn main() -> Int64 { return 0 }").unwrap())
+            .unwrap();
+        let decl = Declared::new(&p);
+        for (name, i) in [("@push", 1), ("fromArray", 0), ("fromStep", 2)] {
             assert!(
-                owned(name),
-                "`{name}` is a view builtin but neither reserved nor unspellable, so a \
-                 user function of that name would be treated as a view and never released"
+                sinks(&decl, name, i),
+                "`{name}` argument {i} declares `consume`"
             );
         }
-        for (name, _) in RESERVED_SINKS {
-            assert!(
-                owned(name),
-                "`{name}` is a sink builtin but neither reserved nor unspellable, so a \
-                 user function of that name would be treated as taking ownership"
+        assert!(
+            !sinks(&decl, "@push", 0),
+            "the receiver is rebuilt, not taken"
+        );
+        // The three linear ones declare `consume` too, and the must-use walk
+        // owns them — see [`sinks`].
+        for name in ["close", "boxStream", "serveStream"] {
+            assert_eq!(
+                crate::prelude::capability(name, 0),
+                Some(Capability::Consume)
             );
+            assert!(!sinks(&decl, name, 0));
         }
     }
 
@@ -4861,6 +4869,43 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("may not be stored into `fromArray(..)`"), "{e}");
+    }
+
+    /// `boxStream` and `serveStream` — the two the census counted as carrying
+    /// their ownership fact **nowhere at all** (Q1). They carry it on the TYPE,
+    /// and this is where that is written down.
+    ///
+    /// Each takes a `Stream<T>` and hands it away for good. A second call on one
+    /// binding is a double free, and each has exactly one corpus caller — which
+    /// the census read as "the only reason no heap has been corrupted". The
+    /// reason is stronger than that: `Stream<T>` is linear, every mention of a
+    /// stream binding is a disposal in the must-use walk, and a second mention
+    /// is refused whatever the name is. The signatures now say `consume` as
+    /// well, so the fact is legible; the refusal was always there.
+    #[test]
+    fn a_stream_is_handed_away_once_however_it_is_handed_away() {
+        for call in ["boxStream(s)", "serveStream(s)"] {
+            let e = run(&format!(
+                "{FEED} fn go(s: Stream<Int64>) -> Int64 {{ let a = {call} let b = {call} \
+                 return 0 }} fn main() -> Int64 {{ return go(feed()) }}"
+            ))
+            .unwrap_err();
+            assert!(e.contains("disposed more than once"), "{call}: {e}");
+        }
+        // And on a local, where the binding is the frame's own.
+        let e = run(&format!(
+            "{FEED} fn main() -> Int64 {{ let s = feed() let a = boxStream(s) \
+             let b = boxStream(s) return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("disposed more than once"), "{e}");
+        // One is fine — the box owes the release, which `close` after
+        // `unboxStream` discharges.
+        assert!(run(&format!(
+            "{FEED} fn main() -> Int64 {{ let s = feed() let a = boxStream(s) \
+             let back: Stream<Int64> = unboxStream(a) close(back) return 0 }}"
+        ))
+        .is_ok());
     }
 
     #[test]

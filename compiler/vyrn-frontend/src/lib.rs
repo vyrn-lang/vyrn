@@ -30,6 +30,7 @@ pub mod movecheck;
 pub mod origin;
 pub mod own;
 pub mod parser;
+pub mod prelude;
 pub mod project;
 pub mod regex;
 pub mod schema;

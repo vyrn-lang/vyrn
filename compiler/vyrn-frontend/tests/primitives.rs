@@ -554,6 +554,73 @@ fn the_census_is_the_code() {
     assert_eq!(found.len(), 89, "the primitive core changed size");
 }
 
+/// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).
+///
+/// [`the_census_is_the_code`] pins the INTERPRETER against the census.
+/// `direct.rs` is the only wasm backend since RFC-0077 M5, and it had no such
+/// pin at all — so the census had to find its gaps by reading, and found five.
+/// One (`alen`) went with the verb forms; the other four are below with the
+/// reason each is allowed to be missing. A fifth appearing here is a program
+/// that runs on three engines and refuses on the fourth.
+///
+/// The scan is a substring, not a parse: a name is covered if the backend
+/// mentions it as a literal, or through the Rust constant it is spelled with.
+/// That is coarse in the safe direction — a mention in a comment reads as
+/// coverage — and it still caught four.
+#[test]
+fn the_direct_backend_carries_the_census_too() {
+    // A censused name absent from the direct wasm backend, and why it may be.
+    // Every one of these refuses at build time with the backend's own
+    // `no lowering for the call` message, so a program that reaches one is
+    // stopped rather than miscompiled.
+    const ABSENT: &[(&str, &str)] = &[
+        (
+            "assert",
+            "RFC-0015: `vyrn test` runs test bodies on the interpreter",
+        ),
+        ("assertEq", "as `assert`"),
+        (
+            "blackBox",
+            "RFC-0055: `vyrn bench` times through the interpreter",
+        ),
+        // Not explained by a test path, and the census said so. It has ZERO
+        // callers in `std/` and `examples/` — one doc mention in
+        // `std/storage.vyrn` and one interpreter unit test — so no parity
+        // program ever asked the wasm column for it, and the absence stayed
+        // invisible. The same shape as `alen`, one step short of it: `alen` had
+        // a replacement and was deleted, `fsyncFile` has none and is a gap.
+        (
+            "fsyncFile",
+            "RFC-0044: no corpus caller, so no parity run reaches it",
+        ),
+    ];
+    // The names a backend spells with a Rust constant rather than a literal.
+    let alias = |n: &str| match n {
+        "@panicAt" => Some("PANIC_AT"),
+        "@at" => Some("project::AT"),
+        "@slot" => Some("ELEM"),
+        _ => None,
+    };
+    let direct = include_str!("../../vyrn-codegen/src/direct.rs");
+    let covers = |n: &str| {
+        direct.contains(&format!("{n:?}")) || alias(n).is_some_and(|a| direct.contains(a))
+    };
+    let missing: Vec<&str> = CENSUS
+        .iter()
+        .map(|(n, ..)| *n)
+        .filter(|n| !covers(n))
+        .collect();
+    let allowed: BTreeSet<&str> = ABSENT.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        missing.iter().copied().collect::<BTreeSet<_>>(),
+        allowed,
+        "the direct wasm backend's coverage of the census moved. A name that \
+         LEFT this set is covered now — delete its row. A name that JOINED it \
+         runs on three engines and refuses on the fourth, which is what the \
+         census found by reading and this test exists to find by running."
+    );
+}
+
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."
 ///
 /// A censused builtin is implemented in Rust; a routed one is implemented in
