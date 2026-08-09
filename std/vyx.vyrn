@@ -777,10 +777,12 @@ fn vyxProcessElem(n: consume VyxNode, fileId: String) -> VyxOne {
     }
 }
 
-fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, fileId: String) -> VyxOne {
+fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: consume Array<VyxNode>, line: Int64, fileId: String) -> VyxOne {
     // v-html replaces the element content with a single Raw node.
     let vhtml = vyxDir(attrs, "v-html")
-    let mut childNodes = kids
+    // `kids` is this frame's, and exactly one of the two branches gives it away:
+    // `v-html` replaces the children, so the list it was handed is dropped here.
+    let mut childNodes: Array<VyxNode> = []
     let mut err = ""
     if vhtml.found {
         childNodes = [VNRaw(vhtml.value, vhtml.line, vhtml.col)]
@@ -804,7 +806,12 @@ fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: A
 }
 
 /// Group a flat sibling list into the control-flow AST.
-fn vyxGroupNodes(nodes: Array<VyxNode>, fileId: String) -> VyxGroup {
+///
+/// **It takes the list.** Every element goes to `vyxProcessElem`, which takes
+/// the node, and a `VyxNode` refers to itself so there is no `.copy()` to hand
+/// over instead. A `read` parameter here said the caller still owned nodes this
+/// function had already given away.
+fn vyxGroupNodes(nodes: consume Array<VyxNode>, fileId: String) -> VyxGroup {
     let mut out: Array<VyxNode> = []
     let mut err = ""
     let mut i = 0
@@ -2488,7 +2495,7 @@ gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
 /// `componentsThemed` — the `listDir` / `readFile` I/O stays in the `gen fn`
 /// bodies (a comptime-only builtin has no native/wasm lowering, so it may only
 /// appear directly in a generator body), and this is called with the results.
-gen fn vyxFinish(comps: Array<VyxComp>, err: String, themed: Bool, theme: String) -> String {
+gen fn vyxFinish(comps: consume Array<VyxComp>, err: String, themed: Bool, theme: String) -> String {
     if comps.length == 0 {
         return "VYX_ERROR__no_vyx_files_found_under_the_components_directory\n"
     }

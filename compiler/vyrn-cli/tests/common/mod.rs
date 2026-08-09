@@ -93,6 +93,12 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "`xs` was moved here into `fromArray(..)`",
     ),
     (
+        "consume_borrowed.vyrn",
+        "a `read` parameter handed to a `consume` parameter — the frame gave away \
+         what it does not own, and the native binary exited 0xC0000374",
+        "`ys` may not be passed to a `consume` parameter via `take(..)`",
+    ),
+    (
         "mustuse_abandoned.vyrn",
         "a USER type's must-use obligation, abandoned (RFC-0086 M3) — the same three \
          rejections `Stream` gets, reached through `impl MustUse for Txn` and naming \

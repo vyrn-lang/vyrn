@@ -59,7 +59,15 @@ RFC-0004 §1 already wrote the table. It becomes enforced, not surface:
 | `share` | nothing | `read` across a `spawn` boundary, as RFC-0004 intended |
 
 `read` and `modify` are **second-class**: a borrowed value cannot be stored in a
-field, captured by an escaping closure, put in a container, or returned. That
+field, captured by an escaping closure, put in a container, or returned — **and
+it cannot be consumed.** A move into a `consume` parameter is the third way a
+value leaves a frame, beside a store and a return, and it is the one the pass
+did not ask about until PR #125. `fn caller(ys: Array<Int64>) -> Int64 { return
+take(ys) }` gave away a buffer the caller still held: `vyrn check` said `ok`, the
+interpreter printed an answer by refcounting, and the native binary exited
+`0xC0000374`. The refusal is `movecheck::check_handover`, and the two fixes it
+names are the two this rule has always had — `consume` on the caller's own
+parameter, or `.copy()` at the call. That
 one restriction is what makes the whole thing work without lifetime annotations
 — a borrow that cannot escape needs no lifetime, because its lifetime is the
 call. This is the published result Vyrn's design has been circling: mutable

@@ -323,12 +323,37 @@ one sentence, at type level, with no name in it — not a special case for three
 names. The rows still say `consume`, which is the point: the fact is written
 where hover, the LSP and every later rule can read it.
 
-**A third finding, and it is open.** The word `consume` means two different rules
-in this compiler. A user `fn take(xs: consume Array<Int64>)` accepts a `read`
-parameter's array today; `fromArray` refuses the same shape, because the builtin
-path goes through rule 1 and the declared path does not. M1 put both readings on
-one page for the first time. It did not unify them, and unifying them is a
-language change, not a milestone of this RFC.
+**A third finding, and it is closed.** The word `consume` meant two different
+rules in this compiler. A user `fn take(xs: consume Array<Int64>)` accepted a
+`read` parameter's array; `fromArray` refused the same shape, because the builtin
+path goes through rule 1 and the declared path did not. M1 put both readings on
+one page for the first time and called the difference an inconsistency.
+
+It was not an inconsistency. **The builtin path was right and the declared path
+was unsound**, and the repro is PR #118's signature one path over: `vyrn check`
+said `ok`, `vyrn run` printed `6`, and the native binary printed nothing and
+exited `0xC0000374`. PR #125 closed it. `movecheck::check_handover` asks rule 2's
+question at the third exit — a borrowed root may not be consumed — with the move
+left where it was, so a capability keeps the wording it has always had. The
+borrow now travels to every spelling of the argument (`let n = ns[0]` and
+`match o { Some(v) => .. }` used to bind a bare projection and lose the root's
+own borrow), and `spawn` asks it too.
+
+**What it found in the corpus, and it was five sites.** `std/graphql`'s
+`gqlProjectCore` handed a `read` parameter's `Json` to `gqlOk`, which takes it;
+`std/vyx`'s `vyxGroupNodes` handed each element of a `read` array to
+`vyxProcessElem`, which takes it, in four places. Both are latent double frees
+that parity and `genwasm` never saw, because no corpus program frees a leaf twice
+in a way a comparison can print. `gqlOk` now gets a `copyJson`, and the two `vyx`
+functions declare the `consume` they were already exercising.
+
+**Where the rule stops is deliberate.** A projection of a place the frame itself
+owns — `take(b.xs)`, or a payload binder over an owned scrutinee — is recorded
+and not refused, which is where the sibling exit stops too: a variant constructor
+holds what it is given and the `constructs` arm records rather than refuses it
+(RFC-0092 M2). `std/html`'s `keyed` drains an owned node through both exits in
+one expression, and its own doc says why a `.copy()` there would be wrong. The
+two exits move together or not at all.
 
 ### The two pins
 
@@ -392,7 +417,7 @@ RFC-0092 M5 test passing unchanged with the same refusals.
   seeded rows are not in `Program`, so `symbols.rs` does not see them. Serving
   hover from the prelude is a separate change and is worth its own measurement.
 - **Effects.** 29 rows, unchanged, as stated.
-- **The two meanings of `consume`**, above.
+- **The two meanings of `consume`** — closed by PR #125, above.
 
 ---
 

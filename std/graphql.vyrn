@@ -1262,7 +1262,11 @@ fn gqlProjectCore(
     schema: fn(String, String) -> String,
 ) -> GqlOut {
     if sels.length == 0 {
-        return gqlOk(v)
+        // A leaf position answers itself, and `v` is the caller's — `gqlOk` takes
+        // what it is handed, so the value that goes in must be this frame's. A
+        // `Json` refers to itself and has no `.copy()`, which is why the
+        // hand-written deep copy is the one on this line too.
+        return gqlOk(copyJson(v))
     }
     return match v {
         JArr(items) => gqlProjectEach(items, sels, gqlElemRef(core), path, schema),
