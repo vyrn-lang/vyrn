@@ -307,7 +307,22 @@ fn let_id(s: &Stmt) -> usize {
 const RESERVED_VIEWS: &[&str] = &["at", "bytes"];
 
 /// The builtins that take ownership of an argument, by name and position.
-const RESERVED_SINKS: &[(&str, usize)] = &[("push", 1)];
+///
+/// The two stream producers are here because the stream's own close frees what
+/// they were handed: `__vyrn_stream_close` frees the array buffer for a
+/// buffer-tagged stream, and the step's capture block for a stepped one. Every
+/// call site in the corpus writes `return fromArray(xs)`, where the `return`
+/// already records the move — so on a NAMED array or a NAMED step that the same
+/// frame consumes, the frame released the buffer a second time and the native
+/// binary corrupted its heap. Recording the move at the call is what stops the
+/// second release, and a later use of the name is then the rule 1 error that
+/// names `fromArray(..)` as where the value went.
+///
+/// `unboxStream` frees a box too, but its argument is an `Int64` address. No
+/// binding of that type carries a release, so it has nothing to double free —
+/// and a second `unboxStream` of one address is the magic-word trap, not a use
+/// after free.
+const RESERVED_SINKS: &[(&str, usize)] = &[("push", 1), ("fromArray", 0), ("fromStep", 2)];
 
 fn views(name: &str) -> bool {
     RESERVED_VIEWS.contains(&name)
@@ -4798,12 +4813,54 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_producer_takes_what_it_is_handed() {
+        // RFC-0092 M5. A buffer-tagged stream's close frees the array's buffer,
+        // and a stepped one's close frees the step's capture block. So the frame
+        // must not release either a second time — it did, and the native binary
+        // corrupted its heap.
+        let moved = |src: &str| {
+            let p = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+            ownership(&p)
+                .values()
+                .any(|r| matches!(&r.gone, Some(Gone::Moved { .. })))
+        };
+        assert!(moved(
+            "fn main() -> Int64 { let xs: Array<Int64> = [1, 2] let s = fromArray(xs) \
+             for v in s { print(v) } return 0 }"
+        ));
+        assert!(moved(
+            "fn main() -> Int64 { let n = 1 \
+             let run: fn(Int64, Int64, Bool) -> Option<Int64> = |a, b, c| { return Some(n) } \
+             let s = fromStep(0, 0, run) close(s) return 0 }"
+        ));
+
+        // Reading the name afterwards is the rule 1 error, and it says where the
+        // array went.
+        let e = run("fn main() -> Int64 { let xs: Array<Int64> = [1, 2] \
+                     let s = fromArray(xs) close(s) return xs.length }")
+            .unwrap_err();
+        assert!(e.contains("moved here into `fromArray(..)`"), "{e}");
+
+        // A `read` parameter's buffer may not go into a stream: the caller still
+        // owns it, and the stream's close would free it.
+        let e = run("fn mk(xs: Array<Int64>) -> Stream<Int64> { return fromArray(xs) } \
+                     fn main() -> Int64 { return 0 }")
+            .unwrap_err();
+        assert!(e.contains("may not be stored into `fromArray(..)`"), "{e}");
+    }
+
+    #[test]
     fn a_generic_producer_is_quoted_as_plain_stream() {
         // `Stream<U>` at a call site names a type parameter the program never
         // wrote. This pass has no types, so it under-specifies instead — the
         // same `Stream` it has always used for `fromArray`.
+        //
+        // `consume` on the parameter, because `fromArray` TAKES the array
+        // (RFC-0092 M5): the stream's close frees the buffer, so a `read`
+        // parameter's buffer may not go into one. The rule refuses it and names
+        // `consume` on the menu; this test was written before it did.
         let e = run(
-            "fn mk<T>(xs: Array<T>) -> Stream<T> { return fromArray(xs) } \
+            "fn mk<T>(xs: consume Array<T>) -> Stream<T> { return fromArray(xs) } \
                      fn main() -> Int64 { let s = mk([1, 2]) return 0 }",
         )
         .unwrap_err();

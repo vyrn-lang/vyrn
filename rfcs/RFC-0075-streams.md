@@ -890,6 +890,17 @@ takes its source out of its box and closes it. Two consequences worth recording:
   is what keeps `unfold` flat: its registered step is an adapter that captures the
   caller's step, so without the free every `unfold` would leak sixteen bytes.
 
+**A producer TAKES what it is handed, and RFC-0092 M5 is where that got
+recorded.** The two facts above — the closer frees the array's buffer, and the
+closer frees the step's capture block — say that a stream owns both. Nothing
+recorded the move, so the frame released them a second time and the native
+binary corrupted its heap. Every call site in this repo writes `return
+fromArray(xs)` or `return fromStep(c.slot, c.gen, run)`, where the `return`
+records the move anyway, which is why no example ever showed it. `fromArray`
+position 0 and `fromStep` position 2 are sinks in `movecheck` now, a read of
+either name after the call is refused, and `examples/streammove.vyrn` holds both
+shapes under three-way parity.
+
 **A wrapper's source is a box, not a slab slot.** `boxStream(s)` moves a stream
 into one `malloc`'d `{ i64 magic, Stream }` and answers its address as an
 `Int64`; `pullAt(a)` asks the stream in that box for one element; `unboxStream(a)`

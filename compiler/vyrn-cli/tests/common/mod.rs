@@ -86,6 +86,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "`mapped` is a `Stream` and is never disposed",
     ),
     (
+        "streammove_after.vyrn",
+        "an array read after `fromArray` took it (RFC-0092 M5) — the frame used to \
+         release a buffer the stream had already freed, and the native binary \
+         corrupted its heap",
+        "`xs` was moved here into `fromArray(..)`",
+    ),
+    (
         "mustuse_abandoned.vyrn",
         "a USER type's must-use obligation, abandoned (RFC-0086 M3) — the same three \
          rejections `Stream` gets, reached through `impl MustUse for Txn` and naming \

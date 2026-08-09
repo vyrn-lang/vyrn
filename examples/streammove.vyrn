@@ -1,0 +1,73 @@
+/// `fromArray` TAKES the array, and the same is true of `fromStep`'s step.
+///
+/// A stream made from a buffer owns that buffer: its close frees it. A stream
+/// made from a step owns the step's captures: its close frees them. So the
+/// frame that handed either one over must not release it a second time.
+///
+/// Until RFC-0092 M5 nothing recorded that move. Every call site in the corpus
+/// wrote `return fromArray(xs)`, where the `return` records it anyway, so the
+/// hole stayed shut by accident. A NAMED array that the same frame consumed was
+/// released twice, and the native binary corrupted its heap and printed
+/// nothing. This file is that shape, so parity now covers it.
+///
+/// A use of the name after the call is refused. See streammove_after.vyrn.
+
+/// A named array, consumed by the frame that made it. The buffer is freed once.
+fn named() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    let s = fromArray(xs)
+    let mut sum = 0
+    for v in s {
+        sum = sum + v
+    }
+    return sum
+}
+
+/// The same, on a type whose elements own heap of their own. Since RFC-0092 M2
+/// an array releases its elements, so an `Array<String>` has more than a buffer
+/// to free twice.
+fn strings() -> Unit {
+    let names: Array<String> = ["ada", "grace", "alan"]
+    for n in fromArray(names) {
+        print(n)
+    }
+}
+
+/// A TEMPORARY argument has no binding to mark, and must keep working.
+fn mk() -> Array<Int64> {
+    let xs: Array<Int64> = [10, 20, 30]
+    return xs
+}
+
+/// A named step, handed to `fromStep` and closed by the loop. `run`'s capture
+/// block is freed by the stream's close, so this frame must not free it too.
+fn stepped() -> Int64 {
+    let each = 7
+    let mut left = 3
+    let run: fn(Int64, Int64, Bool) -> Option<Int64> = |slot, gen, closing| {
+        if closing {
+            return None
+        }
+        return Some(each)
+    }
+    let s = fromStep(0, 0, run)
+    let mut sum = 0
+    for v in s {
+        sum = sum + v
+        left = left - 1
+        if left <= 0 {
+            break
+        }
+    }
+    return sum
+}
+
+fn main() -> Int64 {
+    print(named()) // 6
+    strings() // ada grace alan
+    for v in fromArray(mk()) {
+        print(v) // 10 20 30
+    }
+    print(stepped()) // 21
+    return 0
+}

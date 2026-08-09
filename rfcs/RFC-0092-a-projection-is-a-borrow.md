@@ -812,11 +812,51 @@ alone, and `own` is the one place that answers: both backends ask
 `release_kind` for the array rather than re-deriving it from the element, so the
 guard cannot be forgotten in one engine and kept in the other.
 
-**One pre-existing double free found and left alone.** `fromArray(xs)` on a
-NAMED array leaves the array and the stream owning one buffer, and the native
-binary corrupts its heap. It reproduces on `Array<Int64>`, so it predates this
-row; no example passes a named array to `fromArray`, which is why parity has
-never seen it. Filed, not fixed here.
+**One pre-existing double free found, and then fixed.** `fromArray(xs)` on a
+NAMED array left the array and the stream owning one buffer, and the native
+binary corrupted its heap. It reproduced on `Array<Int64>`, so it predated this
+row; no example passed a named array to `fromArray`, which is why parity had
+never seen it.
+
+The premise was read in all three engines before anything was built. A
+buffer-tagged stream's close frees the array's buffer — `__vyrn_stream_close`
+does it in the LLVM emitter, and the direct backend's bump allocator frees
+nothing at all — so the stream DOES own what `fromArray` was handed. The
+interpreter holds the buffer behind an `Rc` and printed the right bytes by
+refcounting rather than by having the rule. So the move is the fix, not a copy:
+`fromArray` takes the array, which is what the LSP has said since RFC-0075.
+
+The move is recorded at the call. `fromArray` position 0 joins `push` position 1
+in `movecheck`'s `RESERVED_SINKS`, so `own` writes `Gone::Moved` instead of a
+release row, and a read of the name after the call is the rule 1 error that
+names `fromArray(..)` as where the array went. Every call site in the corpus
+writes `return fromArray(xs)`, where the `return` already recorded the move —
+which is exactly why the hole stayed shut by accident for two RFCs.
+
+**`fromStep` had the same bug, in the same arm, on its step.** A stepped
+stream's close frees the step's capture block (RFC-0075 M3), so a NAMED step
+handed to `fromStep` and closed by the same frame was freed twice. The native
+binary corrupted its heap on that shape too. Position 2 joins the same list.
+`unboxStream` does not have it: its argument is an `Int64` address, no binding
+of that type carries a release, and a second unbox of one address is the
+magic-word trap.
+
+**One new refusal comes with the rule, and it is a bug it catches.**
+`fn mk(xs: Array<Int64>) -> Stream<Int64> { return fromArray(xs) }` no longer
+compiles: `xs` is a `read` parameter, the caller still owns that buffer, and the
+stream's close would free it. Rule 2 says so in the words it already had, and
+the menu names `consume` on the parameter. One test in the tree wrote that
+signature, and it now writes `consume`. No file in the corpus did.
+
+A stream's close frees the buffer alone, so the Strings a consumer never read
+are a leak. That is the direction this analysis is allowed to be wrong in, and
+that shape was a double free before.
+
+`examples/streammove.vyrn` is both shapes under parity from now on, on
+`Array<Int64>`, on `Array<String>` — where an array releases its elements since
+M2, so there is more than a buffer to free twice — and on a temporary argument,
+which has no binding to mark and must keep working.
+`examples/streammove_after.vyrn` pins the refusal.
 
 ### M3 — the release rows
 
