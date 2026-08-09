@@ -1,0 +1,17 @@
+// `fromArray` takes the array (RFC-0092 M5), so a read of the name after the
+// call is a use after move. This file is that refusal on purpose: it does not
+// build, and `vyrn check` names `fromArray(..)` as where the array went.
+//
+// Before the move was recorded, this program compiled. The frame released the
+// buffer the stream had already freed, and the native binary corrupted its
+// heap. See streammove.vyrn for the shape that now runs.
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    let s = fromArray(xs)
+    for v in s {
+        print(v)
+    }
+    // `xs` no longer owns anything — the stream does.
+    return xs.length
+}
