@@ -353,9 +353,10 @@ This keeps the "which strategy is this value using?" cognitive load low (Q1's
 worry): the default is ownership, and you only opt into `Ref<T>` exactly when you
 need aliasing — which is also exactly when the type makes that choice legible. The
 memory model is therefore **promoted from open to a decided hybrid**; the remaining
-work (inferred/invisible regions per Q3, `share`-by-reference, and *parallel
+work (`share`-by-reference and *parallel
 execution* of the already-shipped concurrency model per Q4) is refinement of the
-surface and the runtime, not a change of mechanism.
+surface and the runtime, not a change of mechanism. Inferred regions were the
+third item on that list; Q3 below records why they are refused.
 
 ### 5.3 How many of those checks are necessary — the pass is DELETED (§5.4)
 
@@ -487,10 +488,16 @@ of the language built.
   checks are acceptable in hot loops. That is why `std/slots` is built on one.
   §5.4 records the check moving from a compiler builtin into a library, which
   changed neither the cost nor the guarantee.
-- **Q3.** How are regions *named/introduced* in surface syntax, if at all? Ideal:
-  inferred and invisible; fallback: an explicit `region { ... }` block. *(v0.1
-  ships the explicit-block fallback as the first prototype; inferred/invisible
-  regions remain the goal.)*
+- **Q3. Answered by measurement, and the answer is no** — `rfcs/census-regions.md`.
+  The question was how regions are named in surface syntax, with inferred and
+  invisible as the ideal and an explicit `region { ... }` block as the fallback.
+  The fallback shipped. Inference is refused: it has 0 candidates in 3758 corpus
+  bindings, because the arena allocates only a `String` buffer and every binding
+  the type-driven walk does not reclaim reaches an `Array`, a `Stream` or a spawn
+  frame. §4's own 40-million-iteration measurement, re-run at `3d013ef`, now runs
+  **flat without a region** (4,296 KiB) and **1023x larger inside one**
+  (4,393,564 KiB), because the walk frees per binding and the arena defers every
+  free to block exit. RFC-0087 §5 and U6 close on the same file.
 - **Q4. Implemented as a deterministic model; only parallel *execution* remains.**
   Structured concurrency ships in v0.1 — `spawn f(args) -> Task<T>` / `join(t) -> T`
   over functions the compiler *proves* isolated (no `print`, no `modify` params,

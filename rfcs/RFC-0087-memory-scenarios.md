@@ -593,7 +593,7 @@ names a test.
 | 8 | **§15** `bytes` and friends are not producers | leak | **CLOSED**, Phase 4c — same deletion; `views` is the remaining hand-written list, and it is the opposite direction |
 | 9 | **§16** a closure capture block is never freed | leak per lambda evaluation | **CLOSED.** Phase 10b: a `fn` value owns its capture block, and the copy rule 1 demands is derived over RFC-0037's defunctionalized enum. `lambdaLoop` is steady |
 | 10 | **§10** a spawn frame is never freed | bounded leak | **CLOSED**, RFC-0095 M1 — a `Task<T>` is linear, so `join` consumes it and `drop t` waits and discharges it, and the frame, the record and the operating-system handle go back at that one site. 200,000 spawns: 20,252 KiB and 200,076 handles before, 3,880 KiB and 72 handles after |
-| 11 | **§5** regions are hand-placed | the model's best tool is rarely reachable | **OPEN.** RFC-0004 Q3, still undesigned. The arena survived Path B's deletion as Path A's second half |
+| 11 | **§5** regions are hand-placed | the model's best tool is rarely reachable | **REFUSED BY MEASUREMENT** — `rfcs/census-regions.md`. An inferred region has 0 candidates in 3758 corpus bindings: every binding the walk does not reclaim reaches an `Array`, a `Stream` or a spawn frame, and the arena refuses all three. Where a region IS legal it is 1023x the memory and 4.4x the time of the walk, on RFC-0004 §4's own program. The 58 real leaks are `impl Owned` away, not a region away |
 | 12 | **§6** use-after-release traps at run time | not compile-time | **STRUCK.** Path B is deleted (RFC-0090 M4); there is no `release` to use after |
 
 1 is a soundness defect and everything else is a leak. **§17 multiplies 2, 3, 8 and
@@ -811,7 +811,7 @@ calls stay three calls.
 
 ---
 
-## U6. The arena excludes the case it is for
+## U6. The arena excludes the case it is for — REFUSED BY MEASUREMENT
 
 `region { }` is a block. `push` cannot draw from it, because arena memory has no
 `realloc`. So the loop that builds many values with one lifetime — the case
@@ -820,6 +820,31 @@ serve.
 
 What is left is String concatenation inside a lexical block. RFC-0004 Q3 asked for
 inferred, invisible regions and nothing was designed.
+
+**`rfcs/census-regions.md` measured both, and refuses both.** Three numbers.
+
+- **An inferred region has 0 candidates.** Of 3758 corpus bindings, 2281 are not
+  reclaimed; 79 of those own heap and have no release rule, and every one of the 79
+  reaches an `Array` buffer, a `Stream` buffer or a spawn frame — none of which the
+  arena ever allocates. 21 of the 79 are not leaks at all (a `Stream` and a `Task`
+  are discharged by their own lowering, and the reporter is wrong about them).
+  The remaining 58 are self-referring types, and `impl Owned for T` closes them.
+- **A region loses where it is already legal.** RFC-0004 §4's 40-million-iteration
+  loop, native, median of 3: no region 4,296 KiB / 0.85 s; one region around the
+  loop 4,393,564 KiB / 3.73 s. The arena is a chain of `malloc`s that frees once
+  per allocation at block exit, so it defers every free and pays 8 extra bytes to
+  do it. RFC-0004's own measurement was taken against a compiler that leaked
+  without a region; the type-driven walk gives that flatness with no annotation.
+- **Removing the exclusion makes it worse.** The exclusion is why the deferral is
+  bounded. An arena that also swallowed every `Array` would hold more, for longer.
+
+Inference would also mean rebuilding the escape walker RFC-0089 deleted, to serve
+zero bindings. The census records one live defect on the way: `xs.copy()` inside a
+`region` draws its buffer from the arena and is then freed twice, which corrupts
+the native heap while the interpreter and wasm print an answer.
+
+The corpus writes `region` in three places, and all three are the examples that
+teach it.
 
 ---
 
@@ -948,7 +973,7 @@ rule, and the type is in the module.
 | 5 | **U5** the failure message has no location | the worst moment to say the least | **CLOSED.** `error: slots: handle is not alive (std/slots.vyrn:189)` on all three engines. The loader stamps `panic(msg)` into `@panicAt(msg, "file:line")`, so the site travels as data in the AST |
 | 6 | **U4** an element is unreclaimable | the largest silent restriction | **HALF, and the other half is correct.** A DECLARED container reaches its elements (Phase 8b); a built-in `Array<T>` cannot say whether it owns them, and `m.keys()` is the view a per-element release would free twice |
 | 7 | **U7** `consume` and linearity are two things | the surface implies one | **CLOSED.** `impl MustUse for T` (RFC-0086 M3) gives a user's type the whole obligation, and the question is decided: they stay two declarations, because a calling convention and an obligation on a type are not the same fact |
-| 8 | **U6** the arena excludes its own case | the model's best tool is unreachable | **OPEN.** RFC-0004 Q3, undesigned. Path B went; Path A's arena stayed |
+| 8 | **U6** the arena excludes its own case | the model's best tool is unreachable | **REFUSED BY MEASUREMENT** — `rfcs/census-regions.md`. Removing the exclusion needs an arena with `realloc`, a second allocator in the direct backend, and a return-path guard that leaks today — and it would WIDEN the 1023x memory regression, because the exclusion is the only reason the arena's deferral is bounded |
 | 9 | **U9** three layouts, one syntax | justified, but unannounced | **COVERED by U1** — hover names the layout, because it names the type |
 
 **U3 left this table entirely.** "Path B is not subject-first" was rank 7; the
@@ -1167,11 +1192,11 @@ Nine phases, RFC-0089 + RFC-0090 + RFC-0091. What the three tables above came to
 ## The score
 
 - **Correctness (12 rows):** 8 closed after Phase 10 (6 at Phase 9), 1 struck,
-  3 open — and 2 of the 3 are undesigned design questions (§5 regions, §7
-  linearity as a declaration) rather than defects. §14's half became whole and
-  §16 closed.
+  1 refused by measurement (§5 regions — `rfcs/census-regions.md`), 2 open.
+  §14's half became whole and §16 closed.
 - **Usability (10 rows, 9 after U3 left):** 4 closed, 1 closed in practice, 1
-  covered, 1 half, 1 narrowed, 2 open.
+  covered, 1 half, 1 narrowed, 1 refused by measurement (U6 — the same census),
+  1 open.
 - **Performance (7 rows):** 4 closed, 2 struck, 1 open and correctly unmeasured.
 
 The memory suite is the ledger: **eleven of twelve rows steady, one leaking**
@@ -1261,10 +1286,12 @@ key pointers, which a per-element release would free twice. The answer moved fro
 has nothing to declare it with" — and `slotsContainer` is the row that proves the
 declaration works. This is a restriction, recorded, not a defect to chase.
 
-Beside the three rows, **one** design question is open and undesigned: **§5/U6**
-inferred regions (RFC-0004 Q3). **§10** the native spawn frame was the second and
+Beside the three rows, **no** design question is left open. **§5/U6** inferred
+regions (RFC-0004 Q3) was the first of four, and `rfcs/census-regions.md` refuses it by
+measurement: 0 candidates in 3758 corpus bindings, and 1023x the memory of the
+type-driven walk where a region is legal already. **§10** the native spawn frame
 is closed by RFC-0095 M1 — see below, where the measurement that kept it open now
-carries its after column. **§7/U7** was the third and is closed: linearity is a
+carries its after column. **§7/U7** was the third and is closed too: linearity is a
 declaration (RFC-0086 M3), and `consume` and the obligation stay two declarations
 because a calling convention and a property of a type are not the same fact.
 **U5** was the fourth and is closed too: `panic` names the file and line it is
