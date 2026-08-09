@@ -114,6 +114,14 @@ completion** keyed off the receiver's type (`arr.` → `push`/`at`/`pop`/
 `length`; `log.` → `trace`/`debug`/`info`/`warn`/`error`). **Document symbols**
 (outline / breadcrumbs / Ctrl-Shift-O) list the document's own top-level
 functions, methods, types, and variants (imported symbols are excluded).
+**Inlay type hints** draw the type of a binding whose line does not say it —
+`let p = o.copy()` shows `p: Outer`, and `let mut o = Outer { .. }` shows
+nothing, because the line already names the type. An annotation, a record
+literal, and a literal value are all evidence enough; a call, a `match`, a
+`spawn`, a field read, and an element read are not. `.vyrn` files only (a `.vyx`
+template maps through a synthesized module, whose coordinates are not the
+buffer's). Toggle them with the standard VS Code setting
+`editor.inlayHints.enabled`; no extension setting is involved.
 **Formatting** (Shift+Alt+F, or Format on Save) runs the canonical formatter
 (RFC-0017) over the whole document; a buffer that fails to lex is left untouched
 (no edit) rather than corrupted mid-edit. Deferred: range formatting

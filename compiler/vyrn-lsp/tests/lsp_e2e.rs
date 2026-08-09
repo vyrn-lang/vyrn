@@ -4823,9 +4823,17 @@ fn main() -> Int64 {
         .get("result")
         .and_then(|r| r.as_array())
         .expect("hints: {hints}");
-    assert_eq!(list.len(), 1, "one move, one hint: {list:?}");
-    assert_eq!(list[0].pointer("/position/line").unwrap().as_i64(), Some(3));
-    assert_eq!(list[0].get("label").unwrap().as_str(), Some("→ take(..)"));
+    // Type hints share the request; a move hint is the one labelled `→ ..`.
+    let moves: Vec<&serde_json::Value> = list
+        .iter()
+        .filter(|h| h["label"].as_str().is_some_and(|l| l.starts_with('→')))
+        .collect();
+    assert_eq!(moves.len(), 1, "one move, one hint: {list:?}");
+    assert_eq!(
+        moves[0].pointer("/position/line").unwrap().as_i64(),
+        Some(3)
+    );
+    assert_eq!(moves[0].get("label").unwrap().as_str(), Some("→ take(..)"));
 
     // 4. The last use carries the modifier. Tokens are delta-encoded
     //    `[Δline, Δstart, len, type, mods]`; bit 3 is `modification`.
@@ -4957,4 +4965,208 @@ fn main() -> Int64 {
 
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Inlay type hints — the type of a binding whose line does not name it
+// ---------------------------------------------------------------------------
+
+/// Every inlay hint for the whole document, as `(line, character, label)`.
+fn inlay_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
+    let id = serde_json::json!(format!("inlay-{uri}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 100000, "character": 0 }
+            }
+        }
+    }));
+    let resp = client.read_response(&id);
+    resp.get("result")
+        .and_then(|r| r.as_array())
+        .expect("an inlay hint list")
+        .iter()
+        .map(|h| {
+            (
+                h.pointer("/position/line").unwrap().as_u64().unwrap() as u32,
+                h.pointer("/position/character").unwrap().as_u64().unwrap() as u32,
+                h["label"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The type hints only (a move hint is labelled `→ f(..)`).
+fn type_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
+    inlay_hints(client, uri)
+        .into_iter()
+        .filter(|(_, _, l)| l.starts_with(": "))
+        .collect()
+}
+
+/// The operator's own two lines, over the real `examples/copy.vyrn`.
+///
+/// `let p = o.copy()` says nothing about `p`'s type, so the editor draws it.
+/// The line above writes `Outer` already, so the editor draws nothing: a hint
+/// that repeats the source is noise.
+#[test]
+fn a_binding_gets_a_type_hint_when_its_line_hides_the_type() {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/copy.vyrn"
+    ));
+    let src = std::fs::read_to_string(path).expect("examples/copy.vyrn should exist");
+    let uri = file_uri(path);
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", &src);
+    let diags = read_diags_for(&mut client, "copy.vyrn");
+    let list = diags["params"]["diagnostics"].as_array().unwrap();
+    assert!(list.is_empty(), "the example is clean: {list:?}");
+
+    let hints = type_hints(&mut client, &uri);
+
+    // `let p = o.copy()` — the hint sits just past the name.
+    let (pline, pcol) = pos_after(&src, "    let p");
+    let shown: Vec<&(u32, u32, String)> = hints.iter().filter(|(l, _, _)| *l == pline).collect();
+    assert_eq!(
+        shown.len(),
+        1,
+        "one hint on the copy line, at {pline}: {shown:?}"
+    );
+    assert_eq!(shown[0].2, ": Outer", "the copy takes the receiver's type");
+    assert_eq!(shown[0].1, pcol, "the hint sits after the name `p`");
+
+    // `let mut o = Outer { .. }` — the record literal names the type itself.
+    let (oline, _) = pos_after(&src, "    let mut o = Outer {");
+    let on_o: Vec<&(u32, u32, String)> = hints.iter().filter(|(l, _, _)| *l == oline).collect();
+    assert!(on_o.is_empty(), "a record literal names its type: {on_o:?}");
+
+    let _ = client.child.kill();
+}
+
+/// A hint never says a type a hover would not say.
+///
+/// Both read the same row of the cached analysis, and this drives the two
+/// surfaces over a real file to keep it that way: for every hint, the hover at
+/// that binding must name the same type.
+#[test]
+fn a_type_hint_agrees_with_the_hover_at_the_same_binding() {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/copy.vyrn"
+    ));
+    let src = std::fs::read_to_string(path).expect("examples/copy.vyrn should exist");
+    let uri = file_uri(path);
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", &src);
+    let _ = read_diags_for(&mut client, "copy.vyrn");
+
+    let hints = type_hints(&mut client, &uri);
+    assert!(hints.len() > 8, "the file binds plenty: {}", hints.len());
+    for (line, ch, label) in &hints {
+        // The hint is drawn just past the name; hover wants a column inside it.
+        let hover = hover_value(&mut client, &uri, *line, ch - 1)
+            .unwrap_or_else(|| panic!("hover at the binding on line {line}"));
+        // The signature is the first `let`/`for` line of the hover; the type is
+        // what follows the first `: `.
+        let sig = hover
+            .lines()
+            .find(|l| l.starts_with("let ") || l.starts_with("for "))
+            .unwrap_or_else(|| panic!("a binding signature in: {hover}"));
+        let ty = sig
+            .split_once(": ")
+            .unwrap_or_else(|| panic!("a type in the signature: {sig}"))
+            .1;
+        assert_eq!(
+            format!(": {ty}"),
+            *label,
+            "hint and hover disagree on line {line}"
+        );
+    }
+    let _ = client.child.kill();
+}
+
+/// What the source already says, the editor does not repeat.
+///
+/// An annotation, a record literal, and a literal value each name the type on
+/// the line; a call does not, and is the one binding here that earns a hint.
+#[test]
+fn a_line_that_already_names_the_type_gets_no_hint() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-inlay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Point = { x: Int64, y: Int64 }
+fn made() -> Point { return Point { x: 1, y: 2 } }
+fn main() -> Int64 {
+    let annotated: Int64 = 7
+    let record = Point { x: 3, y: 4 }
+    let number = 41
+    let text = \"hello\"
+    let flag = true
+    let list = [1, 2, 3]
+    let called = made()
+    print(text)
+    if flag { print(\"y\") }
+    return annotated + record.x + number + list[0] + called.y
+}
+";
+    let path = dir.join("hints.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", src);
+    let diags = read_diags_for(&mut client, "hints.vyrn");
+    let list = diags["params"]["diagnostics"].as_array().unwrap();
+    assert!(list.is_empty(), "the fixture is clean: {list:?}");
+
+    let hints = type_hints(&mut client, &uri);
+    let labels: Vec<&str> = hints.iter().map(|(_, _, l)| l.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![": Point"],
+        "only the call hides its type: {hints:?}"
+    );
+    let (cline, _) = pos_after(src, "    let called");
+    assert_eq!(hints[0].0, cline, "the hint is on the call line");
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What one inlay-hint request costs on the heaviest file in the repo.
+///
+/// Hints are asked for on every edit and every scroll, so the request may read
+/// the cached analysis and nothing else. The keystroke budget is 97 ms
+/// (RFC-0084); a hint request must stay far under it, and this prints the
+/// per-request mean over the whole of `std/vyx.vyrn`.
+///
+/// `#[ignore]`d: it is a measurement, not an assertion.
+/// `cargo test -p vyrn-lsp --release -- --ignored --nocapture inlay_hint_cost`
+#[test]
+#[ignore]
+fn inlay_hint_cost_on_the_heaviest_file() {
+    let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std/vyx.vyrn"));
+    let src = std::fs::read_to_string(path).expect("std/vyx.vyrn should exist");
+    let uri = file_uri(path);
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", &src);
+    let _ = read_diags_for(&mut client, "vyx.vyrn");
+
+    let n = 200;
+    let hints = type_hints(&mut client, &uri);
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        let _ = inlay_hints(&mut client, &uri);
+    }
+    let per = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+    println!(
+        "inlayHint: {per:.3} ms per request over {} lines, {} type hints",
+        src.lines().count(),
+        hints.len()
+    );
+    let _ = client.child.kill();
 }

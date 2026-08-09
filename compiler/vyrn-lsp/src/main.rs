@@ -43,7 +43,7 @@ use lsp_types::{
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
+    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
     InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, RenameOptions, RenameParams, SemanticToken,
     SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
@@ -53,11 +53,12 @@ use lsp_types::{
     TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
+use vyrn_frontend::ast::Type;
 use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
     analyze, class_completions, class_token_hover, completions, member_completions, references,
-    resolve, string_literal_completions, Analysis, Completion, RefRange, SemKind, SemMods,
-    SymbolKind,
+    resolve, string_literal_completions, Analysis, Completion, LocalKind, RefRange, SemKind,
+    SemMods, SymbolKind,
 };
 
 use templates::VyxCursor;
@@ -1976,8 +1977,8 @@ fn document_sem_tokens(server: &Server, uri: &Url) -> Option<Vec<vyrn_frontend::
     }
 }
 
-/// `textDocument/inlayHint` (RFC-0087 U1) — a label at every move, naming where
-/// the value went.
+/// `textDocument/inlayHint` — a label at every move (RFC-0087 U1), and the type
+/// of every binding whose line does not say it.
 ///
 /// Pure over the cached analysis, filtered here to the requested line range.
 /// A `.vyx` gets nothing: its script is a synthesized module, so a hint built
@@ -1992,25 +1993,127 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         p.range.start.line as usize + 1,
         p.range.end.line as usize + 1,
     );
-    Some(
-        vyrn_frontend::inlay_hints(analysis)
-            .into_iter()
-            .filter(|h| h.line >= from && h.line <= to)
-            .map(|h| InlayHint {
-                position: Position {
-                    line: h.line.saturating_sub(1) as u32,
-                    character: h.col.saturating_sub(1) as u32,
-                },
-                label: InlayHintLabel::String(h.label),
-                kind: None,
-                text_edits: None,
-                tooltip: None,
-                padding_left: Some(true),
-                padding_right: None,
-                data: None,
-            })
-            .collect(),
-    )
+    let mut hints: Vec<InlayHint> = vyrn_frontend::inlay_hints(analysis)
+        .into_iter()
+        .filter(|h| h.line >= from && h.line <= to)
+        .map(|h| InlayHint {
+            position: Position {
+                line: h.line.saturating_sub(1) as u32,
+                character: h.col.saturating_sub(1) as u32,
+            },
+            label: InlayHintLabel::String(h.label),
+            kind: None,
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(true),
+            padding_right: None,
+            data: None,
+        })
+        .collect();
+    if let Some(src) = server.docs.get(&p.text_document.uri) {
+        hints.extend(type_hints(analysis, src, from, to));
+    }
+    Some(hints)
+}
+
+/// A `: Type` label after the name of every binding the source does not already
+/// type (`let p = o.copy()` → `p: Outer`).
+///
+/// The type is the one the cached [`Analysis`] holds for that binding — the row
+/// hover renders — so a hint and a hover cannot disagree. A binding the analysis
+/// gives no type gets no hint.
+///
+/// Whether the type is ALREADY VISIBLE is a question about the text, not about
+/// types, so [`spells_type`] answers it from the document's own line. The server
+/// re-analyzes nothing.
+fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<InlayHint> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    for b in &analysis.locals {
+        // A parameter always writes its type; only `let`s and `for` variables
+        // can hide one.
+        if !matches!(b.kind, LocalKind::Let { .. } | LocalKind::ForVar) {
+            continue;
+        }
+        if b.line < from || b.line > to || b.end_col == 0 {
+            continue;
+        }
+        let Some(ty) = &b.ty else { continue };
+        // An anonymous enum hovers as its variant arms (`{ A(Int64) | B }`),
+        // which is a second renderer this adapter must not copy.
+        if matches!(ty, Type::Enum(_)) {
+            continue;
+        }
+        let Some(line) = lines.get(b.line - 1) else {
+            continue;
+        };
+        let label = ty.to_string();
+        if spells_type(line, b.end_col, &label) {
+            continue;
+        }
+        out.push(InlayHint {
+            position: Position {
+                line: (b.line - 1) as u32,
+                character: (b.end_col - 1) as u32,
+            },
+            label: InlayHintLabel::String(format!(": {label}")),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(false),
+            padding_right: None,
+            data: None,
+        });
+    }
+    out
+}
+
+/// Does the text after a binding's name already say its type?
+///
+/// `line` is the declaration line, `end_col` the 1-based column just past the
+/// name (character columns, the lexer's convention), `ty` the rendered type.
+/// True — and so no hint — for:
+///
+/// * a written annotation (`let x: Int64 = ..`);
+/// * a literal, which is its own evidence (`3`, `"s"`, `true`, `[1, 2]`);
+/// * an initializer that opens with the type's own name (`Outer { .. }`,
+///   `Color.Red`).
+///
+/// Everything else — a call, a `match`, a `spawn`, a field or element read —
+/// hides the type, and gets the hint. In doubt the answer is false: a hint too
+/// many is noise, a hint too few is the feature not working.
+fn spells_type(line: &str, end_col: usize, ty: &str) -> bool {
+    let rest: String = line.chars().skip(end_col.saturating_sub(1)).collect();
+    let rest = rest.trim_start();
+    if rest.starts_with(':') {
+        return true;
+    }
+    // The binding's `=` is the first one after its name, so a comparison inside
+    // the initializer (`a == b`) cannot be mistaken for it.
+    let Some((_, init)) = rest.split_once('=') else {
+        // A `for` variable has no initializer, and its element type is never
+        // written on the line.
+        return false;
+    };
+    let init = init.trim_start();
+    let mut chars = init.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first.is_ascii_digit() || matches!(first, '"' | '\'' | '[' | '`') {
+        return true;
+    }
+    if first == '-' && chars.next().is_some_and(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let word: String = init
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    // `Slots<Int64>` is spelled by a `Slots { .. }`; the head is what a source
+    // line can carry.
+    let head = ty.split(['<', ' ']).next().unwrap_or(ty);
+    word == "true" || word == "false" || word == head
 }
 
 /// Delta-encode classified tokens into the LSP wire form. Tokens are sorted by
