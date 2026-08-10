@@ -1,0 +1,35 @@
+/// Fallible construction over a STRING base — `Root?(s) -> Option<Root>`.
+///
+/// `Age?(n)` over a number has worked on every backend since RFC-0003. Over a
+/// String it did not: the native backend refused the lowering outright, and the
+/// ownership pass read `Root?(s)` as a `Root` rather than an `Option<Root>`, so
+/// an `if let` over one released the sum's tag word as a String pointer. Both
+/// are fixed (RFC-0098 M1), and this example is what keeps them fixed — it runs
+/// the accepted path, the refused path, and the path where the value came from
+/// another Option, byte-identically on interp, native and wasm.
+
+type Root = String where value.byteLength > 0
+
+fn give(k: String) -> Option<String> {
+    return Some(k.copy())
+}
+
+fn main() -> Int64 {
+    if let Some(ok) = Root?("abc") {
+        print(ok)
+    }
+    // The value arrives out of another Option, which is the shape a parsed
+    // command-line option has.
+    if let Some(text) = give("xy") {
+        if let Some(ok) = Root?(text) {
+            print(ok)
+        }
+    }
+    // Refused: the empty string fails the type's own rule, and nothing traps.
+    if let Some(bad) = Root?("") {
+        print(bad)
+    } else {
+        print("refused")
+    }
+    return 0
+}

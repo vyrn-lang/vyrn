@@ -3,6 +3,7 @@
 - [std/args](std/args.md) — std/args — CLI argument parsing over `args()` (RFC-0061). A pure-Vyrn library,
 - [std/arrays](std/arrays.md) — std/arrays — higher-order array helpers (RFC-0023), written in Vyrn itself.
 - [std/bench](std/bench.md) — std/bench — the benchmarking harness helpers (RFC-0055).
+- [std/cli](std/cli.md) — std/cli — the command line IS a record type (RFC-0098, M1).
 - [std/codecs](std/codecs.md) — std/codecs — hex, base64 and percent encoding, written in Vyrn (RFC-0078 M4b).
 - [std/connect](std/connect.md) — std/connect — Connect wire compatibility as a library (RFC-0038), built
 - [std/contract](std/contract.md) — std/contract — check a module against a module contract (RFC-0071).
