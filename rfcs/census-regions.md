@@ -112,8 +112,12 @@ lines of LLVM IR:
   allocates 16 bytes past the payload instead and returns `raw`**: the link is a
   trailer, so a block the arena hands out is exactly what `malloc` returned. The
   measurements below were taken before that and read 8 bytes an allocation
-  lighter.
-- `__vyrn_region_exit()` walks that chain and calls `free` on every link.
+  lighter. **Since that RFC's addendum it calls `__vyrn_malloc(n)` and pushes
+  `raw` onto a per-frame side vector**, so a block carries no link at all: the
+  invariant holds with no arithmetic on the pointer, and the deferral shape reads
+  116,731,904 B against the trailer's 132,493,312 and the front link's
+  100,876,288.
+- `__vyrn_region_exit()` frees every block the vector names, then the vector.
 - `__vyrn_region_enter()` traps above 64 nested scopes. The stack is 64 pointers,
   `thread_local`.
 
@@ -283,8 +287,10 @@ tree built out of `Array` buffers. `impl Owned` can close all nine.
 U6's exclusion is one routing decision: a growable buffer never asks the arena.
 Removing it needs three things the language does not have.
 
-1. **An arena that supports `realloc`.** Today's arena cannot, because a link
-   word sits 8 bytes behind every user pointer and `realloc` would move it. The
+1. **An arena that supports `realloc`.** Today's arena cannot: the address it
+   will hand `free` is recorded when the block is made — behind the user pointer
+   at first, in a trailer after RFC-0096 M3, in a side vector after its addendum
+   — and `realloc` would move the block out from under all three. The
    sound shape is a separate bump arena with a per-region mark, which
    `direct.rs:2455` already names as the missing piece in this backend and which
    exists in neither.

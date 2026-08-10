@@ -5680,6 +5680,17 @@ impl Fn_<'_> {
                 return Ok(t);
             }
         }
+        // `listDir` OUTSIDE a generation reaches here on an ordinary build, and
+        // the front end cannot stop it on the way: the call is legal under `vyrn
+        // run`, where the interpreter lists the real filesystem
+        // (`list_dir_is_not_generation_only`). Only the two compiling backends
+        // lack a lowering, so each says so itself — in one sentence, from
+        // `crate::LIST_DIR_NO_LOWERING`, rather than in this file's own words
+        // about its own gaps (RFC-0096 M3's addendum: `no lowering for the call`
+        // is an emitter's note to itself, not a user's diagnostic).
+        if name == "listDir" {
+            return Err(crate::LIST_DIR_NO_LOWERING.to_string());
+        }
         match name {
             // RFC-0079: `panic(msg)` — `error: `, the caller's message, a
             // newline, exit 1, in three `write_all`s for the reason `log_write`
