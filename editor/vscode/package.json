@@ -28,11 +28,23 @@
         "extensions": [".vyx"],
         "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "von",
+        "aliases": ["VON", "von"],
+        "extensions": [".von"],
+        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
         "language": "vyrn",
+        "scopeName": "source.vyrn",
+        "path": "./vyrn.tmLanguage.json"
+      },
+      {
+        "language": "von",
         "scopeName": "source.vyrn",
         "path": "./vyrn.tmLanguage.json"
       },

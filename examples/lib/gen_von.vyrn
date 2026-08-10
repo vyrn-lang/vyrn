@@ -1,0 +1,90 @@
+/// A compile-time VON loader (RFC-0097 M1) on generator imports (RFC-0021).
+///
+/// `vonModule(path)` reads a `.von` file — mediated and scoped to that path —
+/// runs `std/von`'s strictness walk over it, and emits an ordinary Vyrn module
+/// of baked constants. A malformed document therefore fails the BUILD, with the
+/// reader's `line N, col M:` position in the `.von` file itself.
+///
+/// M1 bakes the document's canonical text and its shape. Loading it as a
+/// CHECKED value of the type the header names — so a `where` clause runs on a
+/// config file — is RFC-0097 M3, and it belongs in `std/von` rather than here.
+
+import { parseVon, toVon, Von, VonDoc, VonField } from "std/von"
+
+export gen fn vonModule(path: String) -> String {
+    let src = match readFile(path) {
+        Ok(text) => text,
+        Err(e) => panic("cannot read " + path + ": " + e),
+    }
+    return match parseVon(src) {
+        Ok(doc) => emitModule(path, doc),
+        Err(e) => panic(path + ": " + e),
+    }
+}
+
+/// The schema name the header imports (the first one, which is the document's
+/// own type).
+fn headTypeName(doc: VonDoc) -> String {
+    for im in doc.imports {
+        for n in im.names {
+            return n.copy()
+        }
+    }
+    return ""
+}
+
+/// The top-level field names, comma-separated — `""` when the document's value
+/// is not a record.
+fn topFieldNames(v: Von) -> String {
+    return match v {
+        VRecord(name, fs) => joinFieldNames(fs),
+        VVariant(name, xs) => "",
+        VArray(xs) => "",
+        VMap(es) => "",
+        VStr(s) => "",
+        VInt(s) => "",
+        VFloat(s) => "",
+        VBool(b) => "",
+    }
+}
+
+/// `a, b, c` over a field list.
+fn joinFieldNames(fs: Array<VonField>) -> String {
+    let mut out = ""
+    let mut i = 0
+    for f in fs {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + f.name
+        i = i + 1
+    }
+    return out
+}
+
+/// Bake the document into a module. Every splice is an EXPRESSION splice, so
+/// each value becomes an escaped Vyrn string literal by construction — the
+/// compiler does the escaping, and a quote or a newline in the document cannot
+/// break out into code.
+gen fn emitModule(path: String, doc: VonDoc) -> String {
+    let name = headTypeName(doc)
+    let fields = topFieldNames(doc.value)
+    let text = toVon(doc)
+    return render(vyrn"""/// Generated from \{path} by `vonModule` (RFC-0097 M1) — do not edit.
+
+/// The type the document's header names.
+export fn configTypeName() -> String {
+    return \{name}
+}
+
+/// The document's top-level field names, in source order.
+export fn configFieldNames() -> String {
+    return \{fields}
+}
+
+/// The document, in canonical VON — what `vyrn fmt` would leave behind.
+export fn configText() -> String {
+    return \{text}
+}
+""")
+}

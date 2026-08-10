@@ -36,19 +36,16 @@ may read "Implemented", "Complete as scoped", "Accepted and complete", "Shipped"
 "Superseded by RFC-XXXX", or a per-milestone line such as "M1 and M2 shipped;
 M3 stopped at its own limit". Read the header, not a legend.
 
-Twelve RFCs stopped short of their own design on purpose: 0047, 0074, 0075,
-0077, 0080, 0082, 0084, 0085, 0086, 0091, 0093 and 0095. Each header says which
-milestone landed and what did not.
+Thirteen RFCs stopped short of their own design on purpose: 0047, 0074, 0075,
+0077, 0080, 0082, 0084, 0085, 0086, 0091, 0093, 0095 and 0097. Each header says
+which milestone landed and what did not.
 
 ## The index
 
-96 RFCs, numbered 0001 to 0098, with two gaps. **There is no RFC-0066** — the
+97 RFCs, numbered 0001 to 0098, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. Nothing in the repository references it.
 Closing the gap would mean renumbering thirty files and breaking every
-cross-reference, so the gap stays. **There is no RFC-0097** either: the number
-was reserved by a branch name, and that work landed as
-[census-call-arguments.md](census-call-arguments.md) instead. The number is free
-for the next RFC that wants it.
+cross-reference, so the gap stays.
 
 | RFC | Title | Status |
 |-----|-------|--------|
@@ -147,6 +144,7 @@ for the next RFC that wants it.
 | [0094](RFC-0094-a-builtin-is-a-declaration.md) | A Builtin Is a Declaration | Complete (M1, M2, M3) |
 | [0095](RFC-0095-a-task-is-owned.md) | A Task Is Owned | M1 and M3 built; M2 priced |
 | [0096](RFC-0096-a-self-referring-type-declares-its-release.md) | A Self-Referring Type Declares Its Release | Complete (M1, M2, M3) |
+| [0097](RFC-0097-von.md) | VON, Vyrn Object Notation | M0 and M1 shipped; M2–M4 not started |
 | [0098](RFC-0098-cli.md) | `std/cli`: The Command Line Is a Record Type | M1 landed; M2–M7 stated |
 
 ## The other documents here

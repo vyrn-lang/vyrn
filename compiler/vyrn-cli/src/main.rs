@@ -57,7 +57,7 @@ use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
@@ -1543,6 +1543,23 @@ fn deps() -> ExitCode {
 /// leaves that file untouched and is reported; the command still processes the
 /// other files but exits non-zero.
 fn fmt_cmd(rest: &[String]) -> ExitCode {
+    // `--from-json` is a converter, not a formatter run: it prints and writes
+    // nothing (RFC-0097 M1).
+    if let Some(i) = rest.iter().position(|a| a == "--from-json") {
+        let Some(path) = rest.get(i + 1).filter(|a| !a.starts_with('-')) else {
+            eprintln!("error: --from-json needs a .json file");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        let flag = |name: &str, fallback: &str| -> String {
+            rest.iter()
+                .position(|a| a == name)
+                .and_then(|k| rest.get(k + 1))
+                .cloned()
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        return from_json_cmd(path, &flag("--as", "Config"), &flag("--from", "./config.vyrn"));
+    }
     let check = rest.iter().any(|a| a == "--check");
     let files: Vec<String> = rest
         .iter()
@@ -1636,6 +1653,83 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// The converter `vyrn fmt --from-json` runs, written in Vyrn.
+///
+/// The CLI carries bytes and nothing else: `std/jsonread` does the reading (it
+/// already rejects duplicate keys and trailing commas — RFC-0059) and
+/// `std/von`'s `jsonToVon` does the writing. There is no second JSON reader and
+/// no second VON writer in Rust, which is the point — a converter that
+/// disagreed with the reader would be worse than no converter.
+///
+/// `toVon` ends its text with a newline and `print` adds one, so the last byte
+/// is dropped here: the output redirected to a `.von` file is then exactly what
+/// `vyrn fmt` leaves behind.
+const FROM_JSON_SRC: &str = r#"import { parseJson } from "std/jsonread"
+import { jsonToVon } from "std/von"
+import { substring } from "std/strings"
+
+fn convert(src: String, name: String, module: String) -> Result<String, String> {
+    let j = parseJson(src)?
+    return jsonToVon(j, name, module)
+}
+
+fn put(s: String) -> Int64 {
+    print(substring(s, 0, s.byteLength - 1))
+    return 0
+}
+
+fn main() -> Int64 {
+    let a = args()
+    return match convert(a[0], a[1], a[2]) {
+        Ok(text) => put(text),
+        Err(e) => panic(e),
+    }
+}
+"#;
+
+/// `vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]` (RFC-0097
+/// M1) — print a JSON file as VON, headed by an `import type` line.
+///
+/// The result is a starting point, not an answer: JSON says nothing about types,
+/// so every nested object arrives as a `Map` and the author, who has the type,
+/// promotes what should be a record. Nothing is written to disk.
+fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
+    let json = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // A key beside the input file, so `std/` resolves the same way it would for
+    // a program written there. Nothing reads it: the source is the constant above.
+    let norm = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let key = match norm.rfind('/') {
+        Some(i) => format!("{}/from-json.vyrn", &norm[..i]),
+        None => "from-json.vyrn".to_string(),
+    };
+    let program = match load_program(&key, FROM_JSON_SRC) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let args = vec![json, type_name.to_string(), module.to_string()];
+    match vyrn_frontend::interp::run_with_args(&program, &args) {
+        Ok(code) => ExitCode::from((code & 0xff) as u8),
+        Err(e) => {
+            // The trap carries the position of the `panic` in the converter
+            // above — a module the user never wrote and cannot open. The message
+            // is the whole answer, so the internal location is dropped and the
+            // INPUT file's name takes its place.
+            let msg = e
+                .split_once(" (from-json.vyrn:")
+                .map(|(m, _)| m)
+                .unwrap_or(e.as_str());
+            eprintln!("error: {path}: {msg}");
+            ExitCode::FAILURE
+        }
     }
 }
 
