@@ -266,16 +266,21 @@ fn dirs_gen_cache() -> PathBuf {
 /// The structured builtins are lowered ONLY on the generation path. In the
 /// language they stay comptime-only, and an ordinary build still says so — the
 /// `gen_host` flag must not leak a runtime meaning into a normal compile.
+///
+/// RFC-0096 M3 (lane C) moved WHERE it says so. All three refusals now come from
+/// the checker, in the one sentence `lex` already used, so `vyrn check` and
+/// `vyrn run` refuse the same call the same way — and the direct backend's
+/// `no lowering for the call` is unreachable for them.
 #[test]
 fn reflection_outside_a_generator_is_still_the_same_error() {
     for (src, want) in [
         (
             "fn main() -> Int64 { let i = moduleInterface(\"./x\") return 0 }",
-            "`moduleInterface` is compile-time reflection",
+            "`moduleInterface` is only available during generation",
         ),
         (
             "contract C { fn g() -> Int64 }\nfn main() -> Int64 { let c = contractOf(C) return 0 }",
-            "`contractOf` is compile-time reflection",
+            "`contractOf` is only available during generation",
         ),
         (
             "fn main() -> Int64 { let t = lex(\"let x = 1\") return 0 }",

@@ -73,7 +73,7 @@
 //! binding. The audit is now the whole of [`crate::checker::RESERVED`], and
 //! every name that ALLOCATES a result this language can spell has a row below.
 //!
-//! Eight names allocate and are still held back. Each is held for a reason
+//! Five names allocate and are still held back. Each is held for a reason
 //! about the TYPE, never about the fact:
 //!
 //! | name | it answers | why no row |
@@ -82,13 +82,21 @@
 //! | `value` | `Value` | It boxes the caller's buffer rather than copying it (`box_payload` of the lowered argument), so it LENDS, and a row would double free. |
 //! | `@list` | `Array<E>` | `E` is the argument's element type, which one row cannot name any more than `at` can. |
 //! | `pullAt` | `Option<T>` | The element type comes from the expected type; the checker refuses the call without an annotation, so the binding is already named. |
-//! | `moduleInterface` | `ModuleInterface` | Generation-only (RFC-0021) — neither compiling backend lowers it, so who owns the result, the host or the generator, is written nowhere. 18 corpus sites, all in `gen fn`s. |
-//! | `contractOf` | `ContractInfo` | The same, for RFC-0071's side. |
-//! | `listDir` | `Result<Array<String>, String>` | The same again: `vyrn run` and the generation engine have it, and no compiled program can call it. |
 //! | `at`, `atSet`, `bytes` | the receiver's | They LEND, which is the older rule above. |
 //!
 //! The remaining reserved names answer a scalar, `Unit`, a `Logger`, a vector or
 //! a bare type parameter, and none of those owns heap.
+//!
+//! ## The three the audit held for the WRONG reason (RFC-0096 M3, lane C)
+//!
+//! `moduleInterface`, `contractOf` and `listDir` were held back together, and
+//! the reason recorded for all three was that no compiling backend lowers them.
+//! That is a fact about LOWERING. Every other exclusion above is a fact about
+//! the type, and these three each answer a type this language spells: `listDir`
+//! answers `Result<Array<String>, String>` the way `readFile` answers
+//! `Result<String, String>`, and the two reflection names answer records the
+//! parser INJECTS into every program (`ModuleInterface`, `ContractInfo` — see
+//! `parser`'s reflection declarations). They have rows below.
 
 use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type};
 use crate::project::ELEM;
@@ -429,6 +437,45 @@ fn rows() -> Vec<Function> {
             Type::Result(Box::new(Bool), Box::new(Str)),
             &[],
         ),
+        // ---- the generation-time results (RFC-0021, RFC-0071) ---------------
+        // What these rows buy is that the declared reading — and `vyrn why
+        // --memory` and the LSP over it — names a type inside a `gen fn` body,
+        // which is where all 31 corpus sites are. What they cannot buy is a
+        // free, and they do not need to: the generation engine is the
+        // interpreter, its values are Rust values (`interp::Val`, an `Rc<String>`
+        // and `Box<Val>` tree) and they drop with the frame that built them. The
+        // only thing that crosses out of a generation is the generated SOURCE, a
+        // `String` through `gen_cache_put`. So the leak class these three could
+        // belong to is empty by construction, and the row is about facts.
+        //
+        // `listDir` also has a runtime: `vyrn run` lists the real filesystem
+        // (`COMPTIME_FORBIDDEN` deliberately omits it, and so does the
+        // interpreter's generation-only refusal). Only the two compiling
+        // backends have no lowering for it.
+        row(
+            "listDir",
+            &[],
+            &[("p", Read, Str)],
+            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            &[],
+        ),
+        row(
+            "moduleInterface",
+            &[],
+            &[("p", Read, Str)],
+            Type::Named("ModuleInterface".to_string()),
+            &[],
+        ),
+        // A contract NAME is a declaration and not a value, so the parameter is
+        // inert here for the reason `schemaOf`'s is, and the checker's arm is
+        // what refuses anything but a declared contract name.
+        row(
+            "contractOf",
+            &[],
+            &[("c", Read, Unit)],
+            Type::Named("ContractInfo".to_string()),
+            &[],
+        ),
     ]
 }
 
@@ -596,20 +643,19 @@ mod tests {
             ("renameFile", "Result<Bool, String>"),
             ("fsyncFile", "Result<Bool, String>"),
             ("stringFromBytes", "Result<String, String>"),
+            // The three the audit held for a reason about LOWERING rather than
+            // about the type. Each answers a type this language spells, and the
+            // two reflection records are the parser's own injected
+            // declarations, so the reading resolves them like any other name.
+            ("listDir", "Result<Array<String>, String>"),
+            ("moduleInterface", "ModuleInterface"),
+            ("contractOf", "ContractInfo"),
         ] {
             assert_eq!(of(name), ty, "`{name}` answers the wrong type");
         }
-        // The eight held back. A row appearing here later is a decision, and it
+        // The five held back. A row appearing here later is a decision, and it
         // has to be made at the table in the module comment.
-        for held in [
-            "fromJson",
-            "value",
-            "@list",
-            "pullAt",
-            "moduleInterface",
-            "contractOf",
-            "listDir",
-        ] {
+        for held in ["fromJson", "value", "@list", "pullAt"] {
             assert!(
                 !rets.iter().any(|(k, _)| *k == held),
                 "`{held}` is held back by the audit and may not answer for a call"
