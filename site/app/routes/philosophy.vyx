@@ -1,0 +1,41 @@
+<script>
+// GET /philosophy — prose at a 65ch measure, punctuated by two widgets. The one
+// page allowed to be quiet, and the page that carries the non-goals.
+import { Head, noHead, withTitle } from "std/ui"
+
+/// Something the language refuses, and why.
+type NonGoal = { what: String, why: String }
+
+export fn head() -> Head {
+    return withTitle(noHead(), "Philosophy — Vyrn")
+}
+
+fn nonGoals() -> Array<NonGoal> {
+    return [
+        NonGoal { what: "No garbage collector", why: "Collection time is a cost you cannot see in the source. Ownership is declared instead, and memory is reclaimed at points you can name." },
+        NonGoal { what: "No async, no await", why: "Two colours of function split a library in half. Spawned work is proved isolated, so its result does not depend on the schedule." },
+        NonGoal { what: "No macros", why: "A generator is ordinary compile-time Vyrn. You can read what it emits with one command." },
+        NonGoal { what: "No higher-kinded types", why: "The cost lands on every error message, paid by every reader, to serve a few abstractions." },
+        NonGoal { what: "No inheritance", why: "A protocol states what a type does. A record states what it holds. Nothing needs a third relationship." },
+    ]
+}
+</script>
+
+<template>
+<main class="prose">
+    <h1>Intent over mechanism</h1>
+    <p>State what the program must be true of, and let the compiler decide how. A validated type is a rule, not a shape: it rejects a bad constant while it compiles, and generates the check when it cannot prove the value.</p>
+    <div class="widget-socket">widget: validated-types demo</div>
+    <h2>Predictability</h2>
+    <p>The same program produces the same bytes under the interpreter, the native binary and wasm. Floating point included: the build forbids the contraction that would change a bit.</p>
+    <div class="widget-socket">widget: parity visualizer</div>
+    <h2>What Vyrn refuses</h2>
+    <p>What a language refuses is the sharpest statement of what it believes.</p>
+    <dl class="nongoals">
+        <div v-for="g in nonGoals()" :key="g.what">
+            <dt>{{ g.what }}</dt>
+            <dd>{{ g.why }}</dd>
+        </div>
+    </dl>
+</main>
+</template>

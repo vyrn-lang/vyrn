@@ -1,0 +1,48 @@
+<script>
+// GET /compare — the densest page: a fixed rail of comparison axes, a scrolling
+// main column. Every row must carry differentiating information, or it goes.
+//
+// The numbers are NOT here. Section 5 of the brief bakes `bench.json` and the
+// `site/compare/` corpus at build time, and no widget on this site prints a
+// number the project cannot produce on demand. The rows below name the axes and
+// nothing else.
+import { Head, noHead, withTitle } from "std/ui"
+
+/// One comparison axis: what is being compared, and where each answer stands.
+type Axis = { id: String, name: String, vyrn: String, note: String }
+
+export fn head() -> Head {
+    return withTitle(noHead(), "Compare — Vyrn")
+}
+
+fn axes() -> Array<Axis> {
+    return [
+        Axis { id: "01", name: "Memory", vyrn: "Declared ownership, no collector", note: "against Rust's inferred lifetimes, Go's collector, TypeScript's host collector" },
+        Axis { id: "02", name: "Backends", vyrn: "Interpreter, native, wasm — byte-identical", note: "the parity harness runs the whole example corpus on all three" },
+        Axis { id: "03", name: "Validation", vyrn: "Rules live in the type", note: "elsewhere a schema library runs beside the type" },
+        Axis { id: "04", name: "Concurrency", vyrn: "Isolated spawn, no function colour", note: "against async/await" },
+        Axis { id: "05", name: "Metaprogramming", vyrn: "Generators are ordinary compile-time code", note: "readable with one command, no macro language" },
+    ]
+}
+</script>
+
+<template>
+<main class="dense">
+    <aside class="rail">
+        <ol>
+            <li v-for="a in axes()" :key="a.id"><span class="num">{{ a.id }}</span> {{ a.name }}</li>
+        </ol>
+    </aside>
+    <div class="column">
+        <h1>Honest comparisons</h1>
+        <p>Each row states a difference and names the evidence. Measured numbers arrive from the benchmark job; nothing here is quoted from memory.</p>
+        <section class="row" v-for="a in axes()" :key="a.id">
+            <p class="eyebrow">{{ a.id }} · {{ a.name }}</p>
+            <p class="answer">{{ a.vyrn }}</p>
+            <p class="note">{{ a.note }}</p>
+            <div class="widget-socket">widget: comparison toggles</div>
+        </section>
+        <div class="widget-socket">widget: benchmark charts</div>
+    </div>
+</main>
+</template>

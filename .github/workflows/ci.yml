@@ -7,13 +7,11 @@ on:
     paths-ignore:
       - 'rfcs/**'
       - '**.md'
-      - 'web/**'
       - 'editor/**'
   pull_request:
     paths-ignore:
       - 'rfcs/**'
       - '**.md'
-      - 'web/**'
       - 'editor/**'
 
 # Stacked pushes cancel the superseded run — only the newest commit's
@@ -63,6 +61,10 @@ jobs:
       - name: Workspace tests
         working-directory: compiler
         run: cargo test --quiet
+      - name: Browser runtime tests (web/)
+        # The zero-dependency JavaScript beside the compiler gets the same gate.
+        # node:test is in the runner's Node already, so this adds no install.
+        run: node --test "web/test/*.test.mjs"
       - name: LSP tests (excluded crate)
         working-directory: compiler
         run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml

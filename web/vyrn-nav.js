@@ -90,6 +90,7 @@ const CONFIG = Object.assign(
   {
     timeoutMs: 10000, // fetch guard: past this a soft nav falls back hard
     progress: true, // built-in top progress bar (rides the nav events)
+    staticData: false, // payloads live in sibling files, not behind `Accept`
   },
   (typeof window !== "undefined" && window.__vyrnNavConfig) || {}
 );
@@ -289,6 +290,22 @@ const DATA_HEADERS = { Accept: "application/json" };
 // so the negotiation is symmetric and nothing depends on the browser's default.
 const DOC_HEADERS = { Accept: "text/html" };
 
+// Where the payload lives. Content negotiation needs a server that can read
+// `Accept`; a file host cannot. So a statically exported site (design brief G1)
+// sets `__vyrnNavConfig.staticData` and the payload is fetched from the sibling
+// file the export wrote — `/philosophy.html` → `/philosophy.data.json`. The
+// `Accept` header still goes out, so the same page works unchanged behind a real
+// server. Nothing else about the navigation changes.
+function payloadUrl(url) {
+  if (!CONFIG.staticData) return url;
+  const u = new URL(url, location.href);
+  const p = u.pathname;
+  u.pathname = p.endsWith(".html")
+    ? p.slice(0, -5) + ".data.json"
+    : (p.endsWith("/") ? p + "index" : p) + ".data.json";
+  return u.href;
+}
+
 // Resolve a nav target against the client bundle (RFC-0069 M4), returning the parsed
 // {found, hasData, page, title} descriptor, or null when there is no resolver / it
 // throws / its answer will not parse (the caller then behaves as M3).
@@ -398,7 +415,7 @@ async function navigateLazy(url, { push }, resolved) {
   const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
   let res;
   try {
-    res = await fetch(url, { headers: DATA_HEADERS, signal: controller.signal });
+    res = await fetch(payloadUrl(url), { headers: DATA_HEADERS, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     inflight = null;
@@ -522,7 +539,7 @@ async function navigate(url, { push }) {
 
   let res;
   try {
-    res = await fetch(url, { headers: wantData ? DATA_HEADERS : DOC_HEADERS, signal: controller.signal });
+    res = await fetch(wantData ? payloadUrl(url) : url, { headers: wantData ? DATA_HEADERS : DOC_HEADERS, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     inflight = null;

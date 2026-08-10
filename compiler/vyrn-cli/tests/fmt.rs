@@ -130,3 +130,44 @@ fn write_preserves_crlf_endings() {
         .unwrap();
     assert_eq!(recheck.status.code(), Some(0), "not idempotent under CRLF");
 }
+
+#[test]
+fn a_vyx_component_is_left_alone() {
+    // `vyrn fmt` used to lex a `.vyx` file as a Vyrn module. The template came
+    // back with a space inside every tag and every sentence — `< / p >`,
+    // `v - for`, `One program.Three backends.` — and the safety invariant did not
+    // catch it, because the mangled text re-lexes to the same tokens. Refusing is
+    // the only honest answer until the formatter can print a template.
+    let dir = scratch("vyx-skip");
+    let file = dir.join("Card.vyx");
+    let source = "<script>\nfn  label()->String{return \"x\"}\n</script>\n\n<template>\n<p class=\"a\">One program. Three backends.</p>\n</template>\n";
+    std::fs::write(&file, source).unwrap();
+
+    let out = vyrn().arg("fmt").arg(&file).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        source,
+        "fmt rewrote a .vyx template"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot format a .vyx"),
+        "expected a note naming the skip, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `--check` says nothing about a file it will not format, so a project with
+    // components still passes the gate.
+    let check = vyrn()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(0));
+}

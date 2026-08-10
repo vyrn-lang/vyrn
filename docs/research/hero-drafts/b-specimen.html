@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hero direction B — specimen sheet</title>
+<style>
+/* Colour, sampled then converged (brief 8.1). The four values are eyedropped
+   from editor/vscode/icons/vyrn.svg and converted to oklch, not guessed:
+     #123258 deep navy   -> oklch(0.3153 0.0778 254.59)
+     #1c7f9c teal        -> oklch(0.5558 0.0959 223.03)
+     #22b8d4 cyan        -> oklch(0.7221 0.1214 214.54)
+     #4fe3f2 bright cyan -> oklch(0.8442 0.1241 204.81)
+   The mark's three strokes converge on one point, which is what the language
+   claims — three backends, one result — so the ramp from navy to bright cyan IS
+   the parity claim, and the widgets that show parity use exactly that ramp.
+   The neutral ramp is warm (hue 60) and never blue-black: the accent is cyan,
+   and a blue-black behind it is the lazy dark answer the brief names. */
+:root {
+  --navy: oklch(0.3153 0.0778 254.59);
+  --teal: oklch(0.5558 0.0959 223.03);
+  --cyan: oklch(0.7221 0.1214 214.54);
+  --bright: oklch(0.8442 0.1241 204.81);
+  --danger: oklch(0.6368 0.2078 25.33);
+  --amber: oklch(0.7686 0.1647 70.08);
+  --n0: oklch(0.15 0.004 60);
+  --n1: oklch(0.35 0.004 60);
+  --n2: oklch(0.65 0.004 60);
+  --n3: oklch(0.92 0.003 60);
+  --n4: oklch(0.98 0.002 60);
+  --mono: ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", monospace;
+  --sans: ui-sans-serif, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-synthesis: none; -webkit-font-smoothing: antialiased; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+p { text-wrap: pretty; margin: 0; }
+a { color: inherit; }
+.eyebrow {
+  font: 12px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.num { font-variant-numeric: tabular-nums slashed-zero; }
+.draftbar {
+  font: 12px/1.6 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 8px 16px;
+  border-bottom: 1px solid;
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+body { background: var(--n4); color: var(--n0); font-family: var(--sans); }
+.draftbar { color: var(--n1); border-color: color-mix(in oklab, var(--n0) 18%, transparent); }
+.sheet {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 32px 64px;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 0 24px;
+}
+.rail {
+  grid-column: 1 / 3;
+  padding-top: 48px;
+  font: 12px/2 var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--n1);
+  border-right: 1px solid color-mix(in oklab, var(--n0) 14%, transparent);
+}
+.rail b { display: block; color: var(--navy); font-weight: 500; }
+.masthead { grid-column: 3 / 13; padding: 48px 0 24px; border-bottom: 1px solid var(--n0); }
+.masthead h1 {
+  font-size: clamp(2.2rem, 1rem + 4.2vw, 5rem);
+  line-height: 0.95;
+  letter-spacing: -0.03em;
+  font-weight: 640;
+}
+.masthead .sub { margin-top: 16px; color: var(--n1); max-width: 65ch; line-height: 1.5; }
+.plate { grid-column: 3 / 9; margin-top: 24px; border: 1px solid var(--n0); }
+.plate canvas { display: block; width: 100%; height: 380px; background: var(--n3); }
+.plate .cap {
+  border-top: 1px solid var(--n0);
+  padding: 8px 16px;
+  font: 12px/1.6 var(--mono);
+  color: var(--n1);
+}
+.spec { grid-column: 9 / 13; margin-top: 24px; padding-left: 24px; }
+.spec dl { margin: 0; font: 13px/1.8 var(--mono); }
+.spec dt { color: var(--n1); letter-spacing: 0.06em; text-transform: uppercase; font-size: 11px; margin-top: 16px; }
+.spec dd { margin: 0; color: var(--navy); font-variant-numeric: tabular-nums slashed-zero; }
+.spec .swatches { display: flex; margin-top: 24px; height: 40px; border: 1px solid var(--n0); }
+.spec .swatches i { flex: 1; }
+.notes { grid-column: 3 / 13; margin-top: 48px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.notes section { border-top: 1px solid var(--n0); padding-top: 16px; }
+.notes h2 { font-size: 1rem; font-weight: 600; margin-bottom: 8px; }
+.notes p { color: var(--n1); font-size: 0.9rem; line-height: 1.5; }
+.notes .k { color: var(--teal); font: 11px/1 var(--mono); letter-spacing: 0.12em; }
+.hero-static { display: grid; place-items: center; height: 380px; margin: 0; color: var(--navy); }
+@media (max-width: 1024px) {
+  .sheet { grid-template-columns: repeat(6, 1fr); }
+  .rail { grid-column: 1 / 7; border-right: 0; padding-top: 24px; }
+  .masthead, .plate, .spec, .notes { grid-column: 1 / 7; }
+  .spec { padding-left: 0; }
+  .notes { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .sheet { padding: 0 16px 48px; }
+  .plate canvas { height: 260px; }
+}
+</style>
+</head>
+<body>
+
+<div class="draftbar">Hero direction B &middot; specimen sheet &middot; draft, not the site</div>
+<div class="sheet">
+  <div class="rail">
+    <b>vyrn</b>
+    01 &nbsp;field<br>
+    02 &nbsp;parity<br>
+    03 &nbsp;memory<br>
+    04 &nbsp;install
+  </div>
+  <div class="masthead">
+    <h1>A language whose three backends agree to the last bit.</h1>
+    <p class="sub">The interpreter is the reference. The native binary and the wasm module must match it — same stdout, same stderr, same exit code, every example, every trap.</p>
+  </div>
+  <figure class="plate" style="margin:24px 0 0">
+    <canvas id="field" aria-hidden="true"></canvas>
+    <figcaption class="cap">field(u, v, t) &mdash; two rotating plane waves, downsampled to an eleven-glyph ramp. Computed in Vyrn, painted by the host.</figcaption>
+  </figure>
+  <div class="spec">
+    <dl>
+      <dt>Backends</dt><dd>interpreter &middot; native &middot; wasm</dd>
+      <dt>Divergences</dt><dd>0</dd>
+      <dt>Glyph ramp</dt><dd>.:+=VYRN#$&amp;</dd>
+      <dt>Grid</dt><dd>cols = w / 7, rows = h / 8.08</dd>
+      <dt>Frame gate</dt><dd>50 ms</dd>
+    </dl>
+    <div class="swatches" role="img" aria-label="The brand ramp, navy to bright cyan">
+      <i style="background:var(--navy)"></i>
+      <i style="background:var(--teal)"></i>
+      <i style="background:var(--cyan)"></i>
+      <i style="background:var(--bright)"></i>
+    </div>
+  </div>
+  <div class="notes">
+    <section><p class="k">01</p><h2>Parity is measured</h2><p>The harness compares the bytes of all three columns, including traps.</p></section>
+    <section><p class="k">02</p><h2>Types carry rules</h2><p>A validated type rejects a bad constant at compile time, or generates the check.</p></section>
+    <section><p class="k">03</p><h2>Ownership is declared</h2><p>No collector. Memory is reclaimed at points you can name.</p></section>
+  </div>
+</div>
+
+<script>
+// Direction B: the canvas is a plate inside a print grid, on warm paper.
+// The ASCII canvas hero (design brief section 6). Downsample a scalar field to a
+// glyph grid and paint it with fillText: not a shader, not a <pre>.
+//
+// In the shipped site the field comes from a Vyrn wasm module — `frame(t)`
+// returns one glyph index per cell and this file only paints. The same two-wave
+// formula is evaluated here directly, which is also the documented fallback when
+// the module fails to load. It is in `std/math` + `examples/herofield.vyrn`,
+// where the parity harness proves the interpreter, the native binary and wasm
+// agree on its bits.
+function mountHero(canvas, opts) {
+  const O = Object.assign({ cellPx: 7, lineFactor: 8.08, rgb: [79, 227, 242], min: 0.06, max: 1 }, opts);
+  const RAMP = ".:+=VYRN#$&"; // eleven glyphs, dark to light; VYRN in the mid-tones
+  const ctx = canvas.getContext("2d", { alpha: true });
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const coarse = matchMedia("(pointer: coarse)").matches;
+  const interval = /^((?!chrome|android).)*safari/i.test(navigator.userAgent) ? 100 : 50;
+
+  let dpr = 1, cols = 0, rows = 0, cellW = 0, cellH = 0, charAR = 0.6;
+  let last = 0, raf = 0, running = false, faults = [], t0 = performance.now();
+  let px = 0, py = 0, pAt = 0; // pointer, and when it was last seen
+
+  // Brightness rides on alpha, so the fill strings are built once.
+  const INK = [];
+  for (let i = 0; i < 256; i++) {
+    const a = O.min + (O.max - O.min) * (i / 255);
+    INK.push(`rgba(${O.rgb[0]},${O.rgb[1]},${O.rgb[2]},${a.toFixed(3)})`);
+  }
+
+  function measure() {
+    // The backing store is pinned in CSS pixels below. Clear that pin first or
+    // the element can never be measured at any size but its first one.
+    canvas.style.width = "";
+    canvas.style.height = "";
+    const box = canvas.getBoundingClientRect();
+    const w = Math.max(1, Math.round(box.width)), h = Math.max(1, Math.round(box.height));
+    dpr = Math.max(1, Math.floor(devicePixelRatio || 1)); // integer only, or the grid blurs
+    const bw = w * dpr, bh = h * dpr;
+    if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.font = `${O.cellPx * 1.6}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    ctx.textBaseline = "top";
+    // Measure the character aspect ratio; assuming 0.6 shears the picture.
+    const probeFont = `100px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    const saved = ctx.font;
+    ctx.font = probeFont;
+    const m = ctx.measureText("M");
+    const hgt = (m.actualBoundingBoxAscent || 70) + (m.actualBoundingBoxDescent || 30);
+    charAR = Math.min(2, Math.max(0.3, m.width / hgt));
+    ctx.font = saved;
+    cols = Math.max(20, Math.min(160, Math.floor(w / O.cellPx)));
+    rows = Math.max(15, Math.min(120, Math.floor(h / (O.cellPx * O.lineFactor / 7))));
+    cellW = w / cols;
+    cellH = h / rows;
+  }
+
+  // The field: two rotating plane waves, plus a pointer term the reference does
+  // not have. It lifts luminance near the cursor and decays over 400 ms.
+  function field(u, v, t) {
+    const a = Math.sin(10 * (u * Math.cos(0.7 * t) + v * Math.sin(0.5 * t)) + t);
+    const b = Math.cos(10 * (u * Math.sin(0.4 * t) - v * Math.cos(0.6 * t)) - 0.5 * t);
+    return 0.6 * a + 0.4 * b;
+  }
+
+  function paint(t) {
+    const w = canvas.width / dpr, h = canvas.height / dpr;
+    ctx.clearRect(0, 0, w, h);
+    const age = coarse ? 1 : Math.min(1, (performance.now() - pAt) / 400);
+    const lift = 1 - age;
+    const buf = new Float32Array(cols * rows);
+    let lo = Infinity, hi = -Infinity;
+    for (let r = 0; r < rows; r++) {
+      const v = (2 * r / rows - 1) / charAR;
+      for (let c = 0; c < cols; c++) {
+        const u = 2 * c / cols - 1;
+        let f = field(u, v, t);
+        if (lift > 0) {
+          const du = (c * cellW - px) / (w * 0.28), dv = (r * cellH - py) / (h * 0.5);
+          f += lift * 1.1 * Math.exp(-(du * du + dv * dv));
+        }
+        buf[r * cols + c] = f;
+        if (f < lo) lo = f;
+        if (f > hi) hi = f;
+      }
+    }
+    // Auto-levels: rescale to this frame's own range, or the field flattens as
+    // it drifts.
+    const span = hi - lo || 1;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const n = (buf[r * cols + c] - lo) / span;
+        const lum = Math.max(0, Math.min(255, Math.floor(255 * n)));
+        if (lum === 0) continue; // zero draws nothing: the background stays clean
+        ctx.fillStyle = INK[lum];
+        ctx.fillText(RAMP[Math.min(RAMP.length - 1, (lum * RAMP.length - 1) >> 8)], c * cellW, r * cellH);
+      }
+    }
+  }
+
+  // Three exceptions inside three seconds and the canvas gives up for good.
+  function guarded(fn) {
+    try { fn(); } catch (err) {
+      const now = performance.now();
+      faults = faults.filter((f) => now - f < 3000);
+      faults.push(now);
+      if (faults.length >= 3) { stop(); canvas.replaceWith(staticBlock()); }
+    }
+  }
+
+  function staticBlock() {
+    const pre = document.createElement("pre");
+    pre.className = "hero-static";
+    pre.setAttribute("aria-hidden", "true");
+    pre.textContent = "vyrn";
+    return pre;
+  }
+
+  function loop(now) {
+    raf = requestAnimationFrame(loop);
+    if (now - last < interval) return; // manual gate, never setInterval
+    last = now;
+    guarded(() => paint((now - t0) / 1000));
+  }
+
+  function start() {
+    if (running || reduced) return;
+    running = true;
+    raf = requestAnimationFrame(loop);
+  }
+  function stop() {
+    running = false;
+    cancelAnimationFrame(raf);
+  }
+
+  guarded(() => { measure(); paint(0.6); }); // one frame, always — a blank hero looks broken
+
+  // Observe the PARENT: the canvas's own box is pinned in pixels, so it would
+  // never report a change. A full-bleed canvas whose parent is the body needs
+  // the window event too, because that parent's box can stay the same size.
+  const remeasure = () => guarded(() => { measure(); paint(reduced ? 0.6 : (performance.now() - t0) / 1000); });
+  new ResizeObserver(remeasure).observe(canvas.parentElement || document.documentElement);
+  addEventListener("resize", remeasure, { passive: true });
+  new IntersectionObserver((es) => { es[0].isIntersecting ? start() : stop(); }, { threshold: 0.1 }).observe(canvas);
+  document.addEventListener("visibilitychange", () => (document.hidden ? stop() : start()));
+  if (!coarse) {
+    addEventListener("pointermove", (e) => {
+      const b = canvas.getBoundingClientRect();
+      px = e.clientX - b.left; py = e.clientY - b.top; pAt = performance.now();
+    }, { passive: true });
+  }
+}
+
+mountHero(document.getElementById("field"), { cellPx: 6, rgb: [18, 50, 88], min: 0.08, max: 1 });
+</script>
+</body>
+</html>
