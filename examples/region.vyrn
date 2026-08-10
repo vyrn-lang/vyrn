@@ -8,6 +8,19 @@
 
 type Tagged = { label: String, size: Int64 }
 
+// A String built inside a region and RETURNED out of it. The return pops the
+// frame without freeing it, so the buffer the return carries is the caller's to
+// release — and the caller does, at `label`'s block exit. That works because the
+// arena hands out exactly what `__vyrn_malloc` returned: while its chain link
+// sat in front of the payload the caller freed a pointer 8 bytes inside the
+// block and the native heap corrupted (RFC-0096 M3, defect 4).
+fn viaString(n: Int64) -> String {
+    region {
+        return "n=" + n.toString()
+    }
+    return ""
+}
+
 fn main() -> Int64 {
     let hello = "Hello, "
     let world = "world!"
@@ -66,6 +79,16 @@ fn main() -> Int64 {
         held = names.length + tagged.label.byteLength
     }
     print(held) // 15
+
+    // 200 calls, each releasing the String the region handed back.
+    let mut p = 0
+    let mut carried = 0
+    while p < 200 {
+        let label = viaString(p)
+        carried = label.byteLength
+        p = p + 1
+    }
+    print(carried) // 5
 
     // `total` is a plain Int64 computed inside the region — safe to carry out.
     print(total) // 13

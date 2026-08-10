@@ -1259,31 +1259,28 @@ impl Emit<'_> {
         // A string literal lives in the data segment. Nothing allocated it and
         // nothing reclaims it (census §1).
         //
-        // **It answers for a `mut` binding too, and that is a leak this rule
-        // cannot close on its own (RFC-0096 M3).** `let mut acc: String = ""` is
-        // the opening line of every accumulator in this language, and the value
-        // the block exits with is whatever the last `acc = acc + …` left — a
-        // heap buffer, read here as the literal it started as. Measured on the
-        // direct backend, a local accumulator grown once a call: 851,968 bytes
-        // after 500 calls and 3,211,264 after 2,000.
+        // **The INITIALIZER answers only for a binding whose value cannot
+        // change.** `let mut acc: String = ""` is the opening line of every
+        // accumulator in this language, and the value the block exits with is
+        // whatever the last `acc = acc + …` left — a heap buffer, which this
+        // rule used to read as the literal it started as. Measured on the direct
+        // backend before the `mut` clause below, a local accumulator grown once
+        // a call: 851,968 bytes after 500 calls and 3,211,264 after 2,000
+        // (RFC-0096 M3, defect 3).
         //
-        // The one-line fix — `&& !matches!(s, Stmt::Let { mutable: true, .. })`
-        // — was written, and it is blocked by a DIFFERENT defect that predates
-        // it. A `String` returned out of a `region` is arena memory, and the
-        // caller's release frees it a second time. Nothing exercised that today
-        // because `let mut last = ""` is `Static` here and never released;
-        // giving it a release turns a leak into a crash. Verified at `c6d9331`,
-        // with no `mut` and no part of this milestone in the build:
+        // A release of a slot that still holds the literal is not a second
+        // defect: `@__vyrn_str_free` reads a `cap` of 0 as "never `realloc`,
+        // never free" and returns, and both compiling backends emit a literal
+        // that way. So the loop that never runs, and the branch that assigns
+        // another literal, both free nothing.
         //
-        //     fn viaString(n: Int64) -> String { region { return "n=" + n.toString() } return "" }
-        //     fn main() -> Int64 { let mut p = 0
-        //         while p < 200 { let last = viaString(p) ; p = p + 1 }
-        //         print("done") ; return 0 }
-        //
-        // exits 127 natively. `parity.rs`'s own region test has that shape and
-        // passes only because its binding is a `mut` with a literal initializer.
-        // Closing the region defect comes first; this rule is one line behind it.
-        if matches!(value, Expr::Str(_)) {
+        // This waited on the `region` defect beside it, because releasing a
+        // reassigned accumulator is what made a `String` returned out of a
+        // `region` reachable — the caller freed a pointer 8 bytes into an arena
+        // block and the native heap corrupted. The arena hands out a
+        // `__vyrn_malloc` block now (`REGION_RUNTIME`), and a `String` inside a
+        // region still answers `Leak::Region` one rule down.
+        if matches!(value, Expr::Str(_)) && !matches!(s, Stmt::Let { mutable: true, .. }) {
             return Fate::Static;
         }
         // A dynamic string inside a region is the arena's, and the two

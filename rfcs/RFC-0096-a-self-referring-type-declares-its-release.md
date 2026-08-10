@@ -413,9 +413,9 @@ seven more allocate and are held back, each for a reason about the TYPE.
 | `value` | `Value` | no | excluded — it boxes the caller's buffer rather than copying it, so it LENDS and a row would double free |
 | `@list` | `Array<E>` | no | excluded — `E` is the argument's element type, which one row cannot name any more than `at` can |
 | `pullAt` | `Option<T>` | no | excluded — the element type comes from the expected type, so the checker already refuses the call without an annotation |
-| `moduleInterface` | `ModuleInterface` | no | excluded — generation-only (RFC-0021); neither compiling backend lowers it, so who owns the result is written nowhere. **18 corpus sites**, all in `gen fn`s |
-| `contractOf` | `ContractInfo` | no | excluded — the same, for RFC-0071's side |
-| `listDir` | `Result<Array<String>, String>` | no | excluded — the same again |
+| `moduleInterface` | `ModuleInterface` | no | excluded — generation-only (RFC-0021); neither compiling backend lowers it, so who owns the result is written nowhere. **18 corpus sites**, all in `gen fn`s. **Reversed below — the exclusion was about lowering, not about the type** |
+| `contractOf` | `ContractInfo` | no | excluded — the same, for RFC-0071's side. **Reversed below** |
+| `listDir` | `Result<Array<String>, String>` | no | excluded — the same again. **Reversed below** |
 | `at`, `atSet`, `bytes` | the receiver's | no | excluded — they LEND, which is RFC-0094's older rule |
 | `blackBox`, `@pop`, `@swapRemove`, `@join` | a bare `T` | no | excluded — RFC-0094's other older rule |
 
@@ -501,16 +501,15 @@ finished with, and neither backend freed it — `"\{a + b}"` has leaked that
 buffer for as long as the textual backend has strdup'd here. The same free, one
 consumer further on.
 
-**3. A local String accumulator is never released — RECORDED, not closed.**
+**3. A local String accumulator is never released — RECORDED, then CLOSED.**
 `let mut acc: String = ""` is the opening line of every accumulator in this
-language. `own`'s static-data rule reads the INITIALIZER, answers `Fate::Static`
-for the whole binding, and the heap buffer the last `acc = acc + …` left is
+language. `own`'s static-data rule read the INITIALIZER, answered `Fate::Static`
+for the whole binding, and the heap buffer the last `acc = acc + …` left was
 never freed. Measured on the direct backend: **851,968 bytes after 500 calls and
-3,211,264 after 2,000.** The one-line fix is written down in `own.rs` beside the
-rule and is blocked by defect 4.
+3,211,264 after 2,000.**
 
 **4. A `String` returned out of a `region` is freed by its caller —
-PRE-EXISTING, recorded.** Verified at `c6d9331`, with no `mut` and no part of
+PRE-EXISTING, then CLOSED.** Verified at `c6d9331`, with no `mut` and no part of
 this milestone in the build:
 
 ```vyrn
@@ -522,13 +521,69 @@ fn main() -> Int64 {
 }
 ```
 
-exits **127** natively. `parity.rs`'s own region test carries that shape and
-passes only because its binding is a `mut` with a literal initializer — which is
-defect 3, holding defect 4 shut. Giving the accumulator its release turns the
-leak into the crash, so the region defect is what comes first. Two leaks, one
-behind the other, and the order is measured rather than assumed.
+`parity.rs`'s own region test carried that shape and passed only because its
+binding is a `mut` with a literal initializer — which is defect 3, holding defect
+4 shut. Giving the accumulator its release turns the leak into the crash, so the
+region defect is what comes first. Two leaks, one behind the other, and the order
+is measured rather than assumed.
 
-### The memory suite reads 19 rows, 19 steady
+### Both are closed, and the order held
+
+**Defect 4 is one word of layout.** The repro exits **`0xC0000374`,
+`STATUS_HEAP_CORRUPTION`,** at `45b3740` — the exit code depends on the C
+runtime, and the free is invalid rather than double. `__vyrn_region_alloc` wrote
+its chain link in FRONT of the payload and returned `raw + 8`, so a `String`
+header sat 8 bytes inside the block; `@__vyrn_str_free` frees `s - 16`, which is
+`raw + 8`, which `malloc` never handed out. The arena's own exit never met that
+because it freed by the link address.
+
+**The link sits after the payload now**, so a block the arena hands out is
+exactly what `__vyrn_malloc` returned. The chain is a chain of trailers — `{
+next, base }` at the first 8-aligned address past the payload — and
+`__vyrn_region_exit` reads the base out of the trailer. Nothing else moves: the
+walk still stands off a `String` inside a region (`own`'s `Leak::Region`, and
+`deep_release` one level down), the arena still frees at the closing brace what
+no return carried out, and `region_pop` still hands the frame up on the return
+path. That is the second of the brief's two directions — **the pop hands
+ownership over explicitly** — rather than the first, and the reason is that a
+boundary COPY answers only for a `String` the return names directly. An
+`Array<String>` built in a region and returned carries arena buffers under a
+`malloc`'d spine, and a deep copy of it would leave the spine with no owner. The
+layout answers for every shape at once, in the runtime, at every depth.
+
+**It costs 16 bytes an allocation where the front link cost 8**, plus the
+alignment of the payload. Measured on the census's own deferral shape — a region
+around a loop, 2,000,000 concatenations of a 13-byte result, nothing freed until
+the closing brace — native peak working set: **100,876,288 B before,
+132,497,408 B after, +31%.** The DEFERRAL is unchanged: still one `malloc` per
+allocation, still every block held to the closing brace, so census §5a's 1023x
+stays a statement about the mechanism rather than about this change. A side
+vector of block pointers would buy the 8 bytes back for about 20 more lines of
+IR, on a path the census measured as a loser with three corpus uses. It is not
+worth them today.
+
+Two shapes that look like the same defect are **not**. An in-place append inside
+a region would `realloc` an arena block and dangle its trailer — `Stmt::Assign`
+already refuses the fast path while `region_depth > 0`, and it still must. A
+slot that still holds its literal releases nothing, because `@__vyrn_str_free`
+reads a `cap` of 0 as "never `realloc`, never free" — which is what makes defect
+3 the one line it was written as.
+
+**Defect 3 is that one line.** `own::fate`'s static-data rule asks whether the
+binding can CHANGE, not what it opened with:
+`matches!(value, Expr::Str(_)) && !matches!(s, Stmt::Let { mutable: true, .. })`.
+A `mut` binding is released by its slot's final value in all three engines
+(Phase 8b), so the accumulator's grown buffer goes back at block exit and the
+loop that never ran frees a literal, which frees nothing.
+
+**The corpus count does not move, and that is the finding.** 2184 not reclaimed
+at `45b3740`; 2186 with this branch's two added `Int64` bindings in
+`examples/region.vyrn`, and **identical with the rule reverted**. `Fate::Static`
+is counted as an answer, not as a leak, so the harness reads a leaking
+accumulator as "static data" and always did. The row that can see it is the
+memory suite's, which is why defect 3 needed one.
+
+### The memory suite reads 20 rows, 20 steady
 
 `exprTemporary` is the new row: a `+` chain, an interpolation whose hole is
 itself a concatenation, and an in-place append whose operand is one — every byte
@@ -550,8 +605,12 @@ EXPRESSION rather than the type.
 - **`stringFromBytes` no longer segfaults** on an unannotated binding.
 - **Corpus 2208 → 2184 not reclaimed**, 2057 → 2033 "the type owns no heap".
 - **Native peak 19.9/54.1 MB → 4.06/4.07 MB** at 250,000 and 1,000,000 turns.
-- **Memory suite 19 rows, 19 steady**, the new row negative-tested by making the
-  rule answer `false`.
+- **Memory suite 20 rows, 20 steady**, each new row negative-tested by reverting
+  its rule: `exprTemporary` by making `str_temporary` answer `false`,
+  `localAccumulator` by dropping the `mut` clause — 8,323,072 B at 500 calls
+  against 32,899,072 at 2,000.
+- **The region repro exits 0 on all three engines**, and
+  `examples/region.vyrn` carries it so parity holds the shape.
 - **Three-way parity byte-identical including traps**, 36 tests, wasm column
   live. It is what found defect 1.
 - **`genwasm` green** over every generator example, both engines byte-identical.
@@ -565,6 +624,88 @@ EXPRESSION rather than the type.
 |---|---:|---|
 | a call argument that is an owning call's result | 930 | a callee may retain its argument; freeing after one needs the signature at the site, cross-module |
 | a call argument that is an allocating String expression | 632 | the same rule |
-| a local `String` accumulator's buffer | 851,968 B at 500 calls | defect 3 — one line, blocked by defect 4 |
-| a `String` returned out of a `region` | exits 127 | defect 4 — pre-existing at `c6d9331` |
-| `moduleInterface`, `contractOf`, `listDir` returns | 18 sites | generation-only; no compiling backend lowers them, so the owner is written nowhere |
+| the rest of a frame a `return` popped | unmeasured | a return out of a region hands over the value it carries and leaks what it does not — census §6's paragraph, which needs the escape analysis RFC-0004 defers |
+| an arena block's 16-byte trailer | +31% peak on a deferring region | a side vector of block pointers buys 8 of it back for ~20 lines of IR, on a path with three corpus uses |
+| `moduleInterface`, `contractOf`, `listDir` returns | 18 sites | ~~generation-only; no compiling backend lowers them, so the owner is written nowhere~~ **closed in the addendum below** |
+
+Defects 3 and 4 are closed (PR #140 — the arena's link left the block, and the
+accumulator's fate reads whether the binding can change); the first two rows
+above are what closing them left.
+
+---
+
+## M3 addendum — the three the audit excluded for a reason about LOWERING
+
+`moduleInterface`, `contractOf` and `listDir` were held back together, and the
+reason recorded for all three was that no compiling backend lowers them. Every
+other exclusion in the table above is a fact about the TYPE. This one was a fact
+about an EMITTER, and an emitter cannot say what a call gives back.
+
+**All three have rows.** `listDir` answers `Result<Array<String>, String>` the
+way `readFile` answers `Result<String, String>`. `moduleInterface` and
+`contractOf` answer `ModuleInterface` and `ContractInfo`, which are records the
+parser INJECTS into every program, beside `Schema` and `Issue` — so the declared
+reading resolves them like any other declared name and no signature had to
+stretch. Where the calls in fact are, the reading was lying:
+
+```
+before   line 2  entries   NOT reclaimed — the type unknown owns no heap
+         line 3  iface     NOT reclaimed — the type unknown owns no heap
+after    line 2  entries   reclaimed at block exit — releasing what the Result<Array<String>, String> holds
+         line 3  iface     reclaimed at block exit — releasing what the { functions: …, types: … } holds
+```
+
+Across `std/`: 2142 bindings, "not reclaimed" **1140 → 1118**, reclaimed 340 →
+362. **Not 22 frees** — 22 sentences that are now true. Read the next paragraph
+for why there is no free to emit.
+
+### The boundedness argument, checked rather than assumed
+
+The generation engine is the interpreter, and `interp::Val` is an ordinary Rust
+enum — `Rc<String>`, `Box<Val>`, `Vec<Val>`. Rust drops the whole graph with the
+frame that built it. The only thing that crosses out of a generation is the
+generated SOURCE, and the cache that holds it is `gen_cache_get`/`gen_cache_put`
+over `String`, checked at `loader.rs` — a `String` in, a `String` out, no value
+handle. So the leak class these three names could have belonged to is **empty by
+construction**, and the milestone here is facts, not frees. That is also why 31
+corpus sites can gain a declared type with no byte of emitted code changing.
+
+### What the rows DID change: movecheck can now see a generator body
+
+Seeding `moduleInterface` gave `for t in iface.types` an element type for the
+first time, so the move rule reached three pushes it had never been able to
+read: `std/rpc.vyrn` stores `t.module` and `t.name` — fields of a loop variable —
+into arrays that outlive the loop. `examples/rpc.vyrn` stopped generating until
+each took the `.copy()` the diagnostic names. **A row is not only a release; it
+is the type every other rule was missing.**
+
+### The boundary is a gate now, not a comment
+
+`moduleInterface` and `contractOf` have no runtime anywhere, and before this the
+front end never said so. `vyrn check` answered `ok`; the refusal arrived from
+the interpreter at RUN time, from the text-IR emitter as one sentence, and from
+the direct backend as `direct backend: no lowering for the call
+'moduleInterface' at line 2` — an emitter's internal words in a user's
+diagnostic. Both are gated in the checker now, in the sentence RFC-0054's
+`lex` already used: **``moduleInterface`` is only available during generation**.
+One gate serves `vyrn check`, `vyrn run` and both backends, and the direct
+backend's fallback is unreachable for them.
+
+**`listDir` is deliberately NOT gated with them, and the brief that asked for it
+was wrong.** `listDir` has a runtime: under `vyrn run` it lists the real
+filesystem, which is why `COMPTIME_FORBIDDEN` omits it and why the interpreter
+serves it. Only the two compiling backends lack a lowering, and each says so
+itself. `list_dir_is_not_generation_only` pins that, beside
+`the_reflection_builtins_are_refused_outside_a_generation` for the other two.
+
+**Open, one line:** the direct backend still refuses `listDir` with `no lowering
+for the call` where the text-IR backend words it properly. The front end cannot
+help — the call is legal under `vyrn run` — so the fix belongs in the emitter,
+and it is a message, not a defect.
+
+**What proves it:** three-way parity byte-identical including traps (36 tests,
+wasm column live); `genwasm` 11 green, both engines byte-identical over every
+structured-result generator; workspace `cargo test --workspace --no-fail-fast`;
+`vyrn-lsp` separately (78); memory suite 19 rows, 19 steady; `cargo fmt --check`
+and `vyrn fmt --check` clean.
+
