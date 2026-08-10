@@ -41,6 +41,16 @@ const VOID = new Set([
   "source", "track", "wbr",
 ]);
 
+// SVG elements must be created in the SVG namespace. `document.createElement`
+// gives an inert `HTMLUnknownElement` for `<svg>` and `<circle>`, which lays out
+// at 0x0 and paints nothing, so every chart on a page would be invisible.
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/// Create an element in `ns`, or in the document's default namespace when null.
+function createEl(tag, ns) {
+  return ns ? document.createElementNS(ns, tag) : document.createElement(tag);
+}
+
 // ---------------------------------------------------------------------------
 // Parse the JSON `Html` tree (the wire form of std/html's payload enum, RFC-0024)
 // into normalized vnodes. Encoding recap:
@@ -51,7 +61,7 @@ const VOID = new Set([
 //   Cls/Id/Key(v)         -> {"Cls": v} …            A(n,v) -> {"A": [n, v]}
 //   On(event,handler,pay) -> {"On": [event, handler, payload]}
 // ---------------------------------------------------------------------------
-function parseHtml(j) {
+function parseHtml(j, ns) {
   if (j === "Empty") return { kind: "empty", key: null };
   if (j && typeof j === "object") {
     if ("Text" in j) return { kind: "text", text: String(j.Text), key: null };
@@ -59,14 +69,22 @@ function parseHtml(j) {
     if ("El" in j) {
       const [tag, attrsJson, kidsJson] = j.El;
       const a = parseAttrs(attrsJson || []);
+      // An `<svg>` opens the SVG namespace for itself and everything under it.
+      // The namespace is recorded on the vnode at PARSE time, so every builder
+      // and every rebuild during a patch reads it without threading a parameter.
+      // ponytail: `<foreignObject>` does not switch back to XHTML; add the
+      // exception when a widget actually needs HTML inside a chart.
+      const tagName = String(tag);
+      const elNs = tagName === "svg" ? SVG_NS : ns || null;
       return {
         kind: "el",
-        tag: String(tag),
+        tag: tagName,
+        ns: elNs,
         attrs: a.attrs,
         on: a.on,
         key: a.key,
         effect: a.effect,
-        kids: (kidsJson || []).map(parseHtml),
+        kids: (kidsJson || []).map((k) => parseHtml(k, elNs)),
       };
     }
   }
@@ -120,7 +138,7 @@ function buildStatic(v) {
     dom.setAttribute("data-vyrn-raw", "");
     dom.innerHTML = v.html;
   } else {
-    dom = document.createElement(v.tag);
+    dom = createEl(v.tag, v.ns);
     for (const name of Object.keys(v.attrs)) dom.setAttribute(name, v.attrs[name]);
     if (!VOID.has(v.tag)) {
       for (const kid of v.kids) dom.appendChild(buildStatic(kid));
@@ -316,7 +334,7 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
       dom.setAttribute("data-vyrn-raw", "");
       dom.innerHTML = v.html;
     } else {
-      dom = document.createElement(v.tag);
+      dom = createEl(v.tag, v.ns);
       applyAttrs(dom, {}, v.attrs);
       if (!VOID.has(v.tag)) {
         for (const kid of v.kids) dom.appendChild(createNode(kid));

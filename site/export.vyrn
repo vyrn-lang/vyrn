@@ -1,0 +1,125 @@
+/// The static export (design brief G1).
+///
+/// `pages()` synthesizes `route(req) -> Response` for a server. GitHub Pages
+/// serves files, not a process. `Request` is an ordinary record, so the whole
+/// gap closes here: walk the route table, call `route` once per path, and write
+/// what comes back.
+///
+/// Each route is exported TWICE, because a page has two representations at one
+/// URL and the client navigator asks for them by `Accept` (RFC-0072 M4):
+///
+///   - the document, as `<name>.html`
+///   - the soft-navigation payload, as `<name>.data.json`
+///
+/// A static host cannot vary on `Accept`, so `vyrn-nav.js` takes
+/// `__vyrnNavConfig.staticData`, which points the payload fetch at the second
+/// file. Soft navigation then works with no server behind it.
+///
+///     vyrn run site/export.vyrn out
+///
+/// The output directory must exist. RFC-0014 has `readFile`, `writeFile` and
+/// `listDir` and no way to create a directory, which is also why the output is
+/// flat rather than one directory per route (see `app/nav.vyrn`).
+import { pages } from "std/ui"
+import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath } from pages("./app/routes")
+import { published, navRows } from "./app/nav"
+import { substring } from "std/strings"
+
+/// Every path the site publishes, from the router's own typed URL helpers. A
+/// route that is renamed or deleted breaks this list at compile time, which is
+/// the point of listing it this way rather than writing the strings out.
+fn sitePaths() -> Array<String> {
+    return [rootPath(), philosophyPath(), comparePath(), installPath(), releasesPath(), docsPath()]
+}
+
+/// The request for a path's document representation.
+fn documentRequest(path: String) -> Request {
+    return Request { method: "GET", path: path.copy(), headers: ["accept": "text/html"], body: "" }
+}
+
+/// The request for a path's soft-navigation payload. Same URL, different
+/// `Accept` — the negotiation the router already answers.
+fn dataRequest(path: String) -> Request {
+    return Request { method: "GET", path: path.copy(), headers: ["accept": "application/json"], body: "" }
+}
+
+/// The payload file beside a document: `philosophy.html` → `philosophy.data.json`.
+fn payloadName(name: String) -> String {
+    return substring(name, 0, name.byteLength - 5) + ".data.json"
+}
+
+/// Write one file. Returns 1 if it failed, so failures add up.
+fn emit(file: String, body: String) -> Int64 {
+    return match writeFile(file, body) {
+        Ok(done) => 0,
+        Err(why) => 1,
+    }
+}
+
+/// Export one route: its document and its navigation payload. Returns the number
+/// of failures, so the caller exits non-zero instead of publishing a hole.
+fn exportPath(outDir: String, path: String) -> Int64 {
+    let name = published(path)
+    let doc = route(documentRequest(path))
+    if doc.status != 200 {
+        print("FAIL \{path} -> \{doc.status}")
+        return 1
+    }
+    let data = route(dataRequest(path))
+    let json = payloadName(name)
+    let bad = emit("\{outDir}/\{name}", doc.body) + emit("\{outDir}/\{json}", data.body)
+    print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
+    return bad
+}
+
+fn main() -> Int64 {
+    let argv = args()
+    let outDir = if argv.length > 1 { argv[1].copy() } else { "out" }
+    let mut failures = 0
+    for path in sitePaths() {
+        failures = failures + exportPath(outDir, path)
+    }
+    // The stylesheet is a static asset, not a route, so it is copied rather than
+    // rendered. When the design lands it becomes the `std/tw` theme stylesheet.
+    failures = failures + match readFile("site/public/style.css") {
+        Ok(css) => emit("\{outDir}/style.css", css),
+        Err(why) => 1,
+    }
+    if failures > 0 {
+        print("export failed: \{failures} file(s)")
+        return 1
+    }
+    print("exported \{sitePaths().length} route(s) to \{outDir}")
+    return 0
+}
+
+test "every navigation row points at a route that exists" {
+    for row in navRows() {
+        let mut found = false
+        for path in sitePaths() {
+            if row.href == "/" + published(path) {
+                found = true
+            }
+        }
+        assert(found)
+    }
+}
+
+test "every route answers 200 as a document and as data" {
+    for path in sitePaths() {
+        assertEq(route(documentRequest(path)).status, 200)
+        assertEq(route(dataRequest(path)).status, 200)
+    }
+}
+
+test "the two representations of one URL differ" {
+    let doc = route(documentRequest(rootPath()))
+    let data = route(dataRequest(rootPath()))
+    assertEq(doc.contentType, "text/html")
+    assertEq(data.contentType, "application/json")
+}
+
+test "a payload sits beside its document" {
+    assertEq(payloadName("index.html"), "index.data.json")
+    assertEq(payloadName("philosophy.html"), "philosophy.data.json")
+}

@@ -1,0 +1,41 @@
+<script>
+// GET /install — the quickstart. The most important page on the site after the
+// landing page.
+//
+// The version is deliberately absent. It comes from `site/data/releases.json`,
+// baked by the site workflow from the GitHub release feed, and `fresh.js` may
+// replace it at runtime. No version string is written by hand.
+import { Head, noHead, withTitle } from "std/ui"
+
+/// One platform's install line.
+type Platform = { id: String, name: String, command: String }
+
+export fn head() -> Head {
+    return withTitle(noHead(), "Install — Vyrn")
+}
+
+fn platforms() -> Array<Platform> {
+    return [
+        Platform { id: "linux", name: "Linux", command: "curl -fsSL https://vyrn.dev/install.sh | sh" },
+        Platform { id: "macos", name: "macOS", command: "curl -fsSL https://vyrn.dev/install.sh | sh" },
+        Platform { id: "windows", name: "Windows", command: "irm https://vyrn.dev/install.ps1 | iex" },
+    ]
+}
+</script>
+
+<template>
+<main class="prose">
+    <h1>Install</h1>
+    <div class="widget-socket">widget: install command, platform detected, channel toggle</div>
+    <section class="platform" v-for="p in platforms()" :key="p.id">
+        <h2>{{ p.name }}</h2>
+        <pre class="cmd"><code>{{ p.command }}</code></pre>
+    </section>
+    <h2>Build from source</h2>
+    <pre class="cmd"><code>git clone https://github.com/vyrn-lang/vyrn
+cd vyrn/compiler
+cargo build --release</code></pre>
+    <h2>Check it runs</h2>
+    <pre class="cmd"><code>vyrn run examples/fib.vyrn</code></pre>
+</main>
+</template>

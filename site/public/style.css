@@ -1,0 +1,85 @@
+/* Placeholder stylesheet for the site skeleton.
+ *
+ * It sets structure and nothing else: measure, spacing on the 8pt grid, and a
+ * neutral surface. There is no palette and no type pairing here on purpose —
+ * the three hero directions under docs/research/hero-drafts/ are waiting on the
+ * maintainer's choice, and this file is replaced by the std/tw theme stylesheet
+ * once that choice is recorded. */
+
+:root {
+  --measure: 65ch;
+  --gap: 24px;
+  color-scheme: light dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 16px/1.6 ui-sans-serif, system-ui, sans-serif;
+  font-synthesis: none;
+}
+
+#root {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 var(--gap);
+}
+
+h1, h2, h3 { text-wrap: balance; line-height: 1.2; }
+p { text-wrap: pretty; }
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  gap: 32px;
+  padding: 24px 0;
+  border-bottom: 1px solid currentColor;
+}
+
+.wordmark { font-weight: 600; text-decoration: none; }
+.nav { display: flex; gap: 16px; }
+
+.prose { max-width: var(--measure); }
+.prose h1, .prose h2 { margin-top: 48px; }
+
+.eyebrow {
+  font: 12px/1 ui-monospace, monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.band { padding: 48px 0; border-bottom: 1px solid; }
+.hero { padding: 64px 0; }
+.hero-canvas { min-height: 240px; }
+
+.dense { display: grid; grid-template-columns: 200px 1fr; gap: 32px; }
+.rail ol { list-style: none; padding: 0; font: 14px/2 ui-monospace, monospace; }
+.rail .num { opacity: 0.6; }
+.row { padding: 24px 0; border-bottom: 1px solid; }
+
+.cmd { overflow-x: auto; padding: 16px; }
+.nongoals dt { font-weight: 600; margin-top: 16px; }
+.nongoals dd { margin: 0; }
+.doclinks { padding: 0; list-style: none; }
+.doclinks li { padding: 16px 0; border-bottom: 1px solid; }
+.doclinks .note { display: block; opacity: 0.75; }
+
+/* Where a widget mounts. Visible while the site is a skeleton so that an empty
+ * band reads as unfinished rather than as a design. */
+.widget-socket {
+  font: 12px/2 ui-monospace, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 24px;
+  border: 1px dashed;
+  opacity: 0.6;
+}
+
+table, .metrics { font-variant-numeric: tabular-nums slashed-zero; }
+
+.foot { padding: 48px 0; opacity: 0.75; }
+
+@media (max-width: 768px) {
+  .dense { grid-template-columns: 1fr; }
+}

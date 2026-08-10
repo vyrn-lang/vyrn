@@ -1,0 +1,57 @@
+<script>
+// GET / — the landing page. Structure only: the hero band, one band per claim,
+// and the install command above the fold. The visual design is not chosen yet
+// (the three hero drafts under `docs/research/hero-drafts/` are waiting on that
+// decision), so nothing here commits to a palette or a type scale.
+//
+// Each band is a socket for one widget. Which widget, and what it looks like,
+// follows the direction choice.
+import { Head, noHead, withTitle } from "std/ui"
+
+/// One claim band: the claim, and the evidence the repository can produce today.
+type Claim = { number: String, title: String, body: String, evidence: String }
+
+export fn head() -> Head {
+    return withTitle(noHead(), "Vyrn — one program, three backends, identical bytes")
+}
+
+fn claims() -> Array<Claim> {
+    return [
+        Claim {
+            number: "01",
+            title: "One program, three backends, identical bytes",
+            body: "The interpreter, the native binary and the wasm module produce the same stdout, the same stderr and the same exit code. Every example. Every trap.",
+            evidence: "widget: parity visualizer",
+        },
+        Claim {
+            number: "02",
+            title: "Types carry rules, not just shapes",
+            body: "A validated type rejects a bad constant while it compiles. When it cannot prove the value, it generates the check instead.",
+            evidence: "widget: validated-types demo",
+        },
+        Claim {
+            number: "03",
+            title: "No garbage collector, and no ownership puzzle",
+            body: "Ownership is declared, not inferred. Memory is reclaimed at points you can name.",
+            evidence: "widget: memory-model replay",
+        },
+    ]
+}
+</script>
+
+<template>
+<main>
+    <section class="hero">
+        <div class="hero-canvas" aria-hidden="true"></div>
+        <h1>One program. Three backends. Identical bytes.</h1>
+        <p class="lede">Vyrn is a compiled language with an interpreter, a native backend and a wasm backend that agree byte for byte.</p>
+        <div class="install"><code>curl -fsSL vyrn.dev/install.sh | sh</code></div>
+    </section>
+    <section class="band" v-for="c in claims()" :key="c.number">
+        <p class="eyebrow">{{ c.number }}</p>
+        <h2>{{ c.title }}</h2>
+        <p>{{ c.body }}</p>
+        <div class="widget-socket">{{ c.evidence }}</div>
+    </section>
+</main>
+</template>

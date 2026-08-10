@@ -1,0 +1,22 @@
+<script>
+// GET /releases — a feed, newest first, pre-releases marked rather than hidden.
+//
+// Empty on purpose. There are no tags in the repository yet. `release.yml` is in
+// this change and stays inert until someone pushes one; the site workflow then
+// bakes `site/data/releases.json` and this page renders it. A hand-written
+// release entry would be a fabricated fact.
+import { Head, noHead, withTitle } from "std/ui"
+
+export fn head() -> Head {
+    return withTitle(noHead(), "Releases — Vyrn")
+}
+</script>
+
+<template>
+<main class="prose">
+    <h1>Releases</h1>
+    <p>No release has been published yet. The release workflow builds the binaries for Linux, macOS and Windows when a <code>v*</code> tag is pushed, and a tag with a suffix publishes as a pre-release.</p>
+    <div class="widget-socket">widget: release feed and commit cadence</div>
+    <p>Until then, build from source. The <a href="/install.html">install page</a> has the three commands.</p>
+</main>
+</template>

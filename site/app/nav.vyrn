@@ -1,0 +1,57 @@
+/// The site navigation, and the one place that maps a route to its published
+/// file.
+///
+/// It sits OUTSIDE `routes/` on purpose. `pages("./app/routes")` scans that
+/// directory, so a page importing the module the scan generates would be a cycle.
+/// The binding is kept honest from the other side instead: `export.vyrn` asserts
+/// every row here against the generated typed-URL helper, so a route that is
+/// renamed or deleted fails the export.
+///
+/// A v2 socket — `/guide`, `/explorer` — is a row that is not here yet. There is
+/// no placeholder page and no dead link; the route table simply has room.
+import { substring } from "std/strings"
+
+/// One navigation entry: where it goes, and what it is called.
+export type NavRow = { href: String, label: String }
+
+/// The published file for a route path. Output is flat, because RFC-0014 has
+/// `readFile`, `writeFile` and `listDir` but no way to CREATE a directory, so the
+/// export step cannot write `philosophy/index.html`. Flat files serve correctly
+/// from any static host. When a `makeDir` builtin lands, this one function
+/// changes and the URLs turn into directories.
+export fn published(path: String) -> String {
+    if path == "/" {
+        return "index.html"
+    }
+    return substring(path, 1, path.byteLength) + ".html"
+}
+
+/// The URL a link uses for a route path.
+export fn hrefOf(path: String) -> String {
+    return "/" + published(path)
+}
+
+/// The navigation, in reading order.
+export fn navRows() -> Array<NavRow> {
+    return [
+        NavRow { href: hrefOf("/philosophy"), label: "Philosophy" },
+        NavRow { href: hrefOf("/compare"), label: "Compare" },
+        NavRow { href: hrefOf("/install"), label: "Install" },
+        NavRow { href: hrefOf("/releases"), label: "Releases" },
+        NavRow { href: hrefOf("/docs"), label: "Docs" },
+    ]
+}
+
+test "the home page keeps the bare index name" {
+    assertEq(published("/"), "index.html")
+    assertEq(hrefOf("/"), "/index.html")
+}
+
+test "a route becomes one flat file" {
+    assertEq(published("/philosophy"), "philosophy.html")
+    assertEq(hrefOf("/compare"), "/compare.html")
+}
+
+test "the navigation covers every v1 route but the home page" {
+    assertEq(navRows().length, 5)
+}

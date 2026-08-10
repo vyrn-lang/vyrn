@@ -1697,6 +1697,16 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
     let mut had_error = false;
     let mut written = 0usize;
     for path in &targets {
+        // A `.vyx` file is a template with a Vyrn `<script>` inside it, not a Vyrn
+        // module. The formatter lexes the whole file as Vyrn, and the template
+        // survives that as a token soup — so it round-trips through the safety
+        // invariant and comes out with spaces inside every tag and every sentence.
+        // Silently destroying source is worse than refusing, so `.vyx` is skipped
+        // until the formatter learns to print a template.
+        if path.ends_with(".vyx") {
+            eprintln!("note: skipping {path}: `vyrn fmt` cannot format a .vyx template yet");
+            continue;
+        }
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {

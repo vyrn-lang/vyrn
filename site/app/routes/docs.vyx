@@ -1,0 +1,35 @@
+<script>
+// GET /docs — one curated entry page that links out. The reference browser and
+// the guide book need a Markdown reader (`std/md`), which is v2 work; until then
+// the repository is the honest destination.
+import { Head, noHead, withTitle } from "std/ui"
+
+/// One place to read next.
+type Link = { href: String, name: String, what: String }
+
+export fn head() -> Head {
+    return withTitle(noHead(), "Docs — Vyrn")
+}
+
+fn links() -> Array<Link> {
+    return [
+        Link { href: "https://github.com/vyrn-lang/vyrn/tree/main/docs/api", name: "Standard library reference", what: "Generated from the source by `vyrn doc`, and gated against drift in CI." },
+        Link { href: "https://github.com/vyrn-lang/vyrn/tree/main/rfcs", name: "RFCs", what: "Every language decision, with the argument that produced it." },
+        Link { href: "https://github.com/vyrn-lang/vyrn/tree/main/examples", name: "Examples", what: "The corpus the parity harness runs on all three backends." },
+        Link { href: "https://github.com/vyrn-lang/vyrn/blob/main/README.md", name: "README", what: "What the language is, in one page." },
+    ]
+}
+</script>
+
+<template>
+<main class="prose">
+    <h1>Docs</h1>
+    <p>The guide book arrives with the Markdown reader. These four are current today.</p>
+    <ul class="doclinks">
+        <li v-for="l in links()" :key="l.href">
+            <a :href="l.href">{{ l.name }}</a>
+            <span class="note">{{ l.what }}</span>
+        </li>
+    </ul>
+</main>
+</template>
