@@ -1,183 +1,250 @@
 # Vyrn
 
-> A systems programming language with the expressiveness of TypeScript and the
-> performance of native code — where safety is **predictable** instead of a
-> puzzle, and types describe not just the *shape* of data but the *rules that
-> make it valid*.
+[![CI](https://github.com/vyrn-lang/vyrn/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrn-lang/vyrn/actions/workflows/ci.yml)
 
-**Vyrn** is a working codename. It is easy to change: the name appears only in
-these docs and in the crate names under `compiler/`.
+**Vyrn is a systems language with the expressiveness of TypeScript.** Types
+carry the rules that make a value valid, not only its shape. Ownership is a
+capability you declare on a parameter — `read`, `modify`, or `consume` — so
+there is no garbage collector and no lifetime syntax. One program compiles to
+three targets: an interpreter, a native binary, and a WebAssembly module. All
+three produce the same bytes.
 
-Vyrn compiles ahead-of-time to native code through LLVM. There is no tracing
-garbage collector. There are no unchecked casts. Every conversion is either
-proven safe by the compiler or checked at runtime — never a blind
-reinterpretation of memory.
+```vyrn
+type Age = Int64 where value >= 18
 
----
+type Ticket = { id: Int64, seats: Int64 }
 
-## The one-paragraph pitch
+// A parameter states the function's intent: read it, change it, or take it.
+fn seatCount(t: read Ticket) -> Int64 { return t.seats }
 
-Rust says *"here are the rules."* Vyrn tries to say *"here is what you're trying
-to do."* You think in terms of **read / modify / consume / share**; the compiler
-figures out ownership, borrowing, moves, and lifetimes underneath. Types are
-**structural** like TypeScript, carry **validation rules** as part of their
-definition, and support first-class **compile-time type transformations**
-(`Omit`, `Partial`, `Pick`, …). If a value can't be proven valid at compile
-time, the compiler *generates* the runtime check for you — you can't forget it.
+fn addSeat(t: modify Ticket) { t.seats = t.seats + 1 }
 
-## Design pillars
+fn redeem(t: consume Ticket) -> Int64 { return t.id }
 
-1. **Intent over mechanism** — program in capabilities, not ownership jargon.
-2. **Predictability** — you can tell whether code is legal by reading it.
-3. **Validated types** — validation lives in the type, not scattered call sites.
-4. **Safety by default** — no null, no dangling pointers, no unchecked casts.
-5. **Compiler as an assistant** — it infers what it can and *explains* what it can't.
+// `Age?(n)` returns None when the rule fails, so untrusted input never traps.
+fn admit(n: Int64) -> Int64 {
+    return match Age?(n) {
+        Some(a) => a,
+        None => 0 - 1,
+    }
+}
+
+fn main() -> Int64 {
+    let mut t = Ticket { id: 7, seats: 1 }
+    addSeat(t)
+    print(seatCount(t)) // 2
+
+    let a = Age(30) // proven valid at compile time - no runtime check
+    print(a) // 30
+    print(admit(25)) // 25
+    print(admit(5)) // -1 - 5 is not an Age, and nothing aborts
+
+    // let bad = Age(5)  // compile error: 5 does not satisfy `Age`
+    return redeem(t) // t is consumed here; using it again is a compile error
+}
+```
+
+Both commented-out lines are real compiler errors:
+
+```
+bad.vyrn:4:0: 5 does not satisfy `Age` (predicate `where value >= 18` is false)
+uac.vyrn:8:0: `a` is used here but was already consumed by `redeem(..)` on line 7
+  (a `consume` parameter takes ownership; the value can't be used afterward)
+```
+
+## Status
+
+Vyrn is early. There are no versioned releases and no published binaries. You
+build the compiler from source. The language changes without a deprecation
+period, and the design record in [`rfcs/`](rfcs/) moves ahead of the
+implementation.
+
+What is stable is the verification. Every example in [`examples/`](examples/)
+runs under all three backends and must agree byte for byte, including trap
+messages and exit codes. CI enforces that on every push.
+
+## Why Vyrn
+
+**Validated types.** A `where` clause is part of the type. The compiler rejects
+a provably-invalid constant, erases the check where it can prove validity, and
+emits the check where it cannot. You cannot forget a check you never wrote.
+See [`examples/validate.vyrn`](examples/validate.vyrn) and
+[`examples/autovalidate.vyrn`](examples/autovalidate.vyrn).
+
+**Ownership by declaration.** You write `read`, `modify`, `consume` or `share`
+on a parameter. The compiler enforces moves and aliasing from that. There is no
+lifetime syntax and no borrow annotations. Memory is reclaimed at a site the
+compiler names — `vyrn why --memory <file>` reports, per binding, whether it is
+reclaimed, how, and the reason when it is not. See
+[`examples/consume.vyrn`](examples/consume.vyrn),
+[`examples/modify.vyrn`](examples/modify.vyrn) and
+[`examples/ownership.vyrn`](examples/ownership.vyrn).
+
+**Three targets, one meaning.** The tree-walking interpreter is the reference
+semantics. `vyrn build` emits textual LLVM IR and links it with `clang`.
+`vyrn build --target wasm` emits the WebAssembly module directly — no LLVM, no
+clang, no WASI sysroot. The parity harness scans `examples/`, runs each program
+three ways, and compares stdout, stderr and exit code.
+
+**No async.** Function suspension is not in the language. The host owns the
+loop: the browser page, the HTTP server, or the runtime you write. See
+[`examples/eventloop.vyrn`](examples/eventloop.vyrn) and
+[`examples/server.vyrn`](examples/server.vyrn).
+
+**Compile-time generators, not compiler features.** A `gen fn` is ordinary Vyrn
+that runs at compile time and returns Vyrn source. An import target can be a
+call to one. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way, in
+[`std/`](std/) — none of them is a keyword. See
+[`examples/gendemo.vyrn`](examples/gendemo.vyrn) and
+`vyrn emit-gen <file>` to read the synthesized module.
+
+**Failure is a value.** No null. `Option<T>`, `Result<T, E>`, exhaustive
+`match`, and `?` propagation. See [`examples/option.vyrn`](examples/option.vyrn)
+and [`examples/fallible.vyrn`](examples/fallible.vyrn).
+
+## Feature tour
+
+| Area | Where to look |
+|------|---------------|
+| Structural records, width subtyping, `Omit`/`Pick`/`Merge` | [`record.vyrn`](examples/record.vyrn), [`utility.vyrn`](examples/utility.vyrn) |
+| Enums, exhaustive `match`, control flow | [`enum.vyrn`](examples/enum.vyrn), [`controlflow.vyrn`](examples/controlflow.vyrn) |
+| Generics, monomorphization, protocols and bounds | [`generics.vyrn`](examples/generics.vyrn), [`protocol.vyrn`](examples/protocol.vyrn) |
+| Function values and closures | [`lambdas.vyrn`](examples/lambdas.vyrn), [`closures2.vyrn`](examples/closures2.vyrn) |
+| Arrays, maps, places, in-place element stores | [`arrays.vyrn`](examples/arrays.vyrn), [`mapdemo.vyrn`](examples/mapdemo.vyrn), [`placeorder.vyrn`](examples/placeorder.vyrn) |
+| Strings, templates, regex, UTF-8 bytes | [`strings.vyrn`](examples/strings.vyrn), [`templates.vyrn`](examples/templates.vyrn), [`regex.vyrn`](examples/regex.vyrn) |
+| Pull streams, linear and lazy | [`stream.vyrn`](examples/stream.vyrn), [`streamops.vyrn`](examples/streamops.vyrn) |
+| Structured concurrency: `spawn` / `join` | [`concurrency.vyrn`](examples/concurrency.vyrn), [`parallel.vyrn`](examples/parallel.vyrn) |
+| Portable SIMD | [`simd.vyrn`](examples/simd.vyrn), [`simdint.vyrn`](examples/simdint.vyrn) |
+| Modules, namespaces, remote imports | [`modules.vyrn`](examples/modules.vyrn), [`namespace.vyrn`](examples/namespace.vyrn) |
+| Reflection, JSON Schema in and out | [`reflection.vyrn`](examples/reflection.vyrn), [`jsonschema.vyrn`](examples/jsonschema.vyrn), [`schemaimport.vyrn`](examples/schemaimport.vyrn) |
+| I/O, arguments, files, time, storage | [`input.vyrn`](examples/input.vyrn), [`args.vyrn`](examples/args.vyrn), [`files.vyrn`](examples/files.vyrn), [`clock.vyrn`](examples/clock.vyrn) |
+| Compile-time i18n over finite string types | [`finitekeys.vyrn`](examples/finitekeys.vyrn), [`i18ndemo.vyrn`](examples/i18ndemo.vyrn) |
+| Tests and benchmarks in the source file | [`testing.vyrn`](examples/testing.vyrn), [`benching.vyrn`](examples/benching.vyrn) |
+
+The standard library is 32 modules in [`std/`](std/), written in Vyrn. Generated
+API docs are committed under [`docs/api/`](docs/api/), and CI fails if they drift
+from the source.
+
+## The web and full-stack story
+
+`.vyx` single-file components compile to Vyrn through the `std/vyx` generator —
+a `<script>` block of ordinary Vyrn and a `<template>` block of markup. See
+[`examples/vyxcomp/`](examples/vyxcomp/).
+
+`vyrn dev` builds the client to wasm and serves the server root, the static
+files and the runtimes in one process. `vyrn serve` runs a plain
+`fn handle(req: Request) -> Response` over an HTTP/1.1 host, with
+`--workers N` for parallel handling. `vyrn routes` prints the resolved wire
+table and where each route came from.
+
+Three full applications are in the tree:
+[`examples/fullstack/`](examples/fullstack/) (the smallest one),
+[`examples/shelf/`](examples/shelf/) and [`examples/bin/`](examples/bin/) (a
+pastebin that survives restarts).
+
+[`web/`](web/) holds the browser demos and the host-side runtimes: `wasi-min.js`
+is a dependency-free WASI preview1 shim, and `vyrn-dom.js`, `vyrn-nav.js`,
+`vyrn-rpc.js` and `vyrn-query.js` are the client halves of the UI and RPC
+libraries.
+
+## Tooling
+
+```
+vyrn run | check | fix | build | test | bench | serve | dev | fmt | doc
+vyrn why <file> | why --contract <file> | why --memory <file>
+vyrn routes | emit-ir | emit-gen
+vyrn new <name> | add <specifier> | update | vendor | deps
+```
+
+- `vyrn fmt` is a canonical formatter. `--check` is the CI gate.
+- `vyrn test` runs `test` blocks written in the source file next to the code.
+- `vyrn bench` runs `bench` blocks, with `--json`, `--compare` and a
+  deterministic `--check` mode.
+- `vyrn doc` generates Markdown API docs from `///` comments.
+- Modules resolve from `vyrn.json`. Remote imports (`github:`, `gist:`,
+  `https:`) are pinned in `vyrn.lock` and cached by sha256 under `~/.vyrn`.
+  `--offline` refuses to fetch.
+- `vyrn-lsp` is a synchronous language server: diagnostics, hover,
+  go-to-definition and completion, across linked files. The VS Code extension
+  is in [`editor/vscode/`](editor/vscode/).
+
+## Getting started
+
+Build from source. You need a recent Rust toolchain.
+
+```bash
+git clone https://github.com/vyrn-lang/vyrn.git
+cd vyrn/compiler
+cargo build -p vyrn-cli
+cargo run -p vyrn-cli -- run ../examples/fib.vyrn
+```
+
+A native binary needs `clang` on `PATH` (or `$CLANG`):
+
+```bash
+cargo run -p vyrn-cli -- build ../examples/fib.vyrn -o fib.exe
+```
+
+A wasm module needs nothing extra:
+
+```bash
+cargo run -p vyrn-cli -- build ../examples/fib.vyrn --target wasm -o fib.wasm
+```
+
+Running the full parity harness also needs a `wasmtime` binary, through
+`$VYRN_WASMTIME` or [`tools/`](tools/) — see the `parity` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the exact versions CI
+uses.
+
+[`compiler/README.md`](compiler/README.md) has the detailed build notes, the
+crate map, and how to build the excluded crates (`vyrn-lsp`, `vyrn-genwasm`).
 
 ## Repository layout
 
 ```
 lang/
-├── README.md              ← you are here
-├── rfcs/                  ← the design record (start with RFC-0001)
-│   ├── README.md          ← RFC index + process
-│   ├── RFC-0001-vision.md
-│   ├── RFC-0002-type-system.md
-│   ├── RFC-0003-validated-types.md
-│   ├── RFC-0004-capabilities-and-memory.md
-│   ├── RFC-0005-error-handling.md
-│   └── RFC-0006-diagnostics.md
-├── compiler/              ← the prototype (Rust workspace)
-│   ├── Cargo.toml         ← workspace
-│   ├── vyrn-frontend/     ← lexer + parser + AST + checker (no LLVM needed)
-│   ├── vyrn-codegen/      ← LLVM IR emission via Inkwell (feature-gated)
-│   └── vyrn-cli/          ← the `vyrn` driver
-└── examples/              ← sample .vyrn programs
+├── rfcs/         the design record: 95 RFCs, RFC-0001 through RFC-0096
+├── compiler/     the Rust workspace
+│   ├── vyrn-frontend/  lexer, parser, checker, move check, interpreter, diagnostics
+│   ├── vyrn-codegen/   textual LLVM IR emitter, and the direct wasm encoder
+│   ├── vyrn-cli/       the `vyrn` driver
+│   ├── vyrn-lsp/       language server (excluded from the workspace)
+│   └── vyrn-genwasm/   runs `gen fn` generators as compiled wasm (excluded)
+├── std/          the standard library, written in Vyrn
+├── examples/     141 single-file programs, plus multi-file apps in subdirectories
+├── web/          browser demos and the JavaScript host runtimes
+├── docs/api/     generated std API docs, checked for drift by CI
+├── editor/       the VS Code extension
+├── bench/        the benchmark baseline
+├── tools/        local toolchain downloads (not tracked)
+└── ROADMAP.md    what ships today and what is next
 ```
 
-## Status
+## What CI proves
 
-This repo holds the **full RFC design record** plus a working compiler. Every
-feature below is verified to produce identical output and exit codes under the
-tree-walking interpreter and the clang-compiled native binary (34 examples, 145
-tests). Highlights:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs four jobs on Linux:
 
-- **Validated types (RFC-0003) — the signature feature — implemented** end to
-  end: `type Age = Int64 where value >= 18;`. Provably-invalid constants are
-  compile errors; valid ones cost nothing at runtime; non-constant values are
-  checked at runtime. See [`examples/validate.vyrn`](examples/validate.vyrn).
-- **Finite string types & interpolation containment (RFC-0020 M1)** — a
-  validated `String` whose regex denotes a *finite* language is a finite string
-  type. An interpolation `"nav.\{s}.label"` over finite holes is itself a finite
-  language, and flowing it into a validated type checks `L ⊆ T` by DFA
-  containment (a product-automaton walk, not the union cross-product TypeScript
-  expands): proven ⇒ the runtime check is erased; not contained ⇒ a compile error
-  naming the offending key. The editor completes `t("` with every key. See
-  [`examples/finitekeys.vyrn`](examples/finitekeys.vyrn). **M2 builds on this as
-  a library**: [`std/i18n`](std/i18n.vyrn) is a `gen fn` that reads a directory of
-  locale JSON, cross-checks drift, and compiles each ICU message (interpolation /
-  CLDR plural / select) into ordinary Vyrn — emitting `TransKey`, a `Locale` enum
-  with `setLocale`, and per-key typed functions whose `///` doc is the translation.
-  See [`examples/i18ndemo.vyrn`](examples/i18ndemo.vyrn).
-- **`Option<T>`, `Result<T, E>`, `match`, and `?` (RFC-0005) implemented** end to
-  end — no null; absence/failure are explicit values, read via exhaustive
-  `match`, and `?` propagates `None`/`Err` out of a function. `Option` **and**
-  `Result` payloads can hold any type (a `Ref`, string, or record), so `Option<Ref<Node>>` gives
-  **recursive heap data structures** — a nil-terminated linked list and a binary
-  tree, each built, traversed, and *reclaimed* by a recursive `release` walk. See
-  [`examples/linkedlist.vyrn`](examples/linkedlist.vyrn),
-  [`examples/tree.vyrn`](examples/tree.vyrn),
-  [`examples/freelist.vyrn`](examples/freelist.vyrn),
-  and [`examples/option.vyrn`](examples/option.vyrn) (Option, Result, and `?`).
-- **Structural records with width subtyping (RFC-0002)** — compatibility by
-  shape, no casts, implemented end to end *including native code*. Width
-  subtyping lowers to a copy coercion at each boundary. Fields of a `mut` record
-  are mutable (`c.value = ...`). See
-  [`examples/record.vyrn`](examples/record.vyrn).
-- **Compile-time type transformers `Omit`/`Pick`/`Merge` (RFC-0002 §7)** — derive
-  new record shapes from existing ones; pure type-level functions, erased before
-  codegen. See [`examples/utility.vyrn`](examples/utility.vyrn).
-- **User-defined enums / sum types with exhaustive `match` (RFC-0002 §4)** —
-  `type Shape = | Circle(Int64) | Unit;`; native-lowered to a tagged aggregate +
-  `switch`. See [`examples/enum.vyrn`](examples/enum.vyrn).
-- **Generics — functions, records, and enums (RFC-0002 §6)** — `fn id<T>(x: T)`,
-  `type Box<T> = { value: T }`, `type Opt<T> = | Wrap(T) | Empty`, inferred per use
-  and **monomorphized** for native code. See
-  [`examples/generics.vyrn`](examples/generics.vyrn).
-- **`consume` and `modify` capabilities (RFC-0004)** — a `consume` parameter takes
-  ownership (using the value after is a compile error); a `modify` parameter is
-  changed in place with the change visible to the caller (by-reference, and the
-  argument must be a `mut` variable). Ownership and mutation as *intent*. See
-  [`examples/consume.vyrn`](examples/consume.vyrn) and
-  [`examples/modify.vyrn`](examples/modify.vyrn).
-- **Nominal types, intersection `A & B`, `Partial`/`Readonly`, multi-payload
-  variants, fallible construction `Age?(n)`, and constrained generics
-  `<T: Ord>`** — see [`examples/generics.vyrn`](examples/generics.vyrn) and
-  [`examples/validate.vyrn`](examples/validate.vyrn).
-- **Checked conversions** — `str(Int64) -> String` (total) and
-  `parse(String) -> Option<Int64>` (fallible, so the "not a number" case is an
-  explicit `None` you must `match`). See [`examples/stringops.vyrn`](examples/stringops.vyrn).
-- **Strings are UTF-8** — a `String` is an immutable sequence of UTF-8 bytes.
-  `s.length` counts *bytes* (equal to code points for ASCII, larger for
-  multi-byte text: `"é".length == 2`), the regex engine matches byte-wise, and
-  source files are read as UTF-8. One consequence: JSON-Schema
-  `minLength`/`maxLength` bounds count bytes, not UTF-16 code units — a
-  deliberate, documented divergence. See [`examples/stringops.vyrn`](examples/stringops.vyrn).
-- **Arrays** — growable `Array<T>` (a `Vec`: `[]` / `xs.push(v)` / `xs[i]` /
-  `xs.length`, a doubling heap buffer, bounds-checked, reclaimed at scope exit or by `drop`) and
-  **fixed-size `Array<T, N>`** (a const generic: the stack value aggregate `[N x T]`,
-  no heap, written with an array literal `[a, b, c]`). See
-  [`examples/arrays.vyrn`](examples/arrays.vyrn) and
-  [`examples/map.vyrn`](examples/map.vyrn) (an integer-keyed map written in Vyrn).
-- **The heap + deterministic reclamation (RFC-0004)** — dynamic strings
-  (`concat`/`len`), plus *two* ways memory gets freed, no GC:
-  - a **`region { .. }`** block frees a whole *group* of allocations when it exits
-    (the checker stops heap values from escaping and dangling),
-  - **ownership auto-drop** frees an *individual* heap temporary the compiler
-    proves never escapes its block — no region needed, and
-  - **ownership transfer** lets a function hand a freshly-allocated value back to
-    its caller, whose binding then owns and frees it (inferred by fixpoint over
-    the call graph).
+1. **tests (workspace + LSP)** — `cargo fmt --check` over all three manifests,
+   the workspace test suite, the LSP suite, the `docs/api/` drift gate, and
+   `vyrn bench --check` over every benchmark.
+2. **three-way parity** — the interpreter, the clang-linked native binary and
+   the wasm module must agree on every example. The known-divergent list is
+   empty and must stay empty.
+3. **cross-engine generation** — every `gen fn` must produce identical source
+   under the interpreter and under wasm.
+4. **benchmarks** — informational, on pushes to `main` only.
 
-  All measured flat (~3 MB) where the same million-allocation loop leaks 1.2 GB.
-  See [`examples/region.vyrn`](examples/region.vyrn) and
-  [`examples/ownership.vyrn`](examples/ownership.vyrn).
-- **Generational references (RFC-0004, Path B)** — a `Ref<T>` is a freely-copyable
-  handle to a mutable heap cell holding any `T` (a scalar, `String`, record, or
-  another `Ref`); unlike an owned value it can be *aliased*. Each access is
-  generation-checked, so a reference used after it's released is caught (instead of
-  dangling) — even after the slot is reused. `release` is **inferred** (the same
-  ownership analysis that frees strings auto-releases a non-escaping cell), and
-  because the payload is boxed a record may hold a `Ref` to its own type without
-  becoming infinite. See [`examples/genref.vyrn`](examples/genref.vyrn) and
-  [`examples/autorelease.vyrn`](examples/autorelease.vyrn).
-- **Structured concurrency (RFC-0004 §Q4)** — `spawn f(args) -> Task<T>` and
-  `join`, a deterministic fork-join. The compiler *proves* a spawned function is
-  isolated (no I/O, no shared mutable state, transitively), so it's data-race-free
-  by construction and the result is the same under any schedule. `share` is the
-  capability for concurrent read access. See
-  [`examples/concurrency.vyrn`](examples/concurrency.vyrn).
-- **A working native path**: `vyrn build prog.vyrn` emits LLVM IR and links a
-  real executable with `clang` (verified end-to-end; interpreter and native
-  binary agree on output and exit codes, including runtime validation failures).
-  It targets `x86-64-v2` at `-O2` by default; `nativeTarget` in `vyrn.json` or
-  `--native-target v1|v2|v3|v4|native` picks another, and every one of them is
-  built with `-ffp-contract=off` so that no target can quietly fuse `a*b+c` into
-  an FMA and give a different float than the interpreter (RFC-0083).
-- **A server (RFC-0016)** — `vyrn serve prog.vyrn [--port N]` runs an ordinary
-  `fn handle(req: Request) -> Response` over a hand-rolled HTTP/1.1 host
-  (`std::net` only, no crates). The host owns the accept loop; module state
-  (`let mut`) persists across requests. `handle` is a plain function — `main`
-  and `test` blocks can call it directly, so a served file is a normal three-way
-  parity citizen. Same program shape as the browser client (RFC-0013); Vyrn adds
-  no `async`/`await` (the async decision, recorded in the RFC). See
-  [`examples/server.vyrn`](examples/server.vyrn).
+## The design record
 
-See [`compiler/README.md`](compiler/README.md) for how to build and run it, and
-the status of the Inkwell backend (now also builds and runs against an LLVM 22
-dev SDK, matching the interpreter on `fib` — but covers only the v0.1 subset, so
-the text-IR path remains the full reference backend).
+[`rfcs/`](rfcs/) is where decisions are made and argued. When the implementation
+and an RFC disagree, one of them is a bug. Start with
+[RFC-0001 Vision](rfcs/RFC-0001-vision.md),
+[RFC-0003 Validated Types](rfcs/RFC-0003-validated-types.md) and
+[RFC-0004 Capabilities & Memory](rfcs/RFC-0004-capabilities-and-memory.md).
+[`rfcs/README.md`](rfcs/README.md) has the full reading order.
 
-## What's deliberately *not* in v1
+## Not in v1
 
-Higher-kinded types, full dependent types / theorem proving, macros, class
-inheritance, and metaclasses. See [RFC-0001 §Non-goals](rfcs/RFC-0001-vision.md).
+Higher-kinded types, dependent types, macros, class inheritance, metaclasses,
+and `async`/`await`. See
+[RFC-0001 §Non-goals](rfcs/RFC-0001-vision.md).
