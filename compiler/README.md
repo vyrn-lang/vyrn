@@ -1,8 +1,8 @@
 # Vyrn compiler (prototype)
 
-A Rust workspace implementing the **v0.1 subset** of Vyrn. Every feature below is
-verified to produce identical results under the tree-walking interpreter and the
-clang-compiled native binary:
+The Rust workspace that implements Vyrn. Every feature below is verified to
+produce identical results three ways: the tree-walking interpreter (the
+reference semantics), the clang-linked native binary, and the wasm module:
 
 - **Core**: `Int64`, `Bool`, immutable + dynamic `String`, `let`/`mut`, arithmetic,
   `if`/`else`, `while`, `for`-in over arrays, functions, `print`, and `str`/`parse`
@@ -14,9 +14,8 @@ clang-compiled native binary:
 - **Validated / nominal types** (RFC-0002 §2, RFC-0003): `type Age = Int64 where
   value >= 18`; `type UserId = String`; fallible construction `Age?(n)`.
 - **`Option`/`Result`/`match`/`?`** (RFC-0005). `Option` and `Result` payloads may
-  be any type, so `Option<Ref<Node>>` gives **recursive heap structures** — a linked
-  list and a binary tree, each built, traversed, and reclaimed by a recursive
-  `release` walk.
+  be any type, so `Option<Handle<Node>>` gives **recursive heap structures** — a
+  linked list and a binary tree, each built, traversed, and reclaimed.
 - **Structural records** with width subtyping, **intersection** `A & B`, and the
   **`Omit`/`Pick`/`Merge`/`Partial`/`Readonly`** transformers (RFC-0002).
 - **Enums / sum types** with multi-payload variants and exhaustive `match`.
@@ -40,27 +39,32 @@ clang-compiled native binary:
   heap value that the caller then owns and frees (inferred by call-graph
   fixpoint). Every allocation is owned by exactly one mechanism, so nothing is
   freed twice; unprovable cases leak (safe).
-- **Generational references** (RFC-0004 §4, Path B): a `Ref<T>` — a freely-copyable
-  handle to a mutable heap cell holding any `T` (`cell` / `get` / `set` /
-  `release`; the payload is boxed, so the handle is fixed-size). Each access is
-  generation-checked, so a use-after-release traps instead of dangling, even after
-  the slot is reused. `release` is **inferred** by the same ownership analysis that
-  frees strings. A record may hold a `Ref` to its own type without becoming infinite.
+- **Generational handles** (RFC-0090, `std/slots`): a `Handle<T>` is a
+  freely-copyable value of three words — a slot, the generation live when the
+  handle was issued, and the identity of the container that issued it. It owns no
+  heap. `s[h]` checks the generation and yields the element's place, so a handle
+  used after its element is removed traps on a compare instead of dangling. This
+  is the answer to the aliasing case single ownership cannot express. The earlier
+  `Ref<T>` cell (RFC-0004 §4, Path B) was deleted by RFC-0090 M4: `cell`, `get`,
+  `set` and `release` no longer exist in any engine.
 
 ## What builds today (no LLVM needed)
 
-The default workspace has **zero external dependencies**:
+The rule for the default workspace is that `cargo build` and `cargo test` need
+**no LLVM, no clang and no wasi sysroot** — not that the resolve holds zero
+crates. `wasm-encoder` is the one external crate, and it does not touch that
+rule (see `Cargo.toml`).
 
 ```bash
 cd compiler
-cargo test        # 188 tests across lexer/parser/checker/interpreter/codegen/movecheck/ownership
+cargo test        # the workspace suite: lexer/parser/checker/interpreter/codegen/movecheck/ownership
 cargo build       # builds the `vyrn` binary
 ```
 
 | Crate | Role |
 |-------|------|
 | `vyrn-frontend` | lexer → parser → AST → type checker → move checker → tree-walking **interpreter**; also the structured-`Diagnostic` API (`diagnostics(source)`) |
-| `vyrn-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) |
+| `vyrn-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) **and the wasm module directly** (RFC-0077: `src/direct.rs`, `src/wasm.rs` — no LLVM, no clang, no sysroot) |
 | `vyrn-cli`      | the `vyrn` driver |
 | `vyrn-lsp`      | Language Server Protocol server (excluded — pulls `lsp-server`/`lsp-types`; see below) |
 | `vyrn-genwasm`  | RFC-0076: runs `gen fn` generators as compiled wasm (excluded — pulls `wasmtime`; optional in both `vyrn-cli` and `vyrn-lsp`, feature `wasm-gen`) |
@@ -230,8 +234,9 @@ hover / F12 go-to-definition / completion. See `editor/vscode/README.md`.
 
 ## Semantics contract
 
-All three execution paths — the interpreter, the text-IR backend, and the
-Inkwell backend — must agree. The interpreter in
+All three execution paths — the interpreter, the native binary (textual IR
+linked by `clang`), and the direct wasm module — must agree; the parity harness
+(`vyrn-cli/tests/parity.rs`) is the gate. The interpreter in
 `vyrn-frontend/src/interp.rs` is the executable reference; its unit tests
 (`fib`, `while`+`mut`, arithmetic) plus the `examples/` are the shared
 conformance cases. Verified match points include: `print` of a `Bool` prints
@@ -245,7 +250,7 @@ check; a failed runtime validation exits with code 1 (native prints
 compiler/
 ├── Cargo.toml              workspace (excludes vyrn-lsp, vyrn-genwasm)
 ├── vyrn-frontend/          lexer, parser, ast, checker, movecheck, interp, types, diagnostics (+ tests)
-├── vyrn-codegen/           textual LLVM IR emitter (+ unit tests)
+├── vyrn-codegen/           textual LLVM IR emitter + the direct wasm backend (+ unit tests)
 ├── vyrn-cli/               vyrn: run | check | emit-ir | emit-gen | build
 ├── vyrn-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
 ├── vyrn-genwasm/           wasm generation engine (excluded — pulls wasmtime; feature `wasm-gen`)

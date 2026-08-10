@@ -241,7 +241,8 @@ and an RFC disagree, one of them is a bug. Start with
 [RFC-0001 Vision](rfcs/RFC-0001-vision.md),
 [RFC-0003 Validated Types](rfcs/RFC-0003-validated-types.md) and
 [RFC-0004 Capabilities & Memory](rfcs/RFC-0004-capabilities-and-memory.md).
-[`rfcs/README.md`](rfcs/README.md) has the full reading order.
+[`rfcs/README.md`](rfcs/README.md) indexes all 95, with the status each one
+carries.
 
 ## Not in v1
 
