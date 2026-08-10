@@ -17,6 +17,12 @@
 //! The store is file-backed (`data/pastes.json` relative to the process cwd), so
 //! the server runs in a fresh temp dir — an empty store the test seeds through
 //! the RPC surface, isolated from the repo's `examples/bin/data`.
+//!
+//! The OS picks the port: the server runs with `--port 0` and names the port it
+//! got in its `serving ... on http://localhost:<port>` line, which the harness
+//! reads before connecting. The server holds the listener from the moment the OS
+//! assigns it, so no other process can take the port in between — the harness
+//! must never pick a port itself.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -58,13 +64,6 @@ struct Serve {
     _dir: PathBuf,
 }
 
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
-}
-
 fn drain_into<R: Read + Send + 'static>(mut r: R, acc: Arc<Mutex<String>>) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 1024];
@@ -80,15 +79,27 @@ fn drain_into<R: Read + Send + 'static>(mut r: R, acc: Arc<Mutex<String>>) {
     });
 }
 
-fn wait_for_or(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) -> Result<(), String> {
+/// Read the port out of the startup banner (`serving <file> on
+/// http://localhost:<port>`), or report the capture after `timeout`. The whole
+/// number must have arrived — a digit run that reaches the end of what was
+/// captured could still be half a port — so the wait ends on the character
+/// after it.
+fn wait_for_port_or(acc: &Arc<Mutex<String>>, timeout: Duration) -> Result<u16, String> {
     let start = Instant::now();
     loop {
-        if acc.lock().unwrap().contains(needle) {
-            return Ok(());
+        {
+            let s = acc.lock().unwrap();
+            if let Some((_, rest)) = s.split_once("http://localhost:") {
+                if let Some((digits, _)) = rest.split_once(|c: char| !c.is_ascii_digit()) {
+                    if let Ok(port) = digits.parse() {
+                        return Ok(port);
+                    }
+                }
+            }
         }
         if start.elapsed() > timeout {
             return Err(format!(
-                "timed out waiting for {needle:?}; got:\n{}",
+                "timed out waiting for the serving banner; captured so far:\n{}",
                 acc.lock().unwrap()
             ));
         }
@@ -118,12 +129,11 @@ fn spawn_bin_server() -> Result<u16, String> {
     let dir = std::env::temp_dir().join(format!("vyrn_upages_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("data")).unwrap();
-    let port = free_port();
     let mut child = vyrn()
         .arg("serve")
         .arg(&server)
         .arg("--port")
-        .arg(port.to_string())
+        .arg("0")
         .current_dir(&dir)
         // EVERY stdio explicitly, `stdin` included. The server outlives this
         // process by design (see the `mem::forget` below), and a child that
@@ -143,16 +153,17 @@ fn spawn_bin_server() -> Result<u16, String> {
     let out = Arc::new(Mutex::new(String::new()));
     drain_into(child.stdout.take().unwrap(), out.clone());
     drain_into(child.stderr.take().unwrap(), out.clone());
-    let s = Serve {
+    let mut s = Serve {
         child,
-        port,
+        port: 0,
         stderr: out,
         _dir: dir,
     };
     // Cold, cache-disabled generation of the WHOLE bin app in a debug build is
     // minutes, not seconds — the old 60s wait panicked mid-generation and the
     // per-test retries ground for an hour. 600s is the honest ceiling.
-    wait_for_or(&s.stderr, "serving", Duration::from_secs(600))?;
+    s.port = wait_for_port_or(&s.stderr, Duration::from_secs(600))?;
+    let port = s.port;
     std::mem::forget(s); // keep the server alive for the whole run
     Ok(port)
 }

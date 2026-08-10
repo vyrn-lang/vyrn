@@ -37,6 +37,12 @@ fn vyrn() -> Command {
 }
 
 // ---- serve harness (mirrors tests/serve.rs) --------------------------------
+//
+// The OS picks the port: the server runs with `--port 0` and names the port it
+// got in its `serving ... on http://localhost:<port>` line, which the harness
+// reads off stderr before connecting. The server holds the listener from the
+// moment the OS assigns it, so no other process can take the port in between —
+// the harness must never pick a port itself.
 
 struct Serve {
     child: Child,
@@ -48,13 +54,6 @@ impl Drop for Serve {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
 }
 
 fn drain<R: Read + Send + 'static>(mut r: R) -> Arc<Mutex<String>> {
@@ -75,43 +74,58 @@ fn drain<R: Read + Send + 'static>(mut r: R) -> Arc<Mutex<String>> {
     acc
 }
 
-fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) {
+/// Read the port out of the startup banner (`serving <file> on
+/// http://localhost:<port>`), or panic after `timeout`. The whole number must
+/// have arrived — a digit run that reaches the end of what was captured could
+/// still be half a port — so the wait ends on the character after it.
+fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
     let start = Instant::now();
     loop {
-        if acc.lock().unwrap().contains(needle) {
-            return;
+        {
+            let s = acc.lock().unwrap();
+            if let Some((_, rest)) = s.split_once("http://localhost:") {
+                if let Some((digits, _)) = rest.split_once(|c: char| !c.is_ascii_digit()) {
+                    if let Ok(port) = digits.parse() {
+                        return port;
+                    }
+                }
+            }
         }
         if start.elapsed() > timeout {
+            let s = acc.lock().unwrap();
             panic!(
-                "timed out waiting for {needle:?}; got:\n{}",
-                acc.lock().unwrap()
+                "timed out waiting for the serving banner; captured so far:\n{}",
+                *s
             );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-/// Spawn `vyrn serve examples/fullstack/server.vyrn` on a free port.
+/// Spawn `vyrn serve examples/fullstack/server.vyrn` and wait for the startup
+/// line — which names the port the OS gave it — before returning.
 fn start_server() -> Serve {
     let server = repo_file("examples/fullstack/server.vyrn");
-    let port = free_port();
     let mut child = vyrn()
         .arg("serve")
         .arg(&server)
         .arg("--port")
-        .arg(port.to_string())
+        .arg("0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn vyrn serve");
     let _ = drain(child.stdout.take().unwrap());
     let stderr = drain(child.stderr.take().unwrap());
-    let s = Serve {
+    let mut s = Serve {
         child,
-        port,
+        port: 0,
         stderr,
     };
-    wait_for(&s.stderr, "serving", Duration::from_secs(20));
+    // The accept loop is live once the banner prints. The wait is long because a
+    // saturated machine (several checkouts building at once) starts the child
+    // slowly; it is not a race, so a generous limit costs a green run nothing.
+    s.port = wait_for_port(&s.stderr, Duration::from_secs(60));
     s
 }
 
