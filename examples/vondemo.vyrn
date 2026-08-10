@@ -1,0 +1,43 @@
+/// VON — Vyrn Object Notation (RFC-0097 M1): a configuration file that is
+/// Vyrn's record literal, saved to `examples/vondemo.von`.
+///
+/// The compiler reads that file at load time, runs `std/von`'s strictness walk
+/// over the tokens its OWN lexer produced, and links the result as an ordinary
+/// module. So a duplicate field, a leading zero, an unquoted word where a string
+/// belongs, or a `\{` hole in a string is a BUILD error, positioned in the
+/// `.von` file. Everything below is then ordinary Vyrn — a normal
+/// interp == native == wasm parity citizen.
+///
+/// Inspect the synthesized module with:  vyrn emit-gen examples/vondemo.vyrn
+import { vonModule } from "./lib/gen_von"
+import { configTypeName, configFieldNames, configText } from vonModule("./vondemo.von")
+
+/// The schema the `.von` file's header names. M1 carries the name through;
+/// checking the document against this declaration — so `Port`'s `where` clause
+/// runs on the file — is M3.
+export type Port = Int64 where value >= 1 && value <= 65535
+
+export type Level = | Debug | Info | Warn | Error
+
+export type AppConfig = {
+    name: String,
+    port: Port,
+    workers: Option<Int64>,
+    tls: Tls,
+    level: Level,
+    hosts: Array<String>,
+    limits: Map<String, Int64>,
+}
+
+export type TlsFiles = { cert: String, key: String }
+
+export type Tls = | Disabled | Enabled(TlsFiles)
+
+fn main() -> Int64 {
+    print(configTypeName())
+    print(configFieldNames())
+    // The canonical text: comments and the author's layout are gone, the value
+    // is not. Numbers keep their verbatim digits.
+    print(configText())
+    return 0
+}
