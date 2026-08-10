@@ -5170,3 +5170,149 @@ fn inlay_hint_cost_on_the_heaviest_file() {
     );
     let _ = client.child.kill();
 }
+
+// ---- inlay type hints inside a `.vyx` `<script>` ---------------------------
+
+/// A `.vyx` whose `<script>` binds three ways: a call (hides the type), an
+/// annotation, and a literal. Only the call earns a hint, and it must land in
+/// the author's own coordinates — never in the generated glue the template
+/// becomes.
+const RFC33_VYX_HINTS: &str = "<script>\n\
+    type Row = { title: String }\n\
+    props { item: Row, words: Array<String> }\n\
+    fn made() -> Row {\n\
+    return Row { title: \"t\" }\n\
+    }\n\
+    fn label(r: Row) -> String {\n\
+    let built = made()\n\
+    let named: String = \"x\"\n\
+    let plain = \"y\"\n\
+    return built.title + named + plain + r.title\n\
+    }\n\
+    </script>\n\
+    <template>\n\
+    <ul>\n\
+    <li>{{ label(item) }}</li>\n\
+    <li v-for=\"w in words\" :key=\"w\">{{ w }}</li>\n\
+    </ul>\n\
+    </template>\n";
+
+/// A `<script>` binding gets the same type hint a `.vyrn` binding gets.
+///
+/// The script line is copied verbatim into the synthesized module, so the hint
+/// maps back column-exactly. The template lines carry no binding of the
+/// author's, so they carry no hint: a hint drawn from generator glue would sit
+/// in the wrong place, and a wrong place is worse than nothing.
+#[test]
+fn a_vyx_script_binding_gets_a_type_hint_at_its_own_position() {
+    let dir = rfc33_scratch("inlay", RFC33_VYX_HINTS);
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC33_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired up
+    did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_HINTS);
+
+    let hints = type_hints(&mut client, &vyx_uri);
+    assert_eq!(
+        hints.len(),
+        1,
+        "only the call hides its type in the script: {hints:?}"
+    );
+    let (bline, bcol) = pos_after(RFC33_VYX_HINTS, "let built");
+    assert_eq!(hints[0].0, bline, "the hint is on the `built` line");
+    assert_eq!(hints[0].1, bcol, "the hint sits just past the name");
+    assert_eq!(hints[0].2, ": Row", "the call returns the prop's type");
+
+    // Nothing in the template: those lines are the generator's, not the
+    // author's bindings. The `v-for` line is the sharp case — the generated
+    // module DOES bind there, under a name the generator invented, and the
+    // author's line must not be labelled with it.
+    let (tline, _) = pos_after(RFC33_VYX_HINTS, "<li>{{ label(item) }}");
+    let (fline, _) = pos_after(RFC33_VYX_HINTS, "<li v-for=\"w in words\"");
+    assert!(
+        !hints.iter().any(|(l, _, _)| *l == tline || *l == fline),
+        "no hint in the template: {hints:?}"
+    );
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.vyx` hint says what a `.vyx` hover says — the same cross-check the
+/// `.vyrn` surfaces get, over the mapped-back position.
+#[test]
+fn a_vyx_type_hint_agrees_with_the_hover_at_the_same_binding() {
+    let dir = rfc33_scratch("inlayhover", RFC33_VYX_HINTS);
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC33_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx");
+    did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_HINTS);
+
+    let hints = type_hints(&mut client, &vyx_uri);
+    assert!(!hints.is_empty(), "the script binds something");
+    for (line, ch, label) in &hints {
+        let hover = hover_value(&mut client, &vyx_uri, *line, ch - 1)
+            .unwrap_or_else(|| panic!("hover at the binding on line {line}"));
+        let sig = hover
+            .lines()
+            .find(|l| l.starts_with("let ") || l.starts_with("for "))
+            .unwrap_or_else(|| panic!("a binding signature in: {hover}"));
+        let ty = sig
+            .split_once(": ")
+            .unwrap_or_else(|| panic!("a type in the signature: {sig}"))
+            .1;
+        assert_eq!(
+            format!(": {ty}"),
+            *label,
+            "hint and hover disagree on line {line}"
+        );
+    }
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What one inlay-hint request costs on the heaviest `.vyx` in the repo.
+///
+/// The `.vyx` path maps every origin region back through the synthesized
+/// module, so it does more work per request than the `.vyrn` one. The budget is
+/// the same 97 ms keystroke budget (RFC-0084).
+///
+/// `#[ignore]`d: it is a measurement, not an assertion.
+/// `cargo test -p vyrn-lsp --release -- --ignored --nocapture vyx_inlay_hint_cost`
+#[test]
+#[ignore]
+fn vyx_inlay_hint_cost_on_the_heaviest_vyx() {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let owner = root.join("examples/bin/server.vyrn");
+    let owner_src = std::fs::read_to_string(&owner).expect("the bin server should exist");
+    let owner_uri = file_uri(&owner);
+    // The heaviest `.vyx` in the corpus, and the one with the most script
+    // bindings — both under the same owner.
+    for name in ["index.vyx", "about.vyx"] {
+        let vyx = root.join("examples/bin/app/routes").join(name);
+        let vyx_src = std::fs::read_to_string(&vyx).expect("the route should exist");
+        let vyx_uri = file_uri(&vyx);
+        let mut client = rfc33_client();
+        did_open(&mut client, &owner_uri, "vyrn", &owner_src);
+        let _ = read_diags_for(&mut client, name);
+        did_open(&mut client, &vyx_uri, "vyx", &vyx_src);
+
+        let n = 50;
+        let hints = type_hints(&mut client, &vyx_uri);
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = inlay_hints(&mut client, &vyx_uri);
+        }
+        let per = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        println!(
+            "vyx inlayHint {name}: {per:.3} ms per request over {} lines, {} type hints",
+            vyx_src.lines().count(),
+            hints.len()
+        );
+        let _ = client.child.kill();
+    }
+}

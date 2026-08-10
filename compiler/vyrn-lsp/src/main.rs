@@ -53,7 +53,6 @@ use lsp_types::{
     TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
-use vyrn_frontend::ast::Type;
 use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
     analyze, class_completions, class_token_hover, completions, member_completions, references,
@@ -1981,18 +1980,18 @@ fn document_sem_tokens(server: &Server, uri: &Url) -> Option<Vec<vyrn_frontend::
 /// of every binding whose line does not say it.
 ///
 /// Pure over the cached analysis, filtered here to the requested line range.
-/// A `.vyx` gets nothing: its script is a synthesized module, so a hint built
-/// from it would land in the wrong coordinates.
+/// A `.vyx` has no analysis of its own — its script is a synthesized module —
+/// so its type hints are mapped back out of that module by [`vyx_type_hints`].
 fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<InlayHint>> {
     let p: InlayHintParams = serde_json::from_value(params).ok()?;
-    if !is_vyrn_uri(&p.text_document.uri) {
-        return Some(Vec::new());
-    }
-    let (analysis, _) = lookup(server, &p.text_document.uri)?;
     let (from, to) = (
         p.range.start.line as usize + 1,
         p.range.end.line as usize + 1,
     );
+    if !is_vyrn_uri(&p.text_document.uri) {
+        return Some(vyx_type_hints(server, &p.text_document.uri, from, to));
+    }
+    let (analysis, _) = lookup(server, &p.text_document.uri)?;
     let mut hints: Vec<InlayHint> = vyrn_frontend::inlay_hints(analysis)
         .into_iter()
         .filter(|h| h.line >= from && h.line <= to)
@@ -2030,42 +2029,163 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
     let lines: Vec<&str> = src.lines().collect();
     let mut out = Vec::new();
     for b in &analysis.locals {
-        // A parameter always writes its type; only `let`s and `for` variables
-        // can hide one.
-        if !matches!(b.kind, LocalKind::Let { .. } | LocalKind::ForVar) {
-            continue;
-        }
         if b.line < from || b.line > to || b.end_col == 0 {
-            continue;
-        }
-        let Some(ty) = &b.ty else { continue };
-        // An anonymous enum hovers as its variant arms (`{ A(Int64) | B }`),
-        // which is a second renderer this adapter must not copy.
-        if matches!(ty, Type::Enum(_)) {
             continue;
         }
         let Some(line) = lines.get(b.line - 1) else {
             continue;
         };
-        let label = ty.to_string();
-        if spells_type(line, b.end_col, &label) {
+        let Some(label) = type_hint_label(b, line, b.end_col) else {
             continue;
-        }
-        out.push(InlayHint {
-            position: Position {
-                line: (b.line - 1) as u32,
-                character: (b.end_col - 1) as u32,
-            },
-            label: InlayHintLabel::String(format!(": {label}")),
-            kind: Some(InlayHintKind::TYPE),
-            text_edits: None,
-            tooltip: None,
-            padding_left: Some(false),
-            padding_right: None,
-            data: None,
-        });
+        };
+        out.push(type_hint_at(b.line, b.end_col, label));
     }
     out
+}
+
+/// The `: Type` label a binding earns on the author's own `line`, or `None`
+/// when the analysis gives it no type or the line already says it.
+///
+/// `end_col` is the 1-based column just past the name IN THAT LINE — the
+/// binding's own for a `.vyrn`, the mapped-back one for a `.vyx`.
+///
+/// The type spelling is [`vyrn_frontend::type_to_string`], the renderer hover
+/// uses, so an anonymous enum reads as its variant arms (`{ A(Int64) | B }`) in
+/// both surfaces and there is no second renderer.
+fn type_hint_label(b: &vyrn_frontend::LocalBinding, line: &str, end_col: usize) -> Option<String> {
+    // A parameter always writes its type; only `let`s and `for` variables can
+    // hide one.
+    if !matches!(b.kind, LocalKind::Let { .. } | LocalKind::ForVar) {
+        return None;
+    }
+    let label = vyrn_frontend::type_to_string(b.ty.as_ref()?);
+    if spells_type(line, end_col, &label) {
+        return None;
+    }
+    Some(label)
+}
+
+/// One type hint, drawn just past a name at 1-based `(line, end_col)`.
+fn type_hint_at(line: usize, end_col: usize, label: String) -> InlayHint {
+    InlayHint {
+        position: Position {
+            line: (line - 1) as u32,
+            character: (end_col - 1) as u32,
+        },
+        label: InlayHintLabel::String(format!(": {label}")),
+        kind: Some(InlayHintKind::TYPE),
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(false),
+        padding_right: None,
+        data: None,
+    }
+}
+
+/// Type hints for a `.vyx` input: the bindings its `<script>` declares, mapped
+/// out of the synthesized module back into the author's own coordinates
+/// (RFC-0033 regions, the same inversion [`vyx_semantic_tokens`] does).
+///
+/// A `<script>` line is copied verbatim into the generated module under its own
+/// origin directive, so its bindings map column-exactly. A hint is emitted only
+/// when the mapped position lands on the author's own name: the binding's name
+/// must end exactly there in the `.vyx` line. Everything else — a binding the
+/// generator invented, a derived region that does not align verbatim — is
+/// dropped. A misplaced hint is worse than a missing one.
+fn vyx_type_hints(server: &Server, vyx_uri: &Url, from: usize, to: usize) -> Vec<InlayHint> {
+    let mut out = Vec::new();
+    let Some(vyx_path) = uri_path(vyx_uri) else {
+        return out;
+    };
+    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else {
+        return out;
+    };
+    let Some(owner_analysis) = server.analyses.get(&owner) else {
+        return out;
+    };
+    let Some(vyx_text) = server
+        .docs
+        .get(vyx_uri)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&vyx_path).ok())
+    else {
+        return out;
+    };
+
+    // One synthesized module per banner, held for the whole request: a `.vyx`
+    // has one generated module and many regions, and `synth_for` re-hashes the
+    // owner on every call.
+    let mut synths: HashMap<String, Rc<AnalyzedSynth>> = HashMap::new();
+    for region in owner_analysis.origins.regions_for(&vyx_path) {
+        if region.origin.line < from || region.origin.line > to {
+            continue;
+        }
+        let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
+            continue;
+        };
+        // A hint always sits on a binding's own declaration line, so a line with
+        // no binding keyword can carry none — and the whole `<template>` is
+        // usually that, at the price of one substring scan.
+        if !vyx_line.contains("let") && !vyx_line.contains("for") {
+            continue;
+        }
+        let synth = match synths.get(&region.gen_module) {
+            Some(s) => s.clone(),
+            None => {
+                let Some(s) = synth_for(server, &owner, &region.gen_module) else {
+                    continue;
+                };
+                synths.insert(region.gen_module.clone(), s.clone());
+                s
+            }
+        };
+        let Some(gen_line) = synth
+            .gen_source
+            .lines()
+            .nth(region.gen_start_line.saturating_sub(1))
+        else {
+            continue;
+        };
+        let Some((gcol, span_len)) = align_expr_span(vyx_line, region.origin.col, gen_line) else {
+            continue;
+        };
+        for b in &synth.analysis.locals {
+            // Only a binding on the region's first generated line, wholly inside
+            // the verbatim span, maps cleanly back.
+            if b.line != region.gen_start_line || b.end_col < gcol {
+                continue;
+            }
+            if b.end_col > gcol + span_len {
+                continue;
+            }
+            let col = region.origin.col + (b.end_col - gcol);
+            if !name_ends_at(vyx_line, col, &b.name) {
+                continue;
+            }
+            let Some(label) = type_hint_label(b, vyx_line, col) else {
+                continue;
+            };
+            out.push(type_hint_at(region.origin.line, col, label));
+        }
+    }
+    // Overlapping regions (rare) could double-emit a position; keep one per spot.
+    out.sort_by_key(|h| (h.position.line, h.position.character));
+    out.dedup_by_key(|h| (h.position.line, h.position.character));
+    out
+}
+
+/// Does `name` end exactly at 1-based character column `col` of `line`?
+///
+/// The proof that a mapped-back position is the author's own name and not
+/// generator glue that happened to align.
+fn name_ends_at(line: &str, col: usize, name: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let end = col.saturating_sub(1);
+    let len = name.chars().count();
+    if end > chars.len() || len > end {
+        return false;
+    }
+    chars[end - len..end].iter().collect::<String>() == name
 }
 
 /// Does the text after a binding's name already say its type?
@@ -3864,4 +3984,44 @@ fn selector_has_class(selector: &str, class: &str) -> bool {
 /// 1-based line number of byte offset `at` in `css`.
 fn line_of(css: &str, at: usize) -> usize {
     css[..at.min(css.len())].matches('\n').count() + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vyrn_frontend::ast::{EnumVariant, Type};
+
+    /// A binding whose type is an anonymous enum is hinted, and hinted with the
+    /// arm spelling hover writes.
+    ///
+    /// `Type`'s own `Display` writes `enum { A | B }` — payloads dropped. Hover
+    /// writes the arms, and so does the hint, because both call
+    /// [`vyrn_frontend::type_to_string`]. This pins the one string, so the two
+    /// surfaces cannot drift apart.
+    #[test]
+    fn an_anonymous_enum_binding_is_hinted_with_the_hover_spelling() {
+        let ty = Type::Enum(vec![
+            EnumVariant {
+                name: "A".to_string(),
+                payload: vec![Type::Int],
+            },
+            EnumVariant {
+                name: "B".to_string(),
+                payload: vec![],
+            },
+        ]);
+        let b = vyrn_frontend::LocalBinding {
+            name: "e".to_string(),
+            kind: LocalKind::Let { mutable: false },
+            ty: Some(ty.clone()),
+            line: 1,
+            col: 5,
+            end_col: 6,
+            fn_line: 1,
+        };
+        let label = type_hint_label(&b, "let e = pick()", 6).expect("the call hides the type");
+        assert_eq!(label, "{ A(Int64) | B }", "the arms, as hover writes them");
+        assert_eq!(label, vyrn_frontend::type_to_string(&ty), "one renderer");
+        assert_ne!(label, ty.to_string(), "`Display` drops the payloads");
+    }
 }

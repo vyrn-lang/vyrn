@@ -2703,7 +2703,12 @@ fn variant_detail(enum_name: &str, v: &EnumVariant) -> String {
     }
 }
 
-fn type_to_string(ty: &Type) -> String {
+/// The user-facing spelling of a type, as hover writes it.
+///
+/// Public because the editor adapter renders the SAME string in its inlay type
+/// hints: an anonymous enum is spelled by its variant arms here and nowhere
+/// else, so a hint and a hover cannot disagree.
+pub fn type_to_string(ty: &Type) -> String {
     // One source of truth: the AST's `Display` impl (the user-facing type
     // spelling). Enums keep the richer per-variant arm rendering for hovers.
     match ty {

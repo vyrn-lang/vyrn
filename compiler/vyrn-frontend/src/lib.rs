@@ -50,6 +50,9 @@ pub use symbols::{
     DocExport, InlayHint, LocalBinding, LocalKind, MemoryNote, ModuleDoc, RefRange, Resolution,
     SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
 };
+// The type spelling hover writes — one renderer, shared with the LSP's inlay
+// type hints (an anonymous enum reads as its variant arms in both).
+pub use symbols::type_to_string;
 
 // RFC-0071 M4: role → contract resolution and the editor queries over a
 // resolved contract. Spelled `vyrn_frontend::contracts::` by the LSP and the
