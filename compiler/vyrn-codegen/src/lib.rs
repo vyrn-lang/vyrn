@@ -31,13 +31,23 @@ use vyrn_frontend::types::INT32;
 /// pops the frame AND releases its chain, which is what a fall-through (and a
 /// `break`/`continue`, whose escapes RFC-0004's `region_store_guard` covers) wants.
 /// `__vyrn_region_pop` only pops, and it exists because a `return` out of a region
-/// can hand back a pointer INTO the frame it is leaving — the escape guard examines
-/// stores into named bindings, not return values, so `return a + b` is not covered
-/// by anything. Popping without freeing leaks that frame and cannot dangle, which
-/// is the trade RFC-0004's escape analysis has to be written before it can be
-/// improved on. Before this existed, `return` emitted neither call: the frame was
-/// never popped, so the 65th call to a function returning out of a region printed
-/// `error: region nesting exceeds 64` where every other engine printed an answer.
+/// hands the value it carries to its caller — the escape guard examines stores into
+/// named bindings, not return values, so `return a + b` is not covered by anything.
+/// Popping without freeing gives that value up: the frame's other blocks leak, and
+/// the one the return carried is the caller's to release. Before this existed,
+/// `return` emitted neither call: the frame was never popped, so the 65th call to a
+/// function returning out of a region printed `error: region nesting exceeds 64`
+/// where every other engine printed an answer.
+///
+/// **The chain link sits AFTER the payload, not in front of it**, which is what
+/// makes the sentence above true. A block the arena hands out is exactly what
+/// `__vyrn_malloc` returned, so `@__vyrn_str_free` — which frees `s - 16`, the
+/// `String` header it wrote — hands `free` a pointer `malloc` gave it. While the
+/// link lived at the front the user pointer was 8 bytes INTO the block, and a
+/// `String` returned out of a region corrupted the native heap the moment its
+/// caller released it (RFC-0096 M3, defect 4). The arena still frees at the
+/// closing brace what no return carried out, so the partition PR #129 states
+/// holds: one owner per block, on both paths.
 ///
 /// The arena stack is `thread_local` (RFC-0025): `region { .. }` is memory
 /// management, not an effect, so an isolated task may use it — and with tasks
@@ -70,16 +80,20 @@ ok:
 
 define ptr @__vyrn_region_alloc(i64 %n) {
 entry:
-  %tot = add i64 %n, 8
+  %pad = add i64 %n, 7
+  %end = and i64 %pad, -8
+  %tot = add i64 %end, 16
   %raw = call ptr @__vyrn_malloc(i64 %tot)
+  %link = getelementptr i8, ptr %raw, i64 %end
   %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
   %slot = getelementptr [64 x ptr], ptr @__vyrn_region_heads, i64 0, i64 %idx
   %prev = load ptr, ptr %slot
-  store ptr %prev, ptr %raw
-  store ptr %raw, ptr %slot
-  %user = getelementptr i8, ptr %raw, i64 8
-  ret ptr %user
+  store ptr %prev, ptr %link
+  %bp = getelementptr i8, ptr %link, i64 8
+  store ptr %raw, ptr %bp
+  store ptr %link, ptr %slot
+  ret ptr %raw
 }
 
 define void @__vyrn_region_pop() {
@@ -104,7 +118,9 @@ loop:
   br i1 %isnull, label %done, label %body
 body:
   %next = load ptr, ptr %cur
-  call void @free(ptr %cur)
+  %bp = getelementptr i8, ptr %cur, i64 8
+  %blk = load ptr, ptr %bp
+  call void @free(ptr %blk)
   br label %loop
 done:
   ret void
@@ -2253,7 +2269,14 @@ impl<'a> Gen<'a> {
     /// at the closing brace, so a second owner is a double free — and the walk
     /// stands off exactly one thing: a `String`, at the binding (`own.rs`'s
     /// `Leak::Region`) and one level down ([`Gen::deep_release`]). A buffer that
-    /// `realloc` may move or that the walk hands back is `__vyrn_malloc`'s.
+    /// `realloc` may move is `__vyrn_malloc`'s: the chain link the arena writes
+    /// after the payload dangles the moment the block moves, which is why the
+    /// in-place append refuses a slot inside a region (`Stmt::Assign`).
+    ///
+    /// What the walk hands back is the arena's too, on one path: a `return` out
+    /// of a region pops the frame without freeing it and the value the return
+    /// carried is the caller's to release. That works because the block is
+    /// exactly a `__vyrn_malloc` block — see [`REGION_RUNTIME`].
     fn heap_alloc(&mut self, size: &str) -> String {
         let buf = self.fresh_tmp();
         if self.region_depth > 0 {

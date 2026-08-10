@@ -501,16 +501,15 @@ finished with, and neither backend freed it — `"\{a + b}"` has leaked that
 buffer for as long as the textual backend has strdup'd here. The same free, one
 consumer further on.
 
-**3. A local String accumulator is never released — RECORDED, not closed.**
+**3. A local String accumulator is never released — RECORDED, then CLOSED.**
 `let mut acc: String = ""` is the opening line of every accumulator in this
-language. `own`'s static-data rule reads the INITIALIZER, answers `Fate::Static`
-for the whole binding, and the heap buffer the last `acc = acc + …` left is
+language. `own`'s static-data rule read the INITIALIZER, answered `Fate::Static`
+for the whole binding, and the heap buffer the last `acc = acc + …` left was
 never freed. Measured on the direct backend: **851,968 bytes after 500 calls and
-3,211,264 after 2,000.** The one-line fix is written down in `own.rs` beside the
-rule and is blocked by defect 4.
+3,211,264 after 2,000.**
 
 **4. A `String` returned out of a `region` is freed by its caller —
-PRE-EXISTING, recorded.** Verified at `c6d9331`, with no `mut` and no part of
+PRE-EXISTING, then CLOSED.** Verified at `c6d9331`, with no `mut` and no part of
 this milestone in the build:
 
 ```vyrn
@@ -522,13 +521,69 @@ fn main() -> Int64 {
 }
 ```
 
-exits **127** natively. `parity.rs`'s own region test carries that shape and
-passes only because its binding is a `mut` with a literal initializer — which is
-defect 3, holding defect 4 shut. Giving the accumulator its release turns the
-leak into the crash, so the region defect is what comes first. Two leaks, one
-behind the other, and the order is measured rather than assumed.
+`parity.rs`'s own region test carried that shape and passed only because its
+binding is a `mut` with a literal initializer — which is defect 3, holding defect
+4 shut. Giving the accumulator its release turns the leak into the crash, so the
+region defect is what comes first. Two leaks, one behind the other, and the order
+is measured rather than assumed.
 
-### The memory suite reads 19 rows, 19 steady
+### Both are closed, and the order held
+
+**Defect 4 is one word of layout.** The repro exits **`0xC0000374`,
+`STATUS_HEAP_CORRUPTION`,** at `45b3740` — the exit code depends on the C
+runtime, and the free is invalid rather than double. `__vyrn_region_alloc` wrote
+its chain link in FRONT of the payload and returned `raw + 8`, so a `String`
+header sat 8 bytes inside the block; `@__vyrn_str_free` frees `s - 16`, which is
+`raw + 8`, which `malloc` never handed out. The arena's own exit never met that
+because it freed by the link address.
+
+**The link sits after the payload now**, so a block the arena hands out is
+exactly what `__vyrn_malloc` returned. The chain is a chain of trailers — `{
+next, base }` at the first 8-aligned address past the payload — and
+`__vyrn_region_exit` reads the base out of the trailer. Nothing else moves: the
+walk still stands off a `String` inside a region (`own`'s `Leak::Region`, and
+`deep_release` one level down), the arena still frees at the closing brace what
+no return carried out, and `region_pop` still hands the frame up on the return
+path. That is the second of the brief's two directions — **the pop hands
+ownership over explicitly** — rather than the first, and the reason is that a
+boundary COPY answers only for a `String` the return names directly. An
+`Array<String>` built in a region and returned carries arena buffers under a
+`malloc`'d spine, and a deep copy of it would leave the spine with no owner. The
+layout answers for every shape at once, in the runtime, at every depth.
+
+**It costs 16 bytes an allocation where the front link cost 8**, plus the
+alignment of the payload. Measured on the census's own deferral shape — a region
+around a loop, 2,000,000 concatenations of a 13-byte result, nothing freed until
+the closing brace — native peak working set: **100,876,288 B before,
+132,497,408 B after, +31%.** The DEFERRAL is unchanged: still one `malloc` per
+allocation, still every block held to the closing brace, so census §5a's 1023x
+stays a statement about the mechanism rather than about this change. A side
+vector of block pointers would buy the 8 bytes back for about 20 more lines of
+IR, on a path the census measured as a loser with three corpus uses. It is not
+worth them today.
+
+Two shapes that look like the same defect are **not**. An in-place append inside
+a region would `realloc` an arena block and dangle its trailer — `Stmt::Assign`
+already refuses the fast path while `region_depth > 0`, and it still must. A
+slot that still holds its literal releases nothing, because `@__vyrn_str_free`
+reads a `cap` of 0 as "never `realloc`, never free" — which is what makes defect
+3 the one line it was written as.
+
+**Defect 3 is that one line.** `own::fate`'s static-data rule asks whether the
+binding can CHANGE, not what it opened with:
+`matches!(value, Expr::Str(_)) && !matches!(s, Stmt::Let { mutable: true, .. })`.
+A `mut` binding is released by its slot's final value in all three engines
+(Phase 8b), so the accumulator's grown buffer goes back at block exit and the
+loop that never ran frees a literal, which frees nothing.
+
+**The corpus count does not move, and that is the finding.** 2184 not reclaimed
+at `45b3740`; 2186 with this branch's two added `Int64` bindings in
+`examples/region.vyrn`, and **identical with the rule reverted**. `Fate::Static`
+is counted as an answer, not as a leak, so the harness reads a leaking
+accumulator as "static data" and always did. The row that can see it is the
+memory suite's, which is why defect 3 needed one.
+
+### The memory suite reads 20 rows, 20 steady
 
 `exprTemporary` is the new row: a `+` chain, an interpolation whose hole is
 itself a concatenation, and an in-place append whose operand is one — every byte
@@ -550,8 +605,12 @@ EXPRESSION rather than the type.
 - **`stringFromBytes` no longer segfaults** on an unannotated binding.
 - **Corpus 2208 → 2184 not reclaimed**, 2057 → 2033 "the type owns no heap".
 - **Native peak 19.9/54.1 MB → 4.06/4.07 MB** at 250,000 and 1,000,000 turns.
-- **Memory suite 19 rows, 19 steady**, the new row negative-tested by making the
-  rule answer `false`.
+- **Memory suite 20 rows, 20 steady**, each new row negative-tested by reverting
+  its rule: `exprTemporary` by making `str_temporary` answer `false`,
+  `localAccumulator` by dropping the `mut` clause — 8,323,072 B at 500 calls
+  against 32,899,072 at 2,000.
+- **The region repro exits 0 on all three engines**, and
+  `examples/region.vyrn` carries it so parity holds the shape.
 - **Three-way parity byte-identical including traps**, 36 tests, wasm column
   live. It is what found defect 1.
 - **`genwasm` green** over every generator example, both engines byte-identical.
@@ -565,6 +624,8 @@ EXPRESSION rather than the type.
 |---|---:|---|
 | a call argument that is an owning call's result | 930 | a callee may retain its argument; freeing after one needs the signature at the site, cross-module |
 | a call argument that is an allocating String expression | 632 | the same rule |
-| a local `String` accumulator's buffer | 851,968 B at 500 calls | defect 3 — one line, blocked by defect 4 |
-| a `String` returned out of a `region` | exits 127 | defect 4 — pre-existing at `c6d9331` |
 | `moduleInterface`, `contractOf`, `listDir` returns | 18 sites | generation-only; no compiling backend lowers them, so the owner is written nowhere |
+| the rest of a frame a `return` popped | unmeasured | a return out of a region hands over the value it carries and leaks what it does not — census §6's paragraph, which needs the escape analysis RFC-0004 defers |
+| an arena block's 16-byte trailer | +31% peak on a deferring region | a side vector of block pointers buys 8 of it back for ~20 lines of IR, on a path with three corpus uses |
+
+Defects 3 and 4 are closed; the two rows above are what closing them left.
