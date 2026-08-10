@@ -562,6 +562,24 @@ vector of block pointers would buy the 8 bytes back for about 20 more lines of
 IR, on a path the census measured as a loser with three corpus uses. It is not
 worth them today.
 
+**It was worth them, and the price was read rather than guessed.** The chain is a
+side vector now — one growable array of block pointers per frame, `{ ptr, len,
+cap }` beside the depth counter — so a block carries NOTHING: no trailer, no
+front link, not even the padding the trailer's alignment needed. The same shape,
+re-run: **132,493,312 B with the trailer, 116,731,904 B with the vector, against
+the front link's 100,876,288** — median of five, wall clock unmoved at ~100 ms.
+Half the trailer's cost given back. It is half rather than all because a vector
+entry is 8 bytes exactly where the trailer's 16 rounded to a 16-byte heap bucket;
+the arithmetic, not the mechanism. The invariant is what decides it: the arena
+still hands out exactly what `__vyrn_malloc` returned, and now with no arithmetic
+on that pointer at all — the thing defect 4 was — so the vector keeps PR #129's
+partition more plainly than the trailer did. The cost is 35 lines of IR, two
+thread-local arrays, and two frees: the vector is the arena's own bookkeeping, so
+`region_exit` releases it after its blocks and `region_pop` releases it instead
+of them (`RUNTIME_FREES` 3 → 5). An arena block still may not be `realloc`'d —
+the vector holds the address `free` will be handed, exactly as the trailer sat in
+the block — so `Stmt::Assign` refuses the in-place append inside a region still.
+
 Two shapes that look like the same defect are **not**. An in-place append inside
 a region would `realloc` an arena block and dangle its trailer — `Stmt::Assign`
 already refuses the fast path while `region_depth > 0`, and it still must. A
@@ -701,10 +719,14 @@ serves it. Only the two compiling backends lack a lowering, and each says so
 itself. `list_dir_is_not_generation_only` pins that, beside
 `the_reflection_builtins_are_refused_outside_a_generation` for the other two.
 
-**Open, one line:** the direct backend still refuses `listDir` with `no lowering
-for the call` where the text-IR backend words it properly. The front end cannot
-help — the call is legal under `vyrn run` — so the fix belongs in the emitter,
-and it is a message, not a defect.
+**Closed:** the direct backend refused `listDir` with `no lowering for the call`
+where the text-IR backend worded it properly. The front end could not help — the
+call is legal under `vyrn run` — so the fix belonged in the emitter, and it was a
+message, not a defect. Both backends read one constant now
+(`vyrn_codegen::LIST_DIR_NO_LOWERING`), the way `IO_MESSAGES` is read once, and
+`list_dir_is_refused_in_the_same_words_by_both_backends` pins the sentence on
+`vyrn build` and on `vyrn build --target wasm` — and pins that the emitter's own
+words do not reach the user.
 
 **What proves it:** three-way parity byte-identical including traps (36 tests,
 wasm column live); `genwasm` 11 green, both engines byte-identical over every
