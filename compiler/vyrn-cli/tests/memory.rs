@@ -58,13 +58,16 @@
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
 //! | `exprTemporary` | RFC-0096 M3 | steady | a String an EXPRESSION allocated has no binding, so the CONSUMER releases it — `@concat`, a String `+`, `@str` and the in-place append each free an operand the expression itself built |
 //! | `localAccumulator` | RFC-0096 M3, defect 3 | steady | the static-data rule read the INITIALIZER, so `let mut acc = ""` answered `Static` for the buffer the loop grew; it asks whether the binding can CHANGE now |
+//! | `callArgument` | census-call-arguments | steady | a value the ARGUMENT built has no binding either, so the CALLER releases it after a call that keeps nothing — the proof was never missing, only the place to write it down |
 //!
-//! **Twenty rows, twenty steady.** RFC-0092 M5 closed the last leaking
+//! **Twenty-one rows, twenty-one steady.** RFC-0092 M5 closed the last leaking
 //! one, and the row beside it — the same statement with `consume` written on it
 //! — was not in the census at all. RFC-0096 closed the last CLASS: the corpus
 //! reading "the type has no release rule" fell from 63 to 0 on two `impl`s, and
 //! M2 took the linked reading from 33 to 0 on two more. M3 closed the one shape
-//! M2 measured out of its own row: an operand with no owner.
+//! M2 measured out of its own row: an operand with no owner. The call-argument
+//! census closed the class next door, and by the same reading one level down: an
+//! ARGUMENT with no owner.
 //!
 //! **§10 reaches this harness in half.** A task owns a frame, a task record and
 //! an operating-system handle. On wasm there are no threads, so the direct
@@ -658,6 +661,26 @@ const ROWS: &[Row] = &[
               stopped handing out a pointer 8 bytes inside its block",
     },
     Row {
+        export: "callArgument",
+        census: "census-call-arguments",
+        today: Shape::Steady,
+        why: "the call argument: a value the ARGUMENT EXPRESSION built has no binding either, \
+              so `own` had nothing to write a row against and `width(tagged(seen))` leaked \
+              every turn where `let s = tagged(seen)` on the line above did not. The name was \
+              the whole difference — the proof was never missing, only the place to write it \
+              down. `movecheck` records the argument's node address and the callee's verdict; \
+              a `read` parameter that keeps nothing is released by the caller after the call, \
+              and rules 2 and 3 are what make `read` mean that. The row runs BOTH halves, \
+              because either alone is a bug: `wrap(tagged(seen))` hands its temporary to a \
+              position `note_retention` recorded, nothing is freed at the call, and the `Twig` \
+              gives it back once at block exit — free it here too and the row does not grow, \
+              it double frees. Measured native over `width(label(i))` in a loop before the \
+              rule: 14.62 MB at 250,000 turns and 49.12 MB at four times that, which is 48.2 \
+              bytes a turn — the String header and its buffer. After it: 3.94 MB and 4.26 MB. \
+              Make the retention question answer `Unknown` everywhere and this row leaks \
+              again, which is the negative test",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -999,6 +1022,28 @@ fn tagged(n: Int64) -> String {{
         return "-"
     }}
     return tag() + "!"
+}}
+
+/// A `read` parameter that keeps nothing — rules 2 and 3 refuse every way it
+/// could. It reads its argument and answers a number, which is what makes the
+/// caller the temporary's only owner.
+fn width(s: String) -> Int64 {{
+    return Int64(s.byteLength)
+}}
+
+/// The call-argument row (`rfcs/census-call-arguments.md`). The temporary
+/// `tagged(seen)` builds has no binding, and `width` keeps nothing, so the
+/// CALLER releases it after the call.
+///
+/// The other half of the rule — a position that KEEPS what it is given — is not
+/// measurable here and has its own test (`the_retained_argument_is_not_freed_at_the_call`
+/// in `tests/parity.rs`). A builder that puts a `read` argument into a value it
+/// returns LENDS that value, so the caller may not release the value either: the
+/// shape leaks whatever this rule does, which the census records as its own
+/// finding and 78 sites of this corpus. A leaking shape cannot be a steady row;
+/// a double free is what that test is for, and a double free is not a leak.
+export extern fn callArgument() {{
+    seen = seen + width(tagged(seen))
 }}
 
 /// Census §10, both discharges (RFC-0095 M1). The join takes the result and

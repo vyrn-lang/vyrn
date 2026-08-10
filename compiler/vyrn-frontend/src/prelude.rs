@@ -352,6 +352,17 @@ fn rows() -> Vec<Function> {
         // refuse a bad receiver with better words than a signature check could.
         // What the row carries is the RETURN.
         row("@str", &[], &[("x", Read, Unit)], Str, &[]),
+        // `print` takes the SAME union `@str` takes, and it had no row at all —
+        // the largest hole in every pass that asks what a builtin does with its
+        // argument. `rfcs/census-call-arguments.md` §3 counts it: 499 of the
+        // corpus's 532 unclassifiable call-argument sites are this one name, and
+        // a pass with no row cannot tell "the callee may keep it" from "nobody
+        // wrote it down". The parameter is inert and spelled `Unit` for the
+        // reason `@str`'s is; the checker's own arm still refuses a bad
+        // argument. What the row carries is the CAPABILITY: `print` reads what
+        // it is given and keeps nothing, so a temporary handed to it is the
+        // caller's to release.
+        row("print", &[], &[("x", Read, Unit)], Unit, &[]),
         // `m.keys()` copies the key pointers into a new buffer (RFC-0028), so
         // the result is the caller's and the map keeps its own.
         row(

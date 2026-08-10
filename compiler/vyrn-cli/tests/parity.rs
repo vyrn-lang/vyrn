@@ -1012,6 +1012,150 @@ fn main() -> Int64 {
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
+/// A temporary handed to a position that KEEPS it, on all three engines
+/// (`rfcs/census-call-arguments.md`).
+///
+/// The call-argument rule releases a temporary after a call whose parameter is
+/// `read` and keeps nothing. The one exit rule 2 does not refuse is a variant
+/// constructor, and `movecheck::note_retention` records it: `tip(s)` puts its
+/// argument into a `Twig` that outlives the call, so the caller must NOT free it
+/// there. If the rule overreached, this program would free one buffer twice —
+/// once at the call and once when the tree is released — and the memory suite
+/// cannot see a double free. The output can: the tree is printed AFTER the call
+/// that would have freed it, so a reused buffer shows as wrong bytes, and a
+/// hardened allocator traps instead.
+///
+/// The three retaining shapes the corpus has are all here: a one-payload
+/// constructor, a two-payload one whose second argument is an array of trees,
+/// and a builder that forwards its parameter into another builder's retaining
+/// position — the "handed on" edge the retention set closes over.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
+fn a_retained_argument_is_not_freed_at_the_call() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-retained-arg");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Twig =
+    | Tip(String)
+    | Fork(String, Array<Twig>)
+
+fn give<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+impl Owned for Twig {
+    fn release(consume self) {
+        let given = match consume self {
+            Tip(s) => give(s),
+            Fork(s, kids) => give(s) + give(kids),
+        }
+    }
+}
+
+fn label(i: Int64) -> String {
+    return \"row-\\{i}\"
+}
+
+fn show(t: Twig) -> String {
+    return match t {
+        Tip(s) => s.copy(),
+        Fork(s, kids) => s + \"/\\{kids.length}\",
+    }
+}
+
+/// The recorded position: the argument goes into the value this returns.
+fn tip(s: String) -> Twig {
+    return Tip(s)
+}
+
+/// The forwarded one. `s` reaches `Tip` through a second call, which is the
+/// edge the retention set closes over the call graph.
+fn relabel(s: String) -> Twig {
+    return tip(s)
+}
+
+fn main() -> Int64 {
+    let mut i: Int64 = 0
+    let mut total: Int64 = 0
+    while i < 200 {
+        let a = tip(label(i))
+        let b = relabel(label(i + 1))
+        let c = Fork(label(i + 2), [])
+        // Every read happens AFTER the calls that would have freed too early.
+        total = total + Int64(show(a).byteLength) + Int64(show(b).byteLength)
+        total = total + Int64(show(c).byteLength)
+        i = i + 1
+    }
+    print(\"\\{total}\")
+    print(show(tip(label(7))))
+    print(show(relabel(label(8))))
+    return 0
+}
+";
+    let path = dir.join("retained.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("retained.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = dir.join("retained.exe");
+    let nb = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .expect("build native");
+    assert!(
+        nb.status.success(),
+        "{}",
+        String::from_utf8_lossy(&nb.stderr)
+    );
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let n = run_io(Command::new(&native), &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Spelled out: a use-after-free here is a plausible-looking string, not a
+    // crash, so the expected bytes are written down rather than compared engine
+    // to engine alone.
+    assert_eq!(
+        norm(&interp.stdout),
+        "4276\nrow-7\nrow-8\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&n.stdout), "native stdout");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "wasm stdout");
+    assert_eq!(
+        runtime_err(&interp.stderr),
+        runtime_err(&n.stderr),
+        "native"
+    );
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "wasm");
+    assert_eq!(interp.status.code(), n.status.code(), "native exit");
+    assert_eq!(interp.status.code(), w.status.code(), "wasm exit");
+}
+
 /// `bytes` / `slice` / `stringFromBytes`, which no example reaches (RFC-0077 M2g).
 ///
 /// The four examples the ladder filed under `stringFromBytes` all reach it through

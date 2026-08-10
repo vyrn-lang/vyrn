@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 use crate::declared::{Declared, Scopes};
 use crate::diagnostics::Diagnostic;
+use crate::own::DropKind;
 
 /// One place a value crosses a boundary RFC-0089 rule 1 governs: a binding, an
 /// argument, a return, a store, a `for` iterable or a lambda capture.
@@ -195,6 +196,71 @@ pub struct LetOwnership {
     pub passed: Vec<(String, usize, usize)>,
 }
 
+/// One call-argument position whose argument expression BUILT the value it
+/// hands over — the census's shape A (an owning call's result) and shape B (an
+/// allocating String expression), in `rfcs/census-call-arguments.md` §1.
+///
+/// The value has no name, so [`crate::own`] — which keys every release on a
+/// `let` — has nothing to write a row against. This is that row: the key is the
+/// ARGUMENT's node address, the way a block-exit release is keyed by the
+/// `Stmt::Let`'s.
+#[derive(Clone, Debug)]
+pub struct ArgTemp {
+    /// The argument expression's node address, in the AST the backend lowers.
+    pub id: usize,
+    /// The name the call site carries.
+    pub callee: String,
+    /// Which parameter it fills.
+    pub ix: usize,
+    pub line: usize,
+    /// The module the body lives in, `None` for the root's own file — the
+    /// stamping an error and a projection site already carry.
+    pub module: Option<String>,
+    /// The call that BUILT the value, or `None` where a String `+` did — which
+    /// is the census's shape B and the one RFC-0096 M3 already frees at four
+    /// consumers.
+    pub producer: Option<String>,
+    /// How a value of this type is reclaimed. Every recorded site has one — a
+    /// type that releases nothing is not recorded at all.
+    pub kind: DropKind,
+    /// What the callee does with it, decided after the walk: the retention set
+    /// is only closed over the call graph when every body has been read.
+    pub verdict: ArgVerdict,
+}
+
+/// What the callee at a call-argument position does with the temporary it is
+/// given. Only [`ArgVerdict::Released`] frees, and the other five are the
+/// census's own classification (`rfcs/census-call-arguments.md` §3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArgVerdict {
+    /// A `read` parameter that keeps nothing. **The caller releases the
+    /// temporary after the call** — rules 2 and 3 refuse every way the callee
+    /// could have kept it, except the constructor below.
+    Released,
+    /// A `consume` parameter: the callee owns it now, so the caller must not.
+    Transferred,
+    /// The callee keeps it — a variant constructor, or a position
+    /// [`MoveCheck::note_retention`] recorded. A leak, and not this rule's.
+    Retained,
+    /// The result points into the argument, or the argument's own producer
+    /// handed back storage it does not own. Either way somebody else owns it.
+    Lent,
+    /// No signature is visible, so nothing is proved and nothing is freed.
+    Unknown,
+    /// RFC-0096 M3's consumer rule already frees this operand at this consumer.
+    /// Recorded so the two rules cannot both fire on one value.
+    AlreadyFreed,
+}
+
+/// Everything one `Want::Lets` walk answers. Two facts out of one walk, because
+/// [`crate::own::analyze`] needs both and the walk is not cheap.
+pub struct Facts {
+    /// What every `let` owns at the end of its block — see [`ownership`].
+    pub lets: HashMap<usize, LetOwnership>,
+    /// Every call-argument temporary, with the callee's verdict on it.
+    pub arg_temps: Vec<ArgTemp>,
+}
+
 /// What every `let` in `program` owns at the end of its block, keyed by the
 /// `Stmt::Let` node address — the same key [`crate::own`] emits drops with.
 ///
@@ -202,7 +268,13 @@ pub struct LetOwnership {
 /// AST the backend lowers. Nothing is cloned on the way through, and a test or
 /// bench body is walked in place for exactly that reason.
 pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
+    facts(program).lets
+}
+
+/// [`ownership`] and the call-argument rows, out of one walk.
+pub fn facts(program: &Program) -> Facts {
     let r = run(program, Want::Lets);
+    let arg_temps = r.arg_temps;
     let mut lets = r.lets;
     // A call to a lender hands back storage the callee does not own, so the
     // binding that names it may not be released. Applied here rather than at the
@@ -255,7 +327,7 @@ pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
             });
         }
     }
-    lets
+    Facts { lets, arg_temps }
 }
 
 /// What a run of the pass is for. The check is the hot path — a keystroke pays
@@ -276,7 +348,85 @@ struct Run {
     lets: HashMap<usize, LetOwnership>,
     lending: HashSet<String>,
     retains: HashSet<(String, usize)>,
+    arg_temps: Vec<ArgTemp>,
     projections: Vec<ProjectionSite>,
+}
+
+/// What the callee does with the temporary at `(callee, ix)`.
+///
+/// Every clause is a rule that already shipped, read at a position instead of at
+/// a binding: `constructs` is `59c8a0c`'s recorded exit, `retains` is
+/// [`MoveCheck::note_retention`]'s set closed over the call graph, `lending` is
+/// [`MoveCheck::lends`]'s, and the capability is the parameter's own
+/// declaration. Rules 2 and 3 are what make `read` mean "keeps nothing": a
+/// borrow may not be stored and may not be returned, and `59c8a0c` closed the
+/// hand-over exit.
+fn arg_verdict(
+    s: &ArgTemp,
+    caps: &HashMap<String, Vec<Capability>>,
+    retains: &HashSet<(String, usize)>,
+    lending: &HashSet<String>,
+    decl: &Declared,
+) -> ArgVerdict {
+    // The producer handed back storage it does not own, so there is no
+    // temporary here at all — the same rule [`ownership`] applies to a `let`
+    // whose initializer is a call to a lender.
+    if s.producer.as_deref().is_some_and(|p| lending.contains(p)) {
+        return ArgVerdict::Lent;
+    }
+    // RFC-0096 M3's four consumer sites free this operand already. The two
+    // rules must not both fire on one value, and this is where they partition.
+    let allocating_operand = match s.producer.as_deref() {
+        None => true,
+        Some(p) => p == "@str" || p == "@concat",
+    };
+    if allocating_operand && (s.callee == "@str" || s.callee == "@concat") {
+        return ArgVerdict::AlreadyFreed;
+    }
+    // A variant constructor is a literal that reads like a call: the value it
+    // builds holds the argument and outlives the call. It has no signature, so
+    // it is asked for first.
+    if decl.constructs(&s.callee) {
+        return ArgVerdict::Retained;
+    }
+    if retains.contains(&(s.callee.clone(), s.ix)) {
+        return ArgVerdict::Retained;
+    }
+    if lending.contains(&s.callee) || views(&s.callee) {
+        return ArgVerdict::Lent;
+    }
+    // A row whose RETURN is the same bare type parameter as this argument's may
+    // hand the argument straight back, and `blackBox` does exactly that: it is
+    // the identity, written so an optimizer cannot see through it. Freeing at
+    // the call would free a buffer the result still names, which is a
+    // use-after-free and not a leak — `blackBox(concatFresh(blackBox(pad()),
+    // ..))` is the shape, six times over in `examples/membench.vyrn`.
+    //
+    // Read off the signature rather than off a name: `lends` answers for a row
+    // whose body yields a place INSIDE a parameter, and this row yields the
+    // parameter itself, which no body spelling can say. A user function cannot
+    // reach here — rule 3 refuses returning a borrow, and `lending` above
+    // catches what it allows.
+    if let Some(f) = crate::prelude::signature(&s.callee) {
+        if let (Type::Param(r), Some(Type::Param(p))) = (&f.ret, f.params.get(s.ix).map(|p| &p.ty))
+        {
+            if r == p {
+                return ArgVerdict::Lent;
+            }
+        }
+    }
+    let cap = caps
+        .get(&s.callee)
+        .and_then(|c| c.get(s.ix))
+        .copied()
+        .or_else(|| crate::prelude::capability(&s.callee, s.ix));
+    match cap {
+        Some(Capability::Read) => ArgVerdict::Released,
+        Some(Capability::Consume) => ArgVerdict::Transferred,
+        // `modify` and `share` write through the argument, which no temporary
+        // can be the destination of. The corpus has none.
+        Some(_) | None => ArgVerdict::Unknown,
+    }
 }
 
 /// The identity of a `let`: its node address, the key `own.rs` emits drops with.
@@ -400,6 +550,7 @@ fn run(program: &Program, want: Want) -> Run {
         retains: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         handed_on: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         param_ix: RefCell::new(HashMap::new()),
+        arg_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
     };
     let mut out = Vec::new();
@@ -415,10 +566,24 @@ fn run(program: &Program, want: Want) -> Run {
             }
         }
     };
+    // An argument temporary is stamped the same way, and for the same reason: a
+    // linked program is most of somebody else's, and the row has to say whose.
+    // It stays in place rather than draining, because the verdict below wants
+    // every row of the whole program at once.
+    let stamp = |mc: &MoveCheck, module: &Option<String>| {
+        if let Some(sink) = &mc.arg_temps {
+            for s in sink.borrow_mut().iter_mut() {
+                if s.module.is_none() {
+                    s.module.clone_from(module);
+                }
+            }
+        }
+    };
     for f in &program.functions {
         mc.errors.borrow_mut().clear();
         mc.function(f);
         drain(&mut projections, &mc, &f.module);
+        stamp(&mc, &f.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = Diagnostic::from_rendered(s, "movecheck");
             d.file = f.module.clone();
@@ -433,6 +598,7 @@ fn run(program: &Program, want: Want) -> Run {
         mc.errors.borrow_mut().clear();
         mc.body(&[], &Type::Unit, &t.body);
         drain(&mut projections, &mc, &t.module);
+        stamp(&mc, &t.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = Diagnostic::from_rendered(s, "movecheck");
             d.file = t.module.clone();
@@ -444,6 +610,7 @@ fn run(program: &Program, want: Want) -> Run {
         mc.errors.borrow_mut().clear();
         mc.body(&[], &Type::Unit, &b.body);
         drain(&mut projections, &mc, &b.module);
+        stamp(&mc, &b.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = Diagnostic::from_rendered(s, "movecheck");
             d.file = b.module.clone();
@@ -492,12 +659,20 @@ fn run(program: &Program, want: Want) -> Run {
             break;
         }
     }
+    // The verdict per call-argument temporary. It waits for both closures above:
+    // whether a position keeps what it is given is only settled once every body
+    // has been read, which is why the walk records the site and decides nothing.
+    let mut arg_temps = mc.arg_temps.map(RefCell::into_inner).unwrap_or_default();
+    for s in &mut arg_temps {
+        s.verdict = arg_verdict(s, &caps, &retains, &lending, &decl);
+    }
     Run {
         diags: out,
         sites: mc.sites.map(RefCell::into_inner).unwrap_or_default(),
         lets: mc.lets.map(RefCell::into_inner).unwrap_or_default(),
         lending,
         retains,
+        arg_temps,
         projections,
     }
 }
@@ -578,6 +753,9 @@ struct MoveCheck<'a> {
     handed_on: Option<RefCell<HashMap<(String, usize), Vec<(String, usize)>>>>,
     /// The index of each parameter of the function under check.
     param_ix: RefCell<HashMap<String, usize>>,
+    /// Where the call-argument temporaries go — see [`MoveCheck::note_arg_temp`].
+    /// `None` on the check path, with `lets`.
+    arg_temps: Option<RefCell<Vec<ArgTemp>>>,
     /// Where RFC-0092 M0's projection sites go, or `None` everywhere else. The
     /// measurement is a mode, not a second walk: the two places that would refuse
     /// are the two places that record.
@@ -1774,6 +1952,52 @@ impl MoveCheck<'_> {
         }
     }
 
+    /// Record an argument whose own expression BUILT the value it hands over —
+    /// the census's shape A and shape B (`rfcs/census-call-arguments.md` §1).
+    ///
+    /// The verdict is not taken here. What is taken here is the TYPE, because
+    /// the scope stack that answers it only exists during the walk. The reading
+    /// is [`Declared::type_of`] and not this pass's widened
+    /// [`MoveCheck::type_of`], for the reason that method's own comment gives: a
+    /// type answered there that was not answered before changes what a program
+    /// FREES, and this decides a free.
+    fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize) {
+        let Some(sink) = &self.arg_temps else { return };
+        let producer = match arg {
+            // A constructor's payload is the constructed value's, and a lending
+            // builtin hands back a place inside its receiver. Neither BUILT
+            // anything the caller may release.
+            Expr::Call { name, .. } if views(name) || self.decl.constructs(name) => return,
+            Expr::Call { name, .. } => Some(name.clone()),
+            // The one allocating operator. `+` is also integer addition, so the
+            // TYPE is what tells them apart — the check `own::str_temporary`'s
+            // doc comment demands of every caller.
+            Expr::Binary { op: BinOp::Add, .. } => None,
+            _ => return,
+        };
+        let Some(ty) = self.decl.type_of(&self.vars.borrow(), arg) else {
+            return;
+        };
+        if producer.is_none() && !matches!(crate::types::resolve(&ty, self.decl.decls()), Type::Str)
+        {
+            return;
+        }
+        let Some(kind) = self.decl.release_kind(&ty) else {
+            return;
+        };
+        sink.borrow_mut().push(ArgTemp {
+            id: arg as *const Expr as usize,
+            callee: callee.to_string(),
+            ix,
+            line,
+            module: None,
+            producer,
+            kind,
+            // Overwritten in `run` once the retention set is closed.
+            verdict: ArgVerdict::Unknown,
+        });
+    }
+
     /// An arm of an if-expression or a `match` can yield a PLACE, and the value
     /// then has two names: the arm's and whatever the expression is bound to,
     /// stored into or returned as.
@@ -2960,6 +3184,7 @@ impl MoveCheck<'_> {
                     self.at_call_site.set(false);
                     r?;
                     self.note_handover(arg, name, i, *line);
+                    self.note_arg_temp(arg, name, i, *line);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         self.check_handover(arg, name, *line)?;
                         if let Expr::Var { name: v, line: vl } = arg {
@@ -5542,6 +5767,177 @@ mod tests {
         println!("per file (file: total, place, unknown)");
         for (f, t, p, u) in &per_file {
             println!("  {t:>5} {p:>5} {u:>5}  {f}");
+        }
+    }
+
+    /// `rfcs/census-call-arguments.md` §3, re-derived from the compiler.
+    ///
+    /// The census took its table with a harness it wrote into this test module
+    /// and then removed. This is that table, taken from the rule itself: every
+    /// call-argument temporary the corpus holds, bucketed by what the callee
+    /// does with it. Each file is parsed ALONE — no loader, no linking — which
+    /// is the convention every corpus measurement here uses, and which makes a
+    /// cross-module callee's signature invisible. The linked reading is larger.
+    ///
+    /// Ignored by default: it reads the repository. Run it with
+    /// `cargo test -p vyrn-frontend --lib census_call_arguments -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn census_call_arguments_over_the_corpus() {
+        let mut files = Vec::new();
+        crate::own::tests::sources("examples", &mut files);
+        crate::own::tests::sources("std", &mut files);
+        files.sort();
+
+        let mut by_verdict: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
+        let mut unknown_callees: BTreeMap<String, usize> = BTreeMap::new();
+        let (mut total, mut parsed, mut released, mut freed) = (0, 0, 0, 0);
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(tokens) = crate::lexer::lex(&src) else {
+                continue;
+            };
+            let (program, errs) = crate::parser::parse_accum(tokens);
+            if !errs.is_empty() {
+                continue;
+            }
+            parsed += 1;
+            for s in facts(&program).arg_temps {
+                total += 1;
+                *by_verdict.entry(format!("{:?}", s.verdict)).or_default() += 1;
+                if s.verdict == ArgVerdict::Released {
+                    released += 1;
+                    *by_kind.entry(format!("{:?}", s.kind)).or_default() += 1;
+                    if s.kind == DropKind::FreeStr {
+                        freed += 1;
+                    }
+                }
+                if s.verdict == ArgVerdict::Unknown {
+                    *unknown_callees.entry(s.callee.clone()).or_default() += 1;
+                }
+            }
+        }
+        println!("corpus: {} files ({parsed} parsed)", files.len());
+        println!("call-argument temporaries: {total}");
+        for (v, c) in &by_verdict {
+            println!("  {v:>13}: {c:>5}");
+        }
+        println!("released, by release kind ({released} sites, {freed} emitted today)");
+        for (k, c) in &by_kind {
+            println!("  {k:>13}: {c:>5}");
+        }
+        let mut un: Vec<_> = unknown_callees.into_iter().collect();
+        un.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("unknown, by callee");
+        for (n, c) in un.iter().take(20) {
+            println!("  {c:>5}  {n}");
+        }
+    }
+
+    /// The same census, over the LINKED corpus — the reading the backends get.
+    ///
+    /// A file parsed alone cannot see an imported function's signature, so every
+    /// cross-module callee reads `Unknown` above: `trim` alone is 43 sites. The
+    /// linker puts both bodies in one program before either backend runs, which
+    /// is the census's own §5 row 4 — a release crosses a module boundary today.
+    /// Each row is counted once, keyed by module, line and position, because a
+    /// `std/` body is linked into many roots.
+    ///
+    /// Ignored by default: it reads the repository and links it. Run it with
+    /// `cargo test -p vyrn-frontend --lib census_call_arguments_linked -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn census_call_arguments_linked() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(census_linked_count)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn census_linked_count() {
+        struct Disk;
+        impl crate::loader::ModuleResolver for Disk {
+            fn read(&self, resolved: &str) -> Result<String, String> {
+                std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+            }
+            fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+                let mut names: Vec<String> = std::fs::read_dir(resolved)
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                Ok(names)
+            }
+        }
+        let slashed = |p: &std::path::Path| {
+            p.canonicalize()
+                .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+                .to_string_lossy()
+                .replace('\\', "/")
+                .replace("//?/", "")
+        };
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let std_root = slashed(&repo.join("std"));
+
+        let mut files = Vec::new();
+        crate::own::tests::sources("examples", &mut files);
+        crate::own::tests::sources("std", &mut files);
+        files.sort();
+
+        let mut seen: HashSet<(String, usize, String, usize)> = HashSet::new();
+        let mut by_verdict: BTreeMap<String, usize> = BTreeMap::new();
+        let mut unknown_callees: BTreeMap<String, usize> = BTreeMap::new();
+        let (mut total, mut linked, mut freed) = (0, 0, 0);
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let root_key = slashed(path);
+            let opts = crate::loader::LoadOptions {
+                std_root: Some(std_root.clone()),
+                ..Default::default()
+            };
+            let Ok(program) = crate::loader::load(&src, &root_key, &opts, &Disk) else {
+                continue;
+            };
+            linked += 1;
+            for s in facts(&program).arg_temps {
+                let key = (
+                    s.module.clone().unwrap_or_else(|| root_key.clone()),
+                    s.line,
+                    s.callee.clone(),
+                    s.ix,
+                );
+                if !seen.insert(key) {
+                    continue;
+                }
+                total += 1;
+                *by_verdict.entry(format!("{:?}", s.verdict)).or_default() += 1;
+                if s.verdict == ArgVerdict::Released && s.kind == DropKind::FreeStr {
+                    freed += 1;
+                }
+                if s.verdict == ArgVerdict::Unknown {
+                    *unknown_callees.entry(s.callee.clone()).or_default() += 1;
+                }
+            }
+        }
+        println!("corpus: {} files, {linked} linked", files.len());
+        println!("call-argument temporaries: {total}");
+        for (v, c) in &by_verdict {
+            println!("  {v:>13}: {c:>5}");
+        }
+        println!("released AND emitted (a String): {freed}");
+        let mut un: Vec<_> = unknown_callees.into_iter().collect();
+        un.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("unknown, by callee");
+        for (n, c) in un.iter().take(20) {
+            println!("  {c:>5}  {n}");
         }
     }
 

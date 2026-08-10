@@ -1318,6 +1318,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
         .collect();
     let holes_map = &holes_map;
     let owned_proto = &ownership.proto;
+    // Every call-argument temporary this program releases at the call
+    // (`rfcs/census-call-arguments.md`), keyed by the argument's node address —
+    // the same shape as `droppable`, one level down from a `let`.
+    let arg_drops = ownership.arg_drops();
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1352,6 +1356,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
+            &arg_drops,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -1468,6 +1473,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
+            &arg_drops,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -1517,6 +1523,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 owned_proto,
                 &regex_globals,
                 &program.impls,
+                &arg_drops,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1554,6 +1561,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 owned_proto,
                 &regex_globals,
                 &program.impls,
+                &arg_drops,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -1599,6 +1607,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
+            &arg_drops,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -1628,6 +1637,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
+            &arg_drops,
         );
         cgen.fnval_variants = fnval_registry.clone();
         cgen.emit_fnval_copy(&mut out);
@@ -1651,6 +1661,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
+            &arg_drops,
         );
         cgen.protocol_methods = protocol_methods.clone();
         cgen.globals = globals_map.clone();
@@ -1780,6 +1791,13 @@ struct Gen<'a> {
     impls: &'a [vyrn_frontend::ast::ImplBlock],
     /// Per-block stack of (slot register, kind) to reclaim when the block exits.
     drop_stack: Vec<Vec<(String, DropKind)>>,
+    /// The argument expressions whose value this frame releases after the call
+    /// they belong to — `own`'s answer, keyed by node address the way
+    /// `droppable` is keyed by the `Stmt::Let`'s.
+    arg_drops: &'a std::collections::HashSet<usize>,
+    /// The registers holding those values, innermost call last. Pushed where the
+    /// argument is EVALUATED and taken back where its call ends.
+    arg_frees: Vec<String>,
     /// Active loop targets for `break`/`continue` (RFC-0060), innermost last.
     /// A break/continue reclaims every scope pushed since loop-body entry (drops
     /// + region exits) before branching to the loop's exit / continue target.
@@ -1925,8 +1943,11 @@ impl<'a> Gen<'a> {
         owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
+        arg_drops: &'a std::collections::HashSet<usize>,
     ) -> Self {
         Gen {
+            arg_drops,
+            arg_frees: Vec::new(),
             tmp: 0,
             label: 0,
             allocas: Vec::new(),
@@ -3770,6 +3791,12 @@ impl<'a> Gen<'a> {
         }
 
         self.gen_block(&f.body)?;
+        // A lowering that reaches an argument node outside [`Gen::gen_call`]
+        // would leave its register here, and freeing it in a block that does not
+        // dominate the use is worse than not freeing it at all. Nothing in the
+        // corpus does — this is the discipline `emit_drop` already states, in
+        // one line: a release this cannot place is a leak, never a wrong free.
+        self.arg_frees.clear();
 
         // Ensure the final block is terminated. The checker proves every path
         // returns, so a fall-through tail is dead by construction — but it must
@@ -4867,9 +4894,29 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Emit code computing `expr`; return (operand, AST type).
+    ///
+    /// The wrapper keeps ONE fact: whether this expression is a call argument
+    /// whose value the CALLER releases once the call is done with it
+    /// (`rfcs/census-call-arguments.md`). `own` decided that, per argument node;
+    /// this only remembers the register, and [`Gen::gen_call`] frees it after
+    /// the call the argument belongs to. Recording it HERE — where the argument
+    /// is evaluated — rather than hoisting the argument at the call is what
+    /// keeps the evaluation order the one the program wrote.
+    ///
+    /// Inside a `region` the buffer came from the arena and the region exit
+    /// reclaims it, exactly as [`Gen::free_str_temp`] stands aside there.
+    fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
+        let r = self.gen_expr_inner(expr)?;
+        if self.region_depth == 0 && self.arg_drops.contains(&(expr as *const Expr as usize)) {
+            self.arg_frees.push(r.0.clone());
+        }
+        Ok(r)
+    }
+
     /// Emit code computing `expr`; return (operand, AST type). The type is
     /// `Type::Unit` for value-less calls (`print`, Unit functions).
-    fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
+    fn gen_expr_inner(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         match expr {
             // RFC-0093: a take is the load the read already emits, without the
             // `deep_copy` call that used to follow it.
@@ -7924,7 +7971,37 @@ impl<'a> Gen<'a> {
     /// nothing here knows what a piece is — which is the point: `render_code`
     /// and the splice table exist once, in the interpreter, and both engines run
     /// that one copy.
+    /// A call, then the release of every argument temporary it is finished with.
+    ///
+    /// The census's rule (`rfcs/census-call-arguments.md` §8): a heap-owning
+    /// value the ARGUMENT EXPRESSION built has no binding, so `own` — which keys
+    /// every release on a `let` — has nothing to write a row against, and
+    /// `width(label(i))` leaked 48 bytes a turn where `let s = label(i)` on the
+    /// line above did not. The consumer is the only place that knows the
+    /// temporary exists AND knows the callee is done with it, so the release
+    /// goes here. Which arguments those are is `own`'s answer and not this
+    /// backend's: it stands aside at a `consume` position, at a constructor, at
+    /// a position `movecheck::note_retention` recorded, and wherever no
+    /// signature is visible.
+    ///
+    /// The mark is what makes it nest. `f(g(h(x)))` frees `h`'s result at `g`
+    /// and `g`'s at `f`, because the inner call takes back only what was pushed
+    /// after its own mark.
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
+        let mark = self.arg_frees.len();
+        let r = self.gen_call_inner(name, args);
+        for v in self.arg_frees.split_off(mark) {
+            // A block that has already branched takes no more instructions —
+            // `panic("a" + b)` ends its block, and the free would be text after
+            // a terminator. The value is unreachable there anyway.
+            if !self.terminated {
+                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+            }
+        }
+        r
+    }
+
+    fn gen_call_inner(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function lowers as
         // a call to it. The loader injected the module (reserved `$` spellings, so
         // nothing can collide with or capture them) and this emitter holds no
@@ -12368,6 +12445,7 @@ mod tests {
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
         let (rt, pt, pc, ty, va, sg, sb, fs, dm, hm, rg) = Default::default();
         let ow = vyrn_frontend::own::Owned::default();
+        let ad = std::collections::HashSet::new();
         let g = Gen::new(
             &rt,
             &pt,
@@ -12382,6 +12460,7 @@ mod tests {
             &ow,
             &rg,
             &[],
+            &ad,
         );
         let rec = |fs: &[Type]| {
             Type::Record(

@@ -1,7 +1,8 @@
 # Census — The Call Argument
 
-- **Status:** measurement only. No engine code changed. The recommendation at the
-  end extends a rule that shipped; it does not propose a new fact on a signature.
+- **Status:** measured, then **implemented** — §9 records what landed and the
+  real numbers. The recommendation extends a rule that shipped; it does not
+  propose a new fact on a signature.
 - **Measured at:** `45b3740` (RFC-0096 M3, as landed).
 - **Machine:** Windows 11, `clang` 22.1.0, release CLI, native target.
 - **Question:** RFC-0096 M3 closed the `@concat` operand class and left two rows
@@ -419,3 +420,91 @@ The milestone is a rule, not a model:
    is not released, because its producer lends. Measured at 48.80 MB over
    1,000,000 turns. It is the constructor hole `59c8a0c` names, it leaks with a
    name today, and it is 78 sites of this corpus.
+
+---
+
+## 9. What landed
+
+Implemented on this branch. **M-a to M-d all shipped**, and the numbers below
+are the compiler's own: the harness this census wrote and removed is now a test
+(`movecheck::tests::census_call_arguments_over_the_corpus`), so the table is
+re-derivable and cannot drift from the rule.
+
+### The measurement flips
+
+`width(label(i))` in a loop, native, peak working set:
+
+| turns | before | after |
+|---|---:|---:|
+| 250,000 | 14.62 MB | **3.94 MB** |
+| 1,000,000 | 49.12 MB | **4.30 MB** |
+
+48.2 bytes a turn, gone. The 4N reading is 0.36 MB above the N one and does not
+move with the turn count: it is the allocator's, not the loop's. The memory suite has a `callArgument` row and reads
+**21 rows, 21 steady**. Its negative test is M-d's: make the retention question
+answer "may retain" everywhere and the row leaks again — 589,824 bytes after 500
+calls against 2,162,688 after 2,000.
+
+### The count, and where it differs from the prediction
+
+Two readings, because the two answer different questions.
+
+| | this census | landed, per file | landed, linked |
+|---|---:|---:|---:|
+| already freed by M3 | 831 | **831** | 467 |
+| open | 1505 | **1508** | 3208 |
+| released | 1274 (predicted) | **1174** | **1936** |
+| transferred (`consume`) | 101 | **101** | 246 |
+| retained | 95 | 71 | 412 |
+| lent | 2 | 24 | 557 |
+| unknown | 33 (after `print`'s row) | 138 | **57** |
+
+**The per-file reading reproduces this census and falls 100 short of its
+prediction.** The 831 and the 101 land exactly. The gap is one thing: this
+census built its capability table from **all 216 files at once** and then read
+it per file, so `trim` — declared in `std/strings` — answered `read` for a file
+that never imported it. The rule cannot do that. It reads the program in front
+of it, so a cross-module callee in a file parsed ALONE has no signature at all:
+`trim` is 43 of the 138 unknowns, and ten more names are the rest.
+
+**The linked reading is the one that ships**, and it is the census's own §5 row
+4: the linker puts both bodies in one program before either backend runs.
+Linked, `print` is gone from the unknown column and 57 sites remain — `@panicAt`
+33 (the desugar of `panic`, which diverges), `fromJson` 10, and eight more. That
+is the residual this census predicted at 33, one name larger.
+
+Linking also moves sites the OTHER way, and that is the rule working: retained
+climbs 71 → 412 and lent 24 → 557, because the retention set closes over the
+whole call graph and `std/html`'s builders become visible to the files that use
+them. A per-file reading cannot see that a callee keeps its argument. **The
+linked reading is the conservative one.**
+
+### What is released and what is only recorded
+
+Of the 1936 released sites, **1599 are a `String`** and are freed today. The
+other 337 are an `Array`, a record, a `Map` or a declared type: `own` records
+the row and the backends leave it alone, which is the leak they are today. Both
+backends free a String out of a register with the helper RFC-0096 M3 gave them;
+every other kind wants the walking release, which needs a PLACE and therefore a
+slot to spill a temporary into. That is a milestone, and this time it is one.
+
+### Three findings this census did not have
+
+1. **`blackBox` hands its argument straight back.** Its row answers `T` and its
+   parameter is `T`, so the result may BE the argument, and freeing at the call
+   is a use-after-free rather than a leak. `examples/membench.vyrn` has the shape
+   six times: `blackBox(concatFresh(blackBox(pad()), ..))`. The rule reads it off
+   the signature — a row whose return is the same bare type parameter as the
+   argument's promises nothing about the result — and `movecheck::arg_verdict`
+   answers `Lent`. It costs 7 sites. A row that hands a CONTAINER back (`@push`
+   answers `Array<T>` for an `Array<T>` receiver) asks the same question, and no
+   container is a `String`, so nothing reaches the emitted set today.
+2. **The retaining shape cannot be a steady memory row.** A builder that puts a
+   `read` argument into the value it returns LENDS that value, so the caller may
+   release neither the argument nor the result: finding 2 above, and it means the
+   shape leaks whatever this rule does. It has a three-engine test instead
+   (`parity::a_retained_argument_is_not_freed_at_the_call`), because what the
+   rule must not do there is free twice, and a double free is not a leak.
+3. **A call result fed to a `+` is a class next door and still open.** `"n" +
+   label(i)` reaches the operator lowering, not a call argument, so it is in
+   neither this census's 1505 nor M3's operand class. It is the same 48 bytes.
