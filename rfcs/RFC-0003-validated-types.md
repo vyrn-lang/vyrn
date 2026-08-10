@@ -1,6 +1,6 @@
 # RFC-0003 — Validated Types
 
-- **Status:** Draft — **core implemented in v0.1** (see below)
+- **Status:** Implemented — **core implemented in v0.1** (see below)
 - **Depends on:** RFC-0002
 - **Related:** RFC-0005 (construction returns `Result`/`Option`)
 

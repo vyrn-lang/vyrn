@@ -5,68 +5,166 @@ implementation and an RFC disagree, that is a bug in one of them, and the RFC is
 where the argument gets settled.
 
 The RFCs capture *decisions and their rationale*, not just syntax. Each one lists
-its open questions explicitly so we know what is settled and what still needs a
-prototype to answer.
+its open questions explicitly, so a reader can tell what is settled from what
+still needs a prototype to answer. Several RFCs record a decision that was later
+reversed; the reversal is written into the same file rather than hidden, because
+the evidence that changed the answer is the part worth keeping.
 
-## Reading order
+## Where to start
 
-| RFC | Title | What it settles |
-|-----|-------|-----------------|
-| [0001](RFC-0001-vision.md) | Vision & Principles | Mission, audience, non-goals, the philosophy every other RFC answers to |
-| [0002](RFC-0002-type-system.md) | Type System | Structural typing, utility types, generics, pattern matching, no casts |
-| [0003](RFC-0003-validated-types.md) | Validated Types | Refinement types, compile-time vs runtime validation, the signature feature |
-| [0004](RFC-0004-capabilities-and-memory.md) | Capabilities & Memory | read/modify/consume/share model, memory strategy, the open research |
-| [0005](RFC-0005-error-handling.md) | Errors & Null | `Result`, `Option`, `?` propagation, no null |
-| [0006](RFC-0006-diagnostics.md) | Diagnostics | The compiler-as-teacher output format |
-| [0007](RFC-0007-string-templates.md) | String Templates | `\{ }` interpolation, tagged templates, injection-safe `sql`/`latex` |
-| [0008](RFC-0008-logging.md) | Logging | SLF4J-style facade + Logback-style backend; retires `print` |
-| [0009](RFC-0009-error-model.md) | Error Model | `Issue` + accumulating `Validation<T>` with i18n keys |
-| [0010](RFC-0010-modules.md) | Modules | `import`/`export`, loader/linker, JSON-Schema type imports, `vyrn.json` manifest, lock-pinned reproducible remotes |
-| [0011](RFC-0011-array-mutation.md) | In-Place Array Mutation | `a[i] = v` / `pop` / `swapRemove`, and `a[i].field = v` write-through |
-| [0012](RFC-0012-js-interop.md) | JS Interop (`extern`) | Host imports/exports on wasm; the first feature whose behavior differs per backend |
-| [0013](RFC-0013-module-state-event-loop.md) | Module State & Event Loop | Top-level `let` state, host-driven handler dispatch |
-| [0014](RFC-0014-input-io.md) | Input I/O | `args()`, `readLine`, file + byte builtins, canonical I/O errors |
-| [0015](RFC-0015-testing.md) | Testing | `test` blocks, `assert`/`assertEq`, `vyrn test` |
-| [0016](RFC-0016-server.md) | The Server | `vyrn serve`, `Request`/`Response`, the async decision |
-| [0017](RFC-0017-formatter.md) | Canonical Formatter | `vyrn fmt`: one style, no options |
-| [0018](RFC-0018-json-codec.md) | The JSON Codec | `toJson`/`fromJson`: canonical encode, decode into `Validation<T>` with accumulated `Issue`s |
-| [0024](RFC-0024-enums-on-the-wire.md) | Payload Enums on the Wire | **Implemented**: the codec's v2 — payload enums & `Result<T, E>` cross the wire externally tagged (`"Unit"` / `{"Circle":5}` / `{"Rect":[2,3]}`), with a matching `oneOf` jsonSchema (emit↔import byte-exact) and a `Result`-returning RPC procedure |
-| [0019](RFC-0019-rpc.md) | Typed RPC | **Implemented**: the codec as an RPC layer, end-to-end typed calls — a library (`std/rpc`) over RFC-0021's `moduleInterface`, with `vyrn dev` + browser runtimes |
-| [0020](RFC-0020-i18n.md) | i18n | **Implemented (M1 + M2)**: M1 finite string types & interpolation containment (a proven `"nav.\{s}.label" ⊆ TransKey` skips its runtime check + literal completion); M2 the `std/i18n` generator on RFC-0021 — a Vyrn-authored JSON + ICU reader that flattens locales, checks cross-locale drift, and compiles each message (interpolation / plural via CLDR rules / select) into ordinary Vyrn, emitting `TransKey`, a `Locale` enum + module state, and per-key typed functions with `///` docs |
-| [0021](RFC-0021-generator-imports.md) | Generator Imports | **Implemented**: `gen fn` + `import { .. } from gen(args)` — comptime-pure module synthesis, mediated `readFile`/`listDir`/`moduleInterface`, content-addressed cache |
-| [0022](RFC-0022-ergonomics.md) | Ergonomics Batch | **Implemented**: `else if` chaining; string ordering (`< <= > >=`, byte-wise); `s[i] : UInt8` (aligned with `bytes(s)`); import aliasing (`import { X as Y }`, alias-aware LSP) — the last erases RFC-0019's `call<Proc>` deviation |
-| [0023](RFC-0023-function-values.md) | Function Values | **Implemented**: `fn`-typed parameters + lambda literals (`\|x\| expr`), parameter-only and call-argument-only, read-only captures, per-lambda monomorphization — zero runtime function pointers in any backend; ships generic `std/arrays` (`map`/`filter`/`fold`/`any`/`all`) |
-| [0025](RFC-0025-worker-threads.md) | Worker Threads | **Implemented**: `spawn` on real OS threads natively (shim-resident: Win32/pthreads, wasm stays inline, `VYRN_SEQUENTIAL_SPAWN=1` escape hatch) — byte-identical by isolation, zero parity exclusions; `vyrn serve/dev --workers N` runs `handle` on per-worker interpreters behind the module-state gate (refusal names the call path) |
+- [RFC-0001 Vision & Principles](RFC-0001-vision.md) — mission, audience,
+  non-goals. Every other RFC answers to it.
+- [RFC-0003 Validated Types](RFC-0003-validated-types.md) — the signature
+  feature: a type carries the rule that makes a value valid.
+- [RFC-0004 Capabilities & Memory](RFC-0004-capabilities-and-memory.md) —
+  `read` / `modify` / `consume` / `share`. Read §4 and §5 as history: the memory
+  model they record was replaced. The current one is
+  [RFC-0089](RFC-0089-mutable-value-semantics.md) through
+  [RFC-0096](RFC-0096-a-self-referring-type-declares-its-release.md), and
+  [`PLAN-memory-model.md`](PLAN-memory-model.md) is the order it landed in.
+- [RFC-0021 Generator Imports](RFC-0021-generator-imports.md) — user code that
+  runs at compile time and synthesizes a module. RPC, i18n, UI, OpenAPI and
+  GraphQL are libraries over it, not compiler features.
 
-## Status legend
+## Status
 
-Each RFC header carries a status:
+Each RFC carries its own `**Status:**` header, and that header is the authority.
+This index copies the header; it does not judge it.
 
-- **Draft** — under active discussion, decisions may still flip.
-- **Accepted** — decision made; implementation may lag.
-- **Implemented** — reflected in `compiler/` and covered by tests.
-- **Superseded by RFC-XXXX** — kept for history.
+The corpus uses more than four words, because the work is milestoned. A status
+may read "Implemented", "Complete as scoped", "Accepted and complete", "Shipped",
+"Superseded by RFC-XXXX", or a per-milestone line such as "M1 and M2 shipped;
+M3 stopped at its own limit". Read the header, not a legend.
 
-The early RFCs (0001–0009) began as **Draft**, distilled from the founding
-design conversation; most of the surface they describe — and RFCs 0010–0016 —
-is now **Implemented** in `compiler/` and covered by the three-way parity
-corpus (each RFC header carries its own status). RFC-0004's memory model is the
-part still expected to move; RFC-0017 (the formatter, `vyrn fmt` + LSP
-`textDocument/formatting`) and RFC-0018 (the JSON codec, `toJson`/`fromJson`)
-are now **Implemented** too. RFC-0021 (generator imports — user code that runs
-at compile time and synthesizes a module) is **Implemented** and is the
-mechanism RFC-0019 (typed RPC) and RFC-0020 (i18n) are now built as libraries
-over: with the `moduleInterface` reflection primitive and mediated file reading,
-both shed their compiler-flavored special cases. Both are now **Implemented** —
-`std/rpc` and `std/i18n` are ordinary Vyrn `gen fn`s the compiler knows nothing
-about. RFC-0025 (worker threads) is **Implemented** too — the promise RFC-0016's
-async decision made ("worker threads calling `handle` in parallel, gated on the
-isolation analysis") is kept, with `spawn` on real OS threads under the same
-byte-identical corpus.
+Twelve RFCs stopped short of their own design on purpose: 0047, 0074, 0075,
+0077, 0080, 0082, 0084, 0085, 0086, 0091, 0093 and 0095. Each header says which
+milestone landed and what did not.
+
+## The index
+
+95 RFCs, numbered 0001 to 0096. **There is no RFC-0066** — the number was
+skipped and never used. Nothing in the repository references it. Closing the gap
+would mean renumbering thirty files and breaking every cross-reference, so the
+gap stays.
+
+| RFC | Title | Status |
+|-----|-------|--------|
+| [0001](RFC-0001-vision.md) | Vision & Principles | Draft |
+| [0002](RFC-0002-type-system.md) | Type System | Implemented |
+| [0003](RFC-0003-validated-types.md) | Validated Types | Implemented (core) |
+| [0004](RFC-0004-capabilities-and-memory.md) | Capabilities & Memory | Implemented in part; §4–§5 superseded by RFC-0090 |
+| [0005](RFC-0005-error-handling.md) | Errors, Null & Concurrency | Implemented |
+| [0006](RFC-0006-diagnostics.md) | Diagnostics | Draft |
+| [0007](RFC-0007-string-templates.md) | String Templates & Safe Interpolation | Implemented (§v2 included) |
+| [0008](RFC-0008-logging.md) | Logging | Implemented in part |
+| [0009](RFC-0009-error-model.md) | Structured, Accumulating Validation | Implemented |
+| [0010](RFC-0010-modules.md) | Modules: `import`/`export`, Manifests & Reproducible Remotes | Implemented (M1–M4) |
+| [0011](RFC-0011-array-mutation.md) | In-Place Array Mutation | Implemented |
+| [0012](RFC-0012-js-interop.md) | JS Interop (`extern`) | Implemented (M1–M3) |
+| [0013](RFC-0013-module-state-event-loop.md) | Module State & the Host-Driven Event Loop | Implemented |
+| [0014](RFC-0014-input-io.md) | Input: Args, Stdin, Files, Bytes | Implemented (M1 + M2) |
+| [0015](RFC-0015-testing.md) | Testing: `test` Blocks, `assert`, `vyrn test` | Implemented |
+| [0016](RFC-0016-server.md) | The Server: `vyrn serve` & the Async Decision | Implemented |
+| [0017](RFC-0017-formatter.md) | `vyrn fmt`: the Canonical Formatter | Implemented |
+| [0018](RFC-0018-json-codec.md) | The JSON Codec: `toJson` / `fromJson` | Implemented |
+| [0019](RFC-0019-rpc.md) | Typed RPC as a Library | Implemented |
+| [0020](RFC-0020-i18n.md) | i18n: Typed Translations & Finite String Types | Implemented (M1 + M2) |
+| [0021](RFC-0021-generator-imports.md) | Generator Imports: Compile-Time Module Synthesis | Implemented |
+| [0022](RFC-0022-ergonomics.md) | Ergonomics Batch | Implemented |
+| [0023](RFC-0023-function-values.md) | Function Values, Monomorphized (Closures v1) | Implemented |
+| [0024](RFC-0024-enums-on-the-wire.md) | Payload Enums on the Wire (Codec v2) | Implemented |
+| [0025](RFC-0025-worker-threads.md) | Worker Threads: Parallel `spawn`, Concurrent `serve` | Implemented |
+| [0026](RFC-0026-ui.md) | The UI Layer: `std/html`, Pages, Components, Compiled Reactivity | Implemented (M1–M4) |
+| [0027](RFC-0027-import-namespace.md) | `import * as ns`: Namespaced Imports | Implemented |
+| [0028](RFC-0028-map.md) | `Map<String, V>`: The Dictionary Type | Implemented |
+| [0029](RFC-0029-module-state.md) | Module State Everywhere: Lifting the Root-Only Rule | Implemented |
+| [0030](RFC-0030-if-expression.md) | `if` as an Expression | Implemented (M1) |
+| [0031](RFC-0031-interface-closure.md) | `moduleInterface`: The Reachable Type Closure | Implemented |
+| [0032](RFC-0032-tw.md) | `std/tw`: Theme-Derived Utility Classes as a Checked Type | Implemented |
+| [0033](RFC-0033-origin-maps.md) | Origin Maps: Editor Support Inside Generator Inputs | Implemented |
+| [0034](RFC-0034-soft-navigation.md) | Soft Navigation: SPA Feel over MPA Truth | Implemented; superseded in part by RFC-0067 |
+| [0035](RFC-0035-patch-protocol.md) | The Patch Protocol: Wasm-Side Diffing | Implemented |
+| [0036](RFC-0036-vyx-tw.md) | `.vyx` ↔ `Tw`: Compile-Checked Classes in Templates | Implemented |
+| [0037](RFC-0037-stored-closures.md) | Stored Function Values by Defunctionalization (Closures v2) | Implemented |
+| [0038](RFC-0038-contract-exports.md) | Contract Exports: Connect, OpenAPI, GraphQL SDL | Implemented |
+| [0039](RFC-0039-vyx-v2.md) | `.vyx` v2: Vue-Flavored Templates, `.vyx` Pages, Real Parsing | Implemented |
+| [0040](RFC-0040-app-ergonomics.md) | App Ergonomics: Generator Identity, RPC Callbacks, `.vyx` Order | Implemented (§1–§5) |
+| [0041](RFC-0041-layouts.md) | Layouts, Error Pages, and Head Ownership | Implemented |
+| [0042](RFC-0042-template-intelligence.md) | Template Editor Intelligence | Implemented |
+| [0043](RFC-0043-time-random.md) | Time and Randomness at the Host Boundary | Implemented |
+| [0044](RFC-0044-storage.md) | `std/storage`: Crash-Safe Persistence | Implemented |
+| [0045](RFC-0045-bitwise.md) | Bitwise Operators | Implemented |
+| [0046](RFC-0046-strings.md) | `std/strings`: The String Library (+ a `slice` builtin) | Implemented |
+| [0047](RFC-0047-semantic-highlighting.md) | Semantic Highlighting, Import Hover, and Grammar Gaps | Implemented (§1–§3); §4 diagnosed, blocked |
+| [0048](RFC-0048-vyx-origins.md) | Complete `.vyx` Origins: Script Sections & Real-File Pages | Implemented (§1–§3) |
+| [0049](RFC-0049-vyx-owner-discovery.md) | `.vyx` Owner Discovery & Cached Forward-Mapping | Implemented |
+| [0050](RFC-0050-lsp-references.md) | LSP: Scope-Aware Highlight, Import-Path Definition, Namespace Colour | Implemented |
+| [0051](RFC-0051-hover-quality.md) | Hover Quality: Docs, Members, Record Structure, Class Precision | Implemented |
+| [0052](RFC-0052-safelist-css-hover.md) | Safelisted Class Hover Shows the App's Own CSS | Implemented |
+| [0053](RFC-0053-generated-error-mapping.md) | Lex/Parse Errors in Generated Code Map Back to Their Source | Implemented |
+| [0054](RFC-0054-code-quotes.md) | Code Quotes: Structured Emission and Real Scanning for Generators | Implemented |
+| [0055](RFC-0055-benchmarking.md) | Benchmarking: `bench` Blocks, `blackBox`, `vyrn bench` | Implemented |
+| [0056](RFC-0056-smallarray.md) | `SmallArray<T, N>`: Small-Buffer Collections | Implemented |
+| [0057](RFC-0057-byte-literals.md) | Byte Literals: `'{'` as `UInt8` | Implemented |
+| [0058](RFC-0058-string-length.md) | `String.length` Is a Lie: `byteLength` / `charCount()` | Implemented |
+| [0059](RFC-0059-std-json.md) | `std/json` + the std Cleanliness Sweep | Implemented |
+| [0060](RFC-0060-control-flow.md) | Control-Flow Ergonomics: `break`/`continue`, `if let`/`while let`, `%` | Implemented |
+| [0061](RFC-0061-std-args.md) | `std/args`: CLI Argument Parsing | Implemented |
+| [0062](RFC-0062-explicit-builtins.md) | Explicit Builtin Imports + Constructor Highlighting | Implemented |
+| [0063](RFC-0063-ci-benchmarks.md) | Benchmarks in CI: `--json`, `--compare`, and the bench job | Implemented |
+| [0064](RFC-0064-dev-codelens.md) | "Run dev server" CodeLens | Implemented |
+| [0065](RFC-0065-vyrn-doc.md) | `vyrn doc`: Markdown API Docs (Mermaid Included) | Implemented |
+| [0067](RFC-0067-soft-navigation.md) | Soft Navigation v2: No More Full Reloads | Implemented |
+| [0068](RFC-0068-validation-ux.md) | Structured Validation UX: Issues Survive the Wire | Implemented |
+| [0069](RFC-0069-universal-pages.md) | Universal Pages: Nuxt-Mode Navigation | Implemented |
+| [0070](RFC-0070-lazy-data.md) | Lazy Data: Render Instantly, Fill In When It Arrives | Implemented |
+| [0071](RFC-0071-module-contracts.md) | Module Contracts: Conventions You Can See | Implemented (M1, M2, M2b, M2c, M3, M4) |
+| [0072](RFC-0072-audience-and-derived-rpc.md) | Audience and Derived RPC: Deleting the Contract File | Implemented (M1–M5) |
+| [0073](RFC-0073-generator-symbol-maps.md) | Generator Symbol Maps: Rename Across the Boundary | Implemented (M1) |
+| [0074](RFC-0074-protocol-projections.md) | Protocol Projections: Full Fidelity, No Erasure | M1, M2, M3a, M3b, M4a shipped; M4b remains |
+| [0075](RFC-0075-streams.md) | `Stream<T>`: Cleanup as an Obligation, Not a Convention | Implemented (M1–M3); M4 given up |
+| [0076](RFC-0076-generators-as-wasm.md) | Generators as Wasm: Compile the Generator, Don't Interpret It | Implemented (M1–M7) |
+| [0077](RFC-0077-direct-wasm-backend.md) | A Direct Wasm Backend: Stop Going Through LLVM | Implemented (M0–M2p, M5, M6); M3 and M4 struck |
+| [0078](RFC-0078-the-runtime-is-vyrn.md) | The Runtime Is Vyrn | Complete as scoped (M1–M5) |
+| [0079](RFC-0079-failure-is-a-value.md) | Failure Is a Value, and Crashing Is the Caller's Call | Accepted and complete (M1–M3) |
+| [0080](RFC-0080-associated-types-and-generic-impls.md) | Associated Types and Generic Impls | M1 and M2 shipped; M3 shipped in half |
+| [0081](RFC-0081-float-formatting-in-vyrn.md) | Float Formatting in Vyrn | Shipped (M1, M2) |
+| [0082](RFC-0082-containers-are-vyrn.md) | Containers Are Vyrn: `Array` Is the Primitive | Accepted; M1 shipped; M2 stopped at its own limit |
+| [0083](RFC-0083-portable-simd.md) | Portable SIMD, Without `unsafe` and Without Breaking Parity | Accepted; M1–M4 shipped |
+| [0084](RFC-0084-static-protocol-dispatch.md) | Protocol Dispatch Is Static Everywhere | M1 and M2 shipped |
+| [0085](RFC-0085-graphql-execution.md) | Answering a GraphQL Query | M1, M2, M3, M4a shipped; M4b designed |
+| [0086](RFC-0086-the-compiler-asks-the-type.md) | The Compiler Asks the Type | M1 and M3 implemented; M2 blocked |
+| [0087](RFC-0087-memory-scenarios.md) | Every Memory Scenario, and What Handles It | Census, closed |
+| [0088](RFC-0088-ownership-of-places.md) | Ownership of Places | Superseded by RFC-0089 |
+| [0089](RFC-0089-mutable-value-semantics.md) | Mutable Value Semantics | Implemented |
+| [0090](RFC-0090-one-model.md) | One Model: Values, and Nothing Else | Implemented |
+| [0091](RFC-0091-the-container-protocols.md) | The Container Protocols | M1, M2, M3 implemented; M4 stopped |
+| [0092](RFC-0092-a-projection-is-a-borrow.md) | A Projection Is a Borrow | Complete (M0–M5) |
+| [0093](RFC-0093-a-take-is-a-move-out-of-a-place.md) | A Take Is a Move Out of a Place | M1 and M2 landed |
+| [0094](RFC-0094-a-builtin-is-a-declaration.md) | A Builtin Is a Declaration | Complete (M1, M2, M3) |
+| [0095](RFC-0095-a-task-is-owned.md) | A Task Is Owned | M1 and M3 built; M2 priced |
+| [0096](RFC-0096-a-self-referring-type-declares-its-release.md) | A Self-Referring Type Declares Its Release | Complete (M1, M2, M3) |
+
+## The other documents here
+
+Seven files in this directory are not RFCs. They are records of measurement and
+of friction, and the RFCs above cite them.
+
+| File | What it is |
+|------|------------|
+| [`PLAN-memory-model.md`](PLAN-memory-model.md) | The execution plan for the memory-model arc: ten phases, in the order they landed. Complete, and it records the chain that continued past it into RFC-0092 and RFC-0093. |
+| [`NOTES-dogfood-bin.md`](NOTES-dogfood-bin.md) | Friction record from writing `examples/bin`, the pastebin that survives restarts — the first persistent app. |
+| [`NOTES-dogfood-shelf.md`](NOTES-dogfood-shelf.md) | Friction record from writing `examples/shelf`, the full-stack app. |
+| [`NOTES-dogfood-vlog.md`](NOTES-dogfood-vlog.md) | Friction record from writing `examples/vlog.vyrn`, the CLI and text app. |
+| [`census-builtins.md`](census-builtins.md) | Measurement of every reserved builtin name. Became RFC-0094. |
+| [`census-call-arguments.md`](census-call-arguments.md) | Measurement of call-argument shapes, then implemented; §9 records what landed. |
+| [`census-regions.md`](census-regions.md) | Measurement of `region { .. }` use. Its recommendation closed two rows of the builtins census. |
 
 ## Process
 
 1. A change to language semantics starts as an edit to the relevant RFC.
 2. Open questions get resolved by writing the smallest prototype that answers
    them, then recording the answer back in the RFC.
-3. Only once an RFC section is **Accepted** does it earn implementation effort.
+3. Only once an RFC section is accepted does it earn implementation effort.
+4. When the work lands, the RFC's own status header is updated to say which
+   milestones shipped and which did not. That header is what this index reads.

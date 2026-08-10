@@ -1,6 +1,6 @@
 # RFC-0005 — Errors, Null & Concurrency
 
-- **Status:** Draft — **`Option`, `Result`, `match`, and `?` implemented in v0.1**
+- **Status:** Implemented — **`Option`, `Result`, `match`, and `?` implemented in v0.1**
 - **Depends on:** RFC-0002 (unions), RFC-0003 (construction returns Result)
 
 > **Implementation status (v0.1).** `Option<T>`, `Result<T, E>`, exhaustive

@@ -1,6 +1,6 @@
 # RFC-0004 — Capabilities & Memory
 
-- **Status:** Draft — capabilities and structured concurrency ship. **§4 and §5's
+- **Status:** Implemented in part — capabilities and structured concurrency ship. **§4 and §5's
   memory model is SUPERSEDED by RFC-0090: the hybrid is gone and Path B with it.**
   Read §5.4 first; §4, §5.1, §5.2 and §5.3 are kept as the record of a decision
   that was made on evidence and reversed on evidence. Remaining: surface

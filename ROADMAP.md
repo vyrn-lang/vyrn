@@ -1,12 +1,14 @@
 # Vyrn — status & roadmap
 
-The forward-looking companion to the [RFCs](rfcs/). What ships today, what's next,
-and the one decision the rest of the language waits on.
+The forward-looking companion to the [RFCs](rfcs/). What ships today, and what is
+next.
 
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **53 examples** and **743 tests** (0 warnings) — including every runtime
+across **every example in `examples/`** and the whole workspace test suite (0
+warnings). The harness scans the directory rather than a list, so the count is
+whatever is on disk. That includes every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014). The whole corpus is kept
 canonical by `vyrn fmt` (RFC-0017) and re-verified by the parity harness.
@@ -399,19 +401,20 @@ the query cache stays host-side and the `on<Proc>` RPC convention stands.
   `readFileBytes`/`bytes`/`stringFromBytes`, with canonical (never-OS) error
   strings; see the narrative above.
 - Immutable string literals (`==`, `!=`, record fields), statically allocated.
-  Concatenate two Strings with `a + b`; a String's byte length is the `s.length`
-  field. (The old `concat(a, b)` / `len(s)` free-functions were removed — a
-  user-written call to either reports a migration hint.)
+  Concatenate two Strings with `a + b`; a String's byte length is the
+  `s.byteLength` field. (The old `concat(a, b)` / `len(s)` free-functions were
+  removed — a user-written call to either reports a migration hint.)
 - **String encoding.** A `String` is an immutable sequence of **UTF-8 bytes**.
-  `s.length` counts **bytes**, not code points — equal to the code-point count
-  for ASCII text, larger for text with multi-byte characters (e.g. `"é"` has
-  `length` 2, `"日"` has `length` 3). The regex engine matches
-  byte-wise for the same reason, and `.` matches one byte. Source files are read
-  as UTF-8. One documented divergence follows from this: JSON-Schema
+  There is no `s.length`: RFC-0058 removed it, because the one name answered two
+  questions. `s.byteLength` counts **bytes** in O(1); `s.charCount()` counts
+  Unicode scalar values in O(n). They agree on ASCII and diverge on anything else
+  (`"é"` is 2 bytes and 1 char, `"日"` is 3 bytes and 1 char). The regex engine
+  matches byte-wise for the same reason, and `.` matches one byte. Source files
+  are read as UTF-8. One documented divergence follows from this: JSON-Schema
   `minLength`/`maxLength` bounds derived from a `String where` predicate carry
   the byte count through unchanged, so for non-ASCII text they bound bytes where
   a JSON validator counts UTF-16 code units — a deliberate, noted trade-off (a
-  code-point index would cost an O(n) scan on every `.length`).
+  code-point index would cost an O(n) scan on every length read).
 
 ### Types
 - **Validated types** — `type Age = Int64 where value >= 18`, or inline on a
@@ -439,7 +442,7 @@ the query cache stays host-side and the `on<Proc>` RPC convention stands.
 
 ### Errors & control
 - `Option<T>`, `Result<T, E>`, `match`, and `?` propagation (no null). `Option` and
-  `Result` payloads may be any type, so `Option<Ref<Node>>` gives a nil terminator.
+  `Result` payloads may be any type, so `Option<Handle<Node>>` gives a nil terminator.
 - **Checked conversions** — `x.toString() -> String` (a method on every number,
   `Bool`, and `String`; it replaced the `str(x)` builtin) and
   `parse(String) -> Option<Int64>` (the fallible inverse is an explicit `None`,
@@ -458,12 +461,11 @@ the query cache stays host-side and the `on<Proc>` RPC convention stands.
   call argument, a return) is that growable heap array directly — contextual,
   replacing the old `list([..])` builtin. Both iterate with `for x in arr { .. }`.
   The surface is subject-first — no `verb(object, …)` builtins.
-- **Recursive heap structures** — a singly-linked list and a binary tree. `Ref<T>`
-  makes the node type finite, `Option<Ref>` terminates it, and a recursive `release`
-  walk reclaims the whole structure (proven: 100,000 nodes cycled through a
-  65536-cell slab). Both build/traverse/reclaim end to end, to a flat memory
-  baseline — the `Option` payload is two words wide, so a `Ref` is stored inline
-  with no heap box.
+- **Recursive heap structures** — a singly-linked list and a binary tree. A
+  `Handle<T>` from `std/slots` (RFC-0090) makes the node type finite and
+  `Option<Handle<T>>` terminates it; the container owns the nodes and reclaims
+  them when it goes. Both build/traverse/reclaim end to end, to a flat memory
+  baseline. See `examples/linkedlist.vyrn` and `examples/freelist.vyrn`.
 
 #### ECS notes — what a Structure-of-Arrays ECS can do today
 
@@ -498,9 +500,9 @@ exactly where the language helps and where it doesn't:
 - **No order-preserving `insert`/`remove`/`truncate`/`clear`.** The shrinking
   surface is `pop` (last) and `swapRemove` (O(1), unordered); an ordered removal
   or a bulk shrink still means an explicit shift loop. Additive, future work.
-- **No generational entity handles yet at the array level.** `Ref<T>` gives
-  generation-checked cells, but there's no built-in dense/sparse-set or
-  generational-index allocator; entity ids here are plain array positions, and
+- **No generational entity handles at the array level.** `std/slots` gives a
+  generation-checked container (RFC-0090), but there is no built-in
+  dense/sparse-set; entity ids here are plain array positions, and
   `swapRemove` reorders survivors (fine for this toy, not for stable cross-frame
   handles).
 
@@ -543,8 +545,11 @@ none blocks the core loop.
   `fib(36)` ≈ 4.6× faster than `VYRN_SEQUENTIAL_SPAWN=1` (the documented
   sequential escape hatch) on a 12-core machine, identical output. The region
   arena stack became `thread_local` so tasks may use `region { .. }`.
-- **The heap** — dynamic strings (`a + b` concatenation, `s.length`), malloc-backed.
-- **Deterministic reclamation, Path A (no GC):**
+- **The heap** — dynamic strings (`a + b` concatenation, `s.byteLength`),
+  malloc-backed. (`String.length` was removed by RFC-0058: a string is UTF-8
+  bytes, so the count you want is `byteLength` or `charCount()`, and you must
+  say which.)
+- **Deterministic reclamation (no GC):**
   - `region { .. }` arenas free a whole *group* of allocations at block exit.
   - **ownership auto-drop** frees an *individual* heap value proven not to escape
     its block — a string, a reference cell, or a growable array (including the
@@ -554,23 +559,23 @@ none blocks the core loop.
   - Measured flat (~3 MB) where the same million-allocation loop leaks 1.2 GB.
     Every allocation is owned by exactly one mechanism, so nothing is freed twice;
     what can't be proven single-owned leaks (always safe).
-- **Generational references (Path B)** — a `Ref<T>` is a freely-copyable handle to
-  a mutable heap cell holding any `T` (`cell` / `get` / `set` / `release`; the
-  payload is boxed, so the handle is fixed-size). Each access is generation-checked,
-  so a use-after-release traps instead of dangling — even after the slot is reused.
-  The answer to the *aliasing* case. A record may hold a `Ref` to its own type
-  without becoming infinite.
-- **Inferred `release`** — the *same* ownership analysis that frees non-escaping
-  strings auto-releases non-escaping cells, so Path A and Path B are one
-  mechanism. Aggressive reclamation is safe here precisely because a missed alias
-  traps cleanly instead of dangling.
+- **Generational handles (`std/slots`, RFC-0090 M1)** — a `Handle<T>` is a
+  freely-copyable value of three words: a slot, the generation live when it was
+  issued, and the identity of the container that issued it. It owns no heap, so
+  copying one costs nothing and obliges nothing. `s[h]` checks the generation and
+  yields the element's place, so a handle used after its element is removed traps
+  on a compare instead of dangling. This is the answer to the *aliasing* case,
+  and it is an ordinary Vyrn library, not a compiler builtin. A record may hold a
+  `Handle` to its own type without becoming infinite.
 
 ### Backend
 - Text LLVM-IR backend; `vyrn build prog.vyrn` emits IR and links a native exe
-  with `clang`. (The Inkwell in-memory backend also works now — builds against an
-  LLVM 22 dev SDK and links a `fib` exe whose exit code matches the interpreter —
-  but stays excluded from the default workspace and covers only the v0.1 subset;
-  the text-IR path remains the full reference backend.)
+  with `clang`. It is the reference backend for the native target.
+- Direct wasm backend (RFC-0077); `vyrn build prog.vyrn --target wasm` writes the
+  module itself. (An in-memory Inkwell backend existed for three commits and was
+  deleted at `b1eef04`. It was ungated, so it rotted in about two weeks while the
+  language moved past it. The rule it broke: multiplicity survives only where a
+  gate checks it.)
 
 ### Tooling
 - **Structured diagnostics as a core API** — `vyrn_frontend::diagnostics(source)`
@@ -639,42 +644,45 @@ none blocks the core loop.
 
 ---
 
-## The memory model — decided (RFC-0004 §5)
+## The memory model — settled (RFC-0087 → RFC-0096)
 
-The founding notes said to settle the memory model by *prototyping and measuring*,
-not by argument. Both lowerings were built behind the same capability surface and
-measured — and the decision is now made: **a hybrid that defaults to ownership.**
-Ownership + regions handle single-owner values with zero per-access overhead and no
-annotations; generational references handle the *aliasing* case, where the check
-proved essentially free in a hot loop (within noise in steady state; ~10 % cold, on
-a loop doing nothing but access). You reach for `Ref<T>` exactly when you need
-shared mutable state — which is also where the type makes that choice legible.
+RFC-0004 §5 recorded a hybrid: ownership for single-owner values, a
+generation-checked `Ref<T>` cell for the aliasing case. That decision was made on
+evidence and **reversed on evidence**. RFC-0087 measured every memory scenario the
+language could meet, and the arc it opened — RFC-0088 through RFC-0096 — replaced
+the hybrid with one model.
 
-Both prototypes:
+**There is one kind of thing: a value.**
 
-- **Path A — ownership + regions.** ✅ Reclaims owned `String`s — regions,
-  ownership auto-drop, and ownership transfer. Measured flat vs. a 1.2 GB leak.
-- **Path B — generational references.** ✅ Prototyped. A freely-copyable `Ref<T>`
-  (over any element type) carries a generation tag; the cell carries a counter;
-  each access validates the tag, so a stale alias fails a cheap check instead of
-  dangling. This is what makes the *aliasing* case safe.
+- **Ownership is declared, not inferred.** A parameter says `read`, `modify`,
+  `consume` or `share`, and the compiler enforces moves and aliasing from that
+  word. The old escape analysis guessed; the declaration states.
+- **A store releases the old value, and an aggregate releases its places**
+  (RFC-0089, RFC-0092). `Array`, `Record`, `Enum`, `ArrayN`, `Map` and
+  `SmallArray` all hand back what they hold.
+- **A projection is a borrow** (RFC-0092) and **a take is a move out of a place**
+  (RFC-0093), so reading through a container neither copies nor loses ownership.
+- **A self-referring type declares its release** (RFC-0096), so a cyclic shape
+  says how it comes apart instead of leaking.
+- **`Ref<T>`, `cell`, `get`, `set` and `release` are gone** (RFC-0090 M4). The
+  aliasing case is `std/slots` — an ordinary Vyrn library whose `Handle<T>` is
+  three plain words. It measured **2.02× faster** than the compiler-builtin slab
+  it replaced, where RFC-0090 had predicted 1.86×.
+- **The worst scenario in the census is closed.** Building a 160 KB string in a
+  module-state accumulator took 4.92 s and 12.2 GB (RFC-0087 P1). It now takes
+  5 ms and 4.6 MB, over one buffer.
 
-**The two paths share one analysis.** `release` is inferred: the same escape
-analysis that frees non-escaping strings auto-releases non-escaping cells. So the
-capability surface stays uniform — you write neither `free` nor `release` in
-ordinary code — and reclaiming aggressively is safe on Path B because a missed
-alias traps cleanly rather than dangling.
-
-The decision is recorded in RFC-0004 §5. What's left is *surface refinement*, not a
-change of mechanism: inferred/invisible regions, `modify`/`share` reference
-inference, and concurrency.
+`vyrn why --memory <file>` reports, per binding, whether it is reclaimed, how,
+and the reason when it is not. RFC-0004 §4 and §5 are kept as history; §5.4
+records the reversal. Read the current model in RFC-0089 through RFC-0096, and
+`rfcs/PLAN-memory-model.md` for the order the ten phases landed in.
 
 ---
 
 ## Next / gated
 
-Each needs dynamic allocation or references; the heap unblocks them, but most wait
-on the reclamation decision above.
+The memory model above is settled, so nothing here waits on it. What is left is
+surface work.
 
 - ~~**Parallel execution of tasks**~~ — **shipped (RFC-0025)**: tasks run on
   real OS threads natively, and it changed no answers (the whole corpus is
@@ -714,11 +722,7 @@ on the reclamation decision above.
 
 ## RFC status
 
-| RFC | Title | Status | Notes |
-|-----|-------|--------|-------|
-| 0001 | Vision | accepted | Principles & non-goals. |
-| 0002 | Type system | mostly shipped | Records, enums, generics, transformers. |
-| 0003 | Validated types | shipped | The signature feature, end to end. |
-| 0004 | Capabilities & memory | decided | `consume` + both lowerings shipped; model settled as a hybrid defaulting to ownership (§5.2), measured. Surface refinements remain. |
-| 0005 | Error handling | shipped | `Option` / `Result` / `match` / `?`. |
-| 0006 | Diagnostics | draft | Message style used by the checker. |
+The index of all 95 RFCs, with the status each one carries in its own header,
+lives in [`rfcs/README.md`](rfcs/README.md). This file used to hold a second copy
+covering the first six. Two indexes of one corpus drift apart, so there is now
+one. Each RFC's header is the authority; the index reads it.

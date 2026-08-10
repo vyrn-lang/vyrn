@@ -101,7 +101,8 @@ Helpers (all trivial constructors so view code reads as structure):
 - **Void elements (locked):** the HTML spec set (`area base br col embed hr
   img input link meta source track wbr`) renders without a closing tag;
   children passed to a void element are ignored (documented — `toHtmlString`
-  is total, it never traps).
+  is total, it never traps). *Both halves of that parenthesis changed — see the
+  **Addendum** below.*
 - **Events on the wire:** `On("click", "removeItem", "42")` renders as
   `data-on-click="removeItem" data-arg-click="42"` — two attributes, so
   neither name nor payload needs in-attribute delimiters beyond standard
@@ -412,3 +413,44 @@ Notes for the next round:
 Runtime signals, scoped CSS, CSS-in-Vyrn, animations/transitions, streaming
 SSR, islands/partial hydration, a client router (v1 is MPA), accessibility
 lint, devtools. And — by the prime constraint — any compiler change at all.
+
+---
+
+## Addendum — a name is checked, and a void element takes no children (2026-08-11)
+
+Two defects, both found by reading `renderEl` rather than by running it.
+
+**A name is not a value.** The escaping above protects a value, because a value
+sits inside quotes. A NAME — a tag, an attribute, the event inside
+`data-on-<event>` — is concatenated into the markup OUTSIDE the quotes, where
+`&` and `"` mean nothing and a single space starts a second attribute. So
+`attr("src\" onload=\"alert(1)", "x")` rendered
+`<img src" onload="alert(1)="x">`: an event handler the program never wrote.
+Escaping is the wrong tool (an escaped name is not the name), so a name is now
+CHECKED — letters, digits, `-`, `_`, `:`, non-empty — and an unusable one traps
+with the name quoted and the fix named: put untrusted text in the value. This
+is the shape `std/http`'s `mount` already uses for an unreachable route, and
+the culture tagged templates set: injection safety by construction, refusal
+where escaping cannot reach.
+
+**Silence was the second defect.** Children given to a void element were
+dropped without a word — a `<li>` written under an `<img>` left no trace in the
+page and no diagnostic anywhere. `renderEl` now traps, naming the element and
+the number of children it cannot hold.
+
+Both refusals are about a malformed TREE, not about data: `toHtmlString` stays
+total over any text and any attribute value, which is the property SSR of
+untrusted content depends on. `attrsEqual` reuses `renderAttrs`, so `diff`
+inherits the name check — a tree that cannot render cannot diff either.
+
+Nothing legitimate paid for it: every tag and attribute in `std/`, `examples/`
+and the `.vyx` corpus is inside the checked set, and `std/vyx`/`std/ui` build
+`A(..)`/`On(..)` variants directly, which is exactly why the guard sits in the
+renderer (the one funnel all three construction paths reach) rather than in the
+`attr`/`on` constructors. `web/vyrn-dom.js` needed no change: it already skips
+children of a `VOID` tag, and `setAttribute` refuses a malformed name itself.
+
+`examples/htmlrefuse.vyrn` is the parity citizen for the attribute-name refusal
+(stderr + exit code, three backends); the tag, event, empty-name and
+void-children refusals are `compiler/vyrn-cli/tests/html.rs`, because a trap
+ends the run and one refusal is therefore one program.

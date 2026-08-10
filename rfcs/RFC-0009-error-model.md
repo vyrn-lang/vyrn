@@ -1,6 +1,6 @@
 # RFC-0009 — Structured, Accumulating Validation
 
-- **Status:** Draft — **`Issue` + `Validation<T>` implemented**
+- **Status:** Implemented — **`Issue` + `Validation<T>` implemented**
 - **Depends on:** RFC-0002 (generic enums, records), RFC-0005 (`Result`/`Option`)
 
 > **Implementation status.** The built-in `Issue` record and generic
