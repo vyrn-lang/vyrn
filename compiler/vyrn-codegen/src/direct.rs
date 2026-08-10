@@ -1830,6 +1830,39 @@ impl Fn_<'_> {
         *self.scratch.entry((t, n)).or_insert_with(|| b.local(t))
     }
 
+    /// Keep the `String` now on top of the stack, if the expression that made it
+    /// ALLOCATED it (RFC-0096 M3). `None` means there is nothing to release.
+    ///
+    /// A fresh local rather than [`Fn_::scratch`], and the reason is the shape
+    /// of the thing being kept: the interpolation spine folds left, so
+    /// `"a\{x}b\{y}c\{z}"` is nested `@concat`s as deep as it has holes, and
+    /// every level holds its left half across the lowering of its right one. A
+    /// numbered scratch slot would be clobbered by the level below it; the
+    /// scratch doc says so itself — "a nested expression evaluates to completion
+    /// before the outer one touches scratch" is exactly what is false here.
+    fn tee_str_temp(&mut self, b: &mut Frame, e: &Expr) -> Option<u32> {
+        if self.region_depth > 0 || !vyrn_frontend::own::str_temporary(e) {
+            return None;
+        }
+        let l = b.local(ValType::I32);
+        b.ins(&Instruction::LocalTee(l));
+        Some(l)
+    }
+
+    /// Hand back what [`Fn_::tee_str_temp`] kept, after the concatenation has
+    /// copied out of it.
+    ///
+    /// The concatenation's own result is on the stack and stays there: a local
+    /// read and a call push and pop above it. `free` refuses anything below
+    /// `HEAP_BASE`, so this is a no-op on a data-segment literal for the same
+    /// reason `drop s` is.
+    fn free_str_temp(&mut self, b: &mut Frame, kept: Option<u32>) {
+        let Some(l) = kept else { return };
+        b.ins(&Instruction::LocalGet(l));
+        str_hdr(b);
+        b.ins(&Instruction::Call(self.cx.rt.free));
+    }
+
     fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
         let mark = self.scope.len();
         self.releases.push(Vec::new());
@@ -3321,13 +3354,19 @@ impl Fn_<'_> {
     ) -> Result<(), String> {
         let line = Expr::line(part);
         match place {
+            // The append COPIES the operand into the accumulator, so an operand
+            // this statement allocated is released after it (RFC-0096 M3).
+            // `s = s + i.toString()` reaches the same `@str` temporary the
+            // general `+` path frees, through the fast path instead.
             Place::Local(l) => {
                 own.addr(b, 0)
                     .ok_or_else(|| gap("an append flag with no address", line))?;
                 b.ins(&Instruction::LocalGet(l));
                 self.expr_as(m, b, part, &Type::Str)?;
+                let k = self.tee_str_temp(b, part);
                 b.ins(&Instruction::Call(self.cx.rt.str_append));
                 b.ins(&Instruction::LocalSet(l));
+                self.free_str_temp(b, k);
             }
             Place::Static(at) => {
                 b.ins(&Instruction::I32Const(at as i32));
@@ -3336,8 +3375,10 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32Const(at as i32))
                     .ins(&Instruction::I32Load(word()));
                 self.expr_as(m, b, part, &Type::Str)?;
+                let k = self.tee_str_temp(b, part);
                 b.ins(&Instruction::Call(self.cx.rt.str_append));
                 b.ins(&Instruction::I32Store(word()));
+                self.free_str_temp(b, k);
             }
             Place::Slot(_) => return unsupported("an in-place append into a slot", line),
         }
@@ -4941,12 +4982,23 @@ impl Fn_<'_> {
         // A string `+` is a concatenation and a string comparison is a byte
         // compare; both are calls, so they are handled before the numeric table.
         if lt == Type::Str {
+            // The concatenation copies both halves, so a half this expression
+            // allocated is released once it has (RFC-0096 M3). The left one is
+            // kept BEFORE the right is lowered, because lowering the right can
+            // be a whole nested concatenation of its own.
+            let kl = match op {
+                BinOp::Add => self.tee_str_temp(b, lhs),
+                _ => None,
+            };
             let r = self.expr(m, b, rhs)?;
             if self.cx.resolve(&r) != Type::Str {
                 return unsupported("a string operator with a non-string operand", line);
             }
             if op == BinOp::Add {
+                let kr = self.tee_str_temp(b, rhs);
                 b.ins(&Instruction::Call(self.cx.rt.concat));
+                self.free_str_temp(b, kl);
+                self.free_str_temp(b, kr);
                 return Ok(Type::Str);
             }
             b.ins(&Instruction::Call(self.cx.rt.strcmp));
@@ -5688,7 +5740,22 @@ impl Fn_<'_> {
                 }
                 let t = self.expr(m, b, &args[0])?;
                 match self.cx.resolve(&t) {
-                    Type::Str => {}
+                    // Copy, so the rendered value owns its storage. This arm was
+                    // the IDENTITY until RFC-0096 M3 — the pointer passed
+                    // straight through, and the textual backend has strdup'd
+                    // here since it was written. That divergence was a latent
+                    // double free on this backend alone: `let t = "\{s}"` has a
+                    // single hole and no literal piece, so the whole
+                    // interpolation IS `@str(s)` with no `@concat` above it, and
+                    // `t` and `s` then released one buffer twice. The two
+                    // engines now say the same thing about who owns a rendered
+                    // String, which is what lets one rule
+                    // ([`vyrn_frontend::own::str_temporary`]) answer for both.
+                    Type::Str => {
+                        let k = self.tee_str_temp(b, &args[0]);
+                        self.str_dup(b);
+                        self.free_str_temp(b, k);
+                    }
                     // The same two steps `print` takes, for the same reason: the
                     // digits of a sized int are the digits of the `i64` its own
                     // signedness widens it to.
@@ -5713,8 +5780,15 @@ impl Fn_<'_> {
                     return unsupported("`@concat` with other than two arguments", line);
                 }
                 self.expr_as(m, b, &args[0], &Type::Str)?;
+                let ka = self.tee_str_temp(b, &args[0]);
                 self.expr_as(m, b, &args[1], &Type::Str)?;
+                let kb = self.tee_str_temp(b, &args[1]);
                 b.ins(&Instruction::Call(self.cx.rt.concat));
+                // The interpolation spine (RFC-0096 M3): `"a\{x}b\{y}"` folds
+                // left into nested `@concat`s, so every hole's `@str` and every
+                // inner join is released by the `@concat` above it.
+                self.free_str_temp(b, ka);
+                self.free_str_temp(b, kb);
                 return Ok(Type::Str);
             }
             // Not calls at all: RFC-0021-family COMPILE-TIME reflection, which the

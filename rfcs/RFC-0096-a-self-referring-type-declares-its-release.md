@@ -1,13 +1,15 @@
 # RFC-0096 — A Self-Referring Type Declares Its Release
 
-- **Status:** **Complete. Landed, M1 and M2.** The corpus row it was written to
-  close reads 0, and so does the LINKED reading M1 left open. Two of M1's claims
-  died to measurement: a declaration on the CYCLE, not on each leaking type, was
-  enough; and a declared release on a user enum leaked its payload boxes on both
-  compiling backends, which is a defect this RFC found and fixed. Two more of
-  M2's died the same way — the two type keys were already one, and the blast
-  radius was three double frees in three different shapes rather than one shape
-  repeated.
+- **Status:** **Complete. Landed, M1, M2 and M3.** The corpus row it was written
+  to close reads 0, and so does the LINKED reading M1 left open. Two of M1's
+  claims died to measurement: a declaration on the CYCLE, not on each leaking
+  type, was enough; and a declared release on a user enum leaked its payload
+  boxes on both compiling backends, which is a defect this RFC found and fixed.
+  Two more of M2's died the same way — the two type keys were already one, and
+  the blast radius was three double frees in three different shapes rather than
+  one shape repeated. M3 closed the two leaks M2 measured out of its own row and
+  found four defects doing it, two of which it recorded with numbers rather than
+  fixing, because one of them holds the other shut.
 - **Depends on:** RFC-0086 M1 (`impl Owned for T`, the declared row), RFC-0089
   rule 4 (releasing a value releases its places), RFC-0092 M2/M3 (the container
   and aggregate element walks), RFC-0093 M1/M2 (the take and the hole),
@@ -333,7 +335,8 @@ bindings carry the injected key `json$Json`. It is negative-tested three ways.
   `Copy` as well, so the tree and its copy are released once each.
 
 **Two shapes in the row leak for reasons outside this milestone**, found by
-building it and measured out of it rather than left in:
+building it and measured out of it rather than left in. **M3 below closed
+both.**
 
 - `let s = toJson(x)` **leaks its String** unless the binding is annotated.
   `toJson` carries no row in `prelude::returns`, so the declared-types reading
@@ -373,3 +376,195 @@ saw the one there was.
   serve suite, `universal_pages --ignored`.
 - RFC-0092's instrument reads `stores: 0`, `elem-store: 0`, `elem-return: 0`.
 - `cargo fmt --check` and `vyrn fmt --check` clean.
+
+---
+
+## M3 as landed — the two leaks M2 measured out of its own row
+
+Both are closed. Neither was the shape the brief named, and the second one cost
+four defects rather than one.
+
+### 1. `toJson` gets its return row, and so do ten more
+
+`let s = toJson(x)` read `NOT reclaimed — the type unknown owns no heap`. It now
+reads `reclaimed at block exit — freeing the String buffer`. The row is one
+line. **The audit around it is the milestone.**
+
+RFC-0094 folded four return types onto seeded signatures and stopped. The rest
+of `checker::RESERVED` was never asked, and the reading it feeds is
+all-or-nothing: a call with no row has no type at all, so the binding is left
+alone. Eleven names allocate a result this language can spell and had no row;
+seven more allocate and are held back, each for a reason about the TYPE.
+
+| name | it answers | named before | after |
+|---|---|:--:|---|
+| `toJson` | `String` | no | **row added** — 3 corpus sites |
+| `jsonSchema` | `String` | no | **row added** |
+| `schemaOf` | `Schema` | no | **row added** — 1 corpus site |
+| `args` | `Array<String>` | no | **row added** — 1 corpus site |
+| `readLine` | `Option<String>` | no | **row added** |
+| `readFile` | `Result<String, String>` | no | **row added** |
+| `readFileBytes` | `Result<Array<UInt8>, String>` | no | **row added** |
+| `writeFile` | `Result<Bool, String>` | no | **row added** |
+| `renameFile` | `Result<Bool, String>` | no | **row added** |
+| `fsyncFile` | `Result<Bool, String>` | no | **row added** |
+| `stringFromBytes` | `Result<String, String>` | **WRONGLY** | **row corrected** — see below |
+| `fromJson` | `Validation<T>` | no | excluded — `T` is the type NAME the caller wrote, which no signature can say |
+| `value` | `Value` | no | excluded — it boxes the caller's buffer rather than copying it, so it LENDS and a row would double free |
+| `@list` | `Array<E>` | no | excluded — `E` is the argument's element type, which one row cannot name any more than `at` can |
+| `pullAt` | `Option<T>` | no | excluded — the element type comes from the expected type, so the checker already refuses the call without an annotation |
+| `moduleInterface` | `ModuleInterface` | no | excluded — generation-only (RFC-0021); neither compiling backend lowers it, so who owns the result is written nowhere. **18 corpus sites**, all in `gen fn`s |
+| `contractOf` | `ContractInfo` | no | excluded — the same, for RFC-0071's side |
+| `listDir` | `Result<Array<String>, String>` | no | excluded — the same again |
+| `at`, `atSet`, `bytes` | the receiver's | no | excluded — they LEND, which is RFC-0094's older rule |
+| `blackBox`, `@pop`, `@swapRemove`, `@join` | a bare `T` | no | excluded — RFC-0094's other older rule |
+
+Every other reserved name answers a scalar, `Unit`, a `Logger`, a vector or a
+sum constructor, and none of those owns heap.
+
+**`stringFromBytes` is what the audit was for.** RFC-0094 M1 wrote its return as
+`String`; the checker's arm answers `Result<String, String>`. Two spellings of
+one fact, which is exactly what that RFC exists to prevent, and they had drifted
+in the milestone that removed the second lists. The declared reading therefore
+released `let s = stringFromBytes(b)` as a String buffer, handing
+`__vyrn_str_free` the aggregate's tag word: **the native binary SEGFAULTED**,
+and `vyrn why --memory` said "reclaimed at block exit — freeing the String
+buffer" about it. No annotated binding ever met it, which is why nothing did.
+`every_allocating_builtin_answers_its_return_type` is the assertion that a row
+cannot drift from the arm again.
+
+**Corpus:** 3783 bindings, "not reclaimed" **2208 → 2184**; "the type owns no
+heap" **2057 → 2033**. The linked reading M2 took to 0 stays 0.
+
+### 2. The expression temporary — measured, then four defects deep
+
+`"n" + i.toString()` allocates twice and names once. `own` keys every release on
+a `Stmt::Let`, so the `@str` result has nothing to write a row against.
+
+**The measurement, native, before anything moved.** A loop of
+`"n" + i.toString()`, peak working set:
+
+| turns | peak |
+|---:|---:|
+| 250,000 | 19.94 MB |
+| 1,000,000 | 54.12 MB |
+| 1,000,000, interpolation form `"n\{i}"` | 65.16 MB |
+
+Not a steady state — about 48 bytes a turn. **The interpolation form leaks the
+same way**, and the brief's guess that `finite.rs` might already free its holes
+is wrong: `"a\{x}b\{y}"` desugars to `@concat` folded LEFT over five pieces, so
+a two-hole template allocates six buffers and names one.
+
+**The corpus shapes, counted:**
+
+| shape | sites |
+|---|---:|
+| a `+` / `@concat` operand that is itself an allocating String expression | **2257** |
+| a call argument that is the result of a call whose declared return owns heap | 930 |
+| a call argument that is an allocating String expression | 632 |
+
+**The fix closes the first row and leaves the other two open**, and the reason
+is a rule rather than an appetite. `@concat`, a String `+`, `@str` and the
+in-place append all COPY out of their operands, so an operand the expression
+itself allocated is finished with the moment the copy is made. A general call
+may RETAIN its argument — a `consume` parameter, a variant constructor — so
+freeing after one needs the callee's signature at the site and across modules.
+That is a milestone, not a line.
+
+`own::str_temporary` is the one rule, read by both compiling backends at four
+sites each. Three forms answer true: `@str`, `@concat`, and `+` where the
+backend's own type check says `String`. Safety rests on the same argument
+`ban_append_expr` already stands on — the lexer cannot produce a leading `@`, so
+no user declaration can shadow either name. Inside a `region` it stands aside:
+the buffer is the arena's, which is the partition `own` already states as
+`Fate::Leaked(Leak::Region)`.
+
+**After: 4.06 MB at 250,000 turns and 4.07 MB at 1,000,000.** Negative-tested by
+making `str_temporary` answer `false` and re-measuring on the direct backend:
+the `+` shape reads 1,638,400 bytes at 500 calls against 6,291,456 at 2,000, and
+the interpolation shape the same; with the rule, 131,072 at both.
+
+#### The four defects, none of them the one the brief expected
+
+**1. `@str` of a String was the IDENTITY on the direct backend and a strdup on
+the textual one.** One rule cannot answer for two engines that disagree about
+who owns a rendered String, and the disagreement was already a latent double
+free on wasm alone: `let t = "\{s}"` has one hole and no literal piece, so the
+whole interpolation IS `@str(s)` with no `@concat` above it, and `t` and `s`
+then released one buffer twice. Found by parity — `sha1.vyrn` printed
+`TEST2: TEST2: 41c3bd26ebaae4aa1f95129e5e` on wasm and the right digest
+everywhere else. The direct backend copies now, which is the cost native has
+always paid.
+
+**2. `@str`'s own argument leaked.** The copy is what makes the argument
+finished with, and neither backend freed it — `"\{a + b}"` has leaked that
+buffer for as long as the textual backend has strdup'd here. The same free, one
+consumer further on.
+
+**3. A local String accumulator is never released — RECORDED, not closed.**
+`let mut acc: String = ""` is the opening line of every accumulator in this
+language. `own`'s static-data rule reads the INITIALIZER, answers `Fate::Static`
+for the whole binding, and the heap buffer the last `acc = acc + …` left is
+never freed. Measured on the direct backend: **851,968 bytes after 500 calls and
+3,211,264 after 2,000.** The one-line fix is written down in `own.rs` beside the
+rule and is blocked by defect 4.
+
+**4. A `String` returned out of a `region` is freed by its caller —
+PRE-EXISTING, recorded.** Verified at `c6d9331`, with no `mut` and no part of
+this milestone in the build:
+
+```vyrn
+fn viaString(n: Int64) -> String { region { return "n=" + n.toString() } return "" }
+fn main() -> Int64 {
+    let mut p = 0
+    while p < 200 { let last = viaString(p) ; p = p + 1 }
+    print("done") ; return 0
+}
+```
+
+exits **127** natively. `parity.rs`'s own region test carries that shape and
+passes only because its binding is a `mut` with a literal initializer — which is
+defect 3, holding defect 4 shut. Giving the accumulator its release turns the
+leak into the crash, so the region defect is what comes first. Two leaks, one
+behind the other, and the order is measured rather than assumed.
+
+### The memory suite reads 19 rows, 19 steady
+
+`exprTemporary` is the new row: a `+` chain, an interpolation whose hole is
+itself a concatenation, and an in-place append whose operand is one — every byte
+of it a String no binding names. `tag()` hands back a data-segment literal and
+allocates nothing, so nothing else in the row can move it. Removing any one of
+the four frees makes it grow.
+
+Two tests read the textual backend's IR beside it, so neither engine can start
+leaking alone: `a_temporary_inside_an_expression_is_freed` counts two frees for
+`"n" + n.toString()`, and `every_interpolation_hole_is_freed` counts six for
+`"a\{n}b\{n}c"` — two holes, three inner joins and the binding, with the three
+literal pieces freeing nothing. That last count is what says the rule reads the
+EXPRESSION rather than the type.
+
+### What proves it
+
+- **`let s = toJson(x)` reclaims**, and eleven builtins answer a return type
+  that no rule could read before.
+- **`stringFromBytes` no longer segfaults** on an unannotated binding.
+- **Corpus 2208 → 2184 not reclaimed**, 2057 → 2033 "the type owns no heap".
+- **Native peak 19.9/54.1 MB → 4.06/4.07 MB** at 250,000 and 1,000,000 turns.
+- **Memory suite 19 rows, 19 steady**, the new row negative-tested by making the
+  rule answer `false`.
+- **Three-way parity byte-identical including traps**, 36 tests, wasm column
+  live. It is what found defect 1.
+- **`genwasm` green** over every generator example, both engines byte-identical.
+- Workspace `cargo test --workspace --no-fail-fast`, `vyrn-lsp` separately.
+- RFC-0092's instrument reads `stores: 0`, `elem-store: 0`, `elem-return: 0`.
+- `cargo fmt --check` and the corpus fmt gate clean.
+
+### What is open, with its number
+
+| what | count | why it is not here |
+|---|---:|---|
+| a call argument that is an owning call's result | 930 | a callee may retain its argument; freeing after one needs the signature at the site, cross-module |
+| a call argument that is an allocating String expression | 632 | the same rule |
+| a local `String` accumulator's buffer | 851,968 B at 500 calls | defect 3 — one line, blocked by defect 4 |
+| a `String` returned out of a `region` | exits 127 | defect 4 — pre-existing at `c6d9331` |
+| `moduleInterface`, `contractOf`, `listDir` returns | 18 sites | generation-only; no compiling backend lowers them, so the owner is written nowhere |

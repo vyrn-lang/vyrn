@@ -64,6 +64,31 @@
 //! lending one, and except a row that returns a bare type parameter — `T` names
 //! a type the program never wrote, and that reading has no types with which to
 //! solve it.
+//!
+//! ## Which reserved names have NO row, and why (RFC-0096 M3)
+//!
+//! RFC-0094 folded four return types onto rows. It did not audit the rest, and
+//! RFC-0096 M2 found what that cost: `let s = toJson(x)` leaked its String,
+//! because a call with no row has no type the declared reading can put on the
+//! binding. The audit is now the whole of [`crate::checker::RESERVED`], and
+//! every name that ALLOCATES a result this language can spell has a row below.
+//!
+//! Eight names allocate and are still held back. Each is held for a reason
+//! about the TYPE, never about the fact:
+//!
+//! | name | it answers | why no row |
+//! |---|---|---|
+//! | `fromJson` | `Validation<T>` | `T` is the first ARGUMENT — a type name, not a value. No signature says "the type my caller wrote". |
+//! | `value` | `Value` | It boxes the caller's buffer rather than copying it (`box_payload` of the lowered argument), so it LENDS, and a row would double free. |
+//! | `@list` | `Array<E>` | `E` is the argument's element type, which one row cannot name any more than `at` can. |
+//! | `pullAt` | `Option<T>` | The element type comes from the expected type; the checker refuses the call without an annotation, so the binding is already named. |
+//! | `moduleInterface` | `ModuleInterface` | Generation-only (RFC-0021) — neither compiling backend lowers it, so who owns the result, the host or the generator, is written nowhere. 18 corpus sites, all in `gen fn`s. |
+//! | `contractOf` | `ContractInfo` | The same, for RFC-0071's side. |
+//! | `listDir` | `Result<Array<String>, String>` | The same again: `vyrn run` and the generation engine have it, and no compiled program can call it. |
+//! | `at`, `atSet`, `bytes` | the receiver's | They LEND, which is the older rule above. |
+//!
+//! The remaining reserved names answer a scalar, `Unit`, a `Logger`, a vector or
+//! a bare type parameter, and none of those owns heap.
 
 use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type};
 use crate::project::ELEM;
@@ -185,7 +210,22 @@ fn rows() -> Vec<Function> {
         // Its inverse ALLOCATES, so it is not a view. The two sit side by side on
         // purpose: the old list held one and not the other, and nothing in either
         // name says which.
-        row("stringFromBytes", &[], &[("b", Read, u8s())], Str, &[]),
+        //
+        // It answers a `Result`, not a `String` — the bytes may not be UTF-8, and
+        // the canonical `@.io.*` wording is the error half. RFC-0094 M1 wrote
+        // `String` here, which is the fork this row exists to prevent: the
+        // declared reading then released `let s = stringFromBytes(b)` as a String
+        // buffer, and the native binary handed `__vyrn_str_free` the aggregate's
+        // tag word. **`vyrn build` on that program SEGFAULTED**, and `vyrn why
+        // --memory` said "reclaimed at block exit — freeing the String buffer"
+        // about it. An annotated binding never met it, which is why nothing did.
+        row(
+            "stringFromBytes",
+            &[],
+            &[("b", Read, u8s())],
+            Type::Result(Box::new(Str), Box::new(Str)),
+            &[],
+        ),
         row("floatBits", &[], &[("x", Read, Float)], Int, &[]),
         row("floatFromBits", &[], &[("b", Read, Int)], Float, &[]),
         row("parse", &[], &[("s", Read, Str)], opt(Int), &[]),
@@ -315,6 +355,78 @@ fn rows() -> Vec<Function> {
                 Type::Map(Box::new(Str), Box::new(Type::Param("V".to_string()))),
             )],
             arr(Str),
+            &[],
+        ),
+        // ---- the rest of the allocating returns (RFC-0096 M3) ---------------
+        // RFC-0094 folded FOUR return types onto rows and left the audit at
+        // that. RFC-0096 M2 found the hole by building a fixture: `let s =
+        // toJson(x)` leaks its String unless the binding is annotated, because a
+        // name with no row has no type this reading can put on a binding. The
+        // audit below is the whole reserved list, not the one name.
+        //
+        // A row belongs here when the call ALLOCATES a result whose type the
+        // signature can spell. The exclusions are on the module comment, and
+        // each is a type a signature CANNOT spell rather than a fact left out.
+        //
+        // `toJson(x)` renders any codable value; the argument's type is the union
+        // `@str`'s is, so the parameter is spelled `Unit` and is inert for the
+        // same reason.
+        row("toJson", &[], &[("x", Read, Unit)], Str, &[]),
+        // `jsonSchema(T)` and `schemaOf(T)` take a TYPE NAME, not a value, so the
+        // parameter is inert here too — the checker's arm is what refuses
+        // anything but a declared name. Both fold to a compile-time literal, and
+        // a literal is data-segment storage whose release is a no-op:
+        // `__vyrn_str_free` returns on `cap == 0` (RFC-0089 M1a) and a `Schema`
+        // is a record of such strings. The rows are here because the READING
+        // must be able to name the type either way — a reading that answers for
+        // some sites and not others is the fork RFC-0094 removed.
+        row("jsonSchema", &[], &[("t", Read, Unit)], Str, &[]),
+        row(
+            "schemaOf",
+            &[],
+            &[("t", Read, Unit)],
+            Type::Named("Schema".to_string()),
+            &[],
+        ),
+        // ---- the input I/O results (RFC-0014, RFC-0044) ---------------------
+        // Every one allocates on the host side and hands the buffer over. The
+        // error half of each `Result` is canonical Vyrn wording built at the use
+        // site, so it is the caller's too.
+        row("args", &[], &[], arr(Str), &[]),
+        row("readLine", &[], &[], opt(Str), &[]),
+        row(
+            "readFile",
+            &[],
+            &[("p", Read, Str)],
+            Type::Result(Box::new(Str), Box::new(Str)),
+            &[],
+        ),
+        row(
+            "readFileBytes",
+            &[],
+            &[("p", Read, Str)],
+            Type::Result(Box::new(u8s()), Box::new(Str)),
+            &[],
+        ),
+        row(
+            "writeFile",
+            &[],
+            &[("p", Read, Str), ("s", Read, Str)],
+            Type::Result(Box::new(Bool), Box::new(Str)),
+            &[],
+        ),
+        row(
+            "renameFile",
+            &[],
+            &[("from", Read, Str), ("to", Read, Str)],
+            Type::Result(Box::new(Bool), Box::new(Str)),
+            &[],
+        ),
+        row(
+            "fsyncFile",
+            &[],
+            &[("p", Read, Str)],
+            Type::Result(Box::new(Bool), Box::new(Str)),
             &[],
         ),
     ]
@@ -450,6 +562,57 @@ mod tests {
             assert!(
                 !rets.iter().any(|(k, _)| *k == held),
                 "`{held}` declares an inert return type and may not answer for a call"
+            );
+        }
+    }
+
+    /// RFC-0096 M3's audit: every reserved name that ALLOCATES a result this
+    /// language can spell answers a type, and the eight that are held back are
+    /// held for a reason the module comment states.
+    ///
+    /// The row that matters most is `stringFromBytes`. RFC-0094 M1 wrote its
+    /// return as `String` where the checker's arm says `Result<String, String>`,
+    /// so `let s = stringFromBytes(b)` was released as a String buffer and the
+    /// native binary SEGFAULTED. A second list cannot drift from a row; two
+    /// spellings of one row can, and this is the assertion that says which.
+    #[test]
+    fn every_allocating_builtin_answers_its_return_type() {
+        let rets: Vec<(&str, String)> = returns().map(|(n, t)| (n, t.to_string())).collect();
+        let of = |n: &str| {
+            rets.iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("`{n}` answers no return type"))
+        };
+        for (name, ty) in [
+            ("toJson", "String"),
+            ("jsonSchema", "String"),
+            ("schemaOf", "Schema"),
+            ("args", "Array<String>"),
+            ("readLine", "Option<String>"),
+            ("readFile", "Result<String, String>"),
+            ("readFileBytes", "Result<Array<UInt8>, String>"),
+            ("writeFile", "Result<Bool, String>"),
+            ("renameFile", "Result<Bool, String>"),
+            ("fsyncFile", "Result<Bool, String>"),
+            ("stringFromBytes", "Result<String, String>"),
+        ] {
+            assert_eq!(of(name), ty, "`{name}` answers the wrong type");
+        }
+        // The eight held back. A row appearing here later is a decision, and it
+        // has to be made at the table in the module comment.
+        for held in [
+            "fromJson",
+            "value",
+            "@list",
+            "pullAt",
+            "moduleInterface",
+            "contractOf",
+            "listDir",
+        ] {
+            assert!(
+                !rets.iter().any(|(k, _)| *k == held),
+                "`{held}` is held back by the audit and may not answer for a call"
             );
         }
     }

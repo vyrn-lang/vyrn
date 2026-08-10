@@ -734,6 +734,37 @@ pub fn holes_under(holes: &[String], name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether `e` ALLOCATED the String it answers — a fresh buffer no binding
+/// names, so the expression that consumes it is its only owner (RFC-0096 M3).
+///
+/// Three forms build one, and every one of them copies out of its operands
+/// rather than borrowing them: `@str` renders a value into a fresh buffer,
+/// `@concat` and a String `+` build a fresh buffer out of both halves. So an
+/// operand this answers `true` for is the concatenation's to release once it
+/// has copied — `"n" + i.toString()` leaked the `@str` result at every turn of
+/// a loop, and nothing else could ever free it because no binding names it.
+///
+/// **A caller must also check that the value's type is `String`.** `+` is the
+/// one operator that allocates and it is also integer addition and `Code`
+/// concatenation; the type is what tells the three apart, and only a backend
+/// knows it. `@str` and `@concat` need no such check — the lexer cannot produce
+/// a leading `@`, so no user declaration can shadow either name and turn the
+/// call into a dispatch that keeps what it is given. That is the same argument
+/// `ban_append_expr` already stands on, in the same two names.
+///
+/// The other two ways an expression makes a temporary — a call's result handed
+/// straight to another call, and an owning call's result read through — are NOT
+/// here. A callee may RETAIN its argument (a `consume` parameter, a variant
+/// constructor), so freeing after a general call needs the callee's signature
+/// at the site and cross-module. RFC-0096 M3 measures both and closes neither.
+pub fn str_temporary(e: &Expr) -> bool {
+    match e {
+        Expr::Call { name, .. } => name == "@str" || name == "@concat",
+        Expr::Binary { op: BinOp::Add, .. } => true,
+        _ => false,
+    }
+}
+
 /// The places a hole names, in the words both surfaces print.
 fn places(paths: &[String]) -> String {
     paths
@@ -1227,6 +1258,31 @@ impl Emit<'_> {
         };
         // A string literal lives in the data segment. Nothing allocated it and
         // nothing reclaims it (census §1).
+        //
+        // **It answers for a `mut` binding too, and that is a leak this rule
+        // cannot close on its own (RFC-0096 M3).** `let mut acc: String = ""` is
+        // the opening line of every accumulator in this language, and the value
+        // the block exits with is whatever the last `acc = acc + …` left — a
+        // heap buffer, read here as the literal it started as. Measured on the
+        // direct backend, a local accumulator grown once a call: 851,968 bytes
+        // after 500 calls and 3,211,264 after 2,000.
+        //
+        // The one-line fix — `&& !matches!(s, Stmt::Let { mutable: true, .. })`
+        // — was written, and it is blocked by a DIFFERENT defect that predates
+        // it. A `String` returned out of a `region` is arena memory, and the
+        // caller's release frees it a second time. Nothing exercised that today
+        // because `let mut last = ""` is `Static` here and never released;
+        // giving it a release turns a leak into a crash. Verified at `c6d9331`,
+        // with no `mut` and no part of this milestone in the build:
+        //
+        //     fn viaString(n: Int64) -> String { region { return "n=" + n.toString() } return "" }
+        //     fn main() -> Int64 { let mut p = 0
+        //         while p < 200 { let last = viaString(p) ; p = p + 1 }
+        //         print("done") ; return 0 }
+        //
+        // exits 127 natively. `parity.rs`'s own region test has that shape and
+        // passes only because its binding is a `mut` with a literal initializer.
+        // Closing the region defect comes first; this rule is one line behind it.
         if matches!(value, Expr::Str(_)) {
             return Fate::Static;
         }
