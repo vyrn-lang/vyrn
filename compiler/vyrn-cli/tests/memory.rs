@@ -57,8 +57,9 @@
 //! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
 //! | `exprTemporary` | RFC-0096 M3 | steady | a String an EXPRESSION allocated has no binding, so the CONSUMER releases it — `@concat`, a String `+`, `@str` and the in-place append each free an operand the expression itself built |
+//! | `localAccumulator` | RFC-0096 M3, defect 3 | steady | the static-data rule read the INITIALIZER, so `let mut acc = ""` answered `Static` for the buffer the loop grew; it asks whether the binding can CHANGE now |
 //!
-//! **Nineteen rows, nineteen steady.** RFC-0092 M5 closed the last leaking
+//! **Twenty rows, twenty steady.** RFC-0092 M5 closed the last leaking
 //! one, and the row beside it — the same statement with `consume` written on it
 //! — was not in the census at all. RFC-0096 closed the last CLASS: the corpus
 //! reading "the type has no release rule" fell from 63 to 0 on two `impl`s, and
@@ -638,6 +639,25 @@ const ROWS: &[Row] = &[
               after it. Removing any one of the four frees makes this row grow",
     },
     Row {
+        export: "localAccumulator",
+        census: "RFC-0096 M3, defect 3",
+        today: Shape::Steady,
+        why: "RFC-0096 M3 defect 3: `own`'s static-data rule read the INITIALIZER. `let mut \
+              acc = \"\"` starts at a data-segment literal, so the whole binding answered \
+              `Fate::Static` and the heap buffer the last `acc = acc + …` left was never \
+              freed — the opening line of every accumulator in this language. The rule asks \
+              whether the binding can CHANGE now, and a `mut` one is released by its slot's \
+              final value like any other. A slot that still holds the literal — a loop that \
+              never runs, a branch that assigns another literal — frees nothing, because \
+              `@__vyrn_str_free` reads a `cap` of 0 as static and returns. Measured on the \
+              direct backend before the fix, over M3's smaller shape: 851,968 bytes after \
+              500 calls and 3,211,264 after 2,000; this row's own ~900-byte turns read \
+              8,323,072 against 32,899,072. It waited on the row below this one — \
+              releasing a reassigned accumulator is what made a `String` returned out of a \
+              `region` reachable, and that shape corrupted the native heap until the arena \
+              stopped handing out a pointer 8 bytes inside its block",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -922,6 +942,25 @@ export extern fn exprTemporary() {{
     acc = ""
     acc = acc + (tag() + "u")
     seen = seen + Int64(held.byteLength) + Int64(acc.byteLength)
+}}
+
+/// RFC-0096 M3, defect 3. A LOCAL String accumulator, which is the shape every
+/// generator in `std/` is written in.
+///
+/// The buffer is the one the loop grew, not the literal the binding opened with,
+/// and the release runs on the slot's FINAL value. Ten turns of ~900 bytes so
+/// one missed release is a page rather than a rounding error. Reverting the
+/// `mut` clause in `own::fate` makes this row read 8,323,072 bytes at 500 calls
+/// against 32,899,072 at 2,000 — four times the calls, four times the memory,
+/// which is the leak stated as the relation this file asserts.
+export extern fn localAccumulator() {{
+    let mut out = ""
+    let mut i = 0
+    while i < 10 {{
+        out = out + tag()
+        i = i + 1
+    }}
+    seen = seen + Int64(out.byteLength)
 }}
 
 export extern fn injectedJson() {{

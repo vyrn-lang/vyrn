@@ -108,7 +108,11 @@ runtime first. `REGION_RUNTIME` (`compiler/vyrn-codegen/src/lib.rs:48`) is 60
 lines of LLVM IR:
 
 - `__vyrn_region_alloc(n)` calls `__vyrn_malloc(n + 8)` and writes the previous
-  head into the first 8 bytes. It returns `raw + 8`.
+  head into the first 8 bytes. It returns `raw + 8`. **Since RFC-0096 M3 it
+  allocates 16 bytes past the payload instead and returns `raw`**: the link is a
+  trailer, so a block the arena hands out is exactly what `malloc` returned. The
+  measurements below were taken before that and read 8 bytes an allocation
+  lighter.
 - `__vyrn_region_exit()` walks that chain and calls `free` on every link.
 - `__vyrn_region_enter()` traps above 64 nested scopes. The stack is 64 pointers,
   `thread_local`.
@@ -293,6 +297,16 @@ Removing it needs three things the language does not have.
    pops the frame **without freeing it**, because `return a + b` is not covered by
    anything. Popping leaks. The comment calls it "the trade RFC-0004's escape
    analysis has to be written before it can be improved on."
+
+   **"By design" was not the whole story, and defect 3 below is where the rest
+   of it is.** Popping leaks the frame, and it also hands the CALLER a pointer
+   the caller's own walk then releases — rule 3 says a return is owned. While the
+   arena wrote its chain link in front of the payload that pointer was 8 bytes
+   inside the block and the release corrupted the native heap. The design was
+   right that popping cannot dangle; it was silent about the second owner. The
+   link sits after the payload now (RFC-0096 M3), so what the arena hands out is
+   exactly a `__vyrn_malloc` block: the value a return carries is the caller's to
+   free, and the rest of the frame is the leak this paragraph already named.
 
 **And fixing U6 makes measurement 5a worse, not better.** The exclusion is the
 only reason the arena's deferral is bounded today. An arena that also swallowed
