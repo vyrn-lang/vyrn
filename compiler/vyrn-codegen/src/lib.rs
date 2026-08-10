@@ -2295,6 +2295,27 @@ impl<'a> Gen<'a> {
         n
     }
 
+    /// Release the operand `v` a String concatenation has just copied out of,
+    /// when the operand EXPRESSION allocated it (RFC-0096 M3).
+    ///
+    /// `"n" + i.toString()` leaks the `@str` result: it feeds `@concat` and no
+    /// binding ever owns it, so `own.rs` — which keys every release on a `let`
+    /// — has nothing to write a row against. The consumer is the only place
+    /// that knows the temporary exists AND knows it is finished with, so the
+    /// release goes here. Measured native before the fix, `"n" + i.toString()`
+    /// in a loop: 19.9 MB peak at 250,000 turns and 54.1 MB at four times that.
+    ///
+    /// Inside a `region` the buffer came from the ARENA and the region exit
+    /// reclaims it. The two mechanisms partition every allocation, which is the
+    /// rule `own` already states as `Fate::Leaked(Leak::Region)`, so this stands
+    /// aside there exactly as the block-exit release does.
+    fn free_str_temp(&mut self, e: &Expr, v: &str) {
+        if self.region_depth > 0 || !vyrn_frontend::own::str_temporary(e) {
+            return;
+        }
+        self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+    }
+
     /// Concatenate two `String` pointers into a fresh, NUL-terminated buffer.
     /// Shared by the `@concat` builtin (interpolation) and the `a + b` operator
     /// lowering. Routing is lexical: inside a `region` the buffer is drawn from
@@ -4185,8 +4206,14 @@ impl<'a> Gen<'a> {
                             .map(|p| self.gen_expr(p).map(|(v, _)| v))
                             .collect();
                         self.expect.pop();
-                        for v in vals? {
+                        // The append COPIES each operand into the accumulator,
+                        // so an operand this statement allocated is released
+                        // after it (RFC-0096 M3) — `s = s + i.toString()` is
+                        // the same `@str` temporary the general `+` path frees,
+                        // reached through the fast path instead.
+                        for (p, v) in parts.iter().zip(vals?) {
                             self.emit_str_append(&slot, &v);
+                            self.free_str_temp(p, &v);
                         }
                         return Ok(());
                     }
@@ -6249,6 +6276,12 @@ impl<'a> Gen<'a> {
         // heap allocation, region routing, and drop analysis.
         if op == BinOp::Add && self.resolve(&lty) == Type::Str {
             let buf = self.emit_str_concat(&l, &r);
+            // Both halves are copied, so an operand this expression allocated
+            // is released here (RFC-0096 M3). The type check is the guard the
+            // predicate cannot make for itself: `+` is also integer addition
+            // and `Code` concatenation, and both are handled above this arm.
+            self.free_str_temp(lhs, &l);
+            self.free_str_temp(rhs, &r);
             return Ok((buf, Type::Str));
         }
 
@@ -9029,6 +9062,13 @@ impl<'a> Gen<'a> {
             let (a, _) = self.gen_expr(&args[0])?;
             let (b, _) = self.gen_expr(&args[1])?;
             let buf = self.emit_str_concat(&a, &b);
+            // The fresh buffer holds a copy of both halves, so a half the
+            // expression itself allocated is finished with (RFC-0096 M3). This
+            // is the interpolation spine: `"a\{x}b\{y}"` folds left into nested
+            // `@concat`s, so every hole's `@str` and every inner join is freed
+            // here by the `@concat` above it.
+            self.free_str_temp(&args[0], &a);
+            self.free_str_temp(&args[1], &b);
             return Ok((buf, Type::Str));
         }
 
@@ -9109,6 +9149,10 @@ impl<'a> Gen<'a> {
                     self.emit(format!(
                         "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {v}, i64 {len}, i1 false)"
                     ));
+                    // The copy is why an argument this expression allocated is
+                    // finished with (RFC-0096 M3). `"\{a + b}"` leaked that
+                    // buffer for as long as this arm has copied.
+                    self.free_str_temp(&args[0], &v);
                     return Ok((buf, Type::Str));
                 }
                 other => return Err(format!("`str` cannot render {other:?}")),
@@ -13787,6 +13831,44 @@ mod tests {
         assert!(
             free_calls(&ir) > RUNTIME_FREES,
             "expected an auto-free beyond the runtime: {ir}"
+        );
+    }
+
+    /// RFC-0096 M3 — the temporary INSIDE the expression, which no binding
+    /// names. Two frees: the `@str` result the concatenation copied out of, and
+    /// the binding that holds the concatenation.
+    ///
+    /// This is the node-free half of the `exprTemporary` memory row. That row
+    /// measures the direct backend and this one reads the textual backend's IR,
+    /// so neither engine can start leaking on its own.
+    #[test]
+    fn a_temporary_inside_an_expression_is_freed() {
+        let src = "fn main() -> Int64 { let n = 1; let s = \"n\" + n.toString(); \
+                   return s.byteLength; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 2,
+            "the `@str` temporary and the binding: {ir}"
+        );
+    }
+
+    /// The same, through the interpolation spine.
+    ///
+    /// `"a\{n}b\{n}c"` folds left into FOUR `@concat`s over the five pieces, so
+    /// six buffers are allocated and one survives: two `@str` holes, three
+    /// inner joins, and the binding. The three literal pieces allocate nothing
+    /// and are not freed — this is the count that says the rule reads the
+    /// EXPRESSION rather than the type.
+    #[test]
+    fn every_interpolation_hole_is_freed() {
+        let src = "fn main() -> Int64 { let n = 1; let s = \"a\\{n}b\\{n}c\"; \
+                   return s.byteLength; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 6,
+            "two `@str` holes, three inner joins, and the binding: {ir}"
         );
     }
 

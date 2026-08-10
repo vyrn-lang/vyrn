@@ -56,12 +56,14 @@
 //! | `consumingLoop` | U4's price, one keyword over | steady | RFC-0092 M5's row for `for x in consume xs`: the loop is the buffer's last owner, so it releases it at every exit |
 //! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
+//! | `exprTemporary` | RFC-0096 M3 | steady | a String an EXPRESSION allocated has no binding, so the CONSUMER releases it — `@concat`, a String `+`, `@str` and the in-place append each free an operand the expression itself built |
 //!
-//! **Eighteen rows, eighteen steady.** RFC-0092 M5 closed the last leaking
+//! **Nineteen rows, nineteen steady.** RFC-0092 M5 closed the last leaking
 //! one, and the row beside it — the same statement with `consume` written on it
 //! — was not in the census at all. RFC-0096 closed the last CLASS: the corpus
 //! reading "the type has no release rule" fell from 63 to 0 on two `impl`s, and
-//! M2 took the linked reading from 33 to 0 on two more.
+//! M2 took the linked reading from 33 to 0 on two more. M3 closed the one shape
+//! M2 measured out of its own row: an operand with no owner.
 //!
 //! **§10 reaches this harness in half.** A task owns a frame, a task record and
 //! an operating-system handle. On wasm there are no threads, so the direct
@@ -611,6 +613,31 @@ const ROWS: &[Row] = &[
               `examples/copy.vyrn` runs the same shape on three engines",
     },
     Row {
+        export: "exprTemporary",
+        census: "RFC-0096 M3",
+        today: Shape::Steady,
+        why: "RFC-0096 M3: a String an EXPRESSION allocated has no binding, so `own` — which \
+              keys every release on a `let` — had nothing to write a row against. `\"n\" + \
+              i.toString()` leaked the `@str` result at every turn of a loop, and so did \
+              every hole of an interpolation, because `\"a\\{x}b\\{y}\"` folds left into \
+              nested `@concat`s and only the outermost result ever reaches a name. The \
+              consumer is the only place that knows the temporary exists and knows it is \
+              finished with, so the release goes there: `@concat`, a String `+`, `@str` \
+              and the in-place append each free an operand the expression itself \
+              allocated. Safe because all four COPY out of their operands, and because \
+              `@str` and `@concat` cannot be shadowed — the lexer produces no leading \
+              `@`, which is the argument `ban_append_expr` already stands on. Inside a \
+              `region` the buffer is the arena's and this stands aside, the way the \
+              block-exit release does. En route it settled a DIVERGENCE: `@str` of a \
+              String was the identity on the direct backend and a strdup on the textual \
+              one, so a lone hole — `let t = \"\\{s}\"`, no literal piece and therefore \
+              no `@concat` above it — released one buffer twice on wasm and copied on \
+              native. Both copy now, which is what lets one rule answer for both. \
+              Measured native before the fix, `\"n\" + i.toString()` in a loop: 19.9 MB \
+              peak at 250,000 turns and 54.1 MB at four times that; 4.06 MB at both \
+              after it. Removing any one of the four frees makes this row grow",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -876,6 +903,25 @@ export extern fn selfReferring() {{
 /// not the encoder.
 fn jsonAnchor() -> String {{
     return toJson(Doc {{ title: "", body: "" }})
+}}
+
+/// RFC-0096 M3. A String an EXPRESSION allocated, which no binding names.
+///
+/// `tag()` hands back a data-segment literal and allocates nothing, so every
+/// byte here is a concatenation: the two halves of `joined`, the hole that
+/// renders `joined + "y"`, the copy `@str` makes of it, and the inner join of
+/// the interpolation spine. Only the outermost result of each statement reaches
+/// a name. The last shape is the in-place append, whose operand the fast path
+/// copies in and must then release.
+///
+/// Removing the free in `@concat`, in the `+` lowering, or in the append makes
+/// this row grow.
+export extern fn exprTemporary() {{
+    let joined = (tag() + "a") + (tag() + "b")
+    let held = "x\{{joined + "y"}}z"
+    acc = ""
+    acc = acc + (tag() + "u")
+    seen = seen + Int64(held.byteLength) + Int64(acc.byteLength)
 }}
 
 export extern fn injectedJson() {{

@@ -6,6 +6,10 @@
   brief; M1 then refuted two rows of the census, M2 refuted one of the census's
   counts, and M3 refuted its own brief about which side of the dispatch the seed
   goes on. See the three "as landed" sections. RFC-0007 §v2 is closed by M3.
+  **The residue section closed a four-row list and left an eighteen-name class
+  behind it**, which RFC-0096 M3 audited and closed — including one row of this
+  RFC's own that had drifted from the checker's arm and segfaulted. See "The
+  residue was four rows and the class was eighteen".
 - **Depends on:** RFC-0086 (seeded rows, `impl`, "no second list"), RFC-0091 M2
   (`place` projections — `at` is already dispatch), RFC-0092 M5 / PR #118 (the
   bug class this closes), RFC-0007 §v2 (the deferral M3 collects).
@@ -838,3 +842,29 @@ expected to: four rows in a list become four signatures plus the reading that
 holds two kinds of row back. What it buys is one deleted fact fork and the drift
 it was already carrying. **No engine changed.** `checker.rs` and both backends
 are byte-identical in this change, so no builtin refusal moved a word.
+
+### The residue was four rows and the class was eighteen — closed by RFC-0096 M3
+
+This section folded the four rows the second list held. **It did not ask which
+builtins had no row at all**, and that is where the class actually lived: a call
+with no row has no type the declared reading can name, so `own` leaves the
+binding alone and the value leaks. RFC-0096 M2 met one — `let s = toJson(x)` —
+by building a fixture, and RFC-0096 M3 audited the whole of `checker::RESERVED`.
+
+**Eleven names allocate a result this language can spell and had no row.** They
+have one now: `toJson`, `jsonSchema`, `schemaOf`, `args`, `readLine`,
+`readFile`, `readFileBytes`, `writeFile`, `renameFile`, `fsyncFile`, and
+`stringFromBytes`. Seven more allocate and stay held back, each for a reason
+about the TYPE rather than about the fact — the audit table is in RFC-0096 §M3.
+
+**The last one is the one this RFC has to record.** M1 wrote `stringFromBytes`
+as returning `String`; the checker's arm answers `Result<String, String>`. Two
+spellings of one fact, drifted, **in the milestone that removed the second
+lists** — the same failure this RFC exists to prevent, one level up. It cost a
+SEGFAULT: `let s = stringFromBytes(b)` unannotated released the aggregate's tag
+word as a String buffer, and `vyrn why --memory` reported it as reclaimed.
+
+The lesson is the one the census already taught, sharpened. A row and a checker
+arm are still two spellings of one fact, and folding the second LIST did not
+fold them. `every_allocating_builtin_answers_its_return_type` asserts the eleven
+return types against the arms; nothing yet derives one from the other.
