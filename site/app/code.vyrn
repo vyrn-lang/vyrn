@@ -1,0 +1,193 @@
+/// Syntax highlighting for the code on the site (design brief G3).
+///
+/// It runs at build time — the static export renders every page once — so a
+/// visitor downloads coloured markup and no highlighter. There is no JavaScript
+/// on this path at all.
+///
+/// SCOPE, stated plainly. This is a word-list colourer over a byte scan:
+/// comments, strings, numbers, keywords, and capitalised names. It is not a
+/// parser. The compiler's own lexer is reachable from Vyrn as `lex()`, but
+/// `lex()` is generation-only and returns tokens with their DECODED text, so
+/// re-splicing them onto the source needs the lexer's span rules a second time.
+/// A word list needs none of that and is right about every snippet on this
+/// site. Rust, TypeScript and Go get the same treatment with their own word
+/// lists, which the brief permits and which is honestly approximate.
+///
+/// ponytail: word-list colouring, no parser. If a snippet ever highlights
+/// wrongly, the upgrade is a `gen fn` over `lex()` with real spans — not a
+/// second hand-written lexer.
+import { substring, fromBytesOr } from "std/strings"
+
+/// The Vyrn keywords, copied from the lexer's own token table
+/// (`compiler/vyrn-frontend/src/lexer.rs`, `token_name_and_text`).
+export fn vyrnWords() -> Array<String> {
+    return ["fn", "gen", "let", "mut", "if", "else", "while", "for", "in", "drop", "protocol", "import", "export", "impl", "self", "return", "true", "false", "type", "where", "match", "region", "spawn", "break", "continue", "test", "bench", "read", "modify", "consume", "share", "from", "as", "panic"]
+}
+
+/// The Rust words the comparison snippets use.
+export fn rustWords() -> Array<String> {
+    return ["fn", "let", "mut", "if", "else", "while", "for", "in", "impl", "self", "return", "true", "false", "struct", "enum", "match", "pub", "use", "mod", "trait", "where", "const", "static", "unsafe", "move", "ref", "dyn", "async", "await", "crate"]
+}
+
+/// The TypeScript words the comparison snippets use.
+export fn tsWords() -> Array<String> {
+    return ["function", "let", "const", "var", "if", "else", "while", "for", "of", "in", "return", "true", "false", "class", "interface", "type", "enum", "import", "export", "from", "as", "new", "async", "await", "throw", "try", "catch", "extends", "implements", "readonly"]
+}
+
+/// The Go words the comparison snippets use.
+export fn goWords() -> Array<String> {
+    return ["func", "var", "const", "if", "else", "for", "range", "return", "true", "false", "type", "struct", "interface", "package", "import", "go", "defer", "chan", "select", "switch", "case", "map", "nil", "make", "new"]
+}
+
+/// One HTML-safe byte. Only the three that can change the markup are replaced;
+/// a quote inside a `<pre>` is text. A byte that is not valid UTF-8 on its own
+/// is a continuation byte of a character the caller split, which cannot happen
+/// here — every caller passes whole runs — so the fallback is unreachable.
+fn escapeByte(b: UInt8) -> String {
+    if b == '&' {
+        return "&amp;"
+    }
+    if b == '<' {
+        return "&lt;"
+    }
+    if b == '>' {
+        return "&gt;"
+    }
+    return fromBytesOr([b], "")
+}
+
+/// `s` with the markup-significant bytes replaced. Multi-byte characters pass
+/// through whole: only ASCII `&`, `<` and `>` are replaced, and neither byte of
+/// a longer character can equal one of them.
+export fn escapeHtml(s: String) -> String {
+    let raw = bytes(s)
+    let mut out = ""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        let b = raw[i]
+        if b == '&' || b == '<' || b == '>' {
+            out = out + substring(s, plain, i) + escapeByte(b)
+            plain = i + 1
+        }
+        i = i + 1
+    }
+    return out + substring(s, plain, raw.length)
+}
+
+fn isLetter(b: UInt8) -> Bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+fn isDigit(b: UInt8) -> Bool {
+    return b >= '0' && b <= '9'
+}
+
+fn isWordByte(b: UInt8) -> Bool {
+    return isLetter(b) || isDigit(b)
+}
+
+fn isWord(word: String, words: Array<String>) -> Bool {
+    for w in words {
+        if w == word {
+            return true
+        }
+    }
+    return false
+}
+
+/// `text` inside a span of class `cls`, escaped.
+fn span(cls: String, text: String) -> String {
+    return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>"
+}
+
+/// Highlight `src` against `words`, returning the inner HTML of a `<pre>`.
+///
+/// One left-to-right pass. A comment runs to the newline, a string runs to the
+/// closing quote (a backslash covers the next byte), a word run is one span or
+/// none, and everything else is escaped through.
+export fn highlightWith(src: String, words: Array<String>) -> String {
+    let raw = bytes(src)
+    let mut out = ""
+    let mut i = 0
+    while i < raw.length {
+        let b = raw[i]
+        if b == '/' && i + 1 < raw.length && raw[i + 1] == '/' {
+            let start = i
+            while i < raw.length && raw[i] != 10 {
+                i = i + 1
+            }
+            out = out + span("c", substring(src, start, i))
+        } else if b == '"' {
+            let start = i
+            i = i + 1
+            while i < raw.length && raw[i] != '"' {
+                if raw[i] == 92 {
+                    i = i + 1
+                }
+                i = i + 1
+            }
+            if i < raw.length {
+                i = i + 1
+            }
+            out = out + span("s", substring(src, start, i))
+        } else if isLetter(b) {
+            let start = i
+            while i < raw.length && isWordByte(raw[i]) {
+                i = i + 1
+            }
+            let word = substring(src, start, i)
+            if isWord(word, words) {
+                out = out + span("k", word)
+            } else if b >= 'A' && b <= 'Z' {
+                out = out + span("t", word)
+            } else {
+                out = out + escapeHtml(word)
+            }
+        } else if isDigit(b) {
+            let start = i
+            while i < raw.length && (isWordByte(raw[i]) || raw[i] == '.') {
+                i = i + 1
+            }
+            out = out + span("n", substring(src, start, i))
+        } else {
+            out = out + escapeByte(b)
+            i = i + 1
+        }
+    }
+    return out
+}
+
+/// Highlight Vyrn source.
+export fn highlight(src: String) -> String {
+    return highlightWith(src, vyrnWords())
+}
+
+test "a keyword, a type and a string each get their own span" {
+    let h = highlight("let s = \"x\"")
+    assertEq(h, "<span class=\"k\">let</span> s = <span class=\"s\">\"x\"</span>")
+}
+
+test "a comment runs to the end of its line and no further" {
+    let h = highlight("// note\nfn")
+    assertEq(h, "<span class=\"c\">// note</span>\n<span class=\"k\">fn</span>")
+}
+
+test "markup in the source cannot escape the pre" {
+    assertEq(escapeHtml("<script>&"), "&lt;script&gt;&amp;")
+    assertEq(highlight("a < b"), "a &lt; b")
+}
+
+test "a capitalised name is a type, a lowercase one is not" {
+    assertEq(highlight("Ticket"), "<span class=\"t\">Ticket</span>")
+    assertEq(highlight("ticket"), "ticket")
+}
+
+test "an escaped quote does not end the string" {
+    assertEq(highlight("\"a\\\"b\" c"), "<span class=\"s\">\"a\\\"b\"</span> c")
+}
+
+test "another language uses its own word list" {
+    assertEq(highlightWith("func x", goWords()), "<span class=\"k\">func</span> x")
+    assertEq(highlightWith("func x", vyrnWords()), "func x")
+}

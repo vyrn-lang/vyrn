@@ -1,0 +1,148 @@
+/// The code the site shows, and the one place it is written.
+///
+/// Every Vyrn snippet here is copied from a file in this repository —
+/// `README.md`, `examples/ownership.vyrn`, `examples/validate.vyrn` — so a
+/// reader who follows the link finds the same lines. The Rust, TypeScript and
+/// Go snippets are the same task written the way each language writes it; they
+/// are illustrative, and the comparison page says so.
+///
+/// Snippets are plain multi-line strings rather than files read at render time,
+/// because a page must render identically wherever it is built, and a page that
+/// calls `readFile` renders differently from a different working directory.
+import { highlight, highlightWith, rustWords, tsWords, goWords } from "./code"
+
+/// A snippet, highlighted and ready for `v-html`.
+export type Snippet = { id: String, lang: String, label: String, html: String }
+
+/// The landing page's snippet: a rule that lives in the type, and ownership
+/// declared one word at a time. Reduced from `README.md`.
+export fn heroSource() -> String {
+    return "type Age = Int64 where value >= 18
+
+type Ticket = { id: Int64, seats: Int64 }
+
+// A parameter states the function's intent: read it, change it, or take it.
+fn seatCount(t: read Ticket) -> Int64 { return t.seats }
+fn addSeat(t: modify Ticket) { t.seats = t.seats + 1 }
+fn redeem(t: consume Ticket) -> Int64 { return t.id }
+
+fn admit(n: Int64) -> Int64 {
+    // `Age?(n)` is None when the rule fails, so untrusted input never traps.
+    return match Age?(n) {
+        Some(a) => a,
+        None => 0 - 1,
+    }
+}
+
+let a = Age(30)    // proven valid while it compiles - no runtime check
+// let bad = Age(5)   // compile error: 5 does not satisfy `Age`
+"
+}
+
+/// The compiler's answer to the commented-out line above, quoted from
+/// `README.md` exactly as the CLI prints it.
+export fn heroError() -> String {
+    return "bad.vyrn:4:0: 5 does not satisfy `Age` (predicate `where value >= 18` is false)"
+}
+
+/// The ownership snippet, from `examples/ownership.vyrn` lines 17-21.
+export fn ownershipSource() -> String {
+    return "fn fullName(first: String, last: String) -> String {
+    let firstSpace = first + \" \" // inner temp - freed inside fullName
+    let whole = firstSpace + last // built by reading firstSpace
+    return whole                  // moved out to the caller
+}
+"
+}
+
+/// `vyrn why --memory examples/ownership.vyrn`, quoted from the tool's output.
+export fn ownershipReport() -> String {
+    return "fn fullName(first: String, last: String) -> String
+  transfers: yes - the caller owns the result, and releases it by
+             freeing the String buffer
+  line 18    firstSpace   reclaimed at block exit - freeing the String buffer
+  line 19    whole        moved at line 20 into the return
+"
+}
+
+/// The same task in four languages: a number that is only valid at 18 or above,
+/// and a total way to check an untrusted one.
+export fn comparison() -> Array<Snippet> {
+    return [
+        Snippet {
+            id: "vyrn",
+            lang: "vyrn",
+            label: "Vyrn",
+            html: highlight("type Age = Int64 where value >= 18
+
+// The rule is part of the type. The compiler rejects a provably bad constant,
+// erases the check where it can prove validity, and emits it where it cannot.
+let ok = Age(30)          // no runtime check is emitted
+let maybe = Age?(input)   // Option<Age>, total over any input
+"),
+        },
+        Snippet {
+            id: "rust",
+            lang: "rust",
+            label: "Rust",
+            html: highlightWith("pub struct Age(i64);
+
+// The rule lives in a constructor beside the type, so a caller can still build
+// the newtype the long way, and nothing checks a constant at compile time.
+impl TryFrom<i64> for Age {
+    type Error = ();
+    fn try_from(v: i64) -> Result<Self, ()> {
+        if v >= 18 { Ok(Age(v)) } else { Err(()) }
+    }
+}
+", rustWords()),
+        },
+        Snippet {
+            id: "ts",
+            lang: "typescript",
+            label: "TypeScript",
+            html: highlightWith("import { z } from \"zod\";
+
+// The rule lives in a schema object beside the type. The type is erased before
+// the program runs, so the check is a library call and never free.
+const Age = z.number().int().min(18);
+type Age = z.infer<typeof Age>;
+const maybe = Age.safeParse(input);
+", tsWords()),
+        },
+        Snippet {
+            id: "go",
+            lang: "go",
+            label: "Go",
+            html: highlightWith("type Age int64
+
+// The rule lives in a function the caller must remember to call. Nothing in the
+// type system says an Age was ever validated.
+func NewAge(v int64) (Age, error) {
+    if v < 18 {
+        return 0, errors.New(\"below 18\")
+    }
+    return Age(v), nil
+}
+", goWords()),
+        },
+    ]
+}
+
+test "every comparison snippet carries an id, a label and markup" {
+    let rows = comparison()
+    assertEq(rows.length, 4)
+    for r in rows {
+        assert(r.id.byteLength > 0)
+        assert(r.label.byteLength > 0)
+        assert(r.html.byteLength > 0)
+    }
+}
+
+test "each snippet is highlighted against its own language" {
+    // `where` is a Vyrn keyword and not a Go one, so the two panes disagree
+    // about it - which is the whole reason each has its own word list.
+    assertEq(highlight("where"), "<span class=\"k\">where</span>")
+    assert(comparison()[0].html.byteLength > 100)
+    assert(comparison()[3].html.byteLength > 100)
+}

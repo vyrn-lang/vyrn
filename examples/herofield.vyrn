@@ -1,16 +1,36 @@
 /// The website hero's luminance field, in Vyrn (design brief section 6).
 ///
-/// Two rotating plane waves over the cell grid. `frame(t)` returns one glyph
-/// index per cell, row by row, and the host paints each glyph with `fillText`.
-/// Vyrn computes, JavaScript paints: one call across the boundary per frame, not
-/// one per cell.
+/// # What it draws, and why this one
 ///
-/// It is also the proof for `std/math`'s `sin`. The field is nothing but
-/// `Float64` arithmetic, and RFC-0083 compiles with `-ffp-contract=off`, so the
-/// interpreter, the native binary and wasm must agree to the last bit. `main`
-/// prints the raw IEEE-754 bits of the sampled field, and the parity harness
-/// compares the three columns byte for byte. A contracted multiply-add anywhere
-/// on this path would change a bit and fail the run.
+/// Three concepts were drawn before this one was picked:
+///
+///   1. THE TYPED GATE — raw glyph noise drifts in from the left, crosses a
+///      bright seam, and leaves as an ordered lattice on the right.
+///   2. THREE LANES — one source stream fans into three lanes that render the
+///      same pattern in lockstep.
+///   3. THE MARK — drifting characters converge into the vortex logo.
+///
+/// (1) ships. It reads at a glance without a caption — the eye sees disorder,
+/// a boundary, and order — and what it depicts is the language's first claim:
+/// a type carries the rule that makes a value valid, so untrusted bytes go in
+/// and values that satisfy the rule come out. (2) draws parity, which is a
+/// quality proof rather than a reason to use the language. (3) draws a logo,
+/// which says nothing at all.
+///
+/// # The division of labour
+///
+/// `frame(t)` returns one glyph per cell, row by row, and the host paints each
+/// glyph with `fillText`. Vyrn computes, JavaScript paints: one call across the
+/// boundary per frame, not one per cell.
+///
+/// # The proof
+///
+/// The field is nothing but `Float64` arithmetic, and RFC-0083 compiles with
+/// `-ffp-contract=off`, so the interpreter, the native binary and wasm must
+/// agree to the last bit. `main` prints the raw IEEE-754 bits of the sampled
+/// field, and the parity harness compares the three columns byte for byte. A
+/// contracted multiply-add anywhere on this path would change a bit and fail
+/// the run.
 import { sin, cos, floorF } from "std/math"
 import { substring } from "std/strings"
 
@@ -20,16 +40,59 @@ fn ramp() -> String {
     return ".:+=VYRN#$&"
 }
 
-/// The two-wave field at `(u, v)` and time `t`, in [-1, 1].
-export fn field(u: Float64, v: Float64, t: Float64) -> Float64 {
-    let a = sin(10.0 * (u * cos(0.7 * t) + v * sin(0.5 * t)) + t)
-    let b = cos(10.0 * (u * sin(0.4 * t) - v * cos(0.6 * t)) - 0.5 * t)
-    return 0.6 * a + 0.4 * b
+/// `x` held inside [0, 1].
+fn unit(x: Float64) -> Float64 {
+    if x < 0.0 {
+        return 0.0
+    }
+    if x > 1.0 {
+        return 1.0
+    }
+    return x
 }
 
-/// The field as an 8-bit luminance.
+/// The disordered half: three waves at frequencies with no common measure,
+/// multiplied. The product speckles at glyph resolution, which is what raw
+/// bytes should look like.
+export fn noise(u: Float64, v: Float64, t: Float64) -> Float64 {
+    let a = sin(9.7 * u + 5.3 * v + 1.7 * t)
+    let b = sin(6.1 * u - 8.3 * v - 1.1 * t)
+    let c = sin(13.7 * (u + v) + 0.7 * t)
+    return a * b * c
+}
+
+/// The ordered half: one regular lattice, drifting steadily to the right. Same
+/// stream, now in rows a reader can count.
+export fn lattice(u: Float64, v: Float64, t: Float64) -> Float64 {
+    return sin(7.0 * v) * cos(3.0 * u - 1.6 * t)
+}
+
+/// How far past the gate `u` sits, from 0 (fully raw) to 1 (fully ordered).
+/// The gate stands at `u = -0.05` and the crossing takes a quarter of the
+/// width, so neither side is a hard edge.
+export fn crossing(u: Float64) -> Float64 {
+    return unit((u + 0.05) / 0.25)
+}
+
+/// The gate itself, as a soft vertical seam. A rational bump rather than a
+/// Gaussian, because it needs no `exp` and reads the same at this size.
+fn seam(u: Float64) -> Float64 {
+    let d = u + 0.05
+    return 1.0 / (1.0 + 900.0 * d * d)
+}
+
+/// The field at `(u, v)` and time `t`, in roughly [-1.3, 2.3]. `frame` levels
+/// it; `main` prints its bits.
+export fn field(u: Float64, v: Float64, t: Float64) -> Float64 {
+    let w = crossing(u)
+    let mixed = (1.0 - w) * 0.85 * noise(u, v, t) + w * lattice(u, v, t)
+    return mixed + 1.3 * seam(u)
+}
+
+/// The field as an 8-bit luminance, levelled against the range the mix can
+/// reach. Zero stays zero: a dark cell draws nothing, so the paper stays clean.
 export fn luminance(u: Float64, v: Float64, t: Float64) -> Int64 {
-    let lum = floorF(255.0 * (0.5 + 0.5 * field(u, v, t)))
+    let lum = floorF(255.0 * unit((field(u, v, t) + 1.1) / 2.6))
     if lum < 0.0 {
         return 0
     }
@@ -69,9 +132,16 @@ export fn frame(cols: Int64, rows: Int64, t: Float64, charAr: Float64) -> String
     return out
 }
 
+/// The frame, exported to the host (RFC-0012 M2). The page calls this on the
+/// live instance after `main` returns, once per painted frame, and paints the
+/// glyphs it gets back. One boundary crossing per frame, not one per cell.
+export extern fn heroFrame(cols: Int64, rows: Int64, t: Float64, charAr: Float64) -> String {
+    return frame(cols, rows, t, charAr)
+}
+
 fn main() -> Int64 {
-    // A small frame, printed as it paints.
-    print(frame(48, 9, 0.35, 0.5))
+    // A small frame, printed as it paints: noise, gate, lattice.
+    print(frame(60, 11, 0.35, 0.5))
 
     // The bits behind it. This is the parity claim: three backends, one number.
     let mut i = 0
@@ -82,6 +152,8 @@ fn main() -> Int64 {
         i = i + 1
     }
     print("sin(1) bits = \{floatBits(sin(1.0))}")
+    print("noise bits = \{floatBits(noise(0.4, 0.0 - 0.2, 1.5))}")
+    print("lattice bits = \{floatBits(lattice(0.4, 0.0 - 0.2, 1.5))}")
     print("luminance sweep = \{luminance(0.0, 0.0, 0.0)} \{luminance(0.5, 0.5, 1.0)} \{luminance(0.9, 0.1, 2.0)}")
     return 0
 }
@@ -89,6 +161,13 @@ fn main() -> Int64 {
 test "the frame has one glyph per cell and one newline per row" {
     let f = frame(12, 4, 0.0, 0.5)
     assertEq(f.byteLength, 12 * 4 + 4)
+}
+
+test "the gate separates the two halves" {
+    // Far left is raw, far right is ordered, and the crossing runs between.
+    assertEq(crossing(0.0 - 1.0), 0.0)
+    assertEq(crossing(1.0), 1.0)
+    assert(crossing(0.0) > 0.0 && crossing(0.0) < 1.0)
 }
 
 test "luminance stays inside the byte range" {

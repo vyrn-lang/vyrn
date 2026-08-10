@@ -1,48 +1,185 @@
 <script>
-// GET /compare — the densest page: a fixed rail of comparison axes, a scrolling
-// main column. Every row must carry differentiating information, or it goes.
+// GET /compare — the densest page: a fixed rail of comparison axes and a
+// scrolling main column. Every row carries differentiating information.
 //
-// The numbers are NOT here. Section 5 of the brief bakes `bench.json` and the
-// `site/compare/` corpus at build time, and no widget on this site prints a
-// number the project cannot produce on demand. The rows below name the axes and
-// nothing else.
-import { Head, noHead, withTitle } from "std/ui"
+// THE DATA RULE, which shapes this page more than anything else: no widget here
+// renders a number the project cannot produce on demand. `bench/baseline.json`
+// is still a placeholder — the file says so itself — so there is no runtime
+// benchmark chart, and the metric strip says "not published" rather than a
+// figure nobody measured. The one chart that ships plots two module sizes that
+// README.md and ROADMAP.md both state, and that anyone can reproduce with one
+// build command.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { comparison, Snippet } from "../snippets"
+import { moduleSizes, Bar } from "../chart"
 
 /// One comparison axis: what is being compared, and where each answer stands.
-type Axis = { id: String, name: String, vyrn: String, note: String }
+type Axis = { id: String, name: String, vyrn: String, rust: String, ts: String, go: String }
 
 export fn head() -> Head {
-    return withTitle(noHead(), "Compare — Vyrn")
+    return pageHead("Compare — Vyrn")
 }
 
 fn axes() -> Array<Axis> {
     return [
-        Axis { id: "01", name: "Memory", vyrn: "Declared ownership, no collector", note: "against Rust's inferred lifetimes, Go's collector, TypeScript's host collector" },
-        Axis { id: "02", name: "Backends", vyrn: "Interpreter, native, wasm — byte-identical", note: "the parity harness runs the whole example corpus on all three" },
-        Axis { id: "03", name: "Validation", vyrn: "Rules live in the type", note: "elsewhere a schema library runs beside the type" },
-        Axis { id: "04", name: "Concurrency", vyrn: "Isolated spawn, no function colour", note: "against async/await" },
-        Axis { id: "05", name: "Metaprogramming", vyrn: "Generators are ordinary compile-time code", note: "readable with one command, no macro language" },
+        Axis {
+            id: "01",
+            name: "Memory",
+            vyrn: "Declared: read, modify, consume, share",
+            rust: "Inferred lifetimes and borrows",
+            ts: "The host's collector",
+            go: "A collector, with a pause",
+        },
+        Axis {
+            id: "02",
+            name: "Validation",
+            vyrn: "A where clause in the type",
+            rust: "A constructor beside the type",
+            ts: "A schema library beside the type",
+            go: "A function you must remember",
+        },
+        Axis {
+            id: "03",
+            name: "Concurrency",
+            vyrn: "spawn and join, no function colour",
+            rust: "async/await, plus a runtime",
+            ts: "async/await, one thread",
+            go: "Goroutines and channels",
+        },
+        Axis {
+            id: "04",
+            name: "Metaprogramming",
+            vyrn: "Generators: compile-time Vyrn, readable output",
+            rust: "Macros, in a second language",
+            ts: "Decorators and codegen tools",
+            go: "go:generate, outside the language",
+        },
+        Axis {
+            id: "05",
+            name: "Targets",
+            vyrn: "Interpreter, native, wasm — byte-identical",
+            rust: "Native and wasm, via LLVM",
+            ts: "One runtime, interpreted or JIT",
+            go: "Native and wasm",
+        },
+        Axis {
+            id: "06",
+            name: "Failure",
+            vyrn: "Option, Result, exhaustive match, no null",
+            rust: "Option, Result, and panics",
+            ts: "null, undefined, and exceptions",
+            go: "Explicit error returns, and nil",
+        },
+    ]
+}
+
+/// What we can honestly say about size and speed today, and what we cannot.
+type Metric = { name: String, value: String, known: Bool, note: String }
+
+fn metrics() -> Array<Metric> {
+    return [
+        Metric { name: "Wasm module, fib", value: "1.4 KB", known: true, note: "vyrn build --target wasm, the direct encoder" },
+        Metric { name: "Same, through clang", value: "277 KB", known: true, note: "the route through textual LLVM IR" },
+        Metric { name: "Build dependencies", value: "0", known: true, note: "the wasm target needs no LLVM, clang or sysroot" },
+        Metric { name: "Run time", value: "not published", known: false, note: "the benchmark baseline is unseeded; see below" },
+        Metric { name: "Peak memory", value: "not published", known: false, note: "no measured figure exists yet" },
     ]
 }
 </script>
 
 <template>
-<main class="dense">
+<main class="page">
     <aside class="rail">
-        <ol>
-            <li v-for="a in axes()" :key="a.id"><span class="num">{{ a.id }}</span> {{ a.name }}</li>
-        </ol>
+        <a v-for="a in axes()" :key="a.id" :href='"#axis-" + a.id'><span class="n">{{ a.id }}</span>{{ a.name }}</a>
+        <a href="#code"><span class="n">07</span>the code</a>
+        <a href="#numbers"><span class="n">08</span>numbers</a>
     </aside>
-    <div class="column">
-        <h1>Honest comparisons</h1>
-        <p>Each row states a difference and names the evidence. Measured numbers arrive from the benchmark job; nothing here is quoted from memory.</p>
-        <section class="row" v-for="a in axes()" :key="a.id">
-            <p class="eyebrow">{{ a.id }} · {{ a.name }}</p>
-            <p class="answer">{{ a.vyrn }}</p>
-            <p class="note">{{ a.note }}</p>
-            <div class="widget-socket">widget: comparison toggles</div>
+        <section class="hero">
+            <p class="eyebrow">Compare</p>
+            <h1 class="display">Where Vyrn differs, and where it has nothing to show yet</h1>
+            <p class="lede">Every row names a real difference. Every number traces to something the project can produce on demand. Where no honest measurement exists, this page says so instead of printing one.</p>
         </section>
-        <div class="widget-socket">widget: benchmark charts</div>
-    </div>
+
+        <section class="band" id="code">
+            <p class="eyebrow">07 — the same task, four times</p>
+            <h2>A number that is only valid at 18 or above</h2>
+            <p>The task is the smallest one that separates these languages: state a rule about a value, and check an untrusted one without crashing. In Vyrn the rule is part of the type. Everywhere else it lives beside the type, in a constructor, a schema object, or a function a caller has to remember.</p>
+            <div class="plate" data-tabs>
+                <div class="plate-head">
+                    <span class="pill">Specimen</span>
+                    <span class="eyebrow">the same rule, four ways</span>
+                </div>
+                <div class="tabs">
+                    <button type="button" v-for="s in comparison()" :key="s.id" :data-tab="s.id" role="tab" aria-selected="false">{{ s.label }}</button>
+                </div>
+                <div class="stage panes">
+                    <div v-for="s in comparison()" :key="s.id" :data-pane="s.id">
+                        <pre class="code" v-html="s.html"></pre>
+                    </div>
+                </div>
+                <p class="cap">The Vyrn snippet is the language's own. The other three are written the way each language's documentation writes them, and are illustrative rather than measured.</p>
+            </div>
+        </section>
+
+        <section class="row" v-for="a in axes()" :key="a.id" :id='"axis-" + a.id'>
+            <p class="eyebrow">{{ a.id }} — {{ a.name }}</p>
+            <h2>{{ a.vyrn }}</h2>
+            <div class="scroller">
+            <table>
+                <thead>
+                    <tr><th>Vyrn</th><th>Rust</th><th>TypeScript</th><th>Go</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="yes">{{ a.vyrn }}</td>
+                        <td class="no">{{ a.rust }}</td>
+                        <td class="no">{{ a.ts }}</td>
+                        <td class="no">{{ a.go }}</td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+        </section>
+
+        <section class="band" id="numbers">
+            <p class="eyebrow">08 — measured, and not measured</p>
+            <h2>Module size, and the numbers we do not have</h2>
+            <p>One figure on this page is a measurement anyone can repeat: build <code>examples/fib.vyrn</code> to WebAssembly. The compiler's own encoder emits the module directly, and a module carries only the runtime its own code reaches.</p>
+            <div class="plate" data-widget="bars">
+                <div class="plate-head">
+                    <span class="pill live">Measured</span>
+                    <span class="eyebrow">vyrn build examples/fib.vyrn --target wasm</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-bars-replay>Replay</button>
+                    </div>
+                </div>
+                <span class="bignum">198<small>times smaller</small></span>
+                <div class="stage">
+                    <svg class="chart" viewBox="0 0 900 100" role="img" aria-label="fib.wasm is 1.4 KB through the direct encoder and 277 KB through clang">
+                        <g v-for="b in moduleSizes()" :key="b.id">
+                            <rect class="bar" x="120" :y="b.y" :width="b.w" height="26" fill="currentColor" fill-opacity="0.28">
+                                <title>{{ b.title }}</title>
+                            </rect>
+                            <text x="0" :y="b.y" dy="19">{{ b.label }}</text>
+                            <text x="120" :y="b.y" dy="-4" class="val">{{ b.value }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">Both figures are stated in README.md and ROADMAP.md, and both are one build command away. One linear scale, so the small bar is a sliver — which is what the difference looks like.</p>
+            </div>
+
+            <dl class="metrics">
+                <div v-for="m in metrics()" :key="m.name">
+                    <dt>{{ m.name }}</dt>
+                    <dd v-if="m.known">{{ m.value }}</dd>
+                    <dd v-else class="none">{{ m.value }}</dd>
+                    <dd class="none">{{ m.note }}</dd>
+                </div>
+            </dl>
+
+            <p class="notice">There is no run-time benchmark chart on this page, and that is deliberate. <code>vyrn bench</code> exists, CI runs it, and <code>bench/baseline.json</code> is still a placeholder — the file documents how to seed it from a CI run. Until it is seeded, any speed figure here would be a number from a developer's laptop dressed up as a measurement. The chart lands the day the baseline does.</p>
+        </section>
 </main>
 </template>

@@ -72,6 +72,38 @@ fn exportPath(outDir: String, path: String) -> Int64 {
     return bad
 }
 
+/// Every text file the site serves beside its pages: `source` in the repository,
+/// `name` in the output. Flat, for the same reason the pages are flat.
+///
+/// The wasm hero module is NOT here. `writeFile` takes a `String`, and a wasm
+/// module is not text, so `site/public/hero.wasm` is copied by the deploy step
+/// (`.github/workflows/site.yml`) along with anything else binary the site grows.
+fn assets() -> Array<Array<String>> {
+    return [
+        ["site/public/style.css", "style.css"],
+        ["site/public/widgets.js", "widgets.js"],
+        ["site/public/hero.js", "hero.js"],
+        ["site/public/fresh.js", "fresh.js"],
+        ["web/wasi-min.js", "wasi-min.js"],
+        ["web/vyrn-nav.js", "vyrn-nav.js"],
+        ["web/vyrn-dom.js", "vyrn-dom.js"],
+    ]
+}
+
+/// Copy one asset. A missing source is a failure, not a warning: a page that
+/// links a stylesheet the export did not write is a broken page.
+fn copyAsset(outDir: String, source: String, name: String) -> Int64 {
+    let body = match readFile(source) {
+        Ok(text) => text,
+        Err(why) => "",
+    }
+    if body.byteLength == 0 {
+        print("FAIL \{source}: unreadable or empty")
+        return 1
+    }
+    return emit("\{outDir}/\{name}", body)
+}
+
 fn main() -> Int64 {
     let argv = args()
     let outDir = if argv.length > 1 { argv[1].copy() } else { "out" }
@@ -79,17 +111,14 @@ fn main() -> Int64 {
     for path in sitePaths() {
         failures = failures + exportPath(outDir, path)
     }
-    // The stylesheet is a static asset, not a route, so it is copied rather than
-    // rendered. When the design lands it becomes the `std/tw` theme stylesheet.
-    failures = failures + match readFile("site/public/style.css") {
-        Ok(css) => emit("\{outDir}/style.css", css),
-        Err(why) => 1,
+    for asset in assets() {
+        failures = failures + copyAsset(outDir, asset[0], asset[1])
     }
     if failures > 0 {
         print("export failed: \{failures} file(s)")
         return 1
     }
-    print("exported \{sitePaths().length} route(s) to \{outDir}")
+    print("exported \{sitePaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
     return 0
 }
 
