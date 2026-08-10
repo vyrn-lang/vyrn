@@ -1,0 +1,848 @@
+/// std/cli — the command line IS a record type (RFC-0098, M1).
+///
+///   import { cli } from "std/cli"
+///   import { parseServe, helpServe } from cli("./serve")
+///
+/// One `gen fn` reflects a module of type declarations and RETURNS a module that
+/// exports, for every exported RECORD type in it, `parse<Name>(argv) ->
+/// Validation<Name>` and `help<Name>() -> String`. The compiler knows nothing
+/// about command lines: the generator is comptime-pure Vyrn string building, the
+/// `std/openapi` precedent, and the walk over a record's fields is the
+/// `std/http:httpFields` walk (`lex()` over `TypeInfo.source` at brace depth 1).
+///
+/// The mapping is a rule over the declaration, never an attribute:
+///
+/// | field type | surface | missing |
+/// |---|---|---|
+/// | `Bool` | `--verbose` | `false` |
+/// | `Option<T>` | `--host <value>` | `None` |
+/// | bare `T` | `--port <value>` | an `Issue` at path `port` |
+/// | `Array<String>` | the positionals, at most one field | empty |
+///
+/// - The long name is the field name in kebab-case: `dryRun` is `--dry-run`.
+/// - The short name is the first byte of the field name, taken in declaration
+///   order and skipped on collision. `-h` is reserved for `--help`.
+/// - An unknown option is an `Issue`. This is the difference from `std/args`: a
+///   spec exists, so silence would be wrong.
+/// - A value is validated BY CONSTRUCTION. `--port 99999` reaches `Port?(99999)`,
+///   which answers `None`, which becomes an `Issue` worded from that type's
+///   `Schema` — so the check the parser runs and the check the program relies on
+///   are one check.
+/// - Help text per option comes from the `///` above the option's own NAMED type
+///   (`TypeInfo.schema.doc`). Per-FIELD `///` docs are discarded by the parser
+///   today, so a documented option needs a named type — which is what RFC-0003
+///   asks for anyway. RFC-0098 M3 is the compiler change that lifts this.
+/// - `--help` is a question about argv, not a value in the record, so the caller
+///   asks it with `wantsHelp(argv)` before parsing.
+///
+/// M1 understands `Bool`, `Int64`, `String`, a validated type over `Int64` or
+/// `String`, an `Option` of those, and one `Array<String>` for the positionals.
+/// Anything else fails the generation with a sentence naming the field.
+///
+/// Inspect the synthesized module with:  vyrn emit-gen <file>
+
+import { includes } from "std/arrays"
+import { fromBytesOr, indexOf, joinWith, padEnd, substring } from "std/strings"
+import { endsWith, startsWith } from "std/strpred"
+
+// ===========================================================================
+// RUNTIME — the argv walk the generated module calls. Ordinary Vyrn, tested
+// below, so the generator emits declarations and lookups and nothing clever.
+// ===========================================================================
+
+/// One declared option, as the generated spec describes it to the walk.
+export type CliOpt = {
+    long: String,
+    short: String,
+    field: String,
+    takesValue: Bool,
+}
+
+/// One option seen in argv: the field it fills, and the text it carried (`""`
+/// for a flag).
+export type CliHit = { field: String, value: String }
+
+/// What one walk of argv found: the options, the free arguments, and the
+/// problems with the argv ITSELF (unknown option, missing value). Problems with
+/// a VALUE belong to the type that refused it, and the generated parser raises
+/// those.
+export type CliRead = {
+    hits: Array<CliHit>,
+    free: Array<String>,
+    issues: Array<Issue>,
+}
+
+fn cliIssueOf(key: String, path: String, message: String) -> Issue {
+    return Issue { key: key.copy(), path: path.copy(), message: message.copy() }
+}
+
+/// The index of the option `name` spells, or `-1`.
+fn cliOptAt(opts: Array<CliOpt>, name: String) -> Int64 {
+    let mut i = 0
+    while i < opts.length {
+        if opts[i].long == name || (opts[i].short != "" && opts[i].short == name) {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// Walk `argv` against `opts`.
+///
+/// A token starting with `-` (and not a bare `-`) is an option; `--name=value`
+/// carries its value inline, otherwise an option that takes a value takes the
+/// NEXT token verbatim — a spec exists, so `--port -1` is a port of -1 and not a
+/// missing value. A literal `--` ends option parsing and everything after it is
+/// a free argument. The FIRST occurrence of an option wins, as in `std/args`.
+export fn readArgv(opts: Array<CliOpt>, argv: Array<String>) -> CliRead {
+    let mut hits: Array<CliHit> = []
+    let mut free: Array<String> = []
+    let mut iss: Array<Issue> = []
+    let mut i = 0
+    let mut flagsEnd = false
+    while i < argv.length {
+        let tok = argv[i]
+        let mut step = 1
+        if flagsEnd {
+            free.push(tok.copy())
+        } else if tok == "--" {
+            flagsEnd = true
+        } else if tok.startsWith("-") && tok != "-" {
+            let mut name = tok.copy()
+            let mut inlineValue = ""
+            let mut inlined = false
+            if let Some(eq) = indexOf(tok, "=") {
+                name = substring(tok, 0, eq)
+                inlineValue = substring(tok, eq + 1, tok.byteLength)
+                inlined = true
+            }
+            let at = cliOptAt(opts, name)
+            if at < 0 {
+                iss.push(cliIssueOf("cli.unknown", "", "unknown option `" + name + "`"))
+            } else if opts[at].takesValue {
+                if inlined {
+                    hits.push(CliHit { field: opts[at].field.copy(), value: inlineValue.copy() })
+                } else if i + 1 < argv.length {
+                    hits.push(CliHit { field: opts[at].field.copy(), value: argv[i + 1].copy() })
+                    step = 2
+                } else {
+                    let long = opts[at].long.copy()
+                    iss.push(
+                        cliIssueOf("cli.value", opts[at].field, "option `" + long + "` needs a value"),
+                    )
+                }
+            } else if inlined {
+                let long = opts[at].long.copy()
+                iss.push(
+                    cliIssueOf("cli.value", opts[at].field, "option `" + long + "` takes no value"),
+                )
+            } else {
+                hits.push(CliHit { field: opts[at].field.copy(), value: "" })
+            }
+        } else {
+            free.push(tok.copy())
+        }
+        i = i + step
+    }
+    return CliRead { hits: hits, free: free, issues: iss }
+}
+
+/// Whether the flag field `field` was seen.
+export fn cliFlag(r: CliRead, field: String) -> Bool {
+    for h in r.hits {
+        if h.field == field {
+            return true
+        }
+    }
+    return false
+}
+
+/// The text the option field `field` carried, first occurrence wins.
+export fn cliValue(r: CliRead, field: String) -> Option<String> {
+    for h in r.hits {
+        if h.field == field {
+            return Some(h.value.copy())
+        }
+    }
+    return None
+}
+
+/// The walk's own problems, as the accumulator a generated parser starts from.
+export fn cliIssues(r: CliRead) -> Array<Issue> {
+    let mut out: Array<Issue> = []
+    for e in r.issues {
+        out.push(cliIssueOf(e.key, e.path, e.message))
+    }
+    return out
+}
+
+/// `--help` or `-h` anywhere before a `--` terminator. Asked BEFORE parsing:
+/// help is a question about argv, and a program that asks for it has not given
+/// the required options.
+export fn wantsHelp(argv: Array<String>) -> Bool {
+    for a in argv {
+        if a == "--" {
+            return false
+        }
+        if a == "--help" || a == "-h" {
+            return true
+        }
+    }
+    return false
+}
+
+/// A required option nobody gave.
+export fn cliMissing(field: String, long: String) -> Issue {
+    return cliIssueOf("cli.missing", field, "required option `" + long + "` is missing")
+}
+
+/// A value that is not a whole number.
+export fn cliNotNumber(field: String, long: String) -> Issue {
+    return cliIssueOf("cli.number", field, "option `" + long + "` expects a whole number")
+}
+
+/// A value the field's own type refused. `want` is that type's rule, worded from
+/// its `Schema` by the generator.
+export fn cliRefused(field: String, long: String, want: String) -> Issue {
+    return cliIssueOf("cli.invalid", field, "option `" + long + "` expects " + want)
+}
+
+/// A free argument in a command that declares no positionals.
+export fn cliUnexpected(value: String) -> Issue {
+    return cliIssueOf("cli.unexpected", "", "unexpected argument `" + value + "`")
+}
+
+// ===========================================================================
+// GENERATION — comptime-pure string building. Nothing below runs in the
+// program; everything below writes the program.
+// ===========================================================================
+
+/// One field of the command record, as `lex()` reads it back.
+type CliField = { name: String, ty: String }
+
+/// One option, fully decided: what it is called, what it holds, and what its
+/// type refuses.
+type CliPlan = {
+    field: String,
+    long: String,
+    short: String,
+    kind: String,
+    optional: Bool,
+    base: String,
+    named: String,
+    bounds: String,
+    doc: String,
+}
+
+/// The fields of a record declaration, in declaration order.
+///
+/// Read off `TypeInfo.source` — canonical Vyrn source — with the compiler's own
+/// lexer (RFC-0054), the `std/http:httpFields` walk: at brace depth 1 an
+/// identifier followed by `:` is a field, and the tokens after the `:` up to the
+/// next top-level `,` are its type. A hand-rolled scanner got this wrong once
+/// already, in `std/vyx`.
+gen fn cliFieldsOf(src: String) -> Array<CliField> {
+    let toks = lex(src)
+    let mut out: Array<CliField> = []
+    let mut depth = 0
+    let mut i = 0
+    while i < toks.length {
+        let tk = toks[i]
+        if tk.kind == "punct" && tk.text == "{" {
+            depth = depth + 1
+        }
+        if tk.kind == "punct" && tk.text == "}" {
+            depth = depth - 1
+        }
+        if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
+            let nx = toks[i + 1]
+            if nx.kind == "punct" && nx.text == ":" {
+                let mut ty = ""
+                let mut ang = 0
+                let mut j = i + 2
+                let mut going = true
+                while going && j < toks.length {
+                    let c = toks[j]
+                    if c.kind == "punct" && c.text == "<" {
+                        ang = ang + 1
+                    }
+                    if c.kind == "punct" && c.text == ">" {
+                        ang = ang - 1
+                    }
+                    if ang == 0 && c.kind == "punct" && (c.text == "," || c.text == "}") {
+                        going = false
+                    } else {
+                        ty = ty + c.text
+                        j = j + 1
+                    }
+                }
+                out.push(CliField { name: tk.text, ty: ty })
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// `Option<String>` is `String`; anything else is itself.
+fn cliInner(ty: String) -> String {
+    if ty.startsWith("Option<") && ty.endsWith(">") {
+        return substring(ty, 7, ty.byteLength - 1)
+    }
+    return ty.copy()
+}
+
+/// lowerCamelCase to kebab-case, with the first byte lowered: `dryRun` is
+/// `dry-run`, `Serve` is `serve`.
+fn cliKebab(name: String) -> String {
+    let ba = bytes(name)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < ba.length {
+        let b = ba[i]
+        if b >= 'A' && b <= 'Z' {
+            if i > 0 {
+                out.push('-')
+            }
+            out.push(b + 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, name)
+}
+
+/// Uppercase the first byte (ASCII), for the generated locals' names.
+fn cliCapFirst(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < ba.length {
+        if i == 0 && ba[i] >= 'a' && ba[i] <= 'z' {
+            out.push(ba[i] - 32)
+        } else {
+            out.push(ba[i])
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, s)
+}
+
+/// The first byte of a field name, lowercased, as a short-flag letter.
+fn cliInitial(name: String) -> String {
+    let ba = bytes(name)
+    if ba.length == 0 {
+        return ""
+    }
+    let mut one: Array<UInt8> = []
+    if ba[0] >= 'A' && ba[0] <= 'Z' {
+        one.push(ba[0] + 32)
+    } else {
+        one.push(ba[0])
+    }
+    return fromBytesOr(one, "")
+}
+
+/// The declaration of the named type, or `None`.
+gen fn cliTypeOf(name: String, iface: ModuleInterface) -> Option<Schema> {
+    for t in iface.types {
+        if t.name == name {
+            return Some(t.schema.copy())
+        }
+    }
+    return None
+}
+
+/// `Int64`, `String` or `Bool` — the base a spelling reduces to, `""` when M1
+/// cannot spell it on a command line.
+gen fn cliBaseOf(spelling: String, iface: ModuleInterface) -> String {
+    if spelling == "Int64" || spelling == "String" || spelling == "Bool" {
+        return spelling.copy()
+    }
+    if let Some(s) = cliTypeOf(spelling, iface) {
+        if s.base == "Int64" || s.base == "String" {
+            return s.base.copy()
+        }
+    }
+    return ""
+}
+
+/// `n bytes` / `1 byte`.
+fn cliBytes(n: Int64) -> String {
+    if n == 1 {
+        return "1 byte"
+    }
+    return n.toString() + " bytes"
+}
+
+/// The rule a validated type states, in its own words: `1 to 65535`, `at least
+/// 1`, `at most 32 bytes long`, or `""` when the predicate is not a bound.
+fn cliBoundsText(lo: Option<Int64>, hi: Option<Int64>, lengths: Bool) -> String {
+    if let Some(a) = lo {
+        if let Some(b) = hi {
+            if lengths {
+                return a.toString() + " to " + cliBytes(b) + " long"
+            }
+            return a.toString() + " to " + b.toString()
+        }
+        if lengths {
+            return "at least " + cliBytes(a) + " long"
+        }
+        return "at least " + a.toString()
+    }
+    if let Some(b) = hi {
+        if lengths {
+            return "at most " + cliBytes(b) + " long"
+        }
+        return "at most " + b.toString()
+    }
+    return ""
+}
+
+/// What a refusal says the option expects: the base's noun plus the type's own
+/// bound, or the type's name when the predicate is not a bound.
+fn cliWant(named: String, base: String, bounds: String) -> String {
+    if bounds == "" {
+        return "a valid `" + named + "`"
+    }
+    if base == "Int64" {
+        return "a whole number, " + bounds
+    }
+    return "text, " + bounds
+}
+
+/// Every option of one command record, decided in declaration order.
+gen fn cliPlansOf(t: TypeInfo, iface: ModuleInterface) -> Array<CliPlan> {
+    let mut out: Array<CliPlan> = []
+    let mut used: Array<String> = ["h"]
+    let mut frees = 0
+    for f in cliFieldsOf(t.source) {
+        let inner = cliInner(f.ty)
+        let optional = inner != f.ty
+        if f.ty == "Array<String>" {
+            frees = frees + 1
+            if frees > 1 {
+                panic(
+                    "std/cli: `" + t.name + "` has more than one `Array<String>` field, so which one takes the positional arguments is not written anywhere. Keep one.",
+                )
+            }
+            out.push(
+                CliPlan {
+                    field: f.name.copy(),
+                    long: "",
+                    short: "",
+                    kind: "free",
+                    optional: false,
+                    base: "",
+                    named: "",
+                    bounds: "",
+                    doc: "",
+                },
+            )
+        } else {
+            let base = cliBaseOf(inner, iface)
+            if base == "" {
+                panic(
+                    "std/cli: field `" + f.name + "` of `" + t.name + "` has type `" + f.ty + "`, which a command line cannot spell. M1 understands Bool, Int64, String, a validated type over Int64 or String, an Option of those, and one Array<String> for the positionals.",
+                )
+            }
+            if base == "Bool" && optional {
+                panic(
+                    "std/cli: field `" + f.name + "` of `" + t.name + "` is `Option<Bool>`. A flag is present or it is not, so `Bool` says all of it.",
+                )
+            }
+            let named = if inner == base { "" } else { inner.copy() }
+            let mut bounds = ""
+            let mut doc = ""
+            if named != "" {
+                if let Some(s) = cliTypeOf(named, iface) {
+                    let lengths = base == "String"
+                    bounds = if lengths {
+                        cliBoundsText(s.minLength, s.maxLength, true)
+                    } else {
+                        cliBoundsText(s.min, s.max, false)
+                    }
+                    doc = match s.doc {
+                        Some(d) => d.copy(),
+                        None => "",
+                    }
+                }
+            }
+            let letter = cliInitial(f.name)
+            let short = if includes(used, letter) {
+                ""
+            } else {
+                "-" + letter
+            }
+            if short != "" {
+                used.push(letter.copy())
+            }
+            out.push(
+                CliPlan {
+                    field: f.name.copy(),
+                    long: "--" + cliKebab(f.name),
+                    short: short,
+                    kind: if base == "Bool" { "flag" } else { "value" },
+                    optional: optional,
+                    base: base,
+                    named: named,
+                    bounds: bounds,
+                    doc: doc,
+                },
+            )
+        }
+    }
+    return out
+}
+
+/// Whether the record declares its own `help` field (then the generator adds no
+/// `--help` of its own).
+fn cliDeclaresHelp(plans: Array<CliPlan>) -> Bool {
+    for p in plans {
+        if p.field == "help" {
+            return true
+        }
+    }
+    return false
+}
+
+/// The left column of one help row: `  -p, --port <value>`.
+fn cliHelpLeft(p: CliPlan) -> String {
+    let head = if p.short == "" {
+        "      "
+    } else {
+        "  " + p.short + ", "
+    }
+    if p.kind == "value" {
+        return head + p.long + " <value>"
+    }
+    return head + p.long
+}
+
+/// The right column: the option type's own `///`, plus its rule.
+fn cliHelpRight(p: CliPlan) -> String {
+    if p.bounds == "" {
+        return p.doc.copy()
+    }
+    if p.doc == "" {
+        return "(" + p.bounds + ")"
+    }
+    return p.doc + " (" + p.bounds + ")"
+}
+
+/// The whole `--help` text of one command.
+fn cliHelpText(t: TypeInfo, plans: Array<CliPlan>) -> String {
+    let mut lefts: Array<String> = []
+    let mut rights: Array<String> = []
+    for p in plans {
+        if p.kind != "free" {
+            lefts.push(cliHelpLeft(p))
+            rights.push(cliHelpRight(p))
+        }
+    }
+    if !cliDeclaresHelp(plans) {
+        lefts.push("  -h, --help")
+        rights.push("Show this help.")
+    }
+    let mut width = 0
+    for l in lefts {
+        if l.byteLength > width {
+            width = l.byteLength
+        }
+    }
+    let mut usage = "Usage: " + cliKebab(t.name) + " [options]"
+    for p in plans {
+        if p.kind == "free" {
+            usage = usage + " [<" + cliKebab(p.field) + ">...]"
+        }
+    }
+    let mut out: Array<String> = []
+    if let Some(d) = t.schema.doc {
+        out.push(d.copy())
+        out.push("")
+    }
+    out.push(usage)
+    out.push("")
+    out.push("Options:")
+    let mut i = 0
+    while i < lefts.length {
+        if rights[i] == "" {
+            out.push(lefts[i].copy())
+        } else {
+            out.push(padEnd(lefts[i], width + 2, " ") + rights[i])
+        }
+        i = i + 1
+    }
+    return joinWith(out, "\n") + "\n"
+}
+
+/// The `help<Name>()` accessor, with the text baked through a code quote
+/// (RFC-0054): `\{text}` sits in expression position, so the compiler's own
+/// escaping turns a user's `///` prose into a string LITERAL and a stray quote
+/// or backslash in it cannot become code.
+gen fn cliEmitHelp(name: String, text: String) -> String {
+    return render(vyrn"""export fn help\{name}() -> String {
+    return \{text}
+}
+""")
+}
+
+/// The option spec the walk reads.
+fn cliEmitSpec(name: String, plans: Array<CliPlan>) -> String {
+    let mut out = "fn cliSpec" + name + "() -> Array<CliOpt> {\n    return [\n"
+    for p in plans {
+        if p.kind != "free" {
+            let takes = if p.kind == "value" { "true" } else { "false" }
+            out = out + "        CliOpt { long: \"" + p.long + "\", short: \"" + p.short + "\", field: \"" + p.field + "\", takesValue: " + takes + " },\n"
+        }
+    }
+    if !cliDeclaresHelp(plans) {
+        out = out + "        CliOpt { long: \"--help\", short: \"-h\", field: \"help\", takesValue: false },\n"
+    }
+    return out + "    ]\n}\n"
+}
+
+/// The assignment that puts an accepted value in the field's local.
+fn cliStore(p: CliPlan, value: String) -> String {
+    let v = "v" + p.field
+    if p.optional {
+        return v + " = Some(" + value + ")"
+    }
+    return v + " = " + value
+}
+
+/// The `Port?(n)` hop — the type's own check, which is also the program's — or
+/// the plain assignment when the field's type is not a named validated one.
+fn cliEmitAccept(p: CliPlan, raw: String, pad: String) -> String {
+    if p.named == "" {
+        return pad + cliStore(p, raw) + "\n"
+    }
+    let refused = "iss.push(cliRefused(\"" + p.field + "\", \"" + p.long + "\", \"" + cliWant(p.named, p.base, p.bounds) + "\"))"
+    let ok = "ok" + cliCapFirst(p.field)
+    let mut out = pad + "if let Some(" + ok + ") = " + p.named + "?(" + raw + ") {\n"
+    out = out + pad + "    " + cliStore(p, ok) + "\n"
+    out = out + pad + "} else {\n"
+    out = out + pad + "    " + refused + "\n"
+    out = out + pad + "}\n"
+    return out
+}
+
+/// One field's contribution to the parse: its local, and the reason it may fail.
+fn cliEmitField(p: CliPlan) -> String {
+    let v = "v" + p.field
+    if p.kind == "free" {
+        let mut out = "    let mut " + v + ": Array<String> = []\n"
+        out = out + "    for one in r.free {\n        " + v + ".push(one.copy())\n    }\n"
+        return out
+    }
+    if p.kind == "flag" {
+        return "    let " + v + " = cliFlag(r, \"" + p.field + "\")\n"
+    }
+    // A value option. The local opens empty and the record literal — the one
+    // place a validated type is enforced — is only reached with no issues.
+    let mut out = ""
+    if p.optional {
+        let inner = if p.named == "" { p.base.copy() } else { p.named.copy() }
+        out = out + "    let mut " + v + ": Option<" + inner + "> = None\n"
+    } else if p.base == "Int64" {
+        out = out + "    let mut " + v + " = 0\n"
+    } else {
+        out = out + "    let mut " + v + " = \"\"\n"
+    }
+    // Every local carries the field's name. Two sibling `if let`s that bind one
+    // name, where the first is moved into a validated construction, are refused
+    // as a single moved binding — a defect RFC-0098 records; a generator that
+    // names its locals never meets it.
+    let text = "text" + cliCapFirst(p.field)
+    let num = "num" + cliCapFirst(p.field)
+    out = out + "    if let Some(" + text + ") = cliValue(r, \"" + p.field + "\") {\n"
+    if p.base == "Int64" {
+        out = out + "        if let Some(" + num + ") = parse(" + text + ") {\n"
+        out = out + cliEmitAccept(p, num, "            ")
+        out = out + "        } else {\n"
+        out = out + "            iss.push(cliNotNumber(\"" + p.field + "\", \"" + p.long + "\"))\n"
+        out = out + "        }\n"
+    } else {
+        out = out + cliEmitAccept(p, text, "        ")
+    }
+    out = out + "    }"
+    if p.optional {
+        return out + "\n"
+    }
+    return out + " else {\n        iss.push(cliMissing(\"" + p.field + "\", \"" + p.long + "\"))\n    }\n"
+}
+
+/// One command record: its spec, its parser, and its help.
+gen fn cliCommand(t: TypeInfo, iface: ModuleInterface) -> String {
+    let plans = cliPlansOf(t, iface)
+    let name = t.name.copy()
+    let mut out = cliEmitSpec(name, plans)
+    out = out + "export fn parse" + name + "(argv: Array<String>) -> Validation<" + name + "> {\n"
+    out = out + "    let r = readArgv(cliSpec" + name + "(), argv)\n"
+    out = out + "    let mut iss: Array<Issue> = cliIssues(r)\n"
+    let mut frees = 0
+    for p in plans {
+        if p.kind == "free" {
+            frees = frees + 1
+        }
+    }
+    if frees == 0 {
+        out = out + "    for one in r.free {\n        iss.push(cliUnexpected(one))\n    }\n"
+    }
+    for p in plans {
+        out = out + cliEmitField(p)
+    }
+    out = out + "    if iss.length > 0 {\n        return Invalid(iss)\n    }\n"
+    out = out + "    return Valid(" + name + " {"
+    let mut i = 0
+    for p in plans {
+        if i > 0 {
+            out = out + ","
+        }
+        out = out + " " + p.field + ": v" + p.field
+        i = i + 1
+    }
+    out = out + " })\n}\n"
+    return out + cliEmitHelp(name, cliHelpText(t, plans))
+}
+
+/// The import block: every type of the reflected closure, from the module that
+/// declares it (RFC-0031).
+fn cliImportBlock(iface: ModuleInterface) -> String {
+    let mut specs: Array<String> = []
+    for t in iface.types {
+        if !includes(specs, t.module) {
+            specs.push(t.module.copy())
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name.copy())
+            }
+        }
+        out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"\n"
+    }
+    return out
+}
+
+/// `cli(module)` — emit a module exporting `parse<Name>` and `help<Name>` for
+/// every exported record type `module` declares.
+export gen fn cli(module: String) -> String {
+    let iface = moduleInterface(module)
+    let mut out = "/// Generated by std/cli `cli` (RFC-0098) — do not edit.\n"
+    out = out + "import { CliOpt, readArgv, cliFlag, cliValue, cliIssues, cliMissing, cliNotNumber, cliRefused, cliUnexpected } from \"std/cli\"\n"
+    out = out + cliImportBlock(iface)
+    let mut commands = 0
+    for t in iface.types {
+        if t.schema.base == "record" {
+            out = out + cliCommand(t, iface)
+            commands = commands + 1
+        }
+    }
+    if commands == 0 {
+        panic(
+            "std/cli: `" + module + "` exports no record type, so there is no command to derive. Export a record whose fields are the options.",
+        )
+    }
+    return out
+}
+
+// ===========================================================================
+// Tests (RFC-0015) — the runtime walk and the comptime helpers. The generated
+// parsers themselves are parity citizens (`examples/clidemo.vyrn`).
+// ===========================================================================
+
+fn twoOpts() -> Array<CliOpt> {
+    return [
+        CliOpt { long: "--port", short: "-p", field: "port", takesValue: true },
+        CliOpt { long: "--verbose", short: "-v", field: "verbose", takesValue: false },
+        CliOpt { long: "--help", short: "-h", field: "help", takesValue: false },
+    ]
+}
+
+test "readArgv takes the next token, the inline form, and the short name" {
+    let a = readArgv(twoOpts(), ["--port", "8080", "-v"])
+    assertEq(a.issues.length, 0)
+    assert(match cliValue(a, "port") { Some(v) => v == "8080", None => false })
+    assert(cliFlag(a, "verbose"))
+    let b = readArgv(twoOpts(), ["--port=80", "-p", "90"])
+    assert(match cliValue(b, "port") { Some(v) => v == "80", None => false })
+}
+
+test "a spec makes a dash-leading value a value" {
+    // `std/args` cannot know `--port` takes a value and refuses `-1`; here the
+    // spec says so, so the value is taken verbatim.
+    let a = readArgv(twoOpts(), ["--port", "-1"])
+    assert(match cliValue(a, "port") { Some(v) => v == "-1", None => false })
+}
+
+test "an unknown option is an Issue, in the library's own words" {
+    let a = readArgv(twoOpts(), ["--porrt", "80"])
+    assertEq(a.issues.length, 1)
+    assertEq(a.issues[0].key, "cli.unknown")
+    assertEq(a.issues[0].message, "unknown option `--porrt`")
+    // The stray value is a free argument, not a second complaint.
+    assertEq(a.free.length, 1)
+}
+
+test "a value with no value, and a flag with one" {
+    let a = readArgv(twoOpts(), ["--port"])
+    assertEq(a.issues.length, 1)
+    assertEq(a.issues[0].message, "option `--port` needs a value")
+    assertEq(a.issues[0].path, "port")
+    let b = readArgv(twoOpts(), ["--verbose=1"])
+    assertEq(b.issues.length, 1)
+    assertEq(b.issues[0].message, "option `--verbose` takes no value")
+}
+
+test "the terminator ends option parsing" {
+    let a = readArgv(twoOpts(), ["one", "--", "--port", "-x"])
+    assertEq(a.issues.length, 0)
+    assertEq(a.free.length, 3)
+    assertEq(a.free[0], "one")
+    assertEq(a.free[1], "--port")
+    assertEq(a.free[2], "-x")
+}
+
+test "the first occurrence wins, as in std/args" {
+    let a = readArgv(twoOpts(), ["--port", "1", "--port", "2"])
+    assert(match cliValue(a, "port") { Some(v) => v == "1", None => false })
+}
+
+test "wantsHelp reads argv, not the spec" {
+    assert(wantsHelp(["--help"]))
+    assert(wantsHelp(["serve", "-h"]))
+    assert(!wantsHelp(["--host", "x"]))
+    // After the terminator, `--help` is somebody else's argument.
+    assert(!wantsHelp(["--", "--help"]))
+}
+
+test "kebab and the short letter come from the field name" {
+    assertEq(cliKebab("dryRun"), "dry-run")
+    assertEq(cliKebab("Serve"), "serve")
+    assertEq(cliKebab("port"), "port")
+    assertEq(cliInitial("dryRun"), "d")
+    assertEq(cliInitial("Port"), "p")
+}
+
+test "Option<T> reduces to T" {
+    assertEq(cliInner("Option<String>"), "String")
+    assertEq(cliInner("Array<String>"), "Array<String>")
+    assertEq(cliInner("Int64"), "Int64")
+}
+
+test "a bound is worded once and read twice" {
+    assertEq(cliBoundsText(Some(1), Some(65535), false), "1 to 65535")
+    assertEq(cliBoundsText(Some(18), None, false), "at least 18")
+    assertEq(cliBoundsText(None, Some(9), false), "at most 9")
+    assertEq(cliBoundsText(Some(1), None, true), "at least 1 byte long")
+    assertEq(cliBoundsText(Some(2), Some(32), true), "2 to 32 bytes long")
+    assertEq(cliBoundsText(None, None, false), "")
+    assertEq(cliWant("Port", "Int64", "1 to 65535"), "a whole number, 1 to 65535")
+    assertEq(cliWant("Even", "Int64", ""), "a valid `Even`")
+}

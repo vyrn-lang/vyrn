@@ -1,0 +1,8 @@
+--port
+8080
+--root
+/srv/www
+--host=example.com
+-v
+a.txt
+b.txt

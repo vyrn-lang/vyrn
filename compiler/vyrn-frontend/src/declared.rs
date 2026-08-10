@@ -291,8 +291,19 @@ impl Declared {
                     _ => None,
                 }
             }
-            // A fallible construction (RFC-0009) names its own type.
-            Expr::TryConstruct { name, .. } => Some(Type::Named(name.clone())),
+            // A fallible construction (RFC-0009) answers an OPTION of its own
+            // type — `Age?(n)` is `Option<Age>`, which is what every other
+            // reading of it says (the direct backend's `Expr::TryConstruct` arm,
+            // and the checker's). Reading it as the bare `Age` cost nothing
+            // while the corpus only refined numbers: `own` released the slot at
+            // the payload's width, and an Int payload owns no heap so the
+            // release was a no-op. RFC-0098 put a String-based option type in an
+            // `if let` scrutinee, and the release then read the sum's TAG word as
+            // a String pointer and freed it — an access violation on the first
+            // line of the program.
+            Expr::TryConstruct { name, .. } => {
+                Some(Type::Option(Box::new(Type::Named(name.clone()))))
+            }
             Expr::Spawn { name, .. } => self
                 .rets
                 .get(name)
