@@ -1,0 +1,96 @@
+name: Site
+
+# Build the website and publish it to GitHub Pages.
+#
+# WHERE THE SITE'S DATA COMES FROM. The design brief proposed a set of
+# `site/data/*.json` files gathered by this job. Most of them turned out to be
+# unnecessary, and one of them would have been dishonest:
+#
+#   - Counts (examples, RFCs, std modules) are read off the repository by a
+#     compile-time generator, `site/app/facts.vyrn`, while the pages render.
+#     There is nothing to gather and nothing to go stale.
+#   - Releases are fetched by the page itself, once per visit, with an hour of
+#     caching (`site/public/fresh.js`). Nothing is baked, so nothing is wrong
+#     between builds.
+#   - Benchmarks are NOT published, because `bench/baseline.json` is still a
+#     placeholder. The comparison page says so rather than printing a number
+#     from an unseeded baseline. When the baseline is seeded, this job gains a
+#     `gh run download` step and the page gains its chart.
+on:
+  release:
+    types: [published, prereleased, edited]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # One daily run, as a safety net for a missed trigger.
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a superseded build is not worth publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    # A CI run that failed does not get published.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the CLI
+        working-directory: compiler
+        run: cargo build --release -p vyrn-cli
+
+      - name: The site's own tests
+        # The export asserts that every navigation row points at a route that
+        # exists and that every route answers as a document AND as data. The
+        # other modules check the highlighter, the chart geometry and the
+        # repository counts.
+        run: |
+          bin=compiler/target/release/vyrn
+          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn; do
+            "$bin" test "$f"
+          done
+
+      - name: Formatting
+        run: compiler/target/release/vyrn fmt --check site/app/*.vyrn site/export.vyrn
+
+      - name: The hero module
+        # `writeFile` takes a String, so the export step cannot copy a wasm
+        # module. It is built here instead, straight into the output.
+        run: |
+          mkdir -p out
+          compiler/target/release/vyrn build examples/herofield.vyrn --target wasm -o out/hero.wasm
+
+      - name: Render every page
+        # One `route()` call per path, twice: the document and the soft-
+        # navigation payload beside it. The stylesheet, the three site scripts
+        # and the three browser runtimes are copied by the same program.
+        run: compiler/target/release/vyrn run site/export.vyrn out
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

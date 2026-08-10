@@ -1,0 +1,71 @@
+/// The repository's own numbers, for the rest of the site.
+///
+/// This is the ONLY place `repoFacts` is called. The generator cache is keyed on
+/// the argument strings, so two call sites naming `rfcs/` with different `../`
+/// prefixes would generate two modules whose exports collide program-wide. One
+/// call, one set of names, and every page imports from here.
+import { repoFacts } from "./facts"
+import { exampleCount as genExamples, rfcCount as genRfcs, stdCount as genStd, stdModules as genModules, rfcNumbers as genNumbers, rfcTitles as genTitles } from repoFacts("../../examples", "../../rfcs", "../../std")
+
+/// One design record: its number and its title.
+export type RfcRow = { number: Int64, title: String }
+
+/// Single-file programs in `examples/`. The parity harness runs every one of
+/// them on all three backends.
+export fn exampleCount() -> Int64 {
+    return genExamples()
+}
+
+/// Numbered design records in `rfcs/`.
+export fn rfcCount() -> Int64 {
+    return genRfcs()
+}
+
+/// Modules in `std/`, all of them written in Vyrn.
+export fn stdCount() -> Int64 {
+    return genStd()
+}
+
+/// The `std/` module names, sorted.
+export fn stdModules() -> Array<String> {
+    return genModules()
+}
+
+/// Every RFC, ascending by number.
+export fn rfcRows() -> Array<RfcRow> {
+    let numbers = genNumbers()
+    let titles = genTitles()
+    let mut out: Array<RfcRow> = []
+    let mut i = 0
+    while i < numbers.length {
+        out.push(RfcRow { number: numbers[i], title: titles[i].copy() })
+        i = i + 1
+    }
+    return out
+}
+
+/// How many backends a program compiles to: the tree-walking interpreter, the
+/// native binary, and the WebAssembly module.
+export fn backendCount() -> Int64 {
+    return 3
+}
+
+test "the repository counts are all positive" {
+    assert(exampleCount() > 0)
+    assert(rfcCount() > 0)
+    assert(stdCount() > 0)
+}
+
+test "every RFC has a number and a title" {
+    let rows = rfcRows()
+    assertEq(rows.length, rfcCount())
+    assertEq(rows[0].number, 1)
+    for r in rows {
+        assert(r.number > 0)
+        assert(r.title.byteLength > 0)
+    }
+}
+
+test "the module list is as long as the module count" {
+    assertEq(stdModules().length, stdCount())
+}

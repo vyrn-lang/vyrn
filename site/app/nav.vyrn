@@ -10,6 +10,19 @@
 /// A v2 socket — `/guide`, `/explorer` — is a row that is not here yet. There is
 /// no placeholder page and no dead link; the route table simply has room.
 import { substring } from "std/strings"
+import { Head, noHead, withTitle, withMeta } from "std/ui"
+
+/// The head every page shares: its title, the viewport (without which a page
+/// renders at desktop width on a phone), and one description.
+///
+/// It lives here rather than in the layout because the layout's `head { … }`
+/// block has entries for a stylesheet and a script and none for a `<meta>`,
+/// while a page's `head()` returns a `Head` value, which does.
+export fn pageHead(title: String) -> Head {
+    let titled = withTitle(noHead(), title)
+    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
+    return withMeta(sized, "description", "Vyrn is a systems language with the expressiveness of TypeScript. Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, and one program for three backends.")
+}
 
 /// One navigation entry: where it goes, and what it is called.
 export type NavRow = { href: String, label: String }

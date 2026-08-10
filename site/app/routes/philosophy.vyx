@@ -1,41 +1,130 @@
 <script>
-// GET /philosophy — prose at a 65ch measure, punctuated by two widgets. The one
+// GET /philosophy — prose at a 68ch measure, punctuated by two widgets. The one
 // page allowed to be quiet, and the page that carries the non-goals.
-import { Head, noHead, withTitle } from "std/ui"
+//
+// The non-goals are the list in README.md's "Not in v1" and RFC-0001's Non-goals
+// section, with the reason each one is refused.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { heroSource } from "../snippets"
+import { highlight } from "../code"
+import { rfcCount } from "../repo"
 
 /// Something the language refuses, and why.
 type NonGoal = { what: String, why: String }
 
 export fn head() -> Head {
-    return withTitle(noHead(), "Philosophy — Vyrn")
+    return pageHead("Philosophy — Vyrn")
 }
 
 fn nonGoals() -> Array<NonGoal> {
     return [
-        NonGoal { what: "No garbage collector", why: "Collection time is a cost you cannot see in the source. Ownership is declared instead, and memory is reclaimed at points you can name." },
-        NonGoal { what: "No async, no await", why: "Two colours of function split a library in half. Spawned work is proved isolated, so its result does not depend on the schedule." },
-        NonGoal { what: "No macros", why: "A generator is ordinary compile-time Vyrn. You can read what it emits with one command." },
+        NonGoal { what: "No garbage collector", why: "Collection time is a cost you cannot see in the source. Ownership is declared instead, and memory is reclaimed at a site the compiler can name." },
+        NonGoal { what: "No async, no await", why: "Two colours of function split a library in half. The host owns the loop — the browser page, the HTTP server, or the runtime you write — and Vyrn owns the state and the logic." },
+        NonGoal { what: "No macros", why: "A generator is ordinary Vyrn that runs at compile time and returns Vyrn source. `vyrn emit-gen` prints what it produced. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way, and none of them is a keyword." },
         NonGoal { what: "No higher-kinded types", why: "The cost lands on every error message, paid by every reader, to serve a few abstractions." },
-        NonGoal { what: "No inheritance", why: "A protocol states what a type does. A record states what it holds. Nothing needs a third relationship." },
+        NonGoal { what: "No inheritance, no metaclasses", why: "A protocol states what a type does. A record states what it holds. Nothing needs a third relationship." },
+        NonGoal { what: "No null", why: "`Option<T>`, `Result<T, E>`, exhaustive `match`, and `?` propagation. A failure is a value you have to look at." },
     ]
+}
+
+/// The capabilities, in the order a reader meets them.
+type Capability = { word: String, means: String }
+
+fn capabilities() -> Array<Capability> {
+    return [
+        Capability { word: "read", means: "The function looks at the value and does not change it. The caller keeps it." },
+        Capability { word: "modify", means: "The function changes the value in place. The caller keeps it, changed." },
+        Capability { word: "consume", means: "The function takes ownership. Using the value afterwards is a compile error." },
+        Capability { word: "share", means: "The value is shared, and the compiler enforces what that permits." },
+    ]
+}
+
+fn heroHtml() -> String {
+    return highlight(heroSource())
 }
 </script>
 
 <template>
-<main class="prose">
-    <h1>Intent over mechanism</h1>
-    <p>State what the program must be true of, and let the compiler decide how. A validated type is a rule, not a shape: it rejects a bad constant while it compiles, and generates the check when it cannot prove the value.</p>
-    <div class="widget-socket">widget: validated-types demo</div>
-    <h2>Predictability</h2>
-    <p>The same program produces the same bytes under the interpreter, the native binary and wasm. Floating point included: the build forbids the contraction that would change a bit.</p>
-    <div class="widget-socket">widget: parity visualizer</div>
-    <h2>What Vyrn refuses</h2>
-    <p>What a language refuses is the sharpest statement of what it believes.</p>
-    <dl class="nongoals">
-        <div v-for="g in nonGoals()" :key="g.what">
-            <dt>{{ g.what }}</dt>
-            <dd>{{ g.why }}</dd>
-        </div>
-    </dl>
+<main class="page">
+    <aside class="rail">
+        <a href="#intent"><span class="n">01</span>intent</a>
+        <a href="#rules"><span class="n">02</span>rules</a>
+        <a href="#ownership"><span class="n">03</span>ownership</a>
+        <a href="#refuses"><span class="n">04</span>refusals</a>
+        <a href="#record"><span class="n">05</span>the record</a>
+    </aside>
+        <section class="hero" id="intent">
+            <p class="eyebrow">Philosophy</p>
+            <h1 class="display">Intent over mechanism</h1>
+            <p class="lede">State what must be true of a value, and let the compiler decide how to keep it true. State what a function does with its argument, and let the compiler decide when the memory goes back.</p>
+        </section>
+
+        <section class="band" id="rules">
+            <p class="eyebrow">01 — a rule is part of a type</p>
+            <h2>The check you cannot forget</h2>
+            <p>A validated type carries a <code>where</code> clause. It is not a schema object sitting next to the type, and not a function a caller has to remember to call. The compiler does three different things with it: it rejects a constant it can prove invalid, it erases the check where it can prove the value is already valid, and it emits the check where it can prove neither.</p>
+            <p>That third case is the one that matters at a boundary. A value arriving from a file, a socket or a form is checked because nothing proved it. A value the compiler already reasoned about costs nothing at run time.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Specimen</span>
+                    <span class="eyebrow">README.md</span>
+                </div>
+                <div class="stage">
+                    <pre class="code" v-html="heroHtml()"></pre>
+                </div>
+                <p class="cap">The same snippet the front page shows. `Age?(n)` returns an Option, so untrusted input never traps.</p>
+            </div>
+        </section>
+
+        <section class="band" id="ownership">
+            <p class="eyebrow">02 — ownership is declared</p>
+            <h2>Four words, and no lifetime syntax</h2>
+            <p>A parameter says what the function intends to do with the value. The compiler enforces moves and aliasing from that declaration. There is nothing to infer, so there is nothing to fight.</p>
+            <div class="scroller">
+            <table>
+                <thead>
+                    <tr><th>Word</th><th>What it means</th></tr>
+                </thead>
+                <tbody>
+                    <tr v-for="c in capabilities()" :key="c.word">
+                        <td class="yes"><code>{{ c.word }}</code></td>
+                        <td>{{ c.means }}</td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+            <p class="notice">Memory is reclaimed at a site the compiler can name, and it will name it: <code>vyrn why --memory &lt;file&gt;</code> reports, per binding, whether it is reclaimed, how, and the reason when it is not. <a href="/index.html#memory">The front page replays one such report.</a></p>
+        </section>
+
+        <section class="band" id="refuses">
+            <p class="eyebrow">03 — non-goals</p>
+            <h2>What Vyrn refuses</h2>
+            <p>What a language refuses is the sharpest statement of what it believes. Each of these is a decision with an argument behind it in the design record, not an omission waiting to be fixed.</p>
+            <dl class="nongoals">
+                <div v-for="g in nonGoals()" :key="g.what">
+                    <dt>{{ g.what }}</dt>
+                    <dd>{{ g.why }}</dd>
+                </div>
+            </dl>
+        </section>
+
+        <section class="band" id="record">
+            <p class="eyebrow">04 — predictability</p>
+            <h2>The same program means the same thing</h2>
+            <p>The tree-walking interpreter is the reference semantics. The native binary and the WebAssembly module must agree with it byte for byte: same stdout, same stderr, same exit code, on every example, including every trap message. Floating point is included — the build forbids the fused multiply-add that would change a bit.</p>
+            <p>That is a quality gate, not a feature. It is here because it is what makes the rest of the page believable: a language whose three backends disagree has no meaning, only implementations.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Record</span>
+                    <span class="eyebrow">rfcs/</span>
+                </div>
+                <span class="bignum">{{ rfcCount() }} <small>design records</small></span>
+                <div class="stage">
+                    <p>Every decision in this language was argued in writing before it was built. When the implementation and an RFC disagree, one of them is a bug.</p>
+                </div>
+                <p class="cap">Counted from the file names in rfcs/ while this page was built. <a href="/releases.html">The release page charts them</a>, and <a href="https://github.com/vyrn-lang/vyrn/tree/main/rfcs">the record itself is in the repository.</a></p>
+            </div>
+        </section>
 </main>
 </template>

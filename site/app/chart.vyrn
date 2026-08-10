@@ -1,0 +1,206 @@
+/// Chart geometry, computed while the site builds.
+///
+/// The architectural rule from the design brief, section 4.3: **Vyrn computes
+/// the geometry at build time, JavaScript animates one scalar.** Every position,
+/// width and label below is in the exported markup before a script runs, so the
+/// charts are correct — and readable — with JavaScript switched off. The scripts
+/// then only fade, sweep, or move a playhead.
+///
+/// Every field is a `String`, because that is what an SVG attribute is. Rounding
+/// happens here, once, rather than in four `.toString()` calls at the template.
+import { rfcRows, RfcRow } from "./repo"
+
+/// One `<rect>` in a bar chart, with its label and its native `<title>`.
+export type Bar = { id: String, y: String, w: String, label: String, value: String, title: String }
+
+/// One cell in the RFC strip.
+export type Cell = { id: String, x: String, y: String, tone: String, title: String }
+
+/// One binding's lifetime in the ownership timeline.
+export type Span = { id: String, name: String, x: String, w: String, y: String, fate: String, ends: String, title: String }
+
+/// A number rounded to the nearest whole, as a string. SVG accepts decimals, but
+/// whole numbers keep the markup small and the grid crisp.
+fn px(v: Int64) -> String {
+    return v.toString()
+}
+
+// ---------------------------------------------------------------------------
+// The module-size chart. Two real measurements, on one linear scale.
+//
+// A log scale would make the small bar look respectable. Linear is the honest
+// picture and it is also the stronger one: at the same scale the direct-wasm bar
+// is a sliver against the clang bar, which is what a 198x difference looks like.
+// ---------------------------------------------------------------------------
+
+/// `fib.vyrn` built to wasm, both ways, in kilobytes. Both figures are stated in
+/// `README.md` and `ROADMAP.md`: the direct encoder (RFC-0077) against the old
+/// route through textual LLVM IR and clang.
+export fn moduleSizes() -> Array<Bar> {
+    let rows = [["clang", "277", "through LLVM IR and clang"], ["direct", "1.4", "the direct wasm encoder, RFC-0077"]]
+    let full = 277.0
+    let mut out: Array<Bar> = []
+    let mut i = 0
+    while i < rows.length {
+        let row = rows[i]
+        let kb = if row[1] == "277" { 277.0 } else { 1.4 }
+        out.push(Bar {
+                id: row[0].copy(),
+                y: px(i * 44 + 8),
+                w: px(Int64(760.0 * kb / full)),
+                label: row[0].copy(),
+                value: row[1] + " KB",
+                title: "fib.wasm, " + row[2] + ": " + row[1] + " KB",
+            })
+        i = i + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// The RFC strip. One cell per design record, in order, tinted by decade so the
+// eye can count. Real data: the file names in `rfcs/`, counted by the generator.
+// ---------------------------------------------------------------------------
+
+/// Every RFC as a cell, twenty to a row.
+export fn rfcCells() -> Array<Cell> {
+    let mut out: Array<Cell> = []
+    let mut i = 0
+    let rows = rfcRows()
+    while i < rows.length {
+        let r = rows[i]
+        out.push(Cell {
+                id: r.number.toString(),
+                x: px(i % 20 * 22),
+                y: px(i / 20 * 22),
+                tone: toneOf(r.number),
+                title: rfcTag(r.number) + " " + r.title,
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// An RFC number as its file name spells it: four digits.
+export fn rfcTag(n: Int64) -> String {
+    if n < 10 {
+        return "RFC-000" + n.toString()
+    }
+    if n < 100 {
+        return "RFC-00" + n.toString()
+    }
+    return "RFC-0" + n.toString()
+}
+
+/// A cell's fill opacity, stepping every ten RFCs so the strip reads as a
+/// sequence rather than a texture.
+fn toneOf(number: Int64) -> String {
+    let step = (number - 1) / 10
+    return "0." + (3 + step * 7).toString()
+}
+
+/// How wide the RFC strip is, in its own coordinates.
+export fn rfcStripWidth() -> String {
+    return "440"
+}
+
+/// How tall the RFC strip is: one row per twenty RFCs, rounded up.
+export fn rfcStripHeight() -> String {
+    return px((rfcRows().length + 19) / 20 * 22)
+}
+
+// ---------------------------------------------------------------------------
+// The ownership timeline. The bindings of `fullName` in
+// `examples/ownership.vyrn`, and what `vyrn why --memory` reports about each.
+// ---------------------------------------------------------------------------
+
+/// The function's first and last source line, which fix the timeline's scale.
+fn firstLine() -> Int64 {
+    return 17
+}
+
+fn lastLine() -> Int64 {
+    return 21
+}
+
+/// One column per source line.
+export fn lineCount() -> Int64 {
+    return lastLine() - firstLine() + 1
+}
+
+/// The two bindings, each running from the line that declares it to the line
+/// that ends it, and the reason the tool gives.
+export fn ownershipSpans() -> Array<Span> {
+    let width = 720 / lineCount()
+    let mut out: Array<Span> = []
+    let rows = [["firstSpace", "18", "21", "reclaimed at block exit - freeing the String buffer"], ["whole", "19", "20", "moved at line 20 into the return"]]
+    let mut i = 0
+    while i < rows.length {
+        let row = rows[i]
+        let from = digitsOf(row[1])
+        let to = digitsOf(row[2])
+        out.push(Span {
+                id: row[0].copy(),
+                name: row[0].copy(),
+                x: px((from - firstLine()) * width),
+                w: px((to - from + 1) * width),
+                y: px(i * 40 + 12),
+                fate: row[3].copy(),
+                ends: to.toString(),
+                title: row[0] + ": " + row[3],
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// A small decimal string as a number. The three call sites pass literals from
+/// the tool's own report, so there is no malformed case to answer for.
+fn digitsOf(s: String) -> Int64 {
+    let mut n = 0
+    for b in bytes(s) {
+        n = n * 10 + Int64(b) - 48
+    }
+    return n
+}
+
+test "the two module bars are on one scale, and the big one is full width" {
+    let bars = moduleSizes()
+    assertEq(bars.length, 2)
+    assertEq(bars[0].w, "760")
+    assertEq(bars[1].w, "3")
+    assertEq(bars[1].value, "1.4 KB")
+}
+
+test "the RFC strip has one cell per RFC and wraps every twenty" {
+    let cells = rfcCells()
+    assertEq(cells.length, rfcRows().length)
+    assertEq(cells[0].x, "0")
+    assertEq(cells[0].y, "0")
+    assertEq(cells[20].x, "0")
+    assertEq(cells[20].y, "22")
+}
+
+test "a binding's bar starts on its declaration line and ends where it dies" {
+    let spans = ownershipSpans()
+    assertEq(spans.length, 2)
+    // firstSpace: declared on 18, alive to block exit on 21 - four columns.
+    assertEq(spans[0].x, "144")
+    assertEq(spans[0].w, "576")
+    // whole: declared on 19, moved out on 20 - two columns.
+    assertEq(spans[1].x, "288")
+    assertEq(spans[1].w, "288")
+}
+
+test "an RFC number is padded the way its file name is" {
+    assertEq(rfcTag(1), "RFC-0001")
+    assertEq(rfcTag(42), "RFC-0042")
+    assertEq(rfcTag(96), "RFC-0096")
+}
+
+test "every tone is a fill-opacity between nothing and everything" {
+    for c in rfcCells() {
+        assert(c.tone.byteLength >= 3)
+        assert(c.title.byteLength > 4)
+    }
+}

@@ -7,27 +7,33 @@
 // table and no page, so nothing links to them and no "coming soon" page exists.
 // Adding the guide book is a directory drop plus one row in `navRows`.
 import { navRows, NavRow } from "../nav"
-
-// The `head` block takes `title`, `stylesheet`, `module` and `script` and
-// nothing else. There is no `meta` entry, and the document shell emits no
-// viewport meta of its own, so a std/ui page is not responsive on a phone until
-// one of those two changes. Reported with this change; not fixed here.
+import { exampleCount, backendCount } from "../repo"
+// The stylesheet and the one script module, for every page.
+//
+// The `head { … }` block takes `title`, `stylesheet`, `module` and `script`, and
+// has no entry for a `<meta>`. Each page therefore carries the viewport and
+// description meta in its own `head()` — one call to `pageHead`, which builds
+// them from a `Head` value where `withMeta` does exist.
 head {
     stylesheet "/style.css"
+    module "/widgets.js"
 }
 </script>
 
 <template>
 <div id="root">
     <header class="masthead">
-        <a href="/" class="wordmark">vyrn</a>
+        <a href="/index.html" class="wordmark">vyrn</a>
         <nav class="nav">
             <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
         </nav>
     </header>
     <slot/>
     <footer class="foot">
-        <p>One program, three backends, identical bytes.</p>
+        <span>{{ exampleCount() }} examples, {{ backendCount() }} backends, 0 divergences</span>
+        <a href="https://github.com/vyrn-lang/vyrn">Source on GitHub</a>
+        <a href="https://github.com/vyrn-lang/vyrn/tree/main/rfcs">The design record</a>
+        <span>Early. No versioned release yet.</span>
     </footer>
 </div>
 </template>
