@@ -162,8 +162,10 @@ fn toHtmlString(h: Html) -> String
 ```
 
 Render a view tree to an HTML string (SSR). Text is escaped, attribute
-values are escaped, `Raw` bypasses, void elements self-close. Total: any
-`Html` value renders to a string, never a trap.
+values are escaped, `Raw` bypasses, void elements self-close. Total over
+DATA — any text and any attribute value renders — and it traps on a
+malformed TREE: a tag/attribute/event name that would break out of the
+markup, or children on a void element.
 
 ## PatchOp
 

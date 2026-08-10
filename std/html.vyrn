@@ -269,11 +269,51 @@ fn escapeAttr(s: String) -> String {
 }
 
 // ===========================================================================
-// The renderer — `toHtmlString` is TOTAL: it never traps on any input.
+// Names — the half of the markup that escaping cannot protect.
+//
+// A VALUE is data and is escaped (`escapeAttr`/`escapeText` above). A NAME is
+// structure: it lands OUTSIDE the quotes, where `&`/`"` mean nothing and a
+// single space starts a second attribute — so `attr("src\" onload=\"alert(1)",
+// "x")` used to render an event handler. Escaping is the wrong tool for it
+// (an escaped name is not the name), so a name is CHECKED and a bad one is
+// refused, the way `std/http`'s `mount` refuses an unreachable route: a name
+// built out of untrusted text is a program bug, and the trap says so.
+// ===========================================================================
+
+/// `true` when every byte of `n` is safe outside quotes: ASCII letters, digits,
+/// `-`, `_`, `:` (the set `data-*`, `aria-*`, custom elements and `xml:lang`
+/// need). None of them can close a tag or begin an attribute. An empty name is
+/// refused too — `<>` is not an element.
+fn nameOk(n: String) -> Bool {
+    let raw = bytes(n)
+    if raw.length == 0 {
+        return false
+    }
+    for b in raw {
+        let ok = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '_' || b == ':'
+        if !ok {
+            return false
+        }
+    }
+    return true
+}
+
+/// Refuse a name that would break out of the markup. `kind` is the word the
+/// message uses: `tag`, `attribute` or `event`.
+fn requireName(kind: String, n: String) {
+    if !nameOk(n) {
+        panic("html: `" + n + "` is not a usable " + kind + " name — a name holds only letters, digits, `-`, `_` and `:`; untrusted text belongs in a VALUE, which is escaped")
+    }
+}
+
+// ===========================================================================
+// The renderer — total over DATA (any text, any attribute value), and refuses
+// a malformed TREE: an unusable name, or children on an element that cannot
+// hold them.
 // ===========================================================================
 
 /// The HTML void-element set (the spec list): rendered without a closing tag,
-/// and any children are ignored.
+/// and children are refused (a void element has no content model).
 fn isVoid(tag: String) -> Bool {
     let voids = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]
     for v in voids {
@@ -295,15 +335,17 @@ fn renderAttr(a: Attr) -> String {
     }
 }
 
-/// ` name="escaped-value"`.
+/// ` name="escaped-value"`. The name is checked, the value escaped.
 fn attrPair(n: String, v: String) -> String {
+    requireName("attribute", n)
     return " " + n + "=\"" + escapeAttr(v) + "\""
 }
 
 /// ` data-on-<event>="handler" data-arg-<event>="payload"`. The event name
-/// forms part of the attribute NAME (not escapable, and always a controlled
-/// identifier like `click`); handler and payload are attribute values.
+/// forms part of the attribute NAME, so it is checked rather than escaped;
+/// handler and payload are attribute values.
 fn onPair(event: String, handler: String, payload: String) -> String {
+    requireName("event", event)
     let mut out = " data-on-" + event + "=\"" + escapeAttr(handler) + "\""
     out = out + " data-arg-" + event + "=\"" + escapeAttr(payload) + "\""
     return out
@@ -327,19 +369,27 @@ fn renderKids(kids: Array<Html>) -> String {
     return out
 }
 
-/// Render one element. A void element emits no closing tag and ignores its
-/// children (documented, so `toHtmlString` stays total).
+/// Render one element. A void element emits no closing tag, and it REFUSES
+/// children: it has no content model, so children given to one never reach the
+/// page — the renderer used to drop them without a word, and a `<li>` that
+/// silently vanishes because it was written under an `<img>` is the kind of bug
+/// a page shows nothing about.
 fn renderEl(tag: String, attrs: Array<Attr>, kids: Array<Html>) -> String {
-    let open = "<" + tag + renderAttrs(attrs) + ">"
+    requireName("tag", tag)
     if isVoid(tag) {
-        return open
+        if kids.length > 0 {
+            panic("html: <" + tag + "> is a void element and takes no children — " + kids.length.toString() + " given; a void element has no content model, so those nodes can never render")
+        }
+        return "<" + tag + renderAttrs(attrs) + ">"
     }
-    return open + renderKids(kids) + "</" + tag + ">"
+    return "<" + tag + renderAttrs(attrs) + ">" + renderKids(kids) + "</" + tag + ">"
 }
 
 /// Render a view tree to an HTML string (SSR). Text is escaped, attribute
-/// values are escaped, `Raw` bypasses, void elements self-close. Total: any
-/// `Html` value renders to a string, never a trap.
+/// values are escaped, `Raw` bypasses, void elements self-close. Total over
+/// DATA — any text and any attribute value renders — and it traps on a
+/// malformed TREE: a tag/attribute/event name that would break out of the
+/// markup, or children on a void element.
 export fn toHtmlString(h: Html) -> String {
     return match h {
         Empty => "",
@@ -521,8 +571,9 @@ fn htmlKids(h: Html) -> Array<Html> {
     }
 }
 
-/// Two attribute lists are "equal" iff they RENDER identically — a total,
-/// order-sensitive notion that reuses `renderAttrs` and never traps. A false
+/// Two attribute lists are "equal" iff they RENDER identically — an
+/// order-sensitive notion that reuses `renderAttrs`, and so inherits its refusal
+/// of an unusable attribute name (a tree that cannot render cannot diff). A false
 /// negative only costs a redundant `OpSetAttrs` (still correct); in practice
 /// rendering is injective enough that equal views produce no op.
 fn attrsEqual(a: Array<Attr>, b: Array<Attr>) -> Bool {
