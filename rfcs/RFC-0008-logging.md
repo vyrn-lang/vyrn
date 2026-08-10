@@ -1,6 +1,6 @@
 # RFC-0008 — Logging
 
-- **Status:** Draft — **leveled logger + threshold + single sink (stderr/stdout/
+- **Status:** Implemented in part — **leveled logger + threshold + single sink (stderr/stdout/
   file) implemented; per-logger overrides, multi-sink fan-out, and pattern not yet**
 - **Depends on:** RFC-0007 (string templates — the message surface), RFC-0004
   (`String` heap values), RFC-0002 (enums, records)

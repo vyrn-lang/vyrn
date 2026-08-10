@@ -1,6 +1,6 @@
 # RFC-0002 — Type System
 
-- **Status:** Draft — **structural records implemented end to end in v0.1**
+- **Status:** Implemented — **structural records implemented end to end in v0.1**
 - **Depends on:** RFC-0001
 - **Related:** RFC-0003 (validated types build directly on this)
 

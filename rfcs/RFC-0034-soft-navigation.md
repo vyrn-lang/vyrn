@@ -1,6 +1,8 @@
 # RFC-0034 — Soft Navigation: SPA Feel over MPA Truth
 
-- **Status:** Implemented (see "As landed" below)
+- **Status:** Implemented (see "As landed" below). **Superseded in part by
+  RFC-0067**, which replaces the body-morph model and drops the hover/focus
+  prefetch described here.
 - **Depends on:** RFC-0026 (M2 `vyrn-dom.js` — the differ this extends;
   M3 pages — the SSR routes being navigated), RFC-0031 (the shelf
   architecture this must not disturb)
