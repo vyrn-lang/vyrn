@@ -506,7 +506,7 @@ fn imported_params_type_works_via_the_closure() {
              return Valid(Data { label: \"user\\{p.id}\" })\n\
          }\n\
          export fn page(p: Params, d: Data) -> Html {\n\
-             return el(\"main\", [], [text(d.label)])\n\
+             return el(\"main\", [], [text(d.label.copy())])\n\
          }\n",
     );
     write(

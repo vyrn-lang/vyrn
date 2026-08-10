@@ -1150,7 +1150,7 @@ gen fn buildTransKey(base: LocaleData) -> String {
     let mut out = "export fn transKey(s: String) -> Option<TransKey> {\n"
     let mut k = 0
     while k < base.entries.length {
-        out = out + "    if s == " + strLit(base.entries[k].key) + " {\n        return Some(s)\n    }\n"
+        out = out + "    if s == " + strLit(base.entries[k].key) + " {\n        return Some(s.copy())\n    }\n"
         k = k + 1
     }
     out = out + "    return None\n}\n"

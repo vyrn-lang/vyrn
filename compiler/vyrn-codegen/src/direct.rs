@@ -4966,7 +4966,37 @@ impl Fn_<'_> {
         Ok((m.data(&table, 4), m.data(&accept, 1), dfa.start))
     }
 
+    /// `a + b` on Strings is `@concat` written as an operator, so its operands
+    /// are call arguments and take the call-argument rule
+    /// (`rfcs/census-call-arguments.md` §9, finding 3): `"n" + label(i)` reaches
+    /// this lowering rather than [`Fn_::call`], so it was in neither that
+    /// census's count nor RFC-0096 M3's operand class, and leaked the same 48
+    /// bytes a turn.
+    ///
+    /// The mark is [`Fn_::call`]'s, for its reason: an operand that is itself a
+    /// call takes back only what was teed after its own mark. Every other
+    /// operator reaches the drain with nothing teed — `own` records a row only
+    /// where the `+` builds a String. The concatenation's own result stays on
+    /// the stack while the frees run, exactly as it does at a call.
     fn binary(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        line: usize,
+    ) -> Result<Type, String> {
+        let mark = self.arg_frees.len();
+        let r = self.binary_inner(m, b, op, lhs, rhs, line);
+        for l in self.arg_frees.split_off(mark) {
+            self.free_str_temp(b, Some(l));
+        }
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn binary_inner(
         &mut self,
         m: &mut Module,
         b: &mut Frame,

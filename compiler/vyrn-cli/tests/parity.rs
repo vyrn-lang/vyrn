@@ -1016,19 +1016,33 @@ fn main() -> Int64 {
 /// (`rfcs/census-call-arguments.md`).
 ///
 /// The call-argument rule releases a temporary after a call whose parameter is
-/// `read` and keeps nothing. The one exit rule 2 does not refuse is a variant
-/// constructor, and `movecheck::note_retention` records it: `tip(s)` puts its
-/// argument into a `Twig` that outlives the call, so the caller must NOT free it
-/// there. If the rule overreached, this program would free one buffer twice —
-/// once at the call and once when the tree is released — and the memory suite
-/// cannot see a double free. The output can: the tree is printed AFTER the call
-/// that would have freed it, so a reused buffer shows as wrong bytes, and a
-/// hardened allocator traps instead.
+/// `read` and keeps nothing. Every OTHER verdict must free nothing at the call,
+/// and if the rule overreached this program would free one buffer twice — once
+/// at the call and once when the tree is released — which the memory suite
+/// cannot see, because a double free is not a leak. The output can: every tree
+/// is printed AFTER the call that would have freed it, so a reused buffer shows
+/// as wrong bytes, and a hardened allocator traps instead.
 ///
-/// The three retaining shapes the corpus has are all here: a one-payload
-/// constructor, a two-payload one whose second argument is an array of trees,
-/// and a builder that forwards its parameter into another builder's retaining
-/// position — the "handed on" edge the retention set closes over.
+/// Four shapes, one per verdict the caller must not act on:
+///
+/// - `Transferred` — `tip(s: consume String)`. The builder TAKES its argument,
+///   which is what a value holding it past the call means. It was a `read`
+///   parameter here until the constructor hole was closed: `return Tip(s)` on a
+///   borrow lends the result as well, so neither the argument nor the result
+///   could be freed and both leaked (the census's finding 2, 48.8 MB over a
+///   million turns). The declaration is the fix, and `check_return` refuses the
+///   old spelling now.
+/// - `Transferred`, forwarded — `relabel` hands its own taken value on to `tip`.
+/// - `Retained` by a constructor — `Fork(label(i + 2), [])`, the literal that
+///   reads like a call.
+/// - `Retained` by a recorded position — `stash(s)` puts a borrowed parameter
+///   into a tree this module KEEPS, so `note_retention` records `(stash, 0)`,
+///   and `restash` forwards into it, which is the "handed on" edge the retention
+///   set closes over the call graph.
+///
+/// It carries the operator class too (`rfcs/census-call-arguments.md` §9,
+/// finding 3): `show` builds `s + "/\{kids.length}"`, so a `+` runs over an
+/// operand a call produced on every engine.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_retained_argument_is_not_freed_at_the_call() {
@@ -1057,6 +1071,8 @@ impl Owned for Twig {
     }
 }
 
+let mut kept: Array<Twig> = []
+
 fn label(i: Int64) -> String {
     return \"row-\\{i}\"
 }
@@ -1068,15 +1084,28 @@ fn show(t: Twig) -> String {
     }
 }
 
-/// The recorded position: the argument goes into the value this returns.
-fn tip(s: String) -> Twig {
+/// The value it builds holds the argument and outlives the call, so it TAKES
+/// it. The verdict at the call is `Transferred`, and the caller frees nothing.
+fn tip(s: consume String) -> Twig {
     return Tip(s)
 }
 
-/// The forwarded one. `s` reaches `Tip` through a second call, which is the
-/// edge the retention set closes over the call graph.
-fn relabel(s: String) -> Twig {
+/// The forwarded one: a taken value handed on to another taking position.
+fn relabel(s: consume String) -> Twig {
     return tip(s)
+}
+
+/// The RECORDED position — a `read` parameter put somewhere that outlives the
+/// call, which is what `movecheck::note_retention` writes down. Nothing is
+/// returned, so the tree this module keeps is the only owner.
+fn stash(s: String) -> Int64 {
+    kept.push(Tip(s))
+    return Int64(kept.length)
+}
+
+/// The edge the retention set closes over the call graph.
+fn restash(s: String) -> Int64 {
+    return stash(s)
 }
 
 fn main() -> Int64 {
@@ -1089,11 +1118,15 @@ fn main() -> Int64 {
         // Every read happens AFTER the calls that would have freed too early.
         total = total + Int64(show(a).byteLength) + Int64(show(b).byteLength)
         total = total + Int64(show(c).byteLength)
+        total = total + stash(label(i + 3)) + restash(label(i + 4))
         i = i + 1
     }
     print(\"\\{total}\")
     print(show(tip(label(7))))
     print(show(relabel(label(8))))
+    // The kept trees, read long after the calls that built them.
+    print(show(kept[0]))
+    print(show(kept[399]))
     return 0
 }
 ";
@@ -1141,7 +1174,7 @@ fn main() -> Int64 {
     // to engine alone.
     assert_eq!(
         norm(&interp.stdout),
-        "4276\nrow-7\nrow-8\n",
+        "84476\nrow-7\nrow-8\nrow-3\nrow-203\n",
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&n.stdout), "native stdout");

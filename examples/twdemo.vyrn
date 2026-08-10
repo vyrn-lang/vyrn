@@ -23,7 +23,7 @@ import { contains } from "std/strpred"
 /// A styled badge, built with checked utility classes. The classes — including a
 /// `md:` responsive variant and a `hover:` state variant — are all proven members
 /// of the theme's `Tw` type when this file compiles.
-fn badge(label: String) -> String {
+fn badge(label: consume String) -> String {
     let node = el("span", [theme.cls("px-2 rounded bg-brand-500 text-white md:hover:bg-brand-600")], [text(label)])
     return toHtmlString(node)
 }

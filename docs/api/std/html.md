@@ -95,7 +95,7 @@ about, not about a part of one.
 ## el
 
 ```vyrn
-fn el(tag: String, attrs: Array<Attr>, kids: Array<Html>) -> Html
+fn el(tag: consume String, attrs: consume Array<Attr>, kids: consume Array<Html>) -> Html
 ```
 
 An element: `el("li", [cls("row")], [text("hi")])`.
@@ -103,7 +103,7 @@ An element: `el("li", [cls("row")], [text("hi")])`.
 ## text
 
 ```vyrn
-fn text(s: String) -> Html
+fn text(s: consume String) -> Html
 ```
 
 An escaped text node.
@@ -119,7 +119,7 @@ The empty node (renders as nothing).
 ## cls
 
 ```vyrn
-fn cls(s: String) -> Attr
+fn cls(s: consume String) -> Attr
 ```
 
 A `class="…"` attribute.
@@ -127,7 +127,7 @@ A `class="…"` attribute.
 ## attr
 
 ```vyrn
-fn attr(n: String, v: String) -> Attr
+fn attr(n: consume String, v: consume String) -> Attr
 ```
 
 An arbitrary `name="value"` attribute.
@@ -135,7 +135,7 @@ An arbitrary `name="value"` attribute.
 ## on
 
 ```vyrn
-fn on(event: String, handler: String, payload: String) -> Attr
+fn on(event: consume String, handler: consume String, payload: consume String) -> Attr
 ```
 
 An event binding: `on("click", "removeItem", "42")`.
@@ -143,7 +143,7 @@ An event binding: `on("click", "removeItem", "42")`.
 ## keyed
 
 ```vyrn
-fn keyed(k: String, node: consume Html) -> Html
+fn keyed(k: consume String, node: consume Html) -> Html
 ```
 
 Attach a list-identity `Key` to an element for the M2 keyed differ. Keying a

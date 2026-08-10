@@ -102,7 +102,12 @@ fn emit_gen_shows_the_synthesized_theme_module() {
     assert!(src.contains("|flex|"), "static utility");
 
     // The checked bridge and the baked stylesheet.
-    assert!(src.contains("export fn cls(c: Tw) -> Attr"), "cls bridge");
+    // `.copy()`, because the `Attr` this builds holds `c` and outlives the call
+    // (`rfcs/census-call-arguments.md` §10, finding 2).
+    assert!(
+        src.contains("export fn cls(c: Tw) -> Attr {\n    return Cls(c.copy())"),
+        "cls bridge"
+    );
     assert!(src.contains("export fn css() -> String"), "css()");
     // css() is a baked constant carrying real rules (escaped `\:` in the literal).
     assert!(

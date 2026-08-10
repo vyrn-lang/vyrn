@@ -14,7 +14,7 @@
 import { el, text, cls, attr, on, keyed, empty, toHtmlString, document, Html, Attr } from "std/html"
 
 /// A small keyed list — the shape the M2 keyed differ reorders.
-fn itemRow(id: Int64, label: String) -> Html {
+fn itemRow(id: Int64, label: consume String) -> Html {
     return keyed("\{id}", el("li", [cls("row"), attr("data-id", "\{id}")], [
                 el("span", [cls("label")], [text(label)]),
                 el("button", [on("click", "removeItem", "\{id}")], [text("remove")]),

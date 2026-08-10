@@ -505,6 +505,168 @@ slot to spill a temporary into. That is a milestone, and this time it is one.
    shape leaks whatever this rule does. It has a three-engine test instead
    (`parity::a_retained_argument_is_not_freed_at_the_call`), because what the
    rule must not do there is free twice, and a double free is not a leak.
+   **Closed in §10 — by refusing the shape, not by freeing it.**
 3. **A call result fed to a `+` is a class next door and still open.** `"n" +
    label(i)` reaches the operator lowering, not a call argument, so it is in
    neither this census's 1505 nor M3's operand class. It is the same 48 bytes.
+   **Closed in §10.**
+
+---
+
+## 10. The two shapes §9 left, closed
+
+Both of §9's open findings landed together, and they closed in opposite ways.
+One is a rule; the other is a refusal, because a rule there would have been the
+alias analysis this repo deleted.
+
+### Finding 3 — the operator operand is a call argument
+
+A String `+` **is** `@concat`, written as an operator. So `movecheck` records its
+two operands as call-argument temporaries under that name, and they take the
+verdict every other argument takes: `arg_verdict` reads the callee's signature,
+the retention set closed over the call graph, `lending`, and the `blackBox` rule
+that a row handing back its own type parameter promises nothing. Nothing new was
+decided. The partition holds for free — an operand that ALLOCATED its own value
+answers `AlreadyFreed`, which is RFC-0096 M3's four consumers, and a call result
+answers what its callee says.
+
+Each backend drains at the operator the way it already drains at a call, with
+the same mark, so `("a" + f(x)) + g(y)` frees each level at its own `+`.
+
+| `let s = "n" + label(i)` in a loop, native | 250,000 | 1,000,000 |
+|---|---:|---:|
+| before | 15.74 MB | 50.25 MB |
+| after | **3.95 MB** | **3.57 MB** |
+
+Flat. The `callArgument` memory row carries the shape, and its negative test is
+the same one: make the retention question answer `Unknown` everywhere.
+
+### Finding 2 — the constructor lend is a DECLARATION, not a rule
+
+`fn wrap(s: String) -> Option<String> { return Some(s) }` leaks twice, and §5 row
+6 measured it at 48.80 MB over a million turns. The census asked whether a rule
+could close it. **It cannot, and the measurement says why in one line:**
+
+| `let o = wrap(s)` in a loop, native | 250,000 | 1,000,000 |
+|---|---:|---:|
+| `wrap(s: String)` — as §5 measured it | 15.73 MB | 50.32 MB |
+| `wrap(s: consume String)` — one keyword | **3.96 MB** | **3.96 MB** |
+
+Nothing else changed. The leak is not a missing release; it is a missing
+**declaration**, and RFC-0089's answer has been the same since it was written: a
+capability is declared, not inferred. A rule that freed the argument here would
+free a buffer the result still names, which is a use-after-free, and telling the
+two apart is the alias analysis RFC-0004 refuses.
+
+So the answer is **both halves of the brief's third option, and the diagnostic
+is what makes the migration stick.** Rule 2 refuses storing a borrow into module
+state, rule 3 refuses returning one, `59c8a0c` refuses handing one to a `consume`
+position — and this exit was recorded and not refused. It is refused now, in
+`check_return`, with rule 2's own menu:
+
+```
+$ vyrn check wrap.vyrn
+wrap.vyrn:6:0: `s` may not be put into the value this function returns — it is a
+  `read` parameter, and a return is owned
+  fix: declare the parameter `s: consume ..` if this function should own it
+  fix: `s.copy()` if both sides need a value
+```
+
+**The narrowing is what makes refusing safe.** `lends_through_a_wrapper` exists
+to RECORD, because `return Some(m)` over a loop element is most of the corpus —
+and an element is a `Borrow::Element` or a `Borrow::Projection`. A WHOLE `read`
+parameter is the one root whose owner is the caller, so `consume` is a fix the
+author can always write. That one clause is the difference between 30 refused
+sites and 263: making the constructor argument a rule-2 store outright refuses
+`Some(x)` over any borrow anywhere, which is measured at **263 sites in 173
+files** and remains what it always was — a migration, not this milestone.
+
+### What the migration cost, and what it closed
+
+**The refusal fires at 30 sites over the corpus, and they are SIX functions.**
+Five of the thirty are one emitter's output instantiated five times.
+
+| the refused function | what it took |
+|---|---|
+| the `toJson` encoder's `Type::Str` arm (`jsonenc.rs`) | `JStr(v.copy())` — `toJson(x)` may not take `x`, so the encoded value owns its own bytes |
+| `std/http`'s `httpValue` | `.copy()` — the `Some(n)` path does not hand the value on |
+| `std/jsonread`'s `parseKeyword` | `.copy()` — the `Err` paths do not |
+| `std/vyx`'s `vyxShiftIf` | `.copy()` ×2 — the caller holds a pattern binder, which cannot be handed over |
+| `std/i18n`'s emitted `transKey` | `.copy()` — the `None` path does not hand it on |
+| `std/tw`'s emitted `cls` | `.copy()` — its callers are `.vyx` templates handing over a PROP, a borrow one level up |
+
+**The declaration is the better fix wherever the value IS handed on, and the
+tree builders are that case.** `std/html`'s seven took `consume` rather than a
+copy, which is why the verdict table below moves as far as it does:
+
+| where | what changed | cascade |
+|---|---|---|
+| `std/html` — `el`, `text`, `cls`, `attr`, `on`, `keyed`, `withKey` | `consume`: the node holds the argument and outlives the call | — |
+| `examples` — `itemRow`, `row`, `badge`, `navLink`, `pluralRow` | the same, one level up, which is the migration propagating | 5 |
+| `examples/shelf` — `text(b.title)` ×2, and one `pages` test fixture | `.copy()`: a field of a `read` record is a borrow, and the menu's other entry is the fix | 3 |
+
+**Two rounds, not one.** `vyxShiftIf` took a second: `find_map` reports the
+first offending argument, so `conds` was refused, fixed, and then `condCols`
+was. That is the diagnostic being per-argument rather than per-function, and
+it costs one more `vyrn check`.
+
+Linked over the corpus, the verdict table before and after:
+
+| verdict | before | after |
+|---|---:|---:|
+| Released | 1936 | **2014** |
+| Transferred | 246 | **689** |
+| Lent | 557 | **160** |
+| Retained | 412 | **282** |
+| AlreadyFreed | 467 | 466 |
+| Unknown | 57 | 57 |
+| released AND emitted (a String) | 1599 | **1606** |
+
+**397 lending sites became transferring ones.** A builder whose parameter was
+`read` lent its RESULT as well — `lends_through_a_wrapper` recorded it, and a
+lender's result is the one thing this analysis never releases. Declaring the
+parameter takes both facts away at once: the argument is handed over, and the
+result owns what it holds. That is the finding the census could only measure as
+"the residual leaks whatever happens".
+
+### One row this opened, with its number
+
+**A `consume` parameter a function does not hand on is leaked.** `own` keys every
+release on a `let`, and a parameter is not one, so a path that neither returns
+nor stores the value frees nothing:
+
+```
+fn wrap(s: consume String, keep: Bool) -> Option<String> {
+    if keep { return Some(s) }
+    return None
+}
+```
+
+Measured with `keep` false: **15.09 MB at 250,000 turns and 50.09 MB at four
+times that** — the same 48 bytes. It is why three of the six migrated functions
+took `.copy()` rather than `consume`: a `consume` there would have moved the leak
+rather than closed it. It is the row below `callArgument` and it is a milestone,
+because a release keyed on a parameter needs the same block-exit machinery a
+`let` has.
+
+### What proves it
+
+- **`"n" + label(i)` flips to flat**: 15.74/50.25 MB → 3.95/3.57 MB, native, at
+  250,000 and 1,000,000 turns.
+- **`wrap(s)` flips to flat on one keyword**: 15.73/50.32 MB → 3.96/3.96 MB.
+- **The memory suite reads 21 rows, 21 steady**, with `callArgument` carrying
+  both halves. Its negative test is the operand rule disabled: **589,824 bytes
+  after 500 calls against 2,162,688 after 2,000** — four times the calls, four
+  times the memory, which is the leak stated as the relation that file asserts.
+- **`parity::a_retained_argument_is_not_freed_at_the_call` is green**, migrated
+  to carry one shape per verdict the caller must not act on: `Transferred`,
+  `Transferred` forwarded, `Retained` by a constructor, and `Retained` by a
+  position `note_retention` recorded. A double free there is wrong bytes in the
+  output, not a leak, which is why it is a parity test and not a memory row.
+- **`vyrn check` over every `.vyrn` in `examples/` and `std/`** — subdirectories
+  included — is clean but for the 13 files that exist to fail.
+- **Three-way parity byte-identical including traps**, 37 tests.
+- Workspace `cargo test --workspace --no-fail-fast`, `vyrn-lsp` separately (74),
+  `genwasm` 11, the memory suite, the docs drift gate.
+- RFC-0092's instrument reads `stores: 0`, `elem-store: 0`, `elem-return: 0`.
+- `cargo fmt --check` and `vyrn fmt --check` over the corpus, clean.
