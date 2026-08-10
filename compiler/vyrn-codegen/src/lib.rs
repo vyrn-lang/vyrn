@@ -39,15 +39,31 @@ use vyrn_frontend::types::INT32;
 /// function returning out of a region printed `error: region nesting exceeds 64`
 /// where every other engine printed an answer.
 ///
-/// **The chain link sits AFTER the payload, not in front of it**, which is what
-/// makes the sentence above true. A block the arena hands out is exactly what
-/// `__vyrn_malloc` returned, so `@__vyrn_str_free` — which frees `s - 16`, the
-/// `String` header it wrote — hands `free` a pointer `malloc` gave it. While the
-/// link lived at the front the user pointer was 8 bytes INTO the block, and a
-/// `String` returned out of a region corrupted the native heap the moment its
-/// caller released it (RFC-0096 M3, defect 4). The arena still frees at the
-/// closing brace what no return carried out, so the partition PR #129 states
-/// holds: one owner per block, on both paths.
+/// **The chain is not in the blocks at all**, which is what makes the sentence
+/// above true. A block the arena hands out is exactly what `__vyrn_malloc`
+/// returned — no header, no trailer, not even padding — so `@__vyrn_str_free`,
+/// which frees `s - 16`, the `String` header it wrote, hands `free` a pointer
+/// `malloc` gave it. While the link lived at the FRONT the user pointer was 8
+/// bytes into the block, and a `String` returned out of a region corrupted the
+/// native heap the moment its caller released it (RFC-0096 M3, defect 4). The
+/// arena still frees at the closing brace what no return carried out, so the
+/// partition PR #129 states holds: one owner per block, on both paths.
+///
+/// What holds the chain is a **side vector of block pointers**, one per frame,
+/// grown by doubling. PR #140's trailer kept the same invariant and cost 16
+/// bytes an allocation where the front link cost 8; the vector costs 8 exactly,
+/// with no rounding, because it is not part of the request. On the census's
+/// deferral shape — 2,000,000 concatenations under one region — native peak
+/// working set is 100,876,288 B with the front link, 132,493,312 B with the
+/// trailer and **116,731,904 B here**: half the trailer's cost given back, and
+/// the invariant kept. The vector is the arena's own bookkeeping and never
+/// reaches a user, so `region_exit` frees it after its blocks and `region_pop`
+/// frees it instead of them.
+///
+/// A block the arena owns may still never be `realloc`'d: the vector holds the
+/// address `free` will be handed, so a moved block would dangle it exactly as it
+/// dangled the trailer. `Stmt::Assign` refuses the in-place append inside a
+/// region for that reason, and it still must.
 ///
 /// The arena stack is `thread_local` (RFC-0025): `region { .. }` is memory
 /// management, not an effect, so an isolated task may use it — and with tasks
@@ -57,7 +73,9 @@ use vyrn_frontend::types::INT32;
 /// unchanged in behavior there.
 const REGION_RUNTIME: &str = "\
 @__vyrn_region_sp = thread_local global i64 0
-@__vyrn_region_heads = thread_local global [64 x ptr] zeroinitializer
+@__vyrn_region_blocks = thread_local global [64 x ptr] zeroinitializer
+@__vyrn_region_lens = thread_local global [64 x i64] zeroinitializer
+@__vyrn_region_caps = thread_local global [64 x i64] zeroinitializer
 @.trap.regiondepth = private unnamed_addr constant [34 x i8] c\"error: region nesting exceeds 64\\0A\\00\"
 
 define void @__vyrn_region_enter() {
@@ -71,8 +89,12 @@ trap:
   call void @exit(i32 1)
   unreachable
 ok:
-  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_heads, i64 0, i64 %sp
+  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %sp
   store ptr null, ptr %slot
+  %lenp = getelementptr [64 x i64], ptr @__vyrn_region_lens, i64 0, i64 %sp
+  store i64 0, ptr %lenp
+  %capp = getelementptr [64 x i64], ptr @__vyrn_region_caps, i64 0, i64 %sp
+  store i64 0, ptr %capp
   %sp1 = add i64 %sp, 1
   store i64 %sp1, ptr @__vyrn_region_sp
   ret void
@@ -80,19 +102,32 @@ ok:
 
 define ptr @__vyrn_region_alloc(i64 %n) {
 entry:
-  %pad = add i64 %n, 7
-  %end = and i64 %pad, -8
-  %tot = add i64 %end, 16
-  %raw = call ptr @__vyrn_malloc(i64 %tot)
-  %link = getelementptr i8, ptr %raw, i64 %end
+  %raw = call ptr @__vyrn_malloc(i64 %n)
   %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
-  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_heads, i64 0, i64 %idx
-  %prev = load ptr, ptr %slot
-  store ptr %prev, ptr %link
-  %bp = getelementptr i8, ptr %link, i64 8
-  store ptr %raw, ptr %bp
-  store ptr %link, ptr %slot
+  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
+  %lenp = getelementptr [64 x i64], ptr @__vyrn_region_lens, i64 0, i64 %idx
+  %capp = getelementptr [64 x i64], ptr @__vyrn_region_caps, i64 0, i64 %idx
+  %len = load i64, ptr %lenp
+  %cap = load i64, ptr %capp
+  %full = icmp eq i64 %len, %cap
+  br i1 %full, label %grow, label %put
+grow:
+  %dbl = shl i64 %cap, 1
+  %empty = icmp eq i64 %cap, 0
+  %newcap = select i1 %empty, i64 16, i64 %dbl
+  %bytes = shl i64 %newcap, 3
+  %old = load ptr, ptr %slot
+  %grown = call ptr @__vyrn_realloc(ptr %old, i64 %bytes)
+  store ptr %grown, ptr %slot
+  store i64 %newcap, ptr %capp
+  br label %put
+put:
+  %vec = load ptr, ptr %slot
+  %el = getelementptr ptr, ptr %vec, i64 %len
+  store ptr %raw, ptr %el
+  %len1 = add i64 %len, 1
+  store i64 %len1, ptr %lenp
   ret ptr %raw
 }
 
@@ -101,6 +136,10 @@ entry:
   %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
   store i64 %idx, ptr @__vyrn_region_sp
+  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
+  %vec = load ptr, ptr %slot
+  call void @free(ptr %vec)
+  store ptr null, ptr %slot
   ret void
 }
 
@@ -109,20 +148,24 @@ entry:
   %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
   store i64 %idx, ptr @__vyrn_region_sp
-  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_heads, i64 0, i64 %idx
-  %head = load ptr, ptr %slot
+  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
+  %vec = load ptr, ptr %slot
+  %lenp = getelementptr [64 x i64], ptr @__vyrn_region_lens, i64 0, i64 %idx
+  %len = load i64, ptr %lenp
   br label %loop
 loop:
-  %cur = phi ptr [ %head, %entry ], [ %next, %body ]
-  %isnull = icmp eq ptr %cur, null
-  br i1 %isnull, label %done, label %body
+  %i = phi i64 [ 0, %entry ], [ %i1, %body ]
+  %spent = icmp uge i64 %i, %len
+  br i1 %spent, label %done, label %body
 body:
-  %next = load ptr, ptr %cur
-  %bp = getelementptr i8, ptr %cur, i64 8
-  %blk = load ptr, ptr %bp
+  %el = getelementptr ptr, ptr %vec, i64 %i
+  %blk = load ptr, ptr %el
   call void @free(ptr %blk)
+  %i1 = add i64 %i, 1
   br label %loop
 done:
+  call void @free(ptr %vec)
+  store ptr null, ptr %slot
   ret void
 }
 
@@ -710,6 +753,19 @@ pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
 pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
 /// Suffixed with the contract's name: the argument is a declaration, not a value.
 pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
+/// What a compiling backend says about `listDir` (RFC-0021).
+///
+/// It is BOTH backends' sentence, held once, for the reason `IO_MESSAGES` is
+/// held once: two copies are two chances to drift, and the wording is a user's
+/// diagnostic rather than an emitter's note to itself. The checker cannot gate
+/// the call the way it gates `moduleInterface`/`contractOf`/`lex` — `listDir`
+/// has a runtime under `vyrn run` (`list_dir_is_not_generation_only`), and only
+/// the two compiling backends lack a lowering — so the refusal belongs to them,
+/// and it says the same thing on both.
+pub const LIST_DIR_NO_LOWERING: &str =
+    "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no native or wasm \
+     lowering in v1 — use it in a `gen fn` or under `vyrn run`";
+
 /// The atom-stream primitives the synthesized decoders are written against.
 pub const GEN_REFLECT: &str = "__vyrnGenReflect";
 pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
@@ -2290,8 +2346,8 @@ impl<'a> Gen<'a> {
     /// at the closing brace, so a second owner is a double free — and the walk
     /// stands off exactly one thing: a `String`, at the binding (`own.rs`'s
     /// `Leak::Region`) and one level down ([`Gen::deep_release`]). A buffer that
-    /// `realloc` may move is `__vyrn_malloc`'s: the chain link the arena writes
-    /// after the payload dangles the moment the block moves, which is why the
+    /// `realloc` may move is `__vyrn_malloc`'s: the arena's side vector holds the
+    /// address it will hand `free`, so a moved block dangles it, which is why the
     /// in-place append refuses a slot inside a region (`Stmt::Assign`).
     ///
     /// What the walk hands back is the arena's too, on one path: a `return` out
@@ -8738,11 +8794,9 @@ impl<'a> Gen<'a> {
             // The language gives `listDir` no runtime meaning (RFC-0021). RFC-0076
             // M2 lowered it behind `emit_gen_host` for the generation engine, and
             // M7 moved that to the direct backend, so this emitter is back to the
-            // one thing it ever had to say about it.
-            return Err(format!(
-                "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
-                 native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
-            ));
+            // one thing it ever had to say about it — and the direct backend says
+            // it in the same words, out of the same constant.
+            return Err(crate::LIST_DIR_NO_LOWERING.to_string());
         }
         if name == "moduleInterface" {
             return Err(
@@ -13202,7 +13256,7 @@ mod tests {
             "{ir}"
         );
         assert!(
-            ir.contains("@__vyrn_region_heads = thread_local global [64 x ptr] zeroinitializer"),
+            ir.contains("@__vyrn_region_blocks = thread_local global [64 x ptr] zeroinitializer"),
             "{ir}"
         );
     }
@@ -13902,10 +13956,16 @@ mod tests {
     }
 
     // The always-present runtime contributes exactly RUNTIME_FREES release
-    // occurrences: one `@free` in `__vyrn_region_exit`, one inside
-    // `@__vyrn_str_free` itself, and one `@__vyrn_str_free` in the
+    // occurrences: three `@free`s in the arena — its blocks and its side vector
+    // in `__vyrn_region_exit`, the vector alone in `__vyrn_region_pop` — one
+    // inside `@__vyrn_str_free` itself, and one `@__vyrn_str_free` in the
     // `__vyrn_bytes_dup` NUL path. An *auto*-free is a release beyond that
     // baseline.
+    //
+    // It was 3 while the arena chained its blocks through a trailer: the chain
+    // was in the blocks, so the walk needed no allocation of its own and `pop`
+    // had nothing to release. The vector is the arena's own bookkeeping, so it
+    // is freed on both ways out (RFC-0096's addendum).
     //
     // It was 6 until RFC-0090 M3, which took `__vyrn_stream_close` out of the
     // always-present prelude: a release is one function per element type now,
@@ -13915,7 +13975,7 @@ mod tests {
     // Both spellings count. A `String` drop is `@__vyrn_str_free` since
     // RFC-0089 M1a — it reads the header cap and returns on a static — and the
     // tests below ask how many bindings are reclaimed, not which call does it.
-    const RUNTIME_FREES: usize = 3;
+    const RUNTIME_FREES: usize = 5;
 
     /// What one element type's release costs in `free`s: a buffer stream's data,
     /// and a producer's step capture block.
