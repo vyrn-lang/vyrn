@@ -1,10 +1,12 @@
 //! Integration tests for `vyrn serve` (RFC-0016): spawn the real `vyrn`
 //! binary as an HTTP host and drive it with raw `std::net::TcpStream` requests.
 //!
-//! Each test picks a free port by binding an ephemeral listener, reading its
-//! port, and dropping it (accepting the small bind race), then spawns the
-//! server on that port and waits for the `serving ...` line on stderr before
-//! connecting. A `Drop` guard kills the child at the end.
+//! Each test lets the OS pick the port: the server runs with `--port 0` and
+//! names the port it got in its `serving ... on http://localhost:<port>` line,
+//! which the harness reads off stderr before connecting. The server holds the
+//! listener from the moment the OS assigns it, so no other process can take the
+//! port in between — the harness must never pick a port itself. A `Drop` guard
+//! kills the child at the end.
 //!
 //! Asserted: `/health` → 200 ok; module state (the hit counter) persisting and
 //! incrementing across sequential requests; a handler trap → 500 with the
@@ -65,19 +67,23 @@ struct TempFile {
     path: std::path::PathBuf,
 }
 
+/// Write `src` to a path no other test can hold: the process id names the
+/// process, and a counter names the call. A timestamp does NOT name the call —
+/// the Windows clock is coarse enough that two tests starting together read the
+/// same nanosecond, and the two servers then share one file, so one serves the
+/// other's source (or parses it half-written, or has it deleted underneath).
+fn write_temp_source(src: &str) -> TempFile {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("vyrn-serve-{}-{n}.vyrn", std::process::id()));
+    std::fs::write(&path, src).expect("write temp server");
+    TempFile { path }
+}
+
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
-}
-
-/// Bind an ephemeral port, read it, drop the listener, and return the port.
-/// The tiny window before `vyrn serve` re-binds is an accepted race.
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
 }
 
 /// Continuously read `r` into `acc` on a background thread (so the child never
@@ -118,27 +124,45 @@ fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) -> String
     }
 }
 
-/// Spawn `vyrn serve <tmp> --port <free> [extra args]` on `src` and wait for
-/// the startup line before returning.
-fn start_server_on(src: &str, extra: &[&str]) -> Serve {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let path = std::env::temp_dir().join(format!("vyrn-serve-{unique}.vyrn"));
-    std::fs::write(&path, src).expect("write temp server");
-    let file = TempFile { path: path.clone() };
+/// Read the port out of the startup banner (`serving <file> on
+/// http://localhost:<port>`), or panic after `timeout`. The whole number must
+/// have arrived — a digit run that reaches the end of what was captured could
+/// still be half a port — so the wait ends on the character after it.
+fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
+    let start = Instant::now();
+    loop {
+        {
+            let s = acc.lock().unwrap();
+            if let Some((_, rest)) = s.split_once("http://localhost:") {
+                if let Some((digits, _)) = rest.split_once(|c: char| !c.is_ascii_digit()) {
+                    if let Ok(port) = digits.parse() {
+                        return port;
+                    }
+                }
+            }
+        }
+        if start.elapsed() > timeout {
+            let s = acc.lock().unwrap();
+            panic!(
+                "timed out waiting for the serving banner; captured so far:\n{}",
+                *s
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
-    let port = free_port();
+/// Spawn `vyrn serve <tmp> --port 0 [extra args]` on `src` and wait for the
+/// startup line — which names the port the OS gave it — before returning.
+fn start_server_on(src: &str, extra: &[&str]) -> Serve {
+    let file = write_temp_source(src);
+    let path = file.path.clone();
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
         .arg(&path)
         .arg("--port")
-        .arg(port.to_string())
+        .arg("0")
         .args(extra)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -147,20 +171,22 @@ fn start_server_on(src: &str, extra: &[&str]) -> Serve {
 
     let stdout = drain(child.stdout.take().unwrap());
     let stderr = drain(child.stderr.take().unwrap());
-    let server = Serve {
+    let mut server = Serve {
         child,
-        port,
+        port: 0,
         stdout,
         stderr,
         _file: file,
     };
-    // The accept loop is live once the banner prints.
-    wait_for(&server.stderr, "serving", Duration::from_secs(10));
+    // The accept loop is live once the banner prints. The wait is long because a
+    // saturated machine (several checkouts building at once) starts the child
+    // slowly; it is not a race, so a generous limit costs a green run nothing.
+    server.port = wait_for_port(&server.stderr, Duration::from_secs(60));
     server
 }
 
-/// Spawn `vyrn serve <tmp> --port <free>` on `SERVER_SRC` and wait for the
-/// startup line before returning.
+/// Spawn `vyrn serve <tmp> --port 0` on `SERVER_SRC` and wait for the startup
+/// line before returning.
 fn start_server() -> Serve {
     start_server_on(SERVER_SRC, &[])
 }
@@ -270,13 +296,10 @@ fn post_body_reaches_handle() {
 fn main_startup_print_precedes_first_request() {
     let s = start_server();
     // `start_server` already waited for the `serving` banner on stderr, which
-    // is printed AFTER `main` runs — so `main`'s stdout is present before any
-    // request is served.
-    let out = s.stdout.lock().unwrap().clone();
-    assert!(
-        out.contains("server up"),
-        "main's startup print reached stdout first:\n{out}"
-    );
+    // is printed AFTER `main` runs — so `main`'s stdout is written before any
+    // request is served. Waiting for it (rather than reading what the drain
+    // thread happens to hold) times out only if it was never written.
+    wait_for(&s.stdout, "server up", Duration::from_secs(10));
 }
 
 // ---- worker threads (RFC-0025): `vyrn serve --workers N` -------------------
@@ -306,12 +329,9 @@ fn handle(req: Request) -> Response {
 #[test]
 fn workers_answer_concurrent_requests_correctly() {
     let s = start_server_on(PURE_SERVER_SRC, &["--workers", "4"]);
-    // The banner names the pool.
-    let err = s.stderr.lock().unwrap().clone();
-    assert!(
-        err.contains("with 4 workers"),
-        "banner should name the pool:\n{err}"
-    );
+    // The banner names the pool. Wait for the words rather than reading what has
+    // arrived: the port is already there, but the rest of the line need not be.
+    wait_for(&s.stderr, "with 4 workers", Duration::from_secs(10));
 
     // Eight concurrent client threads; every response must be correct.
     let port = s.port;
@@ -337,7 +357,7 @@ fn workers_answer_concurrent_requests_correctly() {
     }
 
     // `main` ran ONCE (on the setup interpreter), not once per worker.
-    let out = s.stdout.lock().unwrap().clone();
+    let out = wait_for(&s.stdout, "server up", Duration::from_secs(10));
     assert_eq!(
         out.matches("server up").count(),
         1,
@@ -390,21 +410,11 @@ fn handle(req: Request) -> Response {
     return Response { status: 200, contentType: "text/plain", body: bump().toString(), vary: "", headers: [:] }
 }
 "#;
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let path = std::env::temp_dir().join(format!("vyrn-serve-{unique}.vyrn"));
-    std::fs::write(&path, src).expect("write temp server");
-    let _file = TempFile { path: path.clone() };
+    let file = write_temp_source(src);
 
     let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
-        .arg(&path)
+        .arg(&file.path)
         .arg("--port")
         .arg("0")
         .arg("--workers")
