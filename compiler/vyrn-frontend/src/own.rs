@@ -899,6 +899,40 @@ pub struct Ownership {
     /// lowering an explicit `drop x` asks the SAME question the automatic path
     /// asked, instead of keeping a second copy of the answer.
     pub proto: Owned,
+    /// Every call-argument temporary in the program, with the callee's verdict
+    /// on it (`rfcs/census-call-arguments.md`). The rows a backend acts on are
+    /// the [`crate::movecheck::ArgVerdict::Released`] ones, which is what
+    /// [`Ownership::arg_drops`] hands back; the rest are here so the census's
+    /// own table can be re-derived from the compiler instead of from a harness.
+    pub arg_temps: Vec<crate::movecheck::ArgTemp>,
+}
+
+impl Ownership {
+    /// Every argument temporary the CALLER releases after the call, keyed by the
+    /// argument expression's node address — the key a backend releases by, the
+    /// way `droppable` is keyed by the `Stmt::Let`'s.
+    ///
+    /// Only a `String` today. Both backends free one out of a register with a
+    /// helper each already has ([`str_temporary`]'s), and every other kind wants
+    /// the walking release, which needs a PLACE and therefore a slot to spill
+    /// into. The rows for those kinds are recorded and left alone: a leak, which
+    /// is what they are today.
+    ///
+    /// **A wider kind has one more question to ask first.** A seeded row may
+    /// hand a CONTAINER back — `@push` answers `Array<T>` and its receiver is
+    /// the same `Array<T>` — so freeing at the call would free a buffer the
+    /// result still names. No `Array` is a `FreeStr`, so no such row can reach
+    /// this filter; `movecheck::arg_verdict` answers the same question for a row
+    /// that hands back a bare type parameter, which `blackBox` does.
+    pub fn arg_drops(&self) -> std::collections::HashSet<usize> {
+        self.arg_temps
+            .iter()
+            .filter(|s| {
+                s.verdict == crate::movecheck::ArgVerdict::Released && s.kind == DropKind::FreeStr
+            })
+            .map(|s| s.id)
+            .collect()
+    }
 }
 
 /// Analyse ownership across a whole program.
@@ -907,7 +941,8 @@ pub fn analyze(program: &Program) -> Ownership {
     // What every `let` in the program still owns where its block ends, decided
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
-    let lets = crate::movecheck::ownership(program);
+    let facts = crate::movecheck::facts(program);
+    let lets = facts.lets;
 
     let mut droppable = HashMap::new();
     let mut holes = HashMap::new();
@@ -944,6 +979,7 @@ pub fn analyze(program: &Program) -> Ownership {
         holes,
         notes,
         proto,
+        arg_temps: facts.arg_temps,
     }
 }
 

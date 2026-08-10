@@ -194,7 +194,14 @@ impl Declared {
     /// costs a leak; an `Array<T>` releases its buffer, so handing out somebody
     /// else's is a use-after-free.
     pub fn releases(&self, ty: &Type) -> bool {
-        self.owned.release_kind(ty).is_some()
+        self.release_kind(ty).is_some()
+    }
+
+    /// [`Declared::releases`] with the row kept: HOW a value of `ty` is
+    /// reclaimed, for a caller that has to emit the reclamation and not only
+    /// decide it.
+    pub fn release_kind(&self, ty: &Type) -> Option<crate::own::DropKind> {
+        self.owned.release_kind(ty)
     }
 
     /// Whether `name` CONSTRUCTS a sum value out of its arguments.

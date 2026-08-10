@@ -359,6 +359,10 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         globals: HashMap::new(),
         gappend: HashMap::new(),
         externs,
+        // Every call-argument temporary this program releases at the call
+        // (`rfcs/census-call-arguments.md`), taken before `ownership` is moved
+        // from.
+        arg_drops: ownership.arg_drops(),
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
         // address, which is unique in the program.
@@ -946,6 +950,10 @@ struct Cx {
     /// Per `let` node, the places a `consume` took out of it (RFC-0093 M2). The
     /// release walk skips them: the take already gave them an owner.
     holes: HashMap<usize, Vec<String>>,
+    /// The argument expressions whose value the CALLER releases after the call
+    /// (`rfcs/census-call-arguments.md`), keyed by node address — `own`'s
+    /// answer, one level down from a `let`'s.
+    arg_drops: std::collections::HashSet<usize>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -1355,6 +1363,10 @@ struct Fn_<'a> {
     region_depth: u32,
     /// [`Cx::droppable`] for the function being lowered.
     drops: HashMap<usize, DropKind>,
+    /// The locals holding the argument temporaries this frame releases, innermost
+    /// call last. Teed where the argument is EVALUATED and handed back where its
+    /// call ends — see [`Fn_::call`].
+    arg_frees: Vec<u32>,
     /// The holes the walk in progress must skip, relative to the place it is
     /// looking at (RFC-0093 M2). Taken at the top of [`Fn_::rel_at`], so a walk
     /// into anything that is not a record starts empty.
@@ -1399,6 +1411,7 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
         releases: Vec::new(),
         region_depth: 0,
         drops: HashMap::new(),
+        arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
@@ -1489,6 +1502,7 @@ fn lower_body(
         releases: Vec::new(),
         region_depth: 0,
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
+        arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: binds,
@@ -1567,6 +1581,11 @@ fn lower_body(
         _ => BlockType::Empty,
     }));
     cx_fn.block(m, &mut b, &f.body)?;
+    // A lowering that reaches an argument node outside [`Fn_::call`] would leave
+    // its local here. Nothing in the corpus does; if anything ever did, the local
+    // is simply never read, which is a leak rather than a free of a value still
+    // in use — the direction every release decision in this compiler takes.
+    cx_fn.arg_frees.clear();
     // Falling off the end of a value-returning function is unreachable — the
     // checker proves every path returns — but the validator needs to be told,
     // since it cannot see the proof.
@@ -3812,7 +3831,27 @@ impl Fn_<'_> {
 
     /// Evaluate `e`, leaving its value (a scalar) or its address (an aggregate)
     /// on the stack, and giving the Vyrn type of what it left.
+    ///
+    /// The wrapper keeps ONE fact: whether this expression is a call argument
+    /// whose value the CALLER releases once the call is done with it
+    /// (`rfcs/census-call-arguments.md`). `own` decided that, per argument node;
+    /// this tees the pointer into a local so [`Fn_::call`] can hand it back
+    /// after the call. The tee is HERE — where the argument is evaluated —
+    /// rather than at the call, so the evaluation order stays the one the
+    /// program wrote.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
+        let t = self.expr_inner(m, b, e)?;
+        if self.region_depth == 0 && self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
+            let l = b.local(ValType::I32);
+            b.ins(&Instruction::LocalTee(l));
+            self.arg_frees.push(l);
+        }
+        Ok(t)
+    }
+
+    /// The walk itself. Every arm leaves exactly one value (or none, for
+    /// `Unit`) on the stack, which is what lets the wrapper above tee it.
+    fn expr_inner(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         Ok(match e {
             // RFC-0093: a take is the load the read already emits. The `.copy()`
             // that used to follow it is what the take removes, so the emitted
@@ -5557,7 +5596,39 @@ impl Fn_<'_> {
         Ok(())
     }
 
+    /// A call, then the release of every argument temporary it is finished with.
+    ///
+    /// The census's rule (`rfcs/census-call-arguments.md` §8): a heap-owning
+    /// value the ARGUMENT EXPRESSION built has no binding, so `own` — which keys
+    /// every release on a `let` — has nothing to write a row against, and
+    /// `width(label(i))` leaked 48 bytes a turn where `let s = label(i)` on the
+    /// line above did not. Which arguments those are is `own`'s answer and not
+    /// this backend's: it stands aside at a `consume` position, at a
+    /// constructor, at a position `movecheck::note_retention` recorded, and
+    /// wherever no signature is visible.
+    ///
+    /// The mark is what makes it nest. `f(g(h(x)))` frees `h`'s result at `g`
+    /// and `g`'s at `f`, because the inner call takes back only what was teed
+    /// after its own mark. The call's own result stays on the stack: a local
+    /// read and a call push and pop above it, which is what
+    /// [`Fn_::free_str_temp`] already relies on.
     fn call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let mark = self.arg_frees.len();
+        let r = self.call_inner(m, b, name, args, line);
+        for l in self.arg_frees.split_off(mark) {
+            self.free_str_temp(b, Some(l));
+        }
+        r
+    }
+
+    fn call_inner(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
@@ -15016,6 +15087,7 @@ mod tests {
 
     fn cx() -> Cx {
         Cx {
+            arg_drops: std::collections::HashSet::new(),
             types: HashMap::new(),
             impls: Vec::new(),
             sigs: HashMap::new(),
