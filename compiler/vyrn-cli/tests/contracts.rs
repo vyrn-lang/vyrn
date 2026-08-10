@@ -419,6 +419,12 @@ fn contract_of_is_comptime_only_and_has_no_native_lowering() {
     // Nothing about a contract survives into an emitted module (RFC-0071), so
     // reaching `contractOf` at runtime is a clear compile error rather than a
     // link failure — the same rule `moduleInterface` already follows.
+    //
+    // RFC-0096 M3 (lane C) moved the refusal from the text-IR emitter to the
+    // checker, so the sentence is the front end's and every consumer prints it:
+    // the emitter's version was reached by `vyrn build` alone, while `vyrn
+    // check` said `ok`, `vyrn run` failed later, and the direct backend said
+    // `no lowering for the call`.
     let dir = scratch("nolower");
     std::fs::write(
         dir.join("app.vyrn"),
@@ -441,7 +447,7 @@ fn contract_of_is_comptime_only_and_has_no_native_lowering() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        all.contains("compile-time reflection (RFC-0071)"),
+        all.contains("`contractOf` is only available during generation"),
         "expected a comptime-only refusal, got:\n{all}"
     );
 }

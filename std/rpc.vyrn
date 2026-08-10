@@ -972,8 +972,8 @@ gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
         mi = mi + 1
         for t in iface.types {
             if rpcHasPair(typeMods, typeNames, t.module, t.name) == false {
-                typeMods.push(t.module)
-                typeNames.push(t.name)
+                typeMods.push(t.module.copy())
+                typeNames.push(t.name.copy())
             }
         }
     }
@@ -1243,7 +1243,7 @@ gen fn rpcClientTypes(mods: Array<RpcModule>) -> RpcClientTypes {
         let iface = moduleInterface(m.modPath)
         for t in iface.types {
             if rpcListContains(seen, t.name) == false {
-                seen.push(t.name)
+                seen.push(t.name.copy())
                 out = out + t.source + "\n"
                 syms.push(symbol(t.name, t.origin, []))
             }

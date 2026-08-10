@@ -5732,9 +5732,23 @@ impl<'a> Checker<'a> {
             ));
         }
         // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
-        // reflection over a module's exported surface. A runtime call traps; the
-        // type is available everywhere so a `gen fn` type-checks against it.
+        // reflection over a module's exported surface. It is generation-ONLY —
+        // the interpreter refuses it outside a generation and neither compiling
+        // backend lowers it — so the refusal belongs here, where one gate serves
+        // `vyrn check`, `vyrn run` and both backends. Before RFC-0096 M3's lane
+        // C the call type-checked anywhere: `vyrn check` said `ok`, `vyrn run`
+        // failed at RUN time, `vyrn build` printed a backend sentence, and
+        // `vyrn build --target wasm` printed `direct backend: no lowering for
+        // the call`, which is an emitter's own words in a user's diagnostic.
+        // `listDir` is NOT gated with it — that one has a runtime under `vyrn
+        // run` (see [`COMPTIME_FORBIDDEN`]), and only the compiling backends
+        // lack a lowering for it.
         if name == "moduleInterface" {
+            if !*self.in_gen.borrow() {
+                return Err(format!(
+                    "line {line}: `moduleInterface` is only available during generation"
+                ));
+            }
             if args.len() != 1 {
                 return Err(format!(
                     "line {line}: `moduleInterface` takes 1 argument, got {}",
@@ -6719,6 +6733,12 @@ impl<'a> Checker<'a> {
         // result is an ordinary record, so `std/contract:checkContract` can
         // compare a contract against a `moduleInterface` in plain Vyrn code.
         if name == "contractOf" {
+            // Generation-only, and gated for the reason `moduleInterface` is.
+            if !*self.in_gen.borrow() {
+                return Err(format!(
+                    "line {line}: `contractOf` is only available during generation"
+                ));
+            }
             if args.len() != 1 {
                 return Err(format!(
                     "line {line}: `contractOf` takes 1 argument (a contract name), got {}",
@@ -12586,16 +12606,58 @@ mod tests {
     #[test]
     fn contract_of_types_as_contract_info() {
         let src = "contract Page { let head: String = \"\" }\n\
-                   fn main() -> Int64 { let c = contractOf(Page)  print(c.name)  return 0 }";
+                   gen fn g(p: String) -> String { let c = contractOf(Page)  return c.name }\n\
+                   fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     #[test]
     fn contract_of_rejects_a_name_that_is_not_a_contract() {
         let src = "type Page = { a: Int64 }\n\
-                   fn main() -> Int64 { let c = contractOf(Page)  return 0 }";
+                   gen fn g(p: String) -> String { let c = contractOf(Page)  return \"\" }\n\
+                   fn main() -> Int64 { return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("is not a contract"), "{e}");
+    }
+
+    /// RFC-0096 M3 (lane C): the two reflection builtins are generation-ONLY,
+    /// and the front end is where that is said. Before this gate the call
+    /// type-checked anywhere, so `vyrn check` answered `ok` and the refusal
+    /// arrived from the interpreter at RUN time, from the text-IR emitter, or
+    /// from the direct backend as `no lowering for the call` — an emitter's
+    /// internal sentence in a user's diagnostic.
+    #[test]
+    fn the_reflection_builtins_are_refused_outside_a_generation() {
+        for (src, name) in [
+            (
+                "fn main() -> Int64 { let m = moduleInterface(\"std/json\")  return 0 }"
+                    .to_string(),
+                "moduleInterface",
+            ),
+            (
+                "contract Page { let head: String = \"\" }\n\
+                 fn main() -> Int64 { let c = contractOf(Page)  return 0 }"
+                    .to_string(),
+                "contractOf",
+            ),
+        ] {
+            let e = check_src(&src).unwrap_err();
+            assert!(
+                e.contains(&format!("`{name}` is only available during generation")),
+                "`{name}` outside a `gen fn` must be refused by the checker; got {e}"
+            );
+        }
+    }
+
+    /// `listDir` is NOT gated with them, and the asymmetry is deliberate: it
+    /// lists the real filesystem under `vyrn run` (which is why
+    /// [`COMPTIME_FORBIDDEN`] omits it and the interpreter serves it), so the
+    /// front end has nothing to refuse. Only the two compiling backends lack a
+    /// lowering, and each says so itself.
+    #[test]
+    fn list_dir_is_not_generation_only() {
+        let src = "fn main() -> Int64 { let r = listDir(\".\")  return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     #[test]
