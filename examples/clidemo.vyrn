@@ -1,0 +1,52 @@
+/// clidemo — the command line IS a record type (RFC-0098 M1).
+///
+/// `examples/lib/serve.vyrn` declares the whole command: two validated option
+/// types carrying their own `///` and their own bounds, and one record whose
+/// fields are the options. `cli("./lib/serve")` reflects that module and returns
+/// `parseServe` and `helpServe`; nothing here spells a flag name twice.
+///
+/// The argv is fixed in `clidemo.args`, forwarded byte-identically to interp,
+/// native and wasmtime — so a mapping rule that breaks breaks parity. The
+/// refusal path is its sibling, `clifail.vyrn`.
+///
+/// Inspect the synthesized module with:  vyrn emit-gen examples/clidemo.vyrn
+
+import { cli, wantsHelp } from "std/cli"
+import { parseServe, helpServe } from cli("./lib/serve")
+import { Serve } from "./lib/serve"
+
+fn report(s: Serve) -> Int64 {
+    print("port=\{s.port}")
+    print("root=\{s.root}")
+    if let Some(h) = s.host {
+        print("host=\{h}")
+    } else {
+        print("host=none")
+    }
+    print("verbose=\{s.verbose}")
+    for f in s.files {
+        print("file=\{f}")
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    let argv = args()
+
+    // `--help` is a question about argv, not a value in the record: a program
+    // that asks for help has not given the required options.
+    if wantsHelp(argv) {
+        print(helpServe())
+        return 0
+    }
+
+    // The generated help is printed here too, so one run shows both the parse
+    // and the text the same declaration produced.
+    print(helpServe())
+    print("----")
+
+    return match parseServe(argv) {
+        Valid(s) => report(s),
+        Invalid(issues) => 2,
+    }
+}

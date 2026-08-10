@@ -1,0 +1,14 @@
+/// The TCP port to listen on.
+export type Port = Int64 where value >= 1 && value <= 65535
+
+/// The directory to serve. Must not be empty.
+export type Root = String where value.byteLength > 0
+
+/// Serve a directory over HTTP.
+export type Serve = {
+    port: Port,
+    root: Root,
+    host: Option<String>,
+    verbose: Bool,
+    files: Array<String>,
+}

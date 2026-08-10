@@ -5354,30 +5354,45 @@ impl<'a> Gen<'a> {
 
     /// Fallible validated construction `Age?(n)` → `Option<Age>` (`{ i1, i64 }`):
     /// tag is the refinement result, payload is the value.
+    ///
+    /// `Int64` and `String` are the two bases, which is what the direct backend
+    /// already accepted (its rule is "any scalar", and those are the two scalars
+    /// a validated type is written over in this corpus). A `String` payload is
+    /// its pointer, the same word a `Some(s)` carries — RFC-0098 needed it,
+    /// because an option type over `String` is what a command line hands you.
     fn gen_try_construct(&mut self, name: &str, arg: &Expr) -> Result<(String, Type), String> {
         let decl = self
             .types
             .get(name)
             .cloned()
             .ok_or_else(|| format!("unknown type `{name}`"))?;
-        if self.resolve(&decl.base) != Type::Int {
+        let base = self.resolve(&decl.base);
+        if base != Type::Int && base != Type::Str {
             return Err(format!(
-                "native fallible construction supports Int64-based types only (`{name}`); use `vyrn run`"
+                "native fallible construction supports Int64-based and String-based types only (`{name}`); use `vyrn run`"
             ));
         }
         let (v, _) = self.gen_expr(arg)?;
+        let base_ll = self.llt(&decl.base);
         let pred_i1 = match &decl.predicate {
             None => "true".to_string(),
             Some(pred) => {
                 self.scope.push(Vec::new());
                 let slot = self.declare("value", &decl.base);
-                self.emit(format!("store i64 {v}, ptr {slot}"));
+                self.emit(format!("store {base_ll} {v}, ptr {slot}"));
                 let (cond, _) = self.gen_expr(pred)?;
                 self.scope.pop();
                 cond
             }
         };
-        // The payload is a validated Int (Age → Int), so it lives in word 0.
+        // The payload is one word: the Int itself, or the String's pointer.
+        let word = if base == Type::Str {
+            let w = self.fresh_tmp();
+            self.emit(format!("{w} = ptrtoint ptr {v} to i64"));
+            w
+        } else {
+            v
+        };
         let a = self.fresh_tmp();
         let b = self.fresh_tmp();
         let c = self.fresh_tmp();
@@ -5385,7 +5400,7 @@ impl<'a> Gen<'a> {
             "{a} = insertvalue {{ i1, i64, i64 }} undef, i1 {pred_i1}, 0"
         ));
         self.emit(format!(
-            "{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {v}, 1"
+            "{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {word}, 1"
         ));
         self.emit(format!(
             "{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 0, 2"

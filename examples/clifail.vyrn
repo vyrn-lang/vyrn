@@ -1,0 +1,37 @@
+/// clifail — the refusal half of RFC-0098 M1, and the sibling of `clidemo`.
+///
+/// One argv breaks four rules at once: an unknown option, a flag given a value,
+/// a port outside the range its own type states, and a required option nobody
+/// gave. `Validation` accumulates, so all four arrive together, each with the
+/// library's own wording and the field it belongs to. The exit code is 2, the
+/// usage code, and the run is byte-identical on all three backends.
+
+import { cli, wantsHelp } from "std/cli"
+import { parseServe, helpServe } from cli("./lib/serve")
+
+logging { level: error, sink: stderr }
+
+fn main() -> Int64 {
+    let argv = args()
+    if wantsHelp(argv) {
+        print(helpServe())
+        return 0
+    }
+    return match parseServe(argv) {
+        Valid(s) => 0,
+        Invalid(issues) => refuse(issues),
+    }
+}
+
+fn refuse(issues: Array<Issue>) -> Int64 {
+    let log = logger("serve")
+    for i in issues {
+        if i.path == "" {
+            log.error("\{i.message}")
+        } else {
+            log.error("\{i.path}: \{i.message}")
+        }
+    }
+    print(helpServe())
+    return 2
+}
