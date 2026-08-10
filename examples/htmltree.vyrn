@@ -8,7 +8,10 @@
 ///
 ///   - `Text` escapes `& < > "`; attribute values escape `& "`.
 ///   - `Raw` bypasses escaping (the loud markup escape hatch).
-///   - void elements (`br`, `img`, `input`, …) self-close and ignore children.
+///   - a NAME (tag, attribute, event) is CHECKED, not escaped — it lands
+///     outside the quotes, so a bad one is refused rather than emitted; see
+///     `examples/htmlrefuse.vyrn` for the refusal itself.
+///   - void elements (`br`, `img`, `input`, …) self-close and take no children.
 ///   - `on(event, handler, payload)` → `data-on-<event>` + `data-arg-<event>`.
 ///   - `keyed(k, node)` attaches list identity (`data-key`) for the M2 differ.
 import { el, text, cls, attr, on, keyed, empty, toHtmlString, document, Html, Attr } from "std/html"
@@ -30,10 +33,8 @@ fn cartBody() -> Html {
                     text("5 < 6 and 6 > 5, always."),
                 ]),
             el("hr", [], []),
-            el("img", [attr("src", "/logo.png"), attr("alt", "logo & mark")], [
-                    // children of a void element are ignored on render:
-                    text("this text never appears"),
-                ]),
+            // a void element takes no children — giving it any is refused:
+            el("img", [attr("src", "/logo.png"), attr("alt", "logo & mark")], []),
             el("form", [], [
                     el("input", [attr("name", "q"), on("input", "onQuery", "")], []),
                 ]),
@@ -89,9 +90,19 @@ test "empty renders as nothing" {
     assertEq(toHtmlString(empty()), "")
 }
 
-test "void elements self-close and ignore children" {
-    assertEq(toHtmlString(el("br", [], [text("ignored")])), "<br>")
+test "void elements self-close" {
+    assertEq(toHtmlString(el("br", [], [])), "<br>")
     assertEq(toHtmlString(el("img", [attr("src", "/x.png")], [])), "<img src=\"/x.png\">")
+}
+
+test "a name may hold letters, digits, dash, underscore and colon" {
+    let node = el("my-widget", [attr("xml:lang", "en"), attr("data_x", "1")], [])
+    assertEq(toHtmlString(node), "<my-widget xml:lang=\"en\" data_x=\"1\"></my-widget>")
+}
+
+test "an attribute value carrying markup stays inside its quotes" {
+    let node = el("p", [attr("title", "\" onload=\"alert(1)")], [])
+    assertEq(toHtmlString(node), "<p title=\"&quot; onload=&quot;alert(1)\"></p>")
 }
 
 test "on renders two data attributes" {
