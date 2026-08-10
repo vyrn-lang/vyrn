@@ -1673,7 +1673,7 @@ fn vyxShiftIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<Int
         bs.push(VyxBody { nodes: vyxShiftNodes(b.nodes, d) })
     }
     let es = VyxBody { nodes: vyxShiftNodes(els.nodes, d) }
-    return VNIf(conds, cl, condCols, bs, es, has)
+    return VNIf(conds.copy(), cl, condCols.copy(), bs, es, has)
 }
 
 /// The number of LF bytes in `s` — the line count of a synthesized prefix, so a

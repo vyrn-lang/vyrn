@@ -1295,10 +1295,10 @@ fn httpValue(raw: String, isNumber: Bool) -> Json {
     if isNumber {
         return match parse(raw) {
             Some(n) => JNum(n.toString()),
-            None => JStr(raw),
+            None => JStr(raw.copy()),
         }
     }
-    return JStr(raw)
+    return JStr(raw.copy())
 }
 
 fn httpListHas(items: Array<String>, needle: String) -> Bool {

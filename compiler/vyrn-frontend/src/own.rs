@@ -752,11 +752,17 @@ pub fn holes_under(holes: &[String], name: &str) -> Vec<String> {
 /// call into a dispatch that keeps what it is given. That is the same argument
 /// `ban_append_expr` already stands on, in the same two names.
 ///
-/// The other two ways an expression makes a temporary — a call's result handed
-/// straight to another call, and an owning call's result read through — are NOT
-/// here. A callee may RETAIN its argument (a `consume` parameter, a variant
-/// constructor), so freeing after a general call needs the callee's signature
-/// at the site and cross-module. RFC-0096 M3 measures both and closes neither.
+/// The other way an expression makes a temporary — a CALL's result, handed to
+/// another call or to a `+` — is not here and does not belong here. This is a
+/// question about the expression's SHAPE, and a call's answer is its callee's:
+/// the position may retain the value, or take it, or hand it back. That verdict
+/// is [`crate::movecheck::ArgVerdict`], read per position and closed over the
+/// call graph, and [`Ownership::arg_drops`] is what the backends ask. A String
+/// `+` records its operands there under the name `@concat`, so an operand a
+/// call produced takes the same rule and the same guards as a call argument
+/// (`rfcs/census-call-arguments.md` §9, finding 3) — and the two rules
+/// partition, because an operand this predicate answers `true` for reads
+/// `AlreadyFreed` there.
 pub fn str_temporary(e: &Expr) -> bool {
     match e {
         Expr::Call { name, .. } => name == "@str" || name == "@concat",

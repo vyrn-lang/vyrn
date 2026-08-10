@@ -285,7 +285,7 @@ fn parseKeyword(p: modify Parser, word: String, val: Json) -> Result<Json, Strin
         step(p)
         i = i + 1
     }
-    return Ok(val)
+    return Ok(val.copy())
 }
 
 /// Parse one JSON value (leading whitespace already skipped by the caller).

@@ -181,7 +181,13 @@ impl Walk<'_> {
             }
             Type::Str => {
                 let n = self.rt("JStr");
-                Ok(format!("    return {n}(v)\n"))
+                // `.copy()`, because `v` is a `read` parameter and the `Json`
+                // built here outlives the call. Handing the buffer over would
+                // make the result name storage the CALLER still owns — the
+                // census's finding 2, which leaks the argument and the result
+                // both. `toJson(x)` may not take `x`, so the copy is the fix the
+                // menu names, and the encoded value owns its own bytes.
+                Ok(format!("    return {n}(v.copy())\n"))
             }
             Type::Record(fields) => {
                 let (obj, fld) = (self.rt("JObj"), self.rt("JsonField"));

@@ -812,7 +812,11 @@ gen fn twBuildModule(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Arra
     // The checked bridge into std/html.
     out = out + "/// A checked `class=\"…\"` attribute: `c` is validated against the theme's\n"
     out = out + "/// utility vocabulary at compile time (for a literal) or the boundary (dynamic).\n"
-    out = out + "export fn cls(c: Tw) -> Attr {\n    return Cls(c)\n}\n"
+    // `.copy()` and not `consume`: the `Attr` holds `c` and outlives the call
+    // (`rfcs/census-call-arguments.md` §10, finding 2), and the callers are
+    // `.vyx` templates handing over a PROP, which is a `read` parameter one
+    // level up. The copy keeps the fix inside this one line.
+    out = out + "export fn cls(c: Tw) -> Attr {\n    return Cls(c.copy())\n}\n"
 
     // css() — the whole stylesheet, baked into a deterministic constant (so it is
     // O(1) at runtime; only comptime generation touched the ~10³ rules). The `\{}`

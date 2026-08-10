@@ -58,7 +58,7 @@
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
 //! | `exprTemporary` | RFC-0096 M3 | steady | a String an EXPRESSION allocated has no binding, so the CONSUMER releases it — `@concat`, a String `+`, `@str` and the in-place append each free an operand the expression itself built |
 //! | `localAccumulator` | RFC-0096 M3, defect 3 | steady | the static-data rule read the INITIALIZER, so `let mut acc = ""` answered `Static` for the buffer the loop grew; it asks whether the binding can CHANGE now |
-//! | `callArgument` | census-call-arguments | steady | a value the ARGUMENT built has no binding either, so the CALLER releases it after a call that keeps nothing — the proof was never missing, only the place to write it down |
+//! | `callArgument` | census-call-arguments | steady | a value the ARGUMENT built has no binding either, so the CALLER releases it after a call that keeps nothing — the proof was never missing, only the place to write it down. A String `+` is `@concat` written as an operator, so its operands are call arguments too and `"n" + label(i)` takes the same verdict |
 //!
 //! **Twenty-one rows, twenty-one steady.** RFC-0092 M5 closed the last leaking
 //! one, and the row beside it — the same statement with `consume` written on it
@@ -678,7 +678,14 @@ const ROWS: &[Row] = &[
               rule: 14.62 MB at 250,000 turns and 49.12 MB at four times that, which is 48.2 \
               bytes a turn — the String header and its buffer. After it: 3.94 MB and 4.26 MB. \
               Make the retention question answer `Unknown` everywhere and this row leaks \
-              again, which is the negative test",
+              again, which is the negative test. The row carries the class NEXT DOOR too: \
+              `\"n\" + tagged(seen)` feeds a call result to the OPERATOR lowering rather \
+              than to a call, so it was in neither this census's 1505 nor RFC-0096 M3's \
+              operand class — M3 frees an operand that allocated its own value, and a call \
+              result is one whose CALLEE decides. A String `+` is `@concat` written as an \
+              operator, so its operands take the same verdict and the same guards. Measured \
+              native over `\"n\" + label(i)` in a loop before the rule: 15.74 MB at 250,000 \
+              turns and 50.25 MB at four times that; 3.95 MB and 3.57 MB after it",
     },
     Row {
         export: "consumingLoop",
@@ -1044,6 +1051,13 @@ fn width(s: String) -> Int64 {{
 /// a double free is what that test is for, and a double free is not a leak.
 export extern fn callArgument() {{
     seen = seen + width(tagged(seen))
+    // The class next door, and the same 48 bytes: a call result fed to a `+`.
+    // It reaches the OPERATOR lowering rather than a call, so it was in neither
+    // the census's 1505 nor RFC-0096 M3's operand class — M3 frees an operand
+    // that ALLOCATED its own value, and `tagged(seen)` is a call whose callee
+    // decides. `s` names the concatenation, so a leak here is the operand's.
+    let s = "n" + tagged(seen)
+    seen = seen + Int64(s.byteLength)
 }}
 
 /// Census §10, both discharges (RFC-0095 M1). The join takes the result and

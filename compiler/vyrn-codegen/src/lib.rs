@@ -6243,7 +6243,34 @@ impl<'a> Gen<'a> {
         self.gen_call(&ask("success"), &recv)
     }
 
+    /// `a + b` on Strings is `@concat` written as an operator, so its operands
+    /// are call arguments and take the call-argument rule
+    /// (`rfcs/census-call-arguments.md` §9, finding 3): `"n" + label(i)` reaches
+    /// this lowering rather than [`Gen::gen_call`], so it was in neither that
+    /// census's count nor RFC-0096 M3's operand class, and leaked the same 48
+    /// bytes a turn.
+    ///
+    /// The mark is [`Gen::gen_call`]'s, for its reason: an operand that is
+    /// itself a call takes back only what was pushed after its own mark. Every
+    /// other operator reaches the drain with nothing pushed — `own` records a
+    /// row only where the `+` builds a String.
     fn gen_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(String, Type), String> {
+        let mark = self.arg_frees.len();
+        let r = self.gen_binary_inner(op, lhs, rhs);
+        for v in self.arg_frees.split_off(mark) {
+            if !self.terminated {
+                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+            }
+        }
+        r
+    }
+
+    fn gen_binary_inner(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> Result<(String, Type), String> {
         // short-circuit logical operators
         if matches!(op, BinOp::And | BinOp::Or) {
             let (l, _) = self.gen_expr(lhs)?;

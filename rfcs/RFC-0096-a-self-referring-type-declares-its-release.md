@@ -622,8 +622,11 @@ EXPRESSION rather than the type.
 
 | what | count | why it is not here |
 |---|---:|---|
-| a call argument that is an owning call's result | 930 | a callee may retain its argument; freeing after one needs the signature at the site, cross-module |
-| a call argument that is an allocating String expression | 632 | the same rule |
+| a call argument that is an owning call's result | 930 | ~~a callee may retain its argument; freeing after one needs the signature at the site, cross-module~~ **closed by `rfcs/census-call-arguments.md`.** The sentence is true for 97 sites of 1505 and the compiler already knew which 97: the retention answer is a set `movecheck` builds per position and closes over the call graph, and the linked program puts every callee's body in front of both backends. 1936 sites released |
+| a call argument that is an allocating String expression | 632 | the same rule, and closed with it |
+| a call RESULT fed to a `+` | ~~unmeasured~~ | ~~the operator lowering is not a call, so the operand sat in neither class~~ **closed.** A String `+` is `@concat` written as an operator, so `movecheck` records its operands under that name and they take the argument verdict and its guards. Native `"n" + label(i)` in a loop: 15.74/50.25 MB → 3.95/3.57 MB |
+| a `read` parameter put into the value a function RETURNS | 78 sites | ~~the argument escapes into the constructor and the result lends, so neither may be freed and both leak~~ **closed by refusing the shape.** No release rule can free around a lend; the fix is the signature, which is the language's own answer since RFC-0089. `check_return` refuses it and names `consume` |
+| a `consume` parameter a function does not hand on | unmeasured | nothing releases it — `own` keys every release on a `let`, and a parameter is not one. `fn f(s: consume String) { if c { return Some(s) } return None }` leaks the `None` path, 50.1 MB over a million turns. It is the row below `callArgument`, and it is a milestone |
 | the rest of a frame a `return` popped | unmeasured | a return out of a region hands over the value it carries and leaks what it does not — census §6's paragraph, which needs the escape analysis RFC-0004 defers |
 | an arena block's 16-byte trailer | +31% peak on a deferring region | a side vector of block pointers buys 8 of it back for ~20 lines of IR, on a path with three corpus uses |
 | `moduleInterface`, `contractOf`, `listDir` returns | 18 sites | ~~generation-only; no compiling backend lowers them, so the owner is written nowhere~~ **closed in the addendum below** |

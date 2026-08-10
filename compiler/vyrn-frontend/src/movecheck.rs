@@ -1848,13 +1848,45 @@ impl MoveCheck<'_> {
             return Ok(());
         }
         let found = self.returned_borrow(e);
+        let wrapped = self.lends_through_a_wrapper(e);
         // Whatever it is, the caller may not release it. Recorded even where it
         // is not refused below — that is the half of the hole this phase closes
         // without a diagnostic.
-        if found.is_some() || self.lends_through_a_wrapper(e) {
+        if found.is_some() || wrapped.is_some() {
             self.lends();
         }
         let Some((b, root, path)) = found else {
+            // The census's finding 2, refused: `fn wrap(s: String) -> Option<String>
+            // { return Some(s) }` puts a borrow into the value it hands back, so
+            // the caller may release NEITHER — not the argument, which escapes
+            // into the constructor, nor the result, whose producer does not own
+            // it. Both leak, 48.8 MB over a million turns, and no release rule
+            // may ever close it: freeing around a lend is the alias analysis this
+            // repo deleted. The fix is the signature, which is the language's own
+            // answer since RFC-0089 — a capability is declared, not inferred.
+            //
+            // The narrowing is what makes it safe to refuse. This wrapper reading
+            // exists to RECORD, because `return Some(m)` over a loop element is
+            // most of the corpus, and an element is a [`Borrow::Element`] or a
+            // [`Borrow::Projection`]. A whole `read` parameter is the one root
+            // whose owner is the CALLER, so `consume` is a fix the author can
+            // always write, and it is the shape the census measured.
+            if let Some((b, root, path)) = wrapped {
+                if root == path
+                    && matches!(b, Borrow::Read(_) | Borrow::Modify(_))
+                    && self.param_ix.borrow().contains_key(&root)
+                {
+                    return Err(menu(
+                        line,
+                        format!(
+                            "`{path}` may not be put into the value this function returns — \
+                             it is {}, and a return is owned",
+                            b.what(&path)
+                        ),
+                        b.fixes(&root, &path),
+                    ));
+                }
+            }
             return Ok(());
         };
         // An export refuses every kind, so it is asked before the narrowing.
@@ -1996,6 +2028,19 @@ impl MoveCheck<'_> {
             // Overwritten in `run` once the retention set is closed.
             verdict: ArgVerdict::Unknown,
         });
+    }
+
+    /// Whether this `+` builds a **String** — the one shape of the operator that
+    /// allocates, and so the one whose operands are `@concat`'s arguments.
+    ///
+    /// `+` is also integer addition and `Code` concatenation, and the type is
+    /// what tells the three apart — the check [`crate::own::str_temporary`]'s
+    /// doc comment demands of every caller. The reading is
+    /// [`Declared::type_of`], which answers a `+` with its left operand's type.
+    fn concatenates(&self, e: &Expr) -> bool {
+        self.decl
+            .type_of(&self.vars.borrow(), e)
+            .is_some_and(|t| matches!(crate::types::resolve(&t, self.decl.decls()), Type::Str))
     }
 
     /// An arm of an if-expression or a `match` can yield a PLACE, and the value
@@ -2188,27 +2233,26 @@ impl MoveCheck<'_> {
     /// corpus. Recording is the whole job: a lender's result is the one thing
     /// this analysis never releases, so this can only stop a free, never cause
     /// one.
-    fn lends_through_a_wrapper(&self, e: &Expr) -> bool {
+    fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)> {
         match e {
             Expr::Call { name, args, .. } if self.decl.constructs(name) => {
-                args.iter().any(|a| self.returned_borrow(a).is_some())
+                args.iter().find_map(|a| self.returned_borrow(a))
             }
-            Expr::StructLit { fields, .. } => fields
-                .iter()
-                .any(|(_, v)| self.returned_borrow(v).is_some()),
+            Expr::StructLit { fields, .. } => {
+                fields.iter().find_map(|(_, v)| self.returned_borrow(v))
+            }
             Expr::IfExpr {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                self.lends_through_a_wrapper(then_branch)
-                    || else_branch
-                        .as_ref()
-                        .is_some_and(|b| self.lends_through_a_wrapper(b))
-            }
+            } => self.lends_through_a_wrapper(then_branch).or_else(|| {
+                else_branch
+                    .as_ref()
+                    .and_then(|b| self.lends_through_a_wrapper(b))
+            }),
             Expr::Match {
                 scrutinee, arms, ..
-            } => arms.iter().any(|arm| {
+            } => arms.iter().find_map(|arm| {
                 let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                 self.enter();
                 for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
@@ -2218,7 +2262,7 @@ impl MoveCheck<'_> {
                 self.exit();
                 r
             }),
-            _ => false,
+            _ => None,
         }
     }
 
@@ -3017,9 +3061,25 @@ impl MoveCheck<'_> {
                 self.check_use(name, *line, consumed)
             }
             Expr::Unary { expr, .. } => self.expr(expr, consumed, scope),
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, line } => {
                 self.expr(lhs, consumed, scope)?;
-                self.expr(rhs, consumed, scope)
+                let r = self.expr(rhs, consumed, scope);
+                // A String `+` is `@concat` written as an operator, so its
+                // operands are call arguments and take the argument rule
+                // (`rfcs/census-call-arguments.md` §9, finding 3). `"n" + label(i)`
+                // reaches the operator lowering rather than a call, so it sat in
+                // neither the census's 1505 nor RFC-0096 M3's operand class, and
+                // leaked the same 48 bytes a turn.
+                //
+                // The name is `@concat` and not a spelling of its own, so
+                // [`arg_verdict`]'s partition holds: an operand that ALLOCATED
+                // its own value is M3's to free and answers `AlreadyFreed` here,
+                // and a call result answers what its callee's signature says.
+                if *op == BinOp::Add && self.concatenates(e) {
+                    self.note_arg_temp(lhs, "@concat", 0, *line);
+                    self.note_arg_temp(rhs, "@concat", 1, *line);
+                }
+                r
             }
             // A place chain asks ONE consumption question, of the whole path.
             // Walking into the root instead would ask it of `er` and refuse

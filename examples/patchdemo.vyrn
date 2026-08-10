@@ -13,7 +13,7 @@ import { el, text, cls, attr, on, keyed, empty, Html, diff } from "std/html"
 
 /// A keyed row (element child carrying a `Key`) — the unit the keyed cases
 /// reorder / insert / remove.
-fn row(id: String, label: String) -> Html {
+fn row(id: consume String, label: consume String) -> Html {
     return keyed(id, el("li", [cls("row")], [text(label)]))
 }
 

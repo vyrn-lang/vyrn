@@ -11,7 +11,7 @@ import { Book, BookList, TagCounts } from "../shared/wire"
 
 /// A nav link, styled with theme utilities checked against Tw at compile time —
 /// a typo in the class string here would fail `vyrn check`.
-fn navLink(href: String, label: String) -> Html {
+fn navLink(href: String, label: consume String) -> Html {
     return el("a", [A("href", href), theme.cls("mr-2 hover:text-brand-600")], [text(label)])
 }
 
@@ -31,7 +31,7 @@ fn bookRow(b: Book) -> Html {
         tagKids.push(el("span", [Cls("tag")], [text(label)]))
     }
     return el("li", [Cls("book")], [
-            el("a", [A("href", b.url)], [text(b.title)]),
+            el("a", [A("href", b.url)], [text(b.title.copy())]),
             el("a", [A("href", "/books/\{b.id}"), A("data-nav", "prefetch"), Cls("detail")], [text("details →")]),
             el("span", [Cls("rating")], [text(rating)]),
             el("span", [Cls("tags")], tagKids),
@@ -61,7 +61,7 @@ export fn homePage(list: BookList, tags: TagCounts) -> Html {
 
 /// One row of the plural table: locale label, then the plural rendered in `loc`.
 /// The stateful accessor reads `currentLocale`, so we flip it per group.
-fn pluralRow(label: String, n: Int64) -> Html {
+fn pluralRow(label: consume String, n: Int64) -> Html {
     return el("tr", [], [
             el("td", [], [text(label)]),
             el("td", [], [text("\{n}")]),
@@ -113,7 +113,7 @@ export fn detailPage(b: Book) -> Html {
             el("p", [], [navLink("/", tNavHomeLabel())]),
             el("h2", [], [text("Book #\{b.id}")]),
             el("div", [Id("book"), theme.cls("p-4 rounded-lg border")], [
-                    el("h3", [], [el("a", [A("href", b.url)], [text(b.title)])]),
+                    el("h3", [], [el("a", [A("href", b.url)], [text(b.title.copy())])]),
                     el("p", [Cls("rating")], [text(rating)]),
                     el("p", [Cls("tags")], tagKids),
                 ]),
