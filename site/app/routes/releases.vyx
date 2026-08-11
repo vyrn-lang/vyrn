@@ -11,7 +11,7 @@
 // notice at the top of this page without a rebuild.
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
-import { rfcCells, rfcStripWidth, rfcStripHeight, rfcTag, Cell } from "../chart"
+import { rfcCells, rfcStripWidth, rfcStripHeight, rfcTag, rfcHref, Cell } from "../chart"
 import { rfcCount, rfcRows, RfcRow } from "../repo"
 
 export fn head() -> Head {
@@ -59,12 +59,13 @@ fn latestRfcs() -> Array<RfcRow> {
                 <span class="bignum"><span data-strip-count>{{ rfcCount() }}</span><small>RFCs, RFC-0001 onward</small></span>
                 <div class="stage">
                     <svg class="chart" :viewBox='"0 0 " + rfcStripWidth() + " " + rfcStripHeight()' role="img" aria-label="One cell per design record, in order">
-                        <rect class="cell" v-for="c in rfcCells()" :key="c.id" :x="c.x" :y="c.y" width="18" height="18" :data-tone="c.tone" fill="currentColor" :fill-opacity="c.tone">
+                        <a v-for="c in rfcCells()" :key="c.id" :href="c.href">
                             <title>{{ c.title }}</title>
-                        </rect>
+                            <rect class="cell" :x="c.x" :y="c.y" width="18" height="18" :data-tone="c.tone" fill="currentColor" :fill-opacity="c.tone"/>
+                        </a>
                     </svg>
                 </div>
-                <p class="cap">One cell per file in rfcs/, counted while this page was built. Hover a cell for its number and title. The tone steps every ten records so the sequence is countable.</p>
+                <p class="cap">One cell per file in rfcs/, counted while this page was built. Hover a cell for its number and title, or open the record itself. The tone steps every ten records so the sequence is countable.</p>
             </div>
         </section>
 
@@ -73,7 +74,7 @@ fn latestRfcs() -> Array<RfcRow> {
             <h2>The eight most recent</h2>
             <ul class="feed">
                 <li v-for="r in latestRfcs()" :key="r.number">
-                    <span class="tag">{{ rfcTag(r.number) }}</span>
+                    <a class="tag" :href="rfcHref(r)">{{ rfcTag(r.number) }}</a>
                     <span>{{ r.title }}</span>
                 </li>
             </ul>

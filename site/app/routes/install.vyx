@@ -52,7 +52,7 @@ fn steps() -> Array<Step> {
         Step { title: "Run a program", command: "vyrn run examples/fib.vyrn", what: "The tree-walking interpreter. Needs nothing but the compiler." },
         Step { title: "Build a WebAssembly module", command: "vyrn build examples/fib.vyrn --target wasm -o fib.wasm", what: "The compiler emits the module directly. No LLVM, no clang, no sysroot." },
         Step { title: "Build a native binary", command: "vyrn build examples/fib.vyrn -o fib", what: "Textual LLVM IR, linked with clang. Needs clang on PATH, or $CLANG." },
-        Step { title: "Run the tests in a file", command: "vyrn test examples/testing.vyrn", what: "`test` blocks live in the source file, beside the code they check." },
+        Step { title: "Run the tests in a file", command: "vyrn test examples/testing.vyrn", what: "test blocks live in the source file, beside the code they check." },
         Step { title: "Ask about the memory", command: "vyrn why --memory examples/ownership.vyrn", what: "Per binding: whether it is reclaimed, how, and the reason when it is not." },
     ]
 }

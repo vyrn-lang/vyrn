@@ -16,13 +16,20 @@
 /// Every field is a `String`, because that is what an SVG attribute is. Rounding
 /// happens here, once, rather than in four `.toString()` calls at the template.
 import { rfcRows, RfcRow } from "./repo"
+import { split, joinWith } from "std/strings"
 import { vyrnLines } from "./snippets"
 
-/// One `<rect>` in a bar chart, with its label and its native `<title>`.
-export type Bar = { id: String, y: String, w: String, label: String, value: String, title: String }
+/// One row of a bar chart: the bar itself, the row's full-width hit area, the
+/// label, the value, the native `<title>`, and where the row's name points.
+///
+/// `hy` exists because a bar is 20 units tall inside a 34-unit row, and a
+/// reader hovers the ROW. The hit rectangle spans the whole row, so a 26-unit
+/// sliver of a bar is not the only target on the chart.
+export type Bar = { id: String, y: String, hy: String, w: String, label: String, value: String, title: String, href: String }
 
-/// One cell in the RFC strip.
-export type Cell = { id: String, x: String, y: String, tone: String, title: String }
+/// One cell in the RFC strip. It is a link: a tinted square that answers a
+/// hover but not a click is a square pretending to be a control.
+export type Cell = { id: String, x: String, y: String, tone: String, title: String, href: String }
 
 /// A number as a string.
 fn px(v: Int64) -> String {
@@ -67,6 +74,21 @@ fn barViewBox(rows: Int64) -> String {
 
 fn rowY(i: Int64) -> String {
     return px(i * 34 + 6)
+}
+
+/// The top of row `i`, which is where its hit area starts.
+fn hitY(i: Int64) -> String {
+    return px(i * 34)
+}
+
+/// How tall a row's hit area is.
+export fn barRow() -> String {
+    return "34"
+}
+
+/// A file in this repository, on GitHub.
+fn blob(path: String) -> String {
+    return "https://github.com/vyrn-lang/vyrn/blob/main/" + path
 }
 
 /// `n` bytes as kilobytes with one decimal, rounded rather than truncated.
@@ -116,10 +138,12 @@ export fn moduleLadder() -> Array<Bar> {
         out.push(Bar {
                 id: m.name.copy(),
                 y: rowY(i),
+                hy: hitY(i),
                 w: px(barRoom() * m.size / full),
                 label: m.name.copy(),
                 value: kbOf(m.size),
                 title: "examples/" + m.name + ".vyrn -> " + m.size.toString() + " bytes of wasm",
+                href: blob("examples/" + m.name + ".vyrn"),
             })
         i = i + 1
     }
@@ -165,18 +189,22 @@ export fn moduleSizes() -> Array<Bar> {
         Bar {
             id: "clang",
             y: rowY(0),
+            hy: hitY(0),
             w: px(barRoom()),
             label: "through clang",
             value: "277 KB",
             title: "fib.wasm through textual LLVM IR and clang: 277 KB",
+            href: blob("README.md#status"),
         },
         Bar {
             id: "direct",
             y: rowY(1),
+            hy: hitY(1),
             w: px(barRoom() * directSize() / clangSize()),
             label: "direct encoder",
             value: kbOf(directSize()),
             title: "fib.wasm from the compiler's own wasm encoder (RFC-0077): " + directSize().toString() + " bytes",
+            href: blob("rfcs/RFC-0077-direct-wasm-backend.md"),
         },
     ]
 }
@@ -228,10 +256,12 @@ export fn leakBars(declared: Bool) -> Array<Bar> {
         out.push(Bar {
                 id: tag + i.toString(),
                 y: rowY(i),
+                hy: hitY(i),
                 w: px(barRoom() * r.hundredths / leakFull()),
                 label: r.turns.copy(),
                 value: mbOf(r.hundredths),
                 title: word + ", " + r.turns + ": " + mbOf(r.hundredths),
+                href: blob("rfcs/census-call-arguments.md"),
             })
         i = i + 1
     }
@@ -266,6 +296,7 @@ export fn rfcCells() -> Array<Cell> {
                 y: px(i / 20 * 22),
                 tone: toneOf(r.number),
                 title: rfcTag(r.number) + " " + r.title,
+                href: rfcHref(r),
             })
         i = i + 1
     }
@@ -281,6 +312,15 @@ export fn rfcTag(n: Int64) -> String {
         return "RFC-00" + n.toString()
     }
     return "RFC-0" + n.toString()
+}
+
+/// A design record's file, on GitHub.
+///
+/// The generator read `RFC-0091-memory-model.md` and reported number 91 and
+/// title "memory model"; this puts the name back together. The title's words
+/// ARE the file's own words, so the round trip is exact and a test says so.
+export fn rfcHref(row: RfcRow) -> String {
+    return blob("rfcs/" + rfcTag(row.number) + "-" + joinWith(split(row.title, " "), "-") + ".md")
 }
 
 /// A cell's fill opacity, stepping every ten RFCs so the strip reads as a
@@ -384,6 +424,7 @@ test "no value label is ever drawn above a bar, so none can leave the plate" {
         assert(b.y.byteLength > 0)
     }
     assertEq(moduleLadder()[0].y, "6")
+    assertEq(moduleLadder()[0].hy, "0")
     assertEq(moduleLadderBox(), "0 0 900 278")
 }
 
@@ -395,9 +436,12 @@ test "the module ladder plots what the compiler actually built" {
     assertEq(bars[7].value, "37.9 KB")
     // The largest module fills the width, and nothing exceeds it.
     assertEq(bars[7].w, "670")
+    // Every row names a file a reader can open, and no row leaves it empty.
     for b in bars {
         assert(b.title.byteLength > 10)
+        assert(b.href.byteLength > 40)
     }
+    assertEq(bars[0].href, "https://github.com/vyrn-lang/vyrn/blob/main/examples/fib.vyrn")
 }
 
 test "kilobytes round rather than truncate" {
@@ -438,6 +482,15 @@ test "the RFC strip has one cell per RFC and wraps every twenty" {
     assertEq(cells[20].y, "22")
 }
 
+test "a design record's link is the file name the generator read" {
+    assertEq(rfcHref(RfcRow { number: 91, title: "memory model" }), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/RFC-0091-memory-model.md")
+    assertEq(rfcHref(RfcRow { number: 1, title: "vision" }), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/RFC-0001-vision.md")
+    // Every row the repository reported round-trips to a plausible file.
+    for r in rfcRows() {
+        assert(rfcHref(r).byteLength > 60)
+    }
+}
+
 test "an RFC number is padded the way its file name is" {
     assertEq(rfcTag(1), "RFC-0001")
     assertEq(rfcTag(42), "RFC-0042")
@@ -448,6 +501,7 @@ test "every tone is a fill-opacity between nothing and everything" {
     for c in rfcCells() {
         assert(c.tone.byteLength >= 3)
         assert(c.title.byteLength > 4)
+        assert(c.href.byteLength > 60)
     }
 }
 
