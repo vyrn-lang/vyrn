@@ -54,10 +54,10 @@ uac.vyrn:8:0: `a` is used here but was already consumed by `redeem(..)` on line 
 
 ## Status
 
-Vyrn is early. There are no versioned releases and no published binaries. You
-build the compiler from source. The language changes without a deprecation
-period, and the design record in [`rfcs/`](rfcs/) moves ahead of the
-implementation.
+**Vyrn is an alpha.** Every release is a pre-release: the language changes
+without a deprecation period, and the design record in [`rfcs/`](rfcs/) moves
+ahead of the implementation. Do not build anything on it that you are not
+willing to fix next month.
 
 What is stable is the verification. Every example in [`examples/`](examples/)
 runs under all three backends and must agree byte for byte, including trap
@@ -170,13 +170,52 @@ vyrn new <name> | add <specifier> | update | vendor | deps
 
 ## Getting started
 
-Build from source. You need a recent Rust toolchain.
+### Install
+
+Linux and macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh
+```
+
+Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex
+```
+
+Either script picks the archive for your machine from the newest release,
+verifies it against that release's `SHA256SUMS`, and unpacks it under `~/.vyrn`
+(`%USERPROFILE%\.vyrn`) with the binary at `~/.vyrn/bin/vyrn`. A checksum it
+cannot match is a hard failure: nothing is installed. Then:
+
+```bash
+vyrn run examples/fib.vyrn
+```
+
+Published builds are **Linux x86_64, macOS arm64 and Windows x86_64**. On any
+other platform, build from source. To install a specific tag rather than the
+newest, set `VYRN_VERSION=v0.1.0-alpha.1`; to install elsewhere, set
+`VYRN_INSTALL_DIR`. You can also download the archive and `SHA256SUMS` from the
+[releases page](https://github.com/vyrn-lang/vyrn/releases) and check it by
+hand.
+
+**What needs what.** `vyrn run`, `check`, `test`, `fmt`, `doc` and
+`build --target wasm` need nothing beyond the archive. **`vyrn build` — a native
+binary — needs `clang` on `PATH`** (or `$CLANG`); it emits textual LLVM IR and
+links it. Running the three-way parity harness also needs a `wasmtime` binary,
+through `$VYRN_WASMTIME`.
+
+### Build from source
+
+You need a recent Rust toolchain. No LLVM, no clang and no wasi sysroot are
+needed to build or test the compiler.
 
 ```bash
 git clone https://github.com/vyrn-lang/vyrn.git
 cd vyrn/compiler
-cargo build -p vyrn-cli
-cargo run -p vyrn-cli -- run ../examples/fib.vyrn
+cargo build --release -p vyrn-cli
+cargo run --release -p vyrn-cli -- run ../examples/fib.vyrn
 ```
 
 A native binary needs `clang` on `PATH` (or `$CLANG`):
@@ -191,13 +230,14 @@ A wasm module needs nothing extra:
 cargo run -p vyrn-cli -- build ../examples/fib.vyrn --target wasm -o fib.wasm
 ```
 
-Running the full parity harness also needs a `wasmtime` binary, through
-`$VYRN_WASMTIME` or [`tools/`](tools/) — see the `parity` job in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the exact versions CI
-uses.
+The built binary finds `std/` and `web/` by walking up from its own path, so it
+works in place inside a clone. See the `parity` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the exact wasmtime
+and wasi-sdk versions CI uses.
 
 [`compiler/README.md`](compiler/README.md) has the detailed build notes, the
 crate map, and how to build the excluded crates (`vyrn-lsp`, `vyrn-genwasm`).
+[`docs/releasing.md`](docs/releasing.md) is how a release is cut.
 
 ## Repository layout
 

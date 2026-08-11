@@ -1568,7 +1568,11 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
                 .cloned()
                 .unwrap_or_else(|| fallback.to_string())
         };
-        return from_json_cmd(path, &flag("--as", "Config"), &flag("--from", "./config.vyrn"));
+        return from_json_cmd(
+            path,
+            &flag("--as", "Config"),
+            &flag("--from", "./config.vyrn"),
+        );
     }
     let check = rest.iter().any(|a| a == "--check");
     let files: Vec<String> = rest

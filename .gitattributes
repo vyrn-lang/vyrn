@@ -1,0 +1,4 @@
+# `curl … | sh` feeds these bytes straight to /bin/sh on Linux and macOS. A CRLF
+# committed from a Windows checkout would break the installer for everyone, and
+# break it invisibly on the machine that committed it.
+install.sh text eol=lf
