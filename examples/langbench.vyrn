@@ -1,0 +1,257 @@
+// Benchmarking the operations a program spends its day in (RFC-0055).
+//
+// `membench` times the MEMORY MODEL — what an allocation, a concatenation and a
+// release cost. `smallarray` times one container against another, and `simdbench`
+// times the vector builtins. None of them time the map, the string builder, the
+// two dispatch mechanisms, or the JSON reader and writer, and those are four
+// claims the language makes with no number beside them.
+//
+//   $ vyrn bench examples/langbench.vyrn
+//   $ vyrn bench examples/langbench.vyrn --check      (deterministic, CI)
+//
+// The two rules the earlier benchmarking work paid for hold here verbatim:
+//
+//   * `blackBox` the INPUTS, not only the output. `blackBox` on the result alone
+//     leaves the operands constant, and the optimizer hoists the whole
+//     computation out of the sample loop.
+//   * `vyrn bench` does NOT run `main`. Each block builds what it reads.
+//
+// Rows that measure a REPEATED operation over one input repeat it enough times to
+// bury the setup: 20 parses of one document, 10000 dispatches through one value.
+// A row whose setup is the thing being measured (the map builds, the split) says
+// so in its name.
+
+import { joinWith, split } from "std/strings"
+import { Json, JsonField, emit } from "std/json"
+import { parseJson } from "std/jsonread"
+
+/// `n` distinct 16-byte keys — the shape a corpus of names and identifiers has,
+/// and short enough that a copy is allocator cost rather than `memcpy` cost.
+fn keyList(n: Int64, prefix: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < n {
+        out.push(prefix + i.toString())
+        i = i + 1
+    }
+    return out
+}
+
+/// `n` inserts into a fresh map (RFC-0028). A key belongs to the map, so every
+/// insert copies the key as well as hashing it — this row is both costs.
+///
+/// The `.copy()` is written out because the compiler does not supply it: a
+/// borrowed array element handed straight to `m[k] = v` is taken by the map
+/// WITHOUT a copy, and the array and the map then free the same buffer. The
+/// interpreter answers correctly and the native binary dies with no output, which
+/// is why writing this row found it — no example in the corpus keys a map from an
+/// array element. Filed; remove the `.copy()` when the store copies on its own.
+fn mapBuild(ks: Array<String>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    while i < ks.length {
+        m[ks[i].copy()] = i
+        i = i + 1
+    }
+    return m
+}
+
+/// One lookup per key. Every key is present, so each is a hash plus one
+/// successful compare — the path a program takes when it knows the key is there.
+fn mapHits(m: Map<String, Int64>, ks: Array<String>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < ks.length {
+        t = t + match m[ks[i]] {
+            Some(v) => v,
+            None => 0,
+        }
+        i = i + 1
+    }
+    return t
+}
+
+/// The same count of lookups with NO key present. A miss is the more expensive
+/// half of a hash map and the one a corpus of successful lookups never shows.
+fn mapMisses(m: Map<String, Int64>, ks: Array<String>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < ks.length {
+        t = t + match m[ks[i]] {
+            Some(v) => v,
+            None => 1,
+        }
+        i = i + 1
+    }
+    return t
+}
+
+/// `"\{...}"` interpolation (RFC-0007), which is how a program actually builds a
+/// string. It is a `@concat` of four pieces per turn, one of them an `Int64`
+/// rendered to text, so the row is the template path rather than the `+` path
+/// `membench` already holds.
+fn interpolate(ks: Array<String>) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < ks.length {
+        let row = "row \{i}: \{ks[i]}"
+        t = t + Int64(row.byteLength)
+        i = i + 1
+    }
+    return t
+}
+
+/// A protocol method reached through a bound (RFC-0002 §5). The claim is that
+/// dispatch is static — one specialization per receiver type, no vtable — so this
+/// row exists to be compared against the `fn`-value row below, which goes through
+/// RFC-0037's defunctionalized `@dispatch` instead. Two mechanisms, two numbers.
+protocol Weigh {
+    fn weigh(self) -> Int64
+}
+
+type Stone = { grams: Int64 }
+
+impl Weigh for Stone {
+    fn weigh(self) -> Int64 {
+        return self.grams + 1
+    }
+}
+
+/// The accumulator is a rolling hash rather than a sum, for the reason
+/// `examples/benching.vyrn` records: a sum of a loop-invariant call has a closed
+/// form, LLVM's scalar evolution finds it, and the row reads 1 ns whatever
+/// dispatch costs. A recurrence has no closed form, so the call happens `n` times.
+fn weighN<T: Weigh>(x: T, n: Int64) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = (t * 31 + x.weigh() + i) % 1000000007
+        i = i + 1
+    }
+    return t
+}
+
+/// The other dispatch mechanism: a `fn` value (RFC-0023 / RFC-0037). It is
+/// defunctionalized to a closed enum and a direct call, with no function pointer
+/// anywhere, and the row beside `weighN` is what that costs.
+type Bump = fn(Int64) -> Int64
+
+fn callN(f: Bump, n: Int64) -> Int64 {
+    let mut t = 0
+    let mut i = 0
+    while i < n {
+        t = (t * 31 + f(i)) % 1000000007
+        i = i + 1
+    }
+    return t
+}
+
+/// An `n`-member JSON object of small numbers — the shape an RPC reply has.
+fn doc(n: Int64) -> Json {
+    let mut fs: Array<JsonField> = []
+    let mut i = 0
+    while i < n {
+        fs.push(JsonField { key: "field\{i}", value: JNum(i.toString()) })
+        i = i + 1
+    }
+    return JObj(fs)
+}
+
+/// The size of a parsed tree, enumerated rather than wildcarded: `Json` has six
+/// variants and a pattern that skipped five would stop being a use of the value.
+fn size(j: Json) -> Int64 {
+    return match j {
+        JNull => 0,
+        JBool(b) => if b { 1 } else { 0 },
+        JNum(s) => Int64(s.byteLength),
+        JStr(s) => Int64(s.byteLength),
+        JArr(xs) => xs.length,
+        JObj(fs) => fs.length,
+    }
+}
+
+fn parseSize(r: Result<Json, String>) -> Int64 {
+    return match r {
+        Ok(j) => size(j),
+        Err(e) => 0 - Int64(e.byteLength),
+    }
+}
+
+bench "map build, 1000 string keys" {
+    blackBox(mapBuild(blackBox(keyList(blackBox(1000), blackBox("keykeykeykey")))).length)
+}
+
+bench "map lookup hit, 1000 keys" {
+    let ks = keyList(blackBox(1000), blackBox("keykeykeykey"))
+    let m = mapBuild(blackBox(ks))
+    blackBox(mapHits(blackBox(m), blackBox(ks)))
+}
+
+bench "map lookup miss, 1000 keys" {
+    let ks = keyList(blackBox(1000), blackBox("keykeykeykey"))
+    let m = mapBuild(blackBox(ks))
+    let absent = keyList(blackBox(1000), blackBox("nonenonenone"))
+    blackBox(mapMisses(blackBox(m), blackBox(absent)))
+}
+
+bench "string interpolation, 1000 rows" {
+    blackBox(interpolate(blackBox(keyList(blackBox(1000), blackBox("keykeykeykey")))))
+}
+
+bench "joinWith over 1000 parts" {
+    let ks = keyList(blackBox(1000), blackBox("keykeykeykey"))
+    blackBox(joinWith(blackBox(ks), blackBox(",")).byteLength)
+}
+
+bench "split of a 1000-field line" {
+    let line = joinWith(keyList(blackBox(1000), blackBox("keykeykeykey")), ",")
+    blackBox(split(blackBox(line), blackBox(",")).length)
+}
+
+bench "protocol dispatch, 10000 calls" {
+    blackBox(weighN(blackBox(Stone { grams: 41 }), blackBox(10000)))
+}
+
+bench "fn-value dispatch, 10000 calls" {
+    blackBox(callN(|x| x * 3 + 1, blackBox(10000)))
+}
+
+bench "json emit, 20 x 200-member object" {
+    let j = doc(blackBox(200))
+    let mut t = 0
+    let mut i = 0
+    while i < 20 {
+        t = t + Int64(emit(blackBox(j)).byteLength)
+        i = i + 1
+    }
+    blackBox(t)
+}
+
+bench "json parse, 20 x 200-member object" {
+    let src = emit(doc(blackBox(200)))
+    let mut t = 0
+    let mut i = 0
+    while i < 20 {
+        t = t + parseSize(parseJson(blackBox(src)))
+        i = i + 1
+    }
+    blackBox(t)
+}
+
+fn main() -> Int64 {
+    // Small, deterministic, and identical on all three engines — the benches are
+    // stripped from `run`/`build`.
+    let ks = keyList(4, "k")
+    let m = mapBuild(ks)
+    print(m.length)
+    print(mapHits(m, ks))
+    print(mapMisses(m, keyList(4, "absent")))
+    print(interpolate(ks))
+    print(joinWith(ks, ","))
+    print(split(joinWith(ks, ","), ",").length)
+    print(weighN(Stone { grams: 41 }, 4))
+    print(callN(|x| x * 3 + 1, 4))
+    print(size(doc(4)))
+    print(parseSize(parseJson(emit(doc(4)))))
+    return 0
+}

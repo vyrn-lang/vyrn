@@ -57,6 +57,7 @@
 //! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
 //! | `exprTemporary` | RFC-0096 M3 | steady | a String an EXPRESSION allocated has no binding, so the CONSUMER releases it — `@concat`, a String `+`, `@str` and the in-place append each free an operand the expression itself built |
+//! | `keptForever` | the detector itself | **leaks, on purpose** | the canary: every other row asserts `steady`, and so does a measurement that stopped measuring |
 //! | `localAccumulator` | RFC-0096 M3, defect 3 | steady | the static-data rule read the INITIALIZER, so `let mut acc = ""` answered `Static` for the buffer the loop grew; it asks whether the binding can CHANGE now |
 //! | `callArgument` | census-call-arguments | steady | a value the ARGUMENT built has no binding either, so the CALLER releases it after a call that keeps nothing — the proof was never missing, only the place to write it down. A String `+` is `@concat` written as an operator, so its operands are call arguments too and `"n" + label(i)` takes the same verdict |
 //!
@@ -112,14 +113,30 @@ fn repo(rel: &str) -> PathBuf {
         .join(rel)
 }
 
+/// The Node this file measures the heap through, or `None` when there is none.
+///
+/// Both tests below SKIP without it, and a skip here is the loudest hole in the
+/// repo's regression cover: three-way parity cannot see memory at all, so when
+/// Node is absent nothing in the build checks that the model reclaims anything.
+/// `VYRN_REQUIRE_TOOLS=1` (which CI exports, and which `tests/common/mod.rs`
+/// reads for `wasmtime`) turns that skip into a failure, so an environment that
+/// meant to measure cannot quietly stop.
 fn find_node() -> Option<PathBuf> {
     let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
-    Command::new(&node)
+    let found = Command::new(&node)
         .arg("--version")
         .output()
         .ok()
-        .filter(|o| o.status.success())?;
-    Some(PathBuf::from(node))
+        .filter(|o| o.status.success())
+        .map(|_| PathBuf::from(&node));
+    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
+        panic!(
+            "VYRN_REQUIRE_TOOLS is set and `node` was not found — this run would have \
+             silently skipped the memory census, the only thing here that sees a leak. \
+             Point `VYRN_NODE` at the binary, or unset VYRN_REQUIRE_TOOLS."
+        );
+    }
+    found
 }
 
 /// The measurement's shape, from RFC-0077 M6: an exported function taking a
@@ -730,6 +747,19 @@ const ROWS: &[Row] = &[
               a row that survives to the exit is a body that kept nothing, and the release then \
               gives back the visited and the unvisited elements alike, each exactly once",
     },
+    Row {
+        export: "keptForever",
+        census: "the detector itself",
+        today: Shape::Leaks,
+        why: "the canary. Every row above says `Steady`, and so does a measurement that \
+              stopped measuring — a driver calling nothing, exports that vanished from the \
+              module, a `byteLength` read that no longer moves. This export keeps every \
+              buffer it makes in module state, on purpose, so the `Leaks` arm of the \
+              comparison is exercised by something. If this row ever reads `Steady`, the \
+              table is not looking at the heap and none of the verdicts above mean anything. \
+              It is not a defect and no phase will fix it: an array that is never emptied is \
+              supposed to hold what it was given",
+    },
 ];
 
 /// One export per row. The strings are ~900 bytes so one leaked buffer is
@@ -1121,6 +1151,25 @@ export extern fn spawnFrame() {{
     }}
     let d = spawn tagged(seen)
     drop d
+}}
+
+/// The CANARY, and the only row here that is meant to grow.
+///
+/// Every other row asserts `Steady`, which is the state a broken measurement
+/// also reports: a driver that called nothing, a build whose exports vanished,
+/// or a `byteLength` read that stopped moving would leave the whole table green
+/// while checking nothing. So one export keeps every buffer it makes, on
+/// purpose, and its row says `Leaks`. It fails if the detector stops detecting,
+/// which is the half the other twenty rows structurally cannot cover.
+///
+/// It is not a defect and there is nothing to fix: a module-state array that is
+/// never emptied is SUPPOSED to hold what it was given. That is what makes it a
+/// safe canary — no later phase will ever flip this row.
+let mut kept: Array<String> = []
+
+export extern fn keptForever() {{
+    kept.push(tag() + "!")
+    seen = seen + Int64(kept.length)
 }}
 
 fn main() -> Int64 {{
