@@ -100,6 +100,14 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "`xs` was moved here into `fromArray(..)`",
     ),
     (
+        "mapkeyborrowed.vyrn",
+        "a borrowed array element handed to `m[k] = v` — the map takes the key, so the \
+         array and the map both released one buffer and the native binary exited 127; \
+         the map LITERAL refused the same borrow all along, which made it one fact with \
+         two verdicts. mapkeyowned.vyrn is the shape that runs",
+        "`ks[i]` may not be stored into `m`",
+    ),
+    (
         "consume_borrowed.vyrn",
         "a `read` parameter handed to a `consume` parameter — the frame gave away \
          what it does not own, and the native binary exited 0xC0000374",
