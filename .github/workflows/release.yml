@@ -1,0 +1,149 @@
+name: Release
+
+# Inert until someone pushes a tag. No schedule, no branch trigger, no
+# workflow_dispatch: the only thing that starts a release is `git push origin
+# v0.1.0-alpha.1`. A tag carrying a suffix (`-alpha.N`, `-rc.N`) is published as
+# a GitHub pre-release; a bare `v0.1.0` is published as a full release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# The workflow writes releases and reads the tree. Nothing else.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts help nobody on a one-shot clean runner.
+  CARGO_INCREMENTAL: 0
+  # Symbols are half the binary and no user of an alpha reads them. Set here
+  # rather than in compiler/Cargo.toml so the release build is the only build
+  # that differs from what a contributor runs locally.
+  RUSTFLAGS: -C strip=symbols
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A missing platform is a broken install command for everyone on it, so a
+      # partial matrix must not reach `publish`.
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: x86_64-linux
+            target: x86_64-unknown-linux-gnu
+            bin: vyrn
+          - os: macos-latest
+            name: aarch64-macos
+            target: aarch64-apple-darwin
+            bin: vyrn
+          - os: windows-latest
+            name: x86_64-windows
+            target: x86_64-pc-windows-msvc
+            bin: vyrn.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the CLI
+        working-directory: compiler
+        # `--target` is named explicitly rather than left implicit so the
+        # archive name is a fact about the binary, not about which architecture
+        # GitHub happened to give the `macos-latest` label this year. Building
+        # `vyrn` needs no clang, no LLVM and no wasi sysroot (compiler/Cargo.toml).
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked -p vyrn-cli --target ${{ matrix.target }}
+
+      - name: Stage the archive
+        shell: bash
+        # What a user gets, and why:
+        #   vyrn          the driver
+        #   std/          `vyrn` resolves `std/...` imports from files on disk;
+        #                 it finds them by walking up from the executable, so
+        #                 `std/` MUST stay a sibling of the binary's directory
+        #                 (compiler/vyrn-cli/src/main.rs::std_root)
+        #   web/          the browser-side runtimes `vyrn dev` serves
+        #                 (main.rs::web_root, same walk-up rule)
+        #   README.md     what this is
+        #   VERSION       the tag, because `vyrn` has no --version flag yet
+        # There is deliberately NO LICENSE file: the repository does not have
+        # one. See docs/releasing.md.
+        run: |
+          set -eu
+          stage="vyrn-${{ matrix.name }}"
+          mkdir -p "$stage"
+          cp "compiler/target/${{ matrix.target }}/release/${{ matrix.bin }}" "$stage/"
+          cp -r std "$stage/std"
+          cp -r web "$stage/web"
+          cp README.md "$stage/"
+          printf '%s\n' "${GITHUB_REF_NAME}" > "$stage/VERSION"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$stage.zip" "$stage" > /dev/null
+          else
+            tar czf "$stage.tar.gz" "$stage"
+          fi
+          ls -l "$stage".*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vyrn-${{ matrix.name }}
+          path: |
+            vyrn-*.tar.gz
+            vyrn-*.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        # One SHA256SUMS asset in `sha256sum -c` format, sorted so two runs of
+        # the same tree produce the same file. The install scripts refuse to
+        # install anything whose line is missing from it.
+        run: |
+          set -eu
+          sha256sum vyrn-*.tar.gz vyrn-*.zip | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # `gh` ships on the runner, so no third-party action is in the trust
+        # path of a signed artifact. `--verify-tag` refuses to invent a tag that
+        # was never pushed.
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          flags="--verify-tag --generate-notes"
+          case "$tag" in
+            *-*) flags="$flags --prerelease" ;;
+          esac
+          cat > notes.md <<'EOF'
+          Vyrn is an alpha. The language changes without a deprecation period.
+
+          Install (Linux, macOS):
+
+              curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh
+
+          Install (Windows PowerShell):
+
+              irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex
+
+          Verify a manual download against `SHA256SUMS`.
+
+          `vyrn run`, `vyrn check`, `vyrn test` and `vyrn build --target wasm`
+          need nothing beyond this archive. `vyrn build` (native) needs `clang`
+          on `PATH`.
+          EOF
+          gh release create "$tag" $flags --title "$tag" --notes-file notes.md dist/*
