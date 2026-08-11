@@ -35,6 +35,12 @@ fn fetchModule(p: Params) -> Result<ModuleDoc, PageError> {
     return Ok(ModuleDoc { name: p.module.copy(), intro: apiIntro(p.module), entries: apiEntries(p.module) })
 }
 
+/// `1 export`, `44 exports`. A count and its noun disagreeing is the sort of
+/// thing a reader takes as a sign that nothing here was read.
+fn exportCount(n: Int64) -> String {
+    return if n == 1 { "1 export" } else { n.toString() + " exports" }
+}
+
 /// The anchor an export is linked by. Two exports of one module never share a
 /// name, so the name is the identifier.
 fn anchorOf(name: String) -> String {
@@ -52,7 +58,7 @@ fn hrefFor(name: String) -> String {
     <section class="hero">
         <p class="eyebrow"><a href="/docs.html">Docs</a> — the standard library</p>
         <h1 class="display">std/{{ data.name }}</h1>
-        <p class="lede">{{ data.entries.length }} exports, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
+        <p class="lede">{{ exportCount(data.entries.length) }}, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
         <p class="notice"><a :href="apiSource(data.name)">Read the source</a> — the one thing this site does not host.</p>
     </section>
 
