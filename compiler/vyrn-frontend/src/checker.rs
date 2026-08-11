@@ -1434,8 +1434,9 @@ struct Checker<'a> {
     errors: RefCell<Vec<String>>,
     /// Module-state bindings (RFC-0013): name -> (type, mutable). Populated once
     /// (in declaration order) before any function is checked; every function's
-    /// scope stack bottoms out on these as an outermost frame below its params.
-    /// The declared type is the annotation, or the initializer's inferred type.
+    /// scope stack bottoms out on these, which [`Scope`] reads when its frames
+    /// run out. The declared type is the annotation, or the initializer's
+    /// inferred type.
     globals: RefCell<HashMap<String, Binding>>,
     /// True while checking a `test` body (RFC-0015). `assert`/`assertEq` are legal
     /// only when this is set; in ordinary code they are a checker error pointing
@@ -1498,6 +1499,61 @@ struct Binding {
     mutable: bool,
 }
 
+/// A stack of lexical frames, innermost last, plus whether a name the frames do
+/// not answer falls through to module state (RFC-0013).
+///
+/// The fall-through used to be a COPY: frame 0 was `self.globals.borrow().clone()`,
+/// rebuilt once per function and once per global initializer. That made `vyrn
+/// check` quadratic in the module-state count — 800 / 1,600 / 3,200 / 6,400
+/// globals measured 24 / 57 / 205 / 694 ms, near 3.4x per doubling. The
+/// interpreter never copied: `Interp::lookup_fnval` reads `self.globals` when the
+/// frames run out, and this is the checker agreeing with it.
+///
+/// The flag carries a real distinction, so it is a field and not a constant. A
+/// cross-field `where` predicate and a member default are checked in a scope
+/// holding their fields and nothing else — module state is invisible there, and
+/// was invisible before this change too. [`Scope::closed`] is that scope;
+/// [`Scope::open`] is a function body and a global's initializer.
+///
+/// The empty frame both constructors start with is the one frame 0 always was,
+/// so a frame INDEX still means what it meant: `region_floor` compares depths.
+#[derive(Clone)]
+struct Scope {
+    frames: Vec<HashMap<String, Binding>>,
+    globals: bool,
+}
+
+impl Scope {
+    /// A scope that sees module state.
+    fn open() -> Self {
+        Scope {
+            frames: vec![HashMap::new()],
+            globals: true,
+        }
+    }
+
+    /// A scope that sees only what is put in it.
+    fn closed() -> Self {
+        Scope {
+            frames: vec![HashMap::new()],
+            globals: false,
+        }
+    }
+}
+
+impl std::ops::Deref for Scope {
+    type Target = Vec<HashMap<String, Binding>>;
+    fn deref(&self) -> &Self::Target {
+        &self.frames
+    }
+}
+
+impl std::ops::DerefMut for Scope {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.frames
+    }
+}
+
 impl<'a> Checker<'a> {
     // ---- type relations -------------------------------------------------
 
@@ -1520,7 +1576,7 @@ impl<'a> Checker<'a> {
         recv: &Type,
         method: &str,
         args: &[Expr],
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
         line: usize,
     ) -> Result<Option<Type>, String> {
@@ -1983,7 +2039,7 @@ impl<'a> Checker<'a> {
         &self,
         expr: &Expr,
         to: &Type,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
         line: usize,
     ) -> Result<(), String> {
@@ -2371,7 +2427,7 @@ impl<'a> Checker<'a> {
         errs: &mut Vec<String>,
     ) {
         let Some(d) = default else { return };
-        let scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
+        let scope = Scope::closed();
         let open = type_mentions_param(ty);
         let expected = if open { None } else { Some(ty) };
         match self.expr(d, &scope, expected, None) {
@@ -2415,7 +2471,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 // The predicate sees every field in scope, by name.
-                let mut scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
+                let mut scope = Scope::closed();
                 for f in fields {
                     scope[0].insert(
                         f.name.clone(),
@@ -2545,7 +2601,7 @@ impl<'a> Checker<'a> {
                 ));
             }
             // Predicate is checked in an environment where `value` has the base type.
-            let mut scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
+            let mut scope = Scope::closed();
             scope[0].insert(
                 "value".into(),
                 Binding {
@@ -2725,8 +2781,9 @@ impl<'a> Checker<'a> {
                     self.ensure_type_exists(declared, g.line)?;
                 }
                 // Type-check the initializer against the annotation, seeing only
-                // the earlier globals.
-                let scope: Vec<HashMap<String, Binding>> = vec![self.globals.borrow().clone()];
+                // the earlier globals — `self.globals` holds exactly those at
+                // this point, and an open scope reads it rather than copying it.
+                let scope = Scope::open();
                 let vty = self.expr(&g.init, &scope, g.ty.as_ref(), None)?;
                 if self.base(&vty) == Type::Unit {
                     return Err(format!(
@@ -2782,10 +2839,10 @@ impl<'a> Checker<'a> {
         *self.cur_fn.borrow_mut() = f.name.clone();
         *self.in_gen.borrow_mut() = f.is_gen;
         self.errors.borrow_mut().clear();
-        // Frame 0 is the module-state bindings (RFC-0013) — the outermost scope,
-        // below the parameters; a local (param/let/for) with the same name
-        // shadows a global, since `lookup` walks frames from the top.
-        let mut scope: Vec<HashMap<String, Binding>> = vec![self.globals.borrow().clone()];
+        // Module state (RFC-0013) sits BELOW every frame: a local (param/let/for)
+        // with the same name shadows a global, since `lookup` walks frames from
+        // the top and reads module state only when they run out.
+        let mut scope = Scope::open();
         scope.push(HashMap::new());
         for p in &f.params {
             // A `modify` parameter is mutable inside the body (that is the point);
@@ -2827,7 +2884,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn block(&self, block: &Block, ret: &Type, scope: &mut Vec<HashMap<String, Binding>>) -> bool {
+    fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) -> bool {
         scope.push(HashMap::new());
         let mut always_returns = false;
         for stmt in &block.stmts {
@@ -2857,7 +2914,7 @@ impl<'a> Checker<'a> {
     /// statement kinds leave the scope untouched (their effects hadn't applied
     /// yet when they errored). Best-effort: only the simple name is recovered,
     /// not the declared/element type (the check that computes it failed).
-    fn recover_binding(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Binding>>) {
+    fn recover_binding(&self, stmt: &Stmt, scope: &mut Scope) {
         match stmt {
             Stmt::Let { name, mutable, .. } => {
                 scope.last_mut().unwrap().insert(
@@ -2884,12 +2941,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn stmt(
-        &self,
-        stmt: &Stmt,
-        ret: &Type,
-        scope: &mut Vec<HashMap<String, Binding>>,
-    ) -> Result<bool, String> {
+    fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<bool, String> {
         match stmt {
             Stmt::Let {
                 name,
@@ -3421,7 +3473,7 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
         stored_ty: &Type,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         line: usize,
     ) -> Result<(), String> {
         if let Some(&floor) = self.region_floor.borrow().last() {
@@ -3446,7 +3498,7 @@ impl<'a> Checker<'a> {
     fn expr(
         &self,
         expr: &Expr,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
@@ -4092,7 +4144,7 @@ impl<'a> Checker<'a> {
         name: &str,
         fields: &[(String, Expr)],
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
@@ -4245,7 +4297,7 @@ impl<'a> Checker<'a> {
         &self,
         expr: &Expr,
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
         let ety = self.expr(expr, scope, None, fn_ret)?;
@@ -4313,7 +4365,7 @@ impl<'a> Checker<'a> {
         scrutinee: &Expr,
         arms: &[MatchArm],
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
@@ -4412,7 +4464,7 @@ impl<'a> Checker<'a> {
         evs: &[EnumVariant],
         arms: &[MatchArm],
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
@@ -4493,7 +4545,7 @@ impl<'a> Checker<'a> {
         then_branch: &Expr,
         else_branch: Option<&Expr>,
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
@@ -4890,7 +4942,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Expr],
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
         // A lane argument, with a plain literal adapting to the lane type exactly
@@ -5288,7 +5340,7 @@ impl<'a> Checker<'a> {
         t: &Type,
         args: &[Expr],
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
     ) -> Result<bool, String> {
         if let Type::Param(p) = t {
@@ -5313,7 +5365,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Expr],
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
@@ -5344,7 +5396,7 @@ impl<'a> Checker<'a> {
                 }
                 // RFC-0037 effect collection: a call through a STORED value (any
                 // fn-typed binding that is not a v1 parameter — the params frame
-                // is index 1, above the globals frame 0) is dispatched over the
+                // is index 1, above the body's outermost frame) is dispatched over the
                 // signature's collected sources, so record (caller, signature)
                 // for the extended spawn/workers fixpoint. v1 parameter calls
                 // keep their caller-site attribution untouched.
@@ -7289,7 +7341,7 @@ impl<'a> Checker<'a> {
         i: usize,
         arg: &Expr,
         expected_fn: &Type,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
         subst: &mut HashMap<String, Type>,
         line: usize,
@@ -7506,7 +7558,7 @@ impl<'a> Checker<'a> {
         &self,
         expr: &Expr,
         exp: &Type,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
         let Expr::Lambda { params, body, line } = expr else {
@@ -7584,13 +7636,14 @@ impl<'a> Checker<'a> {
             LambdaBody::Block(b) => calls_block(b, &mut calls),
         }
         // Names that shadow module state at this point: the lambda's own
-        // params/binders plus every enclosing LOCAL binding (scope frame 0 is
-        // the globals frame itself).
+        // params/binders plus every enclosing LOCAL binding. Every frame is a
+        // local one — module state is not a frame any more, it is the
+        // fall-through [`Scope`] takes when the frames run out.
         let mut local_names: HashSet<String> = params.iter().cloned().collect();
         if let LambdaBody::Block(b) = body {
             collect_binders_block(b, &mut local_names);
         }
-        for frame in scope.iter().skip(1) {
+        for frame in scope.iter() {
             local_names.extend(frame.keys().cloned());
         }
         let globals = self.globals.borrow();
@@ -7721,7 +7774,7 @@ impl<'a> Checker<'a> {
     fn check_lambda_body_captures(
         &self,
         body: &LambdaBody,
-        outer: &Vec<HashMap<String, Binding>>,
+        outer: &Scope,
         locals: &mut HashSet<String>,
         line: usize,
     ) -> Result<(), String> {
@@ -7735,7 +7788,7 @@ impl<'a> Checker<'a> {
     fn captures_block(
         &self,
         b: &Block,
-        outer: &Vec<HashMap<String, Binding>>,
+        outer: &Scope,
         locals: &mut HashSet<String>,
     ) -> Result<(), String> {
         for s in &b.stmts {
@@ -7747,7 +7800,7 @@ impl<'a> Checker<'a> {
     fn captures_stmt(
         &self,
         s: &Stmt,
-        outer: &Vec<HashMap<String, Binding>>,
+        outer: &Scope,
         locals: &mut HashSet<String>,
     ) -> Result<(), String> {
         // A captured binding is one visible in the enclosing scope and NOT shadowed
@@ -7857,7 +7910,7 @@ impl<'a> Checker<'a> {
     fn captures_expr(
         &self,
         e: &Expr,
-        outer: &Vec<HashMap<String, Binding>>,
+        outer: &Scope,
         locals: &HashSet<String>,
     ) -> Result<(), String> {
         let is_capture = |n: &str| !locals.contains(n) && self.lookup(outer, n).is_some();
@@ -7952,7 +8005,7 @@ impl<'a> Checker<'a> {
         arg: &Expr,
         aty: &Type,
         pty: &Type,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         line: usize,
     ) -> Result<(), String> {
         match arg {
@@ -8108,7 +8161,7 @@ impl<'a> Checker<'a> {
         decl: &TypeDecl,
         args: &[Expr],
         line: usize,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
         if args.len() != 1 {
@@ -8147,25 +8200,31 @@ impl<'a> Checker<'a> {
         Ok(Type::Named(decl.name.clone()))
     }
 
-    fn lookup(&self, scope: &Vec<HashMap<String, Binding>>, name: &str) -> Option<Binding> {
+    /// The binding `name` has here: the innermost frame that carries it, or —
+    /// when the frames run out and the scope is open — module state (RFC-0013).
+    ///
+    /// The module-state read is a LOOKUP and not a copy, which is the whole of
+    /// [`Scope`]'s note.
+    fn lookup(&self, scope: &Scope, name: &str) -> Option<Binding> {
         for frame in scope.iter().rev() {
             if let Some(b) = frame.get(name) {
                 return Some(b.clone());
             }
         }
+        if scope.globals {
+            return self.globals.borrow().get(name).cloned();
+        }
         None
     }
 
-    /// Whether `name` resolves to a module-state binding (frame 0) rather than a
-    /// local: the topmost frame that binds it is the globals frame. A local of
-    /// the same name (any higher frame) shadows it, so this returns `false` then.
-    fn resolves_to_global(&self, scope: &Vec<HashMap<String, Binding>>, name: &str) -> bool {
-        for (i, frame) in scope.iter().enumerate().rev() {
-            if frame.contains_key(name) {
-                return i == 0;
-            }
+    /// Whether `name` resolves to a module-state binding rather than a local: no
+    /// frame carries it and module state does. A local of the same name shadows
+    /// it, so this returns `false` then.
+    fn resolves_to_global(&self, scope: &Scope, name: &str) -> bool {
+        if scope.iter().any(|f| f.contains_key(name)) {
+            return false;
         }
-        false
+        scope.globals && self.globals.borrow().contains_key(name)
     }
 
     /// The element type of the array a `pop`/`swapRemove` receiver names, after
@@ -8182,7 +8241,7 @@ impl<'a> Checker<'a> {
     fn mut_array_receiver(
         &self,
         recv: &Expr,
-        scope: &Vec<HashMap<String, Binding>>,
+        scope: &Scope,
         line: usize,
         call: &str,
         op: &str,

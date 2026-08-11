@@ -261,10 +261,10 @@ fin:
 /// instead of scanning both operands, and RFC-0081's `str_append` no longer keeps
 /// a length beside the slot — the header IS that length.
 ///
-/// `cap` is the allocated byte capacity, and `cap == 0` means **static**: a
-/// literal in the data segment, never `realloc`'d and never freed. RFC-0077 M6
-/// put an eight-byte class header on every heap block precisely because a
-/// headerless String could not answer this question at a drop site.
+/// `cap` is the allocated byte capacity, and `cap == STR_STATIC` means
+/// **static**: a literal in the data segment, never `realloc`'d and never freed.
+/// RFC-0077 M6 put an eight-byte class header on every heap block precisely
+/// because a headerless String could not answer this question at a drop site.
 ///
 /// The header is BEHIND the pointer rather than beside it (a `{ptr, len, cap}`
 /// value triple, as `Array<T>` is) for two reasons measured here:
@@ -274,6 +274,25 @@ fin:
 ///     never a stale length in the other. Until the conventions land (RFC-0089
 ///     M2) aliasing is still legal, and a triple would go stale.
 const STR_HDR: i64 = 16;
+
+/// The `cap` a data-segment literal carries: all bits set, which no allocation
+/// can ever return.
+///
+/// It was `0` until the audit measured what that costs. `0` is also the capacity
+/// of an EMPTY String built at run time — `""` out of a `slice`, a `join` of
+/// nothing, a concat of two empties — so `@__vyrn_str_free` read every one of
+/// them as a literal and gave nothing back. Three million empty concats held
+/// 88.4 MB against the 3.2 MB the same program holds when the strings are one
+/// byte long. A literal is a fact about WHERE the bytes live, and no capacity
+/// can state it, so the sentinel moved off the range capacities use.
+///
+/// All-ones rather than a flag bit because the free is an equality test: a heap
+/// block would have to answer `cap == 2^64-1` to be mistaken for a literal. The
+/// reserve arithmetic in [`Gen::emit_str_append`] compares capacities UNSIGNED,
+/// where all-ones reads as room for everything — it never sees a literal (step 1
+/// copies a buffer this path does not own before step 2 reads its capacity), and
+/// an equality test keeps that a separate question rather than a shared one.
+const STR_STATIC: i64 = -1;
 
 /// `bytes(s)`: an `Array<UInt8>` ({ptr,len,cap}, i8 stride — RFC-0014 M2) of a
 /// string's raw UTF-8 bytes. The VIEW every Vyrn string routine is written on, and
@@ -317,7 +336,7 @@ define void @__vyrn_str_free(ptr %s) {
 entry:
   %cp = getelementptr i8, ptr %s, i64 -8
   %cap = load i64, ptr %cp
-  %static = icmp eq i64 %cap, 0
+  %static = icmp eq i64 %cap, -1
   br i1 %static, label %done, label %heap
 heap:
   %base = getelementptr i8, ptr %s, i64 -16
@@ -2500,7 +2519,7 @@ impl<'a> Gen<'a> {
     /// remains here is one bit: **did THIS path allocate the buffer the slot
     /// holds?**
     ///
-    /// The bit is not the same question as `cap != 0`. A concat result has a
+    /// The bit is not the same question as "is this buffer on the heap". A concat result has a
     /// real capacity and is still not ours to grow in place, because `s = t`
     /// aliases and nothing yet forbids that — the conventions do (RFC-0089 M2),
     /// and this flag retires with them. `0` means the next append copies into a
@@ -3989,7 +4008,7 @@ impl<'a> Gen<'a> {
         match kind {
             DropKind::FreeStr => {
                 // The header says whether there is anything to hand back:
-                // `cap == 0` is a data-segment literal (RFC-0089 M1a), and
+                // `cap == STR_STATIC` is a data-segment literal (RFC-0089 M1a), and
                 // `@__vyrn_str_free` returns on it. The block base is the
                 // pointer less the header.
                 let p = self.fresh_tmp();
@@ -4223,7 +4242,7 @@ impl<'a> Gen<'a> {
     }
 
     /// Hand a snapshot back, after the store that replaced it. Both callees
-    /// refuse a null, and `@__vyrn_str_free` refuses a `cap == 0` literal.
+    /// refuse a null, and `@__vyrn_str_free` refuses a [`STR_STATIC`] literal.
     fn free_snap(&mut self, snap: &[(String, bool)]) {
         for (p, hdr) in snap {
             if *hdr {
@@ -4276,9 +4295,17 @@ impl<'a> Gen<'a> {
                 // that names somebody else's storage (`let mut s = r.name` is a
                 // borrow, not a move) would free that storage instead, which is why
                 // the answer is read rather than assumed.
+                //
+                // A LITERAL initializer is somebody else's storage too, and the
+                // second half of the test is the same one the module-state seed
+                // has always carried. `own` says a `let mut acc = ""` is droppable
+                // (RFC-0096 M3 defect 3, and it is: the buffer it ENDS on is the
+                // loop's), so without this the first append grew a data-segment
+                // pointer in place. Being wrong the other way costs one copy.
                 if bty == Type::Str && self.append_ok.contains(name.as_str()) {
                     let flag = self.str_append_shadow(&slot);
-                    let owns = self.droppable.contains_key(&key) as i64;
+                    let owns = (self.droppable.contains_key(&key) && !matches!(value, Expr::Str(_)))
+                        as i64;
                     self.emit(format!("store i64 {owns}, ptr {flag}"));
                 }
                 // If ownership analysis proved this heap binding non-escaping,
@@ -11017,14 +11044,14 @@ pub(crate) const SERVE_STREAM_TRAP: &str =
     "error: serveStream: a compiled build has no accept loop — a live route needs `vyrn serve`\n";
 
 /// A static `String` value in the data segment: the `{ i64 len, i64 cap }` header
-/// (RFC-0089 M1a) followed by the NUL-terminated bytes. `cap` is 0, which is the
-/// runtime's word for "never `realloc`, never free" — `@__vyrn_str_free` reads it
-/// and returns, so a drop site needs no static/heap analysis of its own.
+/// (RFC-0089 M1a) followed by the NUL-terminated bytes. `cap` is [`STR_STATIC`],
+/// the runtime's word for "never `realloc`, never free" — `@__vyrn_str_free`
+/// reads it and returns, so a drop site needs no static/heap analysis of its own.
 fn static_str_global(name: &str, s: &str) -> String {
     let (escaped, len) = llvm_str(s);
     format!(
         "{name} = private unnamed_addr constant {{ i64, i64, [{len} x i8] }} \
-         {{ i64 {}, i64 0, [{len} x i8] c\"{escaped}\" }}, align 8\n",
+         {{ i64 {}, i64 {STR_STATIC}, [{len} x i8] c\"{escaped}\" }}, align 8\n",
         s.len()
     )
 }
