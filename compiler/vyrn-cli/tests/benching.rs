@@ -307,12 +307,53 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
         found,
         vec![
             "benching".to_string(),
+            "langbench".to_string(),
             "membench".to_string(),
             "simdbench".to_string(),
             "smallarray".to_string()
         ],
         "bench corpus drifted"
     );
+}
+
+/// Every bench name in the corpus is unique ACROSS files.
+///
+/// `--compare` matches a run entry to a baseline entry **by name alone**, and the
+/// CI job merges the corpus's per-example `--json` reports into one
+/// `bench/baseline.json`. Two files using the same name would silently compare
+/// one bench against the other's timing — a regression gate reading the wrong
+/// row, which looks exactly like a gate that works. Nothing else checks this, so
+/// it is checked here.
+#[test]
+fn no_two_benches_in_the_corpus_share_a_name() {
+    let mut seen: Vec<(String, String)> = Vec::new(); // (bench name, file stem)
+    let mut clashes: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(examples_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("vyrn") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        for line in std::fs::read_to_string(&path).unwrap().lines() {
+            let Some(rest) = line.trim_start().strip_prefix("bench \"") else {
+                continue;
+            };
+            let Some(name) = rest.split('"').next() else {
+                continue;
+            };
+            if let Some((_, other)) = seen.iter().find(|(n, _)| n == name) {
+                clashes.push(format!("`{name}` is in both {other}.vyrn and {stem}.vyrn"));
+            }
+            seen.push((name.to_string(), stem.clone()));
+        }
+    }
+    assert!(
+        clashes.is_empty(),
+        "bench names must be unique across the corpus — the merged baseline keys \
+         on the name alone:\n  {}",
+        clashes.join("\n  ")
+    );
+    assert!(seen.len() > 20, "expected the whole corpus, found {seen:?}");
 }
 
 // ---- `--json` / `--compare` native paths (need clang) ------------------------
