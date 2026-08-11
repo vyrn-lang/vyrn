@@ -14,7 +14,7 @@ import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
 import { exampleCount, rfcCount, stdCount, backendCount } from "../repo"
-import { ownRows, lifetimes, lineCount, moduleRatio, OwnRow, Life } from "../chart"
+import { ownRows, lifetimes, lineCount, moduleRatio, targetsBox, targetsNodes, targetsEdges, OwnRow, Life, Node, Edge } from "../chart"
 
 export fn head() -> Head {
     return pageHead("Vyrn — a systems language with the expressiveness of TypeScript")
@@ -119,6 +119,9 @@ fn quickstart() -> String {
                             <span>lines {{ l.from }} to {{ l.to }} — {{ l.fate }}</span>
                         </li>
                     </ul>
+                    <div class="lines gutter">
+                        <div class="cl head"><span class="ln">line</span><span class="lanes"></span><code>source</code></div>
+                    </div>
                     <div class="lines gutter" data-own-rows>
                         <div class="cl" v-for="r in ownRows()" :key="r.n" :data-l="r.n.toString()">
                             <span class="ln">{{ r.n }}</span>
@@ -138,19 +141,25 @@ fn quickstart() -> String {
             <p class="eyebrow">03 — targets</p>
             <h2>One program, three targets</h2>
             <p>The interpreter is the reference semantics. <code>--target wasm</code> emits the module directly: no LLVM, no clang, no sysroot.</p>
-            <div class="cards">
-                <section>
-                    <h3>Interpreter</h3>
-                    <p>The reference semantics. <code>vyrn run</code> needs nothing but the compiler.</p>
-                </section>
-                <section>
-                    <h3>Native</h3>
-                    <p>Textual LLVM IR, linked by clang. The runtime stays libc-portable.</p>
-                </section>
-                <section>
-                    <h3>WebAssembly</h3>
-                    <p>Emitted directly. A module carries only the runtime its own code reaches.</p>
-                </section>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Schematic</span>
+                    <span class="eyebrow">one source, three paths, one result</span>
+                </div>
+                <div class="stage">
+                    <svg class="chart schematic" :viewBox="targetsBox()" role="img" aria-label="One program compiles through the interpreter, a native binary and a WebAssembly module, and all three produce identical bytes">
+                        <defs>
+                            <marker id="tip" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6"/></marker>
+                        </defs>
+                        <path class="wire" v-for="e in targetsEdges()" :key="e.id" :d="e.d" marker-end="url(#tip)"/>
+                        <g v-for="n in targetsNodes()" :key="n.id" :class="n.tone">
+                            <rect :x="n.x" :y="n.y" :width="n.w" :height="n.h"/>
+                            <text :x="n.cx" :y="n.y" dy="26" text-anchor="middle" class="name">{{ n.name }}</text>
+                            <text :x="n.cx" :y="n.y" dy="42" text-anchor="middle" class="sub">{{ n.sub }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">The three paths converge, and that is the whole claim: CI fails unless they do. The command under each backend is the one you type.</p>
             </div>
             <p class="notice">That is why a module is small: <code>fib.vyrn</code> builds to 1.5 KB, against 277 KB through clang — {{ moduleRatio() }} times. <a href="/compare.html#numbers">The comparison page measures eight of them.</a></p>
         </section>

@@ -16,7 +16,7 @@
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { typeSpecs, memorySpecs, failureSpecs, Snippet } from "../snippets"
-import { moduleSizes, moduleSizesBox, moduleLadder, moduleLadderBox, moduleRatio, largestModule, leakBars, leakBox, leakPeak, barLeft, barRight, barText, barRow, Bar } from "../chart"
+import { moduleSizes, moduleSizesBox, moduleSizesGrid, moduleLadder, moduleLadderBox, moduleLadderGrid, moduleLadderPlot, twoRowPlot, moduleRatio, largestModule, leakBars, leakBox, leakGrid, leakPeak, barLeft, barRight, barText, barRow, Bar, Grid } from "../chart"
 
 /// One comparison axis: what is being compared, and where each answer stands.
 type Axis = { id: String, name: String, vyrn: String, rust: String, ts: String, go: String }
@@ -211,10 +211,14 @@ fn axes() -> Array<Axis> {
                 </div>
                 <div class="stage">
                     <svg class="chart" :viewBox="moduleLadderBox()" role="img" aria-label="Eight example programs, and the size of the WebAssembly module each one builds to">
+<g class="axis">
+                            <line v-for="g in moduleLadderGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="moduleLadderPlot()"/>
+                            <text v-for="g in moduleLadderGrid()" :key="g.id" :x="g.x" :y="moduleLadderPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
                         <g class="row" v-for="b in moduleLadder()" :key="b.id">
                             <title>{{ b.title }}</title>
                             <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
-                            <rect class="bar" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                            <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
                             <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                             <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                         </g>
@@ -235,10 +239,14 @@ fn axes() -> Array<Axis> {
                 <span class="bignum">{{ moduleRatio() }}<small>times smaller</small></span>
                 <div class="stage">
                     <svg class="chart" :viewBox="moduleSizesBox()" role="img" aria-label="fib.wasm is 1.5 KB through the direct encoder and 277 KB through clang">
+<g class="axis">
+                            <line v-for="g in moduleSizesGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
+                            <text v-for="g in moduleSizesGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
                         <g class="row" v-for="b in moduleSizes()" :key="b.id">
                             <title>{{ b.title }}</title>
                             <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
-                            <rect class="bar" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                            <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
                             <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                             <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                         </g>
@@ -264,11 +272,15 @@ fn axes() -> Array<Axis> {
                 <span class="bignum" data-leak-peak :data-alt="leakPeak(true)">{{ leakPeak(false) }}<small>peak, at 1,000,000 turns</small></span>
                 <div class="stage">
                     <svg class="chart" data-leak-svg :viewBox="leakBox()" role="img" aria-label="Peak resident memory of the same loop, with and without the consume declaration">
+<g class="axis">
+                            <line v-for="g in leakGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
+                            <text v-for="g in leakGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
                         <g data-series="no">
                             <g class="row" v-for="b in leakBars(false)" :key="b.id">
                                 <title>{{ b.title }}</title>
                                 <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
-                                <rect class="bar" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                                <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
                                 <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                                 <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                             </g>
@@ -277,7 +289,7 @@ fn axes() -> Array<Axis> {
                             <g class="row" v-for="b in leakBars(true)" :key="b.id">
                                 <title>{{ b.title }}</title>
                                 <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
-                                <rect class="bar" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                                <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
                                 <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                                 <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                             </g>

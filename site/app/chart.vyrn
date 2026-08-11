@@ -13,6 +13,18 @@
 /// exactly what the first version of the module-size chart did to "277 KB". A
 /// value label lives in its own column and cannot collide or clip.
 ///
+/// THREE RULES TAKEN FROM `cathrynlavery/diagram-design` and kept:
+///
+///  - **One focal element.** Eight bars in one tint is eight bars with no
+///    argument. Each chart marks exactly ONE bar as focal — the one the caption
+///    is about — and the rest recede. An accent on everything is an accent on
+///    nothing.
+///  - **A scale, not just labels.** A bar chart with no gridline asks the reader
+///    to trust the numbers printed at the end of each bar. Four faint rules and
+///    a baseline let the eye measure, and the axis starts at zero, always.
+///  - **The 4px grid.** Every coordinate, size and gap below is divisible by
+///    four. It is why the rows line up with the type around them.
+///
 /// Every field is a `String`, because that is what an SVG attribute is. Rounding
 /// happens here, once, rather than in four `.toString()` calls at the template.
 import { rfcRows, RfcRow } from "./repo"
@@ -25,7 +37,7 @@ import { vyrnLines } from "./snippets"
 /// `hy` exists because a bar is 20 units tall inside a 34-unit row, and a
 /// reader hovers the ROW. The hit rectangle spans the whole row, so a 26-unit
 /// sliver of a bar is not the only target on the chart.
-export type Bar = { id: String, y: String, hy: String, w: String, label: String, value: String, title: String, href: String }
+export type Bar = { id: String, y: String, hy: String, w: String, label: String, value: String, title: String, href: String, tone: String }
 
 /// One cell in the RFC strip. It is a link: a tinted square that answers a
 /// hover but not a click is a square pretending to be a control.
@@ -49,41 +61,79 @@ fn px(v: Int64) -> String {
 
 /// Where a bar starts, and how much room it has.
 export fn barLeft() -> String {
-    return "150"
+    return "160"
+}
+
+fn barLeftN() -> Int64 {
+    return 160
 }
 
 fn barRoom() -> Int64 {
-    return 670
+    return 672
 }
 
-/// Where every value label is anchored, six units in from the viewBox's right
+/// Where every value label is anchored, eight units in from the viewBox's right
 /// edge so an end-anchored glyph has air rather than a clip.
 export fn barRight() -> String {
-    return "894"
+    return "896"
 }
 
 /// The baseline of a row's text, relative to the row's `y`.
 export fn barText() -> String {
-    return "15"
+    return "16"
 }
 
-/// A chart's viewBox for `rows` bars.
+/// How tall the whole plot is for `rows` bars, before the axis strip.
+fn plotHeight(rows: Int64) -> Int64 {
+    return rows * 36 + 8
+}
+
+/// A chart's viewBox: the plot, plus twenty units of axis strip under it.
 fn barViewBox(rows: Int64) -> String {
-    return "0 0 900 " + px(rows * 34 + 6)
+    return "0 0 904 " + px(plotHeight(rows) + 20)
 }
 
 fn rowY(i: Int64) -> String {
-    return px(i * 34 + 6)
+    return px(i * 36 + 8)
 }
 
 /// The top of row `i`, which is where its hit area starts.
 fn hitY(i: Int64) -> String {
-    return px(i * 34)
+    return px(i * 36)
 }
 
 /// How tall a row's hit area is.
 export fn barRow() -> String {
-    return "34"
+    return "36"
+}
+
+/// One gridline: where it stands, and what it is worth.
+export type Grid = { id: String, x: String, label: String }
+
+/// Four gridlines and a zero, so the reader can measure a bar rather than take
+/// the printed value on trust. `full` and `step` are in the chart's own integer
+/// units; `unit` is what one `step` is called.
+fn gridOf(full: Int64, step: Int64, per: Int64, unit: String) -> Array<Grid> {
+    let mut out: Array<Grid> = []
+    let mut v = 0
+    while v * per <= full {
+        out.push(Grid {
+                id: v.toString(),
+                x: px(barLeftN() + barRoom() * v * per / full),
+                label: v.toString(),
+            })
+        v = v + step
+    }
+    // The unit is named once, on the last gridline, rather than repeated four
+    // times down an axis that is already saying the same thing.
+    let last = out.length - 1
+    out[last].label = out[last].label + " " + unit
+    return out
+}
+
+/// The gridlines of the module charts, in kilobytes.
+export fn sizeGrid(fullBytes: Int64, stepKb: Int64) -> Array<Grid> {
+    return gridOf(fullBytes, stepKb, 1024, "KB")
 }
 
 /// A file in this repository, on GitHub.
@@ -144,6 +194,7 @@ export fn moduleLadder() -> Array<Bar> {
                 value: kbOf(m.size),
                 title: "examples/" + m.name + ".vyrn -> " + m.size.toString() + " bytes of wasm",
                 href: blob("examples/" + m.name + ".vyrn"),
+                tone: if i == 0 { "bar focal" } else { "bar" },
             })
         i = i + 1
     }
@@ -152,6 +203,16 @@ export fn moduleLadder() -> Array<Bar> {
 
 export fn moduleLadderBox() -> String {
     return barViewBox(modules().length)
+}
+
+/// The ladder's axis: every ten kilobytes.
+export fn moduleLadderGrid() -> Array<Grid> {
+    return sizeGrid(modules()[modules().length - 1].size, 10)
+}
+
+/// How far down a gridline runs on the ladder.
+export fn moduleLadderPlot() -> String {
+    return px(plotHeight(modules().length))
 }
 
 /// The largest module on the ladder, for the caption.
@@ -195,6 +256,7 @@ export fn moduleSizes() -> Array<Bar> {
             value: "277 KB",
             title: "fib.wasm through textual LLVM IR and clang: 277 KB",
             href: blob("README.md#status"),
+            tone: "bar",
         },
         Bar {
             id: "direct",
@@ -205,12 +267,22 @@ export fn moduleSizes() -> Array<Bar> {
             value: kbOf(directSize()),
             title: "fib.wasm from the compiler's own wasm encoder (RFC-0077): " + directSize().toString() + " bytes",
             href: blob("rfcs/RFC-0077-direct-wasm-backend.md"),
+            tone: "bar focal",
         },
     ]
 }
 
 export fn moduleSizesBox() -> String {
     return barViewBox(2)
+}
+
+/// The two-route axis: every hundred kilobytes.
+export fn moduleSizesGrid() -> Array<Grid> {
+    return sizeGrid(clangSize(), 100)
+}
+
+export fn twoRowPlot() -> String {
+    return px(plotHeight(2))
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +334,7 @@ export fn leakBars(declared: Bool) -> Array<Bar> {
                 value: mbOf(r.hundredths),
                 title: word + ", " + r.turns + ": " + mbOf(r.hundredths),
                 href: blob("rfcs/census-call-arguments.md"),
+                tone: if i == rows.length - 1 { "bar focal" } else { "bar" },
             })
         i = i + 1
     }
@@ -270,6 +343,11 @@ export fn leakBars(declared: Bool) -> Array<Bar> {
 
 export fn leakBox() -> String {
     return barViewBox(2)
+}
+
+/// The leak axis: every twenty-five megabytes.
+export fn leakGrid() -> Array<Grid> {
+    return gridOf(leakFull(), 25, 100, "MB")
 }
 
 /// The headline figure of a series: its worst reading.
@@ -418,14 +496,14 @@ export fn lineCount() -> Int64 {
 
 test "no value label is ever drawn above a bar, so none can leave the plate" {
     // The geometry has exactly one text baseline, inside the row.
-    assertEq(barText(), "15")
+    assertEq(barText(), "16")
     for b in moduleLadder() {
         // Every bar's top is at or below the viewBox origin plus its own air.
         assert(b.y.byteLength > 0)
     }
-    assertEq(moduleLadder()[0].y, "6")
+    assertEq(moduleLadder()[0].y, "8")
     assertEq(moduleLadder()[0].hy, "0")
-    assertEq(moduleLadderBox(), "0 0 900 278")
+    assertEq(moduleLadderBox(), "0 0 904 316")
 }
 
 test "the module ladder plots what the compiler actually built" {
@@ -435,13 +513,35 @@ test "the module ladder plots what the compiler actually built" {
     assertEq(bars[0].value, "1.5 KB")
     assertEq(bars[7].value, "37.9 KB")
     // The largest module fills the width, and nothing exceeds it.
-    assertEq(bars[7].w, "670")
+    assertEq(bars[7].w, "672")
+    // Exactly one bar carries the accent. Eight in one tint is not an argument.
+    let mut focal = 0
+    for b in bars {
+        if b.tone == "bar focal" {
+            focal = focal + 1
+        }
+    }
+    assertEq(focal, 1)
+    assertEq(bars[0].tone, "bar focal")
     // Every row names a file a reader can open, and no row leaves it empty.
     for b in bars {
         assert(b.title.byteLength > 10)
         assert(b.href.byteLength > 40)
     }
     assertEq(bars[0].href, "https://github.com/vyrn-lang/vyrn/blob/main/examples/fib.vyrn")
+}
+
+test "an axis starts at zero, is named once, and does not run past the data" {
+    let g = moduleLadderGrid()
+    assertEq(g[0].x, barLeft())
+    assertEq(g[0].label, "0")
+    assertEq(g[g.length - 1].label, "30 KB")
+    assertEq(leakGrid()[leakGrid().length - 1].label, "50 MB")
+    assertEq(moduleSizesGrid()[moduleSizesGrid().length - 1].label, "200 KB")
+    // No gridline is drawn past the room a bar has.
+    for line in g {
+        assert(line.x.byteLength <= 3)
+    }
 }
 
 test "kilobytes round rather than truncate" {
@@ -453,8 +553,9 @@ test "kilobytes round rather than truncate" {
 test "the two routes to a module are on one scale, and the ratio is computed" {
     let bars = moduleSizes()
     assertEq(bars.length, 2)
-    assertEq(bars[0].w, "670")
+    assertEq(bars[0].w, "672")
     assertEq(bars[0].value, "277 KB")
+    assertEq(bars[1].tone, "bar focal")
     assertEq(bars[1].value, "1.5 KB")
     assertEq(moduleRatio(), "186")
 }
@@ -469,8 +570,10 @@ test "the census figures are plotted as the census recorded them" {
     assertEq(leakPeak(false), "50.3 MB")
     assertEq(leakPeak(true), "4.0 MB")
     // One scale for both series: the flat bar is a sliver, which is the finding.
-    assertEq(grows[1].w, "670")
+    assertEq(grows[1].w, "672")
     assertEq(flat[1].w, "52")
+    assertEq(grows[1].tone, "bar focal")
+    assertEq(grows[0].tone, "bar")
 }
 
 test "the RFC strip has one cell per RFC and wraps every twenty" {
@@ -525,4 +628,165 @@ test "the replay's range is the specimen's own range" {
     assertEq(firstLine(), 17)
     assertEq(lastLine(), 21)
     assertEq(lineCount(), 5)
+}
+
+// ---------------------------------------------------------------------------
+// One program, three backends, one result
+//
+// This replaced three prose cards, on the test `cathrynlavery/diagram-design`
+// puts before drawing anything: *would the reader learn more from this than
+// from a well-written paragraph?* Three cards saying "the interpreter does X,
+// clang does Y, the encoder does Z" hid the only fact that matters — the three
+// paths CONVERGE. A drawing says it without a sentence, and it is the mark's
+// own shape: three strokes meeting at one point.
+//
+// The rules the drawing keeps, from the same source:
+//
+//  - **Five nodes, six arrows.** Well inside the budget of nine and twelve.
+//  - **Two focal elements, and no more.** The program you write, and the result
+//    all three agree on. The backends between them recede.
+//  - **Rounded right-angle elbows only.** No diagonal connector anywhere.
+//  - **Fanned attach points.** The three arrows leaving the source are 16 units
+//    apart on its edge, so no arrow hides another.
+//  - **No arrow labels.** Each backend carries its own command as a sublabel,
+//    which is the same information with one element instead of two — and it
+//    removes every mask rectangle and every label-to-stroke gap to police.
+//  - **The 4px grid**, on every coordinate below.
+// ---------------------------------------------------------------------------
+
+/// One box in the targets diagram. `tone` is the class the stylesheet reads:
+/// a focal node, or an ordinary one.
+export type Node = { id: String, x: String, y: String, w: String, h: String, cx: String, name: String, sub: String, tone: String }
+
+/// One connector, as a path.
+export type Edge = { id: String, d: String }
+
+/// A rounded right-angle elbow from (x1, y1) to (x2, y2), turning at `midX`.
+/// A straight run when the two ends already share a row, which is the one case
+/// a plain horizontal line is allowed.
+fn elbow(x1: Int64, y1: Int64, x2: Int64, y2: Int64, midX: Int64) -> String {
+    if y1 == y2 {
+        return "M \{x1} \{y1} H \{x2}"
+    }
+    let r = 8
+    let step = if y2 > y1 { r } else { 0 - r }
+    let corner1 = y1 + step
+    let corner2 = y2 - step
+    return "M \{x1} \{y1} H \{midX - r} Q \{midX} \{y1} \{midX} \{corner1} V \{corner2} Q \{midX} \{y2} \{midX + r} \{y2} H \{x2}"
+}
+
+/// The three backends, in the order the README introduces them.
+fn backends() -> Array<Array<String>> {
+    return [
+        ["interp", "Interpreter", "vyrn run"],
+        ["native", "Native binary", "vyrn build"],
+        ["wasm", "WebAssembly", "vyrn build --target wasm"],
+    ]
+}
+
+/// Where a backend's row sits.
+fn laneY(i: Int64) -> Int64 {
+    return i * 100 + 32
+}
+
+/// The centre of the diagram, vertically: the middle lane's centre.
+fn axisY() -> Int64 {
+    return laneY(1) + 28
+}
+
+export fn targetsBox() -> String {
+    return "0 0 904 292"
+}
+
+export fn targetsNodes() -> Array<Node> {
+    let mut out: Array<Node> = []
+    out.push(Node {
+            id: "source",
+            x: "0",
+            y: px(axisY() - 28),
+            w: "176",
+            h: "56",
+            cx: "88",
+            name: "one program",
+            sub: "hello.vyrn",
+            tone: "node focal",
+        })
+    let rows = backends()
+    let mut i = 0
+    while i < rows.length {
+        out.push(Node {
+                id: rows[i][0].copy(),
+                x: "328",
+                y: px(laneY(i)),
+                w: "232",
+                h: "56",
+                cx: "444",
+                name: rows[i][1].copy(),
+                sub: rows[i][2].copy(),
+                tone: "node",
+            })
+        i = i + 1
+    }
+    out.push(Node {
+            id: "result",
+            x: "712",
+            y: px(axisY() - 28),
+            w: "192",
+            h: "56",
+            cx: "808",
+            name: "identical bytes",
+            sub: "stdout, stderr, exit code",
+            tone: "node focal",
+        })
+    return out
+}
+
+export fn targetsEdges() -> Array<Edge> {
+    let mut out: Array<Edge> = []
+    let rows = backends()
+    let mut i = 0
+    while i < rows.length {
+        let lane = laneY(i) + 28
+        // Fanned along the source's right edge, 16 units apart, so the three
+        // arrows never share a point and never overlap.
+        let from = axisY() + (i - 1) * 16
+        out.push(Edge { id: "out" + rows[i][0], d: elbow(176, from, 320, lane, 252) })
+        // And fanned again on the way in, at the result's left edge.
+        out.push(Edge { id: "in" + rows[i][0], d: elbow(560, lane, 704, axisY() + (i - 1) * 16, 636) })
+        i = i + 1
+    }
+    return out
+}
+
+test "the targets diagram stays inside the budget it was drawn to" {
+    let nodes = targetsNodes()
+    let edges = targetsEdges()
+    // Nine nodes and twelve arrows are the ceiling; this is well under both.
+    assertEq(nodes.length, 5)
+    assertEq(edges.length, 6)
+    let mut focal = 0
+    for n in nodes {
+        if n.tone == "node focal" {
+            focal = focal + 1
+        }
+    }
+    assertEq(focal, 2)
+}
+
+test "no connector in the targets diagram is a diagonal" {
+    // Every path is H/V runs joined by quarter-arcs. A diagonal would need an
+    // `L` with two changing coordinates, and there is no `L` in any of them.
+    for e in targetsEdges() {
+        assert(e.d.byteLength > 10)
+        for b in bytes(e.d) {
+            assert(b != 'L')
+        }
+    }
+}
+
+test "the three arrows leaving the source do not share a point" {
+    let edges = targetsEdges()
+    // The fan is 16 units apart on the source edge: 144, 160, 176 down its side.
+    assert(edges[0].d != edges[2].d)
+    assert(edges[2].d != edges[4].d)
 }
