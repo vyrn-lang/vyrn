@@ -245,9 +245,10 @@ fn main() -> ExitCode {
     // interpreter recursively, nested deep inside the load/parse/check call
     // chain. On Windows the default ~1 MB main-thread stack overflows on a
     // realistic generator (e.g. std/i18n compiling ICU messages). Run the whole
-    // CLI on a worker thread with a generous stack so generation has headroom.
+    // CLI on a worker thread with the interpreter's own reserve, so generation
+    // has the same headroom a run does.
     std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
+        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
         .spawn(real_main)
         .expect("failed to spawn the vyrn worker thread")
         .join()

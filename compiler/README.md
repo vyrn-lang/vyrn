@@ -244,6 +244,27 @@ conformance cases. Verified match points include: `print` of a `Bool` prints
 check; a failed runtime validation exits with code 1 (native prints
 `Vyrn: validation failed`, interpreter prints a detailed message).
 
+## Gates: run the profile CI runs
+
+CI runs the test and parity jobs in DEBUG (`cargo test --quiet`, no `--release`);
+only the cross-engine-generation job uses `--release`. A local gate must match,
+because the profiles are not interchangeable: an unoptimized interpreter frame is
+about 20x an optimized one, so a runtime limit can fit in release and abort in
+debug. That is exactly how `CALL_DEPTH_LIMIT = 10,000` reached `main` green and
+turned CI red — every gate that session was `--release`.
+
+Before pushing, run both:
+
+```sh
+cargo test --workspace --no-fail-fast                                   # what CI runs
+cargo test -p vyrn-cli --test parity -- --ignored --test-threads=1      # debug parity
+cargo test --workspace --release --no-fail-fast
+cargo test -p vyrn-cli --release --test parity -- --ignored --test-threads=1
+```
+
+Release-only is not evidence. Debug-only is not either: the direct wasm backend's
+generation job is optimized, and a debug run is minutes slower per example.
+
 ## Layout
 
 ```
