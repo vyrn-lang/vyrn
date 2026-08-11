@@ -340,7 +340,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
         .collect();
 
-    let ownership = vyrn_frontend::own::analyze(program);
+    // `false`: this backend has no region arena, so nothing here may defer a
+    // release to one. See [`Fn_::region_exit`].
+    let ownership = vyrn_frontend::own::analyze_with(program, false);
     let mut cx = Cx {
         types,
         impls: program.impls.clone(),
@@ -1860,7 +1862,7 @@ impl Fn_<'_> {
     /// scratch doc says so itself — "a nested expression evaluates to completion
     /// before the outer one touches scratch" is exactly what is false here.
     fn tee_str_temp(&mut self, b: &mut Frame, e: &Expr) -> Option<u32> {
-        if self.region_depth > 0 || !vyrn_frontend::own::str_temporary(e) {
+        if !vyrn_frontend::own::str_temporary(e) {
             return None;
         }
         let l = b.local(ValType::I32);
@@ -2562,20 +2564,20 @@ impl Fn_<'_> {
     /// already on the operand stack — the same property M2f's `modify` copy-out
     /// needs and M2d's note about a value sitting under a block established.
     ///
-    /// It reclaims nothing, and that is this backend's allocator showing through
-    /// rather than a region-specific hole: `malloc` is a bump pointer that never
-    /// frees for `push`, for a cell payload and for `Stmt::Drop` alike (see
-    /// `runtime`). What a region owns that IS finite is this counter, so the
-    /// counter is what has to be exact.
+    /// It reclaims nothing, and it does not have to: **this backend has no arena
+    /// at all**, so a `region` here routes no allocation anywhere. Every value
+    /// inside one is an ordinary local that the ordinary ownership rules free at
+    /// its block exit, which is why `own::analyze_with` is asked with
+    /// `arena: false` and why the three sites that used to stand aside for the
+    /// arena — the concat temporary, the call-argument temporary and the
+    /// in-place self-append — no longer test the depth.
     ///
-    /// ponytail: no arena reclamation. The sound version is a SEPARATE bump arena
-    /// with a per-region mark, routed lexically the way `Gen::heap_alloc` routes in
-    /// the textual backend — marking the shared heap would reclaim the array buffer
-    /// a `push` inside a region grew for a binding outside it, and routing on the
-    /// *runtime* depth instead would arena-allocate a callee's String that the
-    /// region escape guard never examined. Both are silent wrong answers, and the
-    /// difference between them and this is not observable, so it waits for a real
-    /// allocator here.
+    /// The old note here said the omission was not observable because `malloc`
+    /// was a bump pointer that never freed. That stopped being true at M6, when
+    /// this backend got a segregated free list, and the omission then leaked
+    /// everything a region held: 13.4 MB native against 3,664.5 MB and `out of
+    /// memory` under wasmtime, from one source file (audit finding C2.1). What a
+    /// region still owns here is this counter, so the counter has to be exact.
     fn region_exit(&mut self, b: &mut Frame) {
         self.region_bump(b, -1);
     }
@@ -2734,8 +2736,7 @@ impl Fn_<'_> {
                 // written in quadratic — `toJson` of 40k `Int64` did not merely
                 // take 1.4 s here, it exhausted linear memory and trapped.
                 //
-                // Only outside a `region` (arena memory is not the bump heap the
-                // helper grows out of) and only for a local that owns a shadow,
+                // Only for a local that owns a shadow,
                 // which is exactly a `let`-declared one the whitelist cleared. The
                 // spine is [`crate::self_append_spine`], shared with the textual
                 // backend: what counts as a self-append is one rule, so the two
@@ -2751,14 +2752,12 @@ impl Fn_<'_> {
                     Place::Static(_) => self.cx.gappend.get(name).copied().map(Place::Static),
                     Place::Slot(_) => None,
                 };
-                if self.region_depth == 0 {
-                    if let Some(own) = shadow {
-                        if let Some(parts) = crate::self_append_spine(name, value) {
-                            for p in parts {
-                                self.append_once(m, b, place, own, p)?;
-                            }
-                            return Ok(());
+                if let Some(own) = shadow {
+                    if let Some(parts) = crate::self_append_spine(name, value) {
+                        for p in parts {
+                            self.append_once(m, b, place, own, p)?;
                         }
+                        return Ok(());
                     }
                 }
                 // RFC-0089 rule 4: the store releases what the place held. Not
@@ -3841,7 +3840,7 @@ impl Fn_<'_> {
     /// program wrote.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.region_depth == 0 && self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
+        if self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push(l);

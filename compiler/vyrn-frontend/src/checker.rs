@@ -3438,6 +3438,44 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// The `region` escape guard at the CALL boundary: inside a `region`, a
+    /// heap-carrying value may not be handed to a `consume` parameter.
+    ///
+    /// `consume` declares that the callee takes ownership. A value the region
+    /// allocated is the arena's, and the arena frees it at the closing brace, so
+    /// no callee can own it — it stores what it took, the brace frees the block,
+    /// and the store reads freed memory. The rule lives here, where the callee
+    /// DECLARES that it takes ownership, and not in a search for the store: the
+    /// store can be one hop away, or two, behind a record field, and following
+    /// it needs whole-program retention analysis to answer a question the
+    /// signature already answers.
+    ///
+    /// The refusal is by the ARGUMENT's type, not the parameter's, so a generic
+    /// `fn take<T>(x: consume T)` is refused for the `String` it is passed and
+    /// allowed for the `Int64`. It is deliberately blunt about WHERE the value
+    /// came from: a String made before the region is ordinary heap and safe to
+    /// hand over, and this refuses it anyway, because "which allocation is the
+    /// arena's" is a lexical fact of the emitter and not of the type. Moving the
+    /// call out of the region is the fix in both cases.
+    fn region_consume_guard(
+        &self,
+        callee: &str,
+        idx: usize,
+        arg_ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        if self.region_floor.borrow().is_empty() || !self.contains_heap(arg_ty) {
+            return Ok(());
+        }
+        Err(format!(
+            "line {line}: cannot hand a heap value to argument {} of `{callee}`, which is \
+             `consume`, inside a `region`. The region frees the value at its closing brace, \
+             so the callee cannot own it. Move the call out of the region, or pass a value \
+             that holds no heap.",
+            idx + 1
+        ))
+    }
+
     // ---- expressions ----------------------------------------------------
 
     /// Type-check an expression. `expected` is the type the context wants (used
@@ -7164,9 +7202,15 @@ impl<'a> Checker<'a> {
             // letting `f<T>(c: modify C, ..)` mutate immutable bindings).
             let caps = self.caps.get(name);
             for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
-                if caps.and_then(|c| c.get(i)) == Some(&Capability::Modify) {
-                    let concrete_pty = crate::types::substitute(pty, &subst);
-                    self.check_modify_arg(name, i, arg, &atys[i], &concrete_pty, scope, line)?;
+                match caps.and_then(|c| c.get(i)) {
+                    Some(&Capability::Modify) => {
+                        let concrete_pty = crate::types::substitute(pty, &subst);
+                        self.check_modify_arg(name, i, arg, &atys[i], &concrete_pty, scope, line)?;
+                    }
+                    Some(&Capability::Consume) => {
+                        self.region_consume_guard(name, i, &atys[i], line)?
+                    }
+                    _ => {}
                 }
             }
             // A parameter no argument mentions — `fn newSlots<T>() -> Slots<T>`,
@@ -7245,8 +7289,12 @@ impl<'a> Checker<'a> {
             self.prove_string_interpolation(arg, pty, scope, fn_ret, line)?;
             // A `modify` parameter receives the caller's binding by reference —
             // full discipline checked in the shared helper.
-            if caps.and_then(|c| c.get(i)) == Some(&Capability::Modify) {
-                self.check_modify_arg(name, i, arg, &aty, pty, scope, line)?;
+            match caps.and_then(|c| c.get(i)) {
+                Some(&Capability::Modify) => {
+                    self.check_modify_arg(name, i, arg, &aty, pty, scope, line)?
+                }
+                Some(&Capability::Consume) => self.region_consume_guard(name, i, &aty, line)?,
+                _ => {}
             }
         }
         Ok(ret.clone())

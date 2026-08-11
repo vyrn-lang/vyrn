@@ -941,8 +941,22 @@ impl Ownership {
     }
 }
 
-/// Analyse ownership across a whole program.
+/// Analyse ownership across a whole program, for a backend that has a region
+/// arena (the textual IR one, and the report `vyrn why --memory` prints).
 pub fn analyze(program: &Program) -> Ownership {
+    analyze_with(program, true)
+}
+
+/// Analyse ownership, told whether the backend asking has a region arena.
+///
+/// `arena` is the one thing the answer turns on: with an arena, a dynamic
+/// `String` allocated inside a `region` belongs to it and no drop may be emitted
+/// for the binding, or the block is freed twice. Without one — the direct wasm
+/// backend, whose `region` is a depth counter — the same binding is an ordinary
+/// local and the ordinary rules reclaim it. Answering `Leak::Region` there freed
+/// nothing at all: one source file measured 13.4 MB native against 3,664.5 MB
+/// then `out of memory` under wasmtime (audit finding C2.1).
+pub fn analyze_with(program: &Program, arena: bool) -> Ownership {
     let proto = Owned::new(program);
     // What every `let` in the program still owns where its block ends, decided
     // by the pass that enforces the rules. One walk, one answer, no second
@@ -954,7 +968,7 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut holes = HashMap::new();
     let mut notes = HashMap::new();
     let mut emit = |name: String, body: &Block| {
-        let r = emit_body(body, &lets, &proto);
+        let r = emit_body(body, &lets, &proto, arena);
         droppable.insert(name.clone(), r.droppable);
         holes.insert(name.clone(), r.holes);
         notes.insert(name, r.notes);
@@ -996,12 +1010,18 @@ struct FnResult {
 }
 
 /// One body's drop sites, in source order.
-fn emit_body(body: &Block, lets: &HashMap<usize, LetOwnership>, proto: &Owned) -> FnResult {
+fn emit_body(
+    body: &Block,
+    lets: &HashMap<usize, LetOwnership>,
+    proto: &Owned,
+    arena: bool,
+) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
         holes: HashMap::new(),
         notes: Vec::new(),
         region_depth: 0,
+        arena,
         lets,
         proto,
     };
@@ -1030,6 +1050,8 @@ struct Emit<'a> {
     /// One row per `let`, in source order, with what happens to its value.
     notes: Vec<BindingNote>,
     region_depth: usize,
+    /// Whether the backend asking has a region arena. See [`analyze_with`].
+    arena: bool,
     /// What every `let` in the program still owns where its block ends.
     lets: &'a HashMap<usize, LetOwnership>,
     /// The `Owned` table — the only thing that decides how a type is released.
@@ -1327,7 +1349,9 @@ impl Emit<'_> {
         }
         // A dynamic string inside a region is the arena's, and the two
         // mechanisms partition every allocation — nothing is freed twice.
-        if kind == DropKind::FreeStr && self.region_depth > 0 {
+        // Only where an arena exists: a backend without one reclaims this
+        // binding by the ordinary rules ([`analyze_with`]).
+        if self.arena && kind == DropKind::FreeStr && self.region_depth > 0 {
             return Fate::Leaked(Leak::Region);
         }
         // A `mut` binding is released by its slot's FINAL value in all three
