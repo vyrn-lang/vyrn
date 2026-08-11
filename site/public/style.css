@@ -54,8 +54,31 @@
   --s5: 48px;
   --s6: 64px;
 
-  /* One prose measure, everywhere prose happens. */
+  /* TEXT ROLES AND THEIR WIDTH. Three roles, and the role decides the width —
+   * not the element. Read this before changing any `max-width` on text.
+   *
+   *   READING  (--measure, 65ch)  Continuous copy, read start to finish, with
+   *            nothing beside it. `.lede` and `.prose` — the module header prose
+   *            on /docs/std/*, and the error page. 65ch is the brief's limit
+   *            (8.2) and it stays here.
+   *
+   *   INTRO    (--wide, 88ch)  One or two sentences that introduce the block
+   *            directly below them: a band intro, a `.notice`, the prose under
+   *            an export's signature. These sit against a full-width plate, so a
+   *            65ch rag stopped at 56% of the plate and read as broken layout
+   *            rather than as a column. 88ch is still a measure — a reader is
+   *            not tracking 116ch lines — but the rag no longer fights the plate.
+   *
+   *   LABEL    (no measure)  `.eyebrow` and `.cap` name the block they are
+   *            attached to, so they take its width, exactly as a `.cap` inside a
+   *            `.plate` always has. They are scanned, not read.
+   *
+   * The invariant, in one line: a paragraph's left edge lines up with the block
+   * it introduces, and it never stops short of 70% of that block's width unless
+   * its role is READING.
+   */
   --measure: 65ch;
+  --wide: 88ch;
 
   --expo: cubic-bezier(0.16, 1, 0.3, 1);
   --overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -212,8 +235,12 @@ code, pre, kbd { font-family: var(--mono); }
   font-weight: 640;
 }
 
-.lede { font-size: 1.2rem; line-height: 1.5; color: var(--muted); max-width: 60ch; }
+/* READING. A lede is the one paragraph deliberately narrower than the block
+ * beside it: the display headline above it is what fills the column, and the
+ * lede is read, not scanned. One measure, not a second magic number. */
+.lede { font-size: 1.2rem; line-height: 1.5; color: var(--muted); max-width: var(--measure); }
 
+/* READING. Long-form only: the module header prose and the error page. */
 .prose { max-width: var(--measure); }
 .prose > p, .prose > ul, .prose > dl { margin-top: var(--s3); line-height: 1.65; }
 .prose h2 { margin-top: var(--s6); font-size: 1.5rem; }
@@ -431,7 +458,10 @@ pre.code {
 
 .band { padding: var(--s6) 0 0; border-top: 1px solid var(--rule); margin-top: var(--s6); }
 .band h2 { font-size: clamp(1.5rem, 1rem + 1.4vw, 2.2rem); margin-bottom: var(--s2); }
-.band > p { max-width: var(--measure); color: var(--muted); }
+/* INTRO, not READING: the paragraph introduces the plate under it. `:not()`
+ * keeps the eyebrow and the caption out — they are LABELs, and a measure in
+ * THEIR font (12px mono) stopped them at 457px under a 1001px plate. */
+.band > p:not(.eyebrow, .cap) { max-width: var(--wide); color: var(--muted); }
 
 
 .specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0; margin-top: var(--s4); border-top: 1px solid var(--rule); }
@@ -534,10 +564,10 @@ table.matrix td.yes { color: var(--ink); font-weight: 520; }
 table.matrix td { padding-right: var(--s2); }
 table.matrix tbody tr:hover td, table.matrix tbody tr:hover th { background: color-mix(in oklab, var(--accent) 7%, transparent); }
 
-.row { padding: var(--s5) 0; border-top: 1px solid var(--rule); }
-.row h2 { font-size: 1.4rem; margin-bottom: var(--s2); }
-.row .answer { font-size: 1.05rem; margin-top: var(--s2); }
-.row .note { color: var(--muted); margin-top: var(--s1); max-width: var(--measure); }
+/* `.row` used to be a comparison section here. No page has carried one since the
+ * matrix replaced it, and the only `class="row"` left in the site is the `<g>`
+ * around each bar of a chart — where `padding` and `border-top` do nothing. The
+ * rules are gone rather than left to be read as live layout. */
 
 .tabs { display: flex; gap: 0; margin-top: var(--s3); border-bottom: 1px solid var(--rule); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -587,7 +617,7 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
   background: color-mix(in oklab, var(--plate) 45%, transparent);
   color: var(--muted);
   font-size: 0.95rem;
-  max-width: var(--measure);
+  max-width: var(--wide); /* INTRO: a note under a plate, not a page of copy. */
 }
 
 /* -------------------------------------------------------------------------
@@ -634,7 +664,11 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
 .entry h2 a { color: inherit; text-decoration: none; }
 .entry h2 a:hover { color: var(--accent); }
 .entry > .cap { border: 0; padding: var(--s2) 0 0; }
-.entry .prose { margin-top: var(--s2); }
+/* INTRO, not READING. An export's prose explains the signature printed directly
+ * above it, so the two share a left edge and very nearly a right one. The module
+ * HEADER prose (`#about`) is the READING role and keeps 65ch: it stands alone in
+ * its own band with no signature block beside it. */
+.entry .prose { margin-top: var(--s2); max-width: var(--wide); }
 
 .kindpill {
   font: 11px/1 var(--mono);
