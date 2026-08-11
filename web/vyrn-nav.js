@@ -636,7 +636,7 @@ function linkFor(target) {
   return target instanceof Element ? target.closest("a[href]") : null;
 }
 
-function shouldIntercept(a, e) {
+export function shouldIntercept(a, e) {
   if (e.defaultPrevented) return false;
   if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return false;
   if (!a || !a.getAttribute("href")) return false;
@@ -647,7 +647,12 @@ function shouldIntercept(a, e) {
   if ((a.getAttribute("rel") || "").split(/\s+/).includes("external")) return false;
   let url;
   try {
-    url = new URL(a.href, location.href);
+    // `getAttribute`, never the `href` PROPERTY. On an SVG `<a>` the property is
+    // an `SVGAnimatedString`, not a string, so `new URL(a.href, …)` resolves the
+    // text "[object SVGAnimatedString]" as a same-origin path and every link
+    // inside a chart navigates to a page that does not exist. The attribute is a
+    // string on both element kinds, and the URL constructor resolves it.
+    url = new URL(a.getAttribute("href"), location.href);
   } catch (_) {
     return false;
   }

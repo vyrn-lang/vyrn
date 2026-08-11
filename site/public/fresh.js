@@ -54,7 +54,7 @@ export async function refreshRelease() {
   const tag = document.querySelector("[data-release-tag]");
   if (tag) tag.textContent = stable.tag;
   const link = document.querySelector("[data-release-link]");
-  if (link) link.href = stable.url;
+  if (link) link.setAttribute("href", stable.url);
   note.hidden = false;
   note.textContent =
     `${stable.tag} is published${stable.pre ? " as a pre-release" : ""}. ` +
