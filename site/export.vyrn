@@ -141,6 +141,10 @@ test "every reference link points at the route the router generated" {
     }
 }
 
+test "a module the reference does not cover answers 404, not an empty page" {
+    assertEq(route(documentRequest("/docs/std/nope")).status, 404)
+}
+
 test "every navigation row points at a route that exists" {
     for row in navRows() {
         let mut found = false
