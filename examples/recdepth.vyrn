@@ -1,0 +1,32 @@
+/// Recursion is bounded, and the bound belongs to the language.
+///
+/// A tree-walking interpreter recurses on the host's stack, a native binary on
+/// the machine's, a wasm module on the engine's. Three stacks, three sizes, so
+/// "how deep may a program go" used to have three answers: at depth 30,000 the
+/// native binary printed 30000 while the reference semantics died with a Rust
+/// runtime message, exit 127, no `file:line` and nothing a Vyrn program could
+/// have caught. That is the one thing this project promises never happens.
+///
+/// So the depth is COUNTED, not left to whichever stack runs out first: 10,000
+/// calls may be in flight, and the 10,001st ends the run with the same words in
+/// every engine. An `extern` does not count (it is the host's frame) and neither
+/// does a lambda body (it has no name to call itself by, so it cannot recurse
+/// without passing through a named function like this one).
+///
+/// The trap is last, because it ends the run — this example is a three-way
+/// parity citizen through its stdout, its stderr and its exit code, like the
+/// other trapping examples.
+fn down(n: Int64) -> Int64 {
+    if n <= 0 {
+        return 0
+    }
+    return 1 + down(n - 1)
+}
+
+fn main() -> Int64 {
+    // Exactly at the budget: `main` holds one frame and `down` takes 9,999 more.
+    print("\{down(9998)}")
+    // One past it. The run ends here.
+    print("\{down(9999)}")
+    return 0
+}

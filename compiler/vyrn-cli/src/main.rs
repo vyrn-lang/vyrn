@@ -384,11 +384,21 @@ fn real_main() -> ExitCode {
 
     match cmd {
         "fix" => fix_cmd(path, &source),
+        // `check` has to predict `build` about the one thing `build` can fail to
+        // FINISH (audit A5.2). Monomorphization is only visible while emitting,
+        // so `check` emits and throws the code away, and reports the depth
+        // refusal alone — every other codegen error stays `build`'s.
         "check" => match load_program(path, &source) {
-            Ok(_) => {
-                println!("ok");
-                ExitCode::SUCCESS
-            }
+            Ok(program) => match vyrn_codegen::check_instantiations(&program) {
+                Ok(()) => {
+                    println!("ok");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            },
             Err(code) => code,
         },
         "run" => {

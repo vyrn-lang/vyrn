@@ -10,6 +10,27 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+/// The most Vyrn calls that may be in flight at once, in EVERY engine (audit
+/// A5.3, RFC-0016 addendum).
+///
+/// A recursion limit is the language's, not the interpreter's. Without one the
+/// three engines disagreed about the same program: at depth 30,000 the native
+/// binary printed the answer while the reference semantics aborted with a Rust
+/// runtime message, exit 127, no `file:line`. Counting the calls — here, and in
+/// each backend's function prologue — is what makes the outcome the same
+/// everywhere, and makes it a Vyrn diagnostic rather than a death.
+///
+/// 10,000 is what every engine can actually reach today: the interpreter spends
+/// ~8.5 KB of Rust stack per Vyrn call against a 256 MB stack, the native binary
+/// and `wasmtime` both run past 20,000 frames of an ordinary function. It is
+/// also the depth other reference implementations settle near, and it is far
+/// past what a recursive descent over real data needs.
+///
+/// An `extern` is NOT counted: it is the host's frame, and no backend gives it a
+/// Vyrn prologue. Neither is a lambda body, which has no name to call itself by
+/// (RFC-0037) and so cannot recurse without passing through a named function.
+pub const CALL_DEPTH_LIMIT: u32 = 10_000;
+
 /// A fast, non-cryptographic hasher for the interpreter's own maps.
 ///
 /// Scope frames are `name -> Slot`, and a variable reference hashes its name on
@@ -1954,6 +1975,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
             .flatten()
             .collect(),
         region_depth: std::cell::Cell::new(0),
+        call_depth: std::cell::Cell::new(0),
         globals: RefCell::new(Frame::default()),
         args: prog_args.to_vec(),
         mono_counter: std::cell::Cell::new(0),
@@ -2005,6 +2027,8 @@ struct Interp<'a> {
     /// on a fixed 64-slot arena stack and traps past it; the interpreter
     /// enforces the same bound so the two stay observably identical.
     region_depth: std::cell::Cell<usize>,
+    /// Vyrn calls currently in flight ([`CALL_DEPTH_LIMIT`]).
+    call_depth: std::cell::Cell<u32>,
     /// Persistent module-state frame (RFC-0013): every function-call scope stack
     /// bottoms out on this. Populated once (in declaration order) before
     /// `main`; variable reads/writes fall back to it when the local scope misses.
@@ -2394,6 +2418,28 @@ impl<'a> Interp<'a> {
     /// Like [`call`], but also returns the final values of the parameters (so the
     /// caller can copy `modify` parameters back — call-by-value-result).
     fn call_capturing(&self, name: &str, args: &[Val]) -> Result<(Val, Vec<Val>), Ctrl> {
+        // An `extern` (RFC-0012) is the host's frame, not Vyrn's, and no backend
+        // gives it one to count; an unknown name errors before any frame exists.
+        // Both are excluded so the three engines count exactly the same calls.
+        let counted = self.funcs.get(name).is_some_and(|f| !f.is_extern);
+        if counted {
+            let d = self.call_depth.get() + 1;
+            if d > CALL_DEPTH_LIMIT {
+                return Err(Ctrl::Err(format!("call depth exceeds {CALL_DEPTH_LIMIT}")));
+            }
+            self.call_depth.set(d);
+        }
+        let r = self.call_capturing_inner(name, args);
+        // Balanced on every path out, including a trap the caller catches: a
+        // `test` run calls many bodies in one process, and a depth left behind
+        // would refuse the next one.
+        if counted {
+            self.call_depth.set(self.call_depth.get() - 1);
+        }
+        r
+    }
+
+    fn call_capturing_inner(&self, name: &str, args: &[Val]) -> Result<(Val, Vec<Val>), Ctrl> {
         let f = self
             .funcs
             .get(name)
