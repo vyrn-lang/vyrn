@@ -610,6 +610,63 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
 
 
 /* -------------------------------------------------------------------------
+   The reference (/docs and /docs/std/*). Generated from std/ at build time, so
+   the styling has to hold for a module with one export and for one with 44.
+   ------------------------------------------------------------------------- */
+
+.modlist { list-style: none; padding: 0; margin: var(--s4) 0 0; }
+.modlist li {
+  display: grid;
+  grid-template-columns: 160px 40px 1fr;
+  gap: var(--s2);
+  align-items: baseline;
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--hair);
+}
+.modlist a { font: 13px/1.6 var(--mono); color: var(--accent); text-decoration: none; }
+.modlist a:hover { text-decoration: underline; }
+.modlist .count { font: 12px/1.6 var(--mono); color: var(--n2); text-align: right; }
+.modlist .note { color: var(--muted); font-size: 0.92rem; }
+
+.entry { padding: var(--s5) 0 0; }
+.entry + .entry { border-top: 1px solid var(--hair); margin-top: var(--s5); }
+.entry h2 { font: 600 1.25rem/1.2 var(--mono); letter-spacing: -0.01em; }
+.entry h2 a { color: inherit; text-decoration: none; }
+.entry h2 a:hover { color: var(--accent); }
+.entry > .cap { border: 0; padding: var(--s2) 0 0; }
+.entry .prose { margin-top: var(--s2); }
+
+.kindpill {
+  font: 11px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin-left: var(--s1);
+  vertical-align: middle;
+}
+
+.prose ul.docprose { padding-left: var(--s3); }
+.prose ul.docprose li { margin-top: var(--s1); line-height: 1.65; }
+.prose code, .modlist code, .entry code { font-size: 0.92em; }
+pre.doccode {
+  margin: var(--s3) 0 0;
+  padding: var(--s2);
+  border-left: 1px solid var(--rule);
+  overflow-x: auto;
+  font: 13px/1.7 var(--mono);
+  color: var(--muted);
+  tab-size: 4;
+}
+
+@media (max-width: 1024px) {
+  .modlist li { grid-template-columns: 1fr 40px; }
+  .modlist .note { grid-column: 1 / 3; }
+}
+
+/* -------------------------------------------------------------------------
    Reflow
    ------------------------------------------------------------------------- */
 

@@ -1,0 +1,79 @@
+<script>
+// GET /docs/std/[module] — one standard library module, generated from its source.
+//
+// Nothing on this page is written by hand. `site/app/apidoc.vyrn` lexes every
+// `std/*.vyrn` while the site compiles and emits the reference as Vyrn source:
+// each export's signature exactly as it is written, its `///` prose, and the
+// line it sits on. The signature is coloured by the compiler's own lexer, which
+// is the same highlighter every other snippet on the site uses.
+//
+// A String segment binds the module name, and the query returns
+// `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
+// themed error page at 404 instead of an empty page.
+import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine } from "../../../docs"
+import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
+import { pageHead } from "../../../nav"
+params { module: String }
+
+/// One module's whole page: its name, its header prose, and its exports.
+type ModuleDoc = { name: String, intro: String, entries: Array<ApiEntry> }
+
+/// The document title names the module, because a reader with twelve tabs open
+/// is reading the title, not the page.
+export fn head(d: ModuleDoc) -> Head {
+    return pageHead("std/" + d.name + " — Vyrn")
+}
+
+export fn data() -> ParamQuery<Params, Result<ModuleDoc, PageError>> {
+    return paramQuery(fetchModule)
+}
+
+fn fetchModule(p: Params) -> Result<ModuleDoc, PageError> {
+    if !apiKnown(p.module) {
+        return Err(notFound("std/" + p.module + " is not a module"))
+    }
+    return Ok(ModuleDoc { name: p.module.copy(), intro: apiIntro(p.module), entries: apiEntries(p.module) })
+}
+
+/// The anchor an export is linked by. Two exports of one module never share a
+/// name, so the name is the identifier.
+fn anchorOf(name: String) -> String {
+    return "e-" + name
+}
+
+/// The link to an export, within this page.
+fn hrefFor(name: String) -> String {
+    return "#" + anchorOf(name)
+}
+</script>
+
+<template>
+<main class="page docpage">
+    <section class="hero">
+        <p class="eyebrow"><a href="/docs.html">Docs</a> — the standard library</p>
+        <h1 class="display">std/{{ data.name }}</h1>
+        <p class="lede">{{ data.entries.length }} exports, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
+        <p class="notice"><a :href="apiSource(data.name)">Read the source</a> — the one thing this site does not host.</p>
+    </section>
+
+    <section class="band" id="exports">
+        <p class="eyebrow">On this page</p>
+        <div class="modgrid">
+            <a v-for="e in data.entries" :key="e.name" :href="hrefFor(e.name)">{{ e.name }}</a>
+        </div>
+    </section>
+
+    <section class="band" id="about">
+        <div class="prose" v-html="data.intro"></div>
+    </section>
+
+    <section class="band" id="api">
+        <article class="entry" v-for="e in data.entries" :key="e.name" :id="anchorOf(e.name)">
+            <h2><a :href="hrefFor(e.name)">{{ e.name }}</a> <span class="kindpill">{{ e.kind }}</span></h2>
+            <pre class="code" v-html="e.sig"></pre>
+            <div class="prose" v-html="e.prose"></div>
+            <p class="cap"><a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a></p>
+        </article>
+    </section>
+</main>
+</template>

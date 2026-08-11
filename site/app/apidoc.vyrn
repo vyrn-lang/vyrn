@@ -297,7 +297,7 @@ fn proseHtml(doc: String) -> String {
 }
 
 /// The one-line summary for the module list: the first sentence of the header
-/// block, as plain escaped text.
+/// block, with its code spans intact.
 fn summaryOf(doc: String) -> String {
     let mut flat = ""
     for line in split(doc, "\n") {
@@ -320,7 +320,7 @@ fn summaryOf(doc: String) -> String {
         }
         i = i + 1
     }
-    return escapeHtml(substring(flat, 0, cut))
+    return inlineHtml(substring(flat, 0, cut))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,10 +382,10 @@ export gen fn apiDocs(stdDir: String) -> String {
             }
             let toks = lex(src)
             mods.push(Mod {
-                name: substring(entry, 0, entry.byteLength - 5),
-                doc: headerDoc(toks),
-                entries: exportsOf(src, toks),
-            })
+                    name: substring(entry, 0, entry.byteLength - 5),
+                    doc: headerDoc(toks),
+                    entries: exportsOf(src, toks),
+                })
         }
     }
 
