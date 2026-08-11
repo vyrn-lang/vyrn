@@ -47,6 +47,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: The tag and the crate version must agree
+        shell: bash
+        working-directory: compiler
+        # `vyrn --version` prints `CARGO_PKG_VERSION`, and the archive carries a
+        # `VERSION` file. Two spellings of one fact drift, so this fails the
+        # release before it builds anything rather than shipping a binary that
+        # disagrees with the tag beside it.
+        run: |
+          set -eu
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' vyrn-cli/Cargo.toml | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} but compiler/vyrn-cli/Cargo.toml says $crate" >&2
+            exit 1
+          fi
+
       - name: Build the CLI
         working-directory: compiler
         # `--target` is named explicitly rather than left implicit so the
@@ -68,7 +84,8 @@ jobs:
         #   web/          the browser-side runtimes `vyrn dev` serves
         #                 (main.rs::web_root, same walk-up rule)
         #   README.md     what this is
-        #   VERSION       the tag, because `vyrn` has no --version flag yet
+        #   VERSION       the tag, which the step above proved is what
+        #                 `vyrn --version` prints
         # There is deliberately NO LICENSE file: the repository does not have
         # one. See docs/releasing.md.
         run: |

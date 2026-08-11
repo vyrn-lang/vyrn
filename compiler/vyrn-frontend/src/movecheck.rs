@@ -5405,12 +5405,10 @@ mod tests {
 
         // A copy is a value of this frame's, and so is a key with no other
         // owner — neither is refused.
-        assert!(
-            run("fn build(ks: Array<String>) -> Map<String, Int64> \
+        assert!(run("fn build(ks: Array<String>) -> Map<String, Int64> \
                  { let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m } \
                  fn main() -> Int64 { return 0 }")
-            .is_ok()
-        );
+        .is_ok());
         assert!(
             run("fn main() -> Int64 { let mut m: Map<String, Int64> = [:] \
                  m[\"a\" + \"b\"] = 1 return 0 }")
