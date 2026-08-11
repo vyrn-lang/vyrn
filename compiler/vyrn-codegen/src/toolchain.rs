@@ -110,7 +110,7 @@ void* __vyrn_realloc(void* p, unsigned long long n) {
 /* ---- String header (RFC-0089 M1a) --------------------------------------- */
 /* A Vyrn String is still a NUL-terminated `char*`, so every C sink here keeps
    working. What is new is the sixteen bytes in FRONT of it: { long long len,
-   long long cap }. `cap == 0` means static: never realloc'd, never freed. The
+   long long cap }. A cap of -1 means static: never realloc'd, never freed. The
    IR carries the public accessors (`@__vyrn_str_new` and friends); these three
    are private to the shim so the two definitions cannot collide at link. */
 #define VSTR_HDR 16

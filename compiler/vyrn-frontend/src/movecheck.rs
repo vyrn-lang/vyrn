@@ -904,13 +904,113 @@ struct Consumption {
     hole: bool,
 }
 
-/// Consumed places: PATH -> what took it (RFC-0093).
+/// Consumed places: PATH -> what took it (RFC-0093), bucketed by ROOT.
 ///
 /// It was keyed by root name until the take arrived. A take makes a hole in one
 /// path rather than emptying the whole binding, so `consume er.node` records
 /// `er.node` and leaves `er.next` readable. A whole-binding move still records
 /// the bare name, which is the same key it always recorded.
-type Consumed = HashMap<String, Consumption>;
+///
+/// The root is back, one level up. A flat `HashMap<String, Consumption>` bought
+/// nothing: [`overlaps`] is a string-prefix relation, so every use paid the hash
+/// AND then scanned the whole map anyway — 250 / 500 / 1,000 / 2,000 drops
+/// interleaved with reads of a live binding measured 10 / 15 / 31 / 99 ms, which
+/// is quadratic. [`overlaps`] is false whenever the roots differ ([`under`] is
+/// `starts_with` at a `.` boundary, and `root_of` cuts at the first `.` or `[`),
+/// so one bucket holds every path a given use can collide with, and a lookup
+/// replaces the scan.
+#[derive(Clone, Default)]
+struct Consumed(HashMap<String, HashMap<String, Consumption>>);
+
+impl Consumed {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn insert(&mut self, path: String, c: Consumption) {
+        self.0
+            .entry(root_of(&path).to_string())
+            .or_default()
+            .insert(path, c);
+    }
+
+    /// Record `c` for `path` only if the path has no consumption yet — the merge
+    /// after a branch, where the FIRST arm to consume a path names the line.
+    fn or_insert(&mut self, path: String, c: Consumption) {
+        self.0
+            .entry(root_of(&path).to_string())
+            .or_default()
+            .entry(path)
+            .or_insert(c);
+    }
+
+    fn get(&self, path: &str) -> Option<&Consumption> {
+        self.0.get(root_of(path))?.get(path)
+    }
+
+    fn contains_key(&self, path: &str) -> bool {
+        self.get(path).is_some()
+    }
+
+    fn remove(&mut self, path: &str) {
+        let root = root_of(path);
+        if let Some(b) = self.0.get_mut(root) {
+            b.remove(path);
+            if b.is_empty() {
+                self.0.remove(root);
+            }
+        }
+    }
+
+    /// A write to `path` revives it and every path inside it — one bucket, since
+    /// nothing outside `path`'s root can be inside `path`.
+    fn revive(&mut self, path: &str) {
+        let root = root_of(path);
+        if let Some(b) = self.0.get_mut(root) {
+            b.retain(|k, _| k != path && !under(k, path));
+            if b.is_empty() {
+                self.0.remove(root);
+            }
+        }
+    }
+
+    /// Every recorded path that names storage overlapping `path`. The one bucket
+    /// the roots can agree on, which is the whole of the fix.
+    fn overlapping<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> impl Iterator<Item = (&'a String, &'a Consumption)> {
+        self.0
+            .get(root_of(path))
+            .into_iter()
+            .flat_map(|b| b.iter())
+            .filter(move |(k, _)| overlaps(k, path))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&String, &Consumption)> {
+        self.0.values().flat_map(|b| b.iter())
+    }
+}
+
+impl IntoIterator for Consumed {
+    type Item = (String, Consumption);
+    type IntoIter = std::vec::IntoIter<(String, Consumption)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Consumed {
+    type Item = (&'a String, &'a Consumption);
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
 
 /// Whether two place paths name overlapping storage: equal, or one a prefix of
 /// the other at a `.`/`[` boundary.
@@ -952,7 +1052,7 @@ fn under(long: &str, short: &str) -> bool {
 /// downward: writing `er.node` fills that field, it does not put back an `er`
 /// that was moved away whole.
 fn revive(consumed: &mut Consumed, path: &str) {
-    consumed.retain(|k, _| k != path && !under(k, path));
+    consumed.revive(path);
 }
 
 impl Consumption {
@@ -983,7 +1083,7 @@ impl MoveCheck<'_> {
             .enumerate()
             .map(|(i, p)| (p.name.clone(), i))
             .collect();
-        let mut consumed: Consumed = HashMap::new();
+        let mut consumed = Consumed::default();
         let mut scope: Vec<HashSet<String>> =
             vec![f_params.iter().map(|p| p.name.clone()).collect()];
         // Module state is the outermost frame, the parameters the next one — the
@@ -1609,8 +1709,7 @@ impl MoveCheck<'_> {
         // Deterministic: the earliest consumption wins, ties broken by path, so
         // one program prints one message however the map is laid out.
         let Some((key, c)) = consumed
-            .iter()
-            .filter(|(k, _)| overlaps(k, path))
+            .overlapping(path)
             .min_by(|(ak, a), (bk, b)| (a.line, *ak).cmp(&(b.line, *bk)))
         else {
             return Ok(());
@@ -2575,12 +2674,12 @@ impl MoveCheck<'_> {
                 // considered moved on the fall-through (RFC-0060).
                 if !then_div {
                     for (k, v) in then_c {
-                        consumed.entry(k).or_insert(v);
+                        consumed.or_insert(k, v);
                     }
                 }
                 if !else_div {
                     for (k, v) in else_c {
-                        consumed.entry(k).or_insert(v);
+                        consumed.or_insert(k, v);
                     }
                 }
                 Ok(then_div && else_div)
@@ -2660,12 +2759,12 @@ impl MoveCheck<'_> {
                 };
                 if !then_div {
                     for (k, v) in then_c {
-                        consumed.entry(k).or_insert(v);
+                        consumed.or_insert(k, v);
                     }
                 }
                 if !else_div {
                     for (k, v) in else_c {
-                        consumed.entry(k).or_insert(v);
+                        consumed.or_insert(k, v);
                     }
                 }
                 Ok(then_div && else_div)
@@ -2680,7 +2779,7 @@ impl MoveCheck<'_> {
                 let body_div = self.block(body, &mut body_c, scope);
                 self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
                 for (k, v) in body_c {
-                    consumed.entry(k).or_insert(v);
+                    consumed.or_insert(k, v);
                 }
                 Ok(false)
             }
@@ -2771,7 +2870,7 @@ impl MoveCheck<'_> {
                 body_c.remove(var);
                 self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
                 for (k, v) in body_c {
-                    consumed.entry(k).or_insert(v);
+                    consumed.or_insert(k, v);
                 }
                 // The container is dead after a consuming loop: using it again is
                 // the rule 1 error `expr` already reports.
@@ -3199,7 +3298,7 @@ impl MoveCheck<'_> {
                         None => merged = Some(c),
                         Some(m) => {
                             for (k, v) in c {
-                                m.entry(k).or_insert(v);
+                                m.or_insert(k, v);
                             }
                         }
                     }
@@ -3228,7 +3327,7 @@ impl MoveCheck<'_> {
                     self.expr(eb, &mut else_c, scope)?;
                 }
                 for (k, v) in then_c.into_iter().chain(else_c) {
-                    consumed.entry(k).or_insert(v);
+                    consumed.or_insert(k, v);
                 }
                 Ok(())
             }
@@ -3258,12 +3357,13 @@ impl MoveCheck<'_> {
                                     by: format!("`{}(..)`", crate::parser::method_surface(name)),
                                 },
                             );
-                            consumed
-                                .entry(v.clone())
-                                .or_insert(Consumption::by_capability(
+                            consumed.or_insert(
+                                v.clone(),
+                                Consumption::by_capability(
                                     *line,
                                     format!("`{}(..)`", crate::parser::method_surface(name)),
-                                ));
+                                ),
+                            );
                         }
                     } else if self.decl.constructs(name) {
                         self.note_retention(arg);
@@ -3379,12 +3479,10 @@ impl MoveCheck<'_> {
                             if !Self::in_scope(scope, v) {
                                 self.reject_consume_global(v, name, true, *vl)?;
                             }
-                            consumed
-                                .entry(v.clone())
-                                .or_insert(Consumption::by_capability(
-                                    *line,
-                                    format!("`spawn {name}(..)`"),
-                                ));
+                            consumed.or_insert(
+                                v.clone(),
+                                Consumption::by_capability(*line, format!("`spawn {name}(..)`")),
+                            );
                         }
                     }
                 }

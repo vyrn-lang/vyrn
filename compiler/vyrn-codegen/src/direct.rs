@@ -2605,26 +2605,34 @@ impl Fn_<'_> {
         self.region_bump(b, 1);
     }
 
-    /// Pop a region scope. Stack-neutral, so it may be emitted with a return value
-    /// already on the operand stack — the same property M2f's `modify` copy-out
-    /// needs and M2d's note about a value sitting under a block established.
+    /// Pop a region scope and free what it allocated. Stack-neutral, so it may be
+    /// emitted with a return value already on the operand stack — the same
+    /// property M2f's `modify` copy-out needs and M2d's note about a value sitting
+    /// under a block established.
     ///
-    /// It reclaims nothing, and that is this backend's allocator showing through
-    /// rather than a region-specific hole: `malloc` is a bump pointer that never
-    /// frees for `push`, for a cell payload and for `Stmt::Drop` alike (see
-    /// `runtime`). What a region owns that IS finite is this counter, so the
-    /// counter is what has to be exact.
+    /// This used to reclaim nothing, on the argument that `malloc` here was a bump
+    /// pointer that never freed, "so the difference is not observable". The
+    /// premise died at M6, when this backend got a segregated free list, and the
+    /// omission then leaked every `String` a region held: one source file measured
+    /// 13.4 MB native against 3,664.5 MB and `out of memory` under wasmtime (the
+    /// external audit's finding C2.1). The arena the note deferred is what
+    /// `region_keep` and `rt.region_free` are.
     ///
-    /// ponytail: no arena reclamation. The sound version is a SEPARATE bump arena
-    /// with a per-region mark, routed lexically the way `Gen::heap_alloc` routes in
-    /// the textual backend — marking the shared heap would reclaim the array buffer
-    /// a `push` inside a region grew for a binding outside it, and routing on the
-    /// *runtime* depth instead would arena-allocate a callee's String that the
-    /// region escape guard never examined. Both are silent wrong answers, and the
-    /// difference between them and this is not observable, so it waits for a real
-    /// allocator here.
+    /// Routing is LEXICAL, as `Gen::heap_alloc` routes in the textual backend:
+    /// `Fn_::expr` keeps the value of an expression that allocated a `String`
+    /// while the emitter is inside a region. Routing on the *runtime* depth
+    /// instead would arena-allocate a callee's `String` that the region escape
+    /// guard never examined, and free it under its caller.
     fn region_exit(&mut self, b: &mut Frame) {
-        self.region_bump(b, -1);
+        b.ins(&Instruction::Call(self.cx.rt.region_free));
+    }
+
+    /// Leave a region WITHOUT freeing its blocks, for a `return` (and a `?`) that
+    /// carries one of them out. The value belongs to the caller now; the frame's
+    /// other blocks leak, which is the trade the textual `__vyrn_region_pop`
+    /// makes for the same reason.
+    fn region_pop(&mut self, b: &mut Frame) {
+        b.ins(&Instruction::Call(self.cx.rt.region_pop));
     }
 
     fn region_bump(&mut self, b: &mut Frame, by: i32) {
@@ -2638,9 +2646,15 @@ impl Fn_<'_> {
     }
 
     /// Close every region scope open past `depth`, for an edge that leaves them.
-    fn exit_regions_above(&mut self, b: &mut Frame, depth: u32) {
+    /// `frees` is false on the one edge that hands a block out — see
+    /// [`Fn_::region_pop`].
+    fn exit_regions_above(&mut self, b: &mut Frame, depth: u32, frees: bool) {
         for _ in depth..self.region_depth {
-            self.region_exit(b);
+            if frees {
+                self.region_exit(b);
+            } else {
+                self.region_pop(b);
+            }
         }
     }
 
@@ -2740,12 +2754,18 @@ impl Fn_<'_> {
                 // binding that names somebody else's storage (`let mut s = r.name`
                 // is a borrow, not a move) would free that storage instead, which
                 // is why the answer is read rather than assumed.
+                //
+                // A LITERAL initializer is somebody else's storage too: `let mut
+                // acc = ""` is droppable (`own` answers for the buffer the loop
+                // ENDS on) and its first append would otherwise grow a data
+                // segment address in place. The textual backend carries the same
+                // second half, and the module-state seed always did.
                 let owns = self.drops.contains_key(&(s as *const Stmt as usize));
                 if let Place::Local(l) = place {
                     if self.cx.resolve(&bound) == Type::Str
                         && self.append_ok.contains(name.as_str())
                     {
-                        self.str_append_shadow(b, l, owns);
+                        self.str_append_shadow(b, l, owns && !matches!(value, Expr::Str(_)));
                     }
                 }
                 // A `let` that owns a heap value is reclaimed when this block
@@ -2922,12 +2942,11 @@ impl Fn_<'_> {
                 self.emit_releases_above(m, b, 0)?;
                 // And every region scope, for the same reason the interpreter
                 // decrements its counter on this path: a `return` out of a region
-                // leaves it. The textual backend does NOT — see the M2m note; there
-                // that omission is load-bearing, because its `region_exit` also
-                // frees the arena and a returned `a + b` built inside the region
-                // points into it. Nothing here frees, so nothing here can dangle,
-                // and the counter can simply be right.
-                self.exit_regions_above(b, 0);
+                // leaves it. It POPS rather than frees, because a returned
+                // `a + b` built inside the region points into the arena and its
+                // caller owns it now — the same split the textual backend makes
+                // between `__vyrn_region_pop` and `__vyrn_region_exit`.
+                self.exit_regions_above(b, 0, false);
                 b.ins(&Instruction::Br(self.depth));
             }
             Stmt::If {
@@ -3275,7 +3294,7 @@ impl Fn_<'_> {
                     .last()
                     .ok_or_else(|| gap("`break` outside a loop", *line))?;
                 self.emit_releases_above(m, b, boundary)?;
-                self.exit_regions_above(b, regions);
+                self.exit_regions_above(b, regions, true);
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
             }
@@ -3285,7 +3304,7 @@ impl Fn_<'_> {
                     .last()
                     .ok_or_else(|| gap("`continue` outside a loop", *line))?;
                 self.emit_releases_above(m, b, boundary)?;
-                self.exit_regions_above(b, regions);
+                self.exit_regions_above(b, regions, true);
                 let d = self.br_to(cont);
                 b.ins(&Instruction::Br(d));
             }
@@ -3879,16 +3898,36 @@ impl Fn_<'_> {
     /// Evaluate `e`, leaving its value (a scalar) or its address (an aggregate)
     /// on the stack, and giving the Vyrn type of what it left.
     ///
-    /// The wrapper keeps ONE fact: whether this expression is a call argument
-    /// whose value the CALLER releases once the call is done with it
-    /// (`rfcs/census-call-arguments.md`). `own` decided that, per argument node;
-    /// this tees the pointer into a local so [`Fn_::call`] can hand it back
-    /// after the call. The tee is HERE — where the argument is evaluated —
-    /// rather than at the call, so the evaluation order stays the one the
-    /// program wrote.
+    /// The wrapper keeps TWO facts.
+    ///
+    /// One: whether this expression is a call argument whose value the CALLER
+    /// releases once the call is done with it (`rfcs/census-call-arguments.md`).
+    /// `own` decided that, per argument node; this tees the pointer into a local
+    /// so [`Fn_::call`] can hand it back after the call. The tee is HERE — where
+    /// the argument is evaluated — rather than at the call, so the evaluation
+    /// order stays the one the program wrote.
+    ///
+    /// Two: whether this expression ALLOCATED a `String` while the emitter is
+    /// inside a `region`, in which case the arena owns the block and frees it at
+    /// the closing brace ([`Fn_::region_exit`]). This is the lexical routing the
+    /// textual backend does inside `Gen::heap_alloc`, at the one funnel this
+    /// backend has for it. Inside a region the two facts never both fire: the
+    /// arena is the single owner there, which is why the argument release above
+    /// stands down.
+    ///
+    /// ponytail: [`vyrn_frontend::own::str_temporary`] answers for `@concat`,
+    /// `@str` and a String `+` — every allocating shape a region has been used
+    /// for, and the audit's own repro. A `String` a runtime helper builds
+    /// (`slice`, `join`, `readLine`) is still the recorded leak it is outside a
+    /// region; widening this means asking `own` for a per-call verdict, not a
+    /// second rule here.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.region_depth == 0 && self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
+        if self.region_depth > 0 {
+            if t == Type::Str && vyrn_frontend::own::str_temporary(e) {
+                b.ins(&Instruction::Call(self.cx.rt.region_keep));
+            }
+        } else if self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push(l);
@@ -10429,7 +10468,7 @@ impl Fn_<'_> {
         // going. The value is already copied through `dest`, so neither of these
         // can disturb it — the same reason the `return` arm does them here.
         self.emit_releases_above(m, b, 0)?;
-        self.exit_regions_above(b, 0);
+        self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
         b.ins(&Instruction::End);
@@ -10524,7 +10563,7 @@ impl Fn_<'_> {
         });
         // The same two unwinds `?` owes as `return`-minus-the-keyword.
         self.emit_releases_above(m, b, 0)?;
-        self.exit_regions_above(b, 0);
+        self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
         b.ins(&Instruction::End);
@@ -11922,6 +11961,16 @@ struct Rt {
     parse_i64: u32,
     line_at: u32,
     col_at: u32,
+    /// `region_keep(bytes) -> bytes` — record a `String` block in the innermost
+    /// region's arena. See [`Fn_::region_exit`].
+    region_keep: u32,
+    /// `region_free()` — free every block the innermost region recorded, then its
+    /// vector, then pop. The exit a fall-through, a `break` and a `continue` take.
+    region_free: u32,
+    /// `region_pop()` — free the vector and pop, leaving the blocks alone. The
+    /// exit a `return` (and `?`) takes, because the value it carries out is one of
+    /// them and belongs to the caller now.
+    region_pop: u32,
     count: u32,
     msg_div0: u32,
     msg_rem0: u32,
@@ -11944,6 +11993,18 @@ struct Rt {
     /// gives it back; past [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] it traps
     /// with the words the interpreter and the native binary use.
     call_depth: u32,
+    /// The arena's own bookkeeping, one word per open region: the address of a
+    /// vector of block pointers, how many it holds, and how many it has room for.
+    /// 64 of each, the depth the counter above bounds.
+    ///
+    /// A side vector rather than a link inside each block, for the reason the
+    /// textual backend's `REGION_RUNTIME` gives at length: a block the arena hands
+    /// out has to be exactly what `malloc` returned, or the `free` that a `return`
+    /// out of a region leaves to the caller is handed a pointer into the middle of
+    /// one.
+    region_vec: u32,
+    region_len: u32,
+    region_cap: u32,
     /// The free list head of each size class (RFC-0077 M6), `MAX_CLASS -
     /// MIN_CLASS + 1` words. Zero-filled by `reserve`, which is what an empty
     /// list is.
@@ -12032,6 +12093,9 @@ impl Rt {
             parse_i64: slot("parse_i64"),
             line_at: slot("line_at"),
             col_at: slot("col_at"),
+            region_keep: slot("region_keep"),
+            region_free: slot("region_free"),
+            region_pop: slot("region_pop"),
             // Derived, not declared. The data segment addresses are filled in by
             // `runtime` as it interns them.
             count: 0,
@@ -12046,6 +12110,9 @@ impl Rt {
             region_sp: 0,
             msg_calldepth: 0,
             call_depth: 0,
+            region_vec: 0,
+            region_len: 0,
+            region_cap: 0,
             heads: 0,
         };
         rt.count = table.len() as u32;
@@ -12073,14 +12140,21 @@ impl Rt {
     /// the BYTES, so a literal is an ordinary `String` pointer and every C-shaped
     /// consumer still scans for the zero.
     ///
-    /// `cap` is 0 — the runtime's word for static. `free` already refuses
+    /// `cap` is all ones — the runtime's word for static, and the same word the
+    /// textual backend writes at twice the width. `free` here already refuses
     /// anything below `HEAP_BASE`; this makes the refusal a fact in the value
     /// rather than a fact about the address.
+    ///
+    /// It was 0 until the audit measured what 0 costs on the backend that DOES
+    /// read the capacity to answer this: an empty String built at run time has
+    /// capacity 0, so the native free read it as a literal and leaked it. This
+    /// backend never had the leak, and it carries the new sentinel anyway —
+    /// two answers to "is this a literal" is how the two backends drift.
     ///
     /// Four-byte aligned so the two header words load aligned.
     fn intern(&self, m: &mut Module, s: &str) -> u32 {
         let mut bytes = (s.len() as u32).to_le_bytes().to_vec();
-        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         bytes.extend_from_slice(s.as_bytes());
         bytes.push(0);
         m.data(&bytes, 4) + SHDR
@@ -12093,9 +12167,15 @@ impl Rt {
 ///
 /// `s.byteLength` is a load off it. `a + b` reads two. RFC-0081's `str_append`
 /// used to keep the same pair beside the variable; the header IS that pair now.
-/// And `cap == 0` marks a data-segment literal, so a drop site knows what it may
-/// hand back without knowing where the pointer came from.
+/// And an all-ones `cap` marks a data-segment literal, so a drop site knows what
+/// it may hand back without knowing where the pointer came from. A capacity of
+/// zero is an ordinary empty buffer, and freeing it is the whole of C2.3.
 const SHDR: u32 = 8;
+
+/// How many `region` scopes may be open at once. The textual prelude's fixed
+/// stack and the interpreter's own limit are the same number, so all three
+/// engines refuse the same nesting with the same words.
+const REGION_MAX: u32 = 64;
 
 /// Replace a `String` pointer on the stack with the address of its header.
 /// [`word`] then reads `len` and [`cap_at`] reads `cap`.
@@ -12171,6 +12251,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         ),
     );
     rt.call_depth = m.reserve(4, 4);
+    rt.region_vec = m.reserve(4 * REGION_MAX, 4);
+    rt.region_len = m.reserve(4 * REGION_MAX, 4);
+    rt.region_cap = m.reserve(4 * REGION_MAX, 4);
 
     // write_all(fd, ptr, len) — the ONE place bytes leave this module.
     //
@@ -13456,6 +13539,194 @@ fn text_runtime(m: &mut Module, rt: &Rt) {
             b.ins(&Instruction::LocalGet(out));
         },
     );
+
+    // region_keep(bytes) -> bytes — the arena's record of one `String` block.
+    //
+    // RFC-0004 §4's arena, on this backend at last. What it stores is
+    // `bytes - SHDR`, which is exactly what `malloc` handed `str_new`, so
+    // `region_free` below gives `free` a pointer `malloc` produced — the same
+    // invariant the textual `REGION_RUNTIME` states, and the reason the record
+    // lives in a side vector instead of in front of the block.
+    //
+    // Outside every region it does nothing and hands the pointer straight back.
+    // The emitter only calls it inside one, so that arm is a safety net, not a
+    // path: it is one compare, and the alternative is trusting a depth counted in
+    // two places to agree.
+    let (sp0, vec0, len0, cap0) = (rt.region_sp, rt.region_vec, rt.region_len, rt.region_cap);
+    let (malloc0, free0) = (rt.malloc, rt.free);
+    rt.next_is(m, rt.region_keep);
+    m.func(
+        &[ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32; 4],
+        0,
+        |b| {
+            let (off, len, cap, nv) = (2, 3, 4, 5);
+            // `sp == 0` → not in a region; hand it back untouched.
+            b.ins(&Instruction::I32Const(sp0 as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::Return)
+                .ins(&Instruction::End);
+            // `off = (sp - 1) * 4` — the byte offset of this frame's three words.
+            b.ins(&Instruction::I32Const(sp0 as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(4))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::LocalSet(off));
+            let at = |b: &mut Frame, base: u32| {
+                b.ins(&Instruction::I32Const(base as i32))
+                    .ins(&Instruction::LocalGet(off))
+                    .ins(&Instruction::I32Add);
+            };
+            at(b, len0);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalSet(len));
+            at(b, cap0);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalSet(cap));
+            // Full: 16 the first time, else double. Allocate, copy, hand the old
+            // vector back — `malloc` has no in-place extend, exactly as `push` and
+            // `str_append` find.
+            b.ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                .ins(&Instruction::I32Const(16))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalSet(cap));
+            b.ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(4))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::Call(malloc0))
+                .ins(&Instruction::LocalTee(nv));
+            at(b, vec0);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(4))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            at(b, vec0);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::Call(free0));
+            at(b, vec0);
+            b.ins(&Instruction::LocalGet(nv))
+                .ins(&Instruction::I32Store(word()));
+            at(b, cap0);
+            b.ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::End);
+            // `vec[len] = bytes - SHDR; len += 1`
+            at(b, vec0);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(4))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(SHDR as i32))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::I32Store(word()));
+            at(b, len0);
+            b.ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::LocalGet(0));
+        },
+    );
+
+    // region_free() and region_pop() — the two ways out of a region, and the
+    // difference is the blocks. A fall-through, a `break` and a `continue` free
+    // them; a `return` does not, because the value it carries out is one of them
+    // and its caller owns it now. The frame's other blocks leak on that path,
+    // which is what the textual backend's `__vyrn_region_pop` also chooses.
+    for (idx, blocks) in [(rt.region_free, true), (rt.region_pop, false)] {
+        rt.next_is(m, idx);
+        m.func(&[], &[], &[ValType::I32; 4], 0, |b| {
+            let (off, vec, n, i) = (1, 2, 3, 4);
+            b.ins(&Instruction::I32Const(sp0 as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::Return)
+                .ins(&Instruction::End);
+            // Pop first: `sp - 1` is this frame, and nothing below reads `sp`.
+            b.ins(&Instruction::I32Const(sp0 as i32))
+                .ins(&Instruction::I32Const(sp0 as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(off))
+                .ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::LocalGet(off))
+                .ins(&Instruction::I32Const(4))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::LocalSet(off));
+            let at = |b: &mut Frame, base: u32| {
+                b.ins(&Instruction::I32Const(base as i32))
+                    .ins(&Instruction::LocalGet(off))
+                    .ins(&Instruction::I32Add);
+            };
+            at(b, vec0);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalSet(vec));
+            if blocks {
+                at(b, len0);
+                b.ins(&Instruction::I32Load(word()))
+                    .ins(&Instruction::LocalSet(n));
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalSet(i));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::LocalGet(n))
+                    .ins(&Instruction::I32GeU)
+                    .ins(&Instruction::BrIf(1))
+                    .ins(&Instruction::LocalGet(vec))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Const(4))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load(word()))
+                    .ins(&Instruction::Call(free0))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(i))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+            }
+            // The vector is the arena's own, on both paths.
+            b.ins(&Instruction::LocalGet(vec))
+                .ins(&Instruction::Call(free0));
+            at(b, vec0);
+            b.ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store(word()));
+            at(b, len0);
+            b.ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store(word()));
+            at(b, cap0);
+            b.ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store(word()));
+        });
+    }
 }
 
 /// `if (off > len) off = len`, over parameters 1 and 2 of a `line_at`-shaped
