@@ -137,10 +137,14 @@ archive name is `vyrn-<name>.tar.gz` (or `.zip` on Windows). Candidates:
 
 ## Known gaps
 
-- `vyrn` has no `--version` flag. The tag ships as a `VERSION` file next to the
-  binary (`~/.vyrn/VERSION`). A `--version` reading `CARGO_PKG_VERSION` is the
-  obvious next step, and needs the crate version raised off `0.0.0`.
-- Nothing verifies that the tag and the crate version agree. Today they cannot
-  agree, because the crate version is `0.0.0`.
 - The archives are not signed. The checksum proves the bytes match the release;
   it does not prove who built them.
+
+## The version, in one place
+
+`vyrn --version` (and `-V`) prints `vyrn <CARGO_PKG_VERSION>` and exits 0. The
+number lives in `compiler/vyrn-cli/Cargo.toml` and nowhere else: the archive's
+`VERSION` file is still the tag, and the release workflow's first step fails if
+the tag and that line disagree. **So raising the tag means raising the crate
+version in the same commit.** The other workspace crates stay `0.0.0` — none is
+published and nothing reads them.

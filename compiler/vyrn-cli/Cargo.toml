@@ -1,6 +1,10 @@
 [package]
 name = "vyrn-cli"
-version = "0.0.0"
+# What `vyrn --version` prints, and what the release workflow checks its tag
+# against. The other workspace crates stay 0.0.0: they are not published and
+# nothing reads their version. Bump this WITH the tag, or the release fails
+# before it builds.
+version = "0.1.0-alpha.1"
 edition = "2021"
 description = "The vyrn driver: check, run (interpret), or emit LLVM IR for a .vyrn file."
 

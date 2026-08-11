@@ -2617,12 +2617,24 @@ impl MoveCheck<'_> {
                 // loop that released its snapshot would hand back a key the map
                 // still holds.
                 //
-                // Recorded AFTER the value, because the value may read the key,
-                // and with `outlives` FALSE, because recording the move is this
-                // milestone's job and refusing a BORROWED key is a rule of its
-                // own with a corpus behind it. The instruments RFC-0092 M0 keeps
-                // are gated on `outlives` too, so their counts do not move.
-                let _ = self.store(index, &|| format!("`{name}`"), *line, false, consumed)?;
+                // Recorded AFTER the value, because the value may read the key.
+                //
+                // `outlives` is TRUE — the rule RFC-0092 M5 named and deferred.
+                // With it FALSE the key was the ONE store in the language that
+                // did not ask rule 2, and the map literal one arm over asked it:
+                // `[ks[0]: 1]` was refused and `m[ks[0]] = 1` was taken, from the
+                // same borrow, in the same function. The second spelling wrote
+                // the array's own buffer into the map's key slot, so the array
+                // and the map both released it — the interpreter answered and
+                // the native binary died with no output. One fact, one verdict:
+                // a borrowed key is refused here exactly as it is there, with
+                // `.copy()` offered as the fix.
+                //
+                // A key that is nobody's borrow is unaffected. `httpHeaders`
+                // (`std/http`) is `for k in base.keys() { hs[k] = .. }`, and the
+                // snapshot is a temporary the loop owns (M5), so `k` binds an
+                // OWNED element and the store still records the move.
+                let _ = self.store(index, &|| format!("`{name}`"), *line, true, consumed)?;
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
             }
@@ -5369,6 +5381,39 @@ mod tests {
                    t.take(s) return s.byteLength }";
         let e = run(src).unwrap_err();
         assert!(e.contains("already consumed by `take(..)`"), "{e}");
+    }
+
+    #[test]
+    fn a_map_key_may_not_be_a_borrow() {
+        // `m[k] = v` used to be the one store that did not ask rule 2, while the
+        // map LITERAL asked it — one fact, two spellings, two verdicts. Both
+        // spellings of the borrow are here: the element read inline, and the
+        // `for` variable over a borrowed container.
+        let inline = "fn build(ks: Array<String>) -> Map<String, Int64> \
+                      { let mut m: Map<String, Int64> = [:] m[ks[0]] = 1 return m } \
+                      fn main() -> Int64 { return 0 }";
+        let e = run(inline).unwrap_err();
+        assert!(e.contains("`ks[0]` may not be stored into `m`"), "{e}");
+        assert!(e.contains("`ks[0].copy()`"), "{e}");
+
+        let loop_var = "fn build(ks: Array<String>) -> Map<String, Int64> \
+                        { let mut m: Map<String, Int64> = [:] \
+                        for k in ks { m[k] = 1 } return m } \
+                        fn main() -> Int64 { return 0 }";
+        let e = run(loop_var).unwrap_err();
+        assert!(e.contains("`k` may not be stored into `m`"), "{e}");
+
+        // A copy is a value of this frame's, and so is a key with no other
+        // owner — neither is refused.
+        assert!(run("fn build(ks: Array<String>) -> Map<String, Int64> \
+                 { let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m } \
+                 fn main() -> Int64 { return 0 }")
+        .is_ok());
+        assert!(
+            run("fn main() -> Int64 { let mut m: Map<String, Int64> = [:] \
+                 m[\"a\" + \"b\"] = 1 return 0 }")
+            .is_ok()
+        );
     }
 
     #[test]
