@@ -240,7 +240,25 @@ fn blockHtml(kind: String, rows: Array<String>) -> String {
     return "<p>" + inlineHtml(joinWith(rows, " ")) + "</p>"
 }
 
+/// How many spaces `line` opens with.
+fn indentOf(line: String) -> Int64 {
+    let raw = bytes(line)
+    let mut i = 0
+    while i < raw.length && raw[i] == ' ' {
+        i = i + 1
+    }
+    return i
+}
+
 /// `doc` as HTML.
+///
+/// An indented run is a code block, and the repository indents code by two
+/// spaces as often as by four. A line indented under a PARAGRAPH is that
+/// paragraph wrapping, not code, so a block only opens at a paragraph boundary
+/// — or under a line that ends in a colon, which is how five blocks in `std/`
+/// introduce themselves.
+/// The block's own indent is the margin: what is indented further inside it —
+/// nested JSON, a continued argument list — keeps its shape.
 fn proseHtml(doc: String) -> String {
     if doc.byteLength == 0 {
         return ""
@@ -249,6 +267,7 @@ fn proseHtml(doc: String) -> String {
     let mut kind = ""
     let mut rows: Array<String> = []
     let mut fenced = false
+    let mut margin = 0
     for line in split(doc, "\n") {
         let flat = trim(line)
         if startsWith(flat, "```") {
@@ -277,13 +296,15 @@ fn proseHtml(doc: String) -> String {
             rows.push(substring(flat, 2, flat.byteLength))
         } else if kind == "list" {
             rows[rows.length - 1] = rows[rows.length - 1] + " " + flat
-        } else if startsWith(line, "    ") {
+        } else if indentOf(line) >= 2 && (kind != "para" || endsWith(rows[rows.length - 1], ":")) {
             if kind != "code" {
                 out = out + blockHtml(kind, rows)
                 rows = []
                 kind = "code"
+                margin = indentOf(line)
             }
-            rows.push(substring(line, 4, line.byteLength))
+            let cut = if indentOf(line) < margin { indentOf(line) } else { margin }
+            rows.push(substring(line, cut, line.byteLength))
         } else {
             if kind == "code" {
                 out = out + blockHtml(kind, rows)
