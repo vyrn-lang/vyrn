@@ -174,51 +174,105 @@ function parityWidget(root) {
 
 // ---------------------------------------------------------------------------
 // W6 — the ownership replay. Shape A: one scalar, one pure render.
+//
+// The playhead is a SOURCE LINE, and every part of the widget is that one
+// number: the readout prints it, the code row carries it, and the report row
+// that names it lights up with them. There is nothing left for the three to
+// disagree about, because there is only one value.
 // ---------------------------------------------------------------------------
 
 function ownershipWidget(root) {
-  const head = $("[data-own-head]", root);
+  const rows = $$("[data-own-rows] .cl", root);
+  const report = $$("[data-own-report] > div", root);
   const label = $("[data-own-n]", root);
-  const bars = $$("rect.span", root);
-  const svg = head.ownerSVGElement;
-  const width = svg.viewBox.baseVal.width;
-  const first = 17, lines = 5;
+  if (!rows.length || !label) return;
+  const lineOf = (el) => Number(el.dataset.l);
 
   /// Everything the widget shows, as a function of p alone.
   const render = (p) => {
-    const line = first + Math.min(lines - 1, Math.floor(p * lines));
-    head.setAttribute("x1", String(p * width));
-    head.setAttribute("x2", String(p * width));
+    const i = Math.min(rows.length - 1, Math.floor(p * rows.length));
+    const line = lineOf(rows[i]);
     label.textContent = String(line);
-    for (const bar of bars) {
-      const dead = line > Number(bar.dataset.ends);
-      bar.setAttribute("fill-opacity", dead ? "0.06" : "0.28");
+    rows.forEach((r, k) => {
+      r.classList.toggle("on", k === i);
+      r.classList.toggle("ahead", k > i);
+    });
+    for (const row of report) {
+      row.classList.toggle("on", Number(row.dataset.from) <= line && line <= Number(row.dataset.to));
     }
   };
 
   const replay = () => (REDUCED ? render(1) : play(3200, render));
   render(0);
-  $("[data-own-play]", root).addEventListener("click", replay);
+  const btn = $("[data-own-play]", root);
+  if (btn) btn.addEventListener("click", replay);
   onView(root, (animate) => (animate ? replay() : render(1)));
 }
 
 // ---------------------------------------------------------------------------
 // W1 supporting act — the validated-types specimen.
+//
+// The control has to be TRUE: it says it uncomments a line, so it uncomments
+// the line. The export ships both renderings of that one row — the commented
+// markup in place, the uncommented markup on the row's own `data-alt` — so the
+// swap is a string assignment and the compiler's lexer coloured both halves.
+// The diagnostic then moves under the row it is about, rather than to the foot
+// of the plate where it belonged to nothing.
 // ---------------------------------------------------------------------------
 
 function typesWidget(root) {
   const btn = $("[data-types-btn]", root);
-  const err = $("#types-error");
-  if (!btn || !err) return;
-  // The export renders the error visible, so a reader with no JavaScript sees
-  // both the snippet and the compiler's answer to it. The toggle only exists
-  // once there is a script to work it.
+  const err = $("[data-types-error]", root);
+  const row = $$("[data-types-code] .cl", root).find((r) => r.dataset.alt);
+  if (!btn || !err || !row) return;
+  const code = $("code", row);
+  const commented = code.innerHTML;
+  const uncommented = row.dataset.alt;
+  // The export renders the diagnostic visible and last, so a reader with no
+  // JavaScript still sees the compiler's answer. The script anchors it to the
+  // line and hides it until that line exists.
+  row.after(err);
   err.hidden = true;
+  let on = false;
   btn.addEventListener("click", () => {
     pinWidth(btn);
-    err.hidden = !err.hidden;
-    btn.textContent = err.hidden ? "Uncomment the bad line" : "Comment it out again";
-    btn.classList.toggle("on", !err.hidden);
+    on = !on;
+    code.innerHTML = on ? uncommented : commented;
+    err.hidden = !on;
+    btn.textContent = on ? "Comment it out again" : "Uncomment the bad line";
+    btn.setAttribute("aria-pressed", String(on));
+    btn.classList.toggle("on", on);
+    if (REDUCED) return;
+    row.classList.remove("changed");
+    // Restart the flash even when the two clicks are close together.
+    void row.offsetWidth;
+    row.classList.add("changed");
+    setTimeout(() => row.classList.remove("changed"), 900);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// W8 — the leak shape. Two measured series, one keyword between them.
+// ---------------------------------------------------------------------------
+
+function leakWidget(root) {
+  const btn = $("[data-leak-toggle]", root);
+  const svg = $("[data-leak-svg]", root);
+  const peak = $("[data-leak-peak]", root);
+  const word = $("[data-leak-word]", root);
+  if (!btn || !svg || !peak || !word) return;
+  const peaks = [peak.firstChild.textContent, peak.dataset.alt];
+  const words = [word.textContent, word.dataset.alt];
+  let on = false;
+  btn.addEventListener("click", () => {
+    pinWidth(btn);
+    on = !on;
+    svg.classList.toggle("declared", on);
+    peak.firstChild.textContent = peaks[on ? 1 : 0];
+    word.textContent = words[on ? 1 : 0];
+    btn.setAttribute("aria-pressed", String(on));
+    btn.textContent = on ? "Take the keyword back" : "Declare consume";
+    growBars(root);
   });
 }
 
@@ -226,19 +280,20 @@ function typesWidget(root) {
 // W4 — the bar charts. Vyrn set every width; this only grows them.
 // ---------------------------------------------------------------------------
 
-function barsWidget(root) {
+function growBars(root) {
   const bars = $$("rect.bar", root);
   const render = (p) => {
     for (const b of bars) b.setAttribute("transform", `scale(${p} 1)`);
   };
-  const grow = () => {
-    if (REDUCED) return render(1);
-    render(0);
-    play(900, render);
-  };
-  onView(root, (animate) => animate && grow());
+  if (REDUCED) return render(1);
+  render(0);
+  play(900, render);
+}
+
+function barsWidget(root) {
+  onView(root, (animate) => animate && growBars(root));
   const btn = $("[data-bars-replay]", root);
-  if (btn) btn.addEventListener("click", grow);
+  if (btn) btn.addEventListener("click", () => growBars(root));
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +360,10 @@ function boot() {
   for (const el of $$('[data-widget="ownership"]')) ownershipWidget(el);
   for (const el of $$('[data-widget="types"]')) typesWidget(el);
   for (const el of $$('[data-widget="bars"]')) barsWidget(el);
+  for (const el of $$('[data-widget="leak"]')) {
+    barsWidget(el);
+    leakWidget(el);
+  }
   for (const el of $$('[data-widget="strip"]')) stripWidget(el);
   for (const el of $$("[data-tabs]")) tabsWidget(el);
   for (const el of $$("[data-install]")) installPicker(el);

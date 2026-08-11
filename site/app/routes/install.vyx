@@ -9,7 +9,7 @@
 // page says plainly that there is nothing to download.
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
-import { highlight } from "../code"
+import { vyrnHtml } from "../snippets"
 
 /// One platform's setup, in the order a reader does it.
 type Platform = { id: String, name: String, deps: String, build: String, run: String }
@@ -58,11 +58,7 @@ fn steps() -> Array<Step> {
 }
 
 fn firstProgram() -> String {
-    return highlight("fn main() -> Int64 {
-    print(\"hello\")
-    return 0
-}
-")
+    return vyrnHtml("hello")
 }
 </script>
 

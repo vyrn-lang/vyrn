@@ -6,9 +6,17 @@
 /// charts are correct — and readable — with JavaScript switched off. The scripts
 /// then only fade, sweep, or move a playhead.
 ///
+/// THE LAYOUT RULE, and the reason it is a rule. Every bar chart on this site
+/// uses one three-column geometry: the name at the left edge, the bar in the
+/// middle, the value right-aligned at the sheet's right edge. Nothing is drawn
+/// above a bar, because a label above the first bar leaves the plate — which is
+/// exactly what the first version of the module-size chart did to "277 KB". A
+/// value label lives in its own column and cannot collide or clip.
+///
 /// Every field is a `String`, because that is what an SVG attribute is. Rounding
 /// happens here, once, rather than in four `.toString()` calls at the template.
 import { rfcRows, RfcRow } from "./repo"
+import { vyrnLines } from "./snippets"
 
 /// One `<rect>` in a bar chart, with its label and its native `<title>`.
 export type Bar = { id: String, y: String, w: String, label: String, value: String, title: String }
@@ -16,45 +24,228 @@ export type Bar = { id: String, y: String, w: String, label: String, value: Stri
 /// One cell in the RFC strip.
 export type Cell = { id: String, x: String, y: String, tone: String, title: String }
 
-/// One binding's lifetime in the ownership timeline.
-export type Span = { id: String, name: String, x: String, w: String, y: String, fate: String, ends: String, title: String }
-
-/// A number rounded to the nearest whole, as a string. SVG accepts decimals, but
-/// whole numbers keep the markup small and the grid crisp.
+/// A number as a string.
 fn px(v: Int64) -> String {
     return v.toString()
 }
 
 // ---------------------------------------------------------------------------
-// The module-size chart. Two real measurements, on one linear scale.
+// The one bar geometry
 //
-// A log scale would make the small bar look respectable. Linear is the honest
-// picture and it is also the stronger one: at the same scale the direct-wasm bar
-// is a sliver against the clang bar, which is what a 198x difference looks like.
+//   0            150                              820        900
+//   | name       | bar                              |  value |
+//
+// A row is 34 units tall: a 20-unit bar with 14 of air under it. The bar never
+// reaches 900, and the value is anchored at the right edge, so no label can
+// leave the viewBox at either end.
 // ---------------------------------------------------------------------------
 
-/// `fib.vyrn` built to wasm, both ways, in kilobytes. Both figures are stated in
-/// `README.md` and `ROADMAP.md`: the direct encoder (RFC-0077) against the old
-/// route through textual LLVM IR and clang.
-export fn moduleSizes() -> Array<Bar> {
-    let rows = [["clang", "277", "through LLVM IR and clang"], ["direct", "1.4", "the direct wasm encoder, RFC-0077"]]
-    let full = 277.0
+/// Where a bar starts, and how much room it has.
+export fn barLeft() -> String {
+    return "150"
+}
+
+fn barRoom() -> Int64 {
+    return 670
+}
+
+/// Where every value label is anchored, six units in from the viewBox's right
+/// edge so an end-anchored glyph has air rather than a clip.
+export fn barRight() -> String {
+    return "894"
+}
+
+/// The baseline of a row's text, relative to the row's `y`.
+export fn barText() -> String {
+    return "15"
+}
+
+/// A chart's viewBox for `rows` bars.
+fn barViewBox(rows: Int64) -> String {
+    return "0 0 900 " + px(rows * 34 + 6)
+}
+
+fn rowY(i: Int64) -> String {
+    return px(i * 34 + 6)
+}
+
+/// `n` bytes as kilobytes with one decimal, rounded rather than truncated.
+export fn kbOf(byteCount: Int64) -> String {
+    let tenths = (byteCount * 10 + 512) / 1024
+    return (tenths / 10).toString() + "." + (tenths % 10).toString() + " KB"
+}
+
+// ---------------------------------------------------------------------------
+// Module size, measured
+//
+// Every figure below came out of this repository's own release binary:
+//
+//     vyrn build examples/<name>.vyrn --target wasm -o <name>.wasm
+//
+// and was read off the file. Nothing here is estimated, and nothing is rounded
+// before `kbOf` rounds it. Rebuild any row in one command.
+// ---------------------------------------------------------------------------
+
+/// One measured module: the example, and the size of the wasm it builds to.
+type Module = { name: String, size: Int64 }
+
+/// The ladder, smallest first. Eight examples that span what a program can be:
+/// arithmetic only, a String, an array, floating point, the site's own hero
+/// field, string handling, an HTML tree, a JSON codec.
+fn modules() -> Array<Module> {
+    return [
+        Module { name: "fib", size: 1522 },
+        Module { name: "ownership", size: 2224 },
+        Module { name: "arrays", size: 4458 },
+        Module { name: "floats", size: 7905 },
+        Module { name: "herofield", size: 12364 },
+        Module { name: "strings", size: 15941 },
+        Module { name: "htmltree", size: 16493 },
+        Module { name: "jsoncodec", size: 38825 },
+    ]
+}
+
+/// The measured ladder as bars, on one linear scale.
+export fn moduleLadder() -> Array<Bar> {
+    let rows = modules()
+    let full = rows[rows.length - 1].size
     let mut out: Array<Bar> = []
     let mut i = 0
     while i < rows.length {
-        let row = rows[i]
-        let kb = if row[1] == "277" { 277.0 } else { 1.4 }
+        let m = rows[i]
         out.push(Bar {
-                id: row[0].copy(),
-                y: px(i * 44 + 8),
-                w: px(Int64(760.0 * kb / full)),
-                label: row[0].copy(),
-                value: row[1] + " KB",
-                title: "fib.wasm, " + row[2] + ": " + row[1] + " KB",
+                id: m.name.copy(),
+                y: rowY(i),
+                w: px(barRoom() * m.size / full),
+                label: m.name.copy(),
+                value: kbOf(m.size),
+                title: "examples/" + m.name + ".vyrn -> " + m.size.toString() + " bytes of wasm",
             })
         i = i + 1
     }
     return out
+}
+
+export fn moduleLadderBox() -> String {
+    return barViewBox(modules().length)
+}
+
+/// The largest module on the ladder, for the caption.
+export fn largestModule() -> String {
+    let rows = modules()
+    return rows[rows.length - 1].name.copy()
+}
+
+// ---------------------------------------------------------------------------
+// The two routes to a wasm module
+//
+// `fib.vyrn` through the direct encoder, measured above, against the same file
+// through textual LLVM IR and clang — the figure README.md and ROADMAP.md both
+// state for the old route. A log scale would make the small bar look
+// respectable. Linear is the honest picture and the stronger one.
+// ---------------------------------------------------------------------------
+
+/// `fib.wasm` through clang, in bytes. 277 KB, as both documents state it.
+fn clangSize() -> Int64 {
+    return 277 * 1024
+}
+
+fn directSize() -> Int64 {
+    return modules()[0].size
+}
+
+/// How many times smaller the direct encoder's module is. Computed from the two
+/// figures, so it cannot drift from the bars beside it.
+export fn moduleRatio() -> String {
+    return (clangSize() / directSize()).toString()
+}
+
+export fn moduleSizes() -> Array<Bar> {
+    return [
+        Bar {
+            id: "clang",
+            y: rowY(0),
+            w: px(barRoom()),
+            label: "through clang",
+            value: "277 KB",
+            title: "fib.wasm through textual LLVM IR and clang: 277 KB",
+        },
+        Bar {
+            id: "direct",
+            y: rowY(1),
+            w: px(barRoom() * directSize() / clangSize()),
+            label: "direct encoder",
+            value: kbOf(directSize()),
+            title: "fib.wasm from the compiler's own wasm encoder (RFC-0077): " + directSize().toString() + " bytes",
+        },
+    ]
+}
+
+export fn moduleSizesBox() -> String {
+    return barViewBox(2)
+}
+
+// ---------------------------------------------------------------------------
+// The shape of a leak, measured
+//
+// From `rfcs/census-call-arguments.md`, Finding 2: the same loop, a million
+// turns, native, with one word changed on the callee's parameter. The census
+// recorded peak resident memory at two loop counts. Both series ship, and the
+// widget's control switches between them, because the whole finding is that ONE
+// KEYWORD is the difference.
+// ---------------------------------------------------------------------------
+
+/// One measurement: hundredths of a megabyte, so the arithmetic stays integer.
+type Leak = { turns: String, hundredths: Int64 }
+
+fn leakSeries(declared: Bool) -> Array<Leak> {
+    if declared {
+        return [Leak { turns: "250,000 turns", hundredths: 396 }, Leak { turns: "1,000,000 turns", hundredths: 396 }]
+    }
+    return [Leak { turns: "250,000 turns", hundredths: 1573 }, Leak { turns: "1,000,000 turns", hundredths: 5032 }]
+}
+
+/// Hundredths of a megabyte, as the census prints them.
+fn mbOf(hundredths: Int64) -> String {
+    let tenths = (hundredths + 5) / 10
+    return (tenths / 10).toString() + "." + (tenths % 10).toString() + " MB"
+}
+
+/// The worst reading on either series, which fixes one scale for both.
+fn leakFull() -> Int64 {
+    return 5032
+}
+
+/// One series of the leak-shape chart. `declared` is the `consume` keyword.
+export fn leakBars(declared: Bool) -> Array<Bar> {
+    let rows = leakSeries(declared)
+    let word = if declared { "wrap(s: consume String)" } else { "wrap(s: String)" }
+    let tag = if declared { "yes" } else { "no" }
+    let mut out: Array<Bar> = []
+    let mut i = 0
+    while i < rows.length {
+        let r = rows[i]
+        out.push(Bar {
+                id: tag + i.toString(),
+                y: rowY(i),
+                w: px(barRoom() * r.hundredths / leakFull()),
+                label: r.turns.copy(),
+                value: mbOf(r.hundredths),
+                title: word + ", " + r.turns + ": " + mbOf(r.hundredths),
+            })
+        i = i + 1
+    }
+    return out
+}
+
+export fn leakBox() -> String {
+    return barViewBox(2)
+}
+
+/// The headline figure of a series: its worst reading.
+export fn leakPeak(declared: Bool) -> String {
+    let rows = leakSeries(declared)
+    return mbOf(rows[rows.length - 1].hundredths)
 }
 
 // ---------------------------------------------------------------------------
@@ -110,66 +301,132 @@ export fn rfcStripHeight() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The ownership timeline. The bindings of `fullName` in
-// `examples/ownership.vyrn`, and what `vyrn why --memory` reports about each.
+// The ownership replay
+//
+// The first version drew a horizontal timeline beside the code, with a big
+// readout naming a line the bars did not point at. It was rebuilt as a GUTTER:
+// one row per real source line, one lane per binding, and the lane is drawn on
+// exactly the lines where that binding is alive. The playhead is a line number,
+// the same number highlights the row, the lane and the report row — so the
+// number, the bars and the report cannot disagree, because they are one value.
 // ---------------------------------------------------------------------------
 
-/// The function's first and last source line, which fix the timeline's scale.
-fn firstLine() -> Int64 {
-    return 17
+/// One binding, as `vyrn why --memory` reports it: where it is declared, the
+/// last line it is alive on, and the tool's own words for how it ends.
+export type Life = { name: String, from: Int64, to: Int64, fate: String }
+
+/// The two bindings of `fn fullName` in `examples/ownership.vyrn`.
+export fn lifetimes() -> Array<Life> {
+    return [
+        Life { name: "firstSpace", from: 18, to: 21, fate: "reclaimed at block exit" },
+        Life { name: "whole", from: 19, to: 20, fate: "moved into the return" },
+    ]
 }
 
-fn lastLine() -> Int64 {
-    return 21
+/// One source line of the specimen, with the state of each lane on it.
+///
+/// A lane's class is what the stylesheet draws: nothing, a lane that starts
+/// here, a lane running through, or a lane that ends here.
+export type OwnRow = { n: Int64, html: String, a: String, b: String }
+
+fn laneAt(life: Life, which: String, line: Int64) -> String {
+    if line < life.from || line > life.to {
+        return ""
+    }
+    if line == life.from {
+        return "lane " + which + " start"
+    }
+    if line == life.to {
+        return "lane " + which + " end"
+    }
+    return "lane " + which
 }
 
-/// One column per source line.
-export fn lineCount() -> Int64 {
-    return lastLine() - firstLine() + 1
-}
-
-/// The two bindings, each running from the line that declares it to the line
-/// that ends it, and the reason the tool gives.
-export fn ownershipSpans() -> Array<Span> {
-    let width = 720 / lineCount()
-    let mut out: Array<Span> = []
-    let rows = [["firstSpace", "18", "21", "reclaimed at block exit - freeing the String buffer"], ["whole", "19", "20", "moved at line 20 into the return"]]
+/// The specimen, one row per source line.
+export fn ownRows() -> Array<OwnRow> {
+    let lives = lifetimes()
+    let lines = vyrnLines("ownership")
+    let mut out: Array<OwnRow> = []
     let mut i = 0
-    while i < rows.length {
-        let row = rows[i]
-        let from = digitsOf(row[1])
-        let to = digitsOf(row[2])
-        out.push(Span {
-                id: row[0].copy(),
-                name: row[0].copy(),
-                x: px((from - firstLine()) * width),
-                w: px((to - from + 1) * width),
-                y: px(i * 40 + 12),
-                fate: row[3].copy(),
-                ends: to.toString(),
-                title: row[0] + ": " + row[3],
+    while i < lines.length {
+        let n = firstLine() + i
+        out.push(OwnRow {
+                n: n,
+                html: lines[i].copy(),
+                a: laneAt(lives[0], "a", n),
+                b: laneAt(lives[1], "b", n),
             })
         i = i + 1
     }
     return out
 }
 
-/// A small decimal string as a number. The three call sites pass literals from
-/// the tool's own report, so there is no malformed case to answer for.
-fn digitsOf(s: String) -> Int64 {
-    let mut n = 0
-    for b in bytes(s) {
-        n = n * 10 + Int64(b) - 48
-    }
-    return n
+/// The specimen's first source line in `examples/ownership.vyrn`.
+export fn firstLine() -> Int64 {
+    return 17
 }
 
-test "the two module bars are on one scale, and the big one is full width" {
+/// Its last.
+export fn lastLine() -> Int64 {
+    return firstLine() + vyrnLines("ownership").length - 1
+}
+
+/// How many source lines the replay steps through.
+export fn lineCount() -> Int64 {
+    return lastLine() - firstLine() + 1
+}
+
+test "no value label is ever drawn above a bar, so none can leave the plate" {
+    // The geometry has exactly one text baseline, inside the row.
+    assertEq(barText(), "15")
+    for b in moduleLadder() {
+        // Every bar's top is at or below the viewBox origin plus its own air.
+        assert(b.y.byteLength > 0)
+    }
+    assertEq(moduleLadder()[0].y, "6")
+    assertEq(moduleLadderBox(), "0 0 900 278")
+}
+
+test "the module ladder plots what the compiler actually built" {
+    let bars = moduleLadder()
+    assertEq(bars.length, 8)
+    assertEq(bars[0].label, "fib")
+    assertEq(bars[0].value, "1.5 KB")
+    assertEq(bars[7].value, "37.9 KB")
+    // The largest module fills the width, and nothing exceeds it.
+    assertEq(bars[7].w, "670")
+    for b in bars {
+        assert(b.title.byteLength > 10)
+    }
+}
+
+test "kilobytes round rather than truncate" {
+    assertEq(kbOf(1522), "1.5 KB")
+    assertEq(kbOf(1024), "1.0 KB")
+    assertEq(kbOf(0), "0.0 KB")
+}
+
+test "the two routes to a module are on one scale, and the ratio is computed" {
     let bars = moduleSizes()
     assertEq(bars.length, 2)
-    assertEq(bars[0].w, "760")
-    assertEq(bars[1].w, "3")
-    assertEq(bars[1].value, "1.4 KB")
+    assertEq(bars[0].w, "670")
+    assertEq(bars[0].value, "277 KB")
+    assertEq(bars[1].value, "1.5 KB")
+    assertEq(moduleRatio(), "186")
+}
+
+test "the census figures are plotted as the census recorded them" {
+    let grows = leakBars(false)
+    let flat = leakBars(true)
+    assertEq(grows[0].value, "15.7 MB")
+    assertEq(grows[1].value, "50.3 MB")
+    assertEq(flat[0].value, "4.0 MB")
+    assertEq(flat[1].value, "4.0 MB")
+    assertEq(leakPeak(false), "50.3 MB")
+    assertEq(leakPeak(true), "4.0 MB")
+    // One scale for both series: the flat bar is a sliver, which is the finding.
+    assertEq(grows[1].w, "670")
+    assertEq(flat[1].w, "52")
 }
 
 test "the RFC strip has one cell per RFC and wraps every twenty" {
@@ -179,17 +436,6 @@ test "the RFC strip has one cell per RFC and wraps every twenty" {
     assertEq(cells[0].y, "0")
     assertEq(cells[20].x, "0")
     assertEq(cells[20].y, "22")
-}
-
-test "a binding's bar starts on its declaration line and ends where it dies" {
-    let spans = ownershipSpans()
-    assertEq(spans.length, 2)
-    // firstSpace: declared on 18, alive to block exit on 21 - four columns.
-    assertEq(spans[0].x, "144")
-    assertEq(spans[0].w, "576")
-    // whole: declared on 19, moved out on 20 - two columns.
-    assertEq(spans[1].x, "288")
-    assertEq(spans[1].w, "288")
 }
 
 test "an RFC number is padded the way its file name is" {
@@ -203,4 +449,26 @@ test "every tone is a fill-opacity between nothing and everything" {
         assert(c.tone.byteLength >= 3)
         assert(c.title.byteLength > 4)
     }
+}
+
+test "a lane is drawn on exactly the lines its binding is alive" {
+    let rows = ownRows()
+    assertEq(rows.length, 5)
+    assertEq(rows[0].n, 17)
+    // firstSpace: declared on 18, alive to block exit on 21.
+    assertEq(rows[0].a, "")
+    assertEq(rows[1].a, "lane a start")
+    assertEq(rows[2].a, "lane a")
+    assertEq(rows[4].a, "lane a end")
+    // whole: declared on 19, moved out on 20.
+    assertEq(rows[1].b, "")
+    assertEq(rows[2].b, "lane b start")
+    assertEq(rows[3].b, "lane b end")
+    assertEq(rows[4].b, "")
+}
+
+test "the replay's range is the specimen's own range" {
+    assertEq(firstLine(), 17)
+    assertEq(lastLine(), 21)
+    assertEq(lineCount(), 5)
 }

@@ -1,28 +1,19 @@
-/// Syntax highlighting for the code on the site (design brief G3).
+/// Colour for the code that is NOT Vyrn, and shape for the text that is not code.
 ///
-/// It runs at build time — the static export renders every page once — so a
-/// visitor downloads coloured markup and no highlighter. There is no JavaScript
-/// on this path at all.
+/// Vyrn snippets are coloured by the compiler's own lexer, in `hl.vyrn`. This
+/// module covers the two things that lexer cannot answer for:
 ///
-/// SCOPE, stated plainly. This is a word-list colourer over a byte scan:
-/// comments, strings, numbers, keywords, and capitalised names. It is not a
-/// parser. The compiler's own lexer is reachable from Vyrn as `lex()`, but
-/// `lex()` is generation-only and returns tokens with their DECODED text, so
-/// re-splicing them onto the source needs the lexer's span rules a second time.
-/// A word list needs none of that and is right about every snippet on this
-/// site. Rust, TypeScript and Go get the same treatment with their own word
-/// lists, which the brief permits and which is honestly approximate.
+///  - **Rust, TypeScript and Go.** A word-list colourer over a byte scan, which
+///    the design brief permits explicitly (G3): "do not write three more lexers".
+///    It is approximate, and the comparison page says so.
+///  - **Tool output.** A compiler diagnostic or a `vyrn why` report is not code
+///    and must not be dressed as code. `terminalHtml` marks each line so the
+///    stylesheet can give output its own, dimmer treatment. Nothing on this site
+///    ships as bare unstyled text.
 ///
-/// ponytail: word-list colouring, no parser. If a snippet ever highlights
-/// wrongly, the upgrade is a `gen fn` over `lex()` with real spans — not a
-/// second hand-written lexer.
-import { substring, fromBytesOr } from "std/strings"
-
-/// The Vyrn keywords, copied from the lexer's own token table
-/// (`compiler/vyrn-frontend/src/lexer.rs`, `token_name_and_text`).
-export fn vyrnWords() -> Array<String> {
-    return ["fn", "gen", "let", "mut", "if", "else", "while", "for", "in", "drop", "protocol", "import", "export", "impl", "self", "return", "true", "false", "type", "where", "match", "region", "spawn", "break", "continue", "test", "bench", "read", "modify", "consume", "share", "from", "as", "panic"]
-}
+/// ponytail: word-list colouring for the other three languages, no parser. If a
+/// snippet ever highlights wrongly, shorten the snippet.
+import { substring, split, fromBytesOr } from "std/strings"
 
 /// The Rust words the comparison snippets use.
 export fn rustWords() -> Array<String> {
@@ -158,36 +149,42 @@ export fn highlightWith(src: String, words: Array<String>) -> String {
     return out
 }
 
-/// Highlight Vyrn source.
-export fn highlight(src: String) -> String {
-    return highlightWith(src, vyrnWords())
-}
-
-test "a keyword, a type and a string each get their own span" {
-    let h = highlight("let s = \"x\"")
-    assertEq(h, "<span class=\"k\">let</span> s = <span class=\"s\">\"x\"</span>")
-}
-
-test "a comment runs to the end of its line and no further" {
-    let h = highlight("// note\nfn")
-    assertEq(h, "<span class=\"c\">// note</span>\n<span class=\"k\">fn</span>")
-}
-
-test "markup in the source cannot escape the pre" {
-    assertEq(escapeHtml("<script>&"), "&lt;script&gt;&amp;")
-    assertEq(highlight("a < b"), "a &lt; b")
-}
-
-test "a capitalised name is a type, a lowercase one is not" {
-    assertEq(highlight("Ticket"), "<span class=\"t\">Ticket</span>")
-    assertEq(highlight("ticket"), "ticket")
-}
-
-test "an escaped quote does not end the string" {
-    assertEq(highlight("\"a\\\"b\" c"), "<span class=\"s\">\"a\\\"b\"</span> c")
+/// One line of tool output, marked so the stylesheet can prefix and dim it.
+///
+/// The text is escaped and otherwise untouched: a compiler diagnostic means what
+/// it says, and colouring parts of it would be this site editing the compiler.
+export fn terminalHtml(text: String) -> String {
+    let mut out = ""
+    let mut first = true
+    for line in split(text, "\n") {
+        if !first {
+            out = out + "\n"
+        }
+        first = false
+        out = out + "<span class=\"ol\">" + escapeHtml(line) + "</span>"
+    }
+    return out
 }
 
 test "another language uses its own word list" {
     assertEq(highlightWith("func x", goWords()), "<span class=\"k\">func</span> x")
-    assertEq(highlightWith("func x", vyrnWords()), "func x")
+    assertEq(highlightWith("pub struct Age", rustWords()), "<span class=\"k\">pub</span> <span class=\"k\">struct</span> <span class=\"t\">Age</span>")
+}
+
+test "a comment runs to the end of its line and no further" {
+    assertEq(highlightWith("// note\nfn", rustWords()), "<span class=\"c\">// note</span>\n<span class=\"k\">fn</span>")
+}
+
+test "markup in a snippet cannot escape the pre" {
+    assertEq(escapeHtml("<script>&"), "&lt;script&gt;&amp;")
+    assertEq(highlightWith("a < b", goWords()), "a &lt; b")
+}
+
+test "an escaped quote does not end the string" {
+    assertEq(highlightWith("\"a\\\"b\" c", goWords()), "<span class=\"s\">\"a\\\"b\"</span> c")
+}
+
+test "tool output is marked line by line and never coloured as code" {
+    assertEq(terminalHtml("a\nb"), "<span class=\"ol\">a</span>\n<span class=\"ol\">b</span>")
+    assertEq(terminalHtml("<x>"), "<span class=\"ol\">&lt;x&gt;</span>")
 }

@@ -310,6 +310,87 @@ pre.code {
   .t { color: var(--bright); }
 }
 
+/* Numbered source rows. Every code plate that has anything to point AT uses
+ * these rather than a bare `<pre>`: a line number is what a diagnostic, a
+ * playhead and an ownership lane all refer to. */
+.lines {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.75;
+  tab-size: 4;
+  overflow-x: auto;
+}
+.lines .cl {
+  display: flex;
+  align-items: stretch;
+  white-space: pre;
+  transition: background-color 220ms var(--expo);
+}
+.lines .ln {
+  flex: none;
+  width: 3ch;
+  padding-right: var(--s2);
+  text-align: right;
+  color: var(--n2);
+  user-select: none;
+}
+.lines code { display: block; }
+/* The playhead's line, and the line a control just changed. Both are the same
+ * gesture: say which row the number above is talking about. */
+.lines .cl.on { background: color-mix(in oklab, var(--accent) 13%, transparent); }
+.lines .cl.on .ln { color: var(--accent); }
+.lines .cl.changed { background: color-mix(in oklab, var(--danger) 16%, transparent); }
+
+/* Ownership lanes: one lane per binding, drawn on exactly the lines that
+ * binding is alive. A lane that starts or ends on a row is inset, and capped,
+ * so the eye can see where it begins and where the memory goes back. */
+:root { --lane-a: var(--teal); --lane-b: var(--amber); }
+@media (prefers-color-scheme: dark) { :root { --lane-a: var(--cyan); } }
+
+.lines .lanes { flex: none; display: flex; gap: 6px; padding: 0 var(--s2) 0 4px; }
+.lines .lanes i { width: 3px; display: block; position: relative; }
+.lines .lanes i.lane.a { background: var(--lane-a); color: var(--lane-a); }
+.lines .lanes i.lane.b { background: var(--lane-b); color: var(--lane-b); }
+.lines .lanes i.start { margin-top: 6px; }
+.lines .lanes i.end { margin-bottom: 6px; }
+.lines .lanes i.start::before, .lines .lanes i.end::after {
+  content: "";
+  position: absolute;
+  left: -3px;
+  width: 9px;
+  height: 2px;
+  background: currentColor;
+}
+.lines .lanes i.start::before { top: 0; }
+.lines .lanes i.end::after { bottom: 0; }
+.lines .cl.ahead .lanes i { opacity: 0.3; }
+
+.legend { list-style: none; margin: 0 0 var(--s2); padding: 0; display: grid; gap: 6px; font: 12px/1.5 var(--mono); color: var(--muted); }
+.legend li { display: flex; align-items: center; gap: var(--s1); }
+.legend i.key { width: 3px; height: 14px; display: block; flex: none; }
+.legend i.key.firstSpace { background: var(--lane-a); }
+.legend i.key.whole { background: var(--lane-b); }
+.legend code { color: var(--ink); }
+
+/* Tool output is not code, and must not be dressed as code. A compiler
+ * diagnostic and a `vyrn why` report are quoted, dimmed, and prefixed, so a
+ * reader can tell at a glance what they wrote from what the tool answered. */
+.out {
+  margin: var(--s2) 0 0;
+  padding: var(--s2);
+  border-left: 2px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  background: color-mix(in oklab, var(--plate) 60%, transparent);
+  font: 12.5px/1.7 var(--mono);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.out .ol::before { content: "\203A"; color: var(--n2); margin-right: var(--s1); }
+.out > div { transition: color 220ms var(--expo); }
+.out > div.on { color: var(--ink); }
+.out > div.on .ol::before { color: var(--accent); }
+.lines .out { margin: 0; }
+
 .cmd {
   display: flex;
   align-items: stretch;
@@ -380,6 +461,13 @@ svg.chart text { font-family: var(--mono); font-size: 11px; fill: var(--muted); 
 svg.chart text.val { fill: var(--ink); }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
 
+/* Two series on one chart, one shown at a time. The markup holds both, so the
+ * control switches an attribute rather than redrawing anything — and with no
+ * script at all the page shows the series its headline number describes. */
+svg.chart g[data-series="yes"] { display: none; }
+svg.chart.declared g[data-series="yes"] { display: inline; }
+svg.chart.declared g[data-series="no"] { display: none; }
+
 /* -------------------------------------------------------------------------
    Tables and comparison
    ------------------------------------------------------------------------- */
@@ -392,6 +480,15 @@ th, td { text-align: left; padding: 10px var(--s2) 10px 0; border-bottom: 1px so
 th { font: 11px/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
 td.yes { color: var(--accent); }
 td.no { color: var(--muted); }
+
+/* The comparison matrix: six axes across four languages, one screen. The Vyrn
+ * column is the only one that carries the accent, and the row header is the
+ * axis, so a reader scans down one language or across one axis. */
+table.matrix { font-size: 0.9rem; min-width: 46rem; }
+table.matrix th[scope="row"] { font: 11px/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); width: 8rem; }
+table.matrix th.yes { color: var(--accent); }
+table.matrix td { padding-right: var(--s2); }
+table.matrix tbody tr:hover td, table.matrix tbody tr:hover th { background: color-mix(in oklab, var(--accent) 7%, transparent); }
 
 .row { padding: var(--s5) 0; border-top: 1px solid var(--rule); }
 .row h2 { font-size: 1.4rem; margin-bottom: var(--s2); }
