@@ -8,6 +8,51 @@
 - **Depends on:** RFC-0001
 - **Related:** RFC-0002 (views), RFC-0006 (how conflicts are reported)
 
+## Addendum — a region value may not be handed to `consume`
+
+**The rule.** Inside `region { .. }`, a value that carries heap may not be passed
+to a `consume` parameter. `vyrn check` refuses it and names the callee, the
+argument and the two ways out: move the call out of the region, or pass a value
+that holds no heap. A value that owns no heap — an `Int64`, an `Array<Int64>` —
+crosses freely, and `read` (the default) crosses freely too, because a borrow
+ends before the closing brace does.
+
+**Why the boundary is the declaration.** §4's escape guard refused a store into a
+binding that outlives the region. It watched *named stores* — `out = a + b`,
+`h.s = ..`, `a.push(..)` — so it refused `kept.push(s)` written inside the region
+and permitted `keep(s)`, which does the same store one frame down. An external
+audit found the hole and demonstrated it: `vyrn check` printed `ok`, the
+interpreter printed the right answer because its values are shared, and the
+native binary printed freed memory that changed from run to run. A second route
+was confirmed through a record field and two `consume` hops.
+
+The fix is not a wider search for the store. A callee may store what it took, or
+hand it to a second callee that does, and following that needs whole-program
+retention analysis to answer a question the signature already answers.
+`consume` DECLARES that the callee takes ownership. Arena memory cannot be owned
+by anyone outside the arena — the closing brace frees it — so the handover is
+refused where it is declared, in one place, for every callee and every hop.
+
+The refusal is by the ARGUMENT's type, so a generic `fn take<T>(x: consume T)` is
+refused for the `String` it is passed and allowed for the `Int64`. It is
+deliberately blunt about WHERE the value came from: a `String` built before the
+region is ordinary heap and safe to hand over, and this refuses it anyway,
+because which allocation is the arena's is a lexical fact of the emitter and not
+a fact of the type. Moving the call out of the region is the answer in both
+cases. `examples/region_consume.vyrn` is the refusal;
+`examples/regionarena.vyrn` is the same shapes written the two ways that run.
+
+**And the arena is now real on every compiling backend.** The direct wasm
+backend counted a region's depth and reclaimed nothing, on a note whose premise —
+"`malloc` is a bump pointer that never frees" — died when that backend got a free
+list. So the one construct built for bounded memory was the one construct that
+made wasm unbounded: 13.4 MB native against 3,664.5 MB then `out of memory` under
+wasmtime, for one loop of concatenations inside a region. It has a side vector of
+block pointers per open region now, allocated lexically and freed at the closing
+brace, exactly as the textual backend's arena works — 27.7 MB and a clean exit
+for the same program. A `return` out of a region still pops the frame without
+freeing it, because the value it carries out belongs to its caller.
+
 > **Implementation status (v0.1).** The capability *surface* is in: a parameter
 > may carry a capability keyword — `fn redeem(t: consume Token)` — and `consume`
 > is enforced by a move-checking pass (`vyrn-frontend::movecheck`):
