@@ -200,7 +200,7 @@ fn letterByte(b: UInt8) -> Bool {
 
 /// The byte offset each line starts at, so a token's `(line, col)` becomes an
 /// offset into the source.
-fn lineStarts(src: String) -> Array<Int64> {
+export fn lineStarts(src: String) -> Array<Int64> {
     let mut out: Array<Int64> = [0]
     let raw = bytes(src)
     let mut i = 0
@@ -337,7 +337,7 @@ fn trivia(src: String, raw: Array<UInt8>, from: Int64, to: Int64) -> String {
 /// The tokens arrive as an argument rather than being lexed here, because `lex()`
 /// is only callable from a generator's own body — so the one `lex(p.src)` call
 /// site is `vyrnCode` below, and everything else is an ordinary function.
-gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
+export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
     let raw = bytes(src)
     let starts = lineStarts(src)
     let mut out = ""

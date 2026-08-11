@@ -27,7 +27,7 @@
 ///
 /// Every field is a `String`, because that is what an SVG attribute is. Rounding
 /// happens here, once, rather than in four `.toString()` calls at the template.
-import { rfcRows, RfcRow } from "./repo"
+import { rfcRows, RfcRow, blob } from "./repo"
 import { split, joinWith } from "std/strings"
 import { vyrnLines } from "./snippets"
 
@@ -134,11 +134,6 @@ fn gridOf(full: Int64, step: Int64, per: Int64, unit: String) -> Array<Grid> {
 /// The gridlines of the module charts, in kilobytes.
 export fn sizeGrid(fullBytes: Int64, stepKb: Int64) -> Array<Grid> {
     return gridOf(fullBytes, stepKb, 1024, "KB")
-}
-
-/// A file in this repository, on GitHub.
-fn blob(path: String) -> String {
-    return "https://github.com/vyrn-lang/vyrn/blob/main/" + path
 }
 
 /// `n` bytes as kilobytes with one decimal, rounded rather than truncated.
