@@ -20,16 +20,33 @@ use std::collections::HashMap;
 /// each backend's function prologue — is what makes the outcome the same
 /// everywhere, and makes it a Vyrn diagnostic rather than a death.
 ///
-/// 10,000 is what every engine can actually reach today: the interpreter spends
-/// ~8.5 KB of Rust stack per Vyrn call against a 256 MB stack, the native binary
-/// and `wasmtime` both run past 20,000 frames of an ordinary function. It is
-/// also the depth other reference implementations settle near, and it is far
-/// past what a recursive descent over real data needs.
+/// 1,000 is what every engine reaches in every BUILD PROFILE, which is the part
+/// the first number (10,000) got wrong. The interpreter spends ~8.5 KB of Rust
+/// stack per Vyrn call in a release build and ~190 KB in a debug build — the
+/// unoptimized `expr`/`stmt` frames keep every local of a large match alive — so
+/// 10,000 fitted in release and died in debug, where CI runs the tests. A limit
+/// only one profile honors is not a limit.
+///
+/// Measured on the debug build against [`INTERP_STACK_BYTES`], with this counter
+/// lifted: depth 2,600 runs and 2,800 overflows, so 1,000 keeps 2.6x margin in
+/// the profile that has the least. The native binary and `wasmtime` run past
+/// 20,000 frames of an ordinary function in either profile. 1,000 is also where
+/// CPython settles, and it is far past what a recursive descent over real data
+/// needs — the parser refuses source nested past 1,024 levels, so no document
+/// this compiler accepts can drive a structural walk deeper than the budget.
 ///
 /// An `extern` is NOT counted: it is the host's frame, and no backend gives it a
 /// Vyrn prologue. Neither is a lambda body, which has no name to call itself by
 /// (RFC-0037) and so cannot recurse without passing through a named function.
-pub const CALL_DEPTH_LIMIT: u32 = 10_000;
+pub const CALL_DEPTH_LIMIT: u32 = 1_000;
+
+/// The Rust stack every thread that runs the interpreter reserves.
+///
+/// Reserving is cheap — the pages are virtual until a frame touches them — and
+/// what is touched is [`CALL_DEPTH_LIMIT`] frames deep at worst: ~8.5 MB in a
+/// release build, ~190 MB in a debug one. Both sit well inside this, which is
+/// what gives the limit above room to be the same number in either profile.
+pub const INTERP_STACK_BYTES: usize = 512 * 1024 * 1024;
 
 /// A fast, non-cryptographic hasher for the interpreter's own maps.
 ///
@@ -875,7 +892,7 @@ pub fn run(program: &Program) -> Result<i64, String> {
 pub fn run_with_args(program: &Program, args: &[String]) -> Result<i64, String> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(INTERP_STACK_BYTES)
             .spawn_scoped(s, || run_inner(program, args))
             .expect("failed to spawn interpreter thread")
             .join()
@@ -918,7 +935,7 @@ where
 {
     std::thread::scope(|s| {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(INTERP_STACK_BYTES)
             .spawn_scoped(s, || run_tests_inner(program, filter, on_result))
             .expect("failed to spawn interpreter thread")
             .join()
@@ -986,7 +1003,7 @@ where
 {
     std::thread::scope(|s| {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(INTERP_STACK_BYTES)
             .spawn_scoped(s, || run_benches_inner(program, filter, on_result))
             .expect("failed to spawn interpreter thread")
             .join()
@@ -1087,7 +1104,7 @@ pub fn mounted_routes(program: &Program) -> Result<Vec<MountedRoute>, String> {
     }
     std::thread::scope(|s| {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(INTERP_STACK_BYTES)
             .spawn_scoped(s, || mounted_routes_inner(program, &calls))
             .expect("failed to spawn interpreter thread")
             .join()
@@ -1356,7 +1373,7 @@ where
 {
     std::thread::scope(|s| {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(INTERP_STACK_BYTES)
             .spawn_scoped(s, || serve_inner(program, run_loop))
             .expect("failed to spawn interpreter thread")
             .join()
@@ -1562,7 +1579,7 @@ where
     std::thread::scope(|s| {
         // Setup: module state + `main`, once, before any worker exists.
         let setup: Result<(), String> = std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(INTERP_STACK_BYTES)
             .spawn_scoped(s, || -> Result<(), String> {
                 let interp = new_interp(program, &[])?;
                 if let Err(Ctrl::Err(e)) = interp.init_globals(program) {
@@ -1593,7 +1610,7 @@ where
         let worker = &worker;
         for i in 0..workers {
             std::thread::Builder::new()
-                .stack_size(256 * 1024 * 1024)
+                .stack_size(INTERP_STACK_BYTES)
                 .spawn_scoped(s, move || {
                     let interp = match new_interp(program, &[]) {
                         Ok(it) => it,

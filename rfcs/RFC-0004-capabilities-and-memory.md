@@ -584,7 +584,7 @@ shared data by read-only reference is an optimisation, not a semantic change.)
 
 ---
 
-## Addendum (implemented) — 10,000 calls may be in flight
+## Addendum (implemented) — 1,000 calls may be in flight
 
 §4 already gives one runtime limit all three engines take together: a `region`
 may nest 64 deep, and the 65th traps with the same words everywhere. The call
@@ -599,12 +599,12 @@ guard could not fire: a Rust stack overflow aborts the process, it does not
 unwind, so there was nothing to catch. Three-way parity was broken for any
 program that recurses deeply, a reader over a nested document included.
 
-**The limit is 10,000 calls in flight**, and it belongs to the language rather
-than to whichever stack runs out first. The 10,001st call ends the run with the
+**The limit is 1,000 calls in flight**, and it belongs to the language rather
+than to whichever stack runs out first. The 1,001st call ends the run with the
 same line in every engine:
 
 ```
-error: call depth exceeds 10000
+error: call depth exceeds 1000
 ```
 
 stderr, exit 1 — the same shape the region trap and every other runtime trap use.
@@ -622,10 +622,29 @@ Two kinds of call are excluded, in all three engines alike. An `extern`
 body has no name to call itself by (RFC-0037), so it cannot recurse without
 passing through a named function, which is counted.
 
-10,000 is what every engine can actually reach today. The interpreter spends
-about 8.5 KB of Rust stack per Vyrn call against a 256 MB stack; the native
-binary and `wasmtime` both run past 20,000 frames of an ordinary function. It is
-also far past what a recursive descent over real data needs.
+### Why 1,000, and why it was 10,000 first
+
+The number has to hold in every engine AND in every build profile. The first one
+did not. The interpreter spends about 8.5 KB of Rust stack per Vyrn call when it
+is optimized and about 190 KB when it is not — an unoptimized `expr`/`stmt` frame
+keeps every local of a large match alive — so 10,000 calls needed ~85 MB of stack
+in a release build and ~2 GB in a debug one. Release parity passed. Debug tests
+aborted with `has overflowed its stack`, which is the exact death the limit
+exists to prevent, in the build CI runs. Honoring 10,000 everywhere would mean
+TOUCHING gigabytes of stack, so the limit came down instead.
+
+The interpreter's threads reserve 512 MB (`INTERP_STACK_BYTES`, one constant, all
+seven spawn sites). Reserving is cheap: the pages stay virtual until a frame
+touches them. At the limit a debug run touches ~190 MB of that and a release run
+~8.5 MB. Measured with the counter lifted, a debug run reaches depth 2,600 and
+overflows at 2,800 — so the limit keeps 2.6x margin in the profile that has the
+least of it.
+
+1,000 is where CPython settles too, and it is far past what a recursive descent
+over real data needs: the parser refuses source nested past 1,024 levels, so no
+document this compiler accepts can drive a structural walk past the budget. The
+native binary and `wasmtime` run past 20,000 frames of an ordinary function in
+either profile; they are not what the number is bounded by.
 
 `examples/recdepth.vyrn` is the parity citizen: it prints one answer from just
 inside the budget and then steps one past it, so the harness compares stdout,
