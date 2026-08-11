@@ -198,11 +198,11 @@ fn boldHtml(s: String) -> String {
     return out
 }
 
-/// `s` with the markup escaped, every `` `span` `` turned into a `<code>` and
-/// every `**pair**` emphasised. A marker inside a code span is text, because a
-/// code span is read first.
-fn inlineHtml(s: String) -> String {
-    let parts = split(escapeHtml(s), "`")
+/// `escaped` with every `` `span` `` turned into a `<code>` and every `**pair**`
+/// emphasised. A marker inside a code span is text, because a code span is read
+/// first.
+fn tickHtml(escaped: String) -> String {
+    let parts = split(escaped, "`")
     let mut out = ""
     let mut i = 0
     while i < parts.length {
@@ -212,6 +212,28 @@ fn inlineHtml(s: String) -> String {
             out = out + "`" + boldHtml(parts[i])
         } else {
             out = out + boldHtml(parts[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// `s` as inline HTML, markup escaped.
+///
+/// A doubled delimiter is read first, because that is how a code span holds a
+/// backtick of its own: ``` ``missing field `name` `` ``` is one span, and its
+/// content is literal.
+fn inlineHtml(s: String) -> String {
+    let parts = split(escapeHtml(s), "``")
+    let mut out = ""
+    let mut i = 0
+    while i < parts.length {
+        if i % 2 == 1 && i + 1 < parts.length {
+            out = out + "<code>" + trim(parts[i]) + "</code>"
+        } else if i % 2 == 1 {
+            out = out + "``" + tickHtml(parts[i])
+        } else {
+            out = out + tickHtml(parts[i])
         }
         i = i + 1
     }
@@ -467,6 +489,7 @@ export gen fn apiDocs(stdDir: String) -> String {
 
 test "a code span becomes a code element and a stray tick stays text" {
     assertEq(inlineHtml("call `min(a, b)` first"), "call <code>min(a, b)</code> first")
+    assertEq(inlineHtml("``field `name` `` is the key"), "<code>field `name`</code> is the key")
     assertEq(inlineHtml("a ` b"), "a ` b")
     assertEq(inlineHtml("2 < 3"), "2 &lt; 3")
 }
