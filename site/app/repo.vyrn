@@ -44,6 +44,12 @@ export fn rfcRows() -> Array<RfcRow> {
     return out
 }
 
+/// A file in this repository, on GitHub. The site does not host the source, so
+/// every link to a source file leaves — and that is the only reason one does.
+export fn blob(path: String) -> String {
+    return "https://github.com/vyrn-lang/vyrn/blob/main/" + path
+}
+
 /// How many backends a program compiles to: the tree-walking interpreter, the
 /// native binary, and the WebAssembly module.
 export fn backendCount() -> Int64 {
