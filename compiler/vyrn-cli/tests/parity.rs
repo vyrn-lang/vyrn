@@ -470,7 +470,7 @@ fn stored_fn_param_compiles_for_any_payload() {
             "type User = {{ id: Int64, name: String }}\n\
              type Sink = fn({payload_ty})\n\
              let mut pending: Map<String, Sink> = [:]\n\
-             fn on(k: String, cb: consume Sink) {{\n    pending[k] = cb\n}}\n\
+             fn on(k: String, cb: consume Sink) {{\n    pending[k.copy()] = cb\n}}\n\
              fn fire(k: String, p: {payload_ty}) {{\n    \
              match pending[k] {{ Some(cb) => cb(p), None => print(\"none\") }}\n}}\n\
              fn main() -> Int64 {{\n    on(\"a\", |p| {body})\n    \
