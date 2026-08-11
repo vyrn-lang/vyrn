@@ -1,0 +1,97 @@
+// A `region` and the values that cross its brace — the shapes region_consume.vyrn
+// refuses, written the two ways that run.
+//
+// The arena owns every `String` allocated inside the block and frees them all at
+// the closing brace. So a callee may READ one (a `read` parameter borrows, and
+// the borrow ends before the brace does), and a callee may TAKE one that the
+// arena never owned — a value built before the region, or handed out of it by a
+// `return`, which pops the frame without freeing it.
+//
+// Both compiling backends reclaim this now. The direct wasm backend used to
+// count the region's depth and free nothing: 13.4 MB native against 3,664.7 MB
+// and `out of memory` under wasmtime, for one loop of concatenations inside a
+// region. The loops below are sized for parity, not for that measurement — the
+// census in `tests/memory.rs` is what watches the bytes.
+
+type Label = { text: String, size: Int64 }
+
+let mut taken: Array<String> = []
+
+/// Takes ownership. Nothing built inside a region may reach it.
+fn keep(s: consume String) {
+    taken.push(s)
+}
+
+/// Borrows. A region value reaches this freely — the read ends inside the block.
+fn measure(s: read String) -> Int64 {
+    return s.byteLength
+}
+
+/// A String built in a region and RETURNED out of it. The return pops the frame
+/// without freeing it, so the buffer belongs to the caller — who may then give it
+/// away, because it is no longer the arena's.
+fn minted(n: Int64) -> String {
+    region {
+        return "minted-" + n.toString()
+    }
+    return ""
+}
+
+fn main() -> Int64 {
+    let stem = "value-"
+
+    // The arena's own growth: many blocks in one frame, freed together. The
+    // vector that records them starts at 16 entries and doubles.
+    let mut total = 0
+    region {
+        let mut i = 0
+        while i < 40 {
+            let s = stem + i.toString()
+            total = total + measure(s)
+            i = i + 1
+        }
+    }
+    print(total) // 310
+
+    // A record and an array of Strings, built inside the region and read there.
+    // The record's field and the array's elements are the arena's too.
+    let mut held = 0
+    region {
+        let mut names: Array<String> = []
+        names.push(stem + "a")
+        names.push(stem + "b")
+        let tag = Label { text: stem + "c", size: names.length }
+        held = measure(tag.text) + names.length
+    }
+    print(held) // 9
+
+    // A `consume` inside a region is fine when the value holds no heap: an
+    // Int64 has nothing the arena could own.
+    let mut counted = 0
+    region {
+        counted = counted + tally(7)
+    }
+    print(counted) // 7
+
+    // The two handovers that ARE ownership. First: a value built before the
+    // region, taken inside it — the arena never allocated it.
+    let early = stem + "early"
+    keep(early)
+    // Second: a value the region minted and handed out by a `return`.
+    let mut m = 0
+    while m < 3 {
+        keep(minted(m))
+        m = m + 1
+    }
+    let mut j = 0
+    while j < taken.length {
+        print(taken[j])
+        j = j + 1
+    }
+    return 0
+}
+
+/// A `consume` of a value that owns no heap — allowed inside a region.
+fn tally(n: consume Int64) -> Int64 {
+    return n
+}

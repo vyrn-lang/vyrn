@@ -10927,6 +10927,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_consume_handover_out_of_a_region() {
+        // The route the store guard could not see: the callee does the store, one
+        // frame down, and a call argument is not a named store.
+        let src = "let mut kept: Array<String> = [] \
+                   fn keep(s: consume String) { kept.push(s) } \
+                   fn main() -> Int64 { \
+                       region { keep(\"a\" + \"b\") } \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("which is `consume`, inside a `region`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_a_consume_handover_of_a_record_carrying_an_arena_string() {
+        // The second route the audit confirmed: the String travels inside a
+        // record, through two `consume` hops. The first hop is refused.
+        let src = "type Box = { s: String } \
+                   let mut boxed: Array<Box> = [] \
+                   fn wrap(s: consume String) -> Box { return Box { s: s } } \
+                   fn stash(b: consume Box) { boxed.push(b) } \
+                   fn main() -> Int64 { \
+                       region { stash(wrap(\"a\" + \"b\")) } \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("which is `consume`, inside a `region`"), "{e}");
+    }
+
+    #[test]
+    fn allows_a_consume_of_a_value_that_owns_no_heap_inside_a_region() {
+        // The rule is about arena memory, so an Int64 crosses freely.
+        let src = "fn tally(n: consume Int64) -> Int64 { return n } \
+                   fn main() -> Int64 { \
+                       let mut c = 0 \
+                       region { c = tally(7) } \
+                       return c }";
+        assert!(check_src(src).is_ok());
+    }
+
+    #[test]
     fn allows_nonheap_stores_out_of_region() {
         // Ints carry no arena memory, so pushing one into an outer Array<Int64>
         // from inside a region is fine.
