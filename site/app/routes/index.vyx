@@ -3,62 +3,21 @@
 //
 // It leads with what the language IS for the person reading it: the
 // expressiveness of TypeScript, native speed, no collector, rules that live in
-// the type, ownership written as one word. Every sentence below is drawn from
+// the type, ownership written as one word. Every sentence is drawn from
 // `README.md`, which is verified copy.
 //
-// Parity comes fourth, under "how we know it works". It is a strong quality
-// proof and a weak reason to adopt a language, and the page is ordered that way
-// on purpose.
+// DENSITY. One band, one claim, one visual, and the visual carries it. The
+// headline states the claim; a single line of prose says the one thing the
+// widget cannot show; the widget does the rest. Anything a reader could learn by
+// pressing the control is not written out above the control.
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
-import { heroSource, heroError, ownershipSource, ownershipReport } from "../snippets"
+import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
 import { exampleCount, rfcCount, stdCount, backendCount } from "../repo"
-import { ownershipSpans, lineCount, Span } from "../chart"
-import { highlight } from "../code"
-
-/// One claim band.
-type Band = { number: String, id: String, title: String, body: String }
+import { ownRows, lifetimes, lineCount, moduleRatio, OwnRow, Life } from "../chart"
 
 export fn head() -> Head {
     return pageHead("Vyrn — a systems language with the expressiveness of TypeScript")
-}
-
-fn bands() -> Array<Band> {
-    return [
-        Band {
-            number: "01",
-            id: "types",
-            title: "Types carry the rules, not only the shape",
-            body: "A `where` clause is part of the type. The compiler rejects a provably invalid constant, erases the check where it can prove the value is valid, and emits the check where it cannot. You cannot forget a check you never wrote.",
-        },
-        Band {
-            number: "02",
-            id: "memory",
-            title: "Ownership is a word you write",
-            body: "Write `read`, `modify`, `consume` or `share` on a parameter. The compiler enforces moves and aliasing from that. There is no lifetime syntax, no borrow annotation, and no garbage collector.",
-        },
-        Band {
-            number: "03",
-            id: "targets",
-            title: "One program, three targets",
-            body: "The tree-walking interpreter is the reference semantics. `vyrn build` emits textual LLVM IR and links it with clang. `vyrn build --target wasm` emits the WebAssembly module directly — no LLVM, no clang, no sysroot.",
-        },
-    ]
-}
-
-/// The rail's section links, mirroring the bands.
-fn railRows() -> Array<Band> {
-    return bands()
-}
-
-/// The highlighted landing snippet.
-fn heroHtml() -> String {
-    return highlight(heroSource())
-}
-
-/// The highlighted ownership snippet.
-fn ownershipHtml() -> String {
-    return highlight(ownershipSource())
 }
 
 /// The install command a first-time reader should copy. It builds from source,
@@ -81,7 +40,7 @@ fn quickstart() -> String {
         <section class="hero">
             <p class="eyebrow">A systems language</p>
             <h1 class="display">The expressiveness of TypeScript.<br/>Native speed. No collector.</h1>
-            <p class="lede">Types carry the rules that make a value valid, not only its shape. Ownership is a capability you declare on a parameter, so there is no garbage collector and no lifetime syntax. One program compiles to an interpreter, a native binary and a WebAssembly module.</p>
+            <p class="lede">Types carry the rules that make a value valid, not only its shape. Ownership is one word on a parameter. One program compiles to an interpreter, a native binary and a WebAssembly module.</p>
             <div class="cmd" data-copy>
                 <code id="quickstart">{{ quickstart() }}</code>
                 <button type="button" data-copy-btn aria-label="Copy the quickstart command">Copy</button>
@@ -115,29 +74,34 @@ fn quickstart() -> String {
 
         <section class="band" id="types">
             <p class="eyebrow">01 — validated types</p>
-            <h2>{{ bands()[0].title }}</h2>
-            <p>A <code>where</code> clause is part of the type. The compiler rejects a provably invalid constant, erases the check where it can prove the value is valid, and emits the check where it cannot. You cannot forget a check you never wrote.</p>
+            <h2>Types carry the rules, not only the shape</h2>
+            <p>The rule is part of the type, so you cannot forget a check you never wrote. Uncomment the last line.</p>
             <div class="plate" data-widget="types">
                 <div class="plate-head">
                     <span class="pill">Specimen</span>
                     <span class="eyebrow">README.md</span>
                     <span class="spacer"></span>
                     <div class="controls">
-                        <button type="button" data-types-btn>Uncomment the bad line</button>
+                        <button type="button" data-types-btn aria-pressed="false">Uncomment the bad line</button>
                     </div>
                 </div>
                 <div class="stage">
-                    <pre class="code" v-html="heroHtml()"></pre>
+                    <div class="lines" data-types-code>
+                        <div class="cl" v-for="r in heroRows()" :key="r.n" :data-l="r.n.toString()" :data-alt="r.alt">
+                            <span class="ln">{{ r.n }}</span>
+                            <code v-html="r.html"></code>
+                        </div>
+                    </div>
+                    <pre class="out" data-types-error v-html="heroDiagnostic()"></pre>
                 </div>
-                <pre class="code" id="types-error">{{ heroError() }}</pre>
-                <p class="cap">The snippet is the one in README.md. The error is what the compiler prints for the commented-out line, word for word.</p>
+                <p class="cap">The snippet is README.md's. Line {{ badRow() + 1 }} is the one the control changes, and the message under it is what vyrn check prints for that line, word for word.</p>
             </div>
         </section>
 
         <section class="band" id="memory">
             <p class="eyebrow">02 — ownership</p>
-            <h2>{{ bands()[1].title }}</h2>
-            <p>Write <code>read</code>, <code>modify</code>, <code>consume</code> or <code>share</code> on a parameter. The compiler enforces moves and aliasing from that. Memory is reclaimed at a site the compiler can name, and <code>vyrn why --memory</code> prints that site for every binding.</p>
+            <h2>Ownership is a word you write</h2>
+            <p>One word on a parameter — <code>read</code>, <code>modify</code>, <code>consume</code>, <code>share</code> — and the compiler enforces the rest. No lifetime syntax, no collector.</p>
             <div class="plate" data-widget="ownership">
                 <div class="plate-head">
                     <span class="pill">Replay</span>
@@ -147,50 +111,54 @@ fn quickstart() -> String {
                         <button type="button" data-own-play>Replay</button>
                     </div>
                 </div>
-                <span class="bignum" data-own-line>line <span data-own-n>17</span></span>
+                <span class="bignum">line <span data-own-n>{{ ownRows()[0].n }}</span></span>
                 <div class="stage">
-                    <pre class="code" v-html="ownershipHtml()"></pre>
-                    <svg class="chart" viewBox="0 0 780 104" role="img" aria-label="Each binding's lifetime, from the line that declares it to the line that ends it">
-                        <g v-for="s in ownershipSpans()" :key="s.id">
-                            <rect class="span" :data-ends="s.ends" :x="s.x" :y="s.y" :width="s.w" height="18" fill="currentColor" fill-opacity="0.18">
-                                <title>{{ s.title }}</title>
-                            </rect>
-                            <text :x="s.x" :y="s.y" dy="-4" class="val">{{ s.name }}</text>
-                            <text :x="s.x" :y="s.y" dy="32">{{ s.fate }}</text>
-                        </g>
-                        <line data-own-head x1="0" y1="0" x2="0" y2="104" stroke="currentColor" stroke-width="1"/>
-                    </svg>
-                    <pre class="code">{{ ownershipReport() }}</pre>
+                    <ul class="legend">
+                        <li v-for="l in lifetimes()" :key="l.name">
+                            <i :class='"key " + l.name'></i><code>{{ l.name }}</code>
+                            <span>lines {{ l.from }} to {{ l.to }} — {{ l.fate }}</span>
+                        </li>
+                    </ul>
+                    <div class="lines gutter" data-own-rows>
+                        <div class="cl" v-for="r in ownRows()" :key="r.n" :data-l="r.n.toString()">
+                            <span class="ln">{{ r.n }}</span>
+                            <span class="lanes"><i :class="r.a"></i><i :class="r.b"></i></span>
+                            <code v-html="r.html"></code>
+                        </div>
+                    </div>
+                    <div class="out" data-own-report>
+                        <div v-for="row in ownershipReport()" :key="row.tag" :data-from="row.from.toString()" :data-to="row.to.toString()" v-html="row.html"></div>
+                    </div>
                 </div>
-                <p class="cap">The bars come from vyrn why --memory. Each one runs from the line that declares a binding to the line the tool names as its end. {{ lineCount() }} source lines, 2 bindings, 0 collectors.</p>
+                <p class="cap">Each lane runs from the line that declares a binding to the line the tool names as its end. The playhead highlights one source line, one lane and one report row at a time — all three are the number above. {{ lineCount() }} lines, 2 bindings, 0 collectors.</p>
             </div>
         </section>
 
         <section class="band" id="targets">
             <p class="eyebrow">03 — targets</p>
-            <h2>{{ bands()[2].title }}</h2>
-            <p>The tree-walking interpreter is the reference semantics. <code>vyrn build</code> emits textual LLVM IR and links it with clang. <code>vyrn build --target wasm</code> emits the WebAssembly module directly — no LLVM, no clang, no WASI sysroot.</p>
+            <h2>One program, three targets</h2>
+            <p>The interpreter is the reference semantics. <code>--target wasm</code> emits the module directly: no LLVM, no clang, no sysroot.</p>
             <div class="cards">
                 <section>
                     <h3>Interpreter</h3>
-                    <p>The reference semantics. <code>vyrn run</code> needs nothing installed but the compiler.</p>
+                    <p>The reference semantics. <code>vyrn run</code> needs nothing but the compiler.</p>
                 </section>
                 <section>
                     <h3>Native</h3>
-                    <p>Textual LLVM IR, linked by clang. The runtime stays libc-portable, so MSVC and glibc link the same module.</p>
+                    <p>Textual LLVM IR, linked by clang. The runtime stays libc-portable.</p>
                 </section>
                 <section>
                     <h3>WebAssembly</h3>
-                    <p>Emitted directly by the compiler. A module carries only the runtime its own code reaches.</p>
+                    <p>Emitted directly. A module carries only the runtime its own code reaches.</p>
                 </section>
             </div>
-            <p class="notice">The direct encoder is why a module is small: <code>fib.vyrn</code> builds to 1.4 KB, where the route through clang produced 277 KB. Both figures are in README.md, and <a href="/compare.html">the comparison page</a> charts them.</p>
+            <p class="notice">That is why a module is small: <code>fib.vyrn</code> builds to 1.5 KB, against 277 KB through clang — {{ moduleRatio() }} times. <a href="/compare.html#numbers">The comparison page measures eight of them.</a></p>
         </section>
 
         <section class="band" id="parity">
             <p class="eyebrow">04 — how we know it works</p>
             <h2>Three backends, checked byte for byte</h2>
-            <p>None of the above is a reason to use Vyrn. It is the reason to believe the rest. Every example in <code>examples/</code> runs under all three backends, and CI fails unless the three produce the same stdout, the same stderr and the same exit code — trap messages included. The known-divergent list is empty and must stay empty.</p>
+            <p>Not a reason to use Vyrn — the reason to believe the rest. CI fails unless all three backends agree on stdout, stderr and exit code, trap messages included.</p>
             <div class="plate" data-widget="parity">
                 <div class="plate-head">
                     <span class="pill live">Live check</span>
@@ -219,17 +187,17 @@ fn quickstart() -> String {
                     </div>
                     <p class="verdict" data-parity-verdict>0 bytes differ</p>
                 </div>
-                <p class="cap">The number is the IEEE-754 bit pattern of sin(1) as examples/herofield.vyrn prints it. All three backends print it because the build forbids the fused multiply-add that would change a bit. Break one byte to watch the harness turn red.</p>
+                <p class="cap">The number is the IEEE-754 bit pattern of sin(1) as examples/herofield.vyrn prints it. All three print it because the build forbids the fused multiply-add that would change a bit. Break one byte to watch the harness turn red.</p>
             </div>
-            <p class="notice">Run the same check yourself: <code>cargo test -p vyrn-cli --test parity -- --ignored</code>.</p>
+            <p class="notice">Run it yourself: <code>cargo test -p vyrn-cli --test parity -- --ignored</code>.</p>
         </section>
 
         <section class="band">
             <p class="eyebrow">05 — next</p>
             <h2>Read it, or build it</h2>
             <ul class="plain">
-                <li><a href="/philosophy.html">Philosophy</a><span class="note">Intent over mechanism, and the five things Vyrn refuses to have.</span></li>
-                <li><a href="/compare.html">Compare</a><span class="note">The same task in Vyrn, Rust, TypeScript and Go, and the numbers we can actually produce.</span></li>
+                <li><a href="/philosophy.html">Philosophy</a><span class="note">Intent over mechanism, and the six things Vyrn refuses to have.</span></li>
+                <li><a href="/compare.html">Compare</a><span class="note">The same task in four languages, and every number we can produce on demand.</span></li>
                 <li><a href="/install.html">Install</a><span class="note">Three commands, per platform, and how to check it runs.</span></li>
                 <li><a href="/docs.html">Docs</a><span class="note">The standard library reference, the examples and the design record.</span></li>
             </ul>
