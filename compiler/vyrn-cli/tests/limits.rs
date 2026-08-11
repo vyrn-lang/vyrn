@@ -136,8 +136,25 @@ fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
         )
     };
     // `main` holds one frame, so `down(limit - 2)` is the deepest run that fits.
+    //
+    // This half also gates the PROFILE. An unoptimized interpreter frame is ~20x
+    // an optimized one, so a limit can fit in release and abort in debug — it
+    // did, at 10,000, and CI runs these tests in debug. Naming the profile in
+    // the failure turns that into a sentence instead of a stack overflow.
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let ok = run("run", &src(limit - 2), "depthok");
-    assert_eq!(text(&ok).trim(), (limit - 2).to_string(), "{}", text(&ok));
+    let got_ok = text(&ok);
+    assert_eq!(
+        got_ok.trim(),
+        (limit - 2).to_string(),
+        "the limit is the LANGUAGE's, so EVERY build profile must reach it. This is a \
+         {profile} build: if the run above died on the host stack, {limit} is the wrong \
+         number, not this test — got:\n{got_ok}"
+    );
     assert_eq!(ok.status.code(), Some(0));
 
     let over = run("run", &src(limit - 1), "depthover");
@@ -165,7 +182,8 @@ fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
 /// `check` did not predict the build as that the build never returned.
 #[test]
 fn polymorphic_recursion_is_refused_by_check_and_by_the_backends() {
-    let spine = "fn f<T>(x: T, n: Int64) -> Int64 {\n    if n <= 0 {\n        return 0\n    }\n    \
+    let spine =
+        "fn f<T>(x: T, n: Int64) -> Int64 {\n    if n <= 0 {\n        return 0\n    }\n    \
                  let xs: Array<T> = [x]\n    return f(xs, n - 1)\n}\n\n\
                  fn main() -> Int64 {\n    print(\"\\{f(1, 3)}\")\n    return 0\n}\n";
     let record = "type P<T> = { a: T, b: T }\n\n\

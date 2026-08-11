@@ -10905,6 +10905,14 @@ impl Fn_<'_> {
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Add);
         b.ins(&Instruction::I64Store(at(l.fields[2])));
+        // A hit keeps the key it already has, so this one is surplus — the map
+        // takes the key, so the map releases the key it does not keep. The
+        // textual backend's `@__vyrn_str_free` call, instruction for
+        // instruction.
+        b.ins(&Instruction::Else);
+        b.ins(&Instruction::LocalGet(k));
+        str_hdr(b);
+        b.ins(&Instruction::Call(self.cx.rt.free));
         self.depth -= 1;
         b.ins(&Instruction::End);
 

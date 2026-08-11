@@ -1,0 +1,94 @@
+// Keying a map from an array element, the way that runs (RFC-0028, RFC-0089
+// rule 2). The map takes the key, so the key is a `.copy()` and the array keeps
+// what it owns — both containers are readable afterwards and both release once.
+//
+// The shape three-way parity had no example of until it cost a defect: a
+// borrowed element handed straight to `m[k] = v` gave one buffer two owners,
+// and only the native binary said so, by dying. mapkeyborrowed.vyrn is that
+// program, pinned as a refusal.
+//
+// The second half of the same rule is the tally below: a map that already holds
+// an equal key releases the surplus one, so the copy in a histogram loop costs a
+// copy and not a leak.
+
+/// `n` distinct keys, owned by the array.
+fn keyList(n: Int64, prefix: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < n {
+        out.push(prefix + i.toString())
+        i = i + 1
+    }
+    return out
+}
+
+/// A map keyed from a BORROWED array's elements, read by index.
+fn indexBuild(ks: Array<String>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    while i < ks.length {
+        m[ks[i].copy()] = i
+        i = i + 1
+    }
+    return m
+}
+
+/// The same map keyed by a `for` variable — the other spelling of one fact.
+fn loopBuild(ks: Array<String>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    for k in ks {
+        m[k.copy()] = i * 10
+        i = i + 1
+    }
+    return m
+}
+
+/// A histogram over repeated keys: every turn after the first takes the hit
+/// path, where the map releases the key it is handed.
+fn tally(words: Array<String>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    for w in words {
+        m[w.copy()] = match m[w] {
+            Some(c) => c + 1,
+            None => 1,
+        }
+    }
+    return m
+}
+
+fn lookup(m: Map<String, Int64>, k: String) -> Int64 {
+    return match m[k] {
+        Some(v) => v,
+        None => 0 - 1,
+    }
+}
+
+fn main() -> Int64 {
+    let ks = keyList(4, "key")
+
+    let byIndex = indexBuild(ks)
+    print("byIndex \{byIndex.length} \{lookup(byIndex, "key0")} \{lookup(byIndex, "key3")}")
+
+    let byLoop = loopBuild(ks)
+    print("byLoop \{byLoop.length} \{lookup(byLoop, "key0")} \{lookup(byLoop, "key3")}")
+
+    // The array is untouched by either build — it still owns every element.
+    print("array \{ks.length} \{ks[0]} \{ks[3]}")
+
+    let mut words: Array<String> = []
+    words.push("ab" + "c")
+    words.push("ab" + "c")
+    words.push("x" + "y")
+    words.push("ab" + "c")
+    let counts = tally(words)
+    print("tally \{counts.length} \{lookup(counts, "abc")} \{lookup(counts, "xy")}")
+    print("words \{words.length} \{words[0]} \{words[2]}")
+
+    drop counts
+    drop words
+    drop byLoop
+    drop byIndex
+    drop ks
+    return 0
+}

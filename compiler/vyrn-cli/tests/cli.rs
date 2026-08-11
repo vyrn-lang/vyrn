@@ -25,6 +25,26 @@ fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
 
+/// `vyrn --version` and `vyrn -V`, and the three facts about them a package
+/// manager reads: exit 0, one line on stdout, and the crate's own version in it.
+///
+/// The published alpha (v0.1.0-alpha.1) printed the usage screen and exited 2
+/// for both spellings. The version comes from `CARGO_PKG_VERSION`, so this row
+/// also pins that the string is not a second copy of the number.
+#[test]
+fn version_prints_the_crate_version_and_exits_zero() {
+    for flag in ["--version", "-V"] {
+        let out = vyrn().arg(flag).output().expect("vyrn --version");
+        assert_eq!(out.status.code(), Some(0), "`vyrn {flag}` exits 0");
+        let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+        assert_eq!(
+            stdout,
+            format!("vyrn {}\n", env!("CARGO_PKG_VERSION")),
+            "`vyrn {flag}` prints one line, and it is the crate's version"
+        );
+    }
+}
+
 /// The runtime half and the comptime helpers, tested over plain arrays with no
 /// generation involved.
 #[test]

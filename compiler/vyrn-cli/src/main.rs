@@ -59,7 +59,7 @@ mod remote;
 
 const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
-       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps\n       vyrn --version   (also -V)";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -245,9 +245,10 @@ fn main() -> ExitCode {
     // interpreter recursively, nested deep inside the load/parse/check call
     // chain. On Windows the default ~1 MB main-thread stack overflows on a
     // realistic generator (e.g. std/i18n compiling ICU messages). Run the whole
-    // CLI on a worker thread with a generous stack so generation has headroom.
+    // CLI on a worker thread with the interpreter's own reserve, so generation
+    // has the same headroom a run does.
     std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
+        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
         .spawn(real_main)
         .expect("failed to spawn the vyrn worker thread")
         .join()
@@ -293,6 +294,15 @@ fn real_main() -> ExitCode {
     // "this command takes no extra arguments" check below still holds.
     let want_maps = args.iter().any(|a| a == "--maps");
     args.retain(|a| a != "--maps");
+    // `--version` / `-V`, before the usage screen: the published alpha printed
+    // usage and exited 2 for both, which is what a package manager reads as a
+    // broken install. The string is the crate's own `version`, so the binary and
+    // the release archive's `VERSION` file cannot drift — the release workflow
+    // checks the tag against this line before it builds anything.
+    if args.iter().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("vyrn {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     if args.len() < 2 {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -1568,7 +1578,11 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
                 .cloned()
                 .unwrap_or_else(|| fallback.to_string())
         };
-        return from_json_cmd(path, &flag("--as", "Config"), &flag("--from", "./config.vyrn"));
+        return from_json_cmd(
+            path,
+            &flag("--as", "Config"),
+            &flag("--from", "./config.vyrn"),
+        );
     }
     let check = rest.iter().any(|a| a == "--check");
     let files: Vec<String> = rest

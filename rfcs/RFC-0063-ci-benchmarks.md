@@ -168,3 +168,60 @@ human from the `bench` job's `bench-json` artifact.
   (all pre-existing, in `vyrn-codegen`/`vyrn-frontend`, none in `vyrn-cli`).
 - No LSP change from RFC-0063 (CLI + std only) — the deployed `vyrn-lsp.exe` hash
   is untouched by this RFC.
+
+---
+
+## Amendment — the tripwire becomes a gate
+
+This RFC put "any blocking timing gate" out of scope, on the ground that hosted
+runner noise makes one a false-positive machine. The ground was right and the
+conclusion was too strong: what it produced was a job that *cannot fail*
+comparing against a baseline that *is never seeded*, which measures nothing at
+all. Both halves are fixed together, because neither is worth fixing alone.
+
+- **Seeding is a download-and-commit.** `--json` is per-example and the baseline
+  is one document over the corpus, so the merge now happens in CI, in the
+  `Assemble a seedable baseline` step, and `bench-json` carries a ready
+  `baseline.json` beside the per-example reports. Seeding is `cp baseline.json
+  bench/baseline.json`. The placeholder's `_readme` names the procedure and the
+  job to take it from. Hand-merging reports in an editor is what the step exists
+  to prevent.
+- **`continue-on-error` is gone.** It was load-bearing only while the baseline
+  was a placeholder, and a placeholder already exits 0 by its own arithmetic —
+  the flag was protecting against nothing and disarming everything.
+- **The margin is `BENCH_THRESHOLD`, one value in the workflow `env:`,
+  defaulting to `2.0`** rather than the comparator's `1.5`. The statistic
+  compared is the minimum of >= 31 samples, so ordinary preemption is already
+  filtered — a stolen timeslice raises the mean, never the minimum. What is left
+  is fleet spread: `ubuntu-latest` is several CPU models under one label. 2.0
+  sits above that and far below every regression this project has actually had
+  (52x, 8x, unbounded). Measured locally against a baseline taken minutes
+  earlier on the same machine, every row read `ok` and an exactly-quartered
+  baseline produced factors of 3.8-4.1 where 4.0 is exact — a min-to-min drift
+  inside 5%.
+- **Still push-to-main only.** A regression is reported after the merge that
+  caused it, against the one hardware line the baseline came from. Comparing a
+  PR runner's timings to main's baseline is comparing two machines, which is the
+  mistake the baseline doc has warned about from the start.
+- **No new statistics.** N-consecutive-runs and median-of-N were considered and
+  dropped: the harness already medians within a run and compares on the min, and
+  a cross-run rule needs state CI does not have. The artifact history is where
+  that evidence will come from if the threshold ever needs to move.
+
+### Coverage
+
+`examples/langbench.vyrn` joins the corpus: the map (build, hit, miss), the
+string builder (`"\{}"` interpolation, `joinWith`, `split`), both dispatch
+mechanisms (a protocol bound against an RFC-0037 `fn` value — they measure
+identical, which is the claim), and `std/json`'s reader and writer. Writing it
+found a native double-free: a `Map` key taken from a borrowed `Array<String>`
+element is not copied, so the array and the map free the same buffer. The
+interpreter is correct and the native binary dies with no output. No example in
+the corpus keys a map from an array element, so parity was blind to it.
+
+The compiler's own front end stays unmeasured and cannot be measured this way:
+a `bench` block is a Vyrn program compiled to machine code, and the lexer, the
+checker, the generator engine and an end-to-end compile are all Rust that runs
+*before* the block exists. `lex()` is the one compiler surface Vyrn can name, and
+the checker refuses it outside a `gen fn`. Timing those needs a second harness,
+which is a different RFC.

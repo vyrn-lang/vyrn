@@ -7,11 +7,16 @@
 /// runtime message, exit 127, no `file:line` and nothing a Vyrn program could
 /// have caught. That is the one thing this project promises never happens.
 ///
-/// So the depth is COUNTED, not left to whichever stack runs out first: 10,000
-/// calls may be in flight, and the 10,001st ends the run with the same words in
+/// So the depth is COUNTED, not left to whichever stack runs out first: 1,000
+/// calls may be in flight, and the 1,001st ends the run with the same words in
 /// every engine. An `extern` does not count (it is the host's frame) and neither
 /// does a lambda body (it has no name to call itself by, so it cannot recurse
 /// without passing through a named function like this one).
+///
+/// The number is 1,000 because a build profile is not allowed to change it. The
+/// interpreter costs ~8.5 KB of host stack per call optimized and ~190 KB
+/// unoptimized, so the first number tried — 10,000 — was reachable only in a
+/// release build and overflowed in a debug one.
 ///
 /// The trap is last, because it ends the run — this example is a three-way
 /// parity citizen through its stdout, its stderr and its exit code, like the
@@ -24,9 +29,9 @@ fn down(n: Int64) -> Int64 {
 }
 
 fn main() -> Int64 {
-    // Exactly at the budget: `main` holds one frame and `down` takes 9,999 more.
-    print("\{down(9998)}")
+    // Exactly at the budget: `main` holds one frame and `down` takes 999 more.
+    print("\{down(998)}")
     // One past it. The run ends here.
-    print("\{down(9999)}")
+    print("\{down(999)}")
     return 0
 }

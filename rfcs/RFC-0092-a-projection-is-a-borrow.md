@@ -1200,6 +1200,25 @@ early returns.
   by hand, leaks the buffer whole, which is the direction this analysis is
   allowed to be wrong in. The new memory row `consumingLoop` measures it, and it
   grows when the row is not minted.
+- **A BORROWED map key is still taken.** M5 records the move and refuses
+  nothing, so `m[ks[i]] = v` writes the array's own buffer into the key slot and
+  both containers release it. The map LITERAL one arm over already refuses the
+  same borrow, so this is one fact with two spellings and two verdicts — the
+  defect this RFC exists to remove, left standing at the one site the milestone
+  had to touch.
+
+  **Closed by the map-key rule.** `Stmt::IndexSet` passes `outlives` TRUE for the
+  index now, so rule 2 answers for the key exactly as it answers for the value,
+  for `push`, and for the map literal. The corpus was four sites and every one of
+  them was the defect: two tag histograms, a level tally and a subscription
+  registry, all handing a map a String somebody else owns; each takes `.copy()`.
+  A key that is nobody's borrow is untouched, so `httpHeaders` is unmoved. The
+  other half of the same contract came with it — **the map releases the key it
+  does not keep** — because without it the `.copy()` the rule requires would leak
+  once per repeat in every histogram loop. Measured native, 200 thousand inserts
+  of one 3-byte key: 10.29 MB peak → 4.09 MB. The interpreter needed nothing; its
+  key is an `Rc`. The memory census gains `mapRepeatKey`, and
+  `examples/mapkeyowned.vyrn` is the parity example the corpus never had.
 - **The interpreter runs no `for` release**, exactly as it runs no `if let`
   release (Phase 10a). It reclaims by dropping the Rust value, and the only
   reclamation it has to run is a DECLARED one, because that is ordinary Vyrn and

@@ -148,7 +148,7 @@ fn histogram(bs: Array<api.Book>) -> Map<String, Int64> {
                 Some(c) => c,
                 None => 0,
             }
-            m[tag] = cur + 1
+            m[tag.copy()] = cur + 1
         }
     }
     return m

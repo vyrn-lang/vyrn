@@ -225,10 +225,15 @@ fn recordsFrom(lines: Array<String>) -> Array<Rec> {
 // ---------------------------------------------------------------------------
 
 /// Tally a list of level strings into an insertion-ordered histogram.
+///
+/// `lv` names an element of the CALLER's array, and the map takes the key it is
+/// given — so the key is `lv.copy()`. Without it the array and the map would
+/// both release one buffer. The copy costs nothing on a repeat, because a map
+/// that already holds an equal key releases the surplus one.
 fn tallyLevels(levels: Array<String>) -> Map<String, Int64> {
     let mut m: Map<String, Int64> = [:]
     for lv in levels {
-        m[lv] = match m[lv] {
+        m[lv.copy()] = match m[lv] {
             Some(c) => c + 1,
             None => 1,
         }

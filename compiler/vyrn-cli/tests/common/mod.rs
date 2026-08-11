@@ -100,6 +100,14 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "`xs` was moved here into `fromArray(..)`",
     ),
     (
+        "mapkeyborrowed.vyrn",
+        "a borrowed array element handed to `m[k] = v` — the map takes the key, so the \
+         array and the map both released one buffer and the native binary exited 127; \
+         the map LITERAL refused the same borrow all along, which made it one fact with \
+         two verdicts. mapkeyowned.vyrn is the shape that runs",
+        "`ks[i]` may not be stored into `m`",
+    ),
+    (
         "consume_borrowed.vyrn",
         "a `read` parameter handed to a `consume` parameter — the frame gave away \
          what it does not own, and the native binary exited 0xC0000374",
@@ -243,12 +251,39 @@ pub fn read_args(args_fixture: &Path) -> Vec<String> {
 /// `toolchain::`, which the generator engine still needs.
 pub fn wasmtime() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    std::env::var("VYRN_WASMTIME")
+    let found = std::env::var("VYRN_WASMTIME")
         .map(PathBuf::from)
         .ok()
         .filter(|p| p.exists())
         .or_else(|| {
             Some(root.join("tools/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe"))
                 .filter(|p| p.exists())
-        })
+        });
+    require_tools("wasmtime", "VYRN_WASMTIME", found)
+}
+
+/// Turn a missing tool from a SKIP into a failure when `VYRN_REQUIRE_TOOLS` is
+/// set, and return it unchanged otherwise.
+///
+/// Every column of this harness that needs an external binary degrades quietly
+/// when it is absent: no `wasmtime` and the wasm column disappears with a `NOTE`
+/// on stderr, and the run still passes with two engines compared instead of
+/// three. That is right on a developer's machine, where the tool is genuinely
+/// optional. It is wrong in CI, where the tool is fetched on purpose and a
+/// cache that restored an empty directory, a renamed release asset or a typo in
+/// an exported path all read as green — a gate measuring two thirds of what its
+/// name says.
+///
+/// So the decision is the CALLER's, made once per environment: CI exports
+/// `VYRN_REQUIRE_TOOLS=1` and a missing tool stops the build, saying which one
+/// and which variable points at it.
+pub fn require_tools(what: &str, var: &str, found: Option<PathBuf>) -> Option<PathBuf> {
+    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
+        panic!(
+            "VYRN_REQUIRE_TOOLS is set and `{what}` was not found — this run would have \
+             silently skipped the checks that need it. Point `{var}` at the binary, or \
+             unset VYRN_REQUIRE_TOOLS to allow the skip."
+        );
+    }
+    found
 }
