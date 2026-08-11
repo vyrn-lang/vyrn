@@ -10,6 +10,8 @@
 /// here, exactly as `repo.vyrn` zips RFC numbers and titles.
 import { apiDocs } from "./apidoc"
 import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docCount } from apiDocs("../../std")
+import { startsWith } from "std/strpred"
+import { substring, trimStart } from "std/strings"
 import { hrefOf } from "./nav"
 import { blob } from "./repo"
 
@@ -21,11 +23,26 @@ export type ApiEntry = { name: String, kind: String, sig: String, prose: String,
 /// has. The summary is HTML, because the prose it came from is.
 export type ApiModule = { name: String, summary: String, count: Int64 }
 
+/// A module's summary without the module's own name in front of it. The list
+/// prints the name in its first column, and a row that says `std/json` twice
+/// reads as a machine repeating itself.
+fn shorten(name: String, summary: String) -> String {
+    let full = "std/" + name
+    if !startsWith(summary, full) {
+        return summary.copy()
+    }
+    let rest = trimStart(substring(summary, full.byteLength, summary.byteLength))
+    if startsWith(rest, "— ") {
+        return trimStart(substring(rest, 4, rest.byteLength))
+    }
+    return rest
+}
+
 /// Every documented module, sorted.
 export fn apiModules() -> Array<ApiModule> {
     let mut out: Array<ApiModule> = []
     for m in docModules() {
-        out.push(ApiModule { name: m.copy(), summary: docSummary(m), count: docCount(m) })
+        out.push(ApiModule { name: m.copy(), summary: shorten(m, docSummary(m)), count: docCount(m) })
     }
     return out
 }
@@ -109,6 +126,12 @@ test "the reference covers the modules it lists and nothing else" {
     assert(!apiKnown("nope"))
     assertEq(apiEntries("nope").length, 0)
     assertEq(apiIntro("nope"), "")
+}
+
+test "a summary does not repeat the module's own name" {
+    assertEq(shorten("json", "std/json — the value tree."), "the value tree.")
+    assertEq(shorten("json", "std/json (RFC-0059) — the value tree."), "(RFC-0059) — the value tree.")
+    assertEq(shorten("fallible", "`Fallible` — the protocol."), "`Fallible` — the protocol.")
 }
 
 test "a module page and its source are one link each" {
