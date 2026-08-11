@@ -84,7 +84,9 @@ fetch_to "$base/$asset" "$tmp/$asset" ||
 fetch_to "$base/SHA256SUMS" "$tmp/SHA256SUMS" ||
   die "release $tag has no SHA256SUMS asset; refusing to install unverified bytes"
 
-want=$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
+# sha256sum writes "<hex>  name" in text mode and "<hex> *name" in binary mode;
+# accept both, so a SHA256SUMS produced on any host still verifies here.
+want=$(awk -v f="$asset" '{ n = $2; sub(/^\*/, "", n); if (n == f) print $1 }' "$tmp/SHA256SUMS")
 [ -n "$want" ] ||
   die "$asset is not listed in the SHA256SUMS of $tag; refusing to install unverified bytes"
 

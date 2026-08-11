@@ -15,7 +15,12 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is 10x faster without it
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-function Die($msg) { Write-Error "vyrn install: $msg"; exit 1 }
+# The message first and readable; the throw is what stops the script. `exit`
+# would close the window when the script arrives through `irm | iex`.
+function Die($msg) {
+  Write-Host "vyrn install: $msg" -ForegroundColor Red
+  throw 'install aborted'
+}
 
 $repo = if ($env:VYRN_REPO) { $env:VYRN_REPO } else { 'vyrn-lang/vyrn' }
 $dir  = if ($env:VYRN_INSTALL_DIR) { $env:VYRN_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.vyrn' }
@@ -68,11 +73,12 @@ try {
     Die "release $tag has no SHA256SUMS asset; refusing to install unverified bytes"
   }
 
-  # sha256sum format: "<hex>  <filename>"
+  # sha256sum writes "<hex>  name" in text mode and "<hex> *name" in binary
+  # mode; accept both.
   $want = $null
   foreach ($line in Get-Content $sums) {
     $parts = $line -split '\s+', 2
-    if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $asset) { $want = $parts[0].Trim() }
+    if ($parts.Count -eq 2 -and $parts[1].Trim().TrimStart('*') -eq $asset) { $want = $parts[0].Trim() }
   }
   if (-not $want) {
     Die "$asset is not listed in the SHA256SUMS of $tag; refusing to install unverified bytes"
