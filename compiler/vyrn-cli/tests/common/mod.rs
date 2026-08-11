@@ -99,6 +99,15 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "`ys` may not be passed to a `consume` parameter via `take(..)`",
     ),
     (
+        "region_consume.vyrn",
+        "a value a `region` allocated, handed to a `consume` parameter (RFC-0004 §4) — \
+         the escape guard watched named stores, so `kept.push(s)` inside the region was \
+         refused and `keep(s)`, which stores one frame down, was not; the native binary \
+         printed freed memory that changed from run to run",
+        "cannot hand a heap value to argument 1 of `keep`, which is `consume`, inside a \
+         `region`",
+    ),
+    (
         "task_abandoned.vyrn",
         "a `Task` acquired and abandoned, one joined twice, and one discharged on a \
          single branch (RFC-0095 M1) — the three refusals a `Stream` gets, over the \

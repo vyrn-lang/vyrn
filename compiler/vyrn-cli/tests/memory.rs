@@ -697,6 +697,25 @@ const ROWS: &[Row] = &[
               turns and 50.25 MB at four times that; 3.95 MB and 3.57 MB after it",
     },
     Row {
+        export: "regionArena",
+        census: "RFC-0004 §4",
+        today: Shape::Steady,
+        why: "the arena. `own` answers `Leak::Region` for every dynamic String bound inside a \
+              `region`, on every backend, because the arena is supposed to own it — and this \
+              backend had no arena. `region_exit` bumped a counter and reclaimed nothing, on \
+              the recorded argument that `malloc` here never freed either, which stopped \
+              being true at M6. So the one construct built for bounded memory was the one \
+              construct that made this target unbounded: an audit measured 13.4 MB native \
+              against 3,664.5 MB and `out of memory` under wasmtime, for 20,000 turns of a \
+              concatenation loop inside a region — and after the arena, 27.7 MB and a clean \
+              exit. `region_keep` records what a lexically-inside-a-region expression \
+              allocated, `rt.region_free` hands the frame's blocks back at the closing brace, \
+              and `rt.region_pop` leaves them alone on the one edge that carries one out. \
+              Lexical routing, like the textual backend's: routing on the RUNTIME depth would \
+              put a callee's String in a caller's arena, where the escape guard never looked. \
+              Take `region_keep` out and this row leaks",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -928,6 +947,20 @@ export extern fn consumingLoop() {{
     xs.push(tag() + "b")
     for x in consume xs {{
         seen = seen + Int64(x.byteLength)
+    }}
+}}
+
+/// RFC-0004 §4. Three ~900-byte Strings a call, all of them the arena's: the
+/// binding's own row says `Leak::Region`, so the closing brace is the only thing
+/// that can free them. It did not, on this backend, until `region_keep` and
+/// `rt.region_free` — and the numbers that measured the difference are on the
+/// `regionArena` row above.
+export extern fn regionArena() {{
+    region {{
+        let a = tag() + "a"
+        let b = tag() + a
+        let c = b + "!"
+        seen = seen + Int64(c.byteLength)
     }}
 }}
 
