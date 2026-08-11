@@ -26,6 +26,33 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental artifacts bloat the cache and don't help clean CI builds.
   CARGO_INCREMENTAL: 0
+  # A missing external tool must FAIL a job here, never skip quietly. The parity
+  # harness drops the wasm column with a `NOTE` when `wasmtime` is absent, and the
+  # memory census skips whole when `node` is, so a restored-but-empty cache or a
+  # renamed release asset reads as green while a third of the gate does not run.
+  # `tests/common/mod.rs` and `tests/memory.rs` read this and panic instead.
+  VYRN_REQUIRE_TOOLS: "1"
+  # THE REGRESSION THRESHOLD, in one place. `vyrn bench --compare` calls a bench
+  # regressed when its `min` exceeds `baseline min * BENCH_THRESHOLD`.
+  #
+  # 2.0, chosen against the noise rather than against a wish:
+  #
+  #   * The statistic compared is the MINIMUM of >= 31 samples, each auto-scaled
+  #     to take >= 1 ms. A preempted sample on a shared runner raises the mean and
+  #     the median; it cannot lower the minimum. Most of the noise is already gone
+  #     before the comparison starts.
+  #   * What remains is not run-to-run jitter but FLEET spread: `ubuntu-latest` is
+  #     several CPU models under one label, and a scheduler that hands out a
+  #     different one shifts every row at once. A margin that a fleet change can
+  #     cross turns main red for a reason no commit caused, and a gate that cries
+  #     wolf gets switched off — which is worse than a loose one.
+  #   * The regressions this project has actually had are not marginal. Census P1
+  #     was 52x, the fixed-array element read was 8x, and the module-state append
+  #     spine was unbounded. A 2x margin catches all of them with room to spare.
+  #
+  # Lower it once the `bench-json` artifacts show what the real spread between
+  # consecutive main runs is. Do not raise it without the same evidence.
+  BENCH_THRESHOLD: "2.0"
 
 jobs:
   test:
@@ -185,15 +212,21 @@ jobs:
             --test genwasm -- --ignored --nocapture
 
   bench:
-    name: benchmarks (informational)
+    name: benchmarks (regression gate)
     # Push-to-main only: timing on shared PR runners is noise, and the trend
-    # record only makes sense against the main line.
+    # record only makes sense against the main line. So this is a tripwire on the
+    # main line, not a pre-merge check — a regression is reported after the merge
+    # that caused it, against the one hardware line the baseline was taken from.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # A gross regression shows as a job-failure annotation without blocking the
-    # merge — the noise on hosted runners makes a blocking timing gate a
-    # false-positive machine (RFC-0063 "Out of scope").
-    continue-on-error: true
+    # `continue-on-error` is deliberately GONE. It was right while
+    # `bench/baseline.json` was a placeholder, because a placeholder can never
+    # report a regression and the job could only ever fail for an unrelated
+    # reason. Once a real baseline is seeded, a job that cannot fail is not a
+    # gate — so the failure is real, and `BENCH_THRESHOLD` (see `env:` above) is
+    # the one knob that decides when it fires. Until the baseline is seeded the
+    # comparator reports every bench `new` and exits 0, so this stays a no-op by
+    # its own arithmetic rather than by a flag.
     steps:
       - uses: actions/checkout@v4
       - name: Rust cache
@@ -217,13 +250,38 @@ jobs:
           for f in $corpus; do
             stem=$(basename "$f" .vyrn)
             echo "== $stem =="
-            # The trend record (always produced, uploaded below).
+            # The trend record, and the raw material the seedable baseline is
+            # assembled from below. Always produced, always uploaded.
             "$vyrn" bench "$f" --json > "../bench/out/$stem.json"
-            # The tripwire — a nonzero exit here fails the (continue-on-error) job.
-            "$vyrn" bench "$f" --compare ../bench/baseline.json || regressed=1
+            # The gate. A nonzero exit here fails the job.
+            "$vyrn" bench "$f" --compare ../bench/baseline.json \
+              --threshold "$BENCH_THRESHOLD" || regressed=1
           done
           exit $regressed
-      - name: Upload bench reports (the trend record)
+      - name: Assemble a seedable baseline
+        # Seeding must be a download-and-commit, never a hand edit. `--json` is
+        # per-example, and `bench/baseline.json` is one document over the whole
+        # corpus, so the merge happens HERE — where the numbers were measured —
+        # rather than in a maintainer's editor. The output is byte-for-byte what
+        # `bench/baseline.json` should contain.
+        #
+        # `backend` and `opt` come from the first report; every report in a run
+        # carries the same pair (`native` / `O2`). Bench names are unique across
+        # the corpus, which `no_two_benches_in_the_corpus_share_a_name` pins —
+        # `--compare` matches on the name alone, so a clash would silently compare
+        # one bench against another's timing.
+        #
+        # Written through a temp file: the glob must not pick up its own output.
+        if: always()
+        run: |
+          python3 -c "import glob, json; rs = [json.load(open(p)) for p in sorted(glob.glob('bench/out/*.json'))]; json.dump({'backend': rs[0]['backend'], 'opt': rs[0]['opt'], 'benches': [b for r in rs for b in r['benches']]}, open('bench/merged.tmp', 'w'), indent=2)"
+          mv bench/merged.tmp bench/out/baseline.json
+          python3 -c "import json; print('seedable baseline:', len(json.load(open('bench/out/baseline.json'))['benches']), 'benches')"
+      - name: Upload bench reports + the seedable baseline
+        # `bench-json` holds the per-example trend record AND `baseline.json`.
+        # To seed the real baseline: open this run, download `bench-json`, and
+        #   cp baseline.json bench/baseline.json && git commit
+        # That is the whole procedure — see the `_readme` in the placeholder.
         if: always()
         uses: actions/upload-artifact@v4
         with:
