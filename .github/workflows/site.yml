@@ -61,7 +61,7 @@ jobs:
         # repository counts.
         run: |
           bin=compiler/target/release/vyrn
-          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn; do
+          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn site/app/apidoc.vyrn site/app/docs.vyrn; do
             "$bin" test "$f"
           done
 
@@ -71,14 +71,18 @@ jobs:
       - name: The hero module
         # `writeFile` takes a String, so the export step cannot copy a wasm
         # module. It is built here instead, straight into the output.
+        #
+        # `out/docs/std` is made here too: RFC-0014 has no way to CREATE a
+        # directory, and the reference publishes one page per std module.
         run: |
-          mkdir -p out
+          mkdir -p out/docs/std
           compiler/target/release/vyrn build examples/herofield.vyrn --target wasm -o out/hero.wasm
 
       - name: Render every page
         # One `route()` call per path, twice: the document and the soft-
         # navigation payload beside it. The stylesheet, the three site scripts
-        # and the three browser runtimes are copied by the same program.
+        # and the three browser runtimes are copied by the same program. The
+        # reference pages are read off `std/` by a generator while this runs.
         run: compiler/target/release/vyrn run site/export.vyrn out
 
       - uses: actions/upload-pages-artifact@v3
