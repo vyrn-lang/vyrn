@@ -31,9 +31,10 @@ use std::collections::HashMap;
 /// lifted: depth 2,600 runs and 2,800 overflows, so 1,000 keeps 2.6x margin in
 /// the profile that has the least. The native binary and `wasmtime` run past
 /// 20,000 frames of an ordinary function in either profile. 1,000 is also where
-/// CPython settles, and it is far past what a recursive descent over real data
-/// needs — the parser refuses source nested past 1,024 levels, so no document
-/// this compiler accepts can drive a structural walk deeper than the budget.
+/// CPython settles, and it is past what a recursive descent over real data
+/// reaches: `.vyx` markup, a GraphQL selection set and a JSON document all nest
+/// in the tens. Data nested deeper than that is data no engine should try — it
+/// stops with the same diagnostic everywhere, which is the whole contract.
 ///
 /// An `extern` is NOT counted: it is the host's frame, and no backend gives it a
 /// Vyrn prologue. Neither is a lambda body, which has no name to call itself by
