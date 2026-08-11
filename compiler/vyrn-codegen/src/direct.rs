@@ -2707,12 +2707,18 @@ impl Fn_<'_> {
                 // binding that names somebody else's storage (`let mut s = r.name`
                 // is a borrow, not a move) would free that storage instead, which
                 // is why the answer is read rather than assumed.
+                //
+                // A LITERAL initializer is somebody else's storage too: `let mut
+                // acc = ""` is droppable (`own` answers for the buffer the loop
+                // ENDS on) and its first append would otherwise grow a data
+                // segment address in place. The textual backend carries the same
+                // second half, and the module-state seed always did.
                 let owns = self.drops.contains_key(&(s as *const Stmt as usize));
                 if let Place::Local(l) = place {
                     if self.cx.resolve(&bound) == Type::Str
                         && self.append_ok.contains(name.as_str())
                     {
-                        self.str_append_shadow(b, l, owns);
+                        self.str_append_shadow(b, l, owns && !matches!(value, Expr::Str(_)));
                     }
                 }
                 // A `let` that owns a heap value is reclaimed when this block
@@ -12078,14 +12084,21 @@ impl Rt {
     /// the BYTES, so a literal is an ordinary `String` pointer and every C-shaped
     /// consumer still scans for the zero.
     ///
-    /// `cap` is 0 — the runtime's word for static. `free` already refuses
+    /// `cap` is all ones — the runtime's word for static, and the same word the
+    /// textual backend writes at twice the width. `free` here already refuses
     /// anything below `HEAP_BASE`; this makes the refusal a fact in the value
     /// rather than a fact about the address.
+    ///
+    /// It was 0 until the audit measured what 0 costs on the backend that DOES
+    /// read the capacity to answer this: an empty String built at run time has
+    /// capacity 0, so the native free read it as a literal and leaked it. This
+    /// backend never had the leak, and it carries the new sentinel anyway —
+    /// two answers to "is this a literal" is how the two backends drift.
     ///
     /// Four-byte aligned so the two header words load aligned.
     fn intern(&self, m: &mut Module, s: &str) -> u32 {
         let mut bytes = (s.len() as u32).to_le_bytes().to_vec();
-        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         bytes.extend_from_slice(s.as_bytes());
         bytes.push(0);
         m.data(&bytes, 4) + SHDR
@@ -12098,8 +12111,9 @@ impl Rt {
 ///
 /// `s.byteLength` is a load off it. `a + b` reads two. RFC-0081's `str_append`
 /// used to keep the same pair beside the variable; the header IS that pair now.
-/// And `cap == 0` marks a data-segment literal, so a drop site knows what it may
-/// hand back without knowing where the pointer came from.
+/// And an all-ones `cap` marks a data-segment literal, so a drop site knows what
+/// it may hand back without knowing where the pointer came from. A capacity of
+/// zero is an ordinary empty buffer, and freeing it is the whole of C2.3.
 const SHDR: u32 = 8;
 
 /// How many `region` scopes may be open at once. The textual prelude's fixed
