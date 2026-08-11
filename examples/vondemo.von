@@ -1,0 +1,22 @@
+/// The vondemo service, configured. A `.von` document is Vyrn's own record
+/// literal saved to a file: the header names the schema, and the rest is data.
+import type { AppConfig } from "./vondemo"
+
+AppConfig {
+    name: "vondemo",
+    // A comment, which the JSON this replaces could not hold at all.
+    port: 8443,
+    workers: Some(8),
+    tls: Enabled(TlsFiles {
+            cert: "/etc/vondemo/fullchain.pem",
+            key: "/etc/vondemo/privkey.pem",
+        }),
+    // `Warn` is a variant of `Level`, not the string "warn"; `0.0.0.0` is a
+    // string because it is quoted, and for no other reason.
+    level: Warn,
+    hosts: ["0.0.0.0", "::1"],
+    limits: [
+        "maxBodyBytes": 1048576,
+        "requestTimeoutMs": 30000,
+    ],
+}

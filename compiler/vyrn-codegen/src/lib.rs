@@ -71,6 +71,56 @@ use vyrn_frontend::types::INT32;
 /// region block self-contained on its own thread. On single-threaded targets
 /// (wasm32-wasip1) LLVM lowers TLS to ordinary globals, so the shared IR is
 /// unchanged in behavior there.
+/// The call-depth counter every emitted function's prologue bumps
+/// ([`vyrn_frontend::interp::CALL_DEPTH_LIMIT`], audit A5.3).
+///
+/// Built rather than written out, so the number in the message and the number in
+/// the comparison are the same number — a trap whose wording drifts from the
+/// check reads exactly like a check that never fires.
+///
+/// `thread_local` for the same reason the region stack is (RFC-0025): a spawned
+/// task recurses on its OWN stack, so it gets its own budget, and a shared
+/// counter would race. LLVM lowers TLS to an ordinary global on wasm32-wasip1.
+///
+/// The exit is a plain decrement with no floor. It cannot go negative: the
+/// emitter puts exactly one in front of every `ret` a prologue's function has,
+/// and a path that does not reach a `ret` (a trap) ends the process.
+fn call_depth_runtime() -> String {
+    let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
+    let (msg, len) = llvm_str(&format!("error: call depth exceeds {limit}\n"));
+    format!(
+        "\
+@__vyrn_call_depth = thread_local global i64 0
+@.trap.calldepth = private unnamed_addr constant [{len} x i8] c\"{msg}\"
+
+define void @__vyrn_call_enter() {{
+entry:
+  %d = load i64, ptr @__vyrn_call_depth
+  %d1 = add i64 %d, 1
+  %over = icmp sgt i64 %d1, {limit}
+  br i1 %over, label %trap, label %ok
+trap:
+  %e = call ptr @__vyrn_stderr()
+  %w = call i32 @fputs(ptr @.trap.calldepth, ptr %e)
+  call void @exit(i32 1)
+  unreachable
+ok:
+  store i64 %d1, ptr @__vyrn_call_depth
+  ret void
+}}
+
+define void @__vyrn_call_exit() {{
+entry:
+  %d = load i64, ptr @__vyrn_call_depth
+  %d1 = sub i64 %d, 1
+  store i64 %d1, ptr @__vyrn_call_depth
+  ret void
+}}
+
+"
+    )
+}
+
 const REGION_RUNTIME: &str = "\
 @__vyrn_region_sp = thread_local global i64 0
 @__vyrn_region_blocks = thread_local global [64 x ptr] zeroinitializer
@@ -261,10 +311,10 @@ fin:
 /// instead of scanning both operands, and RFC-0081's `str_append` no longer keeps
 /// a length beside the slot — the header IS that length.
 ///
-/// `cap` is the allocated byte capacity, and `cap == 0` means **static**: a
-/// literal in the data segment, never `realloc`'d and never freed. RFC-0077 M6
-/// put an eight-byte class header on every heap block precisely because a
-/// headerless String could not answer this question at a drop site.
+/// `cap` is the allocated byte capacity, and `cap == STR_STATIC` means
+/// **static**: a literal in the data segment, never `realloc`'d and never freed.
+/// RFC-0077 M6 put an eight-byte class header on every heap block precisely
+/// because a headerless String could not answer this question at a drop site.
 ///
 /// The header is BEHIND the pointer rather than beside it (a `{ptr, len, cap}`
 /// value triple, as `Array<T>` is) for two reasons measured here:
@@ -274,6 +324,25 @@ fin:
 ///     never a stale length in the other. Until the conventions land (RFC-0089
 ///     M2) aliasing is still legal, and a triple would go stale.
 const STR_HDR: i64 = 16;
+
+/// The `cap` a data-segment literal carries: all bits set, which no allocation
+/// can ever return.
+///
+/// It was `0` until the audit measured what that costs. `0` is also the capacity
+/// of an EMPTY String built at run time — `""` out of a `slice`, a `join` of
+/// nothing, a concat of two empties — so `@__vyrn_str_free` read every one of
+/// them as a literal and gave nothing back. Three million empty concats held
+/// 88.4 MB against the 3.2 MB the same program holds when the strings are one
+/// byte long. A literal is a fact about WHERE the bytes live, and no capacity
+/// can state it, so the sentinel moved off the range capacities use.
+///
+/// All-ones rather than a flag bit because the free is an equality test: a heap
+/// block would have to answer `cap == 2^64-1` to be mistaken for a literal. The
+/// reserve arithmetic in [`Gen::emit_str_append`] compares capacities UNSIGNED,
+/// where all-ones reads as room for everything — it never sees a literal (step 1
+/// copies a buffer this path does not own before step 2 reads its capacity), and
+/// an equality test keeps that a separate question rather than a shared one.
+const STR_STATIC: i64 = -1;
 
 /// `bytes(s)`: an `Array<UInt8>` ({ptr,len,cap}, i8 stride — RFC-0014 M2) of a
 /// string's raw UTF-8 bytes. The VIEW every Vyrn string routine is written on, and
@@ -317,7 +386,7 @@ define void @__vyrn_str_free(ptr %s) {
 entry:
   %cp = getelementptr i8, ptr %s, i64 -8
   %cap = load i64, ptr %cp
-  %static = icmp eq i64 %cap, 0
+  %static = icmp eq i64 %cap, -1
   br i1 %static, label %done, label %heap
 heap:
   %base = getelementptr i8, ptr %s, i64 -16
@@ -793,6 +862,92 @@ pub const TAG_F32: i32 = 6;
 /// reflection redirects and `listDir`'s lowering went with it. A code quote outside
 /// generation is still the checker's error and this emitter still has no lowering
 /// for one, which is what it was before RFC-0076 M3a.
+/// The deepest a type may nest when a generic function is instantiated (audit
+/// A5.2, RFC-0016 addendum).
+///
+/// Monomorphization gives one function one body per distinct instantiation, and
+/// polymorphic recursion has no fixed point: `f<T>` calling `f<P<T>>` asks for a
+/// new type, and a new body, every turn. The `n <= 0` guard a program writes is a
+/// RUN-time test and cannot stop a COMPILE-time worklist. Without a cap the
+/// backends ran forever and printed nothing, and `vyrn check` said `ok` about a
+/// program `vyrn build` could not finish.
+///
+/// 64 is far past anything a real generic reaches — the corpus peaks in single
+/// digits — and bounding the depth bounds the worklist: finitely many
+/// constructors of fixed arity admit finitely many types under a depth bound.
+pub const MONO_DEPTH_LIMIT: usize = 64;
+
+/// The most parts an instantiated type may have once every named type is
+/// expanded ([`vyrn_frontend::types::expanded_size`]).
+///
+/// The depth bound alone does not make the compile FINISH, only finite. A record
+/// is structural, so `type P<T> = { a: T, b: T }` nested d deep is 2^d leaves and
+/// the backends are still asked to lower a billion-member struct at depth 30,
+/// long before depth 64. This is the bound that fires first for that shape — at
+/// depth 17 for two fields, at depth 9 for four — and the depth bound is what
+/// fires first for a spine like `Array<Array<..>>`, which never grows wide.
+///
+/// 65,536 is roughly a thousand times the largest type the corpus builds.
+pub const MONO_SIZE_LIMIT: usize = 65_536;
+
+/// The phrase every instantiation-limit refusal contains. `vyrn check` promotes
+/// exactly this one codegen error to a check failure, so it has to recognise it,
+/// and one needle both sides read cannot drift.
+pub const MONO_LIMIT_NEEDLE: &str = "past the instantiation limit";
+
+/// Refuse an instantiation whose type arguments pass [`MONO_DEPTH_LIMIT`] or
+/// [`MONO_SIZE_LIMIT`].
+///
+/// The message names the TYPE rather than the chain of calls that built it. The
+/// type IS the chain, written down — `P<P<P<..>>>` is one `P` per instantiation —
+/// and it is also the thing the author has to change.
+pub(crate) fn check_inst_depth<'a>(
+    name: &str,
+    args: impl Iterator<Item = &'a Type>,
+    line: usize,
+    types: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
+) -> Result<(), String> {
+    for a in args {
+        let d = vyrn_frontend::types::type_depth(a);
+        let too_deep = d > MONO_DEPTH_LIMIT;
+        let size = vyrn_frontend::types::expanded_size(a, types, MONO_SIZE_LIMIT);
+        if !too_deep && size.is_some() {
+            continue;
+        }
+        let what = if too_deep {
+            format!("nests {d} levels deep, past the limit of {MONO_DEPTH_LIMIT}")
+        } else {
+            format!("has more than {MONO_SIZE_LIMIT} parts once its records are written out")
+        };
+        let mut shown = a.to_string();
+        if shown.len() > 80 {
+            shown.truncate(80);
+            shown.push_str("...");
+        }
+        return Err(format!(
+            "instantiating `{name}` needs a type {MONO_LIMIT_NEEDLE}: it {what}\n  \
+             note: `{name}` is declared on line {line}, and the type is `{shown}`\n  \
+             note: a generic function that calls itself with a BIGGER type has no \
+             finite set of instances — the recursion has to shrink the type, not \
+             only the count"
+        ));
+    }
+    Ok(())
+}
+
+/// Run the monomorphization the backends run, and report ONLY its depth refusal.
+///
+/// `vyrn check` reads this. Every other codegen error stays where it is —
+/// `check` has never claimed to predict them, and promoting them all here would
+/// change its contract by more than the one defect this closes (audit A5.2:
+/// `check` said `ok` about a program no backend could finish).
+pub fn check_instantiations(program: &Program) -> Result<(), String> {
+    match emit(program) {
+        Err(e) if e.contains(MONO_LIMIT_NEEDLE) => Err(e),
+        _ => Ok(()),
+    }
+}
+
 pub fn emit(program: &Program) -> Result<String, String> {
     set_gen_host(false);
     let mut out = String::new();
@@ -1095,6 +1250,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // header bytes holding the "next" link; `exit` walks the list and frees it.
     // `concat` routes through the arena at runtime when a region is active.
     out.push_str(REGION_RUNTIME);
+    out.push_str(&call_depth_runtime());
 
     out.push_str(STREAM_RUNTIME);
     out.push_str(STRING_RUNTIME);
@@ -1559,6 +1715,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 continue;
             }
             let f = funcs[&name];
+            check_inst_depth(&name, type_args.iter(), f.line, &types)?;
             let subst: HashMap<String, Type> = f
                 .type_params
                 .iter()
@@ -1603,6 +1760,12 @@ pub fn emit(program: &Program) -> Result<String, String> {
             if !emitted.insert(inst.sym.clone()) {
                 continue;
             }
+            check_inst_depth(
+                &inst.name,
+                inst.subst.values(),
+                funcs.get(inst.name.as_str()).map_or(0, |f| f.line),
+                &types,
+            )?;
             let mut gen = Gen::new(
                 &ret_types,
                 &param_types,
@@ -2500,7 +2663,7 @@ impl<'a> Gen<'a> {
     /// remains here is one bit: **did THIS path allocate the buffer the slot
     /// holds?**
     ///
-    /// The bit is not the same question as `cap != 0`. A concat result has a
+    /// The bit is not the same question as "is this buffer on the heap". A concat result has a
     /// real capacity and is still not ours to grow in place, because `s = t`
     /// aliases and nothing yet forbids that — the conventions do (RFC-0089 M2),
     /// and this flag retires with them. `0` means the next append copies into a
@@ -3895,7 +4058,30 @@ impl<'a> Gen<'a> {
             out.push_str(a);
             out.push('\n');
         }
+        // RFC-0016 addendum (audit A5.3): one frame of the language's call-depth
+        // budget, taken here and given back in front of every `ret`. This is the
+        // whole instrumentation, and it is at the CALLEE — where the interpreter
+        // counts too, so the argument expressions of a call are still at the
+        // caller's depth in both. Counting at the call site instead would put
+        // `f(g(x))` one level apart between the two engines.
+        //
+        // `self.body` holds this function's own lines only: a lambda body saves,
+        // builds and restores that buffer, and leaves through `lambda_defs`. A
+        // lambda has no name to call itself by (RFC-0037), so it cannot recurse
+        // without passing through a named function — one of these.
+        //
+        // ponytail: every function pays, not only the ones that can recurse. The
+        // cost is one load, one add and one store on a thread-local global, twice
+        // per call, and nothing allocates. If a benchmark ever shows it, the
+        // upgrade is to instrument only functions in a call-graph cycle — but
+        // the cycle set would then have to be computed identically for the
+        // interpreter and both backends, or the three stop counting the same
+        // calls, which is the invariant this whole limit exists to hold.
+        out.push_str("  call void @__vyrn_call_enter()\n");
         for b in &self.body {
+            if b.trim_start().starts_with("ret ") || b.trim_start() == "ret void" {
+                out.push_str("  call void @__vyrn_call_exit()\n");
+            }
             out.push_str(b);
             out.push('\n');
         }
@@ -3989,7 +4175,7 @@ impl<'a> Gen<'a> {
         match kind {
             DropKind::FreeStr => {
                 // The header says whether there is anything to hand back:
-                // `cap == 0` is a data-segment literal (RFC-0089 M1a), and
+                // `cap == STR_STATIC` is a data-segment literal (RFC-0089 M1a), and
                 // `@__vyrn_str_free` returns on it. The block base is the
                 // pointer less the header.
                 let p = self.fresh_tmp();
@@ -4223,7 +4409,7 @@ impl<'a> Gen<'a> {
     }
 
     /// Hand a snapshot back, after the store that replaced it. Both callees
-    /// refuse a null, and `@__vyrn_str_free` refuses a `cap == 0` literal.
+    /// refuse a null, and `@__vyrn_str_free` refuses a [`STR_STATIC`] literal.
     fn free_snap(&mut self, snap: &[(String, bool)]) {
         for (p, hdr) in snap {
             if *hdr {
@@ -4276,9 +4462,17 @@ impl<'a> Gen<'a> {
                 // that names somebody else's storage (`let mut s = r.name` is a
                 // borrow, not a move) would free that storage instead, which is why
                 // the answer is read rather than assumed.
+                //
+                // A LITERAL initializer is somebody else's storage too, and the
+                // second half of the test is the same one the module-state seed
+                // has always carried. `own` says a `let mut acc = ""` is droppable
+                // (RFC-0096 M3 defect 3, and it is: the buffer it ENDS on is the
+                // loop's), so without this the first append grew a data-segment
+                // pointer in place. Being wrong the other way costs one copy.
                 if bty == Type::Str && self.append_ok.contains(name.as_str()) {
                     let flag = self.str_append_shadow(&slot);
-                    let owns = self.droppable.contains_key(&key) as i64;
+                    let owns = (self.droppable.contains_key(&key) && !matches!(value, Expr::Str(_)))
+                        as i64;
                     self.emit(format!("store i64 {owns}, ptr {flag}"));
                 }
                 // If ownership analysis proved this heap binding non-escaping,
@@ -5354,30 +5548,45 @@ impl<'a> Gen<'a> {
 
     /// Fallible validated construction `Age?(n)` → `Option<Age>` (`{ i1, i64 }`):
     /// tag is the refinement result, payload is the value.
+    ///
+    /// `Int64` and `String` are the two bases, which is what the direct backend
+    /// already accepted (its rule is "any scalar", and those are the two scalars
+    /// a validated type is written over in this corpus). A `String` payload is
+    /// its pointer, the same word a `Some(s)` carries — RFC-0098 needed it,
+    /// because an option type over `String` is what a command line hands you.
     fn gen_try_construct(&mut self, name: &str, arg: &Expr) -> Result<(String, Type), String> {
         let decl = self
             .types
             .get(name)
             .cloned()
             .ok_or_else(|| format!("unknown type `{name}`"))?;
-        if self.resolve(&decl.base) != Type::Int {
+        let base = self.resolve(&decl.base);
+        if base != Type::Int && base != Type::Str {
             return Err(format!(
-                "native fallible construction supports Int64-based types only (`{name}`); use `vyrn run`"
+                "native fallible construction supports Int64-based and String-based types only (`{name}`); use `vyrn run`"
             ));
         }
         let (v, _) = self.gen_expr(arg)?;
+        let base_ll = self.llt(&decl.base);
         let pred_i1 = match &decl.predicate {
             None => "true".to_string(),
             Some(pred) => {
                 self.scope.push(Vec::new());
                 let slot = self.declare("value", &decl.base);
-                self.emit(format!("store i64 {v}, ptr {slot}"));
+                self.emit(format!("store {base_ll} {v}, ptr {slot}"));
                 let (cond, _) = self.gen_expr(pred)?;
                 self.scope.pop();
                 cond
             }
         };
-        // The payload is a validated Int (Age → Int), so it lives in word 0.
+        // The payload is one word: the Int itself, or the String's pointer.
+        let word = if base == Type::Str {
+            let w = self.fresh_tmp();
+            self.emit(format!("{w} = ptrtoint ptr {v} to i64"));
+            w
+        } else {
+            v
+        };
         let a = self.fresh_tmp();
         let b = self.fresh_tmp();
         let c = self.fresh_tmp();
@@ -5385,7 +5594,7 @@ impl<'a> Gen<'a> {
             "{a} = insertvalue {{ i1, i64, i64 }} undef, i1 {pred_i1}, 0"
         ));
         self.emit(format!(
-            "{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {v}, 1"
+            "{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {word}, 1"
         ));
         self.emit(format!(
             "{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 0, 2"
@@ -11002,14 +11211,14 @@ pub(crate) const SERVE_STREAM_TRAP: &str =
     "error: serveStream: a compiled build has no accept loop — a live route needs `vyrn serve`\n";
 
 /// A static `String` value in the data segment: the `{ i64 len, i64 cap }` header
-/// (RFC-0089 M1a) followed by the NUL-terminated bytes. `cap` is 0, which is the
-/// runtime's word for "never `realloc`, never free" — `@__vyrn_str_free` reads it
-/// and returns, so a drop site needs no static/heap analysis of its own.
+/// (RFC-0089 M1a) followed by the NUL-terminated bytes. `cap` is [`STR_STATIC`],
+/// the runtime's word for "never `realloc`, never free" — `@__vyrn_str_free`
+/// reads it and returns, so a drop site needs no static/heap analysis of its own.
 fn static_str_global(name: &str, s: &str) -> String {
     let (escaped, len) = llvm_str(s);
     format!(
         "{name} = private unnamed_addr constant {{ i64, i64, [{len} x i8] }} \
-         {{ i64 {}, i64 0, [{len} x i8] c\"{escaped}\" }}, align 8\n",
+         {{ i64 {}, i64 {STR_STATIC}, [{len} x i8] c\"{escaped}\" }}, align 8\n",
         s.len()
     )
 }

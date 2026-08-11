@@ -39,6 +39,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "does not satisfy",
     ),
     (
+        "polyrecursion.vyrn",
+        "polymorphic recursion — a generic that calls itself with a bigger type has no \
+         monomorphization fixed point (audit A5.2). `check` used to say `ok` and `build` \
+         then ran forever printing nothing",
+        "past the instantiation limit",
+    ),
+    (
         "protocol_overlap.vyrn",
         "two impls of one protocol for one type constructor (RFC-0080 M1)",
         "collides with `impl<T> Show for Option<T>` (line",
@@ -97,6 +104,15 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "a `read` parameter handed to a `consume` parameter — the frame gave away \
          what it does not own, and the native binary exited 0xC0000374",
         "`ys` may not be passed to a `consume` parameter via `take(..)`",
+    ),
+    (
+        "region_consume.vyrn",
+        "a value a `region` allocated, handed to a `consume` parameter (RFC-0004 §4) — \
+         the escape guard watched named stores, so `kept.push(s)` inside the region was \
+         refused and `keep(s)`, which stores one frame down, was not; the native binary \
+         printed freed memory that changed from run to run",
+        "cannot hand a heap value to argument 1 of `keep`, which is `consume`, inside a \
+         `region`",
     ),
     (
         "task_abandoned.vyrn",

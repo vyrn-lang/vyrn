@@ -83,6 +83,15 @@
 //! [`the_spawn_handles_go_back_natively`] is that measurement, beside this table
 //! rather than in it, because it needs clang and a real process.
 //!
+//! **Audit finding C2.3 is native-only too, and for the opposite reason.** An
+//! empty String built at run time was never freed, because `cap == 0` named both
+//! "static literal" and "empty heap buffer" and the native `free` could not tell
+//! them apart. The wasm `free` discriminates on the ADDRESS, so this table would
+//! have read the row steady before the fix and steady after it, and seen
+//! nothing. [`an_empty_string_built_at_run_time_goes_back_natively`] is that
+//! measurement — the same relation, against a one-byte control instead of
+//! against a larger N.
+//!
 //! Two rows carry a finding the census did not have:
 //!
 //! - **§16 needs a *stored* closure.** A lambda handed straight to a `fn`
@@ -688,6 +697,25 @@ const ROWS: &[Row] = &[
               turns and 50.25 MB at four times that; 3.95 MB and 3.57 MB after it",
     },
     Row {
+        export: "regionArena",
+        census: "RFC-0004 §4",
+        today: Shape::Steady,
+        why: "the arena. `own` answers `Leak::Region` for every dynamic String bound inside a \
+              `region`, on every backend, because the arena is supposed to own it — and this \
+              backend had no arena. `region_exit` bumped a counter and reclaimed nothing, on \
+              the recorded argument that `malloc` here never freed either, which stopped \
+              being true at M6. So the one construct built for bounded memory was the one \
+              construct that made this target unbounded: an audit measured 13.4 MB native \
+              against 3,664.5 MB and `out of memory` under wasmtime, for 20,000 turns of a \
+              concatenation loop inside a region — and after the arena, 27.7 MB and a clean \
+              exit. `region_keep` records what a lexically-inside-a-region expression \
+              allocated, `rt.region_free` hands the frame's blocks back at the closing brace, \
+              and `rt.region_pop` leaves them alone on the one edge that carries one out. \
+              Lexical routing, like the textual backend's: routing on the RUNTIME depth would \
+              put a callee's String in a caller's arena, where the escape guard never looked. \
+              Take `region_keep` out and this row leaks",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -919,6 +947,20 @@ export extern fn consumingLoop() {{
     xs.push(tag() + "b")
     for x in consume xs {{
         seen = seen + Int64(x.byteLength)
+    }}
+}}
+
+/// RFC-0004 §4. Three ~900-byte Strings a call, all of them the arena's: the
+/// binding's own row says `Leak::Region`, so the closing brace is the only thing
+/// that can free them. It did not, on this backend, until `region_keep` and
+/// `rt.region_free` — and the numbers that measured the difference are on the
+/// `regionArena` row above.
+export extern fn regionArena() {{
+    region {{
+        let a = tag() + "a"
+        let b = tag() + a
+        let c = b + "!"
+        seen = seen + Int64(c.byteLength)
     }}
 }}
 
@@ -1190,12 +1232,40 @@ fn the_census_shapes_hold_their_measured_baseline() {
 // RFC-0095 M1 / census §10 — the native half, which is where the handle lives.
 // ---------------------------------------------------------------------------
 
-// How many handles a live process holds. The one Win32 call this file makes,
-// because it names the resource census §10 is about.
+// How many handles a live process holds, and how much memory one ever held. The
+// two Win32 calls this file makes, because each names the resource its census
+// row is about — §10 is handles, and C2.3 is bytes.
+//
+// `K32GetProcessMemoryInfo` answers for a process that has already exited, as
+// long as the handle is still open: `Child` holds it until it is dropped. So the
+// String row needs no park and no polling — run it, wait, read the peak.
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetProcessHandleCount(process: *mut std::ffi::c_void, count: *mut u32) -> i32;
+    fn K32GetProcessMemoryInfo(
+        process: *mut std::ffi::c_void,
+        counters: *mut ProcessMemoryCounters,
+        cb: u32,
+    ) -> i32;
+}
+
+/// `PROCESS_MEMORY_COUNTERS`, in declaration order. Only `peak_working_set` is
+/// read; the rest are here because the struct's size is the argument.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct ProcessMemoryCounters {
+    cb: u32,
+    page_fault_count: u32,
+    peak_working_set: usize,
+    working_set: usize,
+    quota_peak_paged_pool: usize,
+    quota_paged_pool: usize,
+    quota_peak_nonpaged_pool: usize,
+    quota_nonpaged_pool: usize,
+    pagefile: usize,
+    peak_pagefile: usize,
 }
 
 #[cfg(windows)]
@@ -1325,6 +1395,133 @@ fn the_spawn_handles_go_back_natively() {
          one join or at the `drop` — one per spawn is census §10, which measured 200,076 \
          handles at 200,000 spawns.",
         counts[0], counts[1]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Audit C2.3 — the native half again, and for the same reason: the wasm free
+// discriminates on the ADDRESS, so this row is steady there whatever the header
+// says, and only the textual backend reads a capacity to answer the question.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn empty_string_loop_source(turns: usize, len: usize) -> String {
+    let bytes = "y".repeat(len);
+    format!(
+        r#"fn blank() -> String {{
+    return "{bytes}"
+}}
+
+fn main() -> Int64 {{
+    let mut i = 0
+    while i < {turns} {{
+        let a = blank()
+        let b = blank()
+        let c = a + b
+        i = i + 1
+    }}
+    return 0
+}}
+"#
+    )
+}
+
+/// The peak working set a finished process ever held.
+#[cfg(windows)]
+fn peak_bytes(child: &std::process::Child) -> usize {
+    use std::os::windows::io::AsRawHandle;
+    let size = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+    let mut c = ProcessMemoryCounters {
+        cb: size,
+        ..Default::default()
+    };
+    let ok = unsafe { K32GetProcessMemoryInfo(child.as_raw_handle(), &mut c, size) };
+    assert_ne!(ok, 0, "K32GetProcessMemoryInfo failed");
+    c.peak_working_set
+}
+
+/// An empty String built at run time is given back (audit finding C2.3).
+///
+/// `cap == 0` was the header's word for "static literal, never free me", and it
+/// is also the capacity every empty String gets from `@__vyrn_str_new(0, 0)` —
+/// an empty `join`, a `slice` to nothing, a concat of two empties. So `free`
+/// read every one of them as a literal and returned. Three million empty concats
+/// peaked at 88.4 MB where the same program with one-byte strings peaked at 3.2.
+/// The sentinel is all ones now, which no allocation can return.
+///
+/// **A relation, not a number**, as every row in this file is: the loop with
+/// EMPTY strings must peak where the same loop with one-byte strings peaks. That
+/// is the comparison the audit made, and it is what makes the row negative — put
+/// the `0` back in `static_str_global` and the empty column grows by tens of
+/// megabytes while the control column does not move.
+///
+/// A second pair at four times the turns says it the other way: a leak scales
+/// with the turn count and a steady state does not.
+///
+/// Windows-only and clang-only, the same posture as the handle row above. It
+/// needs a real process, and `K32GetProcessMemoryInfo` is what names the bytes.
+#[cfg(windows)]
+#[test]
+fn an_empty_string_built_at_run_time_goes_back_natively() {
+    if vyrn_codegen::toolchain::find_clang().is_none() {
+        eprintln!("NOTE: no clang — audit C2.3's empty-String release is unverified here");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vyrn-emptystr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 250,000 and 1,000,000. The leak was 17 bytes plus allocator overhead per
+    // turn, so the smaller run already shows megabytes and neither takes a
+    // second. `len` 0 is the shape under test; `len` 1 is the control, and the
+    // only difference between the two programs.
+    let mut peaks = Vec::new();
+    for turns in [250_000usize, 1_000_000] {
+        for len in [0usize, 1] {
+            let stem = format!("s{turns}_{len}");
+            let src = dir.join(format!("{stem}.vyrn"));
+            std::fs::write(&src, empty_string_loop_source(turns, len)).unwrap();
+            let exe = dir.join(format!("{stem}.exe"));
+            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+                .arg("build")
+                .arg(&src)
+                .arg("-o")
+                .arg(&exe)
+                .output()
+                .expect("vyrn build");
+            assert!(
+                build.status.success(),
+                "native build failed:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            let mut child = Command::new(&exe).spawn().expect("run the concat loop");
+            let status = child.wait().expect("wait");
+            assert!(status.success(), "the concat loop exited {status}");
+            peaks.push(peak_bytes(&child));
+        }
+    }
+    let (empty_small, one_small, empty_big, one_big) = (peaks[0], peaks[1], peaks[2], peaks[3]);
+
+    // A megabyte of slack over the control: the two programs differ by one byte
+    // of string literal, so anything larger is storage that was not handed back.
+    let slack = 1 << 20;
+    for (turns, empty, one) in [
+        (250_000, empty_small, one_small),
+        (1_000_000, empty_big, one_big),
+    ] {
+        assert!(
+            empty <= one + slack,
+            "an empty String is not being freed: {turns} turns peaked at {empty} bytes with \
+             `\"\"` and {one} with `\"y\"`. `cap == 0` meant `static literal` AND `empty heap \
+             buffer`, and `@__vyrn_str_free` read the second as the first — audit C2.3, which \
+             measured 88.4 MB against 3.2 MB at three million turns."
+        );
+    }
+    assert!(
+        empty_big <= empty_small + slack,
+        "the empty-String peak grew with the turn count: {empty_small} bytes at 250,000 turns \
+         and {empty_big} at 1,000,000. A steady state does not scale with the loop."
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

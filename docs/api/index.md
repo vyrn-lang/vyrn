@@ -3,6 +3,7 @@
 - [std/args](std/args.md) — std/args — CLI argument parsing over `args()` (RFC-0061). A pure-Vyrn library,
 - [std/arrays](std/arrays.md) — std/arrays — higher-order array helpers (RFC-0023), written in Vyrn itself.
 - [std/bench](std/bench.md) — std/bench — the benchmarking harness helpers (RFC-0055).
+- [std/cli](std/cli.md) — std/cli — the command line IS a record type (RFC-0098, M1).
 - [std/codecs](std/codecs.md) — std/codecs — hex, base64 and percent encoding, written in Vyrn (RFC-0078 M4b).
 - [std/connect](std/connect.md) — std/connect — Connect wire compatibility as a library (RFC-0038), built
 - [std/contract](std/contract.md) — std/contract — check a module against a module contract (RFC-0071).
@@ -31,4 +32,5 @@
 - [std/time](std/time.md) — std/time — wall-clock time at the host boundary (RFC-0043).
 - [std/tw](std/tw.md) — std/tw — theme-derived utility classes as a CHECKED TYPE (RFC-0032), a library
 - [std/ui](std/ui.md) — std/ui — the pages generator (RFC-0026 M3), file-based routing as a library
+- [std/von](std/von.md) — std/von (RFC-0097 M1) — VON, Vyrn Object Notation: Vyrn's record-literal
 - [std/vyx](std/vyx.md) — std/vyx — the `.vyx` single-file component compiler (RFC-0026 M4, RFC-0039 v2),

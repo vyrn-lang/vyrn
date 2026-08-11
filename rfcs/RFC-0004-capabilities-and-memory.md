@@ -8,6 +8,51 @@
 - **Depends on:** RFC-0001
 - **Related:** RFC-0002 (views), RFC-0006 (how conflicts are reported)
 
+## Addendum — a region value may not be handed to `consume`
+
+**The rule.** Inside `region { .. }`, a value that carries heap may not be passed
+to a `consume` parameter. `vyrn check` refuses it and names the callee, the
+argument and the two ways out: move the call out of the region, or pass a value
+that holds no heap. A value that owns no heap — an `Int64`, an `Array<Int64>` —
+crosses freely, and `read` (the default) crosses freely too, because a borrow
+ends before the closing brace does.
+
+**Why the boundary is the declaration.** §4's escape guard refused a store into a
+binding that outlives the region. It watched *named stores* — `out = a + b`,
+`h.s = ..`, `a.push(..)` — so it refused `kept.push(s)` written inside the region
+and permitted `keep(s)`, which does the same store one frame down. An external
+audit found the hole and demonstrated it: `vyrn check` printed `ok`, the
+interpreter printed the right answer because its values are shared, and the
+native binary printed freed memory that changed from run to run. A second route
+was confirmed through a record field and two `consume` hops.
+
+The fix is not a wider search for the store. A callee may store what it took, or
+hand it to a second callee that does, and following that needs whole-program
+retention analysis to answer a question the signature already answers.
+`consume` DECLARES that the callee takes ownership. Arena memory cannot be owned
+by anyone outside the arena — the closing brace frees it — so the handover is
+refused where it is declared, in one place, for every callee and every hop.
+
+The refusal is by the ARGUMENT's type, so a generic `fn take<T>(x: consume T)` is
+refused for the `String` it is passed and allowed for the `Int64`. It is
+deliberately blunt about WHERE the value came from: a `String` built before the
+region is ordinary heap and safe to hand over, and this refuses it anyway,
+because which allocation is the arena's is a lexical fact of the emitter and not
+a fact of the type. Moving the call out of the region is the answer in both
+cases. `examples/region_consume.vyrn` is the refusal;
+`examples/regionarena.vyrn` is the same shapes written the two ways that run.
+
+**And the arena is now real on every compiling backend.** The direct wasm
+backend counted a region's depth and reclaimed nothing, on a note whose premise —
+"`malloc` is a bump pointer that never frees" — died when that backend got a free
+list. So the one construct built for bounded memory was the one construct that
+made wasm unbounded: 13.4 MB native against 3,664.5 MB then `out of memory` under
+wasmtime, for one loop of concatenations inside a region. It has a side vector of
+block pointers per open region now, allocated lexically and freed at the closing
+brace, exactly as the textual backend's arena works — 27.7 MB and a clean exit
+for the same program. A `return` out of a region still pops the frame without
+freeing it, because the value it carries out belongs to its caller.
+
 > **Implementation status (v0.1).** The capability *surface* is in: a parameter
 > may carry a capability keyword — `fn redeem(t: consume Token)` — and `consume`
 > is enforced by a move-checking pass (`vyrn-frontend::movecheck`):
@@ -536,3 +581,52 @@ and verified. See `examples/concurrency.vyrn`.
 (The one thing still to gain teeth is `share`-by-reference: today a `share`
 parameter is passed by value, so it coincides observably with `read`; passing large
 shared data by read-only reference is an optimisation, not a semantic change.)
+
+---
+
+## Addendum (implemented) — 10,000 calls may be in flight
+
+§4 already gives one runtime limit all three engines take together: a `region`
+may nest 64 deep, and the 65th traps with the same words everywhere. The call
+stack needed the same treatment and did not have it.
+
+A tree-walking interpreter recurses on the host's stack, a native binary on the
+machine's, a wasm module on the engine's. Three stacks, three sizes, so "how deep
+may a program go" had three answers. At depth 30,000 the native binary printed
+30000 while the interpreter — the *declared reference semantics* — died with
+`thread '<unknown>' has overflowed its stack`, exit 127. The interpreter's own
+guard could not fire: a Rust stack overflow aborts the process, it does not
+unwind, so there was nothing to catch. Three-way parity was broken for any
+program that recurses deeply, a reader over a nested document included.
+
+**The limit is 10,000 calls in flight**, and it belongs to the language rather
+than to whichever stack runs out first. The 10,001st call ends the run with the
+same line in every engine:
+
+```
+error: call depth exceeds 10000
+```
+
+stderr, exit 1 — the same shape the region trap and every other runtime trap use.
+
+Each engine counts at the CALLEE, where the interpreter counts, so a call's
+argument expressions are still at the caller's depth in all three. Counting at
+the call site instead would put `f(g(x))` one level apart between engines. The
+interpreter bumps a counter in its call path; the textual backend takes a frame
+in each function's prologue and gives it back in front of every `ret`; the direct
+wasm backend does the same at the one exit its `return`-as-`br` lowering leaves
+it. All three read the number from one constant.
+
+Two kinds of call are excluded, in all three engines alike. An `extern`
+(RFC-0012) is the host's frame, and no backend gives it a Vyrn prologue. A lambda
+body has no name to call itself by (RFC-0037), so it cannot recurse without
+passing through a named function, which is counted.
+
+10,000 is what every engine can actually reach today. The interpreter spends
+about 8.5 KB of Rust stack per Vyrn call against a 256 MB stack; the native
+binary and `wasmtime` both run past 20,000 frames of an ordinary function. It is
+also far past what a recursive descent over real data needs.
+
+`examples/recdepth.vyrn` is the parity citizen: it prints one answer from just
+inside the budget and then steps one past it, so the harness compares stdout,
+stderr and exit code across all three engines byte for byte.

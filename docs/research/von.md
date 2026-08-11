@@ -1,6 +1,9 @@
 # VON — Vyrn Object Notation
 
-- **Status:** Research note. Not an RFC. No implementation.
+- **Status:** Research note. Part 2 became [RFC-0097](../../rfcs/RFC-0097-von.md),
+  whose M0 and M1 have shipped. Where this note and that RFC disagree, the RFC
+  is the record: it carries what measurement changed, including the
+  zero-compiler-change claim in §2.10 (§9 there).
 - **Scope:** Part 1 is a census of failures in existing configuration formats.
   Part 2 is a draft design for VON.
 - **Related:** RFC-0002 (records), RFC-0003 (validated types), RFC-0006

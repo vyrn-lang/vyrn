@@ -260,6 +260,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         extra_stmts: Vec::new(),
         in_place: false,
         errors: Vec::new(),
+        depth: 0,
     }
     .program_accum();
     // Before the injected declarations below, so only what the module itself
@@ -884,6 +885,14 @@ struct Parser {
     /// aborting the whole declaration. Merged (and sorted by position) into the
     /// program's error list by [`Parser::program_accum`].
     errors: Vec<Diagnostic>,
+    /// How many levels of nested source the parser is currently inside
+    /// ([`Parser::MAX_NEST`]). Recursive descent turns source nesting into Rust
+    /// stack, and a stack overflow is a process abort with no `file:line` — so
+    /// the depth is counted and refused instead. Bumped on the three recursive
+    /// edges that a source file can drive without bound: an expression
+    /// ([`Parser::unary`], which every expression recursion enters exactly
+    /// once), a type ([`Parser::type_`]) and a block ([`Parser::block`]).
+    depth: u32,
 }
 
 /// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `@at(a, i)`),
@@ -2988,7 +2997,16 @@ impl Parser {
         Ok(t)
     }
 
+    /// Every nested type argument enters here exactly once, so this is where a
+    /// type's nesting is counted (see [`Parser::MAX_NEST`]).
     fn type_atom(&mut self) -> Result<Type, Diagnostic> {
+        self.nest_enter()?;
+        let r = self.type_atom_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn type_atom_inner(&mut self) -> Result<Type, Diagnostic> {
         // An anonymous record type, e.g. in `User & { salary: Int }`.
         if *self.peek() == Tok::LBrace {
             return self.record_type();
@@ -3305,7 +3323,42 @@ impl Parser {
         })
     }
 
+    /// The most levels of nested source the parser accepts (audit A5.4,
+    /// RFC-0006 addendum). One nested parenthesis, one prefix operator, one
+    /// nested type argument and one nested block are one level each.
+    ///
+    /// 175,000 nested parentheses used to abort the process with no `file:line`
+    /// at all, and the same source reaches the LSP and — since RFC-0010 fetches
+    /// `github:` and `https:` modules — a file the user did not write. 1024 is
+    /// far above any written or generated Vyrn (the corpus peaks in the tens)
+    /// and far below what any pass downstream of here needs on its stack.
+    const MAX_NEST: u32 = 1024;
+
+    /// Enter one level of nesting, or refuse. Every caller decrements on the way
+    /// out, INCLUDING the error path — the counter must be exact, because a
+    /// declaration that fails to parse is recovered from and the next one starts
+    /// at the depth this one left behind.
+    fn nest_enter(&mut self) -> Result<(), Diagnostic> {
+        if self.depth >= Self::MAX_NEST {
+            return Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                format!("nesting exceeds {} levels", Self::MAX_NEST),
+            ));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
     fn block(&mut self) -> Result<Block, Diagnostic> {
+        self.nest_enter()?;
+        let r = self.block_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn block_inner(&mut self) -> Result<Block, Diagnostic> {
         self.eat(&Tok::LBrace)?;
         let mut stmts = Vec::new();
         while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
@@ -4111,7 +4164,18 @@ impl Parser {
         }
     }
 
+    /// Every expression recursion enters here exactly once — `binary` calls it
+    /// before anything else, a prefix operator calls it again, and a `( .. )`
+    /// comes back through `primary` → `expr` → `binary` — so this is where an
+    /// expression's nesting is counted (see [`Parser::MAX_NEST`]).
     fn unary(&mut self) -> Result<Expr, Diagnostic> {
+        self.nest_enter()?;
+        let r = self.unary_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn unary_inner(&mut self) -> Result<Expr, Diagnostic> {
         let line = self.line();
         match self.peek() {
             Tok::Minus => {
@@ -4607,6 +4671,7 @@ impl Parser {
             extra_stmts: Vec::new(),
             in_place: false,
             errors: Vec::new(),
+            depth: 0,
         };
         // A sub-parser diagnostic carries line numbers relative to the hole
         // snippet — anchor it at the template and embed the detail, exactly
@@ -4822,6 +4887,7 @@ impl Parser {
             extra_stmts: Vec::new(),
             in_place: false,
             errors: Vec::new(),
+            depth: 0,
         })
     }
 
@@ -5909,6 +5975,7 @@ mod tests {
             extra_stmts: Vec::new(),
             in_place: false,
             errors: Vec::new(),
+            depth: 0,
         };
         let (prog, errors) = p.program_accum();
         assert!(!errors.is_empty(), "the broken decl must actually fail");

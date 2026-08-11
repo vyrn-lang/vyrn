@@ -1,0 +1,1361 @@
+/// std/von (RFC-0097 M1) — VON, Vyrn Object Notation: Vyrn's record-literal
+/// grammar saved to a file.
+///
+///   import { parseVon, toVon, Von, VonDoc } from "std/von"
+///
+/// A `.von` document is an `import type { T } from "…"` header followed by ONE
+/// literal value. Every production is already Vyrn's; the delta is subtractive.
+/// There are no operators, no calls, no `if`, no `match`, no bindings and no
+/// string interpolation, so reading a document costs exactly one parse and the
+/// file says what it says.
+///
+/// The reader runs at GENERATION time. `lex()` — the compiler's own lexer, which
+/// is what makes VON a subset of Vyrn rather than an imitation of one — is
+/// available only inside a `gen fn` (RFC-0054), so `parseVon` is one too. That is
+/// the right place for it: a config error becomes a build error. A runtime
+/// `fromVon` would need a byte reader of its own (RFC-0097 M4), and it is not
+/// this walk.
+///
+/// Strictness (RFC-0097 §4), each rule against a documented failure of an
+/// existing format:
+///
+///   - a bare word is a variant name, never a boolean and never a string
+///     (YAML's `NO` is Norway);
+///   - duplicate record fields and duplicate map keys are errors naming both
+///     lines (JSON leaves duplicates undefined);
+///   - numbers keep their VERBATIM source text, a leading zero is an error
+///     (YAML's `mode: 0777` is 511 under 1.1 and 777 under 1.2);
+///   - `\{` in a string is an error, because it means interpolation in Vyrn;
+///   - a tab in indentation and a byte-order mark are errors.
+///
+/// Errors carry `line N, col M:` positions in the `.von` source, the shape
+/// `std/jsonread` uses, so a caller prefixes the file name and nothing else.
+
+import { Json, JsonField } from "std/json"
+
+// ===========================================================================
+// The value tree
+// ===========================================================================
+
+/// One `name: value` field of a record literal. `line` is the field name's own
+/// 1-based source line — what a duplicate-field error names, and what an origin
+/// map (RFC-0033) anchors to.
+export type VonField = { name: String, value: Von, line: Int64 }
+
+/// One `"key": value` entry of a map literal.
+export type VonEntry = { key: String, value: Von, line: Int64 }
+
+/// A VON value. Numbers carry their RAW, validated source text rather than a
+/// parsed number: a config file's `9007199254740993` and its `18446744073709551615`
+/// both survive the round trip, and emit → parse → emit is byte-stable.
+export type Von =
+    | VRecord(String, Array<VonField>)
+    | VVariant(String, Array<Von>)
+    | VArray(Array<Von>)
+    | VMap(Array<VonEntry>)
+    | VStr(String)
+    | VInt(String)
+    | VFloat(String)
+    | VBool(Bool)
+
+/// One `import type { A, B } from "spec"` line of a document header.
+export type VonImport = { names: Array<String>, module: String }
+
+/// A whole document: its header, and the one value that follows it.
+export type VonDoc = { imports: Array<VonImport>, value: Von }
+
+/// The structural copy is refused for this type and says why: `Von` reaches
+/// itself through four of its variants, and the builtin walk has no bottom to
+/// stop at. Recursion in the value needs recursion in the code. The twin of
+/// `std/json`'s `impl Copy for Json`.
+impl Copy for Von {
+    fn copy(self) -> Von {
+        return match self {
+            VRecord(n, fs) => VRecord(n.copy(), copyVonFields(fs)),
+            VVariant(n, xs) => VVariant(n.copy(), copyVonArray(xs)),
+            VArray(xs) => VArray(copyVonArray(xs)),
+            VMap(es) => VMap(copyVonEntries(es)),
+            VStr(s) => VStr(s.copy()),
+            VInt(s) => VInt(s.copy()),
+            VFloat(s) => VFloat(s.copy()),
+            VBool(b) => VBool(b),
+        }
+    }
+}
+
+/// Hands one payload back to its own release row, so an arm can be an
+/// EXPRESSION. `drop v` is a statement and a `match` arm is not. The twin of
+/// `std/json`'s `jsonGive`.
+fn vonGive<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+/// A `Von` owns its subtree, and says so — RFC-0096 M2. A declaration is the
+/// bottom the structural release walk lacks, so every type ABOVE this one gets
+/// its own row back.
+impl Owned for Von {
+    fn release(consume self) {
+        match consume self {
+            VRecord(n, fs) => vonGive(n) + vonGive(fs),
+            VVariant(n, xs) => vonGive(n) + vonGive(xs),
+            VArray(xs) => vonGive(xs),
+            VMap(es) => vonGive(es),
+            VStr(s) => vonGive(s),
+            VInt(s) => vonGive(s),
+            VFloat(s) => vonGive(s),
+            VBool(b) => 0,
+        }
+    }
+}
+
+/// `copy` over a list of values. Exported because `xs.copy()` cannot be written
+/// for this element type — see the impl above.
+export fn copyVonArray(xs: Array<Von>) -> Array<Von> {
+    let mut out: Array<Von> = []
+    for x in xs {
+        out.push(x.copy())
+    }
+    return out
+}
+
+/// `copy` over a list of record fields, for `xs.copy()`'s reason.
+export fn copyVonFields(fs: Array<VonField>) -> Array<VonField> {
+    let mut out: Array<VonField> = []
+    for f in fs {
+        out.push(VonField { name: f.name.copy(), value: f.value.copy(), line: f.line })
+    }
+    return out
+}
+
+/// `copy` over a list of map entries, for `xs.copy()`'s reason.
+export fn copyVonEntries(es: Array<VonEntry>) -> Array<VonEntry> {
+    let mut out: Array<VonEntry> = []
+    for e in es {
+        out.push(VonEntry { key: e.key.copy(), value: e.value.copy(), line: e.line })
+    }
+    return out
+}
+
+// ===========================================================================
+// Reader — a strictness walk over `lex()`'s token stream.
+//
+// Comments never arrive: `lex` emits no token for `//`, and a whole string
+// literal is ONE token, so a `{` inside a comment or a string cannot be mistaken
+// for structure. Doc comments (`///`) do arrive, as `doc` tokens, and are
+// skipped wherever they appear.
+// ===========================================================================
+
+/// One lexed token, in a type this module owns.
+///
+/// `lex()`'s own `Token` is generation-only — it may not be named in a type
+/// declaration outside a `gen fn` (RFC-0054) — so `vonLex` copies each row into
+/// this one. That confinement is worth having on its own terms: exactly one
+/// function in this module needs a generation context, and the whole strictness
+/// walk below is ordinary Vyrn over ordinary records. A future runtime reader
+/// (RFC-0097 M4) needs a tokenizer, not a second walk.
+export type VonTok = { kind: String, text: String, line: Int64, col: Int64 }
+
+/// The reader cursor: the token stream, the position in it, and the source bytes
+/// (which the number rule reads verbatim — a token carries the lexer's PARSED
+/// integer, and `0777` and `777` parse alike).
+type VonP = { toks: Array<VonTok>, n: Int64, i: Int64, src: Array<UInt8> }
+
+/// The current token's kind, or `""` past the end.
+fn kindAt(p: VonP) -> String {
+    if p.i >= p.n {
+        return ""
+    }
+    return p.toks[p.i].kind.copy()
+}
+
+/// The current token's text, or `""` past the end.
+fn textAt(p: VonP) -> String {
+    if p.i >= p.n {
+        return ""
+    }
+    return p.toks[p.i].text.copy()
+}
+
+/// The kind of the token `k` ahead, or `""` past the end.
+fn kindAhead(p: VonP, k: Int64) -> String {
+    let j = p.i + k
+    if j >= p.n {
+        return ""
+    }
+    return p.toks[j].kind.copy()
+}
+
+/// The text of the token `k` ahead, or `""` past the end.
+fn textAhead(p: VonP, k: Int64) -> String {
+    let j = p.i + k
+    if j >= p.n {
+        return ""
+    }
+    return p.toks[j].text.copy()
+}
+
+/// The current token's 1-based line (the last token's, past the end).
+fn tokLine(p: VonP) -> Int64 {
+    if p.n == 0 {
+        return 1
+    }
+    if p.i >= p.n {
+        return p.toks[p.n - 1].line
+    }
+    return p.toks[p.i].line
+}
+
+/// The current token's 1-based column (the last token's, past the end).
+fn tokCol(p: VonP) -> Int64 {
+    if p.n == 0 {
+        return 1
+    }
+    if p.i >= p.n {
+        return p.toks[p.n - 1].col
+    }
+    return p.toks[p.i].col
+}
+
+/// Advance one token.
+fn bump(p: modify VonP) -> Unit {
+    p.i = p.i + 1
+}
+
+/// Skip any `///` doc comments at the cursor — they are comments, and comments
+/// carry no value.
+fn skipDocs(p: modify VonP) -> Unit {
+    while kindAt(p) == "doc" {
+        bump(p)
+    }
+}
+
+/// `msg` prefixed with the cursor's 1-based `line N, col M:` position.
+fn errAt(p: VonP, msg: String) -> String {
+    return "line " + tokLine(p).toString() + ", col " + tokCol(p).toString() + ": " + msg
+}
+
+/// Whether the cursor is on the punctuation `s`.
+fn atPunct(p: VonP, s: String) -> Bool {
+    return kindAt(p) == "punct" && textAt(p) == s
+}
+
+/// Whether the cursor is on the keyword `s`.
+fn atKeyword(p: VonP, s: String) -> Bool {
+    return kindAt(p) == "keyword" && textAt(p) == s
+}
+
+/// How a token reads back to its author — the source spelling, never a token
+/// kind. A diagnostic that says `punct` names something nobody can type.
+fn showTok(p: VonP) -> String {
+    if p.i >= p.n {
+        return "the end of the file"
+    }
+    if kindAt(p) == "string" {
+        return "a string"
+    }
+    if kindAt(p) == "template" {
+        return "a string with `\\{`"
+    }
+    return "`" + textAt(p) + "`"
+}
+
+// ---------------------------------------------------------------------------
+// Verbatim number text
+// ---------------------------------------------------------------------------
+
+/// The byte offset at which 1-based `line` begins (0 for line 1, the length past
+/// the end).
+fn lineStartOffset(src: Array<UInt8>, line: Int64) -> Int64 {
+    if line <= 1 {
+        return 0
+    }
+    let mut at = 1
+    let mut i = 0
+    while i < src.length {
+        if src[i] == '\n' {
+            at = at + 1
+            if at == line {
+                return i + 1
+            }
+        }
+        i = i + 1
+    }
+    return src.length
+}
+
+/// The byte offset of 1-based `col` on the line beginning at `start`. The lexer
+/// counts columns in CHARACTERS, so this skips UTF-8 continuation bytes rather
+/// than doing arithmetic on the column.
+fn colOffset(src: Array<UInt8>, start: Int64, col: Int64) -> Int64 {
+    let mut seen = 1
+    let mut i = start
+    while i < src.length && seen < col {
+        i = i + 1
+        while i < src.length && (Int64(src[i]) / 64) == 2 {
+            i = i + 1
+        }
+        seen = seen + 1
+    }
+    return i
+}
+
+/// The verbatim source text of the number token at `line`/`col` — digits and at
+/// most the `.` between them, exactly as written. This is the one place the
+/// reader looks past `lex()`: a token carries the lexer's PARSED value, and
+/// `0777`, `777` and `00777` all parse to the same integer.
+fn rawNumber(src: Array<UInt8>, line: Int64, col: Int64) -> String {
+    let start = colOffset(src, lineStartOffset(src, line), col)
+    let mut out: Array<UInt8> = []
+    let mut i = start
+    while i < src.length {
+        let b = src[i]
+        if (b >= '0' && b <= '9') || b == '.' {
+            out.push(b)
+            i = i + 1
+        } else {
+            i = src.length
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// A number written with a leading zero (`0777`, `00.5`) — the ambiguity YAML
+/// 1.1 reads as octal and YAML 1.2 reads as decimal.
+fn hasLeadingZero(raw: String) -> Bool {
+    let ba = bytes(raw)
+    if ba.length < 2 {
+        return false
+    }
+    return ba[0] == '0' && ba[1] >= '0' && ba[1] <= '9'
+}
+
+// ---------------------------------------------------------------------------
+// Values
+// ---------------------------------------------------------------------------
+
+/// Read one number, with the sign already consumed and prefixed onto `sign`.
+fn readNumber(p: modify VonP, sign: String) -> Result<Von, String> {
+    let isFloat = kindAt(p) == "float"
+    let nline = tokLine(p)
+    let ncol = tokCol(p)
+    let raw = rawNumber(p.src, nline, ncol)
+    if hasLeadingZero(raw) {
+        return Err(errAt(p, "`" + raw + "` has a leading zero; write it as a decimal number, or quote it if it is text"))
+    }
+    bump(p)
+    // `0xff`, `1e9` and `1_000` all lex as a number with a word stuck to it.
+    // Vyrn has no hex, exponent or separator literal, so VON has none either,
+    // and the reader says which word it stopped on rather than leaving the
+    // author to work out why a digit was a syntax error.
+    if kindAt(p) == "ident" && tokLine(p) == nline && tokCol(p) == ncol + raw.byteLength {
+        return Err("line " + nline.toString() + ", col " + ncol.toString() + ": `" + raw + textAt(p) + "` is not a VON number — VON writes decimal digits and nothing else: no hex, no exponent, no digit separator")
+    }
+    if isFloat {
+        return Ok(VFloat(sign + raw))
+    }
+    return Ok(VInt(sign + raw))
+}
+
+/// Whether a record already carries `name`, and on which line — `-1` when not.
+fn fieldLine(fs: Array<VonField>, name: String) -> Int64 {
+    for f in fs {
+        if f.name == name {
+            return f.line
+        }
+    }
+    return -1
+}
+
+/// Whether a map already carries `key`, and on which line — `-1` when not.
+fn entryLine(es: Array<VonEntry>, key: String) -> Int64 {
+    for e in es {
+        if e.key == key {
+            return e.line
+        }
+    }
+    return -1
+}
+
+/// Read a record literal's field list (the cursor is ON `{`). Trailing commas are
+/// legal, duplicate fields are not.
+fn readRecord(p: modify VonP, name: String) -> Result<Von, String> {
+    bump(p) // {
+    let mut fs: Array<VonField> = []
+    while true {
+        skipDocs(p)
+        if atPunct(p, "}") {
+            bump(p)
+            return Ok(VRecord(name, fs))
+        }
+        if kindAt(p) == "keyword" {
+            return Err(errAt(p, "`" + textAt(p) + "` is a Vyrn keyword, so it is not a field name here — VON is Vyrn's own grammar, and the same words are spoken for"))
+        }
+        if kindAt(p) != "ident" {
+            return Err(errAt(p, "expected a field name, found " + showTok(p)))
+        }
+        let fname = textAt(p)
+        let fline = tokLine(p)
+        let dup = fieldLine(fs, fname)
+        if dup >= 0 {
+            return Err(errAt(p, "duplicate field `" + fname + "` (first at line " + dup.toString() + ")"))
+        }
+        bump(p)
+        if atPunct(p, ":") == false {
+            return Err(errAt(p, "expected `:` after the field name, found " + showTok(p)))
+        }
+        bump(p)
+        let v = readValue(p)?
+        fs.push(VonField { name: fname, value: v, line: fline })
+        if atPunct(p, ",") {
+            bump(p)
+        } else if atPunct(p, "}") == false {
+            return Err(errAt(p, "expected `,` or `}` in record `" + name + "`, found " + showTok(p)))
+        }
+    }
+    return Err(errAt(p, "unterminated record `" + name + "`"))
+}
+
+/// Read a variant's payload list (the cursor is ON `(`).
+fn readVariantArgs(p: modify VonP, name: String) -> Result<Von, String> {
+    bump(p) // (
+    let mut args: Array<Von> = []
+    while true {
+        skipDocs(p)
+        if atPunct(p, ")") {
+            bump(p)
+            return Ok(VVariant(name, args))
+        }
+        let v = readValue(p)?
+        args.push(v)
+        if atPunct(p, ",") {
+            bump(p)
+        } else if atPunct(p, ")") == false {
+            return Err(errAt(p, "expected `,` or `)` in `" + name + "(…)`, found " + showTok(p)))
+        }
+    }
+    return Err(errAt(p, "unterminated `" + name + "(…)`"))
+}
+
+/// Read an array literal's elements (the cursor is just past `[`).
+fn readArray(p: modify VonP) -> Result<Von, String> {
+    let mut xs: Array<Von> = []
+    while true {
+        skipDocs(p)
+        if atPunct(p, "]") {
+            bump(p)
+            return Ok(VArray(xs))
+        }
+        let v = readValue(p)?
+        xs.push(v)
+        if atPunct(p, ",") {
+            bump(p)
+        } else if atPunct(p, "]") == false {
+            return Err(errAt(p, "expected `,` or `]` in the array, found " + showTok(p)))
+        }
+    }
+    return Err(errAt(p, "unterminated array"))
+}
+
+/// Read a map literal's entries (the cursor is just past `[`, on the first key).
+fn readMap(p: modify VonP) -> Result<Von, String> {
+    let mut es: Array<VonEntry> = []
+    while true {
+        skipDocs(p)
+        if atPunct(p, "]") {
+            bump(p)
+            return Ok(VMap(es))
+        }
+        if kindAt(p) != "string" {
+            return Err(errAt(p, "expected a quoted map key, found " + showTok(p)))
+        }
+        let key = textAt(p)
+        let kline = tokLine(p)
+        let dup = entryLine(es, key)
+        if dup >= 0 {
+            return Err(errAt(p, "duplicate map key \"" + key + "\" (first at line " + dup.toString() + ")"))
+        }
+        bump(p)
+        if atPunct(p, ":") == false {
+            return Err(errAt(p, "expected `:` after the map key, found " + showTok(p)))
+        }
+        bump(p)
+        let v = readValue(p)?
+        es.push(VonEntry { key: key, value: v, line: kline })
+        if atPunct(p, ",") {
+            bump(p)
+        } else if atPunct(p, "]") == false {
+            return Err(errAt(p, "expected `,` or `]` in the map, found " + showTok(p)))
+        }
+    }
+    return Err(errAt(p, "unterminated map"))
+}
+
+/// Read a `[` literal: the empty map `[:]`, an array, or a map (a quoted key
+/// followed by `:` is what tells them apart — the same rule Vyrn's own parser
+/// uses).
+fn readBracket(p: modify VonP) -> Result<Von, String> {
+    bump(p) // [
+    if atPunct(p, ":") {
+        bump(p)
+        if atPunct(p, "]") == false {
+            return Err(errAt(p, "expected `]` after `[:`, found " + showTok(p)))
+        }
+        bump(p)
+        return Ok(VMap([]))
+    }
+    if kindAt(p) == "string" && kindAhead(p, 1) == "punct" && textAhead(p, 1) == ":" {
+        return readMap(p)
+    }
+    return readArray(p)
+}
+
+/// Read a name-led value: a record `N { … }`, a variant `N(…)`, or a bare
+/// variant `N`. A bare word is ALWAYS a variant name here — never a boolean and
+/// never an unquoted string.
+fn readNamed(p: modify VonP) -> Result<Von, String> {
+    let name = textAt(p)
+    bump(p)
+    if atPunct(p, "{") {
+        return readRecord(p, name)
+    }
+    if atPunct(p, "(") {
+        return readVariantArgs(p, name)
+    }
+    return Ok(VVariant(name, []))
+}
+
+/// Read one value.
+fn readValue(p: modify VonP) -> Result<Von, String> {
+    skipDocs(p)
+    let k = kindAt(p)
+    if k == "string" {
+        let s = textAt(p)
+        bump(p)
+        return Ok(VStr(s))
+    }
+    if k == "template" {
+        return Err(errAt(p, "a VON string cannot interpolate: `\\{` needs a scope, and a VON document has none — escape the backslash to mean it literally"))
+    }
+    if k == "int" || k == "float" {
+        return readNumber(p, "")
+    }
+    if atPunct(p, "-") {
+        return readSigned(p)
+    }
+    if atKeyword(p, "true") {
+        bump(p)
+        return Ok(VBool(true))
+    }
+    if atKeyword(p, "false") {
+        bump(p)
+        return Ok(VBool(false))
+    }
+    if k == "ident" {
+        return readNamed(p)
+    }
+    if atPunct(p, "[") {
+        return readBracket(p)
+    }
+    if k == "" {
+        return Err(errAt(p, "expected a value, found the end of the file"))
+    }
+    return Err(errAt(p, showTok(p) + " is not a VON value — a VON document is pure data: no operators, no calls, no bindings"))
+}
+
+/// Read `-` immediately followed by a number. The sign must touch its digits, so
+/// `- 5` is a mistake rather than a value.
+fn readSigned(p: modify VonP) -> Result<Von, String> {
+    let mline = tokLine(p)
+    let mcol = tokCol(p)
+    bump(p)
+    let k = kindAt(p)
+    if k != "int" && k != "float" {
+        return Err(errAt(p, "`-` is only a number's sign in VON, and this one has no digits"))
+    }
+    if tokLine(p) != mline || tokCol(p) != mcol + 1 {
+        return Err(errAt(p, "a minus sign must touch its digits"))
+    }
+    return readNumber(p, "-")
+}
+
+// ---------------------------------------------------------------------------
+// The header, and the document
+// ---------------------------------------------------------------------------
+
+/// Read one `import type { A, B } from "spec"` line (the cursor is ON `import`).
+fn readImport(p: modify VonP) -> Result<VonImport, String> {
+    bump(p) // import
+    if atKeyword(p, "type") == false {
+        return Err(errAt(p, "a VON header imports a TYPE: write `import type { … } from \"…\"`"))
+    }
+    bump(p)
+    if atPunct(p, "{") == false {
+        return Err(errAt(p, "expected `{` after `import type`, found " + showTok(p)))
+    }
+    bump(p)
+    let mut names: Array<String> = []
+    while true {
+        if atPunct(p, "}") {
+            bump(p)
+            return readImportFrom(p, names)
+        }
+        if kindAt(p) != "ident" {
+            return Err(errAt(p, "expected a type name, found " + showTok(p)))
+        }
+        names.push(textAt(p))
+        bump(p)
+        if atPunct(p, ",") {
+            bump(p)
+        } else if atPunct(p, "}") == false {
+            return Err(errAt(p, "expected `,` or `}` in the import list, found " + showTok(p)))
+        }
+    }
+    return Err(errAt(p, "unterminated import list"))
+}
+
+/// Read the `from "spec"` tail of a header line.
+fn readImportFrom(p: modify VonP, names: consume Array<String>) -> Result<VonImport, String> {
+    if kindAt(p) != "ident" || textAt(p) != "from" {
+        return Err(errAt(p, "expected `from` after the import list, found " + showTok(p)))
+    }
+    bump(p)
+    if kindAt(p) != "string" {
+        return Err(errAt(p, "expected a quoted module path after `from`, found " + showTok(p)))
+    }
+    let spec = textAt(p)
+    bump(p)
+    if names.length == 0 {
+        return Err(errAt(p, "an empty import list names no type"))
+    }
+    return Ok(VonImport { names: names, module: spec })
+}
+
+/// The first line that indents with a tab, or `-1`. Indentation carries no
+/// meaning in VON, which is exactly why a tab must not be able to change how a
+/// file looks.
+fn tabIndentLine(src: Array<UInt8>) -> Int64 {
+    let mut line = 1
+    let mut leading = true
+    let mut i = 0
+    while i < src.length {
+        let b = src[i]
+        if b == '\n' {
+            line = line + 1
+            leading = true
+        } else if leading && b == '\t' {
+            return line
+        } else if b != ' ' && b != '\r' {
+            leading = false
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// Whether `src` opens with a UTF-8 byte-order mark.
+fn hasBom(src: Array<UInt8>) -> Bool {
+    if src.length < 3 {
+        return false
+    }
+    return src[0] == '\xef' && src[1] == '\xbb' && src[2] == '\xbf'
+}
+
+/// The layout rules that are about bytes rather than tokens: no BOM, no tab in
+/// indentation. `""` when the source is clean.
+fn layoutError(src: Array<UInt8>) -> String {
+    if hasBom(src) {
+        return "line 1, col 1: a VON file is UTF-8 with no byte-order mark"
+    }
+    let tab = tabIndentLine(src)
+    if tab >= 0 {
+        return "line " + tab.toString() + ", col 1: indent with spaces — a tab is not indentation in VON, and indentation carries no meaning here anyway"
+    }
+    return ""
+}
+
+/// Read a whole VON document: a header of one or more `import type` lines, then
+/// exactly one value.
+///
+/// A `gen fn` because `lex()` is generation-only (RFC-0054) — see the module
+/// header. Errors read `line N, col M: <reason>`, positioned in the `.von`
+/// source the caller passed.
+export gen fn parseVon(src: String) -> Result<VonDoc, String> {
+    return walkVon(vonLex(src), src)
+}
+
+/// The compiler's own lexer, as rows this module owns. The ONE generation-only
+/// function here (see [`VonTok`]).
+gen fn vonLex(src: String) -> Array<VonTok> {
+    let mut out: Array<VonTok> = []
+    for t in lex(src) {
+        out.push(VonTok { kind: t.kind, text: t.text, line: t.line, col: t.col })
+    }
+    return out
+}
+
+/// The strictness walk itself: ordinary Vyrn over the tokens and the source
+/// bytes.
+fn walkVon(toks: consume Array<VonTok>, src: String) -> Result<VonDoc, String> {
+    let layout = layoutError(bytes(src))
+    if layout != "" {
+        return Err(layout)
+    }
+    let count = toks.length
+    let mut p = VonP { toks: toks, n: count, i: 0, src: bytes(src) }
+    let bad = firstErrorToken(p)
+    if bad != "" {
+        return Err(bad)
+    }
+    skipDocs(p)
+    let mut imports: Array<VonImport> = []
+    while atKeyword(p, "import") {
+        let one = readImport(p)?
+        imports.push(one)
+        skipDocs(p)
+    }
+    if imports.length == 0 {
+        return Err(errAt(p, "a VON document starts with its schema: `import type { T } from \"…\"`"))
+    }
+    let v = readValue(p)?
+    skipDocs(p)
+    if p.i < p.n {
+        return Err(errAt(p, "a VON document holds ONE value, and " + showTok(p) + " follows it"))
+    }
+    return Ok(VonDoc { imports: imports, value: v })
+}
+
+/// The lexer's own complaint, if the source does not lex — `lex` reports it as a
+/// single `error` token rather than trapping.
+fn firstErrorToken(p: VonP) -> String {
+    let mut i = 0
+    while i < p.n {
+        let t = p.toks[i]
+        if t.kind == "error" {
+            return "line " + t.line.toString() + ", col " + t.col.toString() + ": " + t.text
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// ===========================================================================
+// Writer — the canonical, `fmt`-shaped layout. A file a human reads and
+// `git diff` shows, so the output is indented rather than compact (the one way
+// `toVon` differs from `toJson`).
+// ===========================================================================
+
+/// `n` levels of the 4-space indentation `vyrn fmt` uses.
+fn indent(n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + "    "
+        i = i + 1
+    }
+    return out
+}
+
+/// The lowercase 2-digit hex of a byte value 0..255.
+fn hex2(b: Int64) -> String {
+    let db = bytes("0123456789abcdef")
+    let mut out: Array<UInt8> = []
+    out.push(db[(b / 16) % 16])
+    out.push(db[b % 16])
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// `s` as a Vyrn string literal, quotes included. `\` is doubled first, so an
+/// emitted `\{` can never open an interpolation hole in the file that is read
+/// back.
+fn emitString(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    out.push('"')
+    for b in ba {
+        if b == '"' {
+            out.push('\\')
+            out.push('"')
+        } else if b == '\\' {
+            out.push('\\')
+            out.push('\\')
+        } else if b == '\n' {
+            out.push('\\')
+            out.push('n')
+        } else if b == '\t' {
+            out.push('\\')
+            out.push('t')
+        } else if b == '\r' {
+            out.push('\\')
+            out.push('r')
+        } else if b < 32 {
+            pushUnicodeEscape(out, Int64(b))
+        } else {
+            out.push(b)
+        }
+    }
+    out.push('"')
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// Append `\u{XX}` for a control byte the short escapes do not cover.
+fn pushUnicodeEscape(out: modify Array<UInt8>, b: Int64) -> Unit {
+    out.push('\\')
+    out.push('u')
+    out.push('{')
+    let hb = bytes(hex2(b))
+    out.push(hb[0])
+    out.push(hb[1])
+    out.push('}')
+}
+
+/// Whether `v` fits on one line without deciding anything — a scalar, or an
+/// empty container.
+fn isFlat(v: Von) -> Bool {
+    return match v {
+        VRecord(n, fs) => fs.length == 0,
+        VVariant(n, xs) => xs.length == 0,
+        VArray(xs) => xs.length == 0,
+        VMap(es) => es.length == 0,
+        VStr(s) => true,
+        VInt(s) => true,
+        VFloat(s) => true,
+        VBool(b) => true,
+    }
+}
+
+/// Whether every element of a value list is flat.
+fn allFlatValues(xs: Array<Von>) -> Bool {
+    for x in xs {
+        if isFlat(x) == false {
+            return false
+        }
+    }
+    return true
+}
+
+/// Whether every entry's value is flat.
+fn allFlatEntries(es: Array<VonEntry>) -> Bool {
+    for e in es {
+        if isFlat(e.value) == false {
+            return false
+        }
+    }
+    return true
+}
+
+/// A record body, one field per line with the trailing comma that keeps a later
+/// field's diff to one line.
+fn emitRecordBlock(name: String, fs: Array<VonField>, depth: Int64) -> String {
+    let pad = indent(depth + 1)
+    let mut out = name + " {\n"
+    for f in fs {
+        out = out + pad + f.name + ": " + emitAt(f.value, depth + 1) + ",\n"
+    }
+    return out + indent(depth) + "}"
+}
+
+/// An array body, one element per line with a trailing comma.
+fn emitArrayBlock(xs: Array<Von>, depth: Int64) -> String {
+    let pad = indent(depth + 1)
+    let mut out = "[\n"
+    for x in xs {
+        out = out + pad + emitAt(x, depth + 1) + ",\n"
+    }
+    return out + indent(depth) + "]"
+}
+
+/// An array body on one line.
+fn emitArrayInline(xs: Array<Von>, depth: Int64) -> String {
+    let mut out = "["
+    let mut i = 0
+    for x in xs {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + emitAt(x, depth)
+        i = i + 1
+    }
+    return out + "]"
+}
+
+/// A map body, one entry per line with a trailing comma.
+fn emitMapBlock(es: Array<VonEntry>, depth: Int64) -> String {
+    let pad = indent(depth + 1)
+    let mut out = "[\n"
+    for e in es {
+        out = out + pad + emitString(e.key) + ": " + emitAt(e.value, depth + 1) + ",\n"
+    }
+    return out + indent(depth) + "]"
+}
+
+/// A map body on one line.
+fn emitMapInline(es: Array<VonEntry>, depth: Int64) -> String {
+    let mut out = "["
+    let mut i = 0
+    for e in es {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + emitString(e.key) + ": " + emitAt(e.value, depth)
+        i = i + 1
+    }
+    return out + "]"
+}
+
+/// A variant's payload list. Each payload is emitted one level DEEPER, because
+/// `vyrn fmt` counts the `(` as an indentation level of its own: a record
+/// payload then breaks its lines and closes in the column `fmt` would put it in
+/// — `Enabled(TlsFiles {` … `})`. That agreement is what makes the canonical
+/// text a fixed point of the formatter.
+fn emitVariantArgs(name: String, xs: Array<Von>, depth: Int64) -> String {
+    let mut out = name + "("
+    let mut i = 0
+    for x in xs {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + emitAt(x, depth + 1)
+        i = i + 1
+    }
+    return out + ")"
+}
+
+/// The canonical text of one value at nesting `depth`. A container whose parts
+/// are all flat stays on one line; any other container breaks, one part per line
+/// with a trailing comma.
+fn emitAt(v: Von, depth: Int64) -> String {
+    return match v {
+        VRecord(name, fs) => if fs.length == 0 { name + " {}" } else { emitRecordBlock(name, fs, depth) },
+        VVariant(name, xs) => if xs.length == 0 { name.copy() } else { emitVariantArgs(name, xs, depth) },
+        VArray(xs) => if xs.length == 0 {
+            "[]"
+        } else if allFlatValues(xs) {
+            emitArrayInline(xs, depth)
+        } else {
+            emitArrayBlock(xs, depth)
+        },
+        VMap(es) => if es.length == 0 {
+            "[:]"
+        } else if allFlatEntries(es) {
+            emitMapInline(es, depth)
+        } else {
+            emitMapBlock(es, depth)
+        },
+        VStr(s) => emitString(s),
+        VInt(s) => s.copy(),
+        VFloat(s) => s.copy(),
+        VBool(b) => if b { "true" } else { "false" },
+    }
+}
+
+/// One value as canonical VON text, with no header.
+export fn emitVon(v: Von) -> String {
+    return emitAt(v, 0)
+}
+
+/// A whole document as canonical VON text: the header, a blank line, the value,
+/// and a closing newline.
+///
+/// Comments do not survive a read/write round trip — `lex()` emits no token for
+/// one — so `toVon` is for writing a document, not for rewriting one somebody
+/// else wrote (RFC-0097 §8).
+export fn toVon(doc: VonDoc) -> String {
+    let mut out = ""
+    for im in doc.imports {
+        out = out + "import type { " + joinNames(im.names) + " } from " + emitString(im.module) + "\n"
+    }
+    return out + "\n" + emitAt(doc.value, 0) + "\n"
+}
+
+/// `A, B, C` — an import list's names.
+fn joinNames(names: Array<String>) -> String {
+    let mut out = ""
+    let mut i = 0
+    for n in names {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + n
+        i = i + 1
+    }
+    return out
+}
+
+// ===========================================================================
+// JSON in, VON out — the migration path. `std/json`'s strict reader does the
+// reading (it already rejects duplicate keys and trailing commas), and this
+// walk decides the one thing JSON cannot say: which member is a record field
+// and which is a map entry.
+// ===========================================================================
+
+/// The Vyrn keywords a JSON key must not be, since a record field is an
+/// identifier and these do not lex as one.
+fn isKeyword(s: String) -> Bool {
+    let kws = ["fn", "let", "mut", "if", "else", "while", "for", "in", "drop", "protocol", "import", "export", "impl", "self", "return", "true", "false", "type", "where", "match", "region", "spawn", "break", "continue"]
+    for k in kws {
+        if k == s {
+            return true
+        }
+    }
+    return false
+}
+
+/// Whether `s` is spellable as a Vyrn identifier (and so as a record field).
+fn isIdent(s: String) -> Bool {
+    let ba = bytes(s)
+    if ba.length == 0 {
+        return false
+    }
+    let f = ba[0]
+    if (f >= 'a' && f <= 'z') == false && (f >= 'A' && f <= 'Z') == false && f != '_' {
+        return false
+    }
+    let mut i = 1
+    while i < ba.length {
+        let b = ba[i]
+        if (b >= 'a' && b <= 'z') == false && (b >= 'A' && b <= 'Z') == false && (b >= '0' && b <= '9') == false && b != '_' {
+            return false
+        }
+        i = i + 1
+    }
+    return isKeyword(s) == false
+}
+
+/// Whether a JSON number's raw text carries an exponent. Vyrn has no exponent
+/// literal, and VON is exactly Vyrn's literal grammar, so `1e9` has no VON
+/// spelling and the conversion says so instead of inventing one.
+fn hasExponent(raw: String) -> Bool {
+    for b in bytes(raw) {
+        if b == 'e' || b == 'E' {
+            return true
+        }
+    }
+    return false
+}
+
+/// Whether a JSON number's raw text is a float (it has a `.`).
+fn hasPoint(raw: String) -> Bool {
+    for b in bytes(raw) {
+        if b == '.' {
+            return true
+        }
+    }
+    return false
+}
+
+/// One JSON value as VON, at `path` (a dotted trail used only by errors).
+fn jsonValueToVon(j: Json, path: String) -> Result<Von, String> {
+    return match j {
+        JNull => Err(path + ": VON has no null — a value that may be absent is an `Option` field, and an absent field is `None`"),
+        JBool(b) => Ok(VBool(b)),
+        JNum(raw) => jsonNumberToVon(raw, path),
+        JStr(s) => Ok(VStr(s.copy())),
+        JArr(items) => jsonArrayToVon(items, path),
+        JObj(fields) => jsonObjectToVon(fields, path),
+    }
+}
+
+/// One JSON number as VON, refusing the two spellings VON has no grammar for.
+fn jsonNumberToVon(raw: String, path: String) -> Result<Von, String> {
+    if hasExponent(raw) {
+        return Err(path + ": `" + raw + "` is written with an exponent, and VON has no exponent form — write the digits out")
+    }
+    if hasPoint(raw) {
+        return Ok(VFloat(raw.copy()))
+    }
+    return Ok(VInt(raw.copy()))
+}
+
+/// A JSON array as a VON array.
+fn jsonArrayToVon(items: Array<Json>, path: String) -> Result<Von, String> {
+    let mut xs: Array<Von> = []
+    let mut i = 0
+    for it in items {
+        let v = jsonValueToVon(it, path + "[" + i.toString() + "]")?
+        xs.push(v)
+        i = i + 1
+    }
+    return Ok(VArray(xs))
+}
+
+/// A NESTED JSON object becomes a map. An object is only a record when a type
+/// names it, and JSON names nothing — so the conversion takes the reading that
+/// is always true (`Map<String, V>` is exactly an untyped JSON object) and
+/// leaves promoting a member to a record to the author, who has the type.
+fn jsonObjectToVon(fields: Array<JsonField>, path: String) -> Result<Von, String> {
+    let mut es: Array<VonEntry> = []
+    for f in fields {
+        let v = jsonValueToVon(f.value, path + "." + f.key)?
+        es.push(VonEntry { key: f.key.copy(), value: v, line: 0 })
+    }
+    return Ok(VMap(es))
+}
+
+/// The document's top object as the record `typeName`, its members as fields.
+fn jsonTopToVon(fields: Array<JsonField>, typeName: String) -> Result<Von, String> {
+    let mut fs: Array<VonField> = []
+    for f in fields {
+        if isIdent(f.key) == false {
+            return Err("`" + f.key + "` is not a Vyrn identifier, so it cannot be a field of `" + typeName + "` — hold those members in a `Map<String, V>` field instead")
+        }
+        let v = jsonValueToVon(f.value, f.key)?
+        fs.push(VonField { name: f.key.copy(), value: v, line: 0 })
+    }
+    return Ok(VRecord(typeName, fs))
+}
+
+/// Convert a JSON document to VON text, headed by
+/// `import type { <typeName> } from "<module>"`.
+///
+/// The result is a starting point, not an answer: JSON says nothing about types,
+/// so every NESTED object arrives as a map and it is the author — who has the
+/// type — who promotes one to a record. What the conversion does answer is
+/// everything JSON got wrong on its own terms: a duplicate key is rejected by
+/// `std/json`'s reader before this walk runs, `null` has no VON spelling, and a
+/// number keeps its verbatim digits.
+export fn jsonToVon(json: Json, typeName: String, module: String) -> Result<String, String> {
+    if isIdent(typeName) == false {
+        return Err("`" + typeName + "` is not a Vyrn type name")
+    }
+    return match json {
+        JNull => Err(notAnObject()),
+        JBool(b) => Err(notAnObject()),
+        JNum(s) => Err(notAnObject()),
+        JStr(s) => Err(notAnObject()),
+        JArr(xs) => Err(notAnObject()),
+        JObj(fs) => jsonTopDoc(fs, typeName, module),
+    }
+}
+
+/// The one shape refusal, said once.
+fn notAnObject() -> String {
+    return "a VON document's top value is a named record, and this JSON document is not an object"
+}
+
+/// The document text for a top-level JSON object.
+fn jsonTopDoc(fields: Array<JsonField>, typeName: String, module: String) -> Result<String, String> {
+    let top = jsonTopToVon(fields, typeName)?
+    let im = VonImport { names: [typeName.copy()], module: module.copy() }
+    return Ok(toVon(VonDoc { imports: [im], value: top }))
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+/// The error a parse gives, or `"ok"`.
+///
+/// A `gen fn`, like the two below it, and for the reason every caller of
+/// `parseVon` must be one: `lex()` is a generation-only builtin with no lowering
+/// in any backend, so an ORDINARY function that reaches it compiles here and
+/// fails at code generation. A `gen fn` is never emitted, and the `test` blocks
+/// run in the interpreter, where it is available.
+gen fn parseErr(src: String) -> String {
+    return match parseVon(src) {
+        Ok(d) => "ok",
+        Err(e) => e,
+    }
+}
+
+/// The canonical text a document round-trips to, or its error.
+gen fn roundTrip(src: String) -> String {
+    return match parseVon(src) {
+        Ok(d) => toVon(d),
+        Err(e) => "ERR: " + e,
+    }
+}
+
+test "a document is a header and one value, and the canonical text is a fixed point" {
+    let src = """import type { Manifest } from "std/manifest"
+
+Manifest {
+    name: "shelf",
+    server: "server.vyrn",
+}
+"""
+    assertEq(roundTrip(src), src)
+    // Comments and the layout the author chose do not survive; the VALUE does.
+    assertEq(roundTrip("""// which project this is
+import type { Manifest } from "std/manifest"
+
+Manifest { name: "shelf", server: "server.vyrn" }
+"""), src)
+}
+
+test "a bare word is a variant, never a boolean and never a string" {
+    // The Norway problem is unrepresentable rather than fixed: no code path
+    // guesses a type from a token's spelling.
+    let src = """import type { Deploy } from "./deploy"
+
+Deploy {
+    country: NO,
+    tls: Enabled,
+    on: false,
+}
+"""
+    assertEq(roundTrip(src), src)
+}
+
+test "numbers keep their verbatim digits" {
+    // `18446744073709551615` is the u64 above `i64::MAX` that a PARSED token
+    // hands back as a negative; `1.50` is the trailing zero a float loses.
+    let src = """import type { N } from "./n"
+
+N {
+    big: 18446744073709551615,
+    exact: 9007199254740993,
+    neg: -3,
+    f: 1.50,
+}
+"""
+    assertEq(roundTrip(src), src)
+}
+
+test "a leading zero is an error, not an octal guess" {
+    assertEq(parseErr("""import type { N } from "./n"
+
+N { mode: 0777 }
+"""), "line 3, col 11: `0777` has a leading zero; write it as a decimal number, or quote it if it is text")
+}
+
+test "a number is decimal digits and nothing else" {
+    let want = " is not a VON number — VON writes decimal digits and nothing else: no hex, no exponent, no digit separator"
+    assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: 0xff }\n"), "line 3, col 8: `0xff`" + want)
+    assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: 1e9 }\n"), "line 3, col 8: `1e9`" + want)
+    assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: 1_000 }\n"), "line 3, col 8: `1_000`" + want)
+    // `+1` is an operator applied to a value, and VON has no operators.
+    assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: +1 }\n"), "line 3, col 8: `+` is not a VON value — a VON document is pure data: no operators, no calls, no bindings")
+}
+
+test "duplicates name both lines" {
+    assertEq(parseErr("""import type { R } from "./r"
+
+R {
+    a: 1,
+    a: 2,
+}
+"""), "line 5, col 5: duplicate field `a` (first at line 4)")
+    assertEq(parseErr("""import type { R } from "./r"
+
+R {
+    m: [
+        "k": 1,
+        "k": 2,
+    ],
+}
+"""), "line 6, col 9: duplicate map key \"k\" (first at line 5)")
+}
+
+test "interpolation and expressions are refused" {
+    assertEq(parseErr("import type { R } from \"./r\"\n\nR { s: \"a\\{1}b\" }\n"), "line 3, col 8: a VON string cannot interpolate: `\\{` needs a scope, and a VON document has none — escape the backslash to mean it literally")
+    assertEq(parseErr("""import type { R } from "./r"
+
+R { n: 1 + 2 }
+"""), "line 3, col 10: expected `,` or `}` in record `R`, found `+`")
+}
+
+test "a Vyrn keyword is not a field name, and the error says which word" {
+    assertEq(parseErr("""import type { R } from "./r"
+
+R { region: "eu" }
+"""), "line 3, col 5: `region` is a Vyrn keyword, so it is not a field name here — VON is Vyrn's own grammar, and the same words are spoken for")
+}
+
+test "the header is required and the document holds one value" {
+    assertEq(parseErr("R { a: 1 }\n"), "line 1, col 1: a VON document starts with its schema: `import type { T } from \"…\"`")
+    assertEq(parseErr("""import type { R } from "./r"
+
+R { a: 1 }
+R { b: 2 }
+"""), "line 4, col 1: a VON document holds ONE value, and `R` follows it")
+}
+
+test "a tab in indentation is an error" {
+    assertEq(parseErr("import type { R } from \"./r\"\n\nR {\n\ta: 1,\n}\n"), "line 4, col 1: indent with spaces — a tab is not indentation in VON, and indentation carries no meaning here anyway")
+}
+
+test "a container breaks a line only where a part is not flat" {
+    let src = """import type { Theme } from "std/tw"
+
+Theme {
+    colors: [
+        "brand": ["500": "#4f46e5", "600": "#4338ca"],
+        "gray": ["200": "#e5e7eb"],
+    ],
+    safelist: ["card", "row"],
+    empty: [:],
+    none: [],
+}
+"""
+    assertEq(roundTrip(src), src)
+}
+
+test "a variant payload keeps its own layout" {
+    let src = """import type { C } from "./c"
+
+C {
+    tls: Enabled(TlsFiles {
+            cert: "/etc/c.pem",
+            key: "/etc/k.pem",
+        }),
+    workers: Some(8),
+    size: Rect(2, 3),
+}
+"""
+    assertEq(roundTrip(src), src)
+}
+
+test "a string escape survives the round trip" {
+    let src = "import type { S } from \"./s\"\n\nS {\n    quoted: \"say \\\"hi\\\"\",\n    lines: \"a\\nb\",\n    backslash: \"C:\\\\tmp\",\n}\n"
+    assertEq(roundTrip(src), src)
+}
+
+/// The VON text a JSON tree converts to, or its error.
+gen fn converted(j: Json) -> String {
+    return match jsonToVon(j, "Manifest", "std/manifest") {
+        Ok(s) => s,
+        Err(e) => "ERR: " + e,
+    }
+}
+
+test "a JSON document converts to a VON starting point" {
+    let j = JObj([
+            JsonField { key: "name", value: JStr("shelf") },
+            JsonField { key: "port", value: JNum("8443") },
+            JsonField { key: "ratio", value: JNum("1.5") },
+            JsonField { key: "debug", value: JBool(false) },
+            JsonField { key: "audience", value: JObj([JsonField { key: "server", value: JArr([JStr("server")]) }]) },
+        ])
+    let want = """import type { Manifest } from "std/manifest"
+
+Manifest {
+    name: "shelf",
+    port: 8443,
+    ratio: 1.5,
+    debug: false,
+    audience: [
+        "server": ["server"],
+    ],
+}
+"""
+    assertEq(converted(j), want)
+    // The output is a VON document, and the reader says so.
+    assertEq(roundTrip(converted(j)), want)
+}
+
+test "the conversion refuses what VON has no spelling for" {
+    assertEq(converted(JObj([JsonField { key: "main", value: JNull }])), "ERR: main: VON has no null — a value that may be absent is an `Option` field, and an absent field is `None`")
+    assertEq(converted(JObj([JsonField { key: "size", value: JNum("1e9") }])), "ERR: size: `1e9` is written with an exponent, and VON has no exponent form — write the digits out")
+    assertEq(converted(JObj([JsonField { key: "a-b", value: JNum("1") }])), "ERR: `a-b` is not a Vyrn identifier, so it cannot be a field of `Manifest` — hold those members in a `Map<String, V>` field instead")
+    assertEq(converted(JArr([])), "ERR: a VON document's top value is a named record, and this JSON document is not an object")
+}
