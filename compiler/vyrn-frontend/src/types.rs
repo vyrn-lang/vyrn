@@ -1142,6 +1142,145 @@ pub fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
     }
 }
 
+/// How deeply `ty` nests. `Int64` is 1, `Array<Int64>` is 2,
+/// `Array<Array<Int64>>` is 3.
+///
+/// This is the number monomorphization has to keep bounded (audit A5.2). The
+/// language has finitely many type constructors and each takes a fixed number of
+/// arguments, so a bounded depth admits finitely many distinct types, and
+/// therefore finitely many instantiations of any one function. Polymorphic
+/// recursion is the shape that breaks the bound: `f<T>` calling `f<P<T>>` adds
+/// one level per call and never repeats a type, so the worklist never empties.
+///
+/// Beside [`walk_type`] because it walks the same shape.
+pub fn type_depth(ty: &Type) -> usize {
+    fn deepest(ts: impl Iterator<Item = usize>) -> usize {
+        ts.max().unwrap_or(0)
+    }
+    1 + match ty {
+        Type::Option(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Stream(a)
+        | Type::Partial(a)
+        | Type::Lazy(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => type_depth(a),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            type_depth(a).max(type_depth(b))
+        }
+        Type::App(_, args) => deepest(args.iter().map(type_depth)),
+        Type::Record(fields) => deepest(fields.iter().map(|f| type_depth(&f.ty))),
+        Type::Enum(variants) => deepest(
+            variants
+                .iter()
+                .flat_map(|v| v.payload.iter())
+                .map(type_depth),
+        ),
+        Type::Fn(params, ret) => deepest(params.iter().map(type_depth)).max(type_depth(ret)),
+        _ => 0,
+    }
+}
+
+/// How many parts `ty` has once every named type is expanded, or `None` when
+/// that passes `budget`.
+///
+/// Nesting depth is not the whole bound (audit A5.2). A record is STRUCTURAL
+/// here — `type P<T> = { a: T, b: T }` nested d deep expands to 2^d leaves — so
+/// a program nesting only 30 levels still asks a backend for a struct with a
+/// billion members, and the backend never comes back. This is the number that
+/// actually grows, and the walk stops the moment the budget is gone, so asking
+/// the question never costs more than the answer.
+///
+/// A type that names itself (RFC-0096) counts as a leaf where it comes back, so
+/// it is measured rather than chased. "Itself" is the name AND the same
+/// [`type_depth`]: `Node` inside `Node` is the same type and stops the walk,
+/// while `P<X>` inside `P<P<X>>` is a different one and does not — which is the
+/// whole shape this measurement exists to catch.
+pub fn expanded_size(ty: &Type, types: &HashMap<String, TypeDecl>, budget: usize) -> Option<usize> {
+    let mut n = 0usize;
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    if size_go(ty, types, budget, &mut n, 0, &mut seen) {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+fn size_go(
+    ty: &Type,
+    types: &HashMap<String, TypeDecl>,
+    budget: usize,
+    n: &mut usize,
+    depth: usize,
+    seen: &mut Vec<(String, usize)>,
+) -> bool {
+    *n += 1;
+    // The node budget alone terminates the walk; the depth bound keeps it off the
+    // Rust stack while it gets there.
+    if *n > budget || depth > 1024 {
+        return false;
+    }
+    let here = match ty {
+        Type::Named(s) | Type::App(s, _) => Some((s.clone(), type_depth(ty))),
+        _ => None,
+    };
+    if let Some(k) = &here {
+        if seen.contains(k) {
+            return true;
+        }
+        seen.push(k.clone());
+    }
+    let resolved;
+    let t = match ty {
+        Type::Named(_)
+        | Type::App(..)
+        | Type::Omit(..)
+        | Type::Pick(..)
+        | Type::Merge(..)
+        | Type::Partial(_) => {
+            resolved = resolve(ty, types);
+            &resolved
+        }
+        other => other,
+    };
+    let d = depth + 1;
+    let ok = match t {
+        Type::Option(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Stream(a)
+        | Type::Partial(a)
+        | Type::Lazy(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => size_go(a, types, budget, n, d, seen),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            size_go(a, types, budget, n, d, seen) && size_go(b, types, budget, n, d, seen)
+        }
+        Type::App(_, args) => args.iter().all(|a| size_go(a, types, budget, n, d, seen)),
+        Type::Record(fields) => fields
+            .iter()
+            .all(|f| size_go(&f.ty, types, budget, n, d, seen)),
+        Type::Enum(variants) => variants
+            .iter()
+            .flat_map(|v| v.payload.iter())
+            .all(|p| size_go(p, types, budget, n, d, seen)),
+        Type::Fn(params, ret) => {
+            params.iter().all(|p| size_go(p, types, budget, n, d, seen))
+                && size_go(ret, types, budget, n, d, seen)
+        }
+        _ => true,
+    };
+    if here.is_some() {
+        seen.pop();
+    }
+    ok
+}
+
 /// Whether `ty` mentions a type parameter anywhere inside it.
 pub fn mentions_param(ty: &Type) -> bool {
     let mut found = false;

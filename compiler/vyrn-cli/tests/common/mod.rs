@@ -39,6 +39,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "does not satisfy",
     ),
     (
+        "polyrecursion.vyrn",
+        "polymorphic recursion — a generic that calls itself with a bigger type has no \
+         monomorphization fixed point (audit A5.2). `check` used to say `ok` and `build` \
+         then ran forever printing nothing",
+        "past the instantiation limit",
+    ),
+    (
         "protocol_overlap.vyrn",
         "two impls of one protocol for one type constructor (RFC-0080 M1)",
         "collides with `impl<T> Show for Option<T>` (line",

@@ -59,6 +59,11 @@ fn allocating_calls(body: &str) -> Vec<&str> {
                 "@__vyrn_trap_msg",
                 "@__vyrn_trap_idx",
                 "@__vyrn_panic",
+                // The call-depth counter (RFC-0004 addendum): a load, an add and
+                // a store on one global, in every prologue and before every
+                // `ret`. It allocates nothing, which is what this list is for.
+                "@__vyrn_call_enter",
+                "@__vyrn_call_exit",
             ]
             .iter()
             .all(|f| !l.contains(f))

@@ -479,6 +479,10 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             mono.insts.get(mono.done).cloned()
         };
         if let Some(p) = p {
+            // Audit A5.2: the same cap the textual backend takes, at this
+            // backend's own worklist. Both drain until nothing is left, and
+            // polymorphic recursion leaves something every turn.
+            crate::check_inst_depth(&p.f.name, p.subst.values(), p.f.line, &cx.types)?;
             cx.subst = p.subst.clone();
             let body = lower_body(&mut m, &p.f, &p.sig, &cx, p.binds.clone())?;
             cx.subst = HashMap::new();
@@ -1573,6 +1577,14 @@ fn lower_body(
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
 
+    // Audit A5.3: one frame of the language's call-depth budget. A lifted lambda
+    // is skipped — it has no name to call itself by (RFC-0037), so it cannot
+    // recurse without passing through a named function, and counting it here
+    // would count a call the interpreter and the textual backend do not.
+    let counted = f.name != "@lambda";
+    if counted {
+        call_depth_enter(&mut b, cx);
+    }
     // The one block every `return` targets. Its result IS the function's when
     // that is a scalar; an aggregate return travels through `dest` instead, so
     // the block carries nothing.
@@ -1621,7 +1633,42 @@ fn lower_body(
         }
     }
 
+    // Give the frame back, at the one exit the copy-out just proved this backend
+    // has. Stack-neutral, so a scalar result already on the operand stack rides
+    // through it untouched — the same property the copy-out needs.
+    if counted {
+        call_depth_bump(&mut b, cx, -1);
+    }
+
     Ok(b)
+}
+
+/// Take one call frame, or trap. Inline for the reason `region_enter` is: it is
+/// a dozen instructions, and a helper would be another index in a table whose
+/// numbering is load-bearing.
+fn call_depth_enter(b: &mut Frame, cx: &Cx) {
+    let (at, msg, trap) = (cx.rt.call_depth, cx.rt.msg_calldepth, cx.rt.trap);
+    b.ins(&Instruction::I32Const(at as i32))
+        .ins(&Instruction::I32Load(word()))
+        .ins(&Instruction::I32Const(
+            vyrn_frontend::interp::CALL_DEPTH_LIMIT as i32,
+        ))
+        .ins(&Instruction::I32GeU)
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::I32Const(msg as i32))
+        .ins(&Instruction::Call(trap))
+        .ins(&Instruction::End);
+    call_depth_bump(b, cx, 1);
+}
+
+fn call_depth_bump(b: &mut Frame, cx: &Cx, by: i32) {
+    let at = cx.rt.call_depth;
+    b.ins(&Instruction::I32Const(at as i32))
+        .ins(&Instruction::I32Const(at as i32))
+        .ins(&Instruction::I32Load(word()))
+        .ins(&Instruction::I32Const(by))
+        .ins(&Instruction::I32Add)
+        .ins(&Instruction::I32Store(word()));
 }
 
 /// One signature's dispatcher (RFC-0037): switch on the tag, unpack the
@@ -11890,6 +11937,13 @@ struct Rt {
     /// wasm global for M2f's reason — module state showed that one mechanism in
     /// memory beats two, and `reserve` is that mechanism.
     region_sp: u32,
+    msg_calldepth: u32,
+    /// The call-depth counter (audit A5.3): four reserved bytes holding how many
+    /// Vyrn calls are in flight, in the same storage and for the same reason
+    /// `region_sp` is. Every named function's prologue bumps it and its one exit
+    /// gives it back; past [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] it traps
+    /// with the words the interpreter and the native binary use.
+    call_depth: u32,
     /// The free list head of each size class (RFC-0077 M6), `MAX_CLASS -
     /// MIN_CLASS + 1` words. Zero-filled by `reserve`, which is what an empty
     /// list is.
@@ -11990,6 +12044,8 @@ impl Rt {
             msg_oob_end: 0,
             msg_region: 0,
             region_sp: 0,
+            msg_calldepth: 0,
+            call_depth: 0,
             heads: 0,
         };
         rt.count = table.len() as u32;
@@ -12105,6 +12161,16 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // three engines agree about it.
     rt.msg_region = rt.intern(m, "error: region nesting exceeds 64\n");
     rt.region_sp = m.reserve(4, 4);
+    // Audit A5.3. Interned from the constant, so the number in the message and
+    // the number the prologue compares against cannot drift apart.
+    rt.msg_calldepth = rt.intern(
+        m,
+        &format!(
+            "error: call depth exceeds {}\n",
+            vyrn_frontend::interp::CALL_DEPTH_LIMIT
+        ),
+    );
+    rt.call_depth = m.reserve(4, 4);
 
     // write_all(fd, ptr, len) — the ONE place bytes leave this module.
     //

@@ -329,3 +329,54 @@ None of them exist at runtime.
   require explicit `impl` when ambiguous.)
 - **Q4.** How far does the transformer language go — is it Turing-complete
   (TypeScript-style, with recursion limits) or deliberately total?
+
+---
+
+## Addendum (implemented) — monomorphization has two declared bounds
+
+Generics are monomorphized: one function gets one body per distinct
+instantiation. Polymorphic recursion has no fixed point under that rule. `f<T>`
+calling `f<P<T>>` asks for `f<P<Int64>>`, then `f<P<P<Int64>>>`, and never
+repeats a type, so the worklist never empties. A `n <= 0` guard in the body does
+not help: it is a run-time test and the worklist is a compile-time one.
+
+Before this addendum the language had no bound at all. `vyrn check` printed `ok`
+and `vyrn build` then ran forever and printed nothing — so `check` was not a
+sound predictor of `build`, which the CLI's shape implies it is.
+
+**Two limits, because two different things grow.**
+
+- **A type may nest 64 levels.** This catches a spine: `Array<Array<..>>` grows
+  deep and never grows wide.
+- **A type may have 65,536 parts once every named type is written out.** This
+  catches a record. A record is structural here, so `type P<T> = { a: T, b: T }`
+  nested *d* deep is 2^*d* leaves, and a backend asked to lower a
+  billion-member struct never comes back — at depth 30, long before the depth
+  bound would fire. Two fields reach the size bound at depth 17, four at depth 9.
+
+Either bound refuses with the same shape of message, which names the TYPE rather
+than the chain of calls that built it. The type *is* the chain written down —
+one `P` per instantiation — and it is also the thing the author has to change:
+
+```
+error: instantiating `f` needs a type past the instantiation limit: it has more
+       than 65536 parts once its records are written out
+  note: `f` is declared on line 3, and the type is `P<P<P<P<Int64>>>>...`
+  note: a generic function that calls itself with a BIGGER type has no finite set
+        of instances — the recursion has to shrink the type, not only the count
+```
+
+Both backends take the bound at their own worklist, and `vyrn check` takes it
+too: `check` runs the monomorphization and throws the code away, so it now
+predicts the one thing `build` could fail to *finish*. Every other codegen error
+stays `build`'s — `check` has never claimed to predict those, and promoting them
+all would change its contract by more than this closes.
+
+Measuring the expanded size stops the moment the budget is gone, so asking the
+question never costs more than the answer. A type that names itself (RFC-0096)
+counts as a leaf where it comes back: "itself" means the same name at the same
+nesting depth, so `Node` inside `Node` stops the walk while `P<X>` inside
+`P<P<X>>` does not.
+
+Both numbers are far past anything real. The corpus peaks in single digits of
+nesting, and 65,536 parts is roughly a thousand times its largest type.

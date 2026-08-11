@@ -149,3 +149,39 @@ aborting at the first problem, at three granularities:
   format stabilizes?
 - **Q4.** Diagnostic output format for the LSP vs the CLI — shared structured
   representation with two renderers.
+
+---
+
+## Addendum (implemented) — the parser refuses source nested past 1024 levels
+
+A recursive-descent parser turns nesting in the source into nesting on the Rust
+stack, and a Rust stack overflow is a process abort: exit 127, a message from the
+Rust runtime, no `file:line`, and nothing this RFC's machinery ever sees. An
+audit reached it with 175,000 nested parentheses; 150,000 checked fine, so the
+compiler both accepted and aborted on the same shape of input.
+
+The threshold sits far above hand-written code, which is not the interesting
+part. RFC-0010 fetches `github:` and `https:` modules, so the compiler parses
+source the author did not write; and the LSP parses whatever is on disk, so one
+pathological file took the editor down with it.
+
+**The limit is 1024 levels.** One nested parenthesis, one prefix operator, one
+nested type argument and one nested block are one level each. Past it the parser
+reports an ordinary parse diagnostic, source-anchored like every other one:
+
+```
+deep.vyrn:2:1035: nesting exceeds 1024 levels
+```
+
+`vyrn check` exits 1, the code every other check failure uses.
+
+The counter sits on the three recursive edges a file can drive without bound —
+`unary` (which every expression recursion enters exactly once), `type_atom` and
+`block` — and it is decremented on the error path as well as the success path,
+because a declaration that fails to parse is recovered from and the next one must
+not start at the depth this one left behind.
+
+1024 was chosen from both ends. The corpus peaks in the tens, and every pass
+downstream of the parser survives 1020 levels on all three backends — checked,
+run, and compiled — so the limit refuses nothing the rest of the compiler could
+have finished.

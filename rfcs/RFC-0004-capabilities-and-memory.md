@@ -536,3 +536,52 @@ and verified. See `examples/concurrency.vyrn`.
 (The one thing still to gain teeth is `share`-by-reference: today a `share`
 parameter is passed by value, so it coincides observably with `read`; passing large
 shared data by read-only reference is an optimisation, not a semantic change.)
+
+---
+
+## Addendum (implemented) — 10,000 calls may be in flight
+
+§4 already gives one runtime limit all three engines take together: a `region`
+may nest 64 deep, and the 65th traps with the same words everywhere. The call
+stack needed the same treatment and did not have it.
+
+A tree-walking interpreter recurses on the host's stack, a native binary on the
+machine's, a wasm module on the engine's. Three stacks, three sizes, so "how deep
+may a program go" had three answers. At depth 30,000 the native binary printed
+30000 while the interpreter — the *declared reference semantics* — died with
+`thread '<unknown>' has overflowed its stack`, exit 127. The interpreter's own
+guard could not fire: a Rust stack overflow aborts the process, it does not
+unwind, so there was nothing to catch. Three-way parity was broken for any
+program that recurses deeply, a reader over a nested document included.
+
+**The limit is 10,000 calls in flight**, and it belongs to the language rather
+than to whichever stack runs out first. The 10,001st call ends the run with the
+same line in every engine:
+
+```
+error: call depth exceeds 10000
+```
+
+stderr, exit 1 — the same shape the region trap and every other runtime trap use.
+
+Each engine counts at the CALLEE, where the interpreter counts, so a call's
+argument expressions are still at the caller's depth in all three. Counting at
+the call site instead would put `f(g(x))` one level apart between engines. The
+interpreter bumps a counter in its call path; the textual backend takes a frame
+in each function's prologue and gives it back in front of every `ret`; the direct
+wasm backend does the same at the one exit its `return`-as-`br` lowering leaves
+it. All three read the number from one constant.
+
+Two kinds of call are excluded, in all three engines alike. An `extern`
+(RFC-0012) is the host's frame, and no backend gives it a Vyrn prologue. A lambda
+body has no name to call itself by (RFC-0037), so it cannot recurse without
+passing through a named function, which is counted.
+
+10,000 is what every engine can actually reach today. The interpreter spends
+about 8.5 KB of Rust stack per Vyrn call against a 256 MB stack; the native
+binary and `wasmtime` both run past 20,000 frames of an ordinary function. It is
+also far past what a recursive descent over real data needs.
+
+`examples/recdepth.vyrn` is the parity citizen: it prints one answer from just
+inside the budget and then steps one past it, so the harness compares stdout,
+stderr and exit code across all three engines byte for byte.

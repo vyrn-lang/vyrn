@@ -1,0 +1,33 @@
+/// A generic function that calls itself with a BIGGER type is refused, and
+/// `vyrn check` is the one that refuses it.
+///
+/// Monomorphization gives one function one body per distinct instantiation.
+/// `f<T>` calling `f<P<T>>` asks for `f<P<Int64>>`, then `f<P<P<Int64>>>`, and
+/// never repeats a type, so the worklist never empties. The `n <= 0` guard below
+/// is a RUN-time test and cannot stop a COMPILE-time worklist — which is why
+/// this used to pass `vyrn check` and then hang `vyrn build` forever, printing
+/// nothing.
+///
+/// Two bounds catch it. A type may nest 64 levels, and it may have 65,536 parts
+/// once its records are written out. `P` is a record of two fields, so its parts
+/// double every level and the SIZE bound is the one that fires here; a spine
+/// like `Array<Array<..>>` never grows wide, so the depth bound fires for that.
+/// Either way the refusal names the type, which is the chain of calls written
+/// down: one `P` per instantiation.
+type P<T> = { a: T, b: T }
+
+fn mk<T>(x: T) -> P<T> {
+    return P { a: x, b: x }
+}
+
+fn f<T>(x: T, n: Int64) -> Int64 {
+    if n <= 0 {
+        return 0
+    }
+    return f(mk(x), n - 1)
+}
+
+fn main() -> Int64 {
+    print("\{f(1, 3)}")
+    return 0
+}
