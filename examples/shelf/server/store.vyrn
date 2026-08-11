@@ -90,6 +90,10 @@ export fn rateBook(req: RateReq) -> BookResult {
 }
 
 /// Tag histogram over the whole shelf — the `Map<String, Int64>` pillar.
+///
+/// `t` names a tag the module state owns, and the map takes the key it is given
+/// — so the key is `t.copy()`. Without it the returned map would release the
+/// shelf's own tag strings when the caller dropped it.
 export fn tagCounts() -> TagCounts {
     let mut m: Map<String, Int64> = [:]
     for b in books {
@@ -98,7 +102,7 @@ export fn tagCounts() -> TagCounts {
                 Some(c) => c,
                 None => 0,
             }
-            m[t] = cur + 1
+            m[t.copy()] = cur + 1
         }
     }
     return m

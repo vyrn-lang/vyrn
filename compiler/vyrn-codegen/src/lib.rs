@@ -6919,6 +6919,13 @@ impl<'a> Gen<'a> {
     /// (order preserved); a miss reserves room (may realloc both buffers),
     /// appends key and value, and bumps the shared length. `val` is the value
     /// type; `v` is already coerced into it.
+    ///
+    /// **The map takes the key, so the map releases the key it does not keep.**
+    /// `movecheck` refuses a borrowed key, so what arrives here is always a
+    /// value this map may own — and the hit path used to drop that value on the
+    /// floor. `m[k] = c + 1` in a histogram loop leaked one key per repeat: 200
+    /// thousand inserts of one 3-byte key read 10.3 MB peak before this line and
+    /// 4.9 MB after. The interpreter needed nothing, because its key is an `Rc`.
     fn emit_map_set(&mut self, slot: &str, key: &str, v: &str, val: &Type) {
         let vll = self.llt(val);
         let esz = self.fresh_tmp();
@@ -6956,6 +6963,8 @@ impl<'a> Gen<'a> {
             "{ep0} = getelementptr {vll}, ptr {vals0}, i64 {idx}"
         ));
         self.emit(format!("store {vll} {v}, ptr {ep0}"));
+        // The map already holds an equal key, so this one is surplus.
+        self.emit(format!("call void @__vyrn_str_free(ptr {key})"));
         self.emit_term(format!("br label %{done_l}"));
         // insert: reserve (may realloc both buffers), reload, append, len += 1.
         self.emit_label(&ins_l);

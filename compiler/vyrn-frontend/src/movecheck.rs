@@ -2617,12 +2617,24 @@ impl MoveCheck<'_> {
                 // loop that released its snapshot would hand back a key the map
                 // still holds.
                 //
-                // Recorded AFTER the value, because the value may read the key,
-                // and with `outlives` FALSE, because recording the move is this
-                // milestone's job and refusing a BORROWED key is a rule of its
-                // own with a corpus behind it. The instruments RFC-0092 M0 keeps
-                // are gated on `outlives` too, so their counts do not move.
-                let _ = self.store(index, &|| format!("`{name}`"), *line, false, consumed)?;
+                // Recorded AFTER the value, because the value may read the key.
+                //
+                // `outlives` is TRUE — the rule RFC-0092 M5 named and deferred.
+                // With it FALSE the key was the ONE store in the language that
+                // did not ask rule 2, and the map literal one arm over asked it:
+                // `[ks[0]: 1]` was refused and `m[ks[0]] = 1` was taken, from the
+                // same borrow, in the same function. The second spelling wrote
+                // the array's own buffer into the map's key slot, so the array
+                // and the map both released it — the interpreter answered and
+                // the native binary died with no output. One fact, one verdict:
+                // a borrowed key is refused here exactly as it is there, with
+                // `.copy()` offered as the fix.
+                //
+                // A key that is nobody's borrow is unaffected. `httpHeaders`
+                // (`std/http`) is `for k in base.keys() { hs[k] = .. }`, and the
+                // snapshot is a temporary the loop owns (M5), so `k` binds an
+                // OWNED element and the store still records the move.
+                let _ = self.store(index, &|| format!("`{name}`"), *line, true, consumed)?;
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
             }

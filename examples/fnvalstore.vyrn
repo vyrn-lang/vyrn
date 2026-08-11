@@ -35,20 +35,24 @@ let mut resPending: Map<String, ResSink> = [:]
 let mut intChain: Array<IntSink> = []
 
 /// The miscompiling shape: a `fn`-typed PARAMETER stored into a Map value.
+///
+/// The key is `k.copy()` in all four: `k` is a `read` parameter and the map
+/// takes the key it is given, so handing it `k` would leave the caller's String
+/// with two owners.
 fn onInt(k: String, cb: consume IntSink) {
-    intPending[k] = cb
+    intPending[k.copy()] = cb
 }
 
 fn onUser(k: String, cb: consume UserSink) {
-    userPending[k] = cb
+    userPending[k.copy()] = cb
 }
 
 fn onVal(k: String, cb: consume ValSink) {
-    valPending[k] = cb
+    valPending[k.copy()] = cb
 }
 
 fn onRes(k: String, cb: consume ResSink) {
-    resPending[k] = cb
+    resPending[k.copy()] = cb
 }
 
 /// A fn-param stored into an Array (the same value position, container aside).
