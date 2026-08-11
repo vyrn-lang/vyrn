@@ -13518,7 +13518,7 @@ fn text_runtime(m: &mut Module, rt: &Rt) {
                 .ins(&Instruction::If(BlockType::Empty));
             b.ins(&Instruction::LocalGet(cap))
                 .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
                 .ins(&Instruction::I32Const(16))
                 .ins(&Instruction::Else)
                 .ins(&Instruction::LocalGet(cap))
