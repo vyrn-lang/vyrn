@@ -165,7 +165,8 @@ fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
 /// `check` did not predict the build as that the build never returned.
 #[test]
 fn polymorphic_recursion_is_refused_by_check_and_by_the_backends() {
-    let spine = "fn f<T>(x: T, n: Int64) -> Int64 {\n    if n <= 0 {\n        return 0\n    }\n    \
+    let spine =
+        "fn f<T>(x: T, n: Int64) -> Int64 {\n    if n <= 0 {\n        return 0\n    }\n    \
                  let xs: Array<T> = [x]\n    return f(xs, n - 1)\n}\n\n\
                  fn main() -> Int64 {\n    print(\"\\{f(1, 3)}\")\n    return 0\n}\n";
     let record = "type P<T> = { a: T, b: T }\n\n\
