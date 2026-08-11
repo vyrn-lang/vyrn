@@ -35,10 +35,10 @@ fn nonGoals() -> Array<NonGoal> {
     return [
         NonGoal { what: "No garbage collector", why: "Collection time is a cost you cannot see in the source. Ownership is declared instead, and memory is reclaimed at a site the compiler can name." },
         NonGoal { what: "No async, no await", why: "Two colours of function split a library in half. The host owns the loop; Vyrn owns the state and the logic." },
-        NonGoal { what: "No macros", why: "A generator is ordinary Vyrn that runs at compile time and returns Vyrn source, and `vyrn emit-gen` prints what it produced. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way." },
+        NonGoal { what: "No macros", why: "A generator is ordinary Vyrn that runs at compile time and returns Vyrn source, and vyrn emit-gen prints what it produced. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way." },
         NonGoal { what: "No higher-kinded types", why: "The cost lands on every error message, paid by every reader, to serve a few abstractions." },
         NonGoal { what: "No inheritance, no metaclasses", why: "A protocol states what a type does. A record states what it holds. Nothing needs a third relationship." },
-        NonGoal { what: "No null", why: "`Option<T>`, `Result<T, E>`, exhaustive `match`, and `?` propagation. A failure is a value you have to look at." },
+        NonGoal { what: "No null", why: "Option<T>, Result<T, E>, exhaustive match, and ? propagation. A failure is a value you have to look at." },
     ]
 }
 

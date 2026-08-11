@@ -19,7 +19,7 @@ export fn head() -> Head {
 
 fn links() -> Array<Link> {
     return [
-        Link { href: "https://github.com/vyrn-lang/vyrn/tree/main/docs/api", name: "Standard library reference", what: "Generated from the source by `vyrn doc`. CI fails if it drifts from the code." },
+        Link { href: "https://github.com/vyrn-lang/vyrn/tree/main/docs/api", name: "Standard library reference", what: "Generated from the source by vyrn doc. CI fails if it drifts from the code." },
         Link { href: "https://github.com/vyrn-lang/vyrn/tree/main/examples", name: "Examples", what: "Single-file programs. The parity harness runs every one on all three backends." },
         Link { href: "https://github.com/vyrn-lang/vyrn/tree/main/rfcs", name: "The design record", what: "Every language decision, with the argument that produced it. Start with RFC-0001, RFC-0003 and RFC-0004." },
         Link { href: "https://github.com/vyrn-lang/vyrn/blob/main/README.md", name: "README", what: "What the language is, in one page, with the feature tour." },
@@ -28,18 +28,30 @@ fn links() -> Array<Link> {
     ]
 }
 
-/// The commands worth learning, grouped the way the README groups them.
-type Command = { name: String, what: String }
+/// The commands worth learning, grouped the way the README groups them. Each
+/// row points somewhere: a table of commands that looks like a set of links and
+/// is not one is worse than plain text.
+type Command = { name: String, what: String, href: String }
+
+/// The README's tooling section, which lists every command in the table below.
+fn tooling() -> String {
+    return "https://github.com/vyrn-lang/vyrn/blob/main/README.md#tooling"
+}
+
+/// A module's generated API reference.
+fn apiDoc(name: String) -> String {
+    return "https://github.com/vyrn-lang/vyrn/blob/main/docs/api/std/" + name + ".md"
+}
 
 fn commands() -> Array<Command> {
     return [
-        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file." },
-        Command { name: "vyrn fmt --check", what: "The canonical formatter. `--check` is the CI gate." },
-        Command { name: "vyrn doc", what: "Markdown API docs from `///` comments." },
-        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. `--memory` and `--contract` narrow it." },
-        Command { name: "vyrn emit-gen <file>", what: "The source a generator produced. A generator is not magic, and this prints it." },
-        Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table." },
-        Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in `vyrn.lock` and cache by sha256." },
+        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file.", href: "/install.html#check" },
+        Command { name: "vyrn fmt --check", what: "The canonical formatter. --check is the CI gate.", href: tooling() },
+        Command { name: "vyrn doc", what: "Markdown API docs from /// comments.", href: tooling() },
+        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. --memory and --contract narrow it.", href: "/index.html#memory" },
+        Command { name: "vyrn emit-gen <file>", what: "The source a generator produced. A generator is not magic, and this prints it.", href: tooling() },
+        Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table.", href: "https://github.com/vyrn-lang/vyrn/blob/main/README.md#the-web-and-full-stack-story" },
+        Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in vyrn.lock and cache by sha256.", href: tooling() },
     ]
 }
 </script>
@@ -74,9 +86,9 @@ fn commands() -> Array<Command> {
             <h2>{{ stdCount() }} modules, written in Vyrn</h2>
             <p>Not one of them is a compiler feature. RPC, UI, i18n, OpenAPI and GraphQL are libraries built on compile-time generators, and <code>vyrn emit-gen</code> prints the source each one produces.</p>
             <div class="modgrid">
-                <span v-for="m in stdModules()" :key="m">std/{{ m }}</span>
+<a v-for="m in stdModules()" :key="m" :href="apiDoc(m)">std/{{ m }}</a>
             </div>
-            <p class="cap" style="margin-top:24px">Listed from std/ while this page was built. Each one has generated API documentation under docs/api/.</p>
+            <p class="cap" style="margin-top:24px">Listed from std/ while this page was built. Each name opens its generated API reference under docs/api/.</p>
         </section>
 
         <section class="band" id="cli">
@@ -89,7 +101,7 @@ fn commands() -> Array<Command> {
                 </thead>
                 <tbody>
                     <tr v-for="c in commands()" :key="c.name">
-                        <td><code>{{ c.name }}</code></td>
+                        <td><a :href="c.href"><code>{{ c.name }}</code></a></td>
                         <td>{{ c.what }}</td>
                     </tr>
                 </tbody>

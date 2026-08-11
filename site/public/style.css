@@ -54,6 +54,9 @@
   --s5: 48px;
   --s6: 64px;
 
+  /* One prose measure, everywhere prose happens. */
+  --measure: 65ch;
+
   --expo: cubic-bezier(0.16, 1, 0.3, 1);
   --overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
 
@@ -94,6 +97,9 @@ body {
 
 h1, h2, h3, h4 { text-wrap: balance; margin: 0; line-height: 1.15; font-weight: 620; letter-spacing: -0.015em; }
 p { text-wrap: pretty; margin: 0; }
+/* Two paragraphs are two paragraphs. Without this they butt together and read
+ * as one block with a hard line break in it — which is what /docs looked like. */
+p + p { margin-top: var(--s2); }
 a { color: inherit; text-decoration-color: var(--n2); text-underline-offset: 3px; }
 a:hover { text-decoration-color: var(--accent); }
 code, pre, kbd { font-family: var(--mono); }
@@ -208,7 +214,7 @@ code, pre, kbd { font-family: var(--mono); }
 
 .lede { font-size: 1.2rem; line-height: 1.5; color: var(--muted); max-width: 60ch; }
 
-.prose { max-width: 68ch; }
+.prose { max-width: var(--measure); }
 .prose > p, .prose > ul, .prose > dl { margin-top: var(--s3); line-height: 1.65; }
 .prose h2 { margin-top: var(--s6); font-size: 1.5rem; }
 .prose h3 { margin-top: var(--s4); font-size: 1.1rem; }
@@ -419,7 +425,7 @@ pre.code {
 
 .band { padding: var(--s6) 0 0; border-top: 1px solid var(--rule); margin-top: var(--s6); }
 .band h2 { font-size: clamp(1.5rem, 1rem + 1.4vw, 2.2rem); margin-bottom: var(--s2); }
-.band > p { max-width: 62ch; color: var(--muted); }
+.band > p { max-width: var(--measure); color: var(--muted); }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--s3); margin-top: var(--s4); }
 .cards section { border-top: 1px solid var(--rule); padding-top: var(--s2); }
@@ -456,7 +462,15 @@ pre.code {
    ------------------------------------------------------------------------- */
 
 svg.chart { display: block; width: 100%; height: auto; }
-svg.chart .bar { transition: transform 700ms var(--expo); transform-origin: left center; }
+/* A replay grows a bar's WIDTH from its own left edge. It is NOT a transform:
+ * `transform-box` defaults to `view-box` on SVG, so `transform-origin: left`
+ * meant the viewBox's left edge, and scaling slid every bar in from x=0 — the
+ * left edges moved and the chart appeared to reflow. The width attribute has
+ * one origin and cannot do that. */
+svg.chart .hit { fill: transparent; }
+svg.chart g.row:hover .bar { fill-opacity: 0.5; }
+svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
+svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(--accent); }
 svg.chart text { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
 svg.chart text.val { fill: var(--ink); }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
@@ -493,13 +507,20 @@ table.matrix tbody tr:hover td, table.matrix tbody tr:hover th { background: col
 .row { padding: var(--s5) 0; border-top: 1px solid var(--rule); }
 .row h2 { font-size: 1.4rem; margin-bottom: var(--s2); }
 .row .answer { font-size: 1.05rem; margin-top: var(--s2); }
-.row .note { color: var(--muted); margin-top: var(--s1); max-width: 62ch; }
+.row .note { color: var(--muted); margin-top: var(--s1); max-width: var(--measure); }
 
 .tabs { display: flex; gap: 0; margin-top: var(--s3); border-bottom: 1px solid var(--rule); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tabs button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); }
 
-.panes > div[hidden] { display: none; }
+/* Every pane occupies the same cell, so the box is as tall as the tallest one
+ * and switching a tab changes no height. `display: none` would let the plate
+ * resize under the reader's cursor — the same defect as a chart that reflows
+ * mid-replay. `visibility: hidden` keeps the room and still takes the pane out
+ * of the accessibility tree and the tab order. */
+.panes { display: grid; }
+.panes > div { grid-area: 1 / 1; }
+.panes > div[hidden] { display: block; visibility: hidden; }
 
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--s3); margin-top: var(--s3); }
 .metrics div { border-top: 1px solid var(--hair); padding-top: var(--s1); }
@@ -520,20 +541,23 @@ ul.plain li { padding: var(--s2) 0; border-bottom: 1px solid var(--hair); }
 ul.plain .note { display: block; color: var(--muted); font-size: 0.92rem; margin-top: 4px; }
 
 .modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: var(--s1) var(--s2); margin-top: var(--s3); font: 13px/2 var(--mono); }
-.modgrid span { color: var(--muted); }
+.modgrid a { color: var(--muted); text-decoration: none; }
+.modgrid a:hover { color: var(--accent); text-decoration: underline; }
 
 .feed { list-style: none; padding: 0; margin: var(--s4) 0 0; }
 .feed li { padding: var(--s3) 0; border-top: 1px solid var(--hair); display: grid; grid-template-columns: 92px 1fr; gap: var(--s2); }
-.feed .tag { font: 13px/1.6 var(--mono); color: var(--accent); }
+.feed a.tag { font: 13px/1.6 var(--mono); color: var(--accent); text-decoration: none; }
+.feed a.tag:hover { text-decoration: underline; }
+svg.chart a .cell:hover { fill-opacity: 1 !important; }
 
 .notice {
   margin-top: var(--s3);
   padding: var(--s2);
   border: 1px solid var(--rule);
-  border-left: none;
   background: color-mix(in oklab, var(--plate) 45%, transparent);
   color: var(--muted);
   font-size: 0.95rem;
+  max-width: var(--measure);
 }
 
 /* -------------------------------------------------------------------------

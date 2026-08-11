@@ -280,10 +280,31 @@ function leakWidget(root) {
 // W4 — the bar charts. Vyrn set every width; this only grows them.
 // ---------------------------------------------------------------------------
 
+/// A value label as a number and whatever follows it: "37.9 KB" -> 37.9, " KB",
+/// one decimal. The export wrote the final string, so the count-up cannot
+/// disagree with it — at p = 1 it prints the same characters back.
+function counter(el) {
+  const m = /^\s*([\d.]+)(.*)$/.exec(el.dataset.to || el.textContent);
+  if (!m) return null;
+  const dot = m[1].indexOf(".");
+  return { el, to: Number(m[1]), places: dot < 0 ? 0 : m[1].length - dot - 1, rest: m[2] };
+}
+
+/// Grow every bar in `root` from nothing to the width the export gave it, and
+/// count its value label up beside it.
+///
+/// The bar's `x` never changes and the label is anchored at the sheet's right
+/// edge, so no frame of this moves anything: only a width and a string of
+/// digits change, and both are in their own column.
 function growBars(root) {
-  const bars = $$("rect.bar", root);
+  const bars = $$("rect.bar", root).map((b) => {
+    if (!b.dataset.w) b.dataset.w = b.getAttribute("width");
+    return b;
+  });
+  const vals = $$("text.val", root).map(counter).filter(Boolean);
   const render = (p) => {
-    for (const b of bars) b.setAttribute("transform", `scale(${p} 1)`);
+    for (const b of bars) b.setAttribute("width", String(Number(b.dataset.w) * p));
+    for (const v of vals) v.el.textContent = (v.to * p).toFixed(v.places) + v.rest;
   };
   if (REDUCED) return render(1);
   render(0);
@@ -338,6 +359,49 @@ function tabsWidget(root) {
 // One orchestrated page entrance, rather than scattered micro-interactions.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The rail. Its links look clickable and are, so they also have to say where
+// the reader is. Smooth scrolling is `html { scroll-behavior: smooth }` — the
+// stylesheet's job, not this file's.
+// ---------------------------------------------------------------------------
+
+/// The rail's in-page links, paired with the section each one points at. A soft
+/// navigation replaces the rail, so this is refilled per page rather than
+/// captured once.
+let railLinks = [];
+
+function markRail() {
+  // The active section is the LAST one whose top has passed a quarter of the
+  // viewport. One rule, no thresholds to tune, and it is right at both ends of
+  // the page: nothing has passed yet, so the first link wins.
+  let current = railLinks.length ? railLinks[0] : null;
+  for (const pair of railLinks) {
+    if (pair.section.getBoundingClientRect().top <= innerHeight * 0.25) current = pair;
+  }
+  // The last section is usually too short to reach a quarter of the viewport,
+  // because the page runs out of scroll first. At the bottom, it is the one.
+  if (railLinks.length && innerHeight + scrollY >= document.documentElement.scrollHeight - 2) {
+    current = railLinks[railLinks.length - 1];
+  }
+  for (const pair of railLinks) pair.link.classList.toggle("on", pair === current);
+}
+
+function railSpy() {
+  railLinks = [];
+  const rail = $(".rail");
+  if (!rail) return;
+  for (const link of $$('a[href^="#"]', rail)) {
+    const section = document.getElementById(decodeURIComponent(link.getAttribute("href").slice(1)));
+    if (section) railLinks.push({ section, link });
+  }
+  markRail();
+}
+
+// One listener for the life of the document. `boot` runs again after every soft
+// navigation, and re-registering here would stack a listener per page.
+addEventListener("scroll", markRail, { passive: true });
+addEventListener("resize", markRail, { passive: true });
+
 function entrance() {
   for (const group of $$(".cards, .specs")) {
     onView(group, (animate) => {
@@ -356,6 +420,7 @@ function entrance() {
 function boot() {
   copyButtons();
   entrance();
+  railSpy();
   for (const el of $$('[data-widget="parity"]')) parityWidget(el);
   for (const el of $$('[data-widget="ownership"]')) ownershipWidget(el);
   for (const el of $$('[data-widget="types"]')) typesWidget(el);
