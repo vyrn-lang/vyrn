@@ -403,7 +403,7 @@ addEventListener("scroll", markRail, { passive: true });
 addEventListener("resize", markRail, { passive: true });
 
 function entrance() {
-  for (const group of $$(".cards, .specs")) {
+  for (const group of $$(".specs")) {
     onView(group, (animate) => {
       if (!animate) return;
       group.classList.add("staged");

@@ -334,7 +334,9 @@ pre.code {
 }
 .lines .ln {
   flex: none;
-  width: 3ch;
+  /* A fixed width, not `3ch`: the header row sets its own font size, and a `ch`
+   * would put its column somewhere else than the numbers it labels. */
+  width: 28px;
   padding-right: var(--s2);
   text-align: right;
   color: var(--n2);
@@ -353,7 +355,11 @@ pre.code {
 :root { --lane-a: var(--teal); --lane-b: var(--amber); }
 @media (prefers-color-scheme: dark) { :root { --lane-a: var(--cyan); } }
 
-.lines .lanes { flex: none; display: flex; gap: 6px; padding: 0 var(--s2) 0 4px; }
+.lines .lanes { flex: none; display: flex; gap: 6px; width: 32px; padding: 0 var(--s2) 0 4px; }
+/* Name the columns. Three-pixel bars in a gutter mean nothing until something
+ * says what the gutter is for. */
+.lines .cl.head { font: 10px/2 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--n2); border-bottom: 1px solid var(--hair); }
+
 .lines .lanes i { width: 3px; display: block; position: relative; }
 .lines .lanes i.lane.a { background: var(--lane-a); color: var(--lane-a); }
 .lines .lanes i.lane.b { background: var(--lane-b); color: var(--lane-b); }
@@ -427,10 +433,6 @@ pre.code {
 .band h2 { font-size: clamp(1.5rem, 1rem + 1.4vw, 2.2rem); margin-bottom: var(--s2); }
 .band > p { max-width: var(--measure); color: var(--muted); }
 
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--s3); margin-top: var(--s4); }
-.cards section { border-top: 1px solid var(--rule); padding-top: var(--s2); }
-.cards h3 { font-size: 1rem; margin-bottom: var(--s1); }
-.cards p { font-size: 0.92rem; color: var(--muted); line-height: 1.55; }
 
 .specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0; margin-top: var(--s4); border-top: 1px solid var(--rule); }
 .specs div { padding: var(--s2) var(--s2) var(--s2) 0; }
@@ -468,12 +470,36 @@ svg.chart { display: block; width: 100%; height: auto; }
  * left edges moved and the chart appeared to reflow. The width attribute has
  * one origin and cannot do that. */
 svg.chart .hit { fill: transparent; }
-svg.chart g.row:hover .bar { fill-opacity: 0.5; }
+
+/* One focal bar per chart, and everything else recedes. Eight bars in one tint
+ * is eight bars with no argument; an accent on all of them is an accent on
+ * none. The focal bar is the one the caption is about. */
+svg.chart .bar { fill: currentColor; fill-opacity: 0.18; }
+svg.chart .bar.focal { fill: var(--accent); fill-opacity: 0.32; }
+svg.chart g.row:hover .bar { fill-opacity: 0.34; }
+svg.chart g.row:hover .bar.focal { fill-opacity: 0.5; }
+
+/* An axis, so a bar can be measured and not merely read. Faint enough to sit
+ * under the data, and it starts at zero on every chart. */
+svg.chart .axis line { stroke: currentColor; stroke-opacity: 0.12; stroke-width: 1; }
+svg.chart .axis line:first-of-type { stroke-opacity: 0.28; }
+svg.chart .axis text { font-size: 9px; fill: var(--n2); }
 svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
 svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(--accent); }
 svg.chart text { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
 svg.chart text.val { fill: var(--ink); }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
+
+/* The schematic: hairline boxes, two focal nodes, orthogonal wires. Names in
+ * the page's sans, commands in mono — mono is for technical content, not a
+ * blanket "developer" font. */
+svg.schematic .wire { fill: none; stroke: currentColor; stroke-opacity: 0.35; stroke-width: 1; }
+svg.schematic marker polygon { fill: currentColor; fill-opacity: 0.45; }
+svg.schematic .node rect { fill: none; stroke: currentColor; stroke-opacity: 0.28; stroke-width: 1; }
+svg.schematic .node.focal rect { stroke: var(--accent); stroke-opacity: 1; fill: var(--accent); fill-opacity: 0.08; }
+svg.schematic .name { font-family: var(--sans); font-size: 13px; font-weight: 600; fill: var(--ink); }
+svg.schematic .node.focal .name { fill: var(--accent); }
+svg.schematic .sub { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
 
 /* Two series on one chart, one shown at a time. The markup holds both, so the
  * control switches an attribute rather than redrawing anything — and with no
@@ -500,7 +526,11 @@ td.no { color: var(--muted); }
  * axis, so a reader scans down one language or across one axis. */
 table.matrix { font-size: 0.9rem; min-width: 46rem; }
 table.matrix th[scope="row"] { font: 11px/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); width: 8rem; }
+/* The accent is spent ONCE, on the column header. Twenty-four accented cells
+ * would be twenty-four things claiming to be the focus. The Vyrn column carries
+ * full-strength ink against the muted others, which is the hierarchy. */
 table.matrix th.yes { color: var(--accent); }
+table.matrix td.yes { color: var(--ink); font-weight: 520; }
 table.matrix td { padding-right: var(--s2); }
 table.matrix tbody tr:hover td, table.matrix tbody tr:hover th { background: color-mix(in oklab, var(--accent) 7%, transparent); }
 
