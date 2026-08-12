@@ -185,7 +185,7 @@ code {
  * source row or the module grid, `<code>` is structure rather than a span in a
  * sentence, and a second box around it would be noise. Kept ABOVE the rules for
  * those blocks, so each one still sets its own size. */
-pre code, .cmd code, .lines code, .modgrid code {
+pre code, .cmd code, .lines code {
   padding: 0;
   border: 0;
   background: none;
@@ -358,6 +358,23 @@ h1 code, h2 code, h3 code, h4 code {
 .rail a { display: block; text-decoration: none; }
 .rail a:hover, .rail a.on { color: var(--accent); }
 .rail .n { color: var(--n2); margin-right: var(--s1); }
+
+/* The reference's table of contents, in the rail.
+ *
+ * It differs from a section rail in two ways, and both come from the content:
+ * an export list is a list of LINKS, not four numbered landmarks, so it carries
+ * the accent at rest exactly as `/docs` prints its module list — a name that
+ * jumps has to look like one. And it can be 44 names long, so it scrolls inside
+ * itself rather than running past the bottom of a sticky box. */
+.rail.toc {
+  max-height: calc(100vh - var(--s6));
+  overflow-y: auto;
+  line-height: 1.9;
+}
+.rail.toc a { color: var(--accent); }
+.rail.toc a:hover, .rail.toc a:focus-visible, .rail.toc a.on { text-decoration: underline; text-underline-offset: 3px; }
+.rail.toc a.on { color: var(--ink); }
+.rail.toc .eyebrow { margin-bottom: var(--s1); }
 
 /* -------------------------------------------------------------------------
    Type
@@ -747,10 +764,6 @@ ul.plain { list-style: none; padding: 0; margin: var(--s3) 0 0; }
 ul.plain li { padding: var(--s2) 0; border-bottom: 1px solid var(--hair); }
 ul.plain .note { display: block; color: var(--muted); font-size: 0.92rem; margin-top: 4px; }
 
-.modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: var(--s1) var(--s2); margin-top: var(--s3); font: 13px/2 var(--mono); }
-.modgrid a { color: var(--muted); text-decoration: none; overflow-wrap: anywhere; }
-.modgrid a:hover { color: var(--accent); text-decoration: underline; }
-
 .feed { list-style: none; padding: 0; margin: var(--s4) 0 0; }
 .feed li { padding: var(--s3) 0; border-top: 1px solid var(--hair); display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: var(--s2); }
 .feed a.tag { font: 13px/1.6 var(--mono); color: var(--accent); text-decoration: none; }
@@ -878,6 +891,7 @@ pre.doccode {
   #root > *, #root > .masthead, #root > .foot, .page > * { grid-column: 1 / 7; }
   .rail { grid-column: 1 / 7; grid-row: auto; border-right: 0; border-bottom: 1px solid var(--hair); position: static; padding: var(--s3) 0; display: flex; gap: var(--s3); flex-wrap: wrap; }
   .rail a { display: inline; }
+  .rail.toc { max-height: 32vh; }
 }
 
 @media (max-width: 640px) {
@@ -896,6 +910,10 @@ pre.doccode {
    * three others and read as a mistake; a strip reads as a strip. */
   .masthead { flex-direction: column; align-items: stretch; gap: var(--s1); padding: var(--s2) 0; }
   .nav, .rail { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: var(--s3); }
+  /* Four section names push sideways; forty export names do not. The index
+   * wraps into a block a third of the screen tall and scrolls down. */
+  .rail.toc { flex-wrap: wrap; overflow-x: hidden; overflow-y: auto; max-height: 32vh; gap: 0 var(--s3); }
+  .rail.toc .eyebrow { flex-basis: 100%; margin: 0; }
   .nav::-webkit-scrollbar, .rail::-webkit-scrollbar { display: none; }
   .nav a, .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
@@ -947,6 +965,8 @@ pre.doccode {
     text-decoration-color: color-mix(in oklab, var(--accent) 50%, transparent);
     text-underline-offset: 3px;
   }
+  .rail.toc a { text-decoration: underline; text-underline-offset: 3px; }
+
   /* ponytail: an inline span in a sentence cannot be 44px tall without opening
    * the line box, so the target is the word plus this padding — about 26px. The
    * upgrade, if a reader ever misses, is a long-press menu, not a taller word. */

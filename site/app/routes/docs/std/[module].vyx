@@ -55,18 +55,22 @@ fn hrefFor(name: String) -> String {
 
 <template>
 <main class="page docpage">
+    <!-- The export index IS the rail. It was a full-width band of its own, two
+         horizontal rules and a screen of whitespace around thirteen short names,
+         and it sat far above the entries it indexes while the page's own left
+         margin stood empty. The rail is the furniture this site already has for
+         "where am I in this page": it is sticky, it fills the margin, and
+         `widgets.js` already marks the section a reader is looking at. Here that
+         marker follows the export you are reading. -->
+    <aside class="rail toc">
+        <p class="eyebrow">On this page</p>
+        <a v-for="e in data.entries" :key="e.name" :href="hrefFor(e.name)">{{ e.name }}</a>
+    </aside>
     <section class="hero">
         <p class="eyebrow"><a href="/docs.html">Docs</a> — the standard library</p>
         <h1 class="display">std/{{ data.name }}</h1>
         <p class="lede">{{ exportCount(data.entries.length) }}, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
         <p class="notice"><a :href="apiSource(data.name)">Read the source</a> — the one thing this site does not host.</p>
-    </section>
-
-    <section class="band" id="exports">
-        <p class="eyebrow">On this page</p>
-        <div class="modgrid">
-            <a v-for="e in data.entries" :key="e.name" :href="hrefFor(e.name)">{{ e.name }}</a>
-        </div>
     </section>
 
     <section class="band" id="about">
