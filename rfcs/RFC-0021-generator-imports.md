@@ -104,12 +104,21 @@ deterministic, and pinned.
 
 ## Caching (what makes this fast)
 
-Deterministic + declared inputs ⇒ content-addressed output:
-`sha256(linked generator sources ++ args ++ every input file read)` keys a
-cache of generated source (`~/.vyrn/cache/gen/<hex>` — the M4
-infrastructure). Cold generation runs once; rebuilds and per-keystroke LSP
-re-analysis hit the cache. The resolver records which files were read — the
-synthesized module's true dependency set, available to any future watcher.
+Deterministic + declared inputs ⇒ content-addressed output. The key is
+`sha256(generator module ++ name ++ args ++ resolved input roots)`; the entry
+it names (`~/.vyrn/cache/gen/<hex>` — the M4 infrastructure) carries the
+generation's own dependency record and validates it. Cold generation runs
+once; rebuilds and per-keystroke LSP re-analysis hit the cache.
+
+The record is what the generation ACTUALLY observed, never a guessed set of
+inputs: every file read, every directory listed (under a `dir/` key, hashed
+over the sorted entry names), the generator's own module closure, and every
+read or listing that FAILED. A failure is an observation: a generator that
+finds no `examples/` emits "0 examples", and that answer stops being right
+the moment the directory appears, so an absent input is recorded as absent
+and the entry misses once it is there. A hit requires every recorded input to
+still hash as it did — and nothing else, so a file elsewhere in the tree
+never costs a re-run.
 
 ## Diagnostics & debugging
 
@@ -182,9 +191,13 @@ restraint is the feature).
   its module as a runnable program, then calls `interp::generate`, which builds
   the ordinary interpreter with a `GenCtx` (mediated resolver I/O, path scoping,
   a per-statement step budget, recorded input reads) and calls the function.
-- **Cache**: `sha256(sorted generator module sources ++ args)` keys a
-  content-addressed entry storing each recorded input's hash + the output; a hit
-  re-verifies the inputs and skips interpretation. Backed by resolver hooks
+- **Cache**: `sha256(generator module ++ name ++ args ++ resolved input roots)`
+  keys a content-addressed entry storing each recorded input's hash + the
+  output; a hit re-verifies every input and skips interpretation. An input that
+  was not there when the generator looked is recorded with the hash `absent`,
+  which no content can equal, so present↔absent always disagrees. The entry
+  opens with a format tag (`v2`); an entry written under an older tag does not
+  parse, which is a miss, and the re-run overwrites it. Backed by resolver hooks
   (`gen_cache_get`/`gen_cache_put`) so the frontend stays filesystem-free and
   the CLI + LSP share `~/.vyrn/cache/gen`. `VYRN_NO_GEN_CACHE` disables it.
 - **Guardrails**: a 20 M-step budget and a 4 MB output cap; each becomes a load
