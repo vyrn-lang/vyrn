@@ -897,7 +897,7 @@ pre.doccode {
   .masthead { flex-direction: column; align-items: stretch; gap: var(--s1); padding: var(--s2) 0; }
   .nav, .rail { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: var(--s3); }
   .nav::-webkit-scrollbar, .rail::-webkit-scrollbar { display: none; }
-  .nav a, .rail a { white-space: nowrap; padding: 10px 0; }
+  .nav a, .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
 
   /* A command is read before it is copied. At this width the button took two
