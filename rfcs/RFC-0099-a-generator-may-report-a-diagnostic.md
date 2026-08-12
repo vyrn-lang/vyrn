@@ -7,7 +7,10 @@
   M1 is smaller than it was written to be and the older spelling survives as one
   match arm. A second claim died the same way: no LSP change was needed at all,
   because a report anchored at an input file already travels the road RFC-0053
-  built for remapped errors.
+  built for remapped errors. The one thing M1 did have to widen was the
+  cross-engine gate, which asserted that generation SUCCEEDS — a corpus example
+  that a generator refuses is now required to be refused by both engines in the
+  same words instead.
 - **Depends on:** RFC-0006 (structured diagnostics, `Severity`), RFC-0021
   (generator imports, the comptime sandbox, the gen cache), RFC-0033 (origin
   maps — the `path:line:col` notation and its resolution), RFC-0053 (generated
@@ -224,6 +227,12 @@ output under the interpreter and under wasm. Reports are output, so they are
 covered by the gate that already exists — and by the discovery rule that gate
 uses: `genwasm` finds every example importing through a generator call rather
 than reading a list, so `examples/gentable.vyrn` joined the corpus by existing.
+The gate did need one widening. It asserted that generation succeeds, which was
+true of every generator that could only ever be silent or fatal-by-accident. A
+generator that refuses ON PURPOSE is a corpus citizen too, so a failed
+generation is now compared rather than rejected: both engines must refuse it
+with the same diagnostic. `gentablefail.vyrn` reads
+`refused identically` in the gate's log.
 The same property makes them survive the gen cache. This is the whole payoff of
 the text channel, and it is why the design question "what surface does a
 generator call" has the answer "none".
