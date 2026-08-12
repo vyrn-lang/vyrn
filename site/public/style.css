@@ -838,19 +838,82 @@ pre.doccode {
 
 /* -------------------------------------------------------------------------
    Reflow
+   -------------------------------------------------------------------------
+   360px is the design target, not the failure case.
+
+   The bug that made every earlier narrow reading wrong, written down so it is
+   not repeated: the shell spans `#root > .masthead, #root > .foot` at
+   `1 / 13`, and that selector is an ID plus a class. The rule below that
+   narrows the sheet to six columns is `#root > *` — an ID alone — so it never
+   reached the shell. The masthead kept spanning to column 13 on a six-column
+   grid, six IMPLICIT columns were created to hold it, and eleven 24px gaps ate
+   264 of the 328 available pixels. Every band was left 184px wide inside a
+   360px phone, and every block in it looked "clipped" because it was.
+
+   A page-level audit does not catch that: the page never scrolled sideways.
+   What catches it is measuring a band against the viewport.
    ------------------------------------------------------------------------- */
 
 @media (max-width: 1024px) {
   #root { grid-template-columns: repeat(6, 1fr); padding: 0 var(--s3) var(--s5); }
-  #root > *, .masthead, .foot, .page > * { grid-column: 1 / 7; }
+  /* Every one of these has to outrank what it replaces, the shell included. */
+  #root > *, #root > .masthead, #root > .foot, .page > * { grid-column: 1 / 7; }
   .rail { grid-column: 1 / 7; grid-row: auto; border-right: 0; border-bottom: 1px solid var(--hair); position: static; padding: var(--s3) 0; display: flex; gap: var(--s3); flex-wrap: wrap; }
   .rail a { display: inline; }
 }
 
 @media (max-width: 640px) {
   body { font-size: 16px; }
-  #root { padding: 0 var(--s2) var(--s5); }
+  /* One column. A twelve-column sheet is a sheet; a phone is a strip, and six
+   * tracks with 24px gutters between them spend a quarter of the width on
+   * gutters that separate nothing. */
+  #root { grid-template-columns: 1fr; gap: 0; padding: 0 var(--s2) var(--s5); }
+  #root > *, #root > .masthead, #root > .foot, .page > *, .rail { grid-column: 1; }
   .columns { grid-template-columns: 1fr; }
   .heroplate canvas, .hero-static { height: 240px; }
   .feed li { grid-template-columns: 1fr; gap: var(--s1); }
+
+  /* The masthead and the rail are both ONE LINE that you push, not a list that
+   * wraps into ragged pairs. Wrapping put "RELEASES DOCS" on a second row under
+   * three others and read as a mistake; a strip reads as a strip. */
+  .masthead { flex-direction: column; align-items: stretch; gap: var(--s1); padding: var(--s2) 0; }
+  .nav, .rail { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: var(--s3); }
+  .nav::-webkit-scrollbar, .rail::-webkit-scrollbar { display: none; }
+  .nav a, .rail a { white-space: nowrap; padding: 10px 0; }
+  .rail { padding: var(--s1) 0; }
+
+  /* A command is read before it is copied. At this width the button took two
+   * thirds of the row and left the command a 120px window on 885px of text, so
+   * the two stack and the command wraps rather than hides. */
+  .cmd { flex-direction: column; align-items: stretch; }
+  .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--s2); }
+  .cmd button { border-left: 0; border-top: 1px solid var(--rule); }
+
+  /* A finger is not a cursor. */
+  button, .btn { padding: 12px 16px; min-height: 44px; }
+  .tabs button { min-height: 44px; }
+
+  /* Source rows keep their alignment — a line number, a lane and the line it
+   * belongs to cannot wrap independently — so they scroll, and they scroll in
+   * less space per character. */
+  .lines { font-size: 12px; }
+  .lines .ln { width: 22px; padding-right: var(--s1); }
+  .lines .lanes { width: 24px; padding: 0 var(--s1) 0 4px; }
+
+  /* A long unbroken word in a headline is the one thing `balance` cannot fix. */
+  h1, h2, h3, h4 { overflow-wrap: break-word; }
+}
+
+/* A phone has no hover, so an affordance that only appears on hover does not
+ * exist there. A copiable span says so at rest instead. */
+@media (hover: none) {
+  code.copyable {
+    text-decoration: underline dotted;
+    text-decoration-color: color-mix(in oklab, var(--accent) 50%, transparent);
+    text-underline-offset: 3px;
+  }
+  /* ponytail: an inline span in a sentence cannot be 44px tall without opening
+   * the line box, so the target is the word plus this padding — about 26px. The
+   * upgrade, if a reader ever misses, is a long-press menu, not a taller word. */
+  code.copyable { padding: 0.18em 0.34em; }
 }
