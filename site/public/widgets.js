@@ -529,6 +529,23 @@ function markRail() {
     current = railLinks[railLinks.length - 1];
   }
   for (const pair of railLinks) pair.link.classList.toggle("on", pair === current);
+  if (current) keepInRail(current.link);
+}
+
+/// Keep the marked link visible when the rail is long enough to scroll — a
+/// reference module has up to 44 exports, and a marker below the fold marks
+/// nothing.
+///
+/// The rail's own `scrollTop` is set directly rather than through
+/// `scrollIntoView`, which can scroll the PAGE as well and would fight the
+/// scroll event that called this.
+function keepInRail(link) {
+  const rail = link.parentElement;
+  if (!rail || rail.scrollHeight <= rail.clientHeight + 1) return;
+  const top = link.offsetTop;
+  const bottom = top + link.offsetHeight;
+  if (top < rail.scrollTop) rail.scrollTop = top;
+  else if (bottom > rail.scrollTop + rail.clientHeight) rail.scrollTop = bottom - rail.clientHeight;
 }
 
 function railSpy() {

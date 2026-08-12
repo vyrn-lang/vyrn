@@ -27,7 +27,7 @@
 import { pages } from "std/ui"
 import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, hrefDocsStd } from pages("./app/routes")
 import { published, navRows, hrefOf } from "./app/nav"
-import { apiModules, apiHref } from "./app/docs"
+import { apiModules, apiEntries, apiHref } from "./app/docs"
 import { substring, indexOf } from "std/strings"
 import { startsWith } from "std/strpred"
 
@@ -177,6 +177,14 @@ fn main() -> Int64 {
     return 0
 }
 
+/// Whether `needle` occurs in `haystack`. Only the tests below use it.
+fn has(haystack: String, needle: String) -> Bool {
+    return match indexOf(haystack, needle) {
+        Some(at) => true,
+        None => false,
+    }
+}
+
 test "every reference link points at the route the router generated" {
     for m in apiModules() {
         assertEq(apiHref(m.name), "/" + published(hrefDocsStd(m.name)))
@@ -239,6 +247,20 @@ test "the marker lands on the navigation, not on the first link in the body" {
     let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Docs</a>"
     let body = "<p>" + nav + "</p>"
     assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Docs</a>" + body)
+}
+
+test "every name in a module's index points at an export that is on the page" {
+    // The index moved from a band into the rail this round. A rail entry that
+    // names an anchor no element carries is a link that silently does nothing —
+    // the reader clicks and the page sits still — so both halves are checked
+    // here, on every one of the 34 module pages rather than on a sample.
+    for m in apiModules() {
+        let html = route(documentRequest(hrefDocsStd(m.name))).body
+        for e in apiEntries(m.name) {
+            assert(has(html, "href=\"#e-\{e.name}\""))
+            assert(has(html, "id=\"e-\{e.name}\""))
+        }
+    }
 }
 
 test "a payload sits beside its document" {
