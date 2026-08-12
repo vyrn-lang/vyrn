@@ -192,7 +192,7 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
         <p class="eyebrow">In use</p>
         <h2>{{ plural(samples(data.name).length, "example program", "example programs") }}</h2>
         <p>Whole programs in <code>examples/</code> that import this module. The parity harness runs every one of them on all three backends, so each is a working use of what is documented above.</p>
-        <ul class="plain">
+        <ul class="plain paths">
             <li v-for="s in samples(data.name)" :key="s.path"><a :href="s.href">{{ s.path }}</a></li>
         </ul>
         <p class="cap" v-if="samples(data.name).length == 0">No example program imports this module yet.</p>

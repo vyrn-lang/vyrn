@@ -974,6 +974,12 @@ svg.graph .node.on circle { fill-opacity: 1; }
 .promises ul.plain { margin-top: var(--s2); }
 .promises ul.plain li { padding: var(--s1) 0; }
 
+/* A file path is one word with no break in it, and
+ * `examples/stream_combinator_abandoned.vyrn` is 329px of it — measured, at
+ * 320px, where it took the page 25px sideways. A path breaks where it must, as
+ * an inline code span already does. */
+.plain.paths a { font: 13px/1.7 var(--mono); overflow-wrap: anywhere; }
+
 /* The module graph on a module's own page: two lists of names, in the same
  * spec grid the landing page uses for its numbers. */
 .specs dd.links { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); font: 13px/1.6 var(--mono); font-weight: 400; }

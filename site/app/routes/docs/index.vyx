@@ -121,10 +121,10 @@ fn commands() -> Array<Command> {
         </section>
 
         <section class="band" id="soon">
-            <p class="eyebrow">04 — later</p>
-            <h2>What is not here yet</h2>
-            <p>A guide book: prose that teaches the language in order, rather than a reference that answers one question at a time. The route table has room for <code>/guide</code> already, with no page behind it, so the book is a directory drop rather than a navigation rewrite. There is no placeholder page and no dead link — the navigation renders a link only for a route that exists.</p>
-            <p>Search over the reference is the other absence. {{ exportCount() }} exports is enough that a reader should be able to type a name rather than scan a list.</p>
+            <p class="eyebrow">04 — the other two ways in</p>
+            <h2>A book, and a search field</h2>
+            <p><a href="/guide.html">The guide</a> teaches the language in order: thirteen chapters, from the first program to a web application. Every code block in it is a program this site compiled and ran while the page was built, so nothing in the book is an illustration.</p>
+            <p><a href="/explore.html">The explorer</a> is the other way in. {{ exportCount() }} exports is more than a reader should have to scan, so the name is typed instead — and the same page draws the import graph of <code>std/</code>, read from the source on every build.</p>
         </section>
 </main>
 </template>
