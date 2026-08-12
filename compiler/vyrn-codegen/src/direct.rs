@@ -4250,7 +4250,7 @@ impl Fn_<'_> {
                 scrutinee,
                 arms,
                 line,
-            } => self.match_expr(m, b, scrutinee, arms, *line)?,
+            } => self.match_expr(m, b, e as *const Expr as usize, scrutinee, arms, *line)?,
             Expr::Try { expr, line } => self.try_(m, b, expr, *line)?,
             Expr::TryConstruct { name, args, line } => {
                 self.try_construct(m, b, name, args, *line)?
@@ -10373,6 +10373,7 @@ impl Fn_<'_> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        key: usize,
         scrutinee: &Expr,
         arms: &[MatchArm],
         line: usize,
@@ -10386,6 +10387,32 @@ impl Fn_<'_> {
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("a `match` on a non-aggregate", line);
         };
+        // The scrutinee's release, where `own` says this match is its last owner
+        // — the `if let` release above, at the construct that also carries a
+        // value out. A row exists only where no arm handed the payload on, so
+        // the copy released here holds nothing anything else still names.
+        //
+        // A frame of its own, and a slot of its own, for the two reasons the
+        // `if let` states: an arm that returns walks the frames, and an arm may
+        // build over the scratch the scrutinee was left in.
+        self.releases.push(Vec::new());
+        let scrut_boundary = self.releases.len() - 1;
+        if self.drops.contains_key(&key) {
+            if let Some(r) = self.rel_for(&st, line)? {
+                let own = b.alloc(sl.size, sl.align);
+                b.slot(own);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I32Const(sl.size as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+                self.releases
+                    .last_mut()
+                    .unwrap()
+                    .push((Place::Slot(own), r));
+            }
+        }
         // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a
         // `match` in a branch. `expr_as` re-checks every arm against it, so a wrong
         // guess here is a compile error rather than a miscompile.
@@ -10439,6 +10466,11 @@ impl Fn_<'_> {
         b.ins(&Instruction::Unreachable);
         self.depth -= 1;
         b.ins(&Instruction::End);
+        // The fall-through release, after the arms have rejoined and before the
+        // aggregate result's address is pushed. A scalar result is already on
+        // the stack here and the release is stack-neutral, so it sits under it.
+        self.emit_releases_above(m, b, scrut_boundary)?;
+        self.releases.pop();
         if let Some((off, _)) = dest {
             b.slot(off);
         }

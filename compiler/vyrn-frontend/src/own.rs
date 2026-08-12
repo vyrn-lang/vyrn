@@ -1048,7 +1048,8 @@ impl Emit<'_> {
             Stmt::Let {
                 name, value, line, ..
             } => {
-                let fate = self.fate(s, value);
+                self.exprs(value);
+                let fate = self.fate(id(s), matches!(s, Stmt::Let { mutable: true, .. }), value);
                 if let Fate::Reclaimed(kind, holes) = &fate {
                     self.droppable.insert(id(s), kind.clone());
                     if !holes.is_empty() {
@@ -1062,10 +1063,12 @@ impl Emit<'_> {
                 });
             }
             Stmt::If {
+                cond,
                 then_block,
                 else_block,
                 ..
             } => {
+                self.exprs(cond);
                 self.block(then_block);
                 if let Some(eb) = else_block {
                     self.block(eb);
@@ -1088,11 +1091,17 @@ impl Emit<'_> {
                 line,
                 ..
             } => {
-                let fate = self.fate(s, scrutinee);
-                if let Fate::Reclaimed(kind, holes) = &fate {
-                    self.droppable.insert(id(s), kind.clone());
-                    if !holes.is_empty() {
-                        self.holes.insert(id(s), holes.clone());
+                self.exprs(scrutinee);
+                // A hole is a path into a RECORD, and a scrutinee is a sum — so
+                // `skippable` answers false at the first hop and `fate` says
+                // `Leaked` before this can see one. The guard says so, which is
+                // what `ForIn` beside it already said; the branch this replaces
+                // wrote the hole set into a map neither backend reads, and a
+                // corpus-wide probe plus a `consume d.title` written INSIDE an
+                // arm confirmed it could not fire.
+                if let Fate::Reclaimed(kind, holes) = self.fate(id(s), false, scrutinee) {
+                    if holes.is_empty() {
+                        self.droppable.insert(id(s), kind);
                     }
                 }
                 // No `BindingNote`: `vyrn why --memory` lists bindings, and this
@@ -1103,7 +1112,10 @@ impl Emit<'_> {
                     self.block(eb);
                 }
             }
-            Stmt::While { body, .. } => self.block(body),
+            Stmt::While { cond, body, .. } => {
+                self.exprs(cond);
+                self.block(body)
+            }
             // RFC-0092 M5, census "U4's price". `for k in m.keys()` walks a
             // temporary, and `movecheck` gives that temporary the row Phase 10a
             // gave an `if let`'s. The row answers the same question: did an
@@ -1121,12 +1133,13 @@ impl Emit<'_> {
                     .and_then(|r| r.ty.as_ref())
                     .map(|t| crate::types::resolve(t, &self.proto.types))
                     .is_some_and(|t| matches!(t, Type::Stream(_)));
+                self.exprs(iter);
                 if !streaming {
                     // A hole is a path relative to a RECORD, and nothing a `for`
                     // walks is one — `skippable` therefore answers false and
                     // `fate` says `Leaked` before this ever sees a hole. The
                     // guard says so rather than depending on it.
-                    if let Fate::Reclaimed(kind, holes) = self.fate(s, iter) {
+                    if let Fate::Reclaimed(kind, holes) = self.fate(id(s), false, iter) {
                         if holes.is_empty() {
                             self.droppable.insert(id(s), kind);
                         }
@@ -1143,24 +1156,46 @@ impl Emit<'_> {
             }
             // A lambda's block body carries `let`s of its own, and the engines
             // walk it as part of this function's AST.
-            Stmt::Expr(e) => self.lambdas(e),
-            Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::IndexSet { value, .. } => self.lambdas(value),
+            Stmt::Expr(e) => self.exprs(e),
+            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => self.exprs(value),
+            Stmt::IndexSet { index, value, .. } => {
+                self.exprs(index);
+                self.exprs(value);
+            }
             Stmt::Return { value, .. } => {
                 if let Some(e) = value {
-                    self.lambdas(e);
+                    self.exprs(e);
                 }
             }
             Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
         }
     }
 
-    /// Walk into any lambda block body inside `e`, so its `let`s get rows too.
+    /// Walk the expressions of a statement: any lambda block body inside `e`, so
+    /// its `let`s get rows too, and any `match`, so its SCRUTINEE gets one.
     ///
-    /// Only the statement-carrying case needs the descent: an expression-bodied
-    /// lambda has no `let` to reclaim.
-    fn lambdas(&mut self, e: &Expr) {
+    /// The scrutinee row is the `if let` row (Phase 10a) at the third construct
+    /// that walks a temporary. `movecheck` mints it keyed by the match
+    /// expression's own address — a match is an expression and has no statement
+    /// to key on — and writes on it whenever an arm hands the payload out. A row
+    /// that survives is a scrutinee nothing kept, and releasing it is what stops
+    /// `match makeResult(i) { .. }` from leaking one every turn.
+    fn exprs(&mut self, e: &Expr) {
+        // Inside a `region` the arena owns what the region allocated, and the
+        // exit hands it back. A scrutinee built there — `match Some(a + b)` —
+        // would then have two owners, so this stands aside exactly as the
+        // `FreeStr` rule below does. That leaks a scrutinee a CALLEE allocated,
+        // which is what a region-enclosed match does today.
+        if let (Expr::Match { scrutinee, .. }, 0) = (e, self.region_depth) {
+            let key = e as *const Expr as usize;
+            // A hole is a path into a RECORD and a scrutinee is not one, so this
+            // says what `ForIn` says: a kind with holes is not this row's.
+            if let Fate::Reclaimed(kind, holes) = self.fate(key, false, scrutinee) {
+                if holes.is_empty() {
+                    self.droppable.insert(key, kind);
+                }
+            }
+        }
         match e {
             Expr::Lambda {
                 body: LambdaBody::Block(b),
@@ -1173,36 +1208,36 @@ impl Emit<'_> {
             | Expr::Unary { expr: inner, .. }
             | Expr::Try { expr: inner, .. }
             | Expr::Consume { place: inner, .. }
-            | Expr::Field { expr: inner, .. } => self.lambdas(inner),
+            | Expr::Field { expr: inner, .. } => self.exprs(inner),
             Expr::Binary { lhs, rhs, .. } => {
-                self.lambdas(lhs);
-                self.lambdas(rhs);
+                self.exprs(lhs);
+                self.exprs(rhs);
             }
             Expr::Call { args, .. }
             | Expr::TryConstruct { args, .. }
             | Expr::ArrayLit { elems: args, .. }
             | Expr::Spawn { args, .. } => {
                 for a in args {
-                    self.lambdas(a);
+                    self.exprs(a);
                 }
             }
             Expr::StructLit { fields, .. } => {
                 for (_, v) in fields {
-                    self.lambdas(v);
+                    self.exprs(v);
                 }
             }
             Expr::MapLit { entries, .. } => {
                 for (k, v) in entries {
-                    self.lambdas(k);
-                    self.lambdas(v);
+                    self.exprs(k);
+                    self.exprs(v);
                 }
             }
             Expr::Match {
                 scrutinee, arms, ..
             } => {
-                self.lambdas(scrutinee);
+                self.exprs(scrutinee);
                 for a in arms {
-                    self.lambdas(&a.body);
+                    self.exprs(&a.body);
                 }
             }
             Expr::IfExpr {
@@ -1211,10 +1246,10 @@ impl Emit<'_> {
                 else_branch,
                 ..
             } => {
-                self.lambdas(cond);
-                self.lambdas(then_branch);
+                self.exprs(cond);
+                self.exprs(then_branch);
                 if let Some(eb) = else_branch {
-                    self.lambdas(eb);
+                    self.exprs(eb);
                 }
             }
             Expr::Int(_)
@@ -1267,8 +1302,13 @@ impl Emit<'_> {
     /// The order of the questions is the order a reader needs them. What does
     /// the TYPE release? Nothing, and there is nothing more to say. Something,
     /// and then: does anything else own this storage?
-    fn fate(&self, s: &Stmt, value: &Expr) -> Fate {
-        let row = self.lets.get(&id(s));
+    ///
+    /// `key` is the node address the row is keyed by — a `Stmt`'s for a `let`
+    /// and for the two statements that walk a temporary, an `Expr`'s for a
+    /// `match`. `mutable` is the one thing the STATEMENT still answers: a `let
+    /// mut` may end the block holding something other than its initializer.
+    fn fate(&self, key: usize, mutable: bool, value: &Expr) -> Fate {
+        let row = self.lets.get(&key);
         let bty = row.and_then(|r| r.ty.as_ref());
         let Some(kind) = bty.and_then(|t| self.proto.release_kind(t)) else {
             // A must-use type reaches here BECAUSE it is discharged elsewhere,
@@ -1322,7 +1362,7 @@ impl Emit<'_> {
         // block and the native heap corrupted. The arena hands out a
         // `__vyrn_malloc` block now (`REGION_RUNTIME`), and a `String` inside a
         // region still answers `Leak::Region` one rule down.
-        if matches!(value, Expr::Str(_)) && !matches!(s, Stmt::Let { mutable: true, .. }) {
+        if matches!(value, Expr::Str(_)) && !mutable {
             return Fate::Static;
         }
         // A dynamic string inside a region is the arena's, and the two
@@ -1587,6 +1627,49 @@ pub(crate) mod tests {
             .get(which)
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    // ---- census §14 at a `match`: the scrutinee and its payload ----------
+
+    /// Census §14 at the third construct that walks a temporary. No arm keeps
+    /// the scrutinee — both hand back a number — so the match is its last owner
+    /// and releases it. `Stmt::IfLet` has had this row since Phase 10a and
+    /// `Expr::Match` had none, because a match is an expression and there was no
+    /// statement to key one on.
+    #[test]
+    fn a_match_over_a_temporary_releases_its_scrutinee() {
+        let src = "fn maybe(n: Int64) -> Option<String> { return Some(\"x\") } \
+                   fn main() -> Int64 { let d = match maybe(1) { \
+                   Some(s) => s.byteLength, None => 0, } return Int64(d) }";
+        assert_eq!(
+            drop_kinds(src, "main"),
+            vec![DropKind::Deep(Type::Option(Box::new(Type::Str)))]
+        );
+    }
+
+    /// The other half of one rule. An arm that hands its payload out gives the
+    /// SCRUTINEE up, so the binding the payload flowed into is the only owner
+    /// there is — releasing both is the double free that aborted every native
+    /// build of `let s = match o { Some(v) => v, None => "" }`.
+    #[test]
+    fn a_payload_that_leaves_its_arm_leaves_the_scrutinee_unreclaimed() {
+        let src = "fn maybe(n: Int64) -> Option<String> { return Some(\"x\") } \
+                   fn main() -> Int64 { let o = maybe(1) \
+                   let s = match o { Some(v) => v, None => \"\", } \
+                   return Int64(s.byteLength) }";
+        assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
+    }
+
+    /// Inside a `region` the arena owns what the region allocated and the exit
+    /// hands it back, so the scrutinee row is not written at all — one block,
+    /// one owner.
+    #[test]
+    fn a_match_inside_a_region_leaves_the_scrutinee_to_the_arena() {
+        let src = "fn maybe(n: Int64) -> Option<String> { return Some(\"x\") } \
+                   fn main() -> Int64 { let mut t = 0 \
+                   region { let d = match maybe(1) { \
+                   Some(s) => s.byteLength, None => 0, } t = Int64(d) } return t }";
+        assert_eq!(drop_kinds(src, "main"), Vec::new());
     }
 
     // ---- RFC-0093 M2: a take leaves a hole, and the walk skips it --------

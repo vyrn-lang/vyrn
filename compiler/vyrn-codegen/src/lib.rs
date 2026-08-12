@@ -5347,7 +5347,7 @@ impl<'a> Gen<'a> {
             Expr::Call { name, args, .. } => self.gen_call(name, args),
             Expr::Match {
                 scrutinee, arms, ..
-            } => self.gen_match(scrutinee, arms),
+            } => self.gen_match(expr as *const Expr as usize, scrutinee, arms),
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -5774,11 +5774,51 @@ impl<'a> Gen<'a> {
         Ok((cur, result_ty))
     }
 
+    /// Lower a `match`, releasing the scrutinee where `own` says the match is its
+    /// last owner.
+    ///
+    /// The release is the `if let` release one construct over (`Stmt::IfLet`
+    /// above): the scrutinee goes into a slot and the slot onto a drop frame of
+    /// its own, so an arm that returns reclaims it through `emit_all_drops` and
+    /// the fall-through reclaims it here. A row exists only where nothing took
+    /// the scrutinee — an arm that hands its payload out marks the row, and then
+    /// the binding the payload flowed into is the one owner there is.
+    fn gen_match(
+        &mut self,
+        key: usize,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+    ) -> Result<(String, Type), String> {
+        let (sv, sty) = self.gen_expr(scrutinee)?;
+        let scrut_drop = self.droppable.get(&key).cloned();
+        self.drop_stack.push(Vec::new());
+        if let Some(kind) = scrut_drop {
+            let ll = self.llt(&self.resolve(&sty)).clone();
+            let slot = self.fresh_alloca(&ll);
+            self.emit(format!("store {ll} {sv}, ptr {slot}"));
+            self.drop_stack.last_mut().unwrap().push((slot, kind));
+        }
+        let r = self.gen_match_body(&sv, &sty, arms);
+        let drops = self.drop_stack.pop().unwrap();
+        if !self.terminated {
+            for (slot, kind) in drops.iter().rev() {
+                self.emit_drop(slot, kind);
+            }
+        }
+        r
+    }
+
     /// Lower a `match` over an Option/Result to a tag test + `phi`. Payloads are
     /// i64 (native restriction), so bindings are i64 locals. The `Some`/`Ok` arm
     /// has tag 1; the `None`/`Err` arm has tag 0.
-    fn gen_match(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> Result<(String, Type), String> {
-        let (sv, sty) = self.gen_expr(scrutinee)?;
+    fn gen_match_body(
+        &mut self,
+        sv: &str,
+        sty: &Type,
+        arms: &[MatchArm],
+    ) -> Result<(String, Type), String> {
+        let sv = sv.to_string();
+        let sty = sty.clone();
         // A user enum dispatches to the switch-based path.
         if let Type::Enum(evs) = self.resolve(&sty) {
             return self.gen_match_enum(&sv, &evs, arms);
