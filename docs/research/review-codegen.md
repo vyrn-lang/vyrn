@@ -32,10 +32,9 @@ answer (a call-depth probe passed where the fresh binary traps).
 | 2 | **Critical** | Agda / C | **A `match` arm or `if let` that lets the payload out of the arm double-frees on both compiled backends.** `let s = match o { Some(v) => v, None => "" }` — the everyday unwrap-or — aborts native with no output; under stress wasm's free list corrupts and traps OOB. String and Array payloads both. Interp alone is right. | G4.2 |
 | 3 | High | Agda | **The direct backend's entire shadow stack is one wasm page.** A 7,000-element array literal compiles in 0.1 s to a module that traps `out of bounds memory access` at a wild address; recursion with an aggregate local dies the same way at depth ~300, breaking the shared `call depth exceeds 1000` contract the engines just adopted. No compile-time check, even for a single frame larger than the whole stack. | G4.3 |
 | 4 | High | Agda / Linus | **`vyrn check` accepts an array literal native cannot build.** 100,000 constant elements: check 0.1 s ok, native runs clang for 2 m 19 s and dies `LLVM ERROR: out of memory` — because the literal lowers to N chained `insertvalue` instructions over an `[N x i64]` SSA aggregate. Combined with #3, a 100k literal runs on NO compiled backend. | G4.4, G1.1 |
-| 5 | High | C systems | **`?` on a `region`'s early-return path pops the arena before reading the propagated payload** — the same read-after-pop shape `lib.rs:30-40` documents for `return`, but reachable without the documented guard. | G2.x (pending agent evidence — see section) |
-| 6 | Medium | PL | **The runtime trap wordings are duplicated as hand-written literals in both backends** (`lib.rs:1161` vs `direct.rs:12244`), while `IO_MESSAGES`, `validation_message` and `CALL_DEPTH_LIMIT` are shared constants. Half the parity-load-bearing strings have a single source; the other half have two. | G5.1 |
-| 7 | Medium | PL | **The calling convention exists only as code.** `llt_of` is the one shared layout function (good); how a value is passed — by value, by shadow-stack address, `modify` copy-back — is implied by `signature`/`wasm_sig` in one backend and `function` in the other, with no written statement to check either against. | G5.2 |
-| 8 | Medium | PL | **The parity gate spans the corpus, not the language.** It discovers examples by glob (good) — but findings #1–#4 are all shapes no example reaches: the corpus matches on call results, never on owned locals; declares no type whose name collides with a mangle prefix; writes no aggregate frame near 64 KB. | G5.3 |
+| 5 | Medium | PL | **The runtime trap wordings are duplicated as hand-written literals in both backends** (`lib.rs:1161` vs `direct.rs:12244`), while `IO_MESSAGES`, `validation_message` and `CALL_DEPTH_LIMIT` are shared constants. Half the parity-load-bearing strings have a single source; the other half have two. | G5.1 |
+| 6 | Medium | PL | **The calling convention exists only as code.** `llt_of` is the one shared layout function (good); how a value is passed — by value, by shadow-stack address, `modify` copy-back — is implied by `signature`/`wasm_sig` in one backend and `function` in the other, with no written statement to check either against. | G5.2 |
+| 7 | Medium | PL | **The parity gate spans the corpus, not the language.** It discovers examples by glob (good) — but findings #1–#4 are all shapes no example reaches: the corpus matches on call results, never on owned locals; declares no type whose name collides with a mangle prefix; writes no aggregate frame near 64 KB. | G5.3 |
 
 Counts at this commit: 6 CONFIRMED (G4.1–G4.4, G1.1, G5.1), the rest
 pending the reading sweep, marked where they land below.
@@ -493,6 +492,10 @@ evidence.
   with one tag.
 - Region shapes: early `return` from inside `region` (arena value crossing
   out as a scalar), nested regions, `break` inside a region loop — identical.
+- Region escape by value: `return "n=" + n.toString()` straight out of a
+  `region`, and an `Err` payload built inside one, both read back correctly
+  after fifty allocations of churn on all three engines — RFC-0089 M3b's fix
+  holds, including through the `?`-adjacent match shapes.
 - Self-append and handover chains: `s = s + s` twice, `xs = grow(consume xs)`
   twice — identical; `xs[0] = xs[0]` is refused with the RFC-0093 wording on
   all three.
