@@ -1503,12 +1503,20 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let mut fnval_dispatch: Vec<Type> = Vec::new();
     let mut stream_closers: Vec<Type> = Vec::new();
 
+    // What has ever been queued, so "is it already waiting?" is one lookup. The
+    // scan it replaces re-mangled every queued entry per discovered
+    // instantiation — O(insts²) mangles, and a mangle now hashes.
+    let mut queued: std::collections::HashSet<String> = std::collections::HashSet::new();
     let enqueue = |emitted: &std::collections::HashSet<String>,
+                   queued: &mut std::collections::HashSet<String>,
                    queue: &mut Vec<(String, Vec<Type>)>,
                    insts: Vec<(String, Vec<Type>)>| {
         for (n, args) in insts {
             let m = mangle_name(&n, &args);
-            if !emitted.contains(&m) && !queue.iter().any(|(qn, qa)| mangle_name(qn, qa) == m) {
+            // Both sets: `emitted` also holds the higher-order instances, which
+            // never pass through here, and `queued` is never drained — an entry
+            // popped and emitted must not be queued a second time.
+            if !emitted.contains(&m) && queued.insert(m) {
                 queue.push((n, args));
             }
         }
@@ -1635,7 +1643,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         // a spawn emits a per-callee thunk into `lambda_defs`) — drain both so
         // the referenced symbols get defined like any function body's.
         let insts = std::mem::take(&mut gi.instantiations);
-        enqueue(&emitted, &mut queue, insts);
+        enqueue(&emitted, &mut queued, &mut queue, insts);
         drain_ho(&mut gi, &mut out, &mut ho_queue, &mut lambda_emitted);
         fnval_registry = std::mem::take(&mut gi.fnval_variants);
         fnval_dispatch = std::mem::take(&mut gi.fnval_dispatch);
@@ -1698,7 +1706,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         gen.function(f, &sym, &mut out)?;
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
-        enqueue(&emitted, &mut queue, insts);
+        enqueue(&emitted, &mut queued, &mut queue, insts);
         drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
         fnval_registry = std::mem::take(&mut gen.fnval_variants);
         fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
@@ -1749,7 +1757,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.function(f, &sym, &mut out)?;
             out.push('\n');
             let insts = std::mem::take(&mut gen.instantiations);
-            enqueue(&emitted, &mut queue, insts);
+            enqueue(&emitted, &mut queued, &mut queue, insts);
             drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
             fnval_registry = std::mem::take(&mut gen.fnval_variants);
             fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
@@ -1793,7 +1801,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.ho_function(&inst, &mut out)?;
             out.push('\n');
             let insts = std::mem::take(&mut gen.instantiations);
-            enqueue(&emitted, &mut queue, insts);
+            enqueue(&emitted, &mut queued, &mut queue, insts);
             drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
             fnval_registry = std::mem::take(&mut gen.fnval_variants);
             fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
@@ -7186,6 +7194,12 @@ impl<'a> Gen<'a> {
             sym.push('_');
             sym.push_str(&sanitize(&b.target_sym));
         }
+        // …and the structural identity of exactly what was just spelled, for
+        // [`struct_key`]'s reason: `drain_ho` dedups on this symbol, and both
+        // halves of the readable spelling are lossy (`mangle_ty` collapses every
+        // record to `Rec`; `sanitize` maps every non-alphanumeric to `_`).
+        let targets: Vec<&str> = bindings.iter().map(|b| b.target_sym.as_str()).collect();
+        sym.push_str(&format!("_h{}", struct_key(&(&type_args, &targets))));
         self.ho_instances.push(HoInst {
             sym: sym.clone(),
             name: name.clone(),
@@ -7604,9 +7618,14 @@ impl<'a> Gen<'a> {
             shape.push('R');
             shape.push_str(&mangle_ty(r));
         }
+        // The trailing key is what makes the shape an identity rather than a
+        // label: `drain_ho` dedups the definition on this symbol, and the
+        // readable half is lossy in both of `mangle_ty`'s and `sanitize`'s ways
+        // (see [`struct_key`]).
         let sym = format!(
-            "__vyrn_lambda_{}_{ordinal}_{shape}",
-            sanitize(&self.cur_fn_name)
+            "__vyrn_lambda_{}_{ordinal}_{shape}_h{}",
+            sanitize(&self.cur_fn_name),
+            struct_key(&(&self.cur_fn_name, cap_tys, param_tys, &want_ret))
         );
 
         // Save the current emission state; emit the lambda into fresh buffers.
@@ -7966,7 +7985,7 @@ impl<'a> Gen<'a> {
             self.stream_closers.push(elem.clone());
         }
         self.fnval_dispatcher_sym(&self.normalize_sig(&stream_step_sig(&elem)).clone());
-        format!("__vyrn_stream_close_{}", mangle_ty(&elem))
+        stream_close_sym(&elem)
     }
 
     /// Emit one element type's release (RFC-0075 M2b, re-hosted by RFC-0090 M3).
@@ -7982,7 +8001,7 @@ impl<'a> Gen<'a> {
         let sig = self.normalize_sig(&stream_step_sig(elem));
         let disp = mangle_dispatch_sym(&sig);
         let optll = self.llt(&Type::Option(Box::new(elem.clone())));
-        let sym = format!("__vyrn_stream_close_{}", mangle_ty(&self.resolve(elem)));
+        let sym = stream_close_sym(&self.resolve(elem));
         out.push_str(&format!("define void @{sym}(ptr %s) {{\n"));
         out.push_str("entry:\n");
         out.push_str(&format!(
@@ -12527,22 +12546,73 @@ pub(crate) fn ty_is_concrete_app(t: &Type, resolve: &dyn Fn(&Type) -> Type) -> b
             && args.iter().all(|a| !matches!(resolve(a), Type::Unit | Type::Param(_))))
 }
 
-/// The mangled LLVM symbol for a generic instantiation, e.g. `vyrn_id__Int`.
-fn mangle_name(name: &str, type_args: &[Type]) -> String {
-    let parts: Vec<String> = type_args.iter().map(mangle_ty).collect();
-    format!("vyrn_{name}__{}", parts.join("_"))
+/// The structural identity of whatever a symbol stands for, as 16 hex
+/// characters — the type arguments of an instantiation, a stored-fn signature,
+/// the capture/parameter/return shape of a lifted lambda.
+///
+/// **Why a symbol needs one at all.** [`mangle_ty`] is a READABLE spelling and
+/// it is not injective: `Option<Int64>` and a user type named `OptInt64` both
+/// mangle to `OptInt64`, every structural record mangles to `Rec`, every
+/// `Omit`/`Pick`/`Merge`/`Partial` to `Xf`, and `App`/`Fn` concatenate their
+/// arguments with no separator. Each symbol below is BOTH the name of the
+/// emitted `define` and the key its worklist dedups on, so a collision skips
+/// the second body and points both call sites at the first — `vyrn check`
+/// prints `ok`, the interpreter and the wasm backend answer correctly, and
+/// native reads one instantiation's value through another's body. (LLVM does
+/// not catch it: a `call` carries its own function type, so two calls of
+/// different types to one `define` assemble without a diagnostic.)
+///
+/// Appending this rather than escaping the readable form: escaping cannot help
+/// `Record`/`Enum`/`Xf` at all — those collapse a whole field list to three
+/// characters, and spelling them out injectively is how a symbol becomes 400
+/// characters long. A hash of the WHOLE identity reduces injectivity to one
+/// claim about SHA-256, covers every variant at once, and leaves the readable
+/// prefix byte-for-byte what it was, which is what `emit-ir` output, crash
+/// dumps and linker errors are read for.
+///
+/// The derived `Debug` form is the structural serialization: [`Type`] is a
+/// plain tree of `String`/`Vec`/`Box`/integers with no map and no address in
+/// it, so `{:?}` is deterministic within a build and across platforms, and it
+/// is injective because `Debug` for `String` quotes and escapes. It is not a
+/// stable ABI — a `Debug` change moves every symbol — which costs nothing here
+/// because no artifact outside the emitted module names one: an
+/// `export extern fn` is exported under its own source name, and the exported
+/// symbols are never generic.
+fn struct_key(x: &impl std::fmt::Debug) -> String {
+    vyrn_frontend::hash::sha256_hex(format!("{x:?}").as_bytes())[..16].to_string()
 }
 
-/// The dispatcher symbol for a stored-fn signature (RFC-0037). The readable
-/// mangle alone is not injective (records mangle as `Rec`), so a SHA-256
-/// prefix of the structural form disambiguates — deterministic across builds
-/// and platforms (the frontend's own hash, no hasher state).
-fn mangle_dispatch_sym(sig: &Type) -> String {
-    let h = vyrn_frontend::hash::sha256_hex(format!("{sig:?}").as_bytes());
+/// The mangled LLVM symbol for a generic instantiation, e.g.
+/// `vyrn_id__Int_h4d1f…`: the readable mangle of the type arguments, then their
+/// structural identity (see [`struct_key`], which is where the second half is
+/// argued).
+fn mangle_name(name: &str, type_args: &[Type]) -> String {
+    let parts: Vec<String> = type_args.iter().map(mangle_ty).collect();
     format!(
-        "__vyrn_fndispatch_{}_{}",
+        "vyrn_{name}__{}_h{}",
+        parts.join("_"),
+        struct_key(&type_args)
+    )
+}
+
+/// The release function for a `Stream<elem>` (RFC-0090 M3). One spelling rather
+/// than two: the site that names it and the site that defines it were separate
+/// `format!`s of the same string, which is a divergence waiting for a mangle
+/// change — and this one is a mangle change.
+fn stream_close_sym(elem: &Type) -> String {
+    format!(
+        "__vyrn_stream_close_{}_h{}",
+        mangle_ty(elem),
+        struct_key(elem)
+    )
+}
+
+/// The dispatcher symbol for a stored-fn signature (RFC-0037).
+fn mangle_dispatch_sym(sig: &Type) -> String {
+    format!(
+        "__vyrn_fndispatch_{}_h{}",
         sanitize(&mangle_ty(sig)),
-        &h[..12]
+        struct_key(sig)
     )
 }
 
@@ -13349,9 +13419,18 @@ mod tests {
     fn a_captured_lambda_takes_a_capture_parameter() {
         let ir = emit(&check(HO).unwrap()).unwrap();
         // `|x| x + off` lifts to a two-parameter function (the capture, then x).
+        // The readable shape is pinned; the trailing `_h<key>` is not, because
+        // it is the structural identity ([`struct_key`]) and asserting it would
+        // pin a hash rather than the thing this test is about.
+        let def = ir
+            .lines()
+            .find(|l| {
+                l.starts_with("define") && l.contains("@__vyrn_lambda_main_1_Int64Int64RInt64_h")
+            })
+            .unwrap_or_else(|| panic!("the captured lambda was not lifted:\n{ir}"));
         assert!(
-            ir.contains("@__vyrn_lambda_main_1_Int64Int64RInt64(i64 %arg0, i64 %arg1)"),
-            "captured lambda should take (capture, param):\n{ir}"
+            def.contains("(i64 %arg0, i64 %arg1)"),
+            "captured lambda should take (capture, param):\n  {def}"
         );
     }
 
@@ -15129,6 +15208,191 @@ mod tests {
         assert!(
             !ir.contains("@vyrn_id("),
             "no un-instantiated generic body:\n{ir}"
+        );
+    }
+
+    // ---- the symbol is an identity, not a label -------------------------
+
+    /// One of every shape [`mangle_ty`] has an arm for, plus the names a user
+    /// can write to imitate one.
+    ///
+    /// The imitations are the point. Nothing stops a program declaring
+    /// `type OptInt64 = { a: Int64 }`, `type ArrInt64`, `type Rec`, `type Enum`,
+    /// `type Xf`, or `type Int8Int64` — and each of those is the exact string a
+    /// built-in constructor produces, so each is a pair the readable mangle
+    /// cannot tell apart. The punctuated names are `sanitize`'s own collapse:
+    /// it maps every non-alphanumeric to `_`, so three distinct module-qualified
+    /// names arrive as one.
+    fn seed_types() -> Vec<Type> {
+        let f = |n: &str, t: Type| Field {
+            name: n.to_string(),
+            ty: t,
+        };
+        vec![
+            Type::Int,
+            Type::IntN {
+                bits: 8,
+                signed: true,
+            },
+            Type::IntN {
+                bits: 8,
+                signed: false,
+            },
+            Type::IntN {
+                bits: 64,
+                signed: false,
+            },
+            Type::Float,
+            Type::Float32,
+            Type::Bool,
+            Type::Str,
+            Type::Unit,
+            Type::Logger,
+            Type::F32x4,
+            Type::I32x4,
+            Type::ConstInt(4),
+            Type::ConstInt(8),
+            // The imitations.
+            Type::Named("OptInt64".into()),
+            Type::Named("ArrInt64".into()),
+            Type::Named("ResInt64Str".into()),
+            Type::Named("Int8Int64".into()),
+            Type::Named("Rec".into()),
+            Type::Named("Enum".into()),
+            Type::Named("Xf".into()),
+            Type::Named("Arr4Int64".into()),
+            Type::Named("a.b".into()),
+            Type::Named("a_b".into()),
+            Type::Named("a$b".into()),
+            // Protocol-bounded parameters mangle as their own name, and a user
+            // type may be spelled like one.
+            Type::Param("T".into()),
+            Type::Param("U".into()),
+            Type::Named("T".into()),
+            // Structural shapes, which the readable mangle collapses whole.
+            Type::Record(vec![]),
+            Type::Record(vec![f("a", Type::Int)]),
+            Type::Record(vec![f("b", Type::Int)]),
+            Type::Record(vec![f("a", Type::Str)]),
+            Type::Record(vec![f("a", Type::Int), f("b", Type::Int)]),
+            Type::Enum(vec![]),
+            Type::Enum(vec![EnumVariant {
+                name: "A".into(),
+                payload: vec![],
+            }]),
+            Type::Enum(vec![EnumVariant {
+                name: "A".into(),
+                payload: vec![Type::Int],
+            }]),
+            Type::Omit(Box::new(Type::Named("R".into())), vec!["a".into()]),
+            Type::Omit(Box::new(Type::Named("R".into())), vec!["b".into()]),
+            Type::Pick(Box::new(Type::Named("R".into())), vec!["a".into()]),
+            Type::Partial(Box::new(Type::Named("R".into()))),
+            Type::Merge(
+                Box::new(Type::Named("R".into())),
+                Box::new(Type::Named("S".into())),
+            ),
+        ]
+    }
+
+    /// Every composite shape, over the types it is given: containers, both
+    /// generic applications, function types of three arities, and the sized
+    /// containers at two capacities.
+    fn grow(base: &[Type], pairs: &[Type]) -> Vec<Type> {
+        let mut out = Vec::new();
+        for t in base {
+            let b = || Box::new(t.clone());
+            out.extend([
+                Type::Option(b()),
+                Type::Array(b()),
+                Type::Stream(b()),
+                Type::Task(b()),
+                Type::Lazy(b()),
+                Type::ArrayN(b(), 4),
+                Type::ArrayN(b(), 8),
+                Type::SmallArray(b(), 4),
+                Type::SmallArray(b(), 8),
+                Type::App("P".into(), vec![t.clone()]),
+                Type::App("Q".into(), vec![t.clone()]),
+                Type::Fn(vec![], b()),
+                Type::Fn(vec![t.clone()], Box::new(Type::Unit)),
+            ]);
+        }
+        for a in pairs {
+            for c in pairs {
+                out.extend([
+                    Type::Result(Box::new(a.clone()), Box::new(c.clone())),
+                    Type::Map(Box::new(a.clone()), Box::new(c.clone())),
+                    Type::App("P".into(), vec![a.clone(), c.clone()]),
+                    Type::Fn(vec![a.clone(), c.clone()], Box::new(Type::Unit)),
+                    Type::Fn(vec![a.clone()], Box::new(c.clone())),
+                ]);
+            }
+        }
+        out
+    }
+
+    /// No two distinct types produce one instantiation symbol.
+    ///
+    /// The claim [`struct_key`] exists for, checked over generated type trees
+    /// rather than the handful of pairs anyone thought to write down: every
+    /// shape the mangle has an arm for, one level of nesting over all of them
+    /// and two levels over a slice, generic applications at both arities, and
+    /// user-declared names spelled exactly like the strings the built-in
+    /// constructors produce. A bucket holding two distinct types is the defect
+    /// — the driver dedups on this string, so it would emit one body and call it
+    /// from both sites.
+    ///
+    /// The arity rows are separate because a symbol carries a LIST of type
+    /// arguments and the readable half joins them with a separator `sanitize`
+    /// can also produce.
+    #[test]
+    fn a_mangled_symbol_is_injective_over_generated_types() {
+        let seeds = seed_types();
+        let pairs = &seeds[..8];
+        let d1 = grow(&seeds, pairs);
+        let d2 = grow(&d1[..40], &d1[..6]);
+        let universe: Vec<Type> = seeds
+            .iter()
+            .chain(d1.iter())
+            .chain(d2.iter())
+            .cloned()
+            .collect();
+
+        // The hazard is real before it is ruled out: if no two members of the
+        // universe shared a readable mangle, the rows below would pass on the
+        // unfixed code and prove nothing.
+        assert_eq!(
+            mangle_ty(&Type::Option(Box::new(Type::Int))),
+            mangle_ty(&Type::Named("OptInt64".into())),
+            "the generator no longer covers a pair the readable mangle collapses"
+        );
+
+        // Every argument LIST a symbol can stand for: one per type, and — for
+        // arity, which the readable half joins with a separator `sanitize` can
+        // also produce — every ordered pair over a slice of them.
+        let mut lists: Vec<Vec<Type>> = universe.iter().map(|t| vec![t.clone()]).collect();
+        for a in &universe[..60] {
+            for b in &universe[..60] {
+                lists.push(vec![a.clone(), b.clone()]);
+            }
+        }
+
+        let mut seen: HashMap<String, Vec<Type>> = HashMap::new();
+        for args in &lists {
+            let sym = mangle_name("f", args);
+            if let Some(prev) = seen.insert(sym.clone(), args.clone()) {
+                assert_eq!(
+                    &prev, args,
+                    "two distinct instantiations share the symbol `{sym}`: the \
+                     driver emits one body and calls it from both sites"
+                );
+            }
+        }
+        assert!(
+            lists.len() > 5_000,
+            "only {} symbols generated; the coverage shrank",
+            lists.len()
         );
     }
 

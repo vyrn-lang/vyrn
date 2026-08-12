@@ -537,7 +537,17 @@ impl Decoders {
 
     /// Emit (once) the decoder for a composite type and return its name.
     fn materialize(&mut self, ty: &Type) -> Option<String> {
-        let name = format!("__vyrnGenDec_{}", mangle(ty)?);
+        // The readable suffix, then the type's structural identity, for the
+        // reason `vyrn_codegen`'s `struct_key` gives: this name is BOTH the
+        // decoder's definition and the key `made` dedups on, and the readable
+        // half is not injective — a user type named `Opt_Str` mangles exactly
+        // as `Option<String>` does, so whichever arrived first would answer for
+        // both and the second would be decoded at the wrong shape.
+        let name = format!(
+            "__vyrnGenDec_{}_h{}",
+            mangle(ty)?,
+            &vyrn_frontend::hash::sha256_hex(format!("{ty:?}").as_bytes())[..16]
+        );
         if !self.made.insert(name.clone()) {
             return Some(name);
         }

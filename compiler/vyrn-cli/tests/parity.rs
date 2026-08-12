@@ -4476,3 +4476,67 @@ fn main() -> Int64 {
         "the native shim no longer prints what this asserts"
     );
 }
+
+/// Two instantiations whose readable mangles collide are still two bodies, on
+/// every engine.
+///
+/// `mangle_ty` spells `Option<Int64>` as `OptInt64`, which is exactly what a user
+/// type named `OptInt64` spells too — and the textual driver deduped its
+/// monomorphization worklist on that string (`emitted.insert(sym)`), so the
+/// second instantiation was never emitted and both call sites called the first.
+/// `vyrn check` printed `ok`. The interpreter (which never mangles) and the
+/// direct wasm backend (which keys its instantiation cache on the type arguments
+/// themselves) both printed `9`; native read the one-word record `{ a: 9 }`
+/// through the `Option<Int64>` body's `{ i1, i64, i64 }` layout and printed a
+/// different number of stack garbage per run. LLVM does not object: a `call`
+/// carries its own function type, so one `define` under two argument types
+/// assembles without a diagnostic and the mismatch is undefined behaviour at run
+/// time. A record with a `String` field would make the same read a wild pointer.
+///
+/// The `match` on the `Option` instantiation's element is the other direction of
+/// the same confusion, and it is the arm that would fail loudly.
+///
+/// Not an example file, deliberately. The corpus reaches this shape nowhere — it
+/// declares no type whose name imitates a mangle prefix, and nothing makes the
+/// imitation a compile error — so a program that reaches it has to be written
+/// down somewhere, and this is the tier that runs all three engines. The unit
+/// claim underneath it (no two distinct types produce one symbol, over generated
+/// type trees) is `vyrn-codegen`'s
+/// `a_mangled_symbol_is_injective_over_generated_types`.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn two_instantiations_that_mangle_alike_are_still_two_bodies() {
+    let rows = three_engines(
+        "mangle",
+        "collide",
+        r#"
+type OptInt64 = { a: Int64 }
+
+fn dup<T>(x: T) -> Array<T> {
+    let mut xs: Array<T> = []
+    xs.push(x)
+    return xs
+}
+
+fn main() -> Int64 {
+    let o: Option<Int64> = Some(5)
+    let r = OptInt64 { a: 9 }
+    let xs = dup(o)
+    let ys = dup(r)
+    print("\{xs.length} \{ys.length}")
+    print("\{ys[0].a}")
+    let m = match xs[0] {
+        Some(v) => v,
+        None => -1,
+    }
+    print("\{m}")
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "collide");
+    assert_eq!(
+        rows[0].1, "1 1\n9\n5\n",
+        "the record's field, then the option's payload"
+    );
+}

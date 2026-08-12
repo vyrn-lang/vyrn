@@ -175,7 +175,7 @@ dispatch (names remain the extern-boundary mechanism).
   from an **expected-type stack** pushed at each storage boundary
   (`if`/`match` arms deliberately push nothing, so conditional sources adopt
   the outer target). Calls lower to ONE direct call to a per-signature
-  dispatcher `@__vyrn_fndispatch_<mangle>_<sha256/12>` (switch + direct
+  dispatcher `@__vyrn_fndispatch_<mangle>_h<sha256/16>` (switch + direct
   calls; named-source arms coerce args/results through the target's declared
   types, so validated params re-validate and record widths re-layout; the
   default arm is unreachable-by-construction and traps defensively). The

@@ -158,11 +158,14 @@ capture-by-move syntax, mutable capture.
   element types (previously only `Option`/`Result`/generic-app did).
 
 - **Monomorphization + dedup.** Each lambda literal is lifted to a top-level
-  function `@__vyrn_lambda_<fn>_<ordinal>_<shape>` whose leading parameters are
-  its captures; the symbol keys on the enclosing function, the lambda's
-  source-order ordinal, and its concrete capture/parameter/return shape, so two
-  instantiations of a generic function lift distinct correctly-typed copies while
-  identical ones dedup. Each `fn`-taking callee is specialized per
+  function `@__vyrn_lambda_<fn>_<ordinal>_<shape>_h<sha256/16>` whose leading
+  parameters are its captures; the symbol keys on the enclosing function, the
+  lambda's source-order ordinal, and its concrete capture/parameter/return shape,
+  so two instantiations of a generic function lift distinct correctly-typed
+  copies while identical ones dedup. The `<shape>` is READABLE and not
+  injective; the trailing key is the identity, and it is there because the
+  definition is deduped on this symbol (see `struct_key`). Each `fn`-taking
+  callee is specialized per
   (callee, type args, target symbols) — `twice(|x| x*2)`, `twice(|x| x+off)`,
   and `twice(double)` are three instances; the parameter's captures arrive as
   the instance's extra trailing parameters, and a call to the parameter becomes
