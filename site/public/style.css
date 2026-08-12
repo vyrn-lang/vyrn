@@ -159,7 +159,14 @@ code, pre, kbd { font-family: var(--mono); }
  *
  * It is deliberately quiet. A sentence naming six flags is a sentence, not six
  * badges: the box is one hairline, the wash is `--code-wash`, and the corners
- * are sharp like everything else on the sheet. */
+ * are sharp like everything else on the sheet.
+ *
+ * Two places take a lighter hand, each with its own rule below: a heading, where
+ * the chip would box the word instead of marking it, and any block that is
+ * already a box. And one span is never a link: a command is copied, not
+ * followed, so a code span is never wrapped in an anchor to give it something to
+ * do. Where a row or a sentence should navigate, the LINK is the words around
+ * the code, and it points at a page this site serves. */
 code {
   font-size: 0.92em;
   padding: 0.08em 0.34em;
@@ -178,6 +185,63 @@ pre code, .cmd code, .lines code, .modgrid code {
   background: none;
   color: inherit;
   font-size: inherit;
+}
+
+/* A code span copies itself when clicked, and `widgets.js` adds `.copyable` at
+ * boot — so the cursor and the hover appear only when the script that backs them
+ * is running. Without JavaScript the span is plain text and promises nothing.
+ *
+ * The answer is a colour flash and not a label: a label changes the span's box
+ * and reflows the sentence around it, and a tooltip over a table cell is clipped
+ * by the `.scroller` it sits in. The transition is the sheet's own, so the
+ * reduced-motion block at the end of this file already flattens it. */
+code.copyable {
+  cursor: copy;
+  transition: background-color 160ms var(--expo), border-color 160ms var(--expo);
+}
+code.copyable:hover {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: color-mix(in oklab, var(--accent) calc(var(--code-wash) * 2), transparent);
+}
+code.copyable.copied {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 32%, transparent);
+}
+code.copyable.copyfail {
+  border-color: var(--danger);
+  background: color-mix(in oklab, var(--danger) 28%, transparent);
+}
+/* In a heading there is no box to flash, so the flash is the ink. */
+h1 code.copyable:hover, h2 code.copyable:hover, h3 code.copyable:hover, h4 code.copyable:hover {
+  background: none;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+h1 code.copyable.copied, h2 code.copyable.copied, h3 code.copyable.copied, h4 code.copyable.copied { background: none; color: var(--bright); }
+h1 code.copyable.copyfail, h2 code.copyable.copyfail, h3 code.copyable.copyfail, h4 code.copyable.copyfail { background: none; color: var(--danger); }
+
+/* Said to a screen reader, shown to nobody: the live region every copy reports
+ * into. Not `display: none`, which is not announced. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A HEADING carries the mono and the colour and drops the box. The chip is
+ * sized for 17px prose; at 2rem the same border and wash stop marking a word
+ * and start boxing it — `What vyrn does` read as a headline with a button in
+ * it. The rule: in a heading, a code span is a change of voice, not a chip. */
+h1 code, h2 code, h3 code, h4 code {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 0.9em;
+  color: var(--accent);
 }
 
 /* Numbers never jitter. This is the whole reason data looks trustworthy. */
