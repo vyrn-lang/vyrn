@@ -42,6 +42,11 @@
   --hair: color-mix(in oklab, var(--n0) 10%, transparent);
   --accent: var(--navy);
   --field: 18, 50, 88;
+  /* How much accent an inline code chip carries. Two numbers, because the two
+   * themes are not symmetric: the light accent is a dark navy, so 8% of it over
+   * warm paper is a heavy step, while the dark accent is a bright cyan and 8%
+   * over near-black is barely there. Matched by eye to the same weight. */
+  --code-wash: 5%;
 
   --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
   --sans: ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
@@ -107,6 +112,7 @@
     --rule: color-mix(in oklab, var(--n0) 22%, transparent);
     --hair: color-mix(in oklab, var(--n0) 12%, transparent);
     --accent: var(--bright);
+    --code-wash: 12%;
     --danger: oklch(0.72 0.17 25.33);
     --amber: oklch(0.8 0.15 70.08);
     --field: 79, 227, 242;
@@ -150,13 +156,13 @@ code, pre, kbd { font-family: var(--mono); }
  * hairline box and a faint wash of the page's own accent, in both themes.
  *
  * It is deliberately quiet. A sentence naming six flags is a sentence, not six
- * badges: the box is one hairline, the wash is 8%, and the corners are sharp
- * like everything else on the sheet. */
+ * badges: the box is one hairline, the wash is `--code-wash`, and the corners
+ * are sharp like everything else on the sheet. */
 code {
   font-size: 0.92em;
   padding: 0.08em 0.34em;
   border: 1px solid color-mix(in oklab, var(--accent) 22%, transparent);
-  background: color-mix(in oklab, var(--accent) 8%, transparent);
+  background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
   color: color-mix(in oklab, var(--ink) 75%, var(--accent));
 }
 
