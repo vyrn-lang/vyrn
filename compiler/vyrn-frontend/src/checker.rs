@@ -4045,6 +4045,25 @@ impl<'a> Checker<'a> {
                 // inline elements. The capacity is known, so a literal LONGER
                 // than `N` is a checker error (pushing past `N` at runtime spills
                 // — that is the feature, but a literal cannot exceed it).
+                // A literal is built element by element, in a frame slot in one
+                // backend and in one `insertvalue` per element in the other, so
+                // its length is a compile-time cost in both. Refused here rather
+                // than in either backend so that `vyrn check` predicts the build
+                // and all three engines refuse the same program — the shape that
+                // used to check `ok` in 0.1 s, run correctly under the
+                // interpreter, and then die `LLVM ERROR: out of memory` after
+                // clang had run for over two minutes.
+                if elems.len() > crate::interp::ARRAY_LIT_LIMIT {
+                    return Err(format!(
+                        "line {line}: this array literal has {} elements, past the limit of {}\n  \
+                         note: a literal is lowered element by element into one call frame, so \
+                         its length is a compile-time cost on both backends\n  \
+                         note: a table this long belongs in a file the program reads, not in \
+                         the program",
+                        elems.len(),
+                        crate::interp::ARRAY_LIT_LIMIT
+                    ));
+                }
                 let small_cap = match expected {
                     Some(Type::SmallArray(_, n)) => Some(*n),
                     _ => None,

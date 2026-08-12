@@ -357,6 +357,15 @@ addr 0          ┐ generated module's shadow stack, 64 KB, growing DOWN from
 16,777,216 +    ┘ shim's data, then the single shared malloc heap
 ```
 
+> **Superseded, and the reason is in RFC-0004.** The SHAPE below still holds;
+> the sizes do not. The 64 KB was clang's default and the frames in it were never
+> counted, so a recursion with an aggregate local ran out of stack at depth ~256
+> while the other two engines reached the shared limit of 1,000. The stack is
+> `FRAME_LIMIT * CALL_DEPTH_LIMIT` plus a page now — 8,257,536 bytes, with
+> `DATA_BASE` moved up to meet it and `SHIM_BASE` doubled to 32 MB so the statics
+> keep their room — and a frame past `FRAME_LIMIT` is refused when it is lowered.
+> See RFC-0004, "a frame is bounded, and the shadow stack is the product".
+
 Confirmed by measurement: `wasm32-wasip1` links `--stack-first` by default
 (stack at 65,528 with or without the explicit flag), and the shim's
 `--global-base=16M -z stack-size=16M` puts its stack at 16,777,208 with data

@@ -589,6 +589,131 @@ fn expected_check_failures_do_fail() {
     }
 }
 
+/// The recursion contract, at the largest frame the compiler accepts.
+///
+/// `CALL_DEPTH_LIMIT` is the language's number and every engine counts to it,
+/// but the wasm backend's shadow stack was one 64 KB page and nothing compared a
+/// frame against it. So a function with a 256-byte frame ran out of stack at
+/// depth 256 — `memory fault at wasm address 0xffffff00`, exit 3 — while the
+/// interpreter and the native binary ran the same program to 1,000 and stopped
+/// with `error: call depth exceeds 1000`. Two engines reported the limit and the
+/// third died 700 frames early with a wild address.
+///
+/// The stack holds `CALL_DEPTH_LIMIT` frames of `FRAME_LIMIT` now, and a frame
+/// past `FRAME_LIMIT` is refused when it is lowered, so the counter always trips
+/// first. This proves it near the edge rather than in the middle: `down` holds a
+/// 4 KB record, half the frame a function may have, and the wasm build
+/// succeeding is the first assertion — a lowering that inflated that frame past
+/// the limit would say so here rather than somewhere a user finds it.
+///
+/// Both sides of the boundary, because a limit that refuses everything would
+/// pass the second half alone: under it, one answer on three engines; over it,
+/// one diagnostic on three engines.
+#[test]
+#[ignore = "needs clang and wasmtime; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-framedepth");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = |n: u32| {
+        format!(
+            "type K8 = {{ a: Int64, b: Int64, c: Int64, d: Int64, e: Int64, f: Int64, \
+             g: Int64, h: Int64 }}\n\
+             type K64 = {{ a: K8, b: K8, c: K8, d: K8, e: K8, f: K8, g: K8, h: K8 }}\n\
+             type K512 = {{ a: K64, b: K64, c: K64, d: K64, e: K64, f: K64, g: K64, h: K64 }}\n\n\
+             fn mk8(n: Int64) -> K8 {{\n    \
+             return K8 {{ a: n, b: n, c: n, d: n, e: n, f: n, g: n, h: n }}\n}}\n\n\
+             fn mk64(n: Int64) -> K64 {{\n    let q = mk8(n)\n    \
+             return K64 {{ a: q, b: q, c: q, d: q, e: q, f: q, g: q, h: q }}\n}}\n\n\
+             fn mk512(n: Int64) -> K512 {{\n    let q = mk64(n)\n    \
+             return K512 {{ a: q, b: q, c: q, d: q, e: q, f: q, g: q, h: q }}\n}}\n\n\
+             fn down(n: Int64) -> Int64 {{\n    let big = mk512(n)\n    \
+             if n <= 0 {{\n        return big.a.a.a\n    }}\n    \
+             return big.a.a.h - big.b.b.h + down(n - 1)\n}}\n\n\
+             fn main() -> Int64 {{\n    print(\"\\{{down({n})}}\")\n    return 0\n}}\n"
+        )
+    };
+    // Under the limit, and over it. `down` calls three levels of constructor, so
+    // the deep case passes the counter inside `mk8` rather than in `down` — which
+    // is the shape a real recursion has and the one the old stack died in.
+    for (what, n) in [("under", 200u32), ("over", 1_200u32)] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src(n)).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(
+            build.status.success(),
+            "{what}: a 4 KB record local must still fit one frame — if this is the \
+             frame-limit refusal, the lowering grew and the contract's edge moved:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let exe = dir.join(format!("{what}.exe"));
+        let nb = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build native");
+        assert!(
+            nb.status.success(),
+            "{what}: native build failed:\n{}",
+            String::from_utf8_lossy(&nb.stderr)
+        );
+
+        let no_stdin = dir.join("no.stdin");
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let i = run_io(interp_cmd, &dir, &no_stdin);
+        let n_out = run_io(Command::new(&exe), &dir, &no_stdin);
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &no_stdin);
+
+        for (other, o) in [("native", &n_out), ("wasm", &w)] {
+            assert_eq!(
+                runtime_err(&i.stderr),
+                runtime_err(&o.stderr),
+                "{what}: interp vs {other} stderr"
+            );
+            assert_eq!(
+                norm(&i.stdout),
+                norm(&o.stdout),
+                "{what}: interp vs {other} stdout"
+            );
+            assert_eq!(
+                i.status.code(),
+                o.status.code(),
+                "{what}: interp vs {other} exit"
+            );
+        }
+        let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
+        if what == "over" {
+            assert!(
+                runtime_err(&w.stderr).contains(&format!("call depth exceeds {limit}")),
+                "over: the deep run must stop at the SHARED limit, not on the shadow \
+                 stack — got:\n{}",
+                runtime_err(&w.stderr)
+            );
+            assert_eq!(w.status.code(), Some(1), "over: a trap exits 1");
+        } else {
+            assert_eq!(norm(&w.stdout).trim(), "0", "under: the answer");
+            assert_eq!(w.status.code(), Some(0), "under: a run that fits exits 0");
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // The wasm cases the corpus does not reach (RFC-0077 M2a-M2p)
 // -------------------------------------------------------------------------

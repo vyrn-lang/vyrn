@@ -270,15 +270,20 @@ fn a_swept_module_still_calls_what_it_meant_to() {
 }
 
 /// The half of the memory map that is a safety property rather than an address:
-/// a frame bigger than the 64 KB below `STACK_TOP` underflows past 0, wraps to
-/// near `0xFFFFFFFF`, and the first access traps. It does NOT wrap into the data
-/// segments — which is the whole reason the stack is at the bottom of memory
-/// (`--stack-first`) and not above the statics.
+/// a frame bigger than the `STACK_BYTES` below `STACK_TOP` underflows past 0,
+/// wraps to near `0xFFFFFFFF`, and the first access traps. It does NOT wrap into
+/// the data segments — which is the whole reason the stack is at the bottom of
+/// memory (`--stack-first`) and not above the statics.
+///
+/// A lowered body can no longer reach this: `direct::compile` refuses a frame
+/// past `FRAME_LIMIT`, and the stack holds `CALL_DEPTH_LIMIT` of those. The net
+/// stays, and this is what still tests it — a `Frame` built by hand, past the
+/// end on purpose.
 #[test]
 fn a_frame_past_the_bottom_of_memory_traps_rather_than_wrapping_into_data() {
     let mut m = Module::new();
     m.data(b"do not overwrite me", 1);
-    let start = m.func(&[], &[], &[], 65_536 + 16, |b| {
+    let start = m.func(&[], &[], &[], vyrn_codegen::wasm::STACK_BYTES + 16, |b| {
         b.slot(0).ins(&Instruction::I32Const(1)).ins(&i32_store(0));
     });
     m.export("_start", start);

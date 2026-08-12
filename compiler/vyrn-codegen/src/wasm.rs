@@ -15,14 +15,21 @@
 //! [`Module::finish`], where the order is written down in one place instead of
 //! being an emergent property of the traversal.
 //!
-//! **The memory map is measured** (RFC-0077 M0), not chosen: a 64 KB shadow
-//! stack growing DOWN from [`STACK_TOP`], data segments from [`DATA_BASE`] up,
-//! statics ending below [`STATICS_LIMIT`]. That is what `--stack-first` gives
-//! today and what the RFC-0076 shim's own placement leaves room for, so a
-//! directly-emitted module reproducing it needs no negotiation with either.
-//! Overflow is load-bearing: a frame push past address 0 wraps to `0xFFFFFFF8`
-//! and the first access traps, rather than quietly walking into the data
-//! segments. `tests/wasm_runs.rs` runs that off the end and checks the trap.
+//! **The memory map is measured** (RFC-0077 M0), not chosen: a [`STACK_BYTES`]
+//! shadow stack growing DOWN from [`STACK_TOP`], data segments from
+//! [`DATA_BASE`] up, statics ending below [`STATICS_LIMIT`]. That is the shape
+//! `--stack-first` gives and the shape the RFC-0076 shim's own placement leaves
+//! room for, so a directly-emitted module reproducing it needs no negotiation
+//! with either. Overflow is load-bearing: a frame push past address 0 wraps to
+//! `0xFFFFFFF8` and the first access traps, rather than quietly walking into the
+//! data segments. `tests/wasm_runs.rs` runs that off the end and checks the
+//! trap.
+//!
+//! The stack's SIZE is not a free choice either, and no longer clang's default:
+//! it holds [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] frames of
+//! [`vyrn_frontend::interp::FRAME_LIMIT`], so that the call counter always trips
+//! before the stack pointer does and a deep recursion stops with the same
+//! diagnostic here as under the interpreter and the native binary.
 //!
 //! **`i1` does not exist in wasm.** LLVM widens `i1` to `i32` at the C boundary
 //! silently — which is how `declare ptr @__vyrn_vj_bool(i1)` has been calling
@@ -38,17 +45,44 @@ use wasm_encoder::{
     TypeSection,
 };
 
+/// How much shadow stack a generated module has: enough for
+/// [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] frames of
+/// [`vyrn_frontend::interp::FRAME_LIMIT`] bytes.
+///
+/// It is a PRODUCT rather than a chosen size, and that is the whole recursion
+/// contract in one line: no accepted frame is bigger than `FRAME_LIMIT`, so at
+/// any depth the call counter admits, the stack pointer is still above 0. The
+/// counter is what stops a deep recursion, on every engine, with the same words.
+///
+/// It was 65,536 — one page, clang's own default and no more thought than that —
+/// and a 256-byte frame therefore ran out of stack at depth 256 while the
+/// interpreter and the native binary ran the same program to 1,000 and reported
+/// `error: call depth exceeds 1000`.
+///
+/// The extra page is for the frames the counter does not count: a runtime helper
+/// is not a Vyrn call, so `print` at the deepest point of a recursion takes stack
+/// the product did not budget. Those frames are tens of bytes; a page is far more
+/// than the deepest chain of them.
+///
+/// 8,257,536 bytes is exactly 126 wasm pages. A module reserves them and touches
+/// only as many as it recurses into, so the cost is address space, not memory.
+pub const STACK_BYTES: u32 =
+    vyrn_frontend::interp::FRAME_LIMIT * vyrn_frontend::interp::CALL_DEPTH_LIMIT + 65_536;
 /// Top of the generated module's shadow stack; it grows down from here to 0.
-pub const STACK_TOP: u32 = 65_536;
+pub const STACK_TOP: u32 = STACK_BYTES;
 /// First byte of the generated module's data segments. Statics grow up from
 /// here, so the stack below can only reach them by underflowing past 0 — which
 /// traps.
-pub const DATA_BASE: u32 = 65_536;
+pub const DATA_BASE: u32 = STACK_BYTES;
 /// Where the RFC-0076 shim's data and heap begin, and where its stack starts
 /// growing back down. The one address the two modules have to agree about, so it
 /// is written down once: [`crate::toolchain::shim_wasm`] passes it to
 /// `--global-base`/`-z stack-size`, and `STATICS_LIMIT` is derived from it.
-pub const SHIM_BASE: u32 = 16 * 1024 * 1024;
+///
+/// Twice what it was, because the stack below it grew: half of this is where the
+/// statics must end, and the room between [`DATA_BASE`] and that line is the same
+/// ~8 MB it was when the shadow stack was one page.
+pub const SHIM_BASE: u32 = 32 * 1024 * 1024;
 
 /// Everything this module statically occupies must end below here: half of
 /// [`SHIM_BASE`], the gap that keeps the shim's downward-growing frames from ever
@@ -701,6 +735,12 @@ fn encode(f: Frame, n_params: usize) -> Function {
     // every access is out of bounds — the trap `--stack-first` buys, and the
     // reason the stack is at the BOTTOM of memory rather than above the data
     // it would otherwise overwrite.
+    //
+    // It is a safety net and not the limit any more: a lowered body is refused
+    // above [`vyrn_frontend::interp::FRAME_LIMIT`], and [`STACK_BYTES`] holds
+    // `CALL_DEPTH_LIMIT` of those, so nothing this backend accepts can reach the
+    // wrap. What still can is a hand-built `Frame` in a test, which is what
+    // `tests/wasm_runs.rs` uses it for.
     if frame != 0 {
         out.instruction(&Instruction::GlobalGet(SP))
             .instruction(&Instruction::I32Const(frame as i32))
@@ -816,6 +856,14 @@ impl Frame {
     /// itself.
     pub fn base(&self) -> u32 {
         self.base
+    }
+
+    /// How many bytes of shadow stack this body's prologue will claim — the same
+    /// rounding [`encode`] applies, so a caller checking it against
+    /// [`vyrn_frontend::interp::FRAME_LIMIT`] is checking the number the prologue
+    /// subtracts.
+    pub fn bytes(&self) -> u32 {
+        round_up(self.frame, FRAME_ALIGN)
     }
 }
 

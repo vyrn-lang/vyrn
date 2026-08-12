@@ -121,17 +121,34 @@ entry:
     )
 }
 
+/// The region runtime, with [`vyrn_frontend::interp::REGION_MAX`] filled in.
+///
+/// The number was written five times in the text below — three array lengths,
+/// one comparison and the trap's own wording — plus a sixth as the hand-counted
+/// byte length of that wording, and again in the other backend and in the
+/// interpreter. Eight copies of one fact, and the two backends' comparisons had
+/// already drifted apart in signedness. Now the text has holes and one constant
+/// fills them, the way [`call_depth_runtime`] already builds its own number in.
+fn region_runtime() -> String {
+    let n = vyrn_frontend::interp::REGION_MAX;
+    let (msg, len) = llvm_str(&format!("error: region nesting exceeds {n}\n"));
+    REGION_RUNTIME
+        .replace("$NEST", &n.to_string())
+        .replace("$TRAPLEN", &len.to_string())
+        .replace("$TRAPTEXT", &msg)
+}
+
 const REGION_RUNTIME: &str = "\
 @__vyrn_region_sp = thread_local global i64 0
-@__vyrn_region_blocks = thread_local global [64 x ptr] zeroinitializer
-@__vyrn_region_lens = thread_local global [64 x i64] zeroinitializer
-@__vyrn_region_caps = thread_local global [64 x i64] zeroinitializer
-@.trap.regiondepth = private unnamed_addr constant [34 x i8] c\"error: region nesting exceeds 64\\0A\\00\"
+@__vyrn_region_blocks = thread_local global [$NEST x ptr] zeroinitializer
+@__vyrn_region_lens = thread_local global [$NEST x i64] zeroinitializer
+@__vyrn_region_caps = thread_local global [$NEST x i64] zeroinitializer
+@.trap.regiondepth = private unnamed_addr constant [$TRAPLEN x i8] c\"$TRAPTEXT\"
 
 define void @__vyrn_region_enter() {
 entry:
   %sp = load i64, ptr @__vyrn_region_sp
-  %over = icmp sge i64 %sp, 64
+  %over = icmp uge i64 %sp, $NEST
   br i1 %over, label %trap, label %ok
 trap:
   %e = call ptr @__vyrn_stderr()
@@ -139,11 +156,11 @@ trap:
   call void @exit(i32 1)
   unreachable
 ok:
-  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %sp
+  %slot = getelementptr [$NEST x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %sp
   store ptr null, ptr %slot
-  %lenp = getelementptr [64 x i64], ptr @__vyrn_region_lens, i64 0, i64 %sp
+  %lenp = getelementptr [$NEST x i64], ptr @__vyrn_region_lens, i64 0, i64 %sp
   store i64 0, ptr %lenp
-  %capp = getelementptr [64 x i64], ptr @__vyrn_region_caps, i64 0, i64 %sp
+  %capp = getelementptr [$NEST x i64], ptr @__vyrn_region_caps, i64 0, i64 %sp
   store i64 0, ptr %capp
   %sp1 = add i64 %sp, 1
   store i64 %sp1, ptr @__vyrn_region_sp
@@ -155,9 +172,9 @@ entry:
   %raw = call ptr @__vyrn_malloc(i64 %n)
   %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
-  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
-  %lenp = getelementptr [64 x i64], ptr @__vyrn_region_lens, i64 0, i64 %idx
-  %capp = getelementptr [64 x i64], ptr @__vyrn_region_caps, i64 0, i64 %idx
+  %slot = getelementptr [$NEST x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
+  %lenp = getelementptr [$NEST x i64], ptr @__vyrn_region_lens, i64 0, i64 %idx
+  %capp = getelementptr [$NEST x i64], ptr @__vyrn_region_caps, i64 0, i64 %idx
   %len = load i64, ptr %lenp
   %cap = load i64, ptr %capp
   %full = icmp eq i64 %len, %cap
@@ -186,7 +203,7 @@ entry:
   %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
   store i64 %idx, ptr @__vyrn_region_sp
-  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
+  %slot = getelementptr [$NEST x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
   %vec = load ptr, ptr %slot
   call void @free(ptr %vec)
   store ptr null, ptr %slot
@@ -198,9 +215,9 @@ entry:
   %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
   store i64 %idx, ptr @__vyrn_region_sp
-  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
+  %slot = getelementptr [$NEST x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
   %vec = load ptr, ptr %slot
-  %lenp = getelementptr [64 x i64], ptr @__vyrn_region_lens, i64 0, i64 %idx
+  %lenp = getelementptr [$NEST x i64], ptr @__vyrn_region_lens, i64 0, i64 %idx
   %len = load i64, ptr %lenp
   br label %loop
 loop:
@@ -895,6 +912,11 @@ pub const MONO_SIZE_LIMIT: usize = 65_536;
 /// and one needle both sides read cannot drift.
 pub const MONO_LIMIT_NEEDLE: &str = "past the instantiation limit";
 
+/// The phrase every frame-size refusal contains, for the same reason
+/// [`MONO_LIMIT_NEEDLE`] exists: a test that pins a limit by quoting its
+/// sentence pins the sentence, not the limit.
+pub const FRAME_LIMIT_NEEDLE: &str = "past the frame limit";
+
 /// Refuse an instantiation whose type arguments pass [`MONO_DEPTH_LIMIT`] or
 /// [`MONO_SIZE_LIMIT`].
 ///
@@ -1249,7 +1271,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // singly-linked allocation lists. Each region allocation reserves 8 extra
     // header bytes holding the "next" link; `exit` walks the list and frees it.
     // `concat` routes through the arena at runtime when a region is active.
-    out.push_str(REGION_RUNTIME);
+    out.push_str(&region_runtime());
     out.push_str(&call_depth_runtime());
 
     out.push_str(STREAM_RUNTIME);
@@ -13709,7 +13731,10 @@ mod tests {
             "{ir}"
         );
         assert!(
-            ir.contains("@__vyrn_region_blocks = thread_local global [64 x ptr] zeroinitializer"),
+            ir.contains(&format!(
+                "@__vyrn_region_blocks = thread_local global [{} x ptr] zeroinitializer",
+                vyrn_frontend::interp::REGION_MAX
+            )),
             "{ir}"
         );
     }
@@ -15558,17 +15583,22 @@ mod tests {
     }
 
     #[test]
-    fn region_enter_traps_past_depth_64() {
-        // The arena stack is a fixed [64 x ptr]; entering a 65th nested region
-        // must trap (stderr + exit 1), not write past the global.
+    fn region_enter_traps_past_the_nesting_limit() {
+        // The arena stack is a fixed [REGION_MAX x ptr]; entering one region
+        // past it must trap (stderr + exit 1), not write past the global.
+        //
+        // Read from the constant, never spelled: this file used to write the
+        // number in five places and the test in two more, and a limit a test
+        // pins by hand is a limit the test can outlive.
+        let n = vyrn_frontend::interp::REGION_MAX;
         let src = "fn main() -> Int64 { region { } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("error: region nesting exceeds 64"),
+            ir.contains(&format!("error: region nesting exceeds {n}")),
             "region-depth trap message present: {ir}"
         );
         assert!(
-            ir.contains("%over = icmp sge i64 %sp, 64"),
+            ir.contains(&format!("%over = icmp uge i64 %sp, {n}")),
             "region_enter bounds-checks the stack pointer: {ir}"
         );
     }

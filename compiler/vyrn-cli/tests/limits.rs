@@ -1,11 +1,12 @@
-//! Three ways the compiler used to DIE, and the three limits that make each one
-//! say something instead (audit A5.2, A5.3, A5.4).
+//! Five ways the compiler used to DIE, and the limits that make each one say
+//! something instead (audit A5.2, A5.3, A5.4; review G4.3, G4.4).
 //!
-//! Every one of them ended the process with no `file:line` and nothing a Vyrn
-//! program could observe: a Rust stack overflow aborts, and an abort is not a
-//! diagnostic. The shape of the fix is the same in all three — count the thing
-//! that grows, declare a number, and refuse at it — and so is the bar: a message
-//! that names the cause, and an exit code the compiler's other refusals use.
+//! Every one of them ended with no `file:line` and nothing a Vyrn program could
+//! observe: a Rust stack overflow aborts, clang runs out of memory, a wasm module
+//! traps at a wild address — and none of those is a diagnostic. The shape of the
+//! fix is the same in all five — count the thing that grows, declare a number,
+//! and refuse at it — and so is the bar: a message that names the cause, and an
+//! exit code the compiler's other refusals use.
 //!
 //! The numbers are the language's, not this file's; they live beside the code
 //! that enforces them and are read from there, so a test cannot pin a limit the
@@ -14,6 +15,12 @@
 use std::process::{Command, Output};
 
 fn run(cmd: &str, src: &str, name: &str) -> Output {
+    run_args(cmd, src, name, &[])
+}
+
+/// [`run`] with extra arguments after the file — `--target wasm -o <path>`, the
+/// only build this file makes, because the frame limit is the wasm backend's.
+fn run_args(cmd: &str, src: &str, name: &str, args: &[String]) -> Output {
     let dir = std::env::temp_dir().join("vyrn-limits");
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join(format!("{name}.vyrn"));
@@ -21,8 +28,30 @@ fn run(cmd: &str, src: &str, name: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg(cmd)
         .arg(&f)
+        .args(args)
         .output()
         .unwrap()
+}
+
+/// `vyrn build --target wasm` of `src`, giving the output and the module path.
+fn build_wasm(src: &str, name: &str) -> (Output, std::path::PathBuf) {
+    let out = std::env::temp_dir()
+        .join("vyrn-limits")
+        .join(format!("{name}.wasm"));
+    // Removed first, so "the refused build left no module" is about this run.
+    let _ = std::fs::remove_file(&out);
+    let o = run_args(
+        "build",
+        src,
+        name,
+        &[
+            "--target".into(),
+            "wasm".into(),
+            "-o".into(),
+            out.display().to_string(),
+        ],
+    );
+    (o, out)
 }
 
 fn text(o: &Output) -> String {
@@ -230,4 +259,207 @@ fn an_ordinary_generic_still_compiles() {
     let out = run("run", src, "genok");
     assert_eq!(text(&out).trim(), "22", "{}", text(&out));
     assert_eq!(out.status.code(), Some(0));
+}
+
+// -------------------------------------------------------------------------
+// G4.4 — the array literal
+// -------------------------------------------------------------------------
+
+/// `vyrn check` said `ok` in 0.1 s about a literal native could not build.
+///
+/// 100,000 constant elements lower to 100,000 chained `insertvalue`
+/// instructions over an aggregate of the full width, and clang's `-O2` pipeline
+/// allocated until it died: `LLVM ERROR: out of memory`, after 2 m 53 s on the
+/// machine this was written on. The same file compiled to wasm in 0.1 s and
+/// trapped `out of bounds memory access` on its first statement, so it ran on no
+/// compiled backend at all, and `check` predicted neither.
+///
+/// Refused in the checker, which is why all four commands below refuse it: a
+/// literal's length is a compile-time cost in both backends, and the one place
+/// that can say so before either of them starts is the front end.
+#[test]
+fn an_array_literal_past_the_limit_is_a_diagnostic_not_a_two_minute_crash() {
+    let limit = vyrn_frontend::interp::ARRAY_LIT_LIMIT;
+    let n = limit + 1;
+    let elems: Vec<String> = (0..n).map(|i| (i % 97).to_string()).collect();
+    let src = format!(
+        "fn main() -> Int64 {{\n    let xs: Array<Int64> = [{}]\n    \
+         print(\"\\{{xs.length}}\")\n    return 0\n}}\n",
+        elems.join(", ")
+    );
+    // Every command that reads a program, including the two that used to hand it
+    // to a backend and wait.
+    for cmd in ["check", "run", "emit-ir", "build"] {
+        let (out, _) = if cmd == "build" {
+            build_wasm(&src, "biglit")
+        } else {
+            (run(cmd, &src, "biglit"), Default::default())
+        };
+        let got = text(&out);
+        assert!(
+            got.contains(&format!(
+                "this array literal has {n} elements, past the limit of {limit}"
+            )),
+            "{cmd}: expected the literal limit, got:\n{got}"
+        );
+        // Source-anchored: `file:line:col`, like every other front-end refusal.
+        assert!(
+            got.contains("biglit.vyrn:2:"),
+            "{cmd}: the diagnostic must name the file and position, got:\n{got}"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{cmd}: a refusal exits 1 — got:\n{got}"
+        );
+    }
+}
+
+/// The control. A literal AT the limit still checks, runs and builds — a bound
+/// that refused the ordinary case would pass the test above and be worthless.
+/// This is also what pins the two limits to each other: the largest literal the
+/// checker admits has to fit in a frame the backend admits, in the same
+/// function, together with the array it becomes.
+#[test]
+fn an_array_literal_at_the_limit_still_runs() {
+    let limit = vyrn_frontend::interp::ARRAY_LIT_LIMIT;
+    let elems: Vec<String> = (0..limit).map(|i| (i % 97).to_string()).collect();
+    let src = format!(
+        "fn main() -> Int64 {{\n    let xs: Array<Int64> = [{}]\n    \
+         print(\"\\{{xs.length}}\")\n    return 0\n}}\n",
+        elems.join(", ")
+    );
+    let out = run("run", &src, "litok");
+    assert_eq!(text(&out).trim(), limit.to_string(), "{}", text(&out));
+    assert_eq!(out.status.code(), Some(0));
+    let (build, _) = build_wasm(&src, "litok");
+    assert!(
+        build.status.success(),
+        "a literal at the limit must still build:\n{}",
+        text(&build)
+    );
+}
+
+// -------------------------------------------------------------------------
+// G4.3 — the call frame
+// -------------------------------------------------------------------------
+
+/// A frame the shadow stack cannot hold at every allowed depth built silently.
+///
+/// The wasm backend's whole stack was one 64 KB page and nothing compared a
+/// frame against it, so a body with more locals than that compiled in a tenth of
+/// a second into a module whose first statement trapped
+/// `out of bounds memory access` at address `0xffe89600` — no build error, no
+/// position, nothing a reader could act on.
+///
+/// The refusal names the function and its line, like the instantiation limit
+/// beside it: the size is the sum of that function's own locals, and its author
+/// is the one who can make them smaller.
+#[test]
+fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
+    // Two 4 KB records, so the frame is past the limit by a whole record and no
+    // rounding decides the outcome.
+    let src = "type K8 = { a: Int64, b: Int64, c: Int64, d: Int64, e: Int64, f: Int64, \
+               g: Int64, h: Int64 }\n\
+               type K64 = { a: K8, b: K8, c: K8, d: K8, e: K8, f: K8, g: K8, h: K8 }\n\
+               type K512 = { a: K64, b: K64, c: K64, d: K64, e: K64, f: K64, g: K64, h: K64 }\n\n\
+               fn mk8(n: Int64) -> K8 {\n    \
+               return K8 { a: n, b: n, c: n, d: n, e: n, f: n, g: n, h: n }\n}\n\n\
+               fn mk64(n: Int64) -> K64 {\n    let q = mk8(n)\n    \
+               return K64 { a: q, b: q, c: q, d: q, e: q, f: q, g: q, h: q }\n}\n\n\
+               fn mk512(n: Int64) -> K512 {\n    let q = mk64(n)\n    \
+               return K512 { a: q, b: q, c: q, d: q, e: q, f: q, g: q, h: q }\n}\n\n\
+               fn wide(n: Int64) -> Int64 {\n    let one = mk512(n)\n    let two = mk512(n + 1)\n    \
+               return one.a.a.h - two.b.b.h\n}\n\n\
+               fn main() -> Int64 {\n    print(\"\\{wide(3)}\")\n    return 0\n}\n";
+    let (out, module) = build_wasm(src, "bigframe");
+    let got = text(&out);
+    assert!(
+        got.contains(vyrn_codegen::FRAME_LIMIT_NEEDLE)
+            && got.contains(&format!(
+                "past the frame limit of {}",
+                vyrn_frontend::interp::FRAME_LIMIT
+            )),
+        "expected the frame limit, got:\n{got}"
+    );
+    assert!(
+        got.contains("`wide` needs") && got.contains("`wide` is declared on line 19"),
+        "the refusal must name the function and its line, got:\n{got}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a refusal exits 1 — got:\n{got}"
+    );
+    assert!(
+        !module.exists(),
+        "a refused build must not leave a module behind"
+    );
+}
+
+// -------------------------------------------------------------------------
+// One source per limit
+// -------------------------------------------------------------------------
+
+/// The limits are one number each, and the others are derived from them.
+///
+/// This is the half of the defect that outlives any single fix. `CALL_DEPTH_LIMIT`
+/// was already shared by all three engines; the shadow stack's size was not
+/// related to it at all, and the region-nesting bound was written eight times
+/// across three engines — three of those inside string literals, one a
+/// hand-counted LLVM array length — with the two backends' comparisons already
+/// differing in signedness.
+///
+/// So the relations are asserted rather than the values: raising `FRAME_LIMIT`
+/// moves the stack with it, and a stack sized by hand fails here.
+#[test]
+fn every_limit_has_one_source() {
+    use vyrn_frontend::interp::{ARRAY_LIT_LIMIT, CALL_DEPTH_LIMIT, FRAME_LIMIT, REGION_MAX};
+    assert_eq!(
+        vyrn_codegen::wasm::STACK_BYTES,
+        FRAME_LIMIT * CALL_DEPTH_LIMIT + 65_536,
+        "the shadow stack is the product plus one page for the uncounted runtime \
+         frames; a stack chosen independently is a depth limit that means a \
+         different number on wasm"
+    );
+    assert_eq!(
+        vyrn_codegen::wasm::DATA_BASE,
+        vyrn_codegen::wasm::STACK_BYTES,
+        "the data segments start where the stack ends, or a frame push walks into them"
+    );
+    assert_eq!(
+        ARRAY_LIT_LIMIT * 16,
+        FRAME_LIMIT as usize,
+        "the literal bound is HALF the frame bound over the width of an Int64 — the \
+         other half is for the array the literal becomes, in the same frame"
+    );
+
+    // The region bound, in all three engines' own output. A copy re-written by
+    // hand shows up as a different number in exactly one of these.
+    let src = "fn main() -> Int64 {\n    region {\n    }\n    return 0\n}\n";
+    let msg = format!("error: region nesting exceeds {REGION_MAX}");
+    let ir = text(&run("emit-ir", src, "regionsrc"));
+    assert!(ir.contains(&msg), "the textual backend's wording:\n{ir}");
+    assert!(
+        ir.contains(&format!("[{REGION_MAX} x ptr]"))
+            && ir.contains(&format!("icmp uge i64 %sp, {REGION_MAX}")),
+        "the textual backend's stack width and comparison:\n{ir}"
+    );
+    let (build, module) = build_wasm(src, "regionsrc");
+    assert!(build.status.success(), "{}", text(&build));
+    let bytes = std::fs::read(&module).unwrap();
+    assert!(
+        bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
+        "the direct backend interns the same wording"
+    );
+    // The interpreter's own copy, from the engine that defines the semantics.
+    let deep = format!(
+        "fn main() -> Int64 {{\n{}    return 0\n{}}}\n",
+        "    region {\n".repeat(REGION_MAX as usize + 1),
+        "    }\n".repeat(REGION_MAX as usize + 1)
+    );
+    let out = run("run", &deep, "regiondeep");
+    let got = text(&out);
+    assert!(got.contains(&msg), "the interpreter's wording:\n{got}");
+    assert_eq!(out.status.code(), Some(1));
 }
