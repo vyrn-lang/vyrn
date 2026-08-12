@@ -1,0 +1,23 @@
+/// RFC-0099 — a generator reports a diagnostic.
+///
+/// `table("./data/users.tbl")` runs at load time, emits an ordinary module, and
+/// WARNS about line 3 of the table definition:
+///
+///     data/users.tbl:3:7: warning: column `email` has no length limit; write `String(120)`
+///
+/// The warning rides a build that succeeded: the program below runs, prints, and
+/// exits 0 exactly as it would if the generator had nothing to say. `vyrn build
+/// --deny-warnings` is how a project refuses it instead.
+///
+/// Nothing in the compiler knows what a table or a length limit is. The rule
+/// lives in `lib/gen_table.vyrn`, in Vyrn, and any generator can write its own.
+///
+/// Inspect the synthesized module with:  vyrn emit-gen examples/gentable.vyrn
+import { table } from "./lib/gen_table"
+import { columnCount, columnNames } from table("./data/users.tbl")
+
+fn main() -> Int64 {
+    print(columnCount())
+    print(columnNames())
+    return 0
+}

@@ -1,0 +1,110 @@
+/// std/diag — a generator reports a diagnostic (RFC-0099).
+///
+/// A `gen fn` returns Vyrn source text. A line of that text may also be a
+/// REPORT: a severity, an anchor in a file the generator read, and a message.
+/// The loader lifts it out and the toolchain shows it like any other
+/// diagnostic — `vyrn check`, `vyrn build`, `vyrn run` and the editor alike.
+///
+/// ```vyrn
+/// import { report, Severity } from "std/diag"
+///
+/// export gen fn table(path: String) -> String {
+///     let mut out = ""
+///     out = out + report(Warning, path, 9, 3, "column `email` has no length limit")
+///     out = out + "export fn columnCount() -> Int64 { return 3 }\n"
+///     return out
+/// }
+/// ```
+///
+/// A `Warning` rides a build that SUCCEEDED — it changes no exit code and no
+/// byte of program output, unless the build asked for zero warnings with
+/// `--deny-warnings`. An `Error` fails the load, at the anchor, with the
+/// generator's own wording.
+///
+/// The anchor names a file the generator READ, at a 1-based line and column it
+/// computed while reading it — the same notation `//@origin` uses (RFC-0033),
+/// resolved against the module that imported the generator. That is the only
+/// anchor a generator can give correctly by construction; anchoring at a file it
+/// never opened is possible and is nobody's check but the generator's own.
+///
+/// The compiler knows nothing about what is being checked. Rules are ordinary
+/// Vyrn in ordinary libraries, and a third-party generator — including one that
+/// targets another language entirely — uses this surface exactly as std does.
+
+import { replace } from "std/strings"
+
+/// How serious a report is. `Warning`: this compiled, but. `Error`: this does
+/// not compile.
+export type Severity = | Warning | Error
+
+/// A report anchored in an input file, at a 1-based `line` and `col`.
+export fn report(
+    severity: Severity,
+    file: String,
+    line: Int64,
+    col: Int64,
+    message: String,
+) -> String {
+    let at = "\{file}:\{atLeastOne(line).toString()}:\{atLeastOne(col).toString()}"
+    return "//@diag \{word(severity)} \{at} \{oneLine(message)}\n"
+}
+
+/// A report with no position to give — shown at the generated line it sits on.
+/// Use it when the fault is in the generator's inputs as a whole (a missing
+/// file, a contradiction between two of them) rather than at one place in one.
+export fn reportHere(severity: Severity, message: String) -> String {
+    return "//@diag \{word(severity)} - \{oneLine(message)}\n"
+}
+
+fn word(severity: Severity) -> String {
+    return match severity {
+        Warning => "warning",
+        Error => "error",
+    }
+}
+
+/// A directive is one line. A newline inside a message would end the comment
+/// and hand the rest of the message to the parser as source, so it becomes a
+/// space here rather than a mystery there.
+fn oneLine(message: String) -> String {
+    return replace(replace(message, "\n", " "), "\r", " ")
+}
+
+/// Positions are 1-based, and a 0 the generator computed off by one would make
+/// the whole anchor unparseable — which loses the position silently. Clamping
+/// keeps the report on the right file at a defensible line.
+fn atLeastOne(n: Int64) -> Int64 {
+    if n < 1 {
+        return 1
+    }
+    return n
+}
+
+test "a report is one directive line" {
+    let line = report(Warning, "./users.tbl", 9, 3, "column `email` has no length limit")
+    assertEq(
+        line,
+        "//@diag warning ./users.tbl:9:3 column `email` has no length limit\n",
+    )
+}
+
+test "an error says error" {
+    assertEq(
+        report(Error, "./users.tbl", 14, 1, "column `id` is declared twice"),
+        "//@diag error ./users.tbl:14:1 column `id` is declared twice\n",
+    )
+}
+
+test "a message never breaks out of its line" {
+    assertEq(
+        reportHere(Warning, "two\nlines"),
+        "//@diag warning - two lines\n",
+    )
+}
+
+test "a zero position is clamped, not lost" {
+    assertEq(
+        report(Warning, "./a.tbl", 0, 0, "x"),
+        "//@diag warning ./a.tbl:1:1 x\n",
+    )
+}

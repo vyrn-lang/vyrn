@@ -136,6 +136,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
          the user's type",
         "`a` is a `Txn` and is never disposed",
     ),
+    (
+        "gentablefail.vyrn",
+        "a GENERATOR's own error, at the line and column of the input file it read \
+         (RFC-0099) — the rule is `lib/gen_table.vyrn`'s, in Vyrn, and the compiler \
+         knows nothing about tables",
+        "data/dupe.tbl:4:1: column `id` is declared twice",
+    ),
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser

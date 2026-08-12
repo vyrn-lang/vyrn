@@ -1,5 +1,5 @@
-//! Integration tests for the warning channel (RFC-0071 M2b), driven through the
-//! real `vyrn` binary.
+//! Integration tests for the generator diagnostic channel (RFC-0071 M2b, then
+//! RFC-0099), driven through the real `vyrn` binary.
 //!
 //! Until M2b nothing in the front end ever produced a `Severity::Warning`:
 //! `load()` returns `Result<Program, Vec<Diagnostic>>`, so there was no
@@ -18,6 +18,11 @@
 //! notices that were the channel's only real-world producer, and the channel is
 //! retained on its own merits — a compiler wants a way to say "this compiled,
 //! but". These tests are that capability's only proof.
+//!
+//! RFC-0099 gave the same directive a SEVERITY, so a generator may also report
+//! something that must stop the build, in its own words, at the input line that
+//! earned it. The error half is tested at the bottom of this file; the anchor
+//! and the severity are one mechanism, so they are proved in one place.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,6 +76,20 @@ export gen fn quiet(path: String) -> String {
 /// A generator with no source position to give writes `-` there.
 export gen fn unpositioned(path: String) -> String {
     return "//@warning - `fn old` is deprecated\n" +
+        "export fn greeting() -> String {\n    return \"hi\"\n}\n"
+}
+
+/// RFC-0099: the same directive with its severity spelled out.
+export gen fn advises(path: String) -> String {
+    return "//@diag warning " + path + ":2:1 `fn old` is deprecated — write `fn new` instead\n" +
+        "export fn greeting() -> String {\n    return \"hi\"\n}\n"
+}
+
+/// RFC-0099: a report the generator says must STOP the build. The module it
+/// emits is perfectly valid — the refusal is the generator's judgement about its
+/// input, not a fault the compiler could have found.
+export gen fn refuses(path: String) -> String {
+    return "//@diag error " + path + ":2:1 `fn old` has no replacement — remove the call\n" +
         "export fn greeting() -> String {\n    return \"hi\"\n}\n"
 }
 "#;
@@ -274,4 +293,57 @@ fn a_failing_load_reports_the_failure_and_not_the_advice() {
         !stderr.contains("warning:"),
         "no advice on a failure:\n{stderr}"
     );
+}
+
+// ---- the severity is the generator's to choose (RFC-0099) -----------------
+
+#[test]
+fn the_diag_directive_spells_the_warning_severity_out() {
+    // `//@warning X` and `//@diag warning X` are one mechanism, so the newer
+    // spelling must reach the user identically — including the anchor.
+    let r = run("advises", "advises", "run", &[], &[]);
+    assert_eq!(r.code, 0, "the load SUCCEEDED:\n{}", r.stderr);
+    assert_eq!(r.stdout, "hi\n");
+    assert!(
+        r.stderr
+            .contains("legacy.vyrn:2:1: warning: `fn old` is deprecated"),
+        "at the input file, as a warning:\n{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn an_error_severity_fails_the_load_in_the_generators_own_words() {
+    // The capability RFC-0099 adds: a generator refuses, and says why, instead
+    // of synthesizing an identifier that fails to resolve and hoping the
+    // parser's wording lands close enough.
+    let r = run("refuses", "refuses", "run", &[], &[]);
+    assert_ne!(r.code, 0, "the load FAILED:\n{}", r.stderr);
+    assert_eq!(r.stdout, "", "the program never ran");
+    assert!(
+        r.stderr
+            .contains("legacy.vyrn:2:1: `fn old` has no replacement — remove the call"),
+        "anchored at the input file, at the line and column the generator gave:\n{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("note: in generated code"),
+        "and the generated location survives as a note:\n{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn a_generator_error_needs_no_deny_warnings_to_bite() {
+    // The severity is the generator's decision, not the build's: every command
+    // that builds a program refuses it with no flag set.
+    for cmd in ["check", "run", "emit-ir"] {
+        let r = run(&format!("refuse_{cmd}"), "refuses", cmd, &[], &[]);
+        assert_ne!(r.code, 0, "`vyrn {cmd}` refused:\n{}", r.stderr);
+        assert!(
+            r.stderr.contains("`fn old` has no replacement"),
+            "`vyrn {cmd}` says why:\n{}",
+            r.stderr
+        );
+    }
 }

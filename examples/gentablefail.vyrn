@@ -1,0 +1,16 @@
+/// RFC-0099 — the other severity. Deliberately does NOT compile.
+///
+/// `data/dupe.tbl` declares `id` twice, which the `table` generator reports as
+/// an ERROR at the line and column of the second one:
+///
+///     data/dupe.tbl:4:1: error: column `id` is declared twice; a table has one column per name
+///
+/// The load fails, so the program never runs — the same outcome as any other
+/// compile error, worded by the generator rather than by the parser.
+import { table } from "./lib/gen_table"
+import { columnCount } from table("./data/dupe.tbl")
+
+fn main() -> Int64 {
+    print(columnCount())
+    return 0
+}
