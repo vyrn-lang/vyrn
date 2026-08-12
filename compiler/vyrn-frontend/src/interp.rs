@@ -1633,12 +1633,21 @@ where
     })
 }
 
+/// One thing a generation read: the resolved key (a file, or a directory with a
+/// trailing `/`) and what it held — `None` when the read or the listing FAILED.
+///
+/// A failure is an observation too. A generator that finds no `examples/`
+/// directory emits "0 examples", and that answer stops being right the moment
+/// the directory appears. Recording only successes made the entry unable to
+/// notice, and the build stayed green with the wrong output.
+pub type GenRead = (String, Option<Vec<u8>>);
+
 /// The result of running a generator (RFC-0021): the synthesized module source
-/// plus the input files the generator read (path + bytes), which the loader
-/// folds into the content-addressed cache key.
+/// plus the inputs the generation read, which the loader folds into the
+/// content-addressed cache entry.
 pub struct GenOutput {
     pub source: String,
-    pub reads: Vec<(String, Vec<u8>)>,
+    pub reads: Vec<GenRead>,
 }
 
 /// Everything a generation run needs from the loader (RFC-0021). Bundled so the
@@ -1716,7 +1725,7 @@ pub fn gen_module_interface_lit(
     opts: &crate::loader::LoadOptions,
     importer_dir: &str,
     allowed: &[String],
-    reads: &mut Vec<(String, Vec<u8>)>,
+    reads: &mut Vec<GenRead>,
     path: &str,
 ) -> Result<Expr, String> {
     // Resolve like a module specifier (`.vyrn` appended), scoped like readFile.
@@ -1729,7 +1738,7 @@ pub fn gen_module_interface_lit(
     let source = resolver
         .read(&resolved)
         .map_err(|e| format!("moduleInterface cannot read `{path}`: {e}"))?;
-    reads.push((resolved.clone(), source.clone().into_bytes()));
+    reads.push((resolved.clone(), Some(source.clone().into_bytes())));
 
     // Follow the reflected module's imports to build the reachable type closure
     // (RFC-0031): link it into one program so a type declared in an imported
@@ -1759,7 +1768,7 @@ pub fn gen_module_interface_lit(
         // The root module was already recorded above; skip the duplicate.
         if p != resolved {
             origin_src.push((Some(p.clone()), p.clone(), s.clone()));
-            reads.push((p, s.into_bytes()));
+            reads.push((p, Some(s.into_bytes())));
         }
     }
 
@@ -2089,7 +2098,7 @@ pub(crate) struct GenCtx<'a> {
     allowed: Vec<String>,
     /// Every input read, in order: `(resolved path, bytes)`. Folded into the
     /// content-addressed cache key so a changed input invalidates the cache.
-    reads: RefCell<Vec<(String, Vec<u8>)>>,
+    reads: RefCell<Vec<GenRead>>,
     /// Remaining step budget; each statement spends one. Zero ⇒ the generator is
     /// killed with the canonical "exceeded its step budget" trap.
     fuel: std::cell::Cell<u64>,
@@ -2169,7 +2178,7 @@ impl<'a> Interp<'a> {
             Ok(content) => {
                 g.reads
                     .borrow_mut()
-                    .push((resolved, content.clone().into_bytes()));
+                    .push((resolved, Some(content.clone().into_bytes())));
                 if content.as_bytes().contains(&0) {
                     return Ok(Val::Result(
                         false,
@@ -2183,10 +2192,15 @@ impl<'a> Interp<'a> {
                     Box::new(Val::Str(std::rc::Rc::new(content))),
                 ))
             }
-            Err(_) => Ok(Val::Result(
-                false,
-                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
-            )),
+            Err(_) => {
+                // A read that FAILED is recorded too: the generator branched on
+                // "not there", so the entry must miss once the file appears.
+                g.reads.borrow_mut().push((resolved, None));
+                Ok(Val::Result(
+                    false,
+                    Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
+                ))
+            }
         }
     }
 
@@ -2202,7 +2216,7 @@ impl<'a> Interp<'a> {
                 // contents change invalidates the cache.
                 g.reads
                     .borrow_mut()
-                    .push((format!("{resolved}/"), names.join("\n").into_bytes()));
+                    .push((format!("{resolved}/"), Some(names.join("\n").into_bytes())));
                 Ok(Val::Result(
                     true,
                     Box::new(Val::Array(std::rc::Rc::new(
@@ -2213,10 +2227,16 @@ impl<'a> Interp<'a> {
                     ))),
                 ))
             }
-            Err(_) => Ok(Val::Result(
-                false,
-                Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
-            )),
+            Err(_) => {
+                // A listing that FAILED is an input as much as one that worked:
+                // the directory being absent is what the generator saw, and a
+                // directory that appears must invalidate the entry.
+                g.reads.borrow_mut().push((format!("{resolved}/"), None));
+                Ok(Val::Result(
+                    false,
+                    Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
+                ))
+            }
         }
     }
 
