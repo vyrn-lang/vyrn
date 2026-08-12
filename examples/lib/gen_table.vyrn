@@ -1,0 +1,116 @@
+/// A generator that checks its own input file and says so (RFC-0099).
+///
+/// `table(path)` reads a tiny table definition — one `<name> <type>` per line —
+/// and emits an ordinary Vyrn module describing it. While reading, it applies
+/// two rules of its own and reports each one at the line and column in the
+/// `.tbl` file that broke it:
+///
+/// - a `String` column with no length limit is a WARNING (the table still
+///   builds; the schema is sloppy),
+/// - a column name used twice is an ERROR (there is no honest module to emit).
+///
+/// Nothing here is a compiler feature. The rules, their wording and their
+/// severities are this file's business, and a third-party generator — one that
+/// emits SQL, protobuf, a Makefile, anything — writes its own the same way. The
+/// compiler's whole contribution is `std/diag`: a severity, an anchor, a
+/// message.
+
+import { report, reportHere, Severity } from "std/diag"
+import { joinWith, substring, trim } from "std/strings"
+
+export gen fn table(path: String) -> String {
+    let text = match readFile(path) {
+        Ok(t) => t,
+        Err(e) => "",
+    }
+    if text == "" {
+        return reportHereFailed(path)
+    }
+
+    let mut names: Array<String> = []
+    let mut reports = ""
+    let mut lineNo = 0
+    // Split by hand: the byte offsets are what make a column number, and a
+    // column number is what makes a diagnostic worth reading.
+    let bytes = text.byteLength
+    let mut i = 0
+    while i <= bytes {
+        // One line: [start, i) where `i` is the newline or the end.
+        let start = i
+        while i < bytes && text[i] != '\n' {
+            i = i + 1
+        }
+        let mut lineEnd = i
+        if lineEnd > start && text[lineEnd - 1] == '\r' {
+            lineEnd = lineEnd - 1
+        }
+        lineNo = lineNo + 1
+
+        // `name` and `type` inside the line, with their 1-based columns.
+        let mut p = start
+        while p < lineEnd && text[p] == ' ' {
+            p = p + 1
+        }
+        let nameStart = p
+        while p < lineEnd && text[p] != ' ' {
+            p = p + 1
+        }
+        let nameEnd = p
+        while p < lineEnd && text[p] == ' ' {
+            p = p + 1
+        }
+        let typeStart = p
+        let name = substring(text, nameStart, nameEnd)
+        let ty = trim(substring(text, typeStart, lineEnd))
+
+        if name != "" && text[nameStart] != '#' {
+            let nameCol = nameStart - start + 1
+            let typeCol = typeStart - start + 1
+            if contains(names, name) {
+                reports = reports
+                    + report(
+                        Error,
+                        path,
+                        lineNo,
+                        nameCol,
+                        "column `\{name}` is declared twice; a table has one column per name",
+                    )
+            } else {
+                names.push(name.copy())
+            }
+            if ty == "String" {
+                reports = reports
+                    + report(
+                        Warning,
+                        path,
+                        lineNo,
+                        typeCol,
+                        "column `\{name}` has no length limit; write `String(120)`",
+                    )
+            }
+        }
+        i = i + 1
+    }
+
+    let quoted = "\"" + joinWith(names, ",") + "\""
+    return reports
+        + "/// Generated from \{path} by the `table` generator (RFC-0021).\n"
+        + "export fn columnCount() -> Int64 { return \{names.length.toString()} }\n"
+        + "export fn columnNames() -> String { return \{quoted} }\n"
+}
+
+/// The input as a whole is missing, so there is no line to point at.
+fn reportHereFailed(path: String) -> String {
+    return reportHere(Error, "cannot read the table definition `\{path}`")
+        + "export fn columnCount() -> Int64 { return 0 }\n"
+        + "export fn columnNames() -> String { return \"\" }\n"
+}
+
+fn contains(names: Array<String>, name: String) -> Bool {
+    for n in names {
+        if n == name {
+            return true
+        }
+    }
+    return false
+}
