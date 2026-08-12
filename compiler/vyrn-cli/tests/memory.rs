@@ -790,6 +790,23 @@ const ROWS: &[Row] = &[
               gives back the visited and the unvisited elements alike, each exactly once",
     },
     Row {
+        export: "matchTemporary",
+        census: "§14, one construct over",
+        today: Shape::Steady,
+        why: "a `match` whose scrutinee is a TEMPORARY owns what it holds, so the match \
+              releases it — Phase 10a's `if let` row at the third construct that walks one. \
+              An `if let` and a `for` each got a statement row and a `match` got none, \
+              because a match is an EXPRESSION and there was no statement to key on; the row \
+              is keyed by the match expression's own node address instead, and `movecheck` \
+              writes on it whenever an arm hands the payload out. A row nothing wrote on is a \
+              scrutinee the arms did not keep, and releasing it is what closes the row. \
+              `match makeResult(i) { Ok(s) => s.byteLength, .. }` leaked one `Option`'s heap \
+              per turn on both compiling backends and the identical `if let` did not — \
+              measured native at 3,000,000 turns, 141.7 MB before and 3.6 MB after. Inside a \
+              `region` the row is not written at all: the arena owns what the region \
+              allocated and the exit hands it back",
+    },
+    Row {
         export: "keptForever",
         census: "the detector itself",
         today: Shape::Leaks,
@@ -1165,6 +1182,19 @@ export extern fn injectedJson() {{
     let doc: Json = JObj(fs)
     let mirror = doc.copy()
     seen = seen + 1
+}}
+
+/// Census §14 at the third construct that walks a temporary. Nothing leaves the
+/// arms — both hand back a number — so this `match` is the scrutinee's last
+/// owner and releases it. Until the row existed nothing did, and the identical
+/// `optionString` one screen up did: a `match` is an expression and had no
+/// statement to key a row on.
+export extern fn matchTemporary() {{
+    let n = match maybe(tag()) {{
+        Some(s) => s.byteLength,
+        None => 0,
+    }}
+    seen = seen + Int64(n)
 }}
 
 export extern fn returnedString() -> String {{
@@ -1653,6 +1683,126 @@ fn an_empty_string_built_at_run_time_goes_back_natively() {
         empty_big <= empty_small + slack,
         "the empty-String peak grew with the turn count: {empty_small} bytes at 250,000 turns \
          and {empty_big} at 1,000,000. A steady state does not scale with the loop."
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Census §14 at a `match` — the textual backend's half of the `matchTemporary`
+// row above, for the reason every native row here exists: the two backends emit
+// their own release, and one of them being right proves nothing about the other.
+// ---------------------------------------------------------------------------
+
+/// A loop whose body is a statement-position `match` over a heap temporary, or
+/// the identical `if let` — the control, because the `if let` has had the row
+/// since Phase 10a and the `match` had none.
+#[cfg(windows)]
+fn match_loop_source(turns: usize, if_let: bool) -> String {
+    let body = if if_let {
+        "        if let Ok(s) = makeResult(i) {\n            c = c + Int64(s.byteLength)\n        }\n"
+    } else {
+        "        let d = match makeResult(i) {\n            Ok(s) => s.byteLength,\n            \
+         Err(e) => e.byteLength,\n        }\n        c = c + Int64(d)\n"
+    };
+    format!(
+        r#"fn makeResult(n: Int64) -> Result<String, String> {{
+    if n % 2 == 0 {{
+        return Ok("ok-\{{n}}")
+    }}
+    return Err("er-\{{n}}")
+}}
+
+fn main() -> Int64 {{
+    let mut i = 0
+    let mut c = 0
+    while i < {turns} {{
+{body}        i = i + 1
+    }}
+    print(c)
+    return 0
+}}
+"#
+    )
+}
+
+/// A `match` whose scrutinee is a temporary releases it (census §14, at the
+/// third construct that walks one).
+///
+/// `own` wrote a statement row for `Stmt::IfLet` and for `Stmt::ForIn` and none
+/// for `Expr::Match`, because a match is an EXPRESSION and there was no
+/// statement to key on. So the two spellings of one loop had two verdicts: the
+/// `if let` form freed its scrutinee every turn and the `match` form freed it
+/// never. The row is keyed by the match expression's own node address now, and
+/// both compiling backends release it where nothing else took it.
+///
+/// **A relation, not a number**, as every row in this file is — twice over. The
+/// peak at four times the turns must be the peak at N, and the `match` peak must
+/// be the `if let` peak, which is the comparison that names the defect. Measured
+/// at 3,000,000 turns before the fix: 141.7 MB for the `match` against 3.4 MB
+/// for the `if let`.
+///
+/// Windows-only and clang-only, the same posture as the rows above.
+#[cfg(windows)]
+#[test]
+fn a_match_over_a_temporary_gives_the_scrutinee_back_natively() {
+    if vyrn_codegen::toolchain::find_clang().is_none() {
+        eprintln!("NOTE: no clang — census §14's `match` release is unverified on this machine");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vyrn-matchloop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 250,000 and 1,000,000. The leak was one `Result<String, String>`'s heap
+    // per turn, so the smaller run already shows tens of megabytes.
+    let slack = 1 << 20;
+    let mut peaks = Vec::new();
+    for if_let in [false, true] {
+        for turns in [250_000usize, 1_000_000] {
+            let stem = format!("ml{turns}_{if_let}");
+            let src = dir.join(format!("{stem}.vyrn"));
+            std::fs::write(&src, match_loop_source(turns, if_let)).unwrap();
+            let exe = dir.join(format!("{stem}.exe"));
+            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+                .arg("build")
+                .arg(&src)
+                .arg("-o")
+                .arg(&exe)
+                .output()
+                .expect("vyrn build");
+            assert!(
+                build.status.success(),
+                "native build failed:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            let mut child = Command::new(&exe)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("run the match loop");
+            let status = child.wait().expect("wait");
+            assert!(status.success(), "the match loop exited {status}");
+            peaks.push(peak_bytes(&child));
+        }
+    }
+    let (m_small, m_big, i_small, i_big) = (peaks[0], peaks[1], peaks[2], peaks[3]);
+
+    assert!(
+        m_big <= m_small + slack,
+        "the `match` peak grew with the turn count: {m_small} bytes at 250,000 turns and \
+         {m_big} at 1,000,000. A `match` over a temporary is that value's last owner, so it \
+         releases it — a steady state does not scale with the loop."
+    );
+    assert!(
+        m_small <= i_small + slack,
+        "the `match` form peaked at {m_small} bytes where the identical `if let` form peaked \
+         at {i_small}. One loop, two spellings, and only one of them freed its scrutinee — \
+         census §14, which `own` answered for `Stmt::IfLet` and `Stmt::ForIn` and not for \
+         `Expr::Match`."
+    );
+    assert!(
+        i_big <= i_small + slack,
+        "the `if let` control itself grew: {i_small} bytes at 250,000 turns and {i_big} at \
+         1,000,000. The control is what makes the comparison above mean anything."
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

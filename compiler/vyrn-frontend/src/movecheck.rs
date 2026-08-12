@@ -1177,9 +1177,16 @@ impl MoveCheck<'_> {
     /// Two statements ask for one: `if let PAT = f()` (Phase 10a) and
     /// `for x in f()` (RFC-0092 M5). The key is the statement address, which is
     /// the key `own.rs` reads.
+    ///
+    /// A `match` asks too, and it is an EXPRESSION — so it keys on its own node
+    /// address through [`MoveCheck::note_temporary_at`]. One AST, one arena: a
+    /// `Stmt` address and an `Expr` address cannot collide.
     fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize {
+        self.note_temporary_at(let_id(s), value)
+    }
+
+    fn note_temporary_at(&self, key: usize, value: &Expr) -> usize {
         let Some(sink) = &self.lets else { return 0 };
-        let key = let_id(s);
         sink.borrow_mut().insert(
             key,
             LetOwnership {
@@ -2151,32 +2158,78 @@ impl MoveCheck<'_> {
     /// were released, and the generator running as wasm then built its stub names
     /// out of reused memory. Neither name may be released, exactly as for the
     /// bare `let d = c` alias.
-    fn note_arm_aliases(&self, e: &Expr, line: usize) {
+    /// A `match` is not walked here. Its arms bind PAYLOAD names, and this walk
+    /// runs with those names out of scope — `Some(v) => v` would ask what `v`
+    /// meant in the enclosing block, which is either nothing or the wrong
+    /// binding. [`MoveCheck::expr`]'s `Expr::Match` arm asks the same question
+    /// one scope in, where the binders are bound and keyed to the scrutinee's
+    /// row, and that is the only place it can be asked correctly.
+    fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String]) {
         if self.lets.is_none() {
             return;
         }
-        let mut arms: Vec<&Expr> = Vec::new();
-        match e {
-            Expr::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                arms.push(then_branch);
-                if let Some(b) = else_branch {
-                    arms.push(b);
-                }
-            }
-            Expr::Match { arms: a, .. } => arms.extend(a.iter().map(|x| &x.body)),
-            _ => return,
+        let Expr::IfExpr {
+            then_branch,
+            else_branch,
+            ..
+        } = e
+        else {
+            return;
+        };
+        self.note_arm_value(then_branch, line, binders);
+        if let Some(b) = else_branch {
+            self.note_arm_value(b, line, binders);
         }
-        for a in arms {
-            self.note_arm_aliases(a, line);
-            if let Some((root, path)) = place_path(a) {
-                if root == path {
-                    self.took(&root, Gone::Aliased { line });
-                }
-            }
+    }
+
+    /// One arm's VALUE, and what naming a place in it costs.
+    ///
+    /// A whole place yielded by an arm is the alias above: two names, one
+    /// buffer, and only the name the expression is bound to may release it.
+    ///
+    /// A place rooted at one of this arm's own `binders` is the same fact about
+    /// the SCRUTINEE, because a binder is keyed to the scrutinee's row — so
+    /// `Some(v) => v` and `Ok(d) => d.title` both say the scrutinee gave its
+    /// payload up, and nothing may release the scrutinee afterwards. The path
+    /// does not have to be the whole root for a binder, and it does for anything
+    /// else: `d.title` out of an outer record leaves the record's own release
+    /// alone, which is what a projection means.
+    fn note_arm_value(&self, a: &Expr, line: usize, binders: &[String]) {
+        self.note_arm_aliases(a, line, binders);
+        let Some((root, path)) = place_path(a).or_else(|| element_path(a)) else {
+            return;
+        };
+        if !self.arm_carries_heap(a) {
+            return;
+        }
+        if root == path || binders.iter().any(|b| *b == root) {
+            self.took(&root, Gone::Aliased { line });
+        }
+    }
+
+    /// Whether an arm's value can carry HEAP out of the arm.
+    ///
+    /// `Ok(s) => s.byteLength` names a place and hands out a number, and reading
+    /// that as a handover left the scrutinee unreleased — the leak this rule
+    /// exists to close, closed by the rule itself.
+    ///
+    /// The type answers wherever it can be named. Where it cannot, a field read
+    /// whose BASE is not a record is a builtin scalar projection (`byteLength`,
+    /// `length`, `charCount`) and carries nothing; everything else is unknown
+    /// and answers yes, because a leak is the direction this analysis fails in.
+    fn arm_carries_heap(&self, a: &Expr) -> bool {
+        if let Some(t) = self.type_of(a) {
+            return self.decl.owns_heap(&t);
+        }
+        match a {
+            Expr::Field { expr, .. } => match self.type_of(expr) {
+                Some(t) => matches!(
+                    crate::types::resolve(&t, self.decl.decls()),
+                    Type::Record(_)
+                ),
+                None => true,
+            },
+            _ => true,
         }
     }
 
@@ -2202,6 +2255,29 @@ impl MoveCheck<'_> {
     fn lends(&self) {
         if let Some(sink) = &self.lending {
             sink.borrow_mut().insert(self.cur_fn.borrow().clone());
+        }
+    }
+
+    /// A borrow WRAPPED into a local — the lend `check_return` cannot see.
+    ///
+    /// [`MoveCheck::lends_through_a_wrapper`] reads the returned expression, and
+    /// `std/html`'s `attrKey` does not return one: it writes `found = match a {
+    /// Key(k) => Some(k), .. }` in a loop and returns the local. `found` is a
+    /// plain name at the `return`, and `borrow_of` answers `None` for it, so
+    /// nothing recorded that this function hands back an element of its
+    /// argument's array — and the caller then released one. Reachable without a
+    /// `match` scrutinee anywhere: `let got = attrKey(xs)` frees the element
+    /// natively on `310753c`.
+    ///
+    /// Recording, never refusing, exactly as the wrapper reading is: refusing
+    /// `found = match a { Key(k) => Some(k) }` would refuse most of `std/html`,
+    /// and a function marked a lender only ever STOPS a release.
+    fn note_wrapped_lend(&self, value: &Expr) {
+        if self.lending.is_some()
+            && self.decl.releases(&self.ret.borrow())
+            && self.lends_through_a_wrapper(value).is_some()
+        {
+            self.lends();
         }
     }
 
@@ -2506,6 +2582,7 @@ impl MoveCheck<'_> {
                     hoisted,
                     consumed,
                 )?;
+                self.note_wrapped_lend(value);
                 // Phase 4c: the row this binding is reclaimed by. Written BEFORE
                 // the binding enters scope, so `let s = s + "x"` records the new
                 // `s` and the move of the old one lands on the old row.
@@ -2565,8 +2642,19 @@ impl MoveCheck<'_> {
                 // `d`. Without this, `let t = d.title` was refused at the next
                 // store and `let mut t = "" ; t = d.title` was not — RFC-0092's
                 // two-spellings-two-verdicts defect, one statement over.
+                self.note_wrapped_lend(value);
                 if !global {
                     let b = self.borrow_from(value);
+                    // And it must carry the RECLAMATION answer too, which is the
+                    // other half of the same sentence. `let t = d.title` gets
+                    // `names_a_place` and is therefore never released; `t =
+                    // d.title` got nothing, so the block freed a buffer the
+                    // record still holds and releases again — `out = v` inside
+                    // `if let Some(v) = o` is the same store one keyword over.
+                    // One question, asked at both spellings.
+                    if let Some(why) = self.names_a_place(value) {
+                        self.took(name, Gone::Borrowed(why));
+                    }
                     self.borrows.borrow_mut().rebind(name, b);
                 }
                 revive(consumed, name); // reassignment revives it
@@ -3286,7 +3374,23 @@ impl MoveCheck<'_> {
                 line,
             } => {
                 self.expr(scrutinee, consumed, scope)?;
-                self.note_arm_aliases(e, *line);
+                // The scrutinee's row, and the same two cases `if let` has since
+                // Phase 10a — with the same guard, for the same reason.
+                //
+                // A PLACE keeps its own row: an arm that hands the payload out
+                // gives that place up, and `note_arm_value` below writes it
+                // there. A TEMPORARY has no name and therefore had no row at
+                // all, so nothing released `match makeResult(i) { .. }` and a
+                // statement-position match leaked its scrutinee every turn. The
+                // row is minted here, keyed by the MATCH EXPRESSION's address —
+                // a match is an expression and has no statement to key on — and
+                // `own` releases exactly the rows nothing wrote on.
+                let key = match self.place_key(scrutinee) {
+                    0 if self.names_a_place(scrutinee).is_none() => {
+                        self.note_temporary_at(e as *const Expr as usize, scrutinee)
+                    }
+                    k => k,
+                };
                 let base = consumed.clone();
                 let mut merged: Option<Consumed> = None;
                 for arm in arms {
@@ -3294,14 +3398,20 @@ impl MoveCheck<'_> {
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
-                    let key = self.place_key(scrutinee);
-                    for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
-                        scope.last_mut().unwrap().insert(b.to_string());
+                    let binders: Vec<String> = pattern_bindings(&arm.pattern)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect();
+                    for (i, b) in binders.iter().enumerate() {
+                        scope.last_mut().unwrap().insert(b.clone());
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                         if key != 0 {
                             self.nodes.borrow_mut().bind(b, key);
                         }
                     }
+                    // Asked HERE, one scope in, because the question is about the
+                    // binders and this is where they are bound.
+                    self.note_arm_value(&arm.body, *line, &binders);
                     let r = self.expr(&arm.body, &mut c, scope);
                     self.exit();
                     r?;
@@ -3330,7 +3440,7 @@ impl MoveCheck<'_> {
                 line,
             } => {
                 self.expr(cond, consumed, scope)?;
-                self.note_arm_aliases(e, *line);
+                self.note_arm_aliases(e, *line, &[]);
                 let base = consumed.clone();
                 let mut then_c = base.clone();
                 self.expr(then_branch, &mut then_c, scope)?;
