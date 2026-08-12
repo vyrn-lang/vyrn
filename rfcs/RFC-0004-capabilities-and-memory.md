@@ -649,3 +649,111 @@ either profile; they are not what the number is bounded by.
 `examples/recdepth.vyrn` is the parity citizen: it prints one answer from just
 inside the budget and then steps one past it, so the harness compares stdout,
 stderr and exit code across all three engines byte for byte.
+
+---
+
+## Addendum (implemented) — a frame is bounded, and the shadow stack is the product
+
+The addendum above gave three engines one number. It did not give them one
+OUTCOME, because a stack is bytes and the limit counts calls.
+
+The direct wasm backend's whole shadow stack was 65,536 bytes — one page, which
+is clang's own default and was never argued — and nothing compared a function's
+frame against it. Two consequences, both measured:
+
+- A function with a 56 KB frame, which is what a 7,000-element array literal
+  needs, compiled in 0.1 s into a module whose first statement trapped
+  `out of bounds memory access` at address `0xffe89600`. No build error, no
+  position, nothing to act on.
+- A recursion with one 128-byte record local ran to the shared limit under the
+  interpreter and the native binary and stopped with
+  `error: call depth exceeds 1000`. On wasm it died near depth 256 with
+  `memory fault at wasm address 0xffffff00`, exit 3. The engine that had just
+  adopted the limit stopped 700 frames early without it.
+
+**A frame may claim 8,192 bytes, and the shadow stack holds one of those for
+every call the depth limit allows.** The product is the contract, and it is why
+the two numbers are one number: no accepted frame is bigger than the limit, so at
+every depth the counter admits, the stack pointer is still above 0 — the counter
+is what stops a deep recursion, on every engine, with the same words. The stack
+carries one page beyond the product for the runtime helpers, which are not Vyrn
+calls and are not counted.
+
+A body past the limit is refused where it is lowered, naming the function and the
+line it is declared on:
+
+```
+error: `wide` needs 16384 bytes of stack for one call, past the frame limit of 8192
+  note: `wide` is declared on line 19, and the shadow stack holds 8192 bytes for each of the 1000 calls a program may have in flight
+  note: the size is the sum of this function's aggregate locals; a big one belongs on the heap — an `Array<T>` rather than a fixed `Array<T, N>` or a record of records
+```
+
+### Why 8,192
+
+From both ends, like every other limit here. The largest frame the corpus builds
+is 5,552 bytes (`createForm`, `examples/shelf/boot.vyrn`), so the limit is 1.5x
+what real code reaches. At the other end the stack it implies is 8,257,536 bytes
+— 126 wasm pages, reserved by every module and touched only as deep as that
+module recurses, so the price is address space rather than memory. The RFC-0076
+shim's base moved from 16 MB to 32 MB to leave the statics the same ~8 MB of room
+they had below it.
+
+One cost is real and is stated rather than hidden. A single 56 KB frame used to
+RUN on wasm when nothing called it deeply, and it is refused now. That is the
+price of the product being a proof: a frame that big cannot be given to every
+call the depth limit allows, and an engine that discovers this at run time
+discovers it as a wild address.
+
+There is no run-time check in the prologue, though the underflow trap stays as a
+net. A check was considered and would be dead code in every accepted module,
+because nothing this backend accepts can reach the wrap.
+
+---
+
+## Addendum (implemented) — an array literal has 512 elements
+
+`vyrn check` said `ok` in 0.1 s about a program that neither compiled backend
+could build. 100,000 constant elements lower to 100,000 chained `insertvalue`
+instructions over an aggregate of the full width; clang's `-O2` pipeline
+allocated until it died — `LLVM ERROR: out of memory`, after 2 m 53 s — while the
+wasm module built in 0.1 s and trapped on its first statement. The interpreter
+printed the right answer, which is the whole difficulty: one engine ran it and no
+compiled one could.
+
+**An array literal may have 512 elements.** It is refused in the CHECKER rather
+than in either backend, because the cost is real in both and only the front end
+can say so before either starts. So `vyrn check`, `vyrn run`, `vyrn emit-ir` and
+both builds refuse the same program, with a position:
+
+```
+prog.vyrn:2:0: this array literal has 100000 elements, past the limit of 512
+  note: a literal is lowered element by element into one call frame, so its length is a compile-time cost on both backends
+  note: a table this long belongs in a file the program reads, not in the program
+```
+
+512 is half the frame limit over the eight bytes of an `Int64`. Half, because the
+slot is not all a literal costs — the array it becomes needs its own slot in the
+same frame — so a bound of a whole frame would let the checker admit a literal
+the backend then refuses. Wider elements, a literal of records, are caught by the
+frame bound itself, which knows the real stride. The corpus's largest literal has
+24 elements, so this is 21x anything written so far.
+
+The LOWERING is not fixed here, and this is the bound rather than the cure. A
+constant table of a scalar type belongs in a data segment plus a copy — which is
+what the string pool a few hundred lines away already does — and neither backend
+does that for arrays yet. Until one does, 512 is where the cost stops being paid.
+
+---
+
+## Addendum (implemented) — one source per limit
+
+Every number above is now read from one place and derived where it is used, which
+is the property that outlives any single fix. `CALL_DEPTH_LIMIT` was already
+shared. The others were not: the shadow stack's size was unrelated to the depth
+limit, and the region-nesting bound of §4 was written eight times across three
+engines — three of those inside string literals, one a hand-counted LLVM array
+length — with the two backends' comparisons already differing in signedness, one
+signed and one unsigned. Both backends now build their region runtime from the
+constant, including the trap's wording and the width of its stack, and
+`compiler/vyrn-cli/tests/limits.rs` asserts the derivations and reads each
+engine's own output back.

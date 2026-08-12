@@ -41,6 +41,62 @@ use std::collections::HashMap;
 /// (RFC-0037) and so cannot recurse without passing through a named function.
 pub const CALL_DEPTH_LIMIT: u32 = 1_000;
 
+/// The most bytes one call frame may claim on the wasm backend's shadow stack.
+///
+/// A backend's stack is finite, and until this number existed nothing compared a
+/// frame against it. The wasm backend's whole stack was one 64 KB page, so a
+/// function with a 256-byte frame ran out of stack at depth 256 while
+/// [`CALL_DEPTH_LIMIT`] said 1,000 and the other two engines reached it — the
+/// program died there with `out of bounds memory access` at a wild address, and
+/// stopped with the shared diagnostic everywhere else.
+///
+/// Bounding the frame is what makes the depth one number again.
+/// `vyrn_codegen::wasm::STACK_BYTES` holds [`CALL_DEPTH_LIMIT`] of these, so at
+/// every depth the counter admits the stack pointer is still above 0: the
+/// counter is what stops the program, on every engine, with the same words. A
+/// frame past this is refused when it is built, naming the function and its
+/// line, because the backend that lays a frame out is the one that knows its
+/// size.
+///
+/// 8 KB is 1.5x the largest frame the corpus builds (5,552 bytes, `createForm`
+/// in `examples/shelf/boot.vyrn`), and the stack it implies costs 8,257,536
+/// bytes of linear memory — 126 wasm pages a module reserves and touches only as
+/// deep as it recurses.
+pub const FRAME_LIMIT: u32 = 8 * 1024;
+
+/// The most elements one array literal may have.
+///
+/// Half of [`FRAME_LIMIT`], over the eight bytes of an `Int64`: a literal is
+/// built in a frame slot, and the widest element type an ordinary literal has is
+/// what turns one bound into the other. HALF, because the slot is not all a
+/// literal costs — the array it becomes needs its own slot in the same frame, so
+/// a bound of a whole frame would let the checker admit a literal the backend
+/// then refuses. Wider elements — a literal of records — are caught by the frame
+/// bound itself, which knows the real stride.
+///
+/// The checker holds this rather than either backend, because the other half of
+/// the defect is one no frame can express: the textual backend lowers a literal
+/// to one `insertvalue` per element over an aggregate of the full width, so
+/// 100,000 elements ran clang for 2 m 53 s and died `LLVM ERROR: out of memory`,
+/// after `vyrn check` had said `ok` in 0.1 s. Refusing in the checker is what
+/// makes `check` predict the build, and makes all three engines refuse the same
+/// literal.
+///
+/// The corpus's largest literal has 24 elements, so this is 21x anything written
+/// so far. A table longer than it belongs in a data segment rather than in
+/// instructions, which is a lowering neither backend has yet.
+pub const ARRAY_LIT_LIMIT: usize = FRAME_LIMIT as usize / 16;
+
+/// How many `region` scopes may be open at once, in EVERY engine.
+///
+/// The two backends each keep a fixed stack of region records, so the number is
+/// the length of an array in one and a reserved block in the other, and it is in
+/// the trap's wording as well. It was written eight times across three engines
+/// before this constant, three of those inside string literals; the backends'
+/// comparisons had already drifted apart in signedness. One number, read by
+/// everything that has an opinion about it.
+pub const REGION_MAX: u32 = 64;
+
 /// The Rust stack every thread that runs the interpreter reserves.
 ///
 /// Reserving is cheap — the pages are virtual until a frame touches them — and
@@ -3616,11 +3672,11 @@ impl<'a> Interp<'a> {
             // reclaims memory. Deterministic freeing is observable only in the
             // native backend; the two agree on output and exit code.
             Stmt::Region { body, .. } => {
-                // Match the native arena runtime's fixed 64-slot region stack:
-                // entering a 65th nested region traps there, so trap here with
-                // the same message (interp == native, incl. traps).
-                if self.region_depth.get() >= 64 {
-                    return Err("region nesting exceeds 64".into());
+                // Match the native arena runtime's fixed region stack: entering
+                // one past [`REGION_MAX`] traps there, so trap here with the same
+                // message (interp == native, incl. traps).
+                if self.region_depth.get() >= REGION_MAX as usize {
+                    return Err(format!("region nesting exceeds {REGION_MAX}").into());
                 }
                 self.region_depth.set(self.region_depth.get() + 1);
                 let r = self.block(body, scope);

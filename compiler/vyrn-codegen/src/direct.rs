@@ -1453,6 +1453,9 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<Fram
                 .ins(&Instruction::I32Const(owns as i32))
                 .ins(&Instruction::I32Store(word()));
         }
+        // One frame holds every initializer's temporaries, so the bound is
+        // checked per global: the one that crossed it is the one to name.
+        frame_fits(&b, &g.name, g.line)?;
     }
     Ok(b)
 }
@@ -1640,7 +1643,44 @@ fn lower_body(
         call_depth_bump(&mut b, cx, -1);
     }
 
+    frame_fits(&b, &f.name, f.line)?;
     Ok(b)
+}
+
+/// Refuse a frame this backend's stack cannot hold at every depth the call
+/// counter admits.
+///
+/// The comparison the backend never made, against two numbers it already owned.
+/// A body whose locals came to more than the whole stack used to compile in a
+/// tenth of a second into a module that trapped `out of bounds memory access` at
+/// a wild address on its first statement. A body far under it was no safer: a
+/// 256-byte frame reached the same trap at depth 256, while the other two
+/// engines ran the same program to 1,000 and stopped with
+/// `error: call depth exceeds 1000`. Both are one missing comparison, so both
+/// are this one — against [`vyrn_frontend::interp::FRAME_LIMIT`], which is the
+/// stack divided by the depth every engine allows.
+///
+/// Naming the function and its line is the point: the size is the sum of its
+/// locals, and the author is the one who can make them smaller.
+///
+/// The wording follows [`crate::check_inst_depth`], the other refusal a backend
+/// makes about a program the checker let through — the message names what is too
+/// big, and a note names the declaration.
+fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
+    let limit = vyrn_frontend::interp::FRAME_LIMIT;
+    if b.bytes() <= limit {
+        return Ok(());
+    }
+    Err(format!(
+        "`{name}` needs {} bytes of stack for one call, {} of {limit}\n  \
+         note: `{name}` is declared on line {line}, and the shadow stack holds {limit} bytes \
+         for each of the {} calls a program may have in flight\n  \
+         note: the size is the sum of this function's aggregate locals; a big one belongs on \
+         the heap — an `Array<T>` rather than a fixed `Array<T, N>` or a record of records",
+        b.bytes(),
+        crate::FRAME_LIMIT_NEEDLE,
+        vyrn_frontend::interp::CALL_DEPTH_LIMIT,
+    ))
 }
 
 /// Take one call frame, or trap. Inline for the reason `region_enter` is: it is
@@ -2618,7 +2658,7 @@ impl Fn_<'_> {
         let (sp, msg, trap) = (self.cx.rt.region_sp, self.cx.rt.msg_region, self.cx.rt.trap);
         b.ins(&Instruction::I32Const(sp as i32))
             .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(64))
+            .ins(&Instruction::I32Const(REGION_MAX as i32))
             .ins(&Instruction::I32GeU)
             .ins(&Instruction::If(BlockType::Empty))
             .ins(&Instruction::I32Const(msg as i32))
@@ -12308,10 +12348,14 @@ impl Rt {
 /// zero is an ordinary empty buffer, and freeing it is the whole of C2.3.
 const SHDR: u32 = 8;
 
-/// How many `region` scopes may be open at once. The textual prelude's fixed
-/// stack and the interpreter's own limit are the same number, so all three
-/// engines refuse the same nesting with the same words.
-const REGION_MAX: u32 = 64;
+/// How many `region` scopes may be open at once — the language's number, not
+/// this backend's ([`vyrn_frontend::interp::REGION_MAX`]).
+///
+/// It was declared here as well, with the same value, and then not used by the
+/// comparison a few thousand lines up, which spelled `64` again. Re-exported
+/// rather than deleted because the reservations below read better with a short
+/// name.
+use vyrn_frontend::interp::REGION_MAX;
 
 /// Replace a `String` pointer on the stack with the address of its header.
 /// [`word`] then reads `len` and [`cap_at`] reads `cap`.
@@ -12375,7 +12419,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // RFC-0004 §4. The 64 is the LLVM prelude's fixed region stack, and the
     // interpreter traps at the same depth with the same words precisely so the
     // three engines agree about it.
-    rt.msg_region = rt.intern(m, "error: region nesting exceeds 64\n");
+    rt.msg_region = rt.intern(m, &format!("error: region nesting exceeds {REGION_MAX}\n"));
     rt.region_sp = m.reserve(4, 4);
     // Audit A5.3. Interned from the constant, so the number in the message and
     // the number the prologue compares against cannot drift apart.
