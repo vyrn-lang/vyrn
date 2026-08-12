@@ -29,7 +29,7 @@
 //!    generated span and answer hover / completion / go-to-definition against
 //!    the synthesized module's existing analysis.
 
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, Severity};
 use std::collections::HashMap;
 
 /// A resolved origin position an origin directive points at.
@@ -242,56 +242,85 @@ impl OriginMaps {
     }
 }
 
-/// The `//@warning` directives in one synthesized module's source, as WARNING
-/// diagnostics (RFC-0071 M2b).
+/// The `//@diag` directives in one synthesized module's source, as diagnostics
+/// at the severity each one names (RFC-0099).
 ///
 /// ```text
-/// //@warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated — write `fn new` instead
+/// //@diag warning ./schema/users.tbl:13:1 column `email` has no length limit
+/// //@diag error   ./schema/users.tbl:14:1 column `id` is declared twice
 /// ```
 ///
-/// This is a generator's ONLY way to say something non-fatal. Its other
-/// reporting convention is an identifier line that fails to parse, which is
-/// fatal by construction; so a notice that must not stop the build rides the
-/// generated text as a comment, and the loader lifts it here — inert to lexing,
-/// hashing, `fmt` and `emit-gen` exactly like `//@origin`.
+/// This is a generator's whole reporting surface. Its other convention is an
+/// identifier line that fails to parse — fatal by construction, and worded by
+/// the parser rather than by the generator — so anything a generator actually
+/// wants to SAY rides the generated text as a comment, and the loader lifts it
+/// here: inert to lexing, hashing, `fmt` and `emit-gen` exactly like `//@origin`.
 ///
-/// The directive was `//@deprecated` when M2b built it, because RFC-0071's
-/// deprecation window was the one thing that needed it. M2c closed that window
-/// and deleted every emitter; the mechanism is spelled generically now, since
-/// nothing about it was ever specific to deprecation.
+/// Carrying the report in the OUTPUT TEXT rather than through a side channel is
+/// the load-bearing choice. Generated output is content-addressed and cached
+/// (RFC-0021), and it is the thing the cross-engine gate compares byte for byte
+/// (RFC-0076). A diagnostic reported by a call into the interpreter would
+/// disappear on a cache hit and would need its own equality gate; a diagnostic
+/// that IS output bytes inherits both properties and can lose neither.
 ///
-/// The leading field is an origin position in the SAME notation `//@origin`
-/// uses, parsed by the same [`parse_origin_body`], so a warning points at the
-/// line the user wrote rather than at generated text they never see. A generator
-/// that has no position to give writes `-` there, and the notice is reported at
-/// the generated location instead — the never-lose rule the origin table already
-/// follows. A first field that is neither `-` nor a parseable position is kept as
-/// part of the message, because dropping text a user might have written is worse
-/// than a slightly odd first word.
+/// `//@warning <anchor> <message>` is the RFC-0071 M2b spelling of
+/// `//@diag warning <anchor> <message>`, kept because it costs one match arm.
+///
+/// The anchor is an origin position in the SAME notation `//@origin` uses,
+/// parsed by the same [`parse_origin_body`], so a report points at the line the
+/// user wrote rather than at generated text they never see. A generator with no
+/// position to give writes `-`, and the report lands at the generated location
+/// instead — the never-lose rule the origin table already follows. An anchor
+/// field that is neither `-` nor a parseable position is kept as part of the
+/// message, because dropping text a user might have written is worse than a
+/// slightly odd first word. An unrecognized SEVERITY word is reported as a
+/// warning with the whole line as its message: a future severity must not fail a
+/// build on an older compiler, and must not vanish either.
 pub const NO_POSITION: &str = "-";
 
-pub fn warnings(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagnostic> {
+pub fn diagnostics(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (i, raw) in source.lines().enumerate() {
-        let Some(rest) = raw.trim_start().strip_prefix("//@warning") else {
+        let trimmed = raw.trim_start();
+        let (severity, rest, unknown) = if let Some(body) = trimmed.strip_prefix("//@diag") {
+            let body = body.trim();
+            match body.split_once(char::is_whitespace) {
+                Some(("error", tail)) => (Severity::Error, tail.trim(), None),
+                Some(("warning", tail)) => (Severity::Warning, tail.trim(), None),
+                // Neither severity word: the fields are shifted, so the anchor is
+                // not parsed and the whole line is the message.
+                Some((word, _)) => (Severity::Warning, body, Some(word.to_string())),
+                None if body.is_empty() => continue,
+                None => (Severity::Warning, body, Some(body.to_string())),
+            }
+        } else if let Some(body) = trimmed.strip_prefix("//@warning") {
+            (Severity::Warning, body.trim(), None)
+        } else {
             continue;
         };
-        let rest = rest.trim();
-        let (pos, message) = match rest.split_once(char::is_whitespace) {
-            // `-` is the explicit "no position" marker. It is consumed rather
-            // than kept, or every unpositioned warning would read `- \`fn old\`
-            // is deprecated`.
-            Some((NO_POSITION, tail)) => (None, tail.trim()),
-            Some((head, tail)) => match parse_origin_body(head, importer_dir) {
-                Ok(origin) => (Some(origin), tail.trim()),
-                Err(_) => (None, rest),
+        let (pos, message) = match unknown {
+            Some(_) => (None, rest),
+            None => match rest.split_once(char::is_whitespace) {
+                // `-` is the explicit "no position" marker. It is consumed rather
+                // than kept, or every unpositioned report would read `- \`fn old\`
+                // is deprecated`.
+                Some((NO_POSITION, tail)) => (None, tail.trim()),
+                Some((head, tail)) => match parse_origin_body(head, importer_dir) {
+                    Ok(origin) => (Some(origin), tail.trim()),
+                    Err(_) => (None, rest),
+                },
+                None => (None, rest),
             },
-            None => (None, rest),
         };
         if message.is_empty() {
             continue;
         }
-        let mut d = Diagnostic::warning(i + 1, 0, "generated.warning", message.to_string());
+        let stage = match severity {
+            Severity::Error => "generated.error",
+            Severity::Warning => "generated.warning",
+        };
+        let mut d = Diagnostic::error(i + 1, 0, stage, message.to_string());
+        d.severity = severity;
         match pos {
             Some(origin) => {
                 d.file = Some(origin.file);
@@ -304,6 +333,11 @@ pub fn warnings(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagnosti
                 ));
             }
             None => d.file = Some(banner.to_string()),
+        }
+        if let Some(word) = unknown {
+            d.note = Some(format!(
+                "unrecognized severity `{word}` in a `//@diag` directive; reported as a warning"
+            ));
         }
         out.push(d);
     }
@@ -486,14 +520,14 @@ mod tests {
         assert_eq!(regions[0].origin.line, 5);
     }
 
-    // ---- `//@warning` -> warnings (RFC-0071 M2b) --------------------------
+    // ---- `//@diag` / `//@warning` -> diagnostics (RFC-0071 M2b, RFC-0099) --
 
     #[test]
     fn a_positioned_warning_points_at_the_input_file() {
         let src = "//@warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated
 fn x() {}
 ";
-        let ds = warnings("b", src, "app");
+        let ds = diagnostics("b", src, "app");
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].severity, crate::diagnostics::Severity::Warning);
         assert_eq!(ds[0].file.as_deref(), Some("app/routes/p/[id].vyx"));
@@ -515,7 +549,7 @@ fn x() {}
         // reach the user's screen as the first word of the message.
         let src = "//@warning - `fn old` is deprecated
 ";
-        let ds = warnings("b", src, "app");
+        let ds = diagnostics("b", src, "app");
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].message, "`fn old` is deprecated");
         assert_eq!(ds[0].file.as_deref(), Some("b")); // reported where it was generated
@@ -527,7 +561,7 @@ fn x() {}
         // Never lose the notice: an unparseable first field is text, not a bug.
         let src = "//@warning whoops something is off
 ";
-        let ds = warnings("b", src, "");
+        let ds = diagnostics("b", src, "");
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].message, "whoops something is off");
         assert_eq!(ds[0].file.as_deref(), Some("b"));
@@ -535,13 +569,59 @@ fn x() {}
 
     #[test]
     fn an_empty_directive_says_nothing() {
-        assert!(warnings(
+        assert!(diagnostics(
             "b",
             "//@warning
-//@warning   
+//@warning
+//@diag
+//@diag
 ",
             ""
         )
         .is_empty());
+    }
+
+    #[test]
+    fn the_severity_is_the_generators_to_choose() {
+        let src = "//@diag error ./schema/users.tbl:14:3 column `id` is declared twice
+//@diag warning ./schema/users.tbl:9:3 column `email` has no length limit
+";
+        let ds = diagnostics("b", src, "app");
+        assert_eq!(ds.len(), 2);
+        assert_eq!(ds[0].severity, Severity::Error);
+        assert_eq!(ds[0].file.as_deref(), Some("app/schema/users.tbl"));
+        assert_eq!((ds[0].line, ds[0].col), (14, 3));
+        assert_eq!(ds[0].message, "column `id` is declared twice");
+        assert!(ds[0].from_generated);
+        assert_eq!(ds[1].severity, Severity::Warning);
+        assert_eq!((ds[1].line, ds[1].col), (9, 3));
+    }
+
+    #[test]
+    fn the_warning_directive_is_the_warning_severity() {
+        // The RFC-0071 M2b spelling and the RFC-0099 one must be one mechanism,
+        // or the older emitters quietly mean something else.
+        let a = diagnostics("b", "//@warning ./x.vyx:1:1 hi\n", "app");
+        let d = diagnostics("b", "//@diag warning ./x.vyx:1:1 hi\n", "app");
+        assert_eq!(a.len(), 1);
+        assert_eq!(d.len(), 1);
+        assert_eq!(a[0].severity, d[0].severity);
+        assert_eq!(a[0].file, d[0].file);
+        assert_eq!(a[0].message, d[0].message);
+    }
+
+    #[test]
+    fn an_unrecognized_severity_neither_escalates_nor_vanishes() {
+        // A generator written for a later compiler must not fail a build here,
+        // and must not be silently dropped either.
+        let ds = diagnostics(
+            "b",
+            "//@diag hint ./x.vyx:1:1 consider a shorter name\n",
+            "",
+        );
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].severity, Severity::Warning);
+        assert_eq!(ds[0].message, "hint ./x.vyx:1:1 consider a shorter name");
+        assert!(ds[0].note.as_deref().unwrap().contains("hint"));
     }
 }

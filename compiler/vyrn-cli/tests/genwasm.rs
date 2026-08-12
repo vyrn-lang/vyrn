@@ -51,6 +51,17 @@ fn generator_examples() -> Vec<PathBuf> {
     out
 }
 
+/// A run's stderr without the `VYRN_GENWASM_TRACE` lines, so the two engines'
+/// diagnostics can be compared even though only one of them was traced.
+fn without_trace(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .replace("\r\n", "\n")
+        .lines()
+        .filter(|l| !l.starts_with("genwasm "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn imports_from_a_generator(path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
@@ -717,8 +728,19 @@ fn every_generator_example_emits_the_same_source_under_both_engines() {
                 "{name}: the emitted source diverged between engines"
             ));
         } else if !interp.status.success() {
+            // A REFUSAL is a differential observation too. Since RFC-0099 a
+            // generator may report an error of its own, so an example that does
+            // not build is a normal corpus citizen — as long as both engines
+            // refuse it in the same words. The wasm column's own trace lines are
+            // dropped first; only the caller that asked for them reads them.
+            let i_msg = without_trace(&interp.stderr);
+            let w_msg = without_trace(&wasm.stderr);
+            if i_msg == w_msg {
+                eprintln!("OK  {name}  ({ran} generator calls compiled; refused identically)");
+                continue;
+            }
             failures.push(format!(
-                "{name}: generation failed under both engines:\n{w_err}"
+                "{name}: the refusal diverged between engines\n  interp: {i_msg}\n  wasm:   {w_msg}"
             ));
         } else if ran == 0 {
             failures.push(format!(

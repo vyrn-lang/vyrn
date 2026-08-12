@@ -45,7 +45,7 @@ use std::sync::mpsc;
 
 use vyrn_frontend::ast::{Block, Expr, Function, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
-use vyrn_frontend::interp::{CodePiece, GenInputs, GenOutput};
+use vyrn_frontend::interp::{CodePiece, GenInputs, GenOutput, GenRead};
 
 /// What this path cannot serve. A generator reaching any of these is handed back
 /// to the interpreter — see [`engine`].
@@ -203,7 +203,7 @@ fn run(
 /// a value the generator can observe — the guest never sees it.
 fn serve(
     inputs: &GenInputs<'_>,
-    reads: &mut Vec<(String, Vec<u8>)>,
+    reads: &mut Vec<GenRead>,
     path: &str,
     mode: i32,
 ) -> Result<Served, String> {
@@ -232,16 +232,22 @@ fn serve(
                 // interpreter's own encoding, so a directory whose contents
                 // change invalidates the same cache entry.
                 let joined = names.join("\n").into_bytes();
-                reads.push((format!("{resolved}/"), joined.clone()));
+                reads.push((format!("{resolved}/"), Some(joined.clone())));
                 Ok(Served::Bytes(0, joined))
             }
-            Err(_) => Ok(Served::Bytes(1, Vec::new())),
+            Err(_) => {
+                // A failed listing is recorded as an absent input, exactly as
+                // the interpreter records it, so the entry misses when the
+                // directory appears.
+                reads.push((format!("{resolved}/"), None));
+                Ok(Served::Bytes(1, Vec::new()))
+            }
         };
     }
     match inputs.resolver.read(&resolved) {
         Ok(content) => {
             let bytes = content.into_bytes();
-            reads.push((resolved, bytes.clone()));
+            reads.push((resolved, Some(bytes.clone())));
             // Recorded before the NUL rule rejects it, like the interpreter: the
             // file was read, and the cache must notice when it changes.
             if mode == MODE_READ && bytes.contains(&0) {
@@ -249,7 +255,10 @@ fn serve(
             }
             Ok(Served::Bytes(0, bytes))
         }
-        Err(_) => Ok(Served::Bytes(1, Vec::new())),
+        Err(_) => {
+            reads.push((resolved, None));
+            Ok(Served::Bytes(1, Vec::new()))
+        }
     }
 }
 
@@ -1189,7 +1198,7 @@ fn run_module(
     argv: &[String],
     program: &Program,
     inputs: &GenInputs<'_>,
-    reads: &mut Vec<(String, Vec<u8>)>,
+    reads: &mut Vec<GenRead>,
     build: impl FnOnce() -> Result<Vec<u8>, EngineError>,
 ) -> Result<String, EngineError> {
     let cached = module_cache().lock().ok().and_then(|c| c.get(key).cloned());
@@ -1236,7 +1245,7 @@ fn run_hosted(
     argv: &[String],
     program: &Program,
     inputs: &GenInputs<'_>,
-    reads: &mut Vec<(String, Vec<u8>)>,
+    reads: &mut Vec<GenRead>,
 ) -> Result<String, EngineError> {
     let fuel = wasm_fuel(inputs.fuel);
     let (req_tx, req_rx) = mpsc::channel::<(String, i32)>();
