@@ -158,7 +158,15 @@ void __vyrn_map_reserve(VMap* m, long long esz) {
     }
 }
 /* Remove entry `i`, shifting later entries down so first-insertion order is
-   preserved for the survivors (remove-then-insert therefore moves a key end). */
+   preserved for the survivors (remove-then-insert therefore moves a key end).
+
+   POINTERS ONLY. This shifts bytes and releases nothing: at this ABI the value
+   is `esz` anonymous bytes, so there is no type here to release it BY. The
+   caller owns that obligation and discharges it before the call — codegen reads
+   the key and the value out of their slots and emits the type-correct release
+   for each (see `Gen::release_entry`, and `Fn_::map_method` for the wasm
+   backend). A caller that only shifts leaks the key String and the value's heap
+   once per removal, which is what this comment exists to stop. */
 void __vyrn_map_remove_at(VMap* m, long long i, long long esz) {
     long long rest = m->len - i - 1;
     if (rest > 0) {

@@ -4365,6 +4365,32 @@ impl<'a> Gen<'a> {
         self.snap_val(&v, ty)
     }
 
+    /// Release what the entry at address `ep` holds — a map key or a map value
+    /// whose slot is about to be overwritten or shifted away (RFC-0028).
+    ///
+    /// Deeper than [`Gen::snap_old`], and for one reason: the value is READ out
+    /// of its slot first, so the walk is not reading a length the store is in the
+    /// middle of replacing. That was the whole argument for the shallow
+    /// snapshot, and it does not apply to an entry a map is giving up. The walk
+    /// is then exactly the one the map's own drop makes over that entry
+    /// (`release_elems` in the `Map` arm of [`Gen::deep_release`]), so an
+    /// overwrite and a drop reclaim the same bytes.
+    ///
+    /// A stream and a declared `release` are the two exceptions, for the reason
+    /// [`Gen::snap_old`] states: both are observable from inside the language,
+    /// and the interpreter — the oracle — runs neither when a value is replaced.
+    fn release_entry(&mut self, ep: &str, ty: &Type) -> Result<(), String> {
+        match self.rel_kind(ty) {
+            None | Some(DropKind::CloseStream) | Some(DropKind::Release(_)) => Ok(()),
+            _ => {
+                let ll = self.llt(ty);
+                let old = self.fresh_tmp();
+                self.emit(format!("{old} = load {ll}, ptr {ep}"));
+                self.deep_release(&old, ty)
+            }
+        }
+    }
+
     /// The same, off a value already in a register — what a record field is.
     fn snap_val(&mut self, v: &str, ty: &Type) -> Vec<(String, bool)> {
         let mut out = Vec::new();
@@ -4701,8 +4727,21 @@ impl<'a> Gen<'a> {
                         self.expect.pop();
                         let (v, vty) = r?;
                         let (v, _) = self.coerce(v, &vty, &val)?;
-                        self.emit_map_set(&slot, &kv, &v, &val);
-                        Ok(())
+                        // Rule 4 through an entry. Two questions, not the element
+                        // store's three: a map owns its values outright — RFC-0092
+                        // M2 removed the shallow views, so the only route into a
+                        // value is a store and rule 2 refuses storing a borrow —
+                        // so who owns the MAP does not change who owns the value
+                        // this store displaces. Nobody can reach it afterwards
+                        // whether the binding is dropped at the block, at an
+                        // explicit `drop`, or by a caller. What is asked is the
+                        // arena (which owns what was allocated inside a `region`)
+                        // and aliasing: a new value or a key that names the map
+                        // could name the very bytes this frees.
+                        let drop_old = self.region_depth == 0
+                            && !vyrn_frontend::movecheck::mentions_place(value, name)
+                            && !vyrn_frontend::movecheck::mentions_place(index, name);
+                        self.emit_map_set(&slot, &kv, &v, &val, drop_old)
                     }
                     other => Err(format!(
                         "`{name}[i] = ..` needs an Array or Map, found {other:?}"
@@ -5520,12 +5559,16 @@ impl<'a> Gen<'a> {
                     // from the first value (a no-op coercion, byte-identical).
                     let val = val_expect.clone().unwrap_or_else(|| vty0.clone());
                     let (v0, _) = self.coerce(v0, &vty0, &val)?;
-                    self.emit_map_set(&slot, &kv0, &v0, &val);
+                    // A repeated key updates in place, so the value it shadows
+                    // has no owner left — `["usd": 1, "usd": 3]`. Inside a
+                    // `region` nothing goes back: the arena owns it.
+                    let drop_old = self.region_depth == 0;
+                    self.emit_map_set(&slot, &kv0, &v0, &val, drop_old)?;
                     for (ke, ve) in entries.iter().skip(1) {
                         let (kv, _) = self.gen_expr(ke)?;
                         let (v, vt) = self.gen_expr(ve)?;
                         let (v, _) = self.coerce(v, &vt, &val)?;
-                        self.emit_map_set(&slot, &kv, &v, &val);
+                        self.emit_map_set(&slot, &kv, &v, &val, drop_old)?;
                     }
                     Ok(val)
                 })();
@@ -6920,13 +6963,29 @@ impl<'a> Gen<'a> {
     /// appends key and value, and bumps the shared length. `val` is the value
     /// type; `v` is already coerced into it.
     ///
-    /// **The map takes the key, so the map releases the key it does not keep.**
-    /// `movecheck` refuses a borrowed key, so what arrives here is always a
-    /// value this map may own — and the hit path used to drop that value on the
-    /// floor. `m[k] = c + 1` in a histogram loop leaked one key per repeat: 200
-    /// thousand inserts of one 3-byte key read 10.3 MB peak before this line and
-    /// 4.9 MB after. The interpreter needed nothing, because its key is an `Rc`.
-    fn emit_map_set(&mut self, slot: &str, key: &str, v: &str, val: &Type) {
+    /// **The map takes the key AND the value, so the map releases the key and
+    /// the value it does not keep.** `movecheck` refuses a borrowed key, so what
+    /// arrives here is always a value this map may own — and the hit path used
+    /// to drop both on the floor. `m[k] = c + 1` in a histogram loop leaked one
+    /// key per repeat: 200 thousand inserts of one 3-byte key read 10.3 MB peak
+    /// before that line and 4.9 MB after. The value half was missed at the time
+    /// and is `drop_old` here: `m["k"] = "b"` over `m["k"] = "a"` leaked the
+    /// String `"a"` every repeat, 100 thousand of them reading 5.0 MB peak
+    /// before this line and 1.3 MB after. The interpreter needed neither,
+    /// because its key and its value are both `Rc`.
+    ///
+    /// `drop_old` is the caller's answer to "may this store release what the
+    /// slot holds now" — rule 4's own question, asked exactly as the element
+    /// store one screen up asks it (`slot_owns` and `mentions_place`), because a
+    /// new value that names the map could name the very bytes this frees.
+    fn emit_map_set(
+        &mut self,
+        slot: &str,
+        key: &str,
+        v: &str,
+        val: &Type,
+        drop_old: bool,
+    ) -> Result<(), String> {
         let vll = self.llt(val);
         let esz = self.fresh_tmp();
         self.emit(format!(
@@ -6962,9 +7021,19 @@ impl<'a> Gen<'a> {
         self.emit(format!(
             "{ep0} = getelementptr {vll}, ptr {vals0}, i64 {idx}"
         ));
+        // The value in that slot has no owner left once the store lands, so it
+        // goes back first — read out of the slot, then released.
+        if drop_old {
+            self.release_entry(&ep0, val)?;
+        }
         self.emit(format!("store {vll} {v}, ptr {ep0}"));
-        // The map already holds an equal key, so this one is surplus.
-        self.emit(format!("call void @__vyrn_str_free(ptr {key})"));
+        // The map already holds an equal key, so this one is surplus. Inside a
+        // `region` it came from the arena, which hands it back at the exit —
+        // freeing it here would give one block two owners. The same partition
+        // `deep_release` draws for a `String`, drawn here too.
+        if self.region_depth == 0 {
+            self.emit(format!("call void @__vyrn_str_free(ptr {key})"));
+        }
         self.emit_term(format!("br label %{done_l}"));
         // insert: reserve (may realloc both buffers), reload, append, len += 1.
         self.emit_label(&ins_l);
@@ -7000,6 +7069,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("store i64 {nl}, ptr {lenp}"));
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&done_l);
+        Ok(())
     }
 
     // ---- higher-order monomorphization (RFC-0023) -----------------------
@@ -10443,6 +10513,25 @@ impl<'a> Gen<'a> {
             let end_l = self.fresh_label("map.rm.end");
             self.emit_term(format!("br i1 {found}, label %{do_l}, label %{end_l}"));
             self.emit_label(&do_l);
+            // The map took the key and the value, so the map hands both back
+            // when the entry goes — and this is the only place that can, because
+            // `__vyrn_map_remove_at` is handed two strides and no types. Read
+            // out of their slots BEFORE the shift moves the survivors over them.
+            // Only the arena is asked: an entry a `remove` drops is unreachable
+            // afterwards whoever owns the map, and nothing aliases it (RFC-0092
+            // M2 made `keys()` copy).
+            if self.region_depth == 0 {
+                let vals = self.fresh_tmp();
+                self.emit(format!(
+                    "{vals} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 1"
+                ));
+                let kp = self.fresh_tmp();
+                self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {idx}"));
+                self.release_entry(&kp, &Type::Str)?;
+                let vp = self.fresh_tmp();
+                self.emit(format!("{vp} = getelementptr {vll}, ptr {vals}, i64 {idx}"));
+                self.release_entry(&vp, &val)?;
+            }
             self.emit(format!(
                 "call void @__vyrn_map_remove_at(ptr {slot}, i64 {idx}, i64 {esz})"
             ));
