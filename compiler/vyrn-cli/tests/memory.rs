@@ -53,6 +53,8 @@
 //! | `slotsContainer` | U4 / RFC-0090 M1 | steady | a DECLARED container gives its elements back — Phase 8b |
 //! | `keysLoop` | U4's price | steady | RFC-0092 M5: a `for` over a temporary owns the snapshot, so it releases it — Phase 10a's row, at the second statement that walks one |
 //! | `mapRepeatKey` | U4's price, the other half | steady | a map takes its key, so it releases the key it does not keep — the hit path used to drop it, which is a leak per repeat in every histogram loop |
+//! | `mapReplaceValue` | RFC-0028, the value half | steady | a map takes the VALUE too, so a store over an existing key releases the value it replaces — the half missed one line from the key's |
+//! | `mapRemoveEntry` | RFC-0028, both halves | steady | `remove` gives up the whole entry, so the key AND the value go back — the runtime shim shifts bytes and is handed no types, so only the call site can |
 //! | `spawnFrame` | §10 | steady | RFC-0095 M1: a task is linear, and both discharges give its storage back |
 //! | `consumingLoop` | U4's price, one keyword over | steady | RFC-0092 M5's row for `for x in consume xs`: the loop is the buffer's last owner, so it releases it at every exit |
 //! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
@@ -598,6 +600,32 @@ const ROWS: &[Row] = &[
               key: 10.29 MB peak before, 4.09 MB after",
     },
     Row {
+        export: "mapReplaceValue",
+        census: "RFC-0028, the value half",
+        today: Shape::Steady,
+        why: "the same rule as `mapRepeatKey`, for the other thing the map took. A store over \
+              a key the map already holds put the new value in the slot and released nothing, \
+              so `Map<String, String>` leaked the previous String on every repeat — the value \
+              half was missed one line from where the key half was fixed. It reaches any \
+              owning value type: a String, an `Array<T>`, a record with String fields. \
+              Measured native, 200 thousand stores over one key with ~200-byte values: 12.99 \
+              MB peak before, 3.26 MB after",
+    },
+    Row {
+        export: "mapRemoveEntry",
+        census: "RFC-0028, both halves",
+        today: Shape::Steady,
+        why: "`remove` gives up the WHOLE entry, so the key and the value both go back. \
+              Neither did: the runtime's `map_remove_at` shifts the survivors down over two \
+              strides and is handed no types, so it cannot release either — at that ABI the \
+              value is `esz` anonymous bytes. The obligation belongs to the call site, where \
+              the two types are known, and the entry is read out of its slots BEFORE the \
+              shift moves the survivors over them. An insert-then-remove loop leaked one key \
+              String plus the value's heap a turn, unbounded, which is every cache eviction. \
+              Measured native, 200 thousand insert-and-remove turns with ~200-byte values: \
+              19.48 MB peak before, 3.26 MB after",
+    },
+    Row {
         export: "returnedString",
         census: "§9a",
         today: Shape::Steady,
@@ -991,6 +1019,32 @@ export extern fn mapRepeatKey() {{
     m[tag() + "r"] = 1
     m[tag() + "r"] = 2
     m[tag() + "r"] = 3
+    seen = seen + m.length
+    drop m
+}}
+
+/// The value half of the same rule. The map holds one key throughout and the
+/// value under it is replaced twice a call, so the two ~900-byte Strings the
+/// stores displace are the only allocation this can leak — and it did, because
+/// the hit path stored over the old value and released nothing.
+export extern fn mapReplaceValue() {{
+    let mut m: Map<String, String> = [:]
+    m["k" + "ey"] = tag() + "1"
+    m["k" + "ey"] = tag() + "2"
+    m["k" + "ey"] = tag() + "3"
+    seen = seen + m.length
+    drop m
+}}
+
+/// Both halves at once, through the other way a map gives an entry up. Every
+/// call inserts a built key with a ~900-byte value and removes it again, so the
+/// map is empty at the `drop` and the entry it dropped is the whole allocation.
+export extern fn mapRemoveEntry() {{
+    let mut m: Map<String, String> = [:]
+    m["k" + "ey"] = tag() + "v"
+    if m.remove("key") {{
+        seen = seen + 1
+    }}
     seen = seen + m.length
     drop m
 }}
@@ -1600,5 +1654,115 @@ fn an_empty_string_built_at_run_time_goes_back_natively() {
         "the empty-String peak grew with the turn count: {empty_small} bytes at 250,000 turns \
          and {empty_big} at 1,000,000. A steady state does not scale with the loop."
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0028 — a map entry the map gives up, on the textual backend. The wasm
+// half is two rows in the table above; this is the same two defects measured
+// where `mapRepeatKey` cannot reach, because the two backends emit their own
+// release and one of them being right proves nothing about the other.
+// ---------------------------------------------------------------------------
+
+/// A loop that replaces the value under ONE key, and optionally removes the
+/// entry each turn. The key is built rather than written (`"k" + "ey"` is a heap
+/// String; a literal lives in the data segment and is never freed), so the entry
+/// this map gives up owns two buffers, not one.
+#[cfg(windows)]
+fn map_churn_source(turns: usize, remove: bool) -> String {
+    let pad = "z".repeat(200);
+    let rm = if remove {
+        "        m.remove(\"key\")\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"fn main() -> Int64 {{
+    let mut m: Map<String, String> = [:]
+    let mut i = 0
+    while i < {turns} {{
+        m["k" + "ey"] = "{pad}\{{i}}"
+{rm}        i = i + 1
+    }}
+    print(m.length)
+    return 0
+}}
+"#
+    )
+}
+
+/// A map hands back the entry it gives up — the value a store replaces, and the
+/// key AND the value a `remove` drops (RFC-0028).
+///
+/// Two defects, one shape. `m[k] = v` over a key the map already holds stored
+/// the new value over the old one and released nothing: the key half of that
+/// rule was fixed one line below and the value half was missed, so
+/// `Map<String, String>` leaked the previous String on every repeat.
+/// `m.remove(k)` released neither half — `__vyrn_map_remove_at` is handed two
+/// strides and no types, so it can only shift pointers, and the call site never
+/// picked the obligation up.
+///
+/// **A relation, not a number**, as every row in this file is: the peak at
+/// 800,000 turns must be the peak at 200,000. Both loops keep exactly one entry
+/// (or none), so nothing about them scales except what is not handed back.
+///
+/// The measured numbers at 200,000 turns, before and after: 12.99 MB → 3.26 MB
+/// for the store, 19.48 MB → 3.26 MB for the store-and-remove. Unbounded either
+/// way — a histogram loop and a cache eviction loop are both this program.
+///
+/// Windows-only and clang-only, the same posture as the two rows above.
+#[cfg(windows)]
+#[test]
+fn a_map_entry_the_map_gives_up_goes_back_natively() {
+    if vyrn_codegen::toolchain::find_clang().is_none() {
+        eprintln!("NOTE: no clang — RFC-0028's entry release is unverified on this machine");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vyrn-mapchurn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 200,000 and 800,000. The leak was one ~200-byte value per turn (plus the
+    // key on the remove path), so the smaller run already shows megabytes and
+    // neither takes a second.
+    let slack = 1 << 20;
+    for (what, remove) in [("a store over an existing key", false), ("a remove", true)] {
+        let mut peaks = Vec::new();
+        for turns in [200_000usize, 800_000] {
+            let stem = format!("m{turns}_{remove}");
+            let src = dir.join(format!("{stem}.vyrn"));
+            std::fs::write(&src, map_churn_source(turns, remove)).unwrap();
+            let exe = dir.join(format!("{stem}.exe"));
+            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+                .arg("build")
+                .arg(&src)
+                .arg("-o")
+                .arg(&exe)
+                .output()
+                .expect("vyrn build");
+            assert!(
+                build.status.success(),
+                "native build failed:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            let mut child = Command::new(&exe)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("run the map churn loop");
+            let status = child.wait().expect("wait");
+            assert!(status.success(), "the map churn loop exited {status}");
+            peaks.push(peak_bytes(&child));
+        }
+        assert!(
+            peaks[1] <= peaks[0] + slack,
+            "the peak of {what} grew with the turn count: {} bytes at 200,000 turns and {} at \
+             800,000. The map takes the key and the value, so the map hands both back when it \
+             gives the entry up — a store releases the value it replaces and a `remove` \
+             releases the key and the value it drops. A steady state does not scale with the \
+             loop; this one held one entry throughout.",
+            peaks[0],
+            peaks[1]
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

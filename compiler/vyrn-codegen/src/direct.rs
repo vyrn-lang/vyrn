@@ -2439,6 +2439,28 @@ impl Fn_<'_> {
         }
     }
 
+    /// Release what the map entry at address `a` holds — a key or a value whose
+    /// slot is about to be overwritten or shifted away (RFC-0028).
+    ///
+    /// [`Gen::release_entry`] on the textual backend, instruction for
+    /// instruction: deeper than [`Fn_::snap_at`] because the entry is read out
+    /// of its slot rather than overwritten under the walk, and skipping the
+    /// stream and the declared `release` because both are observable from inside
+    /// the language and the interpreter runs neither when a value is replaced.
+    fn rel_entry(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match self.cx.owned.release_kind(ty) {
+            None | Some(DropKind::CloseStream) | Some(DropKind::Release(_)) => Ok(()),
+            _ => self.rel_at(m, b, a, ty, line),
+        }
+    }
+
     /// Release the sum payload word at `a + off`.
     ///
     /// The mirror of [`Fn_::copy_word`], and the reason it is a function of its
@@ -3246,7 +3268,15 @@ impl Fn_<'_> {
                     let l = self.layout_of(&ty, *line)?;
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
-                    return self.map_set(m, b, hdr, &l, index, value, &val, *line);
+                    // Rule 4 through an entry. Two questions, not the element
+                    // store's three, for the reason [`crate::Gen::gen_stmt`]
+                    // states at its own map arm: a map owns its values outright,
+                    // so who owns the MAP does not change who owns the value this
+                    // store displaces. The arena and aliasing are what is asked.
+                    let drop_old = self.region_depth == 0
+                        && !vyrn_frontend::movecheck::mentions_place(value, name)
+                        && !vyrn_frontend::movecheck::mentions_place(index, name);
+                    return self.map_set(m, b, hdr, &l, index, value, &val, drop_old, *line);
                 }
                 let w = self.walk(b, &ty, *line)?;
                 if w.byte {
@@ -10842,8 +10872,11 @@ impl Fn_<'_> {
         b.ins(&Instruction::LocalSet(hdr));
         // Written order, so a duplicate key updates in place and keeps its slot —
         // `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first.
+        // A repeated key updates in place, so the value it shadows has no owner
+        // left — `["usd": 1, "usd": 3]`. Inside a `region` the arena owns it.
+        let drop_old = self.region_depth == 0;
         for (ke, ve) in entries {
-            self.map_set(m, b, hdr, &l, ke, ve, &val, line)?;
+            self.map_set(m, b, hdr, &l, ke, ve, &val, drop_old, line)?;
         }
         b.slot(off);
         Ok(mty)
@@ -10851,7 +10884,11 @@ impl Fn_<'_> {
 
     /// `m[k] = v` — update in place on a hit, append on a miss.
     ///
-    /// `hdr` is a local holding the header's address.
+    /// `hdr` is a local holding the header's address. `drop_old` is rule 4's own
+    /// question — may this store release what the slot holds now — answered by
+    /// the caller, because a new value that names the map could name the very
+    /// bytes this frees. The map takes the value as well as the key, so a hit
+    /// that only stored over the old value leaked it.
     fn map_set(
         &mut self,
         m: &mut Module,
@@ -10861,6 +10898,7 @@ impl Fn_<'_> {
         key: &Expr,
         value: &Expr,
         val: &Type,
+        drop_old: bool,
         line: usize,
     ) -> Result<(), String> {
         let esz = self.stride(val, line)? as i32;
@@ -10908,11 +10946,24 @@ impl Fn_<'_> {
         // A hit keeps the key it already has, so this one is surplus — the map
         // takes the key, so the map releases the key it does not keep. The
         // textual backend's `@__vyrn_str_free` call, instruction for
-        // instruction.
+        // instruction. The value it already has is surplus too, once the store
+        // below lands on it: no reserve ran on this path, so `vals` is still the
+        // buffer that value lives in.
         b.ins(&Instruction::Else);
-        b.ins(&Instruction::LocalGet(k));
-        str_hdr(b);
-        b.ins(&Instruction::Call(self.cx.rt.free));
+        if drop_old {
+            self.map_val_addr(b, hdr, l, idx, esz);
+            let old = b.local(ValType::I32);
+            b.ins(&Instruction::LocalSet(old));
+            self.rel_entry(m, b, old, val, line)?;
+        }
+        // Inside a `region` the surplus key came from the arena, which hands it
+        // back at the exit — freeing it here would give one block two owners.
+        // The same partition `rel_at` draws for a `String`, drawn here too.
+        if self.region_depth == 0 {
+            b.ins(&Instruction::LocalGet(k));
+            str_hdr(b);
+            b.ins(&Instruction::Call(self.cx.rt.free));
+        }
         self.depth -= 1;
         b.ins(&Instruction::End);
 
@@ -11114,19 +11165,23 @@ impl Fn_<'_> {
     ) -> Result<Type, String> {
         // `remove` mutates, so it needs the binding rather than a value; the other
         // two read, and read through the same address for one code path.
-        let (hdr, mty) = if name == "@remove" {
+        let (hdr, mty, owns) = if name == "@remove" {
             let (place, ty) = self.receiver(args, "remove", line)?;
             let hdr = b.local(ValType::I32);
             place
                 .addr(b, 0)
                 .ok_or_else(|| gap("`remove` on a non-map binding", line))?;
             b.ins(&Instruction::LocalSet(hdr));
-            (hdr, ty)
+            // An entry a `remove` drops is unreachable afterwards whoever owns
+            // the map, and nothing aliases it (RFC-0092 M2 made `keys()` copy),
+            // so only the arena is asked: inside a `region` it owns the block.
+            let owns = self.region_depth == 0;
+            (hdr, ty, owns)
         } else {
             let ty = self.expr(m, b, &args[0])?;
             let hdr = b.local(ValType::I32);
             b.ins(&Instruction::LocalSet(hdr));
-            (hdr, ty)
+            (hdr, ty, false)
         };
         let Type::Map(_, val) = self.cx.resolve(&mty) else {
             return unsupported(&format!("`{name}` on `{mty}`"), line);
@@ -11199,6 +11254,26 @@ impl Fn_<'_> {
             b.ins(&Instruction::LocalGet(found));
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
+            // The map took the key and the value, so the map hands both back
+            // when the entry goes — BEFORE the shift moves the survivors over
+            // the slots they live in. The runtime's `map_remove_at` twin shifts
+            // bytes and is handed no types, so this is the only place that can.
+            if owns {
+                for (field, stride, ety) in [
+                    (l.fields[0], 4i32, Type::Str),
+                    (l.fields[1], esz, val.as_ref().clone()),
+                ] {
+                    let a = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalGet(hdr));
+                    b.ins(&Instruction::I32Load(word_at(field)));
+                    b.ins(&Instruction::LocalGet(idx));
+                    b.ins(&Instruction::I32Const(stride));
+                    b.ins(&Instruction::I32Mul);
+                    b.ins(&Instruction::I32Add);
+                    b.ins(&Instruction::LocalSet(a));
+                    self.rel_entry(m, b, a, &ety, line)?;
+                }
+            }
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::I64Load(at(l.fields[2])));
             b.ins(&Instruction::I32WrapI64);
