@@ -60,6 +60,8 @@
 //! | `selfReferring` | RFC-0096 | steady | a type that reaches ITSELF is released by DECLARATION — the walk emits a call at the `impl Owned`, which is the bottom it lacked, and every type above it gets its structural row back |
 //! | `injectedJson` | RFC-0096 M2 | steady | the declaration is in an INJECTED module, so the type key is the linker's renamed spelling — and a `Json` that declares `Copy` as well is released once as the original and once as the copy |
 //! | `exprTemporary` | RFC-0096 M3 | steady | a String an EXPRESSION allocated has no binding, so the CONSUMER releases it — `@concat`, a String `+`, `@str` and the in-place append each free an operand the expression itself built |
+//! | `argsBlock` | RFC-0014, the wasm half | steady | `args()` handed back a data pointer four bytes past a block, which `free` reads as a refusal — so `drop xs` reclaimed nothing on wasm where native has always reclaimed |
+//! | `bytesRejected` | RFC-0014 M2 | steady | a REJECTED `stringFromBytes` gives its buffer back: the buffer is allocated before the scan, and both refusals used to leave with the message and without it |
 //! | `keptForever` | the detector itself | **leaks, on purpose** | the canary: every other row asserts `steady`, and so does a measurement that stopped measuring |
 //! | `localAccumulator` | RFC-0096 M3, defect 3 | steady | the static-data rule read the INITIALIZER, so `let mut acc = ""` answered `Static` for the buffer the loop grew; it asks whether the binding can CHANGE now |
 //! | `callArgument` | census-call-arguments | steady | a value the ARGUMENT built has no binding either, so the CALLER releases it after a call that keeps nothing — the proof was never missing, only the place to write it down. A String `+` is `@concat` written as an operator, so its operands are call arguments too and `"n" + label(i)` takes the same verdict |
@@ -626,6 +628,38 @@ const ROWS: &[Row] = &[
               19.48 MB peak before, 3.26 MB after",
     },
     Row {
+        export: "argsBlock",
+        census: "RFC-0014, the wasm half",
+        today: Shape::Steady,
+        why: "`args()` handed back an array whose data pointer was `ptrs + 4` — an address \
+              four bytes past a block rather than a block. `free` reads the class word at \
+              `p - HDR`, which there is the allocation's own header slack: always zero, \
+              below `MIN_CLASS`, so the free was refused without a word and `drop xs` \
+              reclaimed nothing. Native `__vyrn_args` hands back a fresh `malloc` and has \
+              always been freeable, so this was one backend alone. Copying `argv[1..]` down \
+              into slot 0 as the elements are built buys back an allocation base, and drops \
+              two more per-call blocks with it: the copy of the program name that the `+ 4` \
+              left stranded, and the host's staging blob, which native does not have at all \
+              because `main` stashes the argv it was handed. Measured on this harness before \
+              the fix, a hundred `args()` a call: 1,703,936 bytes after 500 calls and \
+              6,488,064 after 2,000; 131,072 at both after it",
+    },
+    Row {
+        export: "bytesRejected",
+        census: "RFC-0014 M2",
+        today: Shape::Steady,
+        why: "`stringFromBytes` allocates the String's buffer before it scans, and both \
+              refusals — an embedded NUL, and invalid UTF-8 — left with the message and \
+              without the buffer. Rejecting input in a loop is what a parser does with \
+              anything it did not write, so this leaked one block a turn for as long as the \
+              buffer has been allocated up front. One free at the join covers both exits; \
+              the block is not the arena's on any path, because a region records only the \
+              `str_temporary` shapes and this call's type is a `Result`. Measured here \
+              before the fix over 900 rejected bytes a call: 589,824 bytes after 500 calls \
+              and 2,162,688 after 2,000; 131,072 at both after it. The row is on the direct \
+              backend only — the textual one frees the buffer on both exits already",
+    },
+    Row {
         export: "returnedString",
         census: "§9a",
         today: Shape::Steady,
@@ -857,6 +891,11 @@ let mut row: Row = Row {{ name: "", n: 0 }}
 
 let mut keyed: Map<String, Int64> = [:]
 
+/// Bytes that are not UTF-8, filled on the first call: a module-state
+/// initializer may call nothing, and the point of holding them here is that a
+/// `stringFromBytes` turn allocates only what the call itself allocates.
+let mut bad: Array<UInt8> = []
+
 /// A ~900-byte literal. It lives in the data segment, so calling this allocates
 /// nothing — every allocation below is the concatenation, and only that.
 fn tag() -> String {{
@@ -1047,6 +1086,37 @@ export extern fn mapRemoveEntry() {{
     }}
     seen = seen + m.length
     drop m
+}}
+
+/// `args()` gives back a block a `drop` can reach. The array is empty here — a
+/// page has no argv — so a hundred turns a call is a hundred pointer blocks and a
+/// hundred staging blobs, and nothing else: exactly the two allocations the call
+/// makes for itself.
+export extern fn argsBlock() {{
+    let mut i = 0
+    while i < 100 {{
+        let xs = args()
+        seen = seen + xs.length
+        i = i + 1
+    }}
+}}
+
+/// A REJECTED `stringFromBytes` gives its buffer back. The bytes are module state
+/// and the `Err` payload is an interned message, so the buffer the call allocates
+/// for the copy is the only thing a turn can leak.
+export extern fn bytesRejected() {{
+    if bad.length == 0 {{
+        let mut i = 0
+        while i < 900 {{
+            bad.push(255)
+            i = i + 1
+        }}
+    }}
+    let r = match stringFromBytes(bad) {{
+        Ok(s) => s.byteLength,
+        Err(e) => e.byteLength,
+    }}
+    seen = seen + r
 }}
 
 /// RFC-0095 M3, and the row `keysLoop` is one keyword away from. The loop TAKES
