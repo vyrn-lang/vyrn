@@ -1725,7 +1725,12 @@ fn render_cache_entry(inputs: &[(String, String)], output: &str) -> String {
 /// Inverse of [`render_cache_entry`].
 fn parse_cache_entry(text: &str) -> Option<(Vec<(String, String)>, String)> {
     let first_nl = text.find('\n')?;
-    let n: usize = text[..first_nl].trim().strip_prefix(CACHE_ENTRY_TAG)?.trim().parse().ok()?;
+    let n: usize = text[..first_nl]
+        .trim()
+        .strip_prefix(CACHE_ENTRY_TAG)?
+        .trim()
+        .parse()
+        .ok()?;
     let mut idx = first_nl + 1;
     let mut inputs = Vec::with_capacity(n);
     for _ in 0..n {
@@ -5790,6 +5795,109 @@ fn main() -> Int64 { return shape().byteLength }"#;
         r.files.insert("data/n.txt".to_string(), "two".to_string());
         run_with(root, &r).unwrap();
         assert_eq!(gen_run_count(), before + 2, "input changed: re-run");
+    }
+
+    /// A generator that COUNTS the entries of a listed directory: the site's
+    /// `repo.vyrn` in miniature. `-1` when the directory is not there at all.
+    const COUNTER: &str = "export gen fn count(dir: String) -> String { \
+                               return match listDir(dir) { \
+                                   Ok(names) => \"export fn n() -> Int64 { return \" \
+                                       + names.length.toString() + \" }\", \
+                                   Err(e) => \"export fn n() -> Int64 { return 0 - 1 }\", \
+                               } }";
+    const COUNTER_ROOT: &str = "import { count } from \"./gen\" \
+                                import { n } from count(\"./data\") \
+                                fn main() -> Int64 { return n() }";
+
+    #[test]
+    fn a_file_added_to_a_listed_directory_re_runs_the_generator() {
+        let mut r = CachingResolver::new(&[("gen.vyrn", COUNTER), ("data/a.txt", "1")]);
+        let before = gen_run_count();
+        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+
+        r.files.insert("data/b.txt".to_string(), "2".to_string());
+        assert_eq!(
+            run_with(COUNTER_ROOT, &r).unwrap(),
+            2,
+            "counts the new file"
+        );
+        assert_eq!(gen_run_count(), before + 2, "listing changed: re-run");
+    }
+
+    #[test]
+    fn a_file_removed_from_a_listed_directory_re_runs_the_generator() {
+        let mut r = CachingResolver::new(&[
+            ("gen.vyrn", COUNTER),
+            ("data/a.txt", "1"),
+            ("data/b.txt", "2"),
+        ]);
+        let before = gen_run_count();
+        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 2);
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+
+        r.files.remove("data/b.txt");
+        assert_eq!(
+            run_with(COUNTER_ROOT, &r).unwrap(),
+            1,
+            "counts what is left"
+        );
+        assert_eq!(gen_run_count(), before + 2, "listing changed: re-run");
+    }
+
+    #[test]
+    fn a_directory_that_appears_re_runs_the_generator() {
+        // The site bug: the first build found no `examples/`, published "0
+        // examples", and kept publishing it. A listing that FAILED is an input
+        // too — the directory being absent is what the generator saw.
+        let mut r = CachingResolver::new(&[("gen.vyrn", COUNTER)]);
+        let before = gen_run_count();
+        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), -1, "no directory yet");
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+
+        r.files.insert("data/a.txt".to_string(), "1".to_string());
+        assert_eq!(
+            run_with(COUNTER_ROOT, &r).unwrap(),
+            1,
+            "the directory appeared: the cached `-1` is stale"
+        );
+        assert_eq!(gen_run_count(), before + 2, "directory appeared: re-run");
+    }
+
+    #[test]
+    fn an_unrelated_file_does_not_invalidate_a_listing() {
+        // The over-invalidation direction. An entry records what the generation
+        // actually read — this listing and nothing else — so a file elsewhere in
+        // the tree leaves the cache hit intact. A cache that never hits would
+        // undo RFC-0076's keystroke budget.
+        let mut r = CachingResolver::new(&[("gen.vyrn", COUNTER), ("data/a.txt", "1")]);
+        let before = gen_run_count();
+        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+
+        r.files
+            .insert("elsewhere/z.txt".to_string(), "irrelevant".to_string());
+        r.files
+            .insert("data.txt".to_string(), "a near miss".to_string());
+        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
+        assert_eq!(
+            gen_run_count(),
+            before + 1,
+            "unrelated files: the cache must still hit"
+        );
+    }
+
+    #[test]
+    fn a_cache_entry_from_an_older_format_misses_instead_of_being_misread() {
+        // A `v1` entry recorded only the inputs that succeeded, so it cannot say
+        // whether a missing file has since appeared. Reject it: re-run, and the
+        // run overwrites it in place.
+        let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
+        let v2 = render_cache_entry(&inputs, "export fn n() -> Int64 { return 1 }");
+        assert!(v2.starts_with("v2 1\n"), "{v2}");
+        assert!(parse_cache_entry(&v2).is_some());
+        let v1 = v2.strip_prefix("v2 ").unwrap();
+        assert!(parse_cache_entry(v1).is_none(), "a v1 entry must not parse");
     }
 
     #[test]
