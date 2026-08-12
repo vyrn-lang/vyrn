@@ -1,0 +1,28 @@
+// There is no null. An absent value is `Option<T>`, a failure is
+// `Result<T, E>`, and `?` returns the failure to the caller untouched.
+import { joinWith } from "std/strings"
+import { parseInt64 } from "std/num"
+
+fn doubled(text: String) -> Result<Int64, String> {
+    return match parseInt64(text) {
+        Some(v) => Ok(v * 2),
+        None => Err("not a number: " + text),
+    }
+}
+
+// `?` unwraps the success and returns the error to this function's caller.
+fn quadrupled(text: String) -> Result<Int64, String> {
+    let twice = doubled(text)?
+    return Ok(twice * 2)
+}
+
+fn showResult(r: Result<Int64, String>) -> String {
+    return match r {
+        Ok(n) => n.toString(),
+        Err(why) => why.copy(),
+    }
+}
+
+export fn demo() -> String {
+    return joinWith([showResult(quadrupled("7")), showResult(quadrupled("seven"))], "\n")
+}

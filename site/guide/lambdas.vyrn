@@ -1,0 +1,21 @@
+// A `fn`-typed parameter takes a lambda or a named function. Every use is
+// monomorphized, so no function value survives to run time.
+import { map, filter, fold } from "std/arrays"
+import { joinWith } from "std/strings"
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+export fn demo() -> String {
+    let nums: Array<Int64> = [1, 2, 3, 4, 5]
+    let doubled = map(nums, double)
+    let evens = filter(nums, |x| x % 2 == 0)
+    let total = fold(nums, 0, |acc, x| acc + x)
+
+    return joinWith([
+            "doubled last \{doubled[4]}",
+            "evens        \{evens.length}",
+            "total        \{total}",
+        ], "\n")
+}

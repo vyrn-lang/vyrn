@@ -9,7 +9,7 @@
 /// name a record type this module declares — so the zip into records happens
 /// here, exactly as `repo.vyrn` zips RFC numbers and titles.
 import { apiDocs } from "./apidoc"
-import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docCount } from apiDocs("../../std")
+import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docTests, docCount } from apiDocs("../../std")
 import { startsWith } from "std/strpred"
 import { substring, trimStart } from "std/strings"
 import { hrefOf } from "./nav"
@@ -76,6 +76,16 @@ export fn apiEntries(m: String) -> Array<ApiEntry> {
 /// The module's header block, as HTML.
 export fn apiIntro(m: String) -> String {
     return docIntro(m)
+}
+
+/// What the module's own tests promise, one sentence each.
+///
+/// These are the names of its `test` blocks, read off the source with the
+/// exports. A test name in this repository is a claim about the code, so the
+/// list is a summary of what the module guarantees — and CI runs every one of
+/// them, so the list cannot outlive the guarantee.
+export fn apiTests(m: String) -> Array<String> {
+    return docTests(m)
 }
 
 /// The page that documents `m`.

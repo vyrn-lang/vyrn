@@ -1,0 +1,59 @@
+// `?` works on your own type too: implement `Fallible`, say which side of the
+// sum a value is on and how to read the success, and the operator resolves
+// through it. The failure reaches the caller with its payload intact.
+import { Fallible } from "std/fallible"
+import { joinWith } from "std/strings"
+
+type Http =
+    | Body(String)
+    | NotFound
+    | ServerError(String)
+
+impl Fallible for Http {
+    type Output = String
+
+    fn isSuccess(self) -> Bool {
+        return match self {
+            Body(b) => true,
+            NotFound => false,
+            ServerError(m) => false,
+        }
+    }
+
+    fn success(self) -> Output {
+        return match self {
+            Body(b) => b.copy(),
+            // `?` calls this only after `isSuccess` answered true, so these arms
+            // are unreachable. `panic` is how an arm says it has no value.
+            NotFound => panic("success on NotFound"),
+            ServerError(m) => panic("success on ServerError"),
+        }
+    }
+}
+
+fn fetch(code: Int64) -> Http {
+    if code == 200 {
+        return Body("hello")
+    }
+    if code == 404 {
+        return NotFound
+    }
+    return ServerError("upstream timed out")
+}
+
+fn shout(code: Int64) -> Http {
+    let body = fetch(code)?
+    return Body(body + "!")
+}
+
+fn describeHttp(h: Http) -> String {
+    return match h {
+        Body(b) => "body " + b,
+        NotFound => "not found",
+        ServerError(m) => "server error: " + m,
+    }
+}
+
+export fn demo() -> String {
+    return joinWith([describeHttp(shout(200)), describeHttp(shout(404)), describeHttp(shout(500))], "\n")
+}

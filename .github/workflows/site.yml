@@ -61,21 +61,33 @@ jobs:
         # repository counts.
         run: |
           bin=compiler/target/release/vyrn
-          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn site/app/apidoc.vyrn site/app/docs.vyrn; do
+          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn site/app/apidoc.vyrn site/app/docs.vyrn site/app/guidecode.vyrn site/app/guide.vyrn site/app/deps.vyrn site/app/explore.vyrn; do
+            "$bin" test "$f"
+          done
+
+      - name: The guide's programs
+        # Every code block in the guide is a file here, and the export imports
+        # and CALLS each one while it renders the pages — so a program that does
+        # not compile already fails the build. This runs their own `test` blocks
+        # as well, which is the half the export does not exercise.
+        run: |
+          bin=compiler/target/release/vyrn
+          for f in site/guide/*.vyrn; do
             "$bin" test "$f"
           done
 
       - name: Formatting
-        run: compiler/target/release/vyrn fmt --check site/app/*.vyrn site/export.vyrn
+        run: compiler/target/release/vyrn fmt --check site/app/*.vyrn site/guide/*.vyrn site/export.vyrn
 
       - name: The hero module
         # `writeFile` takes a String, so the export step cannot copy a wasm
         # module. It is built here instead, straight into the output.
         #
-        # `out/docs/std` is made here too: RFC-0014 has no way to CREATE a
-        # directory, and the reference publishes one page per std module.
+        # `out/docs/std` and `out/guide` are made here too: RFC-0014 has no way
+        # to CREATE a directory, and the reference publishes one page per std
+        # module while the guide publishes one per chapter.
         run: |
-          mkdir -p out/docs/std
+          mkdir -p out/docs/std out/guide
           compiler/target/release/vyrn build examples/herofield.vyrn --target wasm -o out/hero.wasm
 
       - name: Render every page

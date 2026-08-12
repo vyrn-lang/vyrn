@@ -501,6 +501,114 @@ function tabsWidget(root) {
 }
 
 // ---------------------------------------------------------------------------
+// The explorer's search.
+//
+// The rows ARE the index. Each one carries its own lowercased haystack in
+// `data-q` and its export names in `data-e`, both written by the export, so
+// there is no fetch, no index file, and nothing to go stale. Filtering is
+// `hidden` on a row.
+//
+// Every node this builds is built with `createElement` and `textContent`. What
+// the reader typed reaches the DOM as TEXT and never as markup — the same rule
+// the rest of the site keeps, and the reason a fragment cannot become an
+// element here.
+// ---------------------------------------------------------------------------
+
+/// The export names of `row` that contain `q`, at most `limit` of them.
+function matchingExports(row, q, limit) {
+  const names = (row.dataset.e || "").split(" ").filter(Boolean);
+  const hits = names.filter((n) => n.toLowerCase().includes(q));
+  return hits.slice(0, limit);
+}
+
+/// A row's list of matched exports, each one a link to that export's anchor on
+/// the module's own page.
+function exportHits(row, names) {
+  const box = document.createElement("span");
+  box.className = "hits";
+  for (const name of names) {
+    const a = document.createElement("a");
+    a.href = "/docs/std/" + row.dataset.m + ".html#e-" + name;
+    a.textContent = name;
+    box.appendChild(a);
+  }
+  return box;
+}
+
+function exploreSearch() {
+  const input = $("[data-explore-input]");
+  const list = $("[data-explore-list]");
+  const count = $("[data-explore-count]");
+  if (!input || !list) return;
+  const rows = $$("li", list);
+  const total = rows.length;
+
+  const apply = () => {
+    const q = input.value.trim().toLowerCase();
+    let shown = 0;
+    let hits = 0;
+    for (const row of rows) {
+      const old = $(".hits", row);
+      if (old) old.remove();
+      const match = q.length === 0 || (row.dataset.q || "").includes(q);
+      row.hidden = !match;
+      if (!match) continue;
+      shown += 1;
+      if (q.length === 0) continue;
+      // Ten is enough to show WHICH names matched; the module page has them all.
+      const names = matchingExports(row, q, 10);
+      hits += names.length;
+      if (names.length) row.appendChild(exportHits(row, names));
+    }
+    if (!count) return;
+    if (q.length === 0) {
+      count.textContent = total + " modules";
+    } else if (shown === 0) {
+      count.textContent = "no module matches " + q;
+    } else {
+      count.textContent = shown + (shown === 1 ? " module" : " modules") + ", " + hits + (hits === 1 ? " export" : " exports");
+    }
+  };
+
+  input.addEventListener("input", apply);
+  // A reader who arrives with a value already in the field (a restored form
+  // state, a back navigation) sees it applied rather than ignored.
+  if (input.value) apply();
+}
+
+// ---------------------------------------------------------------------------
+// The explorer's graph. Vyrn laid every node and every wire out at build time;
+// this lights up one module's own imports and importers, on hover AND on focus,
+// because the nodes are links and a keyboard reaches them.
+// ---------------------------------------------------------------------------
+
+function graphWidget(svg) {
+  const nodes = $$("g.node", svg);
+  const wires = $$("path.wire", svg);
+  const listOf = (el, key) => (el.dataset[key] || "").split(" ").filter(Boolean);
+
+  const lift = (name) => {
+    svg.classList.toggle("lit", Boolean(name));
+    const node = name ? nodes.find((n) => n.dataset.m === name) : null;
+    const near = node ? listOf(node, "uses").concat(listOf(node, "usedby")) : [];
+    for (const w of wires) {
+      w.classList.toggle("on", Boolean(name) && (w.dataset.from === name || w.dataset.to === name));
+    }
+    for (const n of nodes) {
+      n.classList.toggle("on", n.dataset.m === name);
+      n.classList.toggle("near", near.includes(n.dataset.m));
+    }
+  };
+
+  for (const n of nodes) {
+    n.addEventListener("pointerenter", () => lift(n.dataset.m));
+    n.addEventListener("pointerleave", () => lift(null));
+    n.addEventListener("focusin", () => lift(n.dataset.m));
+    n.addEventListener("focusout", () => lift(null));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // One orchestrated page entrance, rather than scattered micro-interactions.
 // ---------------------------------------------------------------------------
 
@@ -576,9 +684,10 @@ function markNav() {
   const path = location.pathname;
   for (const link of $$(".masthead .nav a")) {
     const href = link.getAttribute("href");
-    // A reference page belongs under Docs, the one row that owns a subtree.
-    // This is the export's `currentNav` rule, in the language the browser has.
-    const here = path === href || (href === "/docs.html" && path.startsWith("/docs/"));
+    // A reference page belongs under Docs and a chapter under Guide: a row owns
+    // the subtree named after it. This is the export's `currentNav` rule, in the
+    // language the browser has, and it needs no list of the two prefixes.
+    const here = path === href || path.startsWith(href.replace(/\.html$/, "") + "/");
     if (here) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
@@ -616,6 +725,8 @@ function boot() {
   for (const el of $$('[data-widget="strip"]')) stripWidget(el);
   for (const el of $$("[data-tabs]")) tabsWidget(el);
   for (const el of $$("[data-install]")) installPicker(el);
+  exploreSearch();
+  for (const el of $$("svg.graph")) graphWidget(el);
   const canvas = document.getElementById("field");
   if (canvas) mountHero(canvas, { cellPx: 6 });
   refreshRelease();

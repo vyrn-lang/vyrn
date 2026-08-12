@@ -2,10 +2,10 @@
 // The site shell (RFC-0041 §1): every page body renders into the <slot/>.
 //
 // The navigation is built from the typed URL helpers the router generates, so a
-// link cannot name a route that does not exist — the compiler rejects it. That is
-// what reserves the v2 sockets: `/guide` and `/explorer` have room in the route
-// table and no page, so nothing links to them and no "coming soon" page exists.
-// Adding the guide book is a directory drop plus one row in `navRows`.
+// link cannot name a route that does not exist — the compiler rejects it. The
+// two reserved sockets were filled that way: `/guide` and `/explore` arrived as
+// a directory of routes plus one row each in `navRows`, and nothing else here
+// changed.
 import { navRows, NavRow } from "../nav"
 import { exampleCount, backendCount } from "../repo"
 // The stylesheet and the one script module, for every page.

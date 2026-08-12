@@ -7,8 +7,10 @@
 /// every row here against the generated typed-URL helper, so a route that is
 /// renamed or deleted fails the export.
 ///
-/// A v2 socket — `/guide`, `/explorer` — is a row that is not here yet. There is
-/// no placeholder page and no dead link; the route table simply has room.
+/// The two sockets the brief reserved are filled: `/guide` is the book, and
+/// `/explore` is the module explorer. Both arrived as a directory drop plus a
+/// row here, which is what reserving them was for. A row is still only written
+/// when the route behind it exists — there is no placeholder page anywhere.
 import { substring } from "std/strings"
 import { Head, noHead, withTitle, withMeta } from "std/ui"
 
@@ -49,13 +51,18 @@ export fn hrefOf(path: String) -> String {
 }
 
 /// The navigation, in reading order.
+///
+/// Guide sits before Docs: the book teaches in order, the reference answers one
+/// question at a time, and a reader who wants the second usually knows it.
 export fn navRows() -> Array<NavRow> {
     return [
         NavRow { href: hrefOf("/philosophy"), label: "Philosophy" },
         NavRow { href: hrefOf("/compare"), label: "Compare" },
         NavRow { href: hrefOf("/install"), label: "Install" },
         NavRow { href: hrefOf("/releases"), label: "Releases" },
+        NavRow { href: hrefOf("/guide"), label: "Guide" },
         NavRow { href: hrefOf("/docs"), label: "Docs" },
+        NavRow { href: hrefOf("/explore"), label: "Explore" },
     ]
 }
 
@@ -71,6 +78,6 @@ test "a route becomes one file, and a nested route keeps its directory" {
     assertEq(hrefOf("/docs/std/json"), "/docs/std/json.html")
 }
 
-test "the navigation covers every v1 route but the home page" {
-    assertEq(navRows().length, 5)
+test "the navigation covers every route but the home page" {
+    assertEq(navRows().length, 7)
 }

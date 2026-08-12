@@ -1,0 +1,4 @@
+// `demo` answers with the text. `main` below prints it and returns the exit code.
+export fn demo() -> String {
+    return "hello, world"
+}
