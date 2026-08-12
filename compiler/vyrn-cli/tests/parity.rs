@@ -3536,6 +3536,49 @@ fn main() -> Int64 {
     assert_eq!(rows[0].3, Some(1), "a failed validation exits 1");
 }
 
+/// A rendered `Bool` owns its storage, on every engine.
+///
+/// `@str` of a `Bool` handed back the interned `"true"`/`"false"` on the direct
+/// backend and a copy of it on the other two. The pointer alone is not the defect
+/// — the ownership behind it is: an accumulator seeded with one takes
+/// `str_append`'s ours-branch, reads the literal's `cap` (all ones, the sentinel
+/// that says "static"), decides it never has to grow, and writes the appended
+/// bytes and a new length straight into the data segment.
+///
+/// The program is the smallest shape that shows it: `s` is only ever self-appended
+/// and read for its length, which is what makes it an eligible in-place
+/// accumulator (`append_candidates`), and a SECOND interpolation of the same
+/// `Bool` afterwards is what reads the literal the first one overwrote. Before the
+/// fix wasm printed `20`, `20`, `true0123456789abcdef` where both other engines
+/// printed `20`, `4`, `true` — the length written over `"true"`'s own header, and
+/// the sixteen bytes written over its NUL and past it.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_rendered_bool_owns_its_buffer_on_every_engine() {
+    let rows = three_engines(
+        "boolstr",
+        "boolrender",
+        r#"
+fn main() -> Int64 {
+    let flag = true
+    let mut s = "\{flag}"
+    s = s + "0123456789abcdef"
+    let n = s.byteLength
+    let again = "\{flag}"
+    print(n)
+    print(again.byteLength)
+    print(again)
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "boolrender");
+    assert_eq!(
+        rows[0].1, "20\n4\ntrue\n",
+        "the literal is untouched by what was rendered out of it"
+    );
+}
+
 /// Every edge that leaves a `region` balances the region stack NATIVELY, taken
 /// more often than the stack is deep.
 ///

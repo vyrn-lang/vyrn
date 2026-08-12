@@ -5870,12 +5870,13 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32Const(2))
                     .ins(&Instruction::I32Const(pre as i32))
                     .ins(&Instruction::I32Const(7))
-                    .ins(&Instruction::Call(write_all));
+                    .ins(&Instruction::Call(write_all))
+                    .ins(&Instruction::Drop);
                 b.ins(&Instruction::I32Const(2))
                     .ins(&Instruction::LocalGet(msg));
                 b.ins(&Instruction::LocalGet(msg));
                 str_len(b);
-                b.ins(&Instruction::Call(write_all));
+                b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
                 b.ins(&Instruction::I32Const(nl as i32))
                     .ins(&Instruction::Call(self.cx.rt.trap));
                 // The stack goes polymorphic here, which is what lets a `panic`
@@ -5996,8 +5997,21 @@ impl Fn_<'_> {
                     ref f if matches!(f, Type::Float | Type::Float32) => {
                         self.f64_str(b, f, line)?;
                     }
+                    // Copy, for the reason the `Str` arm above copies: a rendered
+                    // value owns its storage. `bool_str` hands back the interned
+                    // `"true"`/`"false"` itself, and a caller that owns a
+                    // data-segment pointer is a caller that writes into the data
+                    // segment — `var s = "\{flag}"` then `s = s + ".."` took
+                    // `str_append`'s ours-branch, read the literal's `cap` of
+                    // `u32::MAX`, never grew, and copied past the literal's end.
+                    // The copy is here rather than in `bool_str` because `print`
+                    // is the other caller and it frees nothing: duplicating there
+                    // would leak a block per `print(flag)`. The textual backend
+                    // splits the same way — `@.str.true` is strdup'd by `str(..)`
+                    // and printed straight by `print`.
                     Type::Bool => {
                         b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                        self.str_dup(b);
                     }
                     _ => return unsupported(&format!("`toString` of `{t}`"), line),
                 }
@@ -6504,11 +6518,12 @@ impl Fn_<'_> {
                 self.bounds_check_span(b, &w, idx, span);
                 if name.ends_with("Load") {
                     self.elem_addr(b, &w, idx);
-                    // `align: 0` — one byte. The buffer is an array of 4-byte
-                    // elements, so nothing guarantees the 16 a `v128.load` would
-                    // like, and an overstated hint is a validation-legal lie the
-                    // engine may act on. The textual backend states `align 4` for
-                    // the same reason.
+                    // `align: 0` — a log2 exponent, so one byte. The buffer is an
+                    // array of elements, so nothing guarantees the 16 a
+                    // `v128.load` would like, and an overstated hint is a
+                    // validation-legal lie the engine may act on. The textual
+                    // backend understates for the same reason, in the other unit:
+                    // its `align 4` is a BYTE count, not this exponent.
                     b.ins(&Instruction::V128Load(MemArg {
                         offset: 0,
                         align: 0,
@@ -6950,7 +6965,8 @@ impl Fn_<'_> {
             fd(b);
             b.ins(&Instruction::I32Const(p as i32))
                 .ins(&Instruction::I32Const(n))
-                .ins(&Instruction::Call(write_all));
+                .ins(&Instruction::Call(write_all))
+                .ins(&Instruction::Drop);
         };
         konst(b, at, plen);
         let string = |b: &mut Frame, l: u32| {
@@ -6958,7 +6974,7 @@ impl Fn_<'_> {
             b.ins(&Instruction::LocalGet(l))
                 .ins(&Instruction::LocalGet(l));
             str_len(b);
-            b.ins(&Instruction::Call(write_all));
+            b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
         };
         string(b, name);
         konst(b, colon, 2);
@@ -8889,13 +8905,17 @@ impl Fn_<'_> {
         b.ins(&Instruction::End);
     }
 
-    /// Trap unless all four of `idx..idx+3` are in `0..len` (RFC-0083 M2).
+    /// Trap unless all `span` of `idx..idx+span-1` are in `0..len` (RFC-0083 M2).
+    ///
+    /// `span` is 4 for the four-lane shapes and 2 for `@f64x2` — the check, the
+    /// address arithmetic and the trap are otherwise identical, which is why the
+    /// widths share one arm here as they do in the textual backend.
     ///
     /// ONE branch for the whole vector — the amortisation that is the point of a
     /// vector load, and what a scalar loop cannot express. Two compares rather
     /// than [`bounds_check`]'s one because the unsigned trick does not survive a
-    /// span: `idx + 4` wraps for a huge `idx` and would let the access through,
-    /// while `len - 4` cannot wrap because `len >= 0`.
+    /// span: `idx + span` wraps for a huge `idx` and would let the access through,
+    /// while `len - span` cannot wrap because `len >= 0`.
     fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, span: i64) {
         let (pre, post, trap) = (
             self.cx.rt.msg_aoob,
@@ -8914,9 +8934,10 @@ impl Fn_<'_> {
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         b.ins(&Instruction::I32Const(pre as i32));
-        // The first lane of `idx..idx+3` actually out of range: `idx` when it is
-        // negative, `idx + 3` when the tail overruns. Reporting `idx` alone would
-        // name an in-range element in the common case, and this is the cold path.
+        // The first lane of `idx..idx+span-1` actually out of range: `idx` when it
+        // is negative, `idx + span - 1` when the tail overruns. Reporting `idx`
+        // alone would name an in-range element in the common case, and this is the
+        // cold path.
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(span - 1));
@@ -11741,7 +11762,6 @@ fn word8() -> MemArg {
     }
 }
 
-/// The comparison instruction for an `i32`-shaped operand pair.
 /// A Vyrn integer type as this backend has to think about it: a width, a
 /// signedness, and the wasm carrier both imply.
 ///
@@ -11895,6 +11915,7 @@ fn int_op(op: BinOp, n: Num) -> Option<Instruction<'static>> {
     })
 }
 
+/// The comparison instruction for an `i32`-shaped operand pair.
 fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
     Some(match op {
         BinOp::Eq => Instruction::I32Eq,
@@ -12338,23 +12359,33 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt.region_len = m.reserve(4 * REGION_MAX, 4);
     rt.region_cap = m.reserve(4 * REGION_MAX, 4);
 
-    // write_all(fd, ptr, len) — the ONE place bytes leave this module.
+    // write_all(fd, ptr, len) -> status — the ONE place bytes leave this module.
+    // Zero when every byte arrived, non-zero when the loop gave up.
     //
     // A `fd_write` is allowed to write fewer bytes than it was given and say so
     // in `nwritten`; a caller that drops that number prints a prefix and calls it
     // a day. This backend found that out the direct way — two iovecs, only the
     // first of which arrived — so the retry is here rather than at three call
     // sites that would each have to remember it.
-    let nw = 4;
+    //
+    // The two ways out that are NOT "all of it went" — a non-zero errno, and a
+    // write that moved nothing while bytes were still owed — used to leave by the
+    // same edge as success and say nothing, so `writeFile` on a full disk or a
+    // closed pipe reported `Ok(true)`. The status is what tells them apart; the
+    // native shim has checked `wrote != n` since it was written
+    // (`__vyrn_write_file`, `toolchain.rs`). Every caller that only prints drops
+    // it, exactly as they drop `fd_close`'s errno.
+    let (nw, st) = (4, 5);
     rt.next_is(m, rt.write_all);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
-        &[],
         &[ValType::I32],
+        &[ValType::I32, ValType::I32],
         12,
         |b| {
             b.ins(&Instruction::Block(BlockType::Empty))
                 .ins(&Instruction::Loop(BlockType::Empty));
+            // Nothing left to write: `st` is still the zero a local starts at.
             b.ins(&Instruction::LocalGet(2))
                 .ins(&Instruction::I32Eqz)
                 .ins(&Instruction::BrIf(1));
@@ -12370,12 +12401,17 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             b.slot(8);
             // A non-zero errno, or a zero-length write, would spin forever.
             b.ins(&Instruction::Call(fd_write))
+                .ins(&Instruction::LocalTee(st))
                 .ins(&Instruction::BrIf(1));
             b.slot(8)
                 .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::LocalTee(nw))
                 .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(st))
+                .ins(&Instruction::Br(2))
+                .ins(&Instruction::End);
             b.ins(&Instruction::LocalGet(1))
                 .ins(&Instruction::LocalGet(nw))
                 .ins(&Instruction::I32Add)
@@ -12387,6 +12423,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             b.ins(&Instruction::Br(0))
                 .ins(&Instruction::End)
                 .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(st));
         },
     );
 
@@ -12772,6 +12809,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             .ins(&Instruction::LocalGet(0))
             .ins(&Instruction::Call(strlen))
             .ins(&Instruction::Call(write_all))
+            .ins(&Instruction::Drop)
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::Call(proc_exit));
     });
@@ -12784,10 +12822,12 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             .ins(&Instruction::LocalGet(0));
         str_len(b);
         b.ins(&Instruction::Call(write_all))
+            .ins(&Instruction::Drop)
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32Const(nl as i32))
             .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::Call(write_all));
+            .ins(&Instruction::Call(write_all))
+            .ins(&Instruction::Drop);
     });
 
     rt.next_is(m, rt.print_i64);
@@ -12882,7 +12922,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         },
     );
 
-    // bool_str(v) — the literal, not a copy of it. Nothing frees a String here.
+    // bool_str(v) — the interned literal itself, not a copy of it. `print` wants
+    // exactly that and frees nothing; `@str` copies at its own call site, because
+    // a rendered value owns its storage and a data-segment pointer cannot.
     rt.next_is(m, rt.bool_str);
     m.func(&[ValType::I32], &[ValType::I32], &[], 0, |b| {
         b.ins(&Instruction::LocalGet(0))
@@ -13086,7 +13128,8 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                     .ins(&Instruction::LocalGet(p))
                     .ins(&Instruction::LocalGet(p))
                     .ins(&Instruction::Call(strlen))
-                    .ins(&Instruction::Call(write_all));
+                    .ins(&Instruction::Call(write_all))
+                    .ins(&Instruction::Drop);
             };
             put(b, 0);
             b.ins(&Instruction::LocalGet(1))
@@ -13163,10 +13206,17 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // where the semantics live, and both are canonical wording parity compares:
     // an embedded NUL is rejected BEFORE the UTF-8 check (a Vyrn `String` is
     // NUL-terminated, so it could not carry one), and the DFA decides the rest.
-    // Nothing frees, so an `Err` payload is the interned message itself rather
-    // than a heap copy of it — the textual backend copies only so that every I/O
-    // error payload is owned storage, and this backend's allocator has no free to
-    // make that distinction observable.
+    // An `Err` payload is the interned message itself rather than a heap copy of
+    // it — the textual backend copies only so that every I/O error payload is
+    // owned storage, and nothing here ever frees a message.
+    //
+    // The BUFFER is a different question, and it was answered wrong: it is
+    // allocated before the scan and both failures left by the side door without
+    // it, so `stringFromBytes` over invalid input in a loop lost one block a turn
+    // on this backend alone. One free at the join covers both exits. The block is
+    // not the region's on any path — `Fn_::expr` records a `String` in the arena
+    // only for the `str_temporary` shapes, and this call's type is a `Result` —
+    // so there is no second owner to take it from.
     let bnul = rt.intern(m, crate::io_message("bnul"));
     let butf8 = rt.intern(m, crate::io_message("butf8"));
     let res = layout::of_ll("{ i1, i64, i64 }").expect("the Result<String, String> shape");
@@ -13229,7 +13279,14 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::LocalSet(err))
                 .ins(&Instruction::End)
                 .ins(&Instruction::End); // fin
-                                         // The tag is `no error`, and the word is whichever pointer that named.
+                                         // A failure hands back a message, so the buffer built for the bytes
+                                         // has no owner left. Both exits arrive here.
+            b.ins(&Instruction::LocalGet(err))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(buf));
+            str_hdr(b);
+            b.ins(&Instruction::Call(free)).ins(&Instruction::End);
+            // The tag is `no error`, and the word is whichever pointer that named.
             b.ins(&Instruction::LocalGet(2))
                 .ins(&Instruction::LocalGet(err))
                 .ins(&Instruction::I32Eqz)
@@ -14191,14 +14248,25 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     //
     // WASI writes the pointers as a contiguous array of wasm32 pointers, which is
     // exactly the buffer an `Array<String>` wants — the element stride IS
-    // `of_ll("ptr")` — so dropping the program name is `+ 4` rather than a copy.
+    // `of_ll("ptr")`.
+    //
+    // Dropping the program name used to be `+ 4` rather than a copy, and that made
+    // the array's data pointer an address four bytes past an allocation instead of
+    // an allocation itself. `free` reads the class word at `p - HDR`, which for
+    // `ptrs + 4` is the block's own header slack: always zero, below `MIN_CLASS`,
+    // so the free was silently refused and `drop xs` leaked the whole array on
+    // this backend alone (native `__vyrn_args` hands back a fresh `malloc`).
+    // Copying `argv[1..]` down into slot 0 as it goes buys back an ordinary
+    // allocation base, and skips the copy of the program name that the same `+ 4`
+    // left stranded.
     let (args_sizes_get, args_get) = (wasi.args_sizes_get, wasi.args_get);
     let str_new = rt.str_new;
     let strlen = rt.strlen;
+    let free = rt.free;
     rt.next_is(m, rt.args);
-    m.func(&[ValType::I32], &[], &[ValType::I32; 7], 8, |b| {
+    m.func(&[ValType::I32], &[], &[ValType::I32; 8], 8, |b| {
         let (cnt, ptrs) = (2, 3);
-        let (i, at_p, e, n, c) = (4, 5, 6, 7, 8);
+        let (i, at_p, e, n, c, blob) = (4, 5, 6, 7, 8, 9);
         b.slot(0)
             .ins(&Instruction::I32Const(0))
             .ins(&Instruction::I32Store(word()));
@@ -14214,8 +14282,8 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             .ins(&Instruction::LocalTee(cnt))
             .ins(&Instruction::I32Const(2))
             .ins(&Instruction::I32Shl)
-            // Two words of slack, so `ptrs + 4` is inside the allocation even
-            // when there are no arguments at all and it is never read.
+            // Two words of slack, so an argv of one name alone still asks for a
+            // block rather than for nothing.
             .ins(&Instruction::I32Const(8))
             .ins(&Instruction::I32Add)
             .ins(&Instruction::I64ExtendI32U)
@@ -14228,29 +14296,39 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             .ins(&Instruction::I32Add)
             .ins(&Instruction::I64ExtendI32U)
             .ins(&Instruction::Call(malloc))
+            .ins(&Instruction::LocalTee(blob))
             .ins(&Instruction::Call(args_get))
             .ins(&Instruction::Drop);
         // The host wrote one blob and pointers into it, so no element has a
         // String header in front of it. Copy each one into a String that does
-        // (RFC-0089 M1a). The blob and the copies both outlive the program, which
-        // is what `args()` always did — RFC-0011's array-element rule.
-        b.ins(&Instruction::LocalGet(cnt))
+        // (RFC-0089 M1a). The copies outlive the program, which is what `args()`
+        // always did — RFC-0011's array-element rule.
+        //
+        // Ascending, from `argv[1]` into slot 0: the program name is not copied at
+        // all (`__vyrn_args_count` drops it natively, so a copy of it here was a
+        // String a turn nobody could reach), and the read of slot `i` always
+        // precedes the write of slot `i - 1`.
+        b.ins(&Instruction::I32Const(1))
             .ins(&Instruction::LocalSet(i));
         b.ins(&Instruction::Block(BlockType::Empty))
             .ins(&Instruction::Loop(BlockType::Empty))
             .ins(&Instruction::LocalGet(i))
-            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::LocalGet(cnt))
+            .ins(&Instruction::I32GeU)
             .ins(&Instruction::BrIf(1))
+            .ins(&Instruction::LocalGet(ptrs))
             .ins(&Instruction::LocalGet(i))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(i))
+            .ins(&Instruction::I32Const(2))
+            .ins(&Instruction::I32Shl)
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(at_p))
             .ins(&Instruction::LocalGet(ptrs))
             .ins(&Instruction::LocalGet(i))
             .ins(&Instruction::I32Const(2))
             .ins(&Instruction::I32Shl)
             .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalTee(at_p))
             .ins(&Instruction::I32Load(word()))
             .ins(&Instruction::LocalTee(e))
             .ins(&Instruction::Call(strlen))
@@ -14267,9 +14345,18 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             .ins(&Instruction::LocalGet(at_p))
             .ins(&Instruction::LocalGet(c))
             .ins(&Instruction::I32Store(word()))
+            .ins(&Instruction::LocalGet(i))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(i))
             .ins(&Instruction::Br(0))
             .ins(&Instruction::End)
             .ins(&Instruction::End);
+        // The blob was the host's staging buffer and every byte of it has been
+        // copied. Native has no blob at all — `main` stashes the argv it was
+        // handed — so holding this one was a block a call that nothing could name.
+        b.ins(&Instruction::LocalGet(blob))
+            .ins(&Instruction::Call(free));
         b.ins(&Instruction::LocalGet(cnt))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::I32GtU)
@@ -14283,8 +14370,6 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             .ins(&Instruction::LocalSet(cnt));
         b.ins(&Instruction::LocalGet(0))
             .ins(&Instruction::LocalGet(ptrs))
-            .ins(&Instruction::I32Const(4))
-            .ins(&Instruction::I32Add)
             .ins(&Instruction::I32Store(word_at(triple.fields[0])));
         for f in [triple.fields[1], triple.fields[2]] {
             b.ins(&Instruction::LocalGet(0))
@@ -14881,15 +14966,23 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     //
     // A Vyrn `String` never contains a NUL (the readers above are why), so
     // `strlen` is its full length and there is no separate length to pass.
+    //
+    // Three ways to fail, one message: the open, the write, and the close. The
+    // open was the only one caught until the audit — a full filesystem, a
+    // read-only mount or a closed pipe all wrote nothing and reported `Ok(true)`,
+    // where the native shim has failed all three since it was written (it checks
+    // `wrote != n` AND `fclose`). The fd is closed on every path, as `fclose` is
+    // reached on every path there; the close's own errno joins the write's,
+    // because a buffered write that only fails at the close failed.
     let write_all = rt.write_all;
     rt.next_is(m, rt.write_file);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
         &[],
-        &[ValType::I32, ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32],
         0,
         |b| {
-            let (fd, emsg) = (4, 5); // params 0..2, the frame base 3, then ours
+            let (fd, emsg, wst) = (4, 5, 6); // params 0..2, the frame base 3, then ours
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)) // 0: err
                 .ins(&Instruction::LocalGet(0))
@@ -14912,9 +15005,19 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::LocalGet(1))
                 .ins(&Instruction::Call(strlen))
                 .ins(&Instruction::Call(write_all))
+                .ins(&Instruction::LocalSet(wst))
                 .ins(&Instruction::LocalGet(fd))
                 .ins(&Instruction::Call(fd_close))
-                .ins(&Instruction::Drop);
+                .ins(&Instruction::LocalGet(wst))
+                .ins(&Instruction::I32Or)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(writepre as i32))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(writepost as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::LocalSet(emsg))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End);
             // `Ok(true)`: the payload is a `Bool`, zero-extended into the word,
             // which is the encoding `build_sum2`'s `Word::Ext` arm produces.
             b.ins(&Instruction::LocalGet(2))
@@ -15429,7 +15532,7 @@ fn print_i64(m: &mut Module, write_all: u32) -> u32 {
             b.slot(BUF_END)
                 .ins(&Instruction::LocalGet(p))
                 .ins(&Instruction::I32Sub);
-            b.ins(&Instruction::Call(write_all));
+            b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
         },
     )
 }
