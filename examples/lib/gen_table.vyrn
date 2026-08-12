@@ -68,25 +68,25 @@ export gen fn table(path: String) -> String {
             let typeCol = typeStart - start + 1
             if contains(names, name) {
                 reports = reports
-                    + report(
-                        Error,
-                        path,
-                        lineNo,
-                        nameCol,
-                        "column `\{name}` is declared twice; a table has one column per name",
-                    )
+                + report(
+                    Error,
+                    path,
+                    lineNo,
+                    nameCol,
+                    "column `\{name}` is declared twice; a table has one column per name",
+                )
             } else {
                 names.push(name.copy())
             }
             if ty == "String" {
                 reports = reports
-                    + report(
-                        Warning,
-                        path,
-                        lineNo,
-                        typeCol,
-                        "column `\{name}` has no length limit; write `String(120)`",
-                    )
+                + report(
+                    Warning,
+                    path,
+                    lineNo,
+                    typeCol,
+                    "column `\{name}` has no length limit; write `String(120)`",
+                )
             }
         }
         i = i + 1
@@ -94,16 +94,16 @@ export gen fn table(path: String) -> String {
 
     let quoted = "\"" + joinWith(names, ",") + "\""
     return reports
-        + "/// Generated from \{path} by the `table` generator (RFC-0021).\n"
-        + "export fn columnCount() -> Int64 { return \{names.length.toString()} }\n"
-        + "export fn columnNames() -> String { return \{quoted} }\n"
+    + "/// Generated from \{path} by the `table` generator (RFC-0021).\n"
+    + "export fn columnCount() -> Int64 { return \{names.length.toString()} }\n"
+    + "export fn columnNames() -> String { return \{quoted} }\n"
 }
 
 /// The input as a whole is missing, so there is no line to point at.
 fn reportHereFailed(path: String) -> String {
     return reportHere(Error, "cannot read the table definition `\{path}`")
-        + "export fn columnCount() -> Int64 { return 0 }\n"
-        + "export fn columnNames() -> String { return \"\" }\n"
+    + "export fn columnCount() -> Int64 { return 0 }\n"
+    + "export fn columnNames() -> String { return \"\" }\n"
 }
 
 fn contains(names: Array<String>, name: String) -> Bool {
