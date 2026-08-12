@@ -105,7 +105,11 @@ fn quickstart() -> String {
             <p>One word on a parameter — <code>read</code>, <code>modify</code>, <code>consume</code>, <code>share</code> — and the compiler enforces the rest. No lifetime syntax, no collector.</p>
             <div class="plate" data-widget="ownership">
                 <div class="plate-head">
-                    <span class="pill">Replay</span>
+                    <!-- The pill names the PLATE and the button names the ACTION.
+                         Both said "Replay", and on a narrow column the head wraps,
+                         so the two stacked and read as two Replay buttons — one of
+                         which does nothing. A pill is never a control's label. -->
+                    <span class="pill">Ownership</span>
                     <span class="eyebrow">vyrn why --memory examples/ownership.vyrn</span>
                     <span class="spacer"></span>
                     <div class="controls">
