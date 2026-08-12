@@ -129,7 +129,7 @@ fn capabilities() -> Array<Capability> {
             <dl class="nongoals">
                 <div v-for="g in nonGoals()" :key="g.what">
                     <dt>{{ g.what }}</dt>
-                    <dd>{{ g.why }}</dd>
+                    <dd v-html="g.why"></dd>
                 </div>
             </dl>
         </section>
