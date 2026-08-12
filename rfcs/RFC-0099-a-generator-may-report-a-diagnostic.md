@@ -158,7 +158,7 @@ build, and must not be silently swallowed by one either.
 
 ### Codes and fixes are not in v1
 
-`docs/research/llm-agents.md` argues for stable machine-readable codes, and it is
+The agent-facing research argues for stable machine-readable codes, and it is
 right — for a consumer. A code is load-bearing exactly when something reads it:
 a suppression comment that waives one rule at one line, a per-code severity
 policy, an agent that maps a code to a fix. None of those exists yet, and each
