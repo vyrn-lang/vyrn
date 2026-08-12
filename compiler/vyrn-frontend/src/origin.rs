@@ -614,7 +614,11 @@ fn x() {}
     fn an_unrecognized_severity_neither_escalates_nor_vanishes() {
         // A generator written for a later compiler must not fail a build here,
         // and must not be silently dropped either.
-        let ds = diagnostics("b", "//@diag hint ./x.vyx:1:1 consider a shorter name\n", "");
+        let ds = diagnostics(
+            "b",
+            "//@diag hint ./x.vyx:1:1 consider a shorter name\n",
+            "",
+        );
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].severity, Severity::Warning);
         assert_eq!(ds[0].message, "hint ./x.vyx:1:1 consider a shorter name");
