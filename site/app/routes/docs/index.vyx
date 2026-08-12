@@ -39,25 +39,25 @@ fn links() -> Array<Link> {
     ]
 }
 
-/// The commands worth learning, grouped the way the README groups them. Each
-/// row points somewhere: a table of commands that looks like a set of links and
-/// is not one is worse than plain text.
-type Command = { name: String, what: String, href: String }
-
-/// The README's tooling section, which lists every command in the table below.
-fn tooling() -> String {
-    return blob("README.md") + "#tooling"
-}
+/// One row of the command table: what you type, and what it does.
+///
+/// The name is CODE, not a link. An earlier round wrapped each command in an
+/// anchor so the row would do something when clicked; that was wrong twice over.
+/// A command is something you copy — every inline code span on this site copies
+/// itself when you click it — and the anchors it grew pointed at GitHub, which
+/// is exactly the redirect this site exists to remove. Where a row has more to
+/// say, the sentence carries an ON-SITE link, in the sentence, as a link looks.
+type Command = { name: String, what: String }
 
 fn commands() -> Array<Command> {
     return [
-        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file.", href: "/install.html#check" },
-        Command { name: "vyrn fmt --check", what: "The canonical formatter. <code>--check</code> is the CI gate.", href: tooling() },
-        Command { name: "vyrn doc", what: "Markdown API docs from /// comments. The pages on this site are read off the same declarations.", href: tooling() },
-        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it.", href: "/index.html#memory" },
-        Command { name: "vyrn emit-gen <file>", what: "The source a generator produced. A generator is not magic, and this prints it.", href: tooling() },
-        Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table.", href: blob("README.md") + "#the-web-and-full-stack-story" },
-        Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in <code>vyrn.lock</code> and cache by sha256.", href: tooling() },
+        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/install.html#check\">Five of them, on day one.</a>" },
+        Command { name: "vyrn fmt --check", what: "The canonical formatter. <code>--check</code> is the CI gate." },
+        Command { name: "vyrn doc", what: "Markdown API docs from /// comments. <a href=\"/docs.html#std\">The pages on this site</a> are read off the same declarations." },
+        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it. <a href=\"/index.html#memory\">One report, replayed.</a>" },
+        Command { name: "vyrn emit-gen <file>", what: "The source a generator produced. A generator is not magic, and this prints it." },
+        Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table." },
+        Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in <code>vyrn.lock</code> and cache by sha256." },
     ]
 }
 </script>
@@ -100,7 +100,7 @@ fn commands() -> Array<Command> {
                 </thead>
                 <tbody>
                     <tr v-for="c in commands()" :key="c.name">
-                        <td><a :href="c.href"><code>{{ c.name }}</code></a></td>
+                        <td><code>{{ c.name }}</code></td>
                         <td v-html="c.what"></td>
                     </tr>
                 </tbody>

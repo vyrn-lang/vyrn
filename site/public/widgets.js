@@ -81,6 +81,21 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 // W3 — the install command. The most important widget on the site.
 // ---------------------------------------------------------------------------
 
+/// Put `text` on the clipboard, and say whether it worked.
+///
+/// `navigator.clipboard` is missing on an insecure origin and can be refused by
+/// permission, so failure is a real answer here rather than an exception nobody
+/// catches. Both callers — the COPY button and an inline span — show what
+/// happened instead of pretending.
+async function writeClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
 function copyButtons() {
   for (const box of $$("[data-copy]")) {
     const btn = $("[data-copy-btn]", box);
@@ -88,10 +103,9 @@ function copyButtons() {
     if (!btn || !code) continue;
     btn.addEventListener("click", async () => {
       pinWidth(btn);
-      try {
-        await navigator.clipboard.writeText(code.textContent.trim());
+      if (await writeClipboard(code.textContent.trim())) {
         btn.textContent = "Copied";
-      } catch (err) {
+      } else {
         btn.textContent = "Press Ctrl+C";
         getSelection().selectAllChildren(code);
       }
@@ -99,6 +113,137 @@ function copyButtons() {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Inline code copies itself.
+//
+// `Run it yourself: cargo test -p vyrn-cli --test parity -- --ignored` is
+// written INLINE on purpose — it belongs in the sentence, not in a plate — and a
+// reader who wants that command should not have to drag across it. So every
+// code span in prose copies itself when clicked, and the same for a short
+// reference like `$PATH` or `~/.vyrn`.
+//
+// The one real cost is text selection, and the rules that protect it are
+// `isPlainCopyClick` below.
+// ---------------------------------------------------------------------------
+
+/// The code span `node` is inside, if that span is one in a SENTENCE.
+///
+/// A `<pre>`, a command plate and a numbered source row are blocks: the plate
+/// already has its own COPY button, and a second handler inside one would fire
+/// twice on a single click. One predicate, used by both the marking pass and the
+/// delegated listener, so the two can never disagree about what is in scope.
+function inlineCode(node) {
+  const el = node && node.closest ? node.closest("code") : null;
+  if (!el || el.closest("pre, .cmd, .lines")) return null;
+  return el;
+}
+
+/// What an inline code span puts on the clipboard: what the reader sees.
+///
+/// Markup indentation reaches `textContent` as newlines and runs of spaces, and
+/// an inline box renders every one of those as a single space. The copy does the
+/// same, and trims the ends.
+function codeText(el) {
+  return el.textContent.replace(/\s+/g, " ").trim();
+}
+
+/// Whether a click on a code span is a COPY or part of a SELECTION.
+///
+/// Copy-on-click eats text selection unless it is careful, so a click has to
+/// pass all three rules:
+///
+///  - the pointer did not travel — a drag is a selection, not a click,
+///  - it is not the second click of a double-click, which selects a word,
+///  - nothing is selected when the button comes up.
+///
+/// A keyboard-driven activation arrives with no pointer position at all, and
+/// passes. `down` is null then, and null is the answer to "where did the pointer
+/// press", not a missing value to guess at.
+function isPlainCopyClick(down, up, selected) {
+  if (up.detail >= 2) return false;
+  if (selected) return false;
+  if (!down) return true;
+  return Math.abs(up.x - down.x) <= 3 && Math.abs(up.y - down.y) <= 3;
+}
+
+/// The polite live region every copy reports into. One per document, and a soft
+/// navigation replaces `<main>` rather than `<body>`, so it survives.
+function announce(msg) {
+  let region = document.getElementById("copy-status");
+  if (!region) {
+    region = document.createElement("div");
+    region.id = "copy-status";
+    region.className = "sr-only";
+    region.setAttribute("aria-live", "polite");
+    document.body.appendChild(region);
+  }
+  region.textContent = msg;
+}
+
+/// Copy one span, and say so twice: a colour flash for the eye and the live
+/// region for a screen reader.
+///
+/// The flash is a class, not a label. A label would change the span's box and
+/// reflow the sentence around it, and a tooltip above a table cell is clipped by
+/// the `.scroller` it sits in. Colour cannot do either.
+async function copySpan(el) {
+  const text = codeText(el);
+  const ok = await writeClipboard(text);
+  el.classList.add(ok ? "copied" : "copyfail");
+  setTimeout(() => el.classList.remove("copied", "copyfail"), 900);
+  if (ok) {
+    announce("Copied " + text);
+  } else {
+    // The clipboard refused. Select the text so the reader can take it, and say
+    // that is what happened.
+    getSelection().selectAllChildren(el);
+    announce("Copy failed. " + text + " is selected — press Control C.");
+  }
+}
+
+/// Give every inline code span the affordance, once the script that backs it is
+/// running. Without JavaScript the spans stay plain text and advertise nothing,
+/// which is the honest state.
+function markCopyable() {
+  for (const el of $$("code")) {
+    if (!inlineCode(el)) continue;
+    el.classList.add("copyable");
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.setAttribute("aria-label", "Copy " + codeText(el));
+  }
+}
+
+// Where the pointer went down, when it went down on a code span. Read once, by
+// the click that follows.
+let copyDownAt = null;
+
+// One listener per document for the life of the page. `boot` runs again after
+// every soft navigation and re-marks the spans; registering here would stack a
+// listener per page.
+document.addEventListener("pointerdown", (e) => {
+  copyDownAt = inlineCode(e.target) ? { x: e.clientX, y: e.clientY } : null;
+});
+
+document.addEventListener("click", (e) => {
+  const el = inlineCode(e.target);
+  if (!el) return;
+  const sel = getSelection();
+  const selected = !!sel && !sel.isCollapsed && sel.toString().length > 0;
+  if (isPlainCopyClick(copyDownAt, e, selected)) copySpan(el);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const el = inlineCode(e.target);
+  if (!el) return;
+  // A span with `role="button"` gets no synthetic click from the browser, so
+  // this is the only keyboard path and it cannot double-fire. Space would
+  // scroll the page.
+  e.preventDefault();
+  copySpan(el);
+});
 
 /// Pick the platform tab that matches the visitor, and let them override it.
 function installPicker(root) {
@@ -439,6 +584,7 @@ function entrance() {
 
 function boot() {
   copyButtons();
+  markCopyable();
   entrance();
   markNav();
   railSpy();
