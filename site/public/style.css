@@ -58,9 +58,8 @@
    * not the element. Read this before changing any `max-width` on text.
    *
    *   READING  (--measure, 65ch)  Continuous copy, read start to finish, with
-   *            nothing beside it. `.lede` and `.prose` — the module header prose
-   *            on /docs/std/*, and the error page. 65ch is the brief's limit
-   *            (8.2) and it stays here.
+   *            nothing beside it. `.lede`, and the error page. 65ch is the
+   *            brief's limit (8.2) and it stays here.
    *
    *   INTRO    (--wide, 88ch)  One or two sentences that introduce the block
    *            directly below them: a band intro, a `.notice`, the prose under
@@ -68,6 +67,16 @@
    *            65ch rag stopped at 56% of the plate and read as broken layout
    *            rather than as a column. 88ch is still a measure — a reader is
    *            not tracking 116ch lines — but the rag no longer fights the plate.
+   *
+   *            A reference page's `.prose` is INTRO too, and that is a decision
+   *            rather than an oversight. On /docs/std/* the header prose is not
+   *            copy set beside furniture, it IS the page's body, and every piece
+   *            of furniture around it — the rules between bands, the signature
+   *            plates, the entry borders — spans the whole column. At 65ch it
+   *            stopped at 59% of a 1009px column while the rule directly above
+   *            it ran the full width, which reads as a broken block and not as a
+   *            considered one. The whole reference now agrees at 88ch: the
+   *            module header and each export's prose share one width.
    *
    *   LABEL    (no measure)  `.eyebrow` and `.cap` name the block they are
    *            attached to, so they take its width, exactly as a `.cap` inside a
@@ -128,6 +137,41 @@ a:hover { text-decoration-color: var(--accent); }
 code, pre, kbd { font-family: var(--mono); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* INLINE CODE, and the rule that decides what gets it.
+ *
+ * THE RULE: if it is something you TYPE, it is `<code>`. A file name, a flag, a
+ * path, an environment variable, a command, a keyword, a header. If you would
+ * not type it, it is prose. `vyrn.lock`, `~/.vyrn`, `--offline`, `$CLANG`,
+ * `PATH` — all of them are marked, on every page, and this is the only rule.
+ *
+ * A font-family change is not an identity. At 13px against a warm ground the
+ * mono and the sans carry nearly the same colour and weight, so `$PATH` read as
+ * ordinary prose — which is what a reader reported. A span therefore takes a
+ * hairline box and a faint wash of the page's own accent, in both themes.
+ *
+ * It is deliberately quiet. A sentence naming six flags is a sentence, not six
+ * badges: the box is one hairline, the wash is 8%, and the corners are sharp
+ * like everything else on the sheet. */
+code {
+  font-size: 0.92em;
+  padding: 0.08em 0.34em;
+  border: 1px solid color-mix(in oklab, var(--accent) 22%, transparent);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+  color: color-mix(in oklab, var(--ink) 75%, var(--accent));
+}
+
+/* A block is already a box. Inside a `<pre>`, a command plate, a numbered
+ * source row or the module grid, `<code>` is structure rather than a span in a
+ * sentence, and a second box around it would be noise. Kept ABOVE the rules for
+ * those blocks, so each one still sets its own size. */
+pre code, .cmd code, .lines code, .modgrid code {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
+
 /* Numbers never jitter. This is the whole reason data looks trustworthy. */
 .num, table, .metric, .bignum, .spec dd, .diffline {
   font-variant-numeric: tabular-nums slashed-zero;
@@ -186,6 +230,18 @@ code, pre, kbd { font-family: var(--mono); }
 .nav { display: flex; gap: var(--s3); flex-wrap: wrap; }
 .nav a { text-decoration: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
 .nav a:hover { color: var(--ink); }
+/* Where the reader is. `site/export.vyrn` stamps the attribute per published
+ * document and `widgets.js` moves it after a soft navigation, so the marker is
+ * right on a first load with no script and right after every navigation with
+ * one. A rule under the word, in the accent: the masthead is a single line of
+ * mono capitals, and colour alone in that row is too quiet to find. */
+.nav a[aria-current="page"] {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 7px;
+}
 
 .foot {
   margin-top: var(--s6);
@@ -240,7 +296,8 @@ code, pre, kbd { font-family: var(--mono); }
  * lede is read, not scanned. One measure, not a second magic number. */
 .lede { font-size: 1.2rem; line-height: 1.5; color: var(--muted); max-width: var(--measure); }
 
-/* READING. Long-form only: the module header prose and the error page. */
+/* READING. Long-form only: the error page. The reference's prose is INTRO and
+ * takes `--wide` — see `.docpage .prose`, and the role note at the top. */
 .prose { max-width: var(--measure); }
 .prose > p, .prose > ul, .prose > dl { margin-top: var(--s3); line-height: 1.65; }
 .prose h2 { margin-top: var(--s6); font-size: 1.5rem; }
@@ -664,11 +721,16 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
 .entry h2 a { color: inherit; text-decoration: none; }
 .entry h2 a:hover { color: var(--accent); }
 .entry > .cap { border: 0; padding: var(--s2) 0 0; }
-/* INTRO, not READING. An export's prose explains the signature printed directly
- * above it, so the two share a left edge and very nearly a right one. The module
- * HEADER prose (`#about`) is the READING role and keeps 65ch: it stands alone in
- * its own band with no signature block beside it. */
-.entry .prose { margin-top: var(--s2); max-width: var(--wide); }
+/* INTRO, not READING — the WHOLE reference page, header prose included.
+ *
+ * An export's prose explains the signature printed directly above it, so the two
+ * share a left edge and very nearly a right one. The module header prose
+ * (`#about`) was left at 65ch on the argument that it stands alone; it does not.
+ * It sits between two full-width rules on a page whose every other block runs
+ * the column, and at 65ch it stopped at 59% of that column. One width for the
+ * page, and the furniture and the prose agree. */
+.docpage .prose { max-width: var(--wide); }
+.entry .prose { margin-top: var(--s2); }
 
 .kindpill {
   font: 11px/1 var(--mono);
@@ -684,14 +746,16 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
 
 .prose ul.docprose { padding-left: var(--s3); }
 .prose ul.docprose li { margin-top: var(--s1); line-height: 1.65; }
-.prose code, .modlist code, .entry code { font-size: 0.92em; }
+/* A fenced block inside doc prose is code, and `apidoc.vyrn` colours it with the
+ * compiler's own lexer like every other snippet. It keeps the quieter rule —
+ * one left hairline instead of a full border — because it sits INSIDE a
+ * paragraph's flow rather than standing on its own. */
 pre.doccode {
   margin: var(--s3) 0 0;
   padding: var(--s2);
   border-left: 1px solid var(--rule);
   overflow-x: auto;
   font: 13px/1.7 var(--mono);
-  color: var(--muted);
   tab-size: 4;
 }
 

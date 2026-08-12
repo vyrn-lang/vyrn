@@ -252,7 +252,7 @@ fn axes() -> Array<Axis> {
                         </g>
                     </svg>
                 </div>
-                <p class="cap">The direct figure is the ladder's first row, measured. 277 KB is the figure README.md and ROADMAP.md both state for the old route through textual LLVM IR and clang. One linear scale, so the small bar is a sliver — which is what the difference looks like.</p>
+                <p class="cap">The direct figure is the ladder's first row, measured. 277 KB is the figure <code>README.md</code> and <code>ROADMAP.md</code> both state for the old route through textual LLVM IR and <code>clang</code>. One linear scale, so the small bar is a sliver — which is what the difference looks like.</p>
             </div>
         </section>
 
