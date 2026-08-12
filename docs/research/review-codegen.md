@@ -35,9 +35,10 @@ answer (a call-depth probe passed where the fresh binary traps).
 | 5 | Medium | PL | **The runtime trap wordings are duplicated as hand-written literals in both backends** (`lib.rs:1161` vs `direct.rs:12244`), while `IO_MESSAGES`, `validation_message` and `CALL_DEPTH_LIMIT` are shared constants. Half the parity-load-bearing strings have a single source; the other half have two. | G5.1 |
 | 6 | Medium | PL | **The calling convention exists only as code.** `llt_of` is the one shared layout function (good); how a value is passed — by value, by shadow-stack address, `modify` copy-back — is implied by `signature`/`wasm_sig` in one backend and `function` in the other, with no written statement to check either against. | G5.2 |
 | 7 | Medium | PL | **The parity gate spans the corpus, not the language.** It discovers examples by glob (good) — but findings #1–#4 are all shapes no example reaches: the corpus matches on call results, never on owned locals; declares no type whose name collides with a mangle prefix; writes no aggregate frame near 64 KB. | G5.3 |
+| 8 | Medium | C systems | **A statement-position `match` on a heap temporary never frees it** — the sibling `if let` does. `let d = match makeResult(i) { … }` in a 3M loop: native peak 141.6 MB against 3.4 MB for the same loop written `if let`. A pure leak, both compiled backends. | G2.1 |
 
-Counts at this commit: 6 CONFIRMED (G4.1–G4.4, G1.1, G5.1), the rest
-pending the reading sweep, marked where they land below.
+Counts: **8 CONFIRMED** (G4.1–G4.4, G1.1, G2.1, G5.1, G5.3), the rest
+PLAUSIBLE from reading, cited in each lens.
 
 ---
 
@@ -84,8 +85,32 @@ folding — 50,000 `add` instructions for a constant the frontend knew. The
 inherits the shape: `check` does not predict `build` cost in either
 direction. Recorded as context for G4.4, not ranked.
 
-*(Further Linus-lens findings from the reading sweep land in this section
-when confirmed.)*
+### G1.3 PLAUSIBLE — Medium. The instantiation worklist is quadratic in distinct instantiations
+
+`lib.rs:1511` dedups a discovered instantiation by re-mangling the whole
+pending queue:
+
+```rust
+if !emitted.contains(&m) && !queue.iter().any(|(qn, qa)| mangle_name(qn, qa) == m) {
+```
+
+`mangle_name` allocates, and this runs per discovered instantiation, so it is
+O(insts²) mangles. The HO drain has the same shape (`lib.rs:698`), and the
+direct backend keys its cache by a linear scan of a `Vec<Pending>` on every
+call site (`direct.rs:1034`, `self.mono.borrow().insts.iter().find(|p| p.key
+== key)`), where a `HashMap<Key, Sig>` is sitting right there.
+
+Measured, distinct generic instantiations (growing array literals), `emit-ir`
+net: 60 / 114 / 334 / 1,237 ms for n = 200 / 400 / 800 / 1,600 — ~3.4×
+per doubling. Ranked PLAUSIBLE not CONFIRMED because `emit-ir` includes the
+checker's own per-instantiation cost (the prior audit's L1.1 already found it
+quadratic), and this probe cannot separate the backend's mangle-scan from the
+checker's clone. The code at `lib.rs:1511` is quadratic on its face; its share
+of the measured curve is the unproven part. (Reported independently by the
+Rust-lens reading sweep, items 17/18/19.)
+
+**Fix.** A `HashSet<String>` of mangled names beside the queue; a
+`HashMap<Key, Sig>` in `Cx::mono`.
 
 ---
 
@@ -94,7 +119,88 @@ when confirmed.)*
 The confirmed core of this lens turned out to be G4.2 — the double free is a
 resource-discipline defect first and a parity break second; it is written up
 under the Agda lens because the three-engine disagreement is what proves it.
-What this lens verified by running programs:
+G2.1 below is its mirror: the same missing rule, in the direction that leaks
+instead of double-freeing.
+
+### G2.1 CONFIRMED — Medium. A statement-position `match` on a heap temporary leaks it every iteration
+
+The `if let` form frees a match scrutinee that is a heap temporary; the
+`match` form does not. `own::analyze` writes a statement row for
+`Stmt::IfLet` and `Stmt::ForIn` (`own.rs:1084, 1117`) but an `Expr::Match`
+scrutinee gets none (`own.rs:1200-1207` descends only into lambdas), so
+neither backend pushes a drop for it (`lib.rs:5729-5743`,
+`direct.rs` match lowering). The interpreter reference-counts, so it does not
+leak.
+
+**Repro** — two files differing only in `match` vs `if let`, 3,000,000
+iterations, native, peak working set measured:
+
+```vyrn
+// p34_matchleak.vyrn
+while i < 3000000 {
+    let d = match makeResult(i) {   // makeResult -> Result<String, String>
+        Ok(s) => s.byteLength,
+        Err(e) => e.byteLength,
+    }
+    c = c + d
+    i = i + 1
+}
+```
+
+| form | peak | output |
+|---|---|---|
+| `match` (above) | **141.6 MB** | `total=28888890` |
+| `if let Ok(s) = makeResult(i) { … }` | **3.4 MB** | correct |
+
+Both print the right number; one keeps every scrutinee's String forever.
+The wasm build leaks the same bytes (it completes here because 144 MB fits
+its growable memory). The parity harness compares stdout and cannot see it.
+
+**Fix.** Give `Expr::Match` the same scrutinee-ownership row `Stmt::IfLet`
+already has in `own::analyze`.
+
+### PLAUSIBLE — drop-placement shapes from the reading sweep
+
+Reported by the drop-placement reading pass; each names a control-flow shape
+whose release one backend forgets or the two disagree on. Not reproduced.
+
+- **G2.2 — the in-region reassignment guard is on one backend only.** `lib.rs`
+  `slot_owns` carries a `region_depth == 0` guard (`lib.rs:4344-4347`);
+  `direct.rs` `place_owns` (`direct.rs:2523-2525`) has none, so every rule-4
+  snap site (`direct.rs:2836, 2883, 3264`) snaps-and-frees a replaced value
+  inside a region on wasm while native deliberately stands aside. Guaranteed
+  emitted-code divergence (native leaks the buffer, wasm frees it); a double
+  free if any store of a region-allocated value past the escape guard reaches
+  it. *Probed the reachable half:* the escape guard refuses the obvious route
+  (`cannot store a heap value into 's', which outlives the enclosing region`),
+  and an in-region reassignment of an in-region binding runs clean and
+  identical on all three engines over 20,000 iterations — so the divergence is
+  real in the emitted code but I could not drive it to an observable double
+  free from valid source. PLAUSIBLE, latent.
+- **G2.3 — `if let` scrutinee holes are recorded but never consumed.**
+  `own.rs:1092-1096` inserts holes for the `IfLet` statement, but the
+  holes_map→hole_slots wiring exists only in `Stmt::Let` (`lib.rs:4484-4486`,
+  `direct.rs:2782-2787`); `IfLet` lowering reads only `droppable`. `ForIn`
+  refuses droppable when holes are non-empty (`own.rs:1129-1132`); `IfLet`
+  does not — the asymmetry is the tell. If a `consume` can land a hole on an
+  if-let scrutinee, the Deep walk frees the taken place twice.
+- **G2.4 — the `?` propagate path skips pending argument-temporary frees.**
+  `gen_try`'s propagate arm runs `emit_all_drops` (drop_stack only) then
+  `ret` (`lib.rs:6453-6459`); the call's `arg_frees` drain lands in `try.ok`
+  (`lib.rs:8292-8302`), so `f("n" + 1.toString(), o?)` with `o == None` leaks
+  the concat. Direct backend identical (`direct.rs:10470-10472` vs
+  `direct.rs:5739-5744`).
+- **G2.5 — the String self-append fast path never drains `arg_frees`.** A
+  call-shaped operand of `s = s + label(i)` is parked in `arg_frees` with no
+  enclosing mark and survives to function end unfreed (`lib.rs:4501-4519`;
+  `direct.rs:2821-2829`). A per-iteration leak in `s = s + label(i)`.
+- **G2.6 — a String `+` feeding a comparison is freed by nobody.**
+  `free_str_temp`/`tee_str_temp` fire only under the `Add` arm
+  (`lib.rs:6639-6647`, `direct.rs:5144-5156`); `("a" + x) == y` is neither an
+  Add operand nor an `arg_drops` row (`own.rs:766-772` records operands only
+  under `@concat`/call positions). Per-evaluation leak, both backends.
+
+What this lens verified by running programs (CLEAN):
 
 - **`break`/`continue` with owned Strings between the loop header and the
   exit** — nested loops, an accumulator, `continue` at i%4, `break` from an
@@ -111,23 +217,109 @@ What this lens verified by running programs:
 - **`panic` with a live droppable local** — canonical
   `error: too big: 9 (file:line)` on all three engines.
 
-*(The systematic control-flow-shape sweep of `emit_drops_above` /
-`emit_releases_above` is in flight; PLAUSIBLE entries land here when it
-reports.)*
+The reading pass additionally traced and found CLEAN, with cites: the
+`break`/`continue` boundary walk (both backends set `drop_boundary` before the
+body frame and `emit_drops_above`/`emit_releases_above` clone without popping,
+`lib.rs:4140-4148`, `direct.rs:1954-1968`); regions on break/continue vs
+return/`?` (freed on the loop exit, popped-not-freed on return — documented
+safe leak, backends agree); `?` vs `return` drop parity (both emit
+`emit_all_drops` + `emit_modify_copyout` before `ret`); the modify copy-out on
+every non-trap exit; stream close-on-every-exit exactly once; the
+reassignment snap (`x = f(x)`/`x = x` take no snap via the shared
+`mentions_place` guard → recorded leak never double free; `x = y` snaps old
+`x` once and marks `y` Moved); loop-variable frames (element is a borrow, its
+frame stays empty); `join`/`spawn` release order (RFC-0095, consume-once
+compile-checked, no double release found).
 
 ---
 
 ## Lens 3 — Rust reviewer: the backend code itself
 
-*(Reading sweep in flight; findings land here marked PLAUSIBLE unless
-reproduced.)*
+The reading sweep's judgement: no panic traces to a valid checked program;
+the real exposure is the stringly-typed layer and the quadratic worklists
+(G1.3). All PLAUSIBLE — read, not driven to a crash.
+
+**Panics — all invalid-IR-only or structurally unreachable.**
+- **G3.1** `lib.rs:5751, 5758` — `gen_match` over Option/Result does
+  `arms.iter().find(|a| pattern_is_one(&a.pattern)).unwrap()` and its negated
+  twin. The invariant (exactly one tag-1 and one tag-0 arm) is the checker's;
+  any future relaxation (a wildcard arm, a single-arm match) panics here
+  instead of erroring. Reachable only from invalid IR today.
+- **G3.2** `wasm.rs:100-114` — `boundary()` compiles a dummy program through
+  the TEXT backend and string-parses its emitted IR
+  (`rest.split_once(" @").expect("declare RET @NAME(..)")`) inside a
+  `OnceLock`. Any drift in `lib.rs`'s `declare` formatting is a process panic
+  on every subsequent wasm build — a cross-file format coupling whose only
+  detector is the panic. Same shape in `declare_sig` (`wasm.rs:135-137`). This
+  is the same defect as G3.10 (the import boundary recovered by parsing IR).
+- **G3.3** `lib.rs:11171` `decl.predicate.clone().expect("predicate present")`
+  — both callers filter on predicate presence; invalid-IR-only.
+- Locally-paired, unreachable: `lib.rs:3840/4104/4487/6129` scope+drop_stack
+  `last_mut`/`pop`; `direct.rs:2790` `.expect("a let outside any block")`;
+  `direct.rs:4340` guarded by `c.len() == 1`; `direct.rs:5879`
+  `Num::of(it).unwrap()` guarded by its match (evaluated twice — style).
+
+**Integer casts — bounded by the checker, no single choke point.**
+- **G3.4** `direct.rs:8987` `b.alloc(stride * elems.len() as u32, …)` — the
+  same u32-multiply class as the dispatched `direct.rs:9026`, on array-literal
+  element counts; `n` is source-bounded, effectively unreachable.
+- **G3.5** `direct.rs` pervasive `l.size as i32` / `I32Const(off as i32)` —
+  layout sizes are checker-bounded (SmallArray `N ≤ 64` at `checker.rs:2231`,
+  ArrayN = literal length), fine today, but the bound lives in many heads with
+  no single assertion that `size ≤ i32::MAX`. Hygiene note.
+
+**Errors swallowed — all documented policy, CLEAN.** `lib.rs:4271/4305/4323`
+`let _ = self.deep_release(...)` in `emit_drop` ("a drop this cannot emit is a
+leak, never a wrong free"); `direct.rs:4380-4388` `if let Ok(t) =
+self.peek_arm(...)` (re-checked downstream); `toolchain.rs` `.ok()?` discovery
+chains (absence is a legitimate answer).
+
+**The stringly-typed layer (the theme).**
+- **G3.6 CONFIRMED-by-inspection** — the direct backend's type representation
+  IS an LLVM type string: `layout::of_ll(&cx.ll(ty))` round-trips at
+  `direct.rs:418, 1777, 3521, 3714, 7068, 7715, 8119, 10015`, and
+  aggregate-ness is decided by `ll.starts_with('{') || ll.starts_with('[')`
+  (`direct.rs:1098`). Deliberate single-source-of-truth (the layout.rs doc
+  argues it), but every query pays a format+parse and the "enum" is a char
+  prefix. This is the mechanism finding G4.1 exploits from the mangle side.
+- **G3.7** `lib.rs:12451` `mangle_dispatch_sym` hashes `format!("{sig:?}")` —
+  derived `Debug` output as the canonical structural form of a type. Any
+  `Debug`-affecting change to `Type` silently changes every dispatcher symbol.
+- **G3.8** ownership facts keyed by AST node address `stmt as *const Stmt as
+  usize` (`lib.rs:4433` and 5 more; `direct.rs:2763` and 5 more). Sound only
+  while the exact `&Program` from `own::analyze` reaches codegen unmoved; a
+  future clone/transform between the two silently misses the map and drops
+  stop being emitted — a leak with no diagnostic and no type-system backing.
+  This is the invariant every drop finding above ultimately rests on.
+- **G3.9** `lib.rs` places are raw strings; `slot_owns` tests
+  `slot.starts_with('@')` to mean "global" (`lib.rs:4346`). `direct.rs`
+  already has a `Place` enum; the text backend never got one.
+
+**Duplication.**
+- **G3.10** `wasm.rs:97-130` recovers the runtime import boundary by parsing
+  the text backend's IR (see G3.2). A `Vec<(name, Sig)>` table both backends
+  read would delete the parser and the panic. (Priority fix — removes a panic
+  and a parser at once.)
+- **G3.11** `direct.rs:633-643` re-implements LEB (`leb()`) inside
+  `export_returns` while the crate already depends on `wasm-encoder` (which
+  encodes LEB) and `wasm.rs` decodes it at `:843`. Ten dead lines.
+- **G3.12** SIMD builtin dispatch tables duplicated: name→(element, span)
+  prefix-matching on `"@i32x4"`/`"@f64x2"` at `lib.rs:8499, 8686` and
+  `direct.rs:6264, 6459`, both with `ends_with("Load")` splits. Emission
+  differs (text vs instructions), so only the 3-row name→lane table could
+  share.
 
 One item verified directly: the `Let` lowering (`lib.rs:4423-4490`) keys
-ownership decisions on `stmt as *const Stmt as usize` — "node-address
+ownership decisions on `stmt as *const Stmt as usize` (G3.8) — "node-address
 identity — must match `vyrn_frontend::own`, which ran on this same borrowed
-AST" (`lib.rs:4431-4433`). That invariant is carried by a comment across two
-crates; nothing asserts the maps were built from this AST. It held everywhere
-probed.
+AST" (`lib.rs:4431-4433`). It held everywhere probed.
+
+**CLEAN (Rust lens):** the string pool deduplicates (`wasm.rs:297-309`), the
+type section interns via HashMap, dead-function pruning remaps indices
+correctly; no `insert(0,..)`/rope string building anywhere (the old 240×
+append bug has no surviving siblings); `toolchain.rs` unwraps are confined to
+`#[cfg(test)]`; `io_message`'s panic-on-unknown-key is a documented typo guard
+on a const table.
 
 ---
 
@@ -312,8 +504,11 @@ Interp and wasm print `hit-9`; native `exit=127`, no output.
 
 **Repro 3 — Array payloads too**: `Some(xs) => xs` out of an
 `Option<Array<Int64>>` — interp and wasm print `2 3 6`, native `exit=127`.
-Also reproduced with `Err(e) => e` on `Result<Int64, String>`, and through
-`?`-bearing callers (four distinct programs total).
+Also reproduced with `Err(e) => e` on `Result<Int64, String>`, through
+`?`-bearing callers, and with a USER enum's payload
+(`Bunch(xs, t) => xs` out of `type Node = | Leaf(Int64) |
+Bunch(Array<Int64>, String)`: interp and wasm print `5 16`, native
+`exit=127`) — six distinct programs total. Any sum type, any heap payload.
 
 **Wasm is not actually correct — it just fails later.** Its allocator frees;
 a double free corrupts its free list. Loop the unwrap-or 20,000 times:
@@ -583,6 +778,66 @@ missing instrument is adversarial generation — the audit's closing note said
 "a random-program differ against the three engines is how the remaining
 parity breaks will be found", and all four of these would have fallen to it.
 
+### G5.4 PLAUSIBLE — Medium. The String header is spelled three times, in two layouts, under one RFC cite
+
+The reading pass found one fact — the String header — written down three
+times, and two of the three disagree:
+
+- `toolchain.rs:116` `#define VSTR_HDR 16`: the shim header is 16 bytes,
+  `{ long long len, long long cap }`, with `cap == -1` the static sentinel
+  (`toolchain.rs:111-115`), citing RFC-0089 M1a.
+- `direct.rs:12217-12226` `cap_at()` uses `offset: 4` and i32 loads: the
+  direct backend's header is 8 bytes, `{ u32 len, u32 cap }`, static sentinel
+  by address below `HEAP_BASE` (`wasm.rs:737-746`).
+- `web/wasi-min.js:373` `const STR_HDR = 8;` with `setUint32(base…)` — its
+  comment claims "the eight-byte { len, cap } header … every Vyrn String
+  (RFC-0089 M1a)", which is false for the native/shim String.
+
+Coherent TODAY only because `--target wasm` is unconditionally the direct
+backend (`main.rs:4641-4652`), so `wasi-min.js` never meets a clang-built
+module. No shared constant ties the three; if the clang→wasm path returns, or
+`toolchain::shim_wasm()` (still alive, `toolchain.rs:815`) is paired with a
+direct-backend guest, a JS-allocated String is a silent misread. This is the
+calling-convention gap of G5.2 made concrete in one struct.
+
+### G5.5 PLAUSIBLE — Medium. Two more hand-written pairs where the extern/shim ABI must agree
+
+The scalar extern ABI IS a shared table (`crate::extern_abi_ll` at
+`lib.rs:652`, consumed at `direct.rs:207/212` — CLEAN). Three shapes around it
+are not:
+
+- **The "String param = two words" rule** is hand-written in both consumers:
+  `lib.rs:670-681` `extern_decl_params` pushes `ptr` then `i64`;
+  `direct.rs:200-209` `extern_abi_sig` pushes `I32` then `I64`. Two copies of
+  one shape.
+- **Extern return narrowing** is two implementations: `lib.rs:11115+`
+  `from_extern_abi` (`trunc i32→i1/iN`) vs `direct.rs:6843-6848` `renorm`,
+  whose own comment points at "`from_extern_abi`'s `trunc` on the other
+  backend". Enforced by parity only.
+- **The WASI/browser import set** is implemented twice, admitted in source
+  (`direct.rs:79-82`: "The set is implemented twice over: wasmtime provides
+  all of preview1, and `web/wasi-min.js` implements exactly these for the
+  browser"). No test diffs the `Wasi` struct (`direct.rs:83-121`) against
+  `wasi-min.js`; enforced by manual browser verification.
+- The `__vyrn_malloc`/`__vyrn_free` export condition is two hand-written
+  predicates in two files (`direct.rs:597-603`, and the comment at
+  `direct.rs:580` naming the LLVM path's `-Wl,--export` under "exactly the
+  same condition").
+
+**What the reading pass confirmed CLEAN, and it is exemplary:**
+`imports_vs_shim.rs` parses `RUNTIME_SHIM`'s C definitions and diffs them
+against `wasm::boundary()` — the same lines the direct backend builds its
+import section from — with two pins (`the_i1_that_is_really_an_i32`,
+`no_import_takes_or_returns_an_aggregate`). This is the source-of-truth test
+G5.5's other shapes lack. Also CLEAN: the SHIM_BASE memory map is one constant
+(`wasm.rs:51`) consumed by the clang flags; drop semantics take their SET from
+the frontend in both backends (mechanics differ, set shared); float formatting
+is shared by construction (both compile `std/num`'s `f64Str`); gap reporting
+is loud at compile time (`direct.rs:55-61` returns `Err` from `compile`, and
+the `Stmt` match is exhaustive with no wildcard, so a new AST statement is a
+`rustc` error in the direct backend, not a runtime gap); parity pins compare
+against the interpreter's live answer, not a spelling in the test.
+
 ---
 
 ## What this review did not cover
@@ -598,7 +853,9 @@ parity breaks will be found", and all four of these would have fallen to it.
 - **Frontend cost** — the 19 s `check` on a 50k-term chain (G1.2) is checker
   territory and was measured only as context.
 - **`extern`/JS interop ABI** — the asymmetric String ABI (RFC-0012) was
-  read, not exercised.
-- Reading sweeps of drop placement across every control-flow shape, backend
-  code quality, and the shared-fact census were dispatched and land in
-  their lenses' sections as they report.
+  read, not exercised; the reading pass reports it as G5.4/G5.5.
+- **The PLAUSIBLE drop-placement shapes (G2.2–G2.6) and the stringly-type /
+  quadratic-worklist items (G3.x, G1.3)** come from reading, not running. Each
+  names a file:line and a shape; none was driven to an observable crash, and
+  where I could probe the reachable half (G2.2) the escape guard held. They
+  are the obvious targets for the adversarial differ G5.3 calls for.
