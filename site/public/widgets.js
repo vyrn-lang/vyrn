@@ -680,14 +680,21 @@ addEventListener("resize", markRail, { passive: true });
 // visitor arrived on.
 // ---------------------------------------------------------------------------
 
+/// Whether the navigation row `href` is the row for `path`.
+///
+/// A reference page belongs under Docs and a chapter under Guide: a row owns the
+/// subtree named after it. This is the export's `currentNav` rule, in the
+/// language the browser has, and it needs no list of the prefixes — adding a
+/// third section adds nothing here.
+function navOwns(href, path) {
+  return path === href || path.startsWith(href.replace(/\.html$/, "") + "/");
+}
+
 function markNav() {
   const path = location.pathname;
   for (const link of $$(".masthead .nav a")) {
     const href = link.getAttribute("href");
-    // A reference page belongs under Docs and a chapter under Guide: a row owns
-    // the subtree named after it. This is the export's `currentNav` rule, in the
-    // language the browser has, and it needs no list of the two prefixes.
-    const here = path === href || path.startsWith(href.replace(/\.html$/, "") + "/");
+    const here = navOwns(href, path);
     if (here) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
