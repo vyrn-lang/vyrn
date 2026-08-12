@@ -43,9 +43,11 @@
   --accent: var(--navy);
   --field: 18, 50, 88;
   /* How much accent an inline code chip carries. Two numbers, because the two
-   * themes are not symmetric: the light accent is a dark navy, so 8% of it over
-   * warm paper is a heavy step, while the dark accent is a bright cyan and 8%
-   * over near-black is barely there. Matched by eye to the same weight. */
+   * themes are not symmetric: the light accent is a dark navy, so one share of
+   * it over warm paper is a heavy step, while the dark accent is a bright cyan
+   * and the same share over near-black is barely there. Measured, not guessed —
+   * 5% here and 12% in the dark block land the chip the same distance from the
+   * plate it sits on (33 and 22 points of sRGB). */
   --code-wash: 5%;
 
   --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
