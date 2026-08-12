@@ -149,6 +149,68 @@ export fn highlightWith(src: String, words: Array<String>) -> String {
     return out
 }
 
+/// A shell block, coloured by token class.
+///
+/// Four classes, and they are the four things a reader picks out of a command:
+/// the program being run, its flags, a comment, and everything else. The program
+/// is the first word of a line, a flag is a word opening with `-`, a comment runs
+/// from `#` to the newline, and an argument is left as text — which is right,
+/// because the argument is usually the only part the reader has to change.
+///
+/// ponytail: this is a token class treatment, NOT a shell parser. It does not
+/// know a pipe from a subshell, so `cat x | wc -l` colours `cat` and leaves `wc`
+/// as an argument, and a `#` inside a quoted string would read as a comment. No
+/// command on this site has either. The upgrade is a real tokenizer, and nothing
+/// here has asked for one.
+export fn shellHtml(src: String) -> String {
+    let mut out = ""
+    let mut first = true
+    for line in split(src, "\n") {
+        if !first {
+            out = out + "\n"
+        }
+        first = false
+        out = out + shellLine(line)
+    }
+    return out
+}
+
+/// One command line. `head` is true until the first word is spent.
+fn shellLine(line: String) -> String {
+    let raw = bytes(line)
+    let mut out = ""
+    let mut head = true
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == '#' {
+            return out + span("c", substring(line, i, raw.length))
+        }
+        if raw[i] == ' ' || raw[i] == 9 {
+            out = out + escapeByte(raw[i])
+            i = i + 1
+        } else {
+            let start = i
+            while i < raw.length && raw[i] != ' ' && raw[i] != 9 {
+                i = i + 1
+            }
+            let word = substring(line, start, i)
+            if word == "&&" || word == "||" || word == "|" || word == ";" {
+                // What follows a connector is another program, not an argument.
+                out = out + escapeHtml(word)
+                head = true
+            } else if head {
+                out = out + span("k", word)
+                head = false
+            } else if raw[start] == '-' {
+                out = out + span("n", word)
+            } else {
+                out = out + escapeHtml(word)
+            }
+        }
+    }
+    return out
+}
+
 /// One line of tool output, marked so the stylesheet can prefix and dim it.
 ///
 /// The text is escaped and otherwise untouched: a compiler diagnostic means what
@@ -182,6 +244,25 @@ test "markup in a snippet cannot escape the pre" {
 
 test "an escaped quote does not end the string" {
     assertEq(highlightWith("\"a\\\"b\" c", goWords()), "<span class=\"s\">\"a\\\"b\"</span> c")
+}
+
+test "a shell block marks the program, its flags and its comments" {
+    assertEq(shellHtml("cargo build --release -p vyrn-cli"), "<span class=\"k\">cargo</span> build <span class=\"n\">--release</span> <span class=\"n\">-p</span> vyrn-cli")
+    assertEq(shellHtml("cd vyrn/compiler"), "<span class=\"k\">cd</span> vyrn/compiler")
+    assertEq(shellHtml("mkdir out # first"), "<span class=\"k\">mkdir</span> out <span class=\"c\"># first</span>")
+}
+
+test "every line of a shell block gets its own program word" {
+    assertEq(shellHtml("a\nb"), "<span class=\"k\">a</span>\n<span class=\"k\">b</span>")
+    assertEq(shellHtml("  a b"), "  <span class=\"k\">a</span> b")
+}
+
+test "a connector starts another command, not another argument" {
+    assertEq(shellHtml("a x && b"), "<span class=\"k\">a</span> x &amp;&amp; <span class=\"k\">b</span>")
+}
+
+test "a shell argument cannot carry markup out of the block" {
+    assertEq(shellHtml("run <x> &"), "<span class=\"k\">run</span> &lt;x&gt; &amp;")
 }
 
 test "tool output is marked line by line and never coloured as code" {

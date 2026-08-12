@@ -10,6 +10,7 @@
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { vyrnHtml } from "../snippets"
+import { shellHtml } from "../code"
 
 /// One platform's setup, in the order a reader does it.
 type Platform = { id: String, name: String, deps: String, build: String, run: String }
@@ -23,21 +24,21 @@ fn platforms() -> Array<Platform> {
         Platform {
             id: "linux",
             name: "Linux",
-            deps: "A recent Rust toolchain. clang, for a native binary.",
+            deps: "A recent Rust toolchain. <code>clang</code>, for a native binary.",
             build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
             run: "./target/release/vyrn run ../examples/fib.vyrn",
         },
         Platform {
             id: "macos",
             name: "macOS",
-            deps: "A recent Rust toolchain. Xcode command line tools supply clang.",
+            deps: "A recent Rust toolchain. Xcode command line tools supply <code>clang</code>.",
             build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
             run: "./target/release/vyrn run ../examples/fib.vyrn",
         },
         Platform {
             id: "windows",
             name: "Windows",
-            deps: "A recent Rust toolchain. clang, for a native binary.",
+            deps: "A recent Rust toolchain. <code>clang</code>, for a native binary.",
             build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
             run: ".\\target\\release\\vyrn.exe run ..\\examples\\fib.vyrn",
         },
@@ -50,15 +51,22 @@ type Step = { title: String, command: String, what: String }
 fn steps() -> Array<Step> {
     return [
         Step { title: "Run a program", command: "vyrn run examples/fib.vyrn", what: "The tree-walking interpreter. Needs nothing but the compiler." },
-        Step { title: "Build a WebAssembly module", command: "vyrn build examples/fib.vyrn --target wasm -o fib.wasm", what: "The compiler emits the module directly. No LLVM, no clang, no sysroot." },
-        Step { title: "Build a native binary", command: "vyrn build examples/fib.vyrn -o fib", what: "Textual LLVM IR, linked with clang. Needs clang on PATH, or $CLANG." },
-        Step { title: "Run the tests in a file", command: "vyrn test examples/testing.vyrn", what: "test blocks live in the source file, beside the code they check." },
+        Step { title: "Build a WebAssembly module", command: "vyrn build examples/fib.vyrn --target wasm -o fib.wasm", what: "The compiler emits the module directly. No LLVM, no <code>clang</code>, no sysroot." },
+        Step { title: "Build a native binary", command: "vyrn build examples/fib.vyrn -o fib", what: "Textual LLVM IR, linked with <code>clang</code>. Needs <code>clang</code> on <code>PATH</code>, or <code>$CLANG</code>." },
+        Step { title: "Run the tests in a file", command: "vyrn test examples/testing.vyrn", what: "<code>test</code> blocks live in the source file, beside the code they check." },
         Step { title: "Ask about the memory", command: "vyrn why --memory examples/ownership.vyrn", what: "Per binding: whether it is reclaimed, how, and the reason when it is not." },
     ]
 }
 
 fn firstProgram() -> String {
     return vyrnHtml("hello")
+}
+
+/// The one command that builds the language server. It is written here rather
+/// than in the template because the template shows it coloured, and a coloured
+/// command is built from its text.
+fn lspBuild() -> String {
+    return "cargo build --release --manifest-path vyrn-lsp/Cargo.toml"
 }
 </script>
 
@@ -91,14 +99,14 @@ fn firstProgram() -> String {
                 <div class="stage panes">
                     <div v-for="p in platforms()" :key="p.id" :data-plat-pane="p.id">
                         <p class="eyebrow">You need</p>
-                        <p>{{ p.deps }}</p>
+                        <p v-html="p.deps"></p>
                         <div class="cmd" data-copy>
-                            <code>{{ p.build }}</code>
+                            <code v-html="shellHtml(p.build)"></code>
                             <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>
                         </div>
                         <p class="eyebrow" style="margin-top:24px">Then</p>
                         <div class="cmd" data-copy>
-                            <code>{{ p.run }}</code>
+                            <code v-html="shellHtml(p.run)"></code>
                             <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>
                         </div>
                     </div>
@@ -115,10 +123,10 @@ fn firstProgram() -> String {
                 <li v-for="s in steps()" :key="s.title">
                     <strong>{{ s.title }}</strong>
                     <div class="cmd" data-copy>
-                        <code>{{ s.command }}</code>
+                        <code v-html="shellHtml(s.command)"></code>
                         <button type="button" data-copy-btn aria-label="Copy this command">Copy</button>
                     </div>
-                    <span class="note">{{ s.what }}</span>
+                    <span class="note" v-html="s.what"></span>
                 </li>
             </ul>
         </section>
@@ -135,7 +143,7 @@ fn firstProgram() -> String {
             <h2>The language server</h2>
             <p><code>vyrn-lsp</code> is a synchronous language server: diagnostics, hover, go-to-definition and completion, across linked files. The VS Code extension lives in <code>editor/vscode/</code>. It is excluded from the main workspace, so it is built on its own:</p>
             <div class="cmd" data-copy>
-                <code>cargo build --release --manifest-path vyrn-lsp/Cargo.toml</code>
+                <code v-html="shellHtml(lspBuild())"></code>
                 <button type="button" data-copy-btn aria-label="Copy the language server build command">Copy</button>
             </div>
             <p class="notice">Modules resolve from <code>vyrn.json</code>. Remote imports (<code>github:</code>, <code>gist:</code>, <code>https:</code>) are pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch.</p>

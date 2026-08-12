@@ -26,9 +26,10 @@
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
 import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, hrefDocsStd } from pages("./app/routes")
-import { published, navRows } from "./app/nav"
+import { published, navRows, hrefOf } from "./app/nav"
 import { apiModules, apiHref } from "./app/docs"
-import { substring } from "std/strings"
+import { substring, indexOf } from "std/strings"
+import { startsWith } from "std/strpred"
 
 /// Every path the site publishes, from the router's own typed URL helpers. A
 /// route that is renamed or deleted breaks this list at compile time, which is
@@ -61,6 +62,47 @@ fn payloadName(name: String) -> String {
     return substring(name, 0, name.byteLength - 5) + ".data.json"
 }
 
+/// The navigation row a path belongs under, or "" for a path under none.
+///
+/// A reference page — `/docs/std/json` — belongs under Docs, which is the only
+/// row that owns a subtree.
+fn currentNav(path: String) -> String {
+    let here = hrefOf(path)
+    for row in navRows() {
+        if row.href == here {
+            return row.href.copy()
+        }
+    }
+    if startsWith(path, "/docs/") {
+        return hrefOf("/docs")
+    }
+    return ""
+}
+
+/// `html` with the navigation link for `path` marked as the page the reader is
+/// on.
+///
+/// The marker is stamped HERE rather than by the layout, because the layout is
+/// shared by every page and is not told which route it is rendering — the export
+/// is, once per path. One replacement, on the FIRST match: the masthead is the
+/// document's first element, so the first `data-key` anchor for a route is the
+/// navigation's, and a link to the same route inside the page body is left
+/// alone.
+///
+/// A soft navigation swaps `<main>` and never touches the masthead, so
+/// `widgets.js` moves the marker after every one. This is the full-load half.
+fn markCurrent(html: String, path: String) -> String {
+    let href = currentNav(path)
+    if href.byteLength == 0 {
+        return html.copy()
+    }
+    let anchor = "<a href=\"\{href}\" data-key=\"\{href}\">"
+    return match indexOf(html, anchor) {
+        Some(at) => substring(html, 0, at) + "<a href=\"\{href}\" data-key=\"\{href}\" aria-current=\"page\">" + substring(html, at + anchor.byteLength, html.byteLength),
+        None => html.copy(),
+    }
+}
+
 /// Write one file. Returns 1 if it failed, so failures add up.
 fn emit(file: String, body: String) -> Int64 {
     return match writeFile(file, body) {
@@ -80,7 +122,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
     }
     let data = route(dataRequest(path))
     let json = payloadName(name)
-    let bad = emit("\{outDir}/\{name}", doc.body) + emit("\{outDir}/\{json}", data.body)
+    let bad = emit("\{outDir}/\{name}", markCurrent(doc.body, path)) + emit("\{outDir}/\{json}", data.body)
     print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
     return bad
 }
@@ -169,6 +211,34 @@ test "the two representations of one URL differ" {
     let data = route(dataRequest(rootPath()))
     assertEq(doc.contentType, "text/html")
     assertEq(data.contentType, "application/json")
+}
+
+test "every published document marks exactly one navigation row" {
+    for path in sitePaths() {
+        let html = markCurrent(route(documentRequest(path)).body, path)
+        let mut marked = 0
+        for row in navRows() {
+            marked = marked + match indexOf(html, "data-key=\"\{row.href}\" aria-current=\"page\"") {
+                Some(at) => 1,
+                None => 0,
+            }
+        }
+        // The home page is not a navigation row, and marks none.
+        assertEq(marked, if path == "/" { 0 } else { 1 })
+    }
+}
+
+test "a reference page belongs under Docs, and the home page under nothing" {
+    assertEq(currentNav("/install"), "/install.html")
+    assertEq(currentNav("/docs"), "/docs.html")
+    assertEq(currentNav("/docs/std/json"), "/docs.html")
+    assertEq(currentNav("/"), "")
+}
+
+test "the marker lands on the navigation, not on the first link in the body" {
+    let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Docs</a>"
+    let body = "<p>" + nav + "</p>"
+    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Docs</a>" + body)
 }
 
 test "a payload sits beside its document" {

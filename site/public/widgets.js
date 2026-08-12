@@ -402,6 +402,26 @@ function railSpy() {
 addEventListener("scroll", markRail, { passive: true });
 addEventListener("resize", markRail, { passive: true });
 
+// ---------------------------------------------------------------------------
+// The masthead. `site/export.vyrn` stamps `aria-current="page"` on the row this
+// document belongs to, so a reader with no JavaScript still sees where they are.
+// A soft navigation replaces `<main>` and never touches the masthead, so the
+// marker has to be moved here — otherwise it keeps pointing at the page the
+// visitor arrived on.
+// ---------------------------------------------------------------------------
+
+function markNav() {
+  const path = location.pathname;
+  for (const link of $$(".masthead .nav a")) {
+    const href = link.getAttribute("href");
+    // A reference page belongs under Docs, the one row that owns a subtree.
+    // This is the export's `currentNav` rule, in the language the browser has.
+    const here = path === href || (href === "/docs.html" && path.startsWith("/docs/"));
+    if (here) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+}
+
 function entrance() {
   for (const group of $$(".specs")) {
     onView(group, (animate) => {
@@ -420,6 +440,7 @@ function entrance() {
 function boot() {
   copyButtons();
   entrance();
+  markNav();
   railSpy();
   for (const el of $$('[data-widget="parity"]')) parityWidget(el);
   for (const el of $$('[data-widget="ownership"]')) ownershipWidget(el);

@@ -14,6 +14,7 @@ import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
 import { exampleCount, rfcCount, stdCount, backendCount } from "../repo"
+import { shellHtml } from "../code"
 import { ownRows, lifetimes, lineCount, moduleRatio, targetsBox, targetsNodes, targetsEdges, OwnRow, Life, Node, Edge } from "../chart"
 
 export fn head() -> Head {
@@ -42,14 +43,14 @@ fn quickstart() -> String {
             <h1 class="display">The expressiveness of TypeScript.<br/>Native speed. No collector.</h1>
             <p class="lede">Types carry the rules that make a value valid, not only its shape. Ownership is one word on a parameter. One program compiles to an interpreter, a native binary and a WebAssembly module.</p>
             <div class="cmd" data-copy>
-                <code id="quickstart">{{ quickstart() }}</code>
+                <code id="quickstart" v-html="shellHtml(quickstart())"></code>
                 <button type="button" data-copy-btn aria-label="Copy the quickstart command">Copy</button>
             </div>
             <p class="eyebrow" style="margin-top:16px">Build from source. There is no published binary yet.</p>
 
             <figure class="heroplate" style="margin:48px 0 0">
                 <canvas id="field" aria-hidden="true"></canvas>
-                <figcaption class="cap">field(u, v, t) — raw noise enters on the left, a gate crosses the field, ordered values leave on the right. The field function is Vyrn (examples/herofield.vyrn), and the parity harness proves all three backends agree on its bits. The host only paints.</figcaption>
+                <figcaption class="cap">field(u, v, t) — raw noise enters on the left, a gate crosses the field, ordered values leave on the right. The field function is Vyrn (<code>examples/herofield.vyrn</code>), and the parity harness proves all three backends agree on its bits. The host only paints.</figcaption>
             </figure>
 
             <dl class="specs">
@@ -94,7 +95,7 @@ fn quickstart() -> String {
                     </div>
                     <pre class="out" data-types-error v-html="heroDiagnostic()"></pre>
                 </div>
-                <p class="cap">The snippet is README.md's. Line {{ badRow() + 1 }} is the one the control changes, and the message under it is what vyrn check prints for that line, word for word.</p>
+                <p class="cap">The snippet is <code>README.md</code>'s. Line {{ badRow() + 1 }} is the one the control changes, and the message under it is what <code>vyrn check</code> prints for that line, word for word.</p>
             </div>
         </section>
 
@@ -140,7 +141,7 @@ fn quickstart() -> String {
         <section class="band" id="targets">
             <p class="eyebrow">03 — targets</p>
             <h2>One program, three targets</h2>
-            <p>The interpreter is the reference semantics. <code>--target wasm</code> emits the module directly: no LLVM, no clang, no sysroot.</p>
+            <p>The interpreter is the reference semantics. <code>--target wasm</code> emits the module directly: no LLVM, no <code>clang</code>, no sysroot.</p>
             <div class="plate">
                 <div class="plate-head">
                     <span class="pill">Schematic</span>
@@ -161,7 +162,7 @@ fn quickstart() -> String {
                 </div>
                 <p class="cap">The three paths converge, and that is the whole claim: CI fails unless they do. The command under each backend is the one you type.</p>
             </div>
-            <p class="notice">That is why a module is small: <code>fib.vyrn</code> builds to 1.5 KB, against 277 KB through clang — {{ moduleRatio() }} times. <a href="/compare.html#numbers">The comparison page measures eight of them.</a></p>
+            <p class="notice">That is why a module is small: <code>fib.vyrn</code> builds to 1.5 KB, against 277 KB through <code>clang</code> — {{ moduleRatio() }} times. <a href="/compare.html#numbers">The comparison page measures eight of them.</a></p>
         </section>
 
         <section class="band" id="parity">
@@ -196,7 +197,7 @@ fn quickstart() -> String {
                     </div>
                     <p class="verdict" data-parity-verdict>0 bytes differ</p>
                 </div>
-                <p class="cap">The number is the IEEE-754 bit pattern of sin(1) as examples/herofield.vyrn prints it. All three print it because the build forbids the fused multiply-add that would change a bit. Break one byte to watch the harness turn red.</p>
+                <p class="cap">The number is the IEEE-754 bit pattern of <code>sin(1)</code> as <code>examples/herofield.vyrn</code> prints it. All three print it because the build forbids the fused multiply-add that would change a bit. Break one byte to watch the harness turn red.</p>
             </div>
             <p class="notice">Run it yourself: <code>cargo test -p vyrn-cli --test parity -- --ignored</code>.</p>
         </section>
