@@ -868,6 +868,121 @@ pre.doccode {
 }
 
 /* -------------------------------------------------------------------------
+   The guide (/guide and /guide/*). A chapter is prose with a program under
+   each idea, and every program on the page ran while the page was built.
+   ------------------------------------------------------------------------- */
+
+/* The rail is the book's contents, so the chapter being read is marked the way
+ * the masthead marks the page you are on: full-strength ink, and a rule in the
+ * accent. `.on` is the scroll spy's marker and does not apply here — a chapter
+ * link points at another page, not at a section of this one. */
+.rail.toc a[aria-current="page"] {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+
+/* A program in the book. The plate says BUILT and not "live": it ran once,
+ * while the page was built, and the output under it is what it printed then. */
+.plate.block { margin-top: var(--s4); }
+.plate.block pre.code { padding: var(--s2); }
+.plate.block .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); }
+.plate.block .cap a { color: inherit; }
+.plate-head .btn { text-decoration: none; }
+
+/* Previous and next, at the foot of a chapter. Each link names the chapter it
+ * goes to, because "next" alone tells a reader nothing about where it goes. */
+.chapternav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s2);
+  margin-top: var(--s6);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+.chapternav a {
+  display: block;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  text-decoration: none;
+  font-weight: 560;
+}
+.chapternav a:hover { border-color: var(--accent); color: var(--accent); }
+.chapternav a .eyebrow { display: block; margin-bottom: 4px; }
+.chapternav a.next { text-align: right; grid-column: -2; }
+
+/* -------------------------------------------------------------------------
+   The explorer (/explore). A search field over rows that are already on the
+   page, and the import graph drawn from the source.
+   ------------------------------------------------------------------------- */
+
+.finder { margin-top: var(--s4); }
+.finder label { display: block; margin-bottom: var(--s1); }
+.finder input {
+  width: 100%;
+  max-width: var(--wide);
+  padding: 12px var(--s2);
+  border: 1px solid var(--rule);
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+  color: var(--ink);
+  font: 15px/1.4 var(--mono);
+}
+.finder input:focus-visible { border-color: var(--accent); }
+.finder .cap { border: 0; padding: var(--s1) 0 0; }
+
+/* The exports a search matched, under the module that holds them. They appear
+ * only while a search is running, and each is a link to that export's own
+ * anchor on the module's page. */
+.modlist .hits { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: 4px; }
+.modlist .hits a {
+  font: 12px/1 var(--mono);
+  padding: 5px 8px;
+  border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent);
+  background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
+  text-decoration: none;
+}
+.modlist .hits a:hover { border-color: var(--accent); text-decoration: underline; }
+.modlist li[hidden] { display: none; }
+
+/* The import graph. Every coordinate came from Vyrn; the script only adds a
+ * class. At rest the wires are faint, because seventy of them at full strength
+ * are a texture and not a diagram. */
+svg.graph { display: block; height: auto; }
+svg.graph .wire { fill: none; stroke: currentColor; stroke-opacity: 0.16; stroke-width: 1; }
+svg.graph circle { fill: var(--accent); fill-opacity: 0.55; }
+svg.graph text { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+svg.graph .hit { fill: transparent; }
+svg.graph a { text-decoration: none; }
+
+/* One module lit: its own wires, its name, and the names at the other end of
+ * those wires. The rest recedes rather than disappears, so the shape of the
+ * graph stays on the page. */
+svg.graph.lit .wire { stroke-opacity: 0.06; }
+svg.graph .wire.on { stroke: var(--accent); stroke-opacity: 0.85; stroke-width: 1.5; }
+svg.graph.lit text { fill: var(--n2); }
+svg.graph .node.near text { fill: var(--ink); }
+svg.graph .node.on text { fill: var(--accent); font-weight: 600; }
+svg.graph .node.on circle { fill-opacity: 1; }
+
+/* What a module's tests promise. Closed by default: a list of claims a reader
+ * opens when they want it, not a screen to scroll past. */
+.promises { margin-top: var(--s3); }
+.promises summary { cursor: pointer; font: 12px/1.6 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.promises summary:hover { color: var(--accent); }
+.promises ul.plain { margin-top: var(--s2); }
+.promises ul.plain li { padding: var(--s1) 0; }
+
+/* The module graph on a module's own page: two lists of names, in the same
+ * spec grid the landing page uses for its numbers. */
+.specs dd.links { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); font: 13px/1.6 var(--mono); font-weight: 400; }
+.specs dd.links a { color: var(--accent); text-decoration: none; }
+.specs dd.links a:hover { text-decoration: underline; }
+.specs dd.links .none { color: var(--muted); font-size: 0.85rem; }
+.cap.demo { border-top: 0; padding-top: 0; }
+
+/* -------------------------------------------------------------------------
    Reflow
    -------------------------------------------------------------------------
    360px is the design target, not the failure case.

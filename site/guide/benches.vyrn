@@ -1,0 +1,19 @@
+// A `bench` block is a body the timer runs. `blackBox` hides a value from the
+// optimizer, so the work is done rather than folded away.
+fn hashTo(n: Int64) -> Int64 {
+    let mut h = 0
+    let mut i = 0
+    while i < n {
+        h = (h * 31 + i) % 1000000007
+        i = i + 1
+    }
+    return h
+}
+
+bench "hash to 1000" {
+    blackBox(hashTo(blackBox(1000)))
+}
+
+export fn demo() -> String {
+    return "hashTo(1000) is \{hashTo(1000)}"
+}

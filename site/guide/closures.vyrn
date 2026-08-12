@@ -1,0 +1,22 @@
+// A `fn` type is storable: a let, a record field, an array. A lambda that reads
+// an outer local carries a copy of it, taken where the lambda is written.
+import { joinWith } from "std/strings"
+
+type Transform = fn(Int64) -> Int64
+
+fn makeAdder(n: Int64) -> Transform {
+    return |x| x + n
+}
+
+export fn demo() -> String {
+    let tenfold: Transform = |x| x * 10
+    let addFive = makeAdder(5)
+    let steps: Array<Transform> = [tenfold, addFive]
+
+    let mut value = 1
+    for step in steps {
+        value = step(value)
+    }
+
+    return joinWith(["tenfold 4 is \{tenfold(4)}", "add five to 4 is \{addFive(4)}", "both, from 1, give \{value}"], "\n")
+}

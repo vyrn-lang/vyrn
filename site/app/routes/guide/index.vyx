@@ -1,0 +1,62 @@
+<script>
+// GET /guide — the book's contents.
+//
+// The chapter list is the book's own `chapters()`, so a chapter added there
+// appears here, in the rail of every chapter page, and in the export's route
+// table, with nothing written twice.
+import { Head } from "std/ui"
+import { pageHead } from "../../nav"
+import { Chapter, chapters, chapterHref, chapterNumber, chapterTag, blockCount } from "../../guide"
+
+export fn head() -> Head {
+    return pageHead("The guide — Vyrn")
+}
+
+/// The chapter's number, as the rail and the list print it.
+fn tagOf(c: Chapter) -> String {
+    return chapterTag(chapterNumber(c.slug))
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#read"><span class="n">01</span>how to read it</a>
+        <a href="#chapters"><span class="n">02</span>chapters</a>
+        <a href="#run"><span class="n">03</span>running the code</a>
+    </aside>
+
+    <section class="hero">
+        <p class="eyebrow">The guide</p>
+        <h1 class="display">Learn the language in order</h1>
+        <p class="lede">Thirteen chapters, from the first program to a web application. Written for a developer who knows one other language. Every program in the book was compiled and run while this page was built.</p>
+    </section>
+
+    <section class="band" id="read">
+        <p class="eyebrow">01 — how to read it</p>
+        <h2>Start at the top, or jump</h2>
+        <p>The chapters build on each other, so the first read is best in order. Each one is a page: a few sections, a program per idea, and the output that program produced. Nothing on these pages is an excerpt or an illustration.</p>
+        <p>The <a href="/docs.html">reference</a> answers one question at a time — a signature, its prose, the line it sits on. The book answers the questions in the order they come up.</p>
+    </section>
+
+    <section class="band" id="chapters">
+        <p class="eyebrow">02 — chapters</p>
+        <h2>{{ chapters().length }} chapters</h2>
+        <ul class="modlist">
+            <li v-for="c in chapters()" :key="c.slug">
+                <a :href="chapterHref(c.slug)">{{ c.title }}</a>
+                <span class="count">{{ tagOf(c) }}</span>
+                <span class="note">{{ c.lede }}</span>
+            </li>
+        </ul>
+    </section>
+
+    <section class="band" id="run">
+        <p class="eyebrow">03 — running the code</p>
+        <h2>{{ blockCount() }} programs, each one run at build time</h2>
+        <p>Every code block in this book is a file in <code>site/guide/</code>. The site imports each file and calls it while the pages are built, and prints what it answered. A program that does not compile fails the build; a program that traps fails the export. That is why there is no pseudo-code here.</p>
+        <p>Each program has the same shape: a <code>demo</code> function that returns the output, and the four-line <code>main</code> that prints it. The run link on a block carries that whole source to the playground, so what you run is what you read.</p>
+        <p>Two blocks carry no run link. A generator needs the file that imports it, and the playground takes one source, so those two say so under the block instead of opening something that cannot compile.</p>
+    </section>
+</main>
+</template>

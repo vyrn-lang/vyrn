@@ -1,0 +1,18 @@
+// A record type is a shape. A value with more fields fits where fewer are
+// wanted, with no cast and no inheritance.
+import { joinWith } from "std/strings"
+
+type Named = { name: String }
+type User = { name: String, age: Int64 }
+
+fn greet(who: Named) -> String {
+    return "hello, \{who.name}"
+}
+
+export fn demo() -> String {
+    let u = User { name: "Ada", age: 36 }
+    let mut next = u.copy() // a copy, because both `u` and `next` are read below
+    next.age = next.age + 1
+
+    return joinWith([greet(u), "was \{u.age}", "now \{next.age}"], "\n")
+}

@@ -1,0 +1,32 @@
+// `Map<String, V>` keeps insertion order. A lookup answers `Option<V>`, so a
+// missing key is a value you handle and never a null you forget.
+import { joinWith } from "std/strings"
+
+fn score(m: Map<String, Int64>, k: String) -> String {
+    return match m[k] {
+        Some(v) => v.toString(),
+        None => "none",
+    }
+}
+
+export fn demo() -> String {
+    let mut scores: Map<String, Int64> = [:]
+    scores["ada"] = 5
+    scores["grace"] = 8
+    scores["ada"] = 6 // an update keeps the original slot
+
+    let mut order: Array<String> = []
+    for k in scores.keys() {
+        order.push(k)
+    }
+    let keys = joinWith(order, ", ")
+    let ada = score(scores, "ada")
+    let hopper = score(scores, "hopper")
+
+    return joinWith([
+            "keys    \{keys}",
+            "ada     \{ada}",
+            "hopper  \{hopper}",
+            "length  \{scores.length}",
+        ], "\n")
+}

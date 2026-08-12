@@ -1,0 +1,214 @@
+/// The module graph, read off the source while the site compiles.
+///
+///     import { moduleDeps } from "./deps"
+///     import { depUses, depUsedBy, depDepth, depExamples } from moduleDeps("../../std", "../../examples")
+///
+/// Two questions, both answered from `import` lines and nothing else:
+///
+///  1. **What does a standard library module import?** That is the dependency
+///     graph the explorer draws. It is read from `std/*.vyrn` on every build, so
+///     it cannot be a picture of the graph as it was.
+///  2. **Which example programs import a module?** That is what the reference
+///     page lists under an export, and it is the honest answer to "show me this
+///     module in use in a whole program".
+///
+/// The import lines come from the compiler's own lexer through
+/// `importsOf` in `guidecode.vyrn`, so an `import` written inside a code quote —
+/// `std/tw` and `std/graphql` both emit one, and `std/cli` writes a whole module
+/// in a string — is a string token and is never read as a real import. A line
+/// scan gets that wrong and invents a `std/manifest` that does not exist.
+import { substring, joinWith } from "std/strings"
+import { endsWith } from "std/strpred"
+import { importsOf } from "./guidecode"
+
+/// One file and the `std/` modules it imports.
+type Uses = { path: String, uses: Array<String> }
+
+/// The entries of `dir`, or nothing when it cannot be read.
+fn entriesOf(dir: String) -> Array<String> {
+    return match listDir(dir) {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+}
+
+/// Whether `name` is one of `all`.
+fn known(name: String, all: Array<String>) -> Bool {
+    for m in all {
+        if m == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// The `std/` module names, from the directory listing.
+fn moduleNames(stdDir: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for entry in entriesOf(stdDir) {
+        if endsWith(entry, ".vyrn") {
+            out.push(substring(entry, 0, entry.byteLength - 5))
+        }
+    }
+    return out
+}
+
+/// What one file imports, by path.
+gen fn usesOf(dir: String, name: String, shown: String) -> Uses {
+    let src = match readFile(dir + "/" + name) {
+        Ok(text) => text,
+        Err(why) => "",
+    }
+    return Uses { path: shown.copy(), uses: importsOf(lex(src)).uses.copy() }
+}
+
+/// Every `.vyrn` file under `dir`, to two levels of subdirectory — which is as
+/// deep as `examples/` goes (`examples/shelf/server/store.vyrn`).
+///
+/// A directory entry has no extension, so the two are told apart by the name. A
+/// subdirectory that cannot be read yields nothing, and the listing is short by
+/// exactly that directory rather than wrong.
+gen fn walk(root: String, sub: String, depth: Int64) -> Array<Uses> {
+    let dir = if sub.byteLength == 0 { root.copy() } else { root + "/" + sub }
+    let mut out: Array<Uses> = []
+    for entry in entriesOf(dir) {
+        let shown = if sub.byteLength == 0 { entry.copy() } else { sub + "/" + entry }
+        if endsWith(entry, ".vyrn") {
+            out.push(usesOf(dir, entry, shown))
+        } else if depth > 0 {
+            for deeper in walk(root, shown, depth - 1) {
+                out.push(deeper)
+            }
+        }
+    }
+    return out
+}
+
+/// How far a module is from the bottom of the graph: 0 for one that imports no
+/// other `std/` module, otherwise one more than the deepest module it imports.
+///
+/// `walking` holds the path being measured, so a cycle answers 0 rather than
+/// recurring forever. `std/` has none today; a graph that grows one should not
+/// take the build down with it.
+gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array<String>) -> Int64 {
+    if known(m, walking) {
+        return 0
+    }
+    let mut here = walking.copy()
+    here.push(m.copy())
+    let mut deepest = 0 - 1
+    for e in edges {
+        if e.path == m {
+            for u in e.uses {
+                if known(u, all) {
+                    let d = depthOf(u, all, edges, here)
+                    if d > deepest {
+                        deepest = d
+                    }
+                }
+            }
+        }
+    }
+    return deepest + 1
+}
+
+/// `s` as a Vyrn string literal. These are file names and module names from this
+/// repository, which carry no quote and no backslash.
+fn quoted(s: String) -> String {
+    return "\"" + s + "\""
+}
+
+/// A Vyrn array literal of quoted strings.
+fn quotedList(items: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for it in items {
+        parts.push(quoted(it))
+    }
+    return "[" + joinWith(parts, ", ") + "]"
+}
+
+/// One `if` branch of a lookup.
+fn branch(m: String, value: String) -> String {
+    return "    if m == " + quoted(m) + " { return " + value + " }\n"
+}
+
+/// A lookup over the modules, with an empty answer for a name that is not one.
+fn lookup(name: String, ret: String, branches: Array<String>, fallback: String) -> String {
+    let mut out = "export fn " + name + "(m: String) -> " + ret + " {\n"
+    for b in branches {
+        out = out + b
+    }
+    return out + "    return " + fallback + "\n}\n"
+}
+
+/// Read `stdDir` and `examplesDir`, and emit the graph as one module.
+export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
+    let all = moduleNames(stdDir)
+    let mut edges: Array<Uses> = []
+    for m in all {
+        edges.push(usesOf(stdDir, m + ".vyrn", m))
+    }
+    let samples = walk(examplesDir, "", 2)
+
+    let mut uses: Array<String> = []
+    let mut usedBy: Array<String> = []
+    let mut depth: Array<String> = []
+    let mut examples: Array<String> = []
+    for m in all {
+        let mut mine: Array<String> = []
+        for e in edges {
+            if e.path == m {
+                for u in e.uses {
+                    // A target that is not a module in this directory is dropped:
+                    // the graph draws what `std/` holds, not what a name suggests.
+                    if known(u, all) && !known(u, mine) {
+                        mine.push(u.copy())
+                    }
+                }
+            }
+        }
+        uses.push(branch(m, quotedList(mine)))
+
+        let mut back: Array<String> = []
+        for e in edges {
+            if e.path != m && known(m, e.uses) {
+                back.push(e.path.copy())
+            }
+        }
+        usedBy.push(branch(m, quotedList(back)))
+
+        let mut users: Array<String> = []
+        for s in samples {
+            if known(m, s.uses) {
+                users.push(s.path.copy())
+            }
+        }
+        examples.push(branch(m, quotedList(users)))
+
+        depth.push(branch(m, depthOf(m, all, edges, []).toString()))
+    }
+
+    let mut out = "/// The module graph, read off `std/` and `examples/` by `site/app/deps.vyrn`\n/// while the site compiled. Do not edit.\n"
+    out = out + "/// The `std/` modules a module imports.\n"
+    out = out + lookup("depUses", "Array<String>", uses, "[]")
+    out = out + "/// The `std/` modules that import a module.\n"
+    out = out + lookup("depUsedBy", "Array<String>", usedBy, "[]")
+    out = out + "/// How far a module sits from the bottom of the graph.\n"
+    out = out + lookup("depDepth", "Int64", depth, "0")
+    out = out + "/// The example programs that import a module, by path under `examples/`.\n"
+    out = out + lookup("depExamples", "Array<String>", examples, "[]")
+    return out
+}
+
+test "a name is looked up in a list, and a missing one is not there" {
+    assert(known("json", ["json", "html"]))
+    assert(!known("nope", ["json", "html"]))
+    assert(!known("json", []))
+}
+
+test "a lookup is a Vyrn function with one branch per module" {
+    assertEq(quotedList([]), "[]")
+    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
+    assertEq(branch("json", "[]"), "    if m == \"json\" { return [] }\n")
+    assertEq(lookup("f", "Int64", [], "0"), "export fn f(m: String) -> Int64 {\n    return 0\n}\n")
+}

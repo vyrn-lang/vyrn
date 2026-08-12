@@ -1,0 +1,26 @@
+// A parameter's capability states what the function does with the value:
+// `read` observes it, `modify` changes it in place, `consume` takes it.
+import { joinWith } from "std/strings"
+
+type Ticket = { id: Int64, seats: Int64 }
+
+fn seatCount(t: read Ticket) -> Int64 {
+    return t.seats
+}
+
+fn addSeat(t: modify Ticket) {
+    t.seats = t.seats + 1
+}
+
+fn redeem(t: consume Ticket) -> Int64 {
+    return t.id
+}
+
+export fn demo() -> String {
+    let mut t = Ticket { id: 7, seats: 1 }
+    addSeat(t)
+    let before = seatCount(t)
+    let id = redeem(t)
+    // seatCount(t) here is a compile error: `redeem` consumed t.
+    return joinWith(["seats \{before}", "redeemed \{id}"], "\n")
+}

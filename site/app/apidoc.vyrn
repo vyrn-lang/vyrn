@@ -28,8 +28,9 @@ import { highlightSrc, lineStarts } from "./hl"
 /// One exported declaration.
 type Entry = { name: String, kind: String, sig: String, doc: String, line: Int64 }
 
-/// One documented module: its name, its header prose, and its exports.
-type Mod = { name: String, doc: String, entries: Array<Entry> }
+/// One documented module: its name, its header prose, its exports, and the
+/// names of the `test` blocks it keeps beside them.
+type Mod = { name: String, doc: String, entries: Array<Entry>, tests: Array<String> }
 
 // ---------------------------------------------------------------------------
 // Reading the source.
@@ -162,6 +163,28 @@ gen fn exportsOf(src: String, toks: Array<Token>) -> Array<Entry> {
             }
             docBuf = []
             docEnd = 0 - 2
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The name of every `test` block in the module, in source order.
+///
+/// A test's name is a sentence about the code — "base64 pads at all three
+/// residues, and refuses misplaced padding" — so the list of them is the list of
+/// promises the module keeps, written by whoever had to keep them. The reference
+/// page prints them under the exports.
+///
+/// `test` is a contextual keyword, so it arrives as an identifier in column 1
+/// with a string after it. A `test` written inside a code quote is a string
+/// token and is never counted.
+gen fn testNames(toks: Array<Token>) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i + 1 < toks.length {
+        if toks[i].text == "test" && toks[i].col == 1 && toks[i + 1].kind == "string" {
+            out.push(toks[i + 1].text.copy())
         }
         i = i + 1
     }
@@ -444,6 +467,7 @@ export gen fn apiDocs(stdDir: String) -> String {
                     name: substring(entry, 0, entry.byteLength - 5),
                     doc: headerDoc(toks),
                     entries: exportsOf(src, toks),
+                    tests: testNames(toks),
                 })
         }
     }
@@ -456,6 +480,7 @@ export gen fn apiDocs(stdDir: String) -> String {
     let mut sigLists: Array<String> = []
     let mut proseLists: Array<String> = []
     let mut lineLists: Array<String> = []
+    let mut testLists: Array<String> = []
     let mut counts: Array<String> = []
     for m in mods {
         names.push(m.name.copy())
@@ -478,6 +503,7 @@ export gen fn apiDocs(stdDir: String) -> String {
         sigLists.push(branch(m.name, quotedList(es)))
         proseLists.push(branch(m.name, quotedList(ep)))
         lineLists.push(branch(m.name, "[" + joinWith(el, ", ") + "]"))
+        testLists.push(branch(m.name, quotedList(m.tests)))
         counts.push(branch(m.name, m.entries.length.toString()))
     }
 
@@ -498,6 +524,8 @@ export gen fn apiDocs(stdDir: String) -> String {
     out = out + lookup("docProse", "Array<String>", proseLists, "[]")
     out = out + "/// The source line each export is declared on.\n"
     out = out + lookup("docLines", "Array<Int64>", lineLists, "[]")
+    out = out + "/// The name of every `test` block the module keeps, in source order.\n"
+    out = out + lookup("docTests", "Array<String>", testLists, "[]")
     out = out + "/// How many exports a module has.\n"
     out = out + lookup("docCount", "Int64", counts, "0")
     return out

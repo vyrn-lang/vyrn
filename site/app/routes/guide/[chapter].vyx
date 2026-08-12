@@ -1,0 +1,78 @@
+<script>
+// GET /guide/[chapter] — one chapter of the book.
+//
+// The prose is in `site/app/guide.vyrn`; the programs are files in
+// `site/guide/`, imported and CALLED by that module while this page renders. So
+// a block on this page is a program that ran, and its output is what it printed.
+//
+// A String segment binds the slug, and the query returns
+// `Result<ChapterPage, PageError>`, so a slug that is not a chapter renders the
+// themed error page at 404 rather than an empty book.
+import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
+import { pageHead } from "../../nav"
+import { Chapter, Section, chapters, chapterOf, chapterKnown, chapterNumber, chapterTag, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
+params { chapter: String }
+
+/// One chapter, with the number the rail prints beside it.
+type ChapterPage = { n: Int64, chapter: Chapter }
+
+export fn head(d: ChapterPage) -> Head {
+    return pageHead(d.chapter.title + " — the Vyrn guide")
+}
+
+export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {
+    return paramQuery(fetchChapter)
+}
+
+fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
+    if !chapterKnown(p.chapter) {
+        return Err(notFound(p.chapter + " is not a chapter of the guide"))
+    }
+    return Ok(ChapterPage { n: chapterNumber(p.chapter), chapter: chapterOf(p.chapter) })
+}
+
+/// One rail row: a chapter of the book, and whether it is the one being read.
+type RailRow = { href: String, tag: String, title: String, here: String }
+
+/// The rail is the book's contents, with the chapter you are on marked. It is
+/// the same furniture the reference pages use for their export index.
+fn railRows(here: String) -> Array<RailRow> {
+    let mut out: Array<RailRow> = []
+    let mut n = 1
+    for c in chapters() {
+        out.push(RailRow {
+                href: chapterHref(c.slug),
+                tag: chapterTag(n),
+                title: c.title.copy(),
+                // `aria-current="page"` marks the reader's place. An empty value
+                // is "not current", which is what the attribute means.
+                here: if c.slug == here { "page" } else { "" },
+            })
+        n = n + 1
+    }
+    return out
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail toc">
+        <p class="eyebrow">The guide</p>
+        <a v-for="r in railRows(data.chapter.slug)" :key="r.href" :href="r.href" :aria-current="r.here"><span class="n">{{ r.tag }}</span>{{ r.title }}</a>
+    </aside>
+
+    <section class="hero">
+        <p class="eyebrow"><a href="/guide.html">The guide</a> — chapter {{ data.n }} of {{ chapters().length }}</p>
+        <h1 class="display">{{ data.chapter.title }}</h1>
+        <p class="lede">{{ data.chapter.lede }}</p>
+    </section>
+
+    <section class="band" v-for="s in data.chapter.sections" :key="s.anchor" :id="s.anchor">
+        <p class="eyebrow">{{ sectionEyebrow(data.chapter, s) }}</p>
+        <h2>{{ s.heading }}</h2>
+        <div v-html="sectionBody(s)"></div>
+    </section>
+
+    <nav class="chapternav" aria-label="Chapters" v-html="chapterNavHtml(data.chapter.slug)"></nav>
+</main>
+</template>
