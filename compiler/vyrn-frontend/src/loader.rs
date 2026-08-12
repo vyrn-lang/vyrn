@@ -1494,13 +1494,15 @@ fn run_generator(
     let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
     // 5a. Cache hit: every recorded input still hashes as it did ⇒ reuse output.
+    //     An input recorded as ABSENT must still be absent — a file or directory
+    //     that appeared since the run is a change like any other.
     if !no_cache {
         if let Some(cached) = resolver.gen_cache_get(&sources_hash) {
             if let Some((inputs, output)) = parse_cache_entry(&cached) {
-                if inputs
-                    .iter()
-                    .all(|(path, hash)| current_input_hash(resolver, path) == Some(hash.clone()))
-                {
+                if inputs.iter().all(|(path, hash)| {
+                    current_input_hash(resolver, path).unwrap_or_else(|| ABSENT.to_string())
+                        == *hash
+                }) {
                     return Ok((gen_key, Some(output)));
                 }
             }
@@ -1598,7 +1600,13 @@ fn run_generator(
         let mut inputs: Vec<(String, String)> = out
             .reads
             .iter()
-            .map(|(p, bytes)| (p.clone(), crate::hash::sha256_hex(bytes)))
+            .map(|(p, bytes)| {
+                let h = match bytes {
+                    Some(b) => crate::hash::sha256_hex(b),
+                    None => ABSENT.to_string(),
+                };
+                (p.clone(), h)
+            })
             .collect();
         // The generator's OWN transitive sources join the recorded inputs. That is
         // what lets the lookup key stay cheap: the entry now carries everything
@@ -1650,8 +1658,9 @@ fn generator_cache_key(
 }
 
 /// The current hash of a recorded generation input — a file (`resolver.read`) or
-/// a directory listing (a `dir/` marker, `resolver.list`). `None` if it can no
-/// longer be read (a miss: the input vanished).
+/// a directory listing (a `dir/` marker, `resolver.list`). `None` if it cannot
+/// be read now; validation reads that as [`ABSENT`], which matches an input the
+/// generator also found absent and mismatches every other recorded hash.
 /// Memoized for the duration of ONE outermost load. Validating a generator cache
 /// hit re-reads and re-hashes every recorded input, and a root that imports seven
 /// generators validates the same std modules seven times — 8.6 ms of a 20 ms load.
@@ -1689,10 +1698,23 @@ fn current_input_hash_uncached(resolver: &dyn ModuleResolver, path: &str) -> Opt
     }
 }
 
-/// Serialize a cache entry: an input-hash header (`N` then `path⇥hash` lines)
-/// followed verbatim by the generated source.
+/// The recorded hash of an input that was NOT there when the generator looked.
+/// Not a sha256, so it can never equal the hash of any content: absent↔present
+/// always disagrees.
+const ABSENT: &str = "absent";
+
+/// The cache entry format tag. Bumped when the meaning of the recorded inputs
+/// changes, because an entry written by an older compiler cannot be re-read
+/// under the new meaning. `v2` records absent inputs; a `v1` entry recorded only
+/// the inputs that succeeded, so it cannot tell whether a missing file has since
+/// appeared. [`parse_cache_entry`] rejects anything else, which is a miss: the
+/// generator re-runs and overwrites the entry in place.
+const CACHE_ENTRY_TAG: &str = "v2";
+
+/// Serialize a cache entry: a format tag and input count (`v2 N`), then
+/// `path⇥hash` lines, then the generated source verbatim.
 fn render_cache_entry(inputs: &[(String, String)], output: &str) -> String {
-    let mut s = format!("{}\n", inputs.len());
+    let mut s = format!("{CACHE_ENTRY_TAG} {}\n", inputs.len());
     for (p, h) in inputs {
         s.push_str(&format!("{p}\t{h}\n"));
     }
@@ -1703,7 +1725,7 @@ fn render_cache_entry(inputs: &[(String, String)], output: &str) -> String {
 /// Inverse of [`render_cache_entry`].
 fn parse_cache_entry(text: &str) -> Option<(Vec<(String, String)>, String)> {
     let first_nl = text.find('\n')?;
-    let n: usize = text[..first_nl].trim().parse().ok()?;
+    let n: usize = text[..first_nl].trim().strip_prefix(CACHE_ENTRY_TAG)?.trim().parse().ok()?;
     let mut idx = first_nl + 1;
     let mut inputs = Vec::with_capacity(n);
     for _ in 0..n {
