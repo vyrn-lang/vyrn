@@ -43,10 +43,16 @@ gen fn offsetOf(starts: Array<Int64>, t: Token) -> Int64 {
 /// The index of the first token that is NOT part of the declaration's signature.
 ///
 /// A function's signature ends where its body opens: the first `{` no bracket is
-/// holding open. A protocol's signature IS its body, so it ends one token past
-/// the `}` that closes it. A type has no body, so it ends at the next token that
-/// starts a line in column 1 — which the formatter guarantees is the next
-/// top-level declaration, because every continuation line is indented.
+/// holding open. A protocol's signature IS its body, and so is a RECORD type's,
+/// so both end one token past the `}` that closes them. A type with no braces —
+/// `type Age = Int64 where value >= 18`, a sum of variants over several lines —
+/// ends at the next token that starts a line in column 1, which the formatter
+/// guarantees is the next top-level declaration, because every continuation line
+/// is indented.
+///
+/// The brace-closes-it rule has to be read BEFORE the column-1 rule and not
+/// after: a record's closing `}` is itself in column 1, so the column rule alone
+/// stopped one token short and shipped ten unbalanced signatures.
 gen fn sigEnd(toks: Array<Token>, from: Int64, head: String) -> Int64 {
     let mut depth = 0
     let mut i = from
@@ -60,7 +66,7 @@ gen fn sigEnd(toks: Array<Token>, from: Int64, head: String) -> Int64 {
         }
         if t.kind == "punct" && t.text == "}" {
             depth = depth - 1
-            if depth == 0 && head == "protocol" {
+            if depth == 0 && (head == "protocol" || head == "type") {
                 return i + 1
             }
         }
@@ -241,16 +247,26 @@ fn inlineHtml(s: String) -> String {
 }
 
 /// A paragraph, a list or a code block, closed.
-fn blockHtml(kind: String, rows: Array<String>) -> String {
+///
+/// A fenced or indented block inside a `///` comment is Vyrn — an import line, a
+/// call, a small program — so it is coloured by the same `lex()` highlighter the
+/// signatures and the site's snippets use, rather than shipped as grey text.
+///
+/// ponytail: a block that is NOT Vyrn (a JSON body, a shell line) is lexed all
+/// the same. The lexer answers `error` for what it cannot read, `classOf` gives
+/// that no colour, and the text comes out as it went in. A per-block language
+/// tag is the upgrade, and no block in `std/` needs one yet.
+gen fn blockHtml(kind: String, rows: Array<String>) -> String {
     if rows.length == 0 {
         return ""
     }
     if kind == "code" {
         let mut body = ""
         for row in rows {
-            body = body + escapeHtml(row) + "\n"
+            body = body + row + "\n"
         }
-        return "<pre class=\"doccode\">" + trimEnd(body) + "\n</pre>"
+        let src = trimEnd(body) + "\n"
+        return "<pre class=\"doccode\">" + highlightSrc(src, lex(src)) + "</pre>"
     }
     if kind == "list" {
         let mut out = "<ul class=\"docprose\">"
@@ -281,7 +297,7 @@ fn indentOf(line: String) -> Int64 {
 /// introduce themselves.
 /// The block's own indent is the margin: what is indented further inside it —
 /// nested JSON, a continued argument list — keeps its shape.
-fn proseHtml(doc: String) -> String {
+gen fn proseHtml(doc: String) -> String {
     if doc.byteLength == 0 {
         return ""
     }
@@ -498,7 +514,7 @@ test "the four prose shapes render" {
     assertEq(proseHtml("one line"), "<p>one line</p>")
     assertEq(proseHtml("one\ntwo"), "<p>one two</p>")
     assertEq(proseHtml("- a\n- b"), "<ul class=\"docprose\"><li>a</li><li>b</li></ul>")
-    assertEq(proseHtml("    let a = 1"), "<pre class=\"doccode\">let a = 1\n</pre>")
+    assertEq(proseHtml("    let a = 1"), "<pre class=\"doccode\"><span class=\"k\">let</span> a = <span class=\"n\">1</span>\n</pre>")
     assertEq(proseHtml("one\n\ntwo"), "<p>one</p><p>two</p>")
 }
 
