@@ -99,6 +99,48 @@ export fn apiSourceLine(m: String, line: Int64) -> String {
     return apiSource(m) + "#L" + line.toString()
 }
 
+/// How many times the byte `b` occurs in `s`. Only the balance gate below uses
+/// it, and it lives here because this is where the real signatures are.
+fn countByte(s: String, b: UInt8) -> Int64 {
+    let raw = bytes(s)
+    let mut n = 0
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == b {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+test "every signature the reference renders is a whole declaration" {
+    // The gate this test exists for: a record type's closing `}` sits in column
+    // 1, which is also where the NEXT declaration starts. Reading the column
+    // rule before the brace rule cut ten signatures one line short — `type
+    // CliRead = {` with three fields and no closing brace. A truncated signature
+    // is silent: it renders, it reads, and only a count catches it.
+    //
+    // The check runs here rather than in `apidoc.vyrn` because a generator's
+    // `listDir` resolves against the importing file, so this module's own
+    // `apiDocs("../../std")` import is the one place the real reference exists.
+    //
+    // ponytail: brackets are counted, not parsed. A signature with an unbalanced
+    // bracket inside a string literal or a trailing comment would be a false
+    // alarm; none in `std/` has one, and the day one does, this test says so.
+    let mut total = 0
+    for m in apiModules() {
+        for e in apiEntries(m.name) {
+            assert(e.sig.byteLength > 0)
+            assertEq(countByte(e.sig, '{'), countByte(e.sig, '}'))
+            assertEq(countByte(e.sig, '('), countByte(e.sig, ')'))
+            assertEq(countByte(e.sig, '['), countByte(e.sig, ']'))
+            total = total + 1
+        }
+    }
+    assert(total > 300)
+}
+
 test "every module has a name, a summary and at least one export" {
     let mods = apiModules()
     assert(mods.length > 20)
