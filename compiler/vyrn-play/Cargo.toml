@@ -1,0 +1,39 @@
+[package]
+name = "vyrn-play"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The compiler's front end as a wasm module, for the playground on the website."
+
+# NOT part of the default workspace (see ../Cargo.toml `exclude`), for the same
+# reason `vyrn-lsp` and `vyrn-genwasm` are not: it is not needed to build or test
+# the language, and it only makes sense for one target. Nothing depends on it.
+#
+# THE BUILD COMMAND HAS TO RUN FROM THIS DIRECTORY. `.cargo/config.toml` beside
+# this file sets the linker's stack size, and cargo reads that file from the
+# working directory upward — `--manifest-path` from elsewhere silently misses it
+# and leaves the module with wasm-ld's 1 MB default, which the interpreter
+# exhausts long before `CALL_DEPTH_LIMIT`.
+#
+#   cd compiler/vyrn-play
+#   cargo build --release --target wasm32-unknown-unknown
+#
+# `cargo test` from here runs the host-side checks (the crate is an rlib too).
+[dependencies]
+vyrn-frontend = { path = "../vyrn-frontend" }
+
+[lib]
+name = "vyrn_play"
+path = "src/lib.rs"
+# `cdylib` is the wasm module. `rlib` is what lets `cargo test` run the pure
+# functions below on the host, where a failure is readable.
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+# The page downloads this. Size is the only axis that matters here; the front end
+# is not the slow part of typing into a textarea.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
