@@ -48,7 +48,58 @@ fn std_json_writer_unit_tests_run_green() {
 
 #[test]
 fn std_jsonread_unit_tests_run_green() {
-    unit_tests_green("std/jsonread.vyrn", "13 passed, 0 failed");
+    // The 14th is the awkward-input round trip: a key holding the document's own
+    // punctuation, a quote, a backslash and a control byte; two keys differing
+    // only by case; a character above the BMP; empty containers; and every
+    // number form `JNum` may carry. `read(emit(x))` is the oracle — the writer's
+    // output is checked by the toolchain's own strict reader, not by eye.
+    unit_tests_green("std/jsonread.vyrn", "14 passed, 0 failed");
+}
+
+/// `JNum` is a public, unvalidated `String` constructor and `emit` copies its
+/// contents out VERBATIM, so `emit(JNum("0x1f"))` used to print `0x1f` and exit
+/// 0 — a document no JSON reader accepts, produced by an ordinary call. The
+/// writer now refuses a raw number that is not one, where it escapes a value
+/// (the rule `std/html` follows for a name), so both writers and every caller of
+/// either are covered by the one check.
+///
+/// What this test validates: the refusal fires, says which text was refused, and
+/// fails the program. What it cannot: that `numberOk` accepts exactly the JSON
+/// grammar — the round trip in `std/jsonread`'s suite is what pins that end.
+#[test]
+fn emit_refuses_a_jnum_that_is_not_a_json_number() {
+    let dir = std::env::temp_dir().join("vyrn-json-badnum");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, raw) in [
+        ("hex", "0x1f"),
+        ("leading-zero", "007"),
+        ("plus", "+1"),
+        ("bare-word", "NaN"),
+        ("trailing-dot", "1."),
+        ("empty", ""),
+        ("punctuation", "1,2"),
+    ] {
+        let file = dir.join(format!("{name}.vyrn"));
+        std::fs::write(
+            &file,
+            format!(
+                "import {{ Json, emit }} from \"std/json\"\n\
+                 fn main() -> Int64 {{\n    print(emit(JNum(\"{raw}\")))\n    return 0\n}}\n"
+            ),
+        )
+        .unwrap();
+        let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "`JNum(\"{raw}\")` emitted a document:\n{text}"
+        );
+        assert!(
+            text.contains(&format!("json: `{raw}` is not a usable number")),
+            "`JNum(\"{raw}\")`: unexpected failure:\n{text}"
+        );
+    }
 }
 
 /// RFC-0078 M2b: the injected import is invisible. A program that mentions

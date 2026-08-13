@@ -236,3 +236,171 @@ fn from_json_refuses_null_and_a_duplicate_key() {
         combined(&out)
     );
 }
+
+/// The writer's own awkward-input round trip: `parseVon(toVon(v))` through the
+/// real toolchain. `vyrn fmt --from-json` runs the writer over data a reasonable
+/// test never feeds it — map keys holding a quote, a backslash, the target's own
+/// punctuation, a control byte and a character above the BMP, two keys differing
+/// only by case, empty containers, and an integer no f64 holds — and the emitted
+/// document is then READ BACK by `std/von`'s own reader (through `vonModule`),
+/// which is the strongest cheap oracle available: what the writer produces, the
+/// reader accepts, byte for byte.
+///
+/// What this cannot check: the value is compared as canonical TEXT, since the
+/// reader's tree does not cross the process boundary. A writer and a reader that
+/// agreed on the same wrong bytes would pass — which is why the strictness rules
+/// have their own suite.
+#[test]
+fn the_writer_round_trips_the_awkward_keys_and_values() {
+    let dir = scratch("awkward-round-trip");
+    let json = dir.join("awkward.json");
+    std::fs::write(
+        &json,
+        r#"{"port": 8080,
+           "ratio": -0.5,
+           "big": 9007199254740993,
+           "nothing": {},
+           "none": [],
+           "labels": {
+             "a \"quoted\" key": "v",
+             "back\\slash": "b",
+             "punctuation: {}, [] ,": "c",
+             "\u0001control": "d",
+             "𝄞 above the BMP": "e",
+             "Case": "upper",
+             "case": "lower"}}"#,
+    )
+    .unwrap();
+    let out = vyrn()
+        .arg("fmt")
+        .arg("--from-json")
+        .arg(&json)
+        .arg("--as")
+        .arg("Awkward")
+        .arg("--from")
+        .arg("./awkward")
+        .output()
+        .expect("vyrn fmt --from-json");
+    assert!(out.status.success(), "{}", combined(&out));
+    let von = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+
+    // It is canonically formatted Vyrn — the formatter is the lexer's verdict.
+    let doc = dir.join("awkward.von");
+    std::fs::write(&doc, von.as_bytes()).unwrap();
+    let check = vyrn()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&doc)
+        .output()
+        .expect("vyrn fmt --check");
+    assert_eq!(check.status.code(), Some(0), "{}", combined(&check));
+
+    // And the reader takes it back unchanged: `parseVon(toVon(v))` re-emits the
+    // same bytes.
+    std::fs::copy(
+        repo_file("examples/lib/gen_von.vyrn"),
+        dir.join("gen_von.vyrn"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "import { vonModule } from \"./gen_von\"\n\
+         import { configText } from vonModule(\"./awkward.von\")\n\n\
+         fn main() -> Int64 {\n    print(configText())\n    return 0\n}\n",
+    )
+    .unwrap();
+    let run = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("vyrn run");
+    assert!(
+        run.status.success(),
+        "the reader refused the writer's document:\n{}",
+        combined(&run)
+    );
+    let printed = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    assert_eq!(
+        printed.trim_end_matches('\n').to_string() + "\n",
+        von,
+        "the document did not survive parse -> emit"
+    );
+}
+
+/// `VInt`/`VFloat` are public, unvalidated `String` constructors and `emitVon`
+/// copies their contents out VERBATIM, as it does a record, field or variant
+/// NAME — so an ordinary call used to write a document the reader refuses, or
+/// text that is not even Vyrn tokens. The writer now checks a name and a number
+/// where it escapes a value, the way `std/html` checks a tag.
+///
+/// What this validates: every refusal fires, names the text it refused, and
+/// fails the program. What it cannot: that a document the writer ACCEPTS is
+/// readable — that is the round trip above.
+#[test]
+fn emit_von_refuses_a_name_or_a_number_it_cannot_spell() {
+    let dir = scratch("writer-refusals");
+    for (name, value, wanted) in [
+        // A name that is not a Vyrn identifier: the target's own punctuation and
+        // a newline, an empty name, a digit-led name, a keyword, a space.
+        (
+            "record-punctuation",
+            "VRecord(\"Cfg }\\ndrop x\", [])",
+            "is not a usable record name",
+        ),
+        (
+            "record-empty",
+            "VRecord(\"\", [])",
+            "is not a usable record name",
+        ),
+        (
+            "record-digit-led",
+            "VRecord(\"2fa\", [])",
+            "is not a usable record name",
+        ),
+        (
+            "variant-keyword",
+            "VVariant(\"match\", [])",
+            "is not a usable variant name",
+        ),
+        (
+            "field-space",
+            "VRecord(\"Cfg\", [VonField { name: \"a b\", value: VBool(true), line: 0 }])",
+            "is not a usable field name",
+        ),
+        // A number VON has no spelling for: hex, a leading zero, an exponent, a
+        // digit separator, an empty text, and a float that is not one.
+        ("int-hex", "VInt(\"0x1f\")", "is not a usable integer"),
+        (
+            "int-leading-zero",
+            "VInt(\"007\")",
+            "is not a usable integer",
+        ),
+        ("int-exponent", "VInt(\"1e9\")", "is not a usable integer"),
+        (
+            "int-separator",
+            "VInt(\"1_000\")",
+            "is not a usable integer",
+        ),
+        ("int-empty", "VInt(\"\")", "is not a usable integer"),
+        ("float-no-point", "VFloat(\"1\")", "is not a usable float"),
+        (
+            "float-trailing-point",
+            "VFloat(\"1.\")",
+            "is not a usable float",
+        ),
+    ] {
+        let file = dir.join(format!("{name}.vyrn"));
+        std::fs::write(
+            &file,
+            format!(
+                "import {{ Von, VonField, emitVon }} from \"std/von\"\n\
+                 fn main() -> Int64 {{\n    print(emitVon({value}))\n    return 0\n}}\n"
+            ),
+        )
+        .unwrap();
+        let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+        let text = combined(&out);
+        assert!(!out.status.success(), "{name} emitted a document:\n{text}");
+        assert!(text.contains(wanted), "{name}: unexpected failure:\n{text}");
+    }
+}

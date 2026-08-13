@@ -746,6 +746,11 @@ fn firstErrorToken(p: VonP) -> String {
 // Writer — the canonical, `fmt`-shaped layout. A file a human reads and
 // `git diff` shows, so the output is indented rather than compact (the one way
 // `toVon` differs from `toJson`).
+//
+// The writer is TOTAL over data — any string, any map key, escaped — and refuses
+// what VON cannot spell: a name that is not a Vyrn identifier, and a number that
+// is not a decimal literal. Both are emitted verbatim, so both are checked where
+// they are written, beside the escaping, the way `std/html` checks a name.
 // ===========================================================================
 
 /// `n` levels of the 4-space indentation `vyrn fmt` uses.
@@ -818,6 +823,71 @@ fn pushUnicodeEscape(out: modify Array<UInt8>, b: Int64) -> Unit {
     out.push('}')
 }
 
+/// Refuse a name that would not read back as the identifier it is written as.
+/// `kind` is the word the message uses: `record`, `field`, `variant` or
+/// `imported type`.
+///
+/// A name is emitted VERBATIM — that is what makes the canonical text Vyrn
+/// source — so, unlike a string or a map key, there is no escaping that could
+/// carry arbitrary text. `isIdent` is the single decider, the same one the JSON
+/// conversion asks before it makes a member a record field, so a document this
+/// writer produces and a document the reader accepts are one grammar.
+fn requireName(kind: String, n: String) {
+    if isIdent(n) == false {
+        panic("von: `" + n + "` is not a usable " + kind + " name — a name is a Vyrn identifier (a letter or `_`, then letters, digits or `_`) and not a keyword; text that is not one belongs in a VALUE, which is quoted and escaped")
+    }
+}
+
+/// Whether `raw` is the text of a VON number of `kind` (`integer` or `float`):
+/// an optional `-`, digits with no leading zero, and for a float a `.` and at
+/// least one more digit. Exactly what the reader accepts — VON is Vyrn's literal
+/// grammar, which has no hex, no exponent and no digit separator.
+fn numberOk(raw: String, kind: String) -> Bool {
+    let ba = bytes(raw)
+    let mut i = 0
+    if i < ba.length && ba[i] == '-' {
+        i = i + 1
+    }
+    let intStart = i
+    while i < ba.length && ba[i] >= '0' && ba[i] <= '9' {
+        i = i + 1
+    }
+    if i == intStart {
+        return false
+    }
+    if i - intStart > 1 && ba[intStart] == '0' {
+        return false
+    }
+    if kind == "float" {
+        if i >= ba.length || ba[i] != '.' {
+            return false
+        }
+        i = i + 1
+        let fracStart = i
+        while i < ba.length && ba[i] >= '0' && ba[i] <= '9' {
+            i = i + 1
+        }
+        if i == fracStart {
+            return false
+        }
+    }
+    return i == ba.length
+}
+
+/// A `VInt`/`VFloat`'s raw text, refusing what is not a VON number.
+///
+/// The variants carry RAW text on purpose — a config file's
+/// `9007199254740993` survives the round trip — so the constructors are public
+/// `String` ones and nothing stops `VInt("0x1f")`. The check therefore lives
+/// HERE, where the value is written, beside the escaping: one funnel for
+/// `emitVon`, `toVon` and every caller of either.
+fn emitNumber(kind: String, raw: String) -> String {
+    if numberOk(raw, kind) == false {
+        panic("von: `" + raw + "` is not a usable " + kind + " — a `VInt`/`VFloat` holds the RAW text of a decimal literal (an optional `-`, then digits with no leading zero, and for a float a `.` and more digits); VON has no hex, no exponent and no digit separator")
+    }
+    return raw.copy()
+}
+
 /// Whether `v` fits on one line without deciding anything — a scalar, or an
 /// empty container.
 fn isFlat(v: Von) -> Bool {
@@ -853,12 +923,23 @@ fn allFlatEntries(es: Array<VonEntry>) -> Bool {
     return true
 }
 
+/// A record literal: `Name {}` when it has no fields, else the block below. The
+/// one place a record is written, so the one place its name is checked.
+fn emitRecord(name: String, fs: Array<VonField>, depth: Int64) -> String {
+    requireName("record", name)
+    if fs.length == 0 {
+        return name + " {}"
+    }
+    return emitRecordBlock(name, fs, depth)
+}
+
 /// A record body, one field per line with the trailing comma that keeps a later
 /// field's diff to one line.
 fn emitRecordBlock(name: String, fs: Array<VonField>, depth: Int64) -> String {
     let pad = indent(depth + 1)
     let mut out = name + " {\n"
     for f in fs {
+        requireName("field", f.name)
         out = out + pad + f.name + ": " + emitAt(f.value, depth + 1) + ",\n"
     }
     return out + indent(depth) + "}"
@@ -912,6 +993,17 @@ fn emitMapInline(es: Array<VonEntry>, depth: Int64) -> String {
     return out + "]"
 }
 
+/// A variant literal: the bare name when it carries nothing, else its payload
+/// list. The one place a variant is written, so the one place its name is
+/// checked.
+fn emitVariant(name: String, xs: Array<Von>, depth: Int64) -> String {
+    requireName("variant", name)
+    if xs.length == 0 {
+        return name.copy()
+    }
+    return emitVariantArgs(name, xs, depth)
+}
+
 /// A variant's payload list. Each payload is emitted one level DEEPER, because
 /// `vyrn fmt` counts the `(` as an indentation level of its own: a record
 /// payload then breaks its lines and closes in the column `fmt` would put it in
@@ -935,8 +1027,8 @@ fn emitVariantArgs(name: String, xs: Array<Von>, depth: Int64) -> String {
 /// with a trailing comma.
 fn emitAt(v: Von, depth: Int64) -> String {
     return match v {
-        VRecord(name, fs) => if fs.length == 0 { name + " {}" } else { emitRecordBlock(name, fs, depth) },
-        VVariant(name, xs) => if xs.length == 0 { name.copy() } else { emitVariantArgs(name, xs, depth) },
+        VRecord(name, fs) => emitRecord(name, fs, depth),
+        VVariant(name, xs) => emitVariant(name, xs, depth),
         VArray(xs) => if xs.length == 0 {
             "[]"
         } else if allFlatValues(xs) {
@@ -952,8 +1044,8 @@ fn emitAt(v: Von, depth: Int64) -> String {
             emitMapBlock(es, depth)
         },
         VStr(s) => emitString(s),
-        VInt(s) => s.copy(),
-        VFloat(s) => s.copy(),
+        VInt(s) => emitNumber("integer", s),
+        VFloat(s) => emitNumber("float", s),
         VBool(b) => if b { "true" } else { "false" },
     }
 }
@@ -977,11 +1069,13 @@ export fn toVon(doc: VonDoc) -> String {
     return out + "\n" + emitAt(doc.value, 0) + "\n"
 }
 
-/// `A, B, C` — an import list's names.
+/// `A, B, C` — an import list's names, which are emitted verbatim into the
+/// header and so are checked like every other name.
 fn joinNames(names: Array<String>) -> String {
     let mut out = ""
     let mut i = 0
     for n in names {
+        requireName("imported type", n)
         if i > 0 {
             out = out + ", "
         }

@@ -34,8 +34,16 @@
 ///     `FnInfo.mutates` (RFC-0074 M4a) — nothing here guesses from a name, so
 ///     renaming a procedure cannot silently move it between roots. A
 ///     1-parameter procedure takes `(input: <Req>Input)`; the return maps by the
-///     table above. An empty `Query` gets a `_placeholder` field (GraphQL needs a
-///     non-empty query root); an empty `Mutation` is omitted.
+///     table above. An empty `Mutation` is omitted.
+///   - an OBJECT with no fields gets a `_placeholder: Boolean` field, wherever it
+///     comes from — an empty query root, or a zero-field record (`type Empty =
+///     {}`). GraphQL requires an object type to define at least one field, so
+///     `type Empty {}` is a syntax error that poisons every field referencing it.
+///   - a NAME the document would define twice (a contract type called `Query`,
+///     `Mutation` or `JSON`; a record `Foo` beside a type `FooInput`), or one
+///     beginning with the introspection-reserved `__`, is REPORTED (RFC-0099)
+///     and not repaired: these names are the wire surface, and renaming one is
+///     the author's decision.
 ///   - `///` docs on TYPES become SDL descriptions. Procedure/param/module docs
 ///     are NOT in `moduleInterface` reflection, so operation descriptions are
 ///     absent (gap recorded in RFC-0038).
@@ -74,6 +82,10 @@ import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } f
 // imports it for the same reason.
 import { validateContract } from "std/rpc"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
+
+// A name the document would define twice, or an introspection-reserved name, is
+// reported rather than repaired (RFC-0099) — see `gqlDefine`.
+import { reportHere, Severity } from "std/diag"
 
 /// The bytes `ba[s..e)` as a String ("" on the impossible non-UTF-8 slice).
 fn gqlSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
@@ -508,24 +520,45 @@ fn gqlVariantsOf(rhs: String) -> Array<String> {
     return gqlSplitTop(stripped, 124)
 }
 
+/// The `{ … }` BODY of an object or input definition, from its field lines.
+///
+/// The one place a member block is written, because there is one rule: GraphQL
+/// requires an object type to define at least one field, so an empty body is a
+/// syntax error (`Expected Name, found }`) that poisons the whole document —
+/// every field referencing the type becomes unresolvable too. An empty body
+/// therefore gets the `_placeholder: Boolean` field the query root has always
+/// emitted for exactly this reason, and it gets it here rather than at the root,
+/// so a zero-field RECORD (`type Empty = {}`) is answered the same way.
+///
+/// The repair is silent because the emitted document says what happened: the
+/// placeholder field is visible in the SDL, and naming the type in a diagnostic
+/// would need a SECOND reading of "which declarations are objects", which is the
+/// divergence `gqlMembers` exists to prevent.
+fn gqlBlock(fields: String) -> String {
+    if fields == "" {
+        return "{\n  _placeholder: Boolean\n}\n"
+    }
+    return "{\n" + fields + "}\n"
+}
+
 /// An object `type Name { .. }` definition from its members.
 fn gqlObjectSdl(name: String, doc: String, ms: Array<GqlMember>) -> String {
-    let mut out = doc + "type " + name + " {\n"
+    let mut fields = ""
     for m in ms {
-        out = out + "  " + m.name + ": " + m.ref + "\n"
+        fields = fields + "  " + m.name + ": " + m.ref + "\n"
     }
-    return out + "}\n"
+    return doc + "type " + name + " " + gqlBlock(fields)
 }
 
 /// The SDL for a RECORD: the `type Name { .. }` object and the `input NameInput
 /// { .. }` twin — GraphQL separates output objects from input objects, and both
 /// derive from the one member list.
 fn gqlRecord(decl: GqlDecl, doc: String, ms: Array<GqlMember>) -> String {
-    let mut inp = "input " + decl.name + "Input {\n"
+    let mut fields = ""
     for m in ms {
-        inp = inp + "  " + m.name + ": " + m.inputRef + "\n"
+        fields = fields + "  " + m.name + ": " + m.inputRef + "\n"
     }
-    return gqlObjectSdl(decl.name, doc, ms) + inp + "}\n"
+    return gqlObjectSdl(decl.name, doc, ms) + "input " + decl.name + "Input " + gqlBlock(fields)
 }
 
 /// The inner text between the outer `{` and `}` of a record RHS.
@@ -631,6 +664,73 @@ fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
 }
 
 // ===========================================================================
+// The names one document defines.
+// ===========================================================================
+
+/// One definition the document makes: the NAME it defines, and the route that
+/// defined it — a route is what a collision message has to name, because which
+/// of the two an author meant is exactly what the generator does not know.
+type GqlDef = { name: String, from: String }
+
+/// The names one type declaration defines: its own, and — for a RECORD — the
+/// `Input` twin. Split by the SAME `decl.rhs.startsWith("{")` verdict
+/// `gqlTypeSdl` emits by, so the list of names defined and the definitions
+/// emitted are one answer.
+fn gqlDeclNames(t: TypeInfo) -> Array<String> {
+    let decl = gqlSplitDecl(t.source)
+    if decl.rhs.startsWith("{") {
+        return [decl.name.copy(), decl.name + "Input"]
+    }
+    return [decl.name.copy()]
+}
+
+/// The route already holding `name`, or `""` — the linear scan a document's
+/// handful of type names deserves.
+fn gqlDefinedBy(defs: Array<GqlDef>, name: String) -> String {
+    for d in defs {
+        if d.name == name {
+            return d.from.copy()
+        }
+    }
+    return ""
+}
+
+/// Register one definition, and REPORT (RFC-0099) rather than repair when the
+/// name is already taken: a GraphQL document may not define one name twice, and
+/// the second definition is rejected by every parser.
+///
+/// An `Error`, not a rename: these names are the contract's WIRE surface, and a
+/// generator that quietly renames a type an author declared changes what every
+/// client queries. Which of the two colliding definitions gives way is the
+/// author's decision — the same reading `std/ui` records for two routes that
+/// reach one helper name.
+fn gqlDefine(defs: modify Array<GqlDef>, name: String, from: String) -> String {
+    let taken = gqlDefinedBy(defs, name)
+    if taken != "" {
+        return reportHere(
+            Error,
+            "the GraphQL document would define `\{name}` twice — \{taken}, and \{from}; a document may not define one name twice, so rename the contract's type",
+        )
+    }
+    defs.push(GqlDef { name: name.copy(), from: from.copy() })
+    return ""
+}
+
+/// A contract type name GraphQL reserves: `__` is the introspection prefix, and
+/// a name carrying it is refused by a parser. Checked once per DECLARATION, not
+/// once per definition — the `Input` twin's name is the declaration's, so one
+/// mistake gets one diagnostic.
+fn gqlReservedName(name: String) -> String {
+    if name.startsWith("__") {
+        return reportHere(
+            Error,
+            "the GraphQL document would define `\{name}` — a name beginning with `__` is reserved for introspection, so rename the contract's type",
+        )
+    }
+    return ""
+}
+
+// ===========================================================================
 // Root fields.
 // ===========================================================================
 
@@ -715,9 +815,24 @@ export gen fn sdl(contract: String) -> String {
     doc = doc + "\"\"\"An arbitrary JSON value — the wire form of a Vyrn Map<String, V>.\"\"\"\n"
     doc = doc + "scalar JSON\n"
 
+    // Every name the document defines, and the route that defined it — a repeat
+    // is refused rather than emitted (`gqlDefine`).
+    let mut defs: Array<GqlDef> = []
+    let mut diags = gqlDefine(defs, "JSON", "the built-in JSON scalar")
+
     // Types, in the reflection's deterministic order.
     for t in iface.types {
         doc = doc + gqlTypeSdl(t, iface)
+        let dname = gqlSplitDecl(t.source).name
+        diags = diags + gqlReservedName(dname)
+        for n in gqlDeclNames(t) {
+            let from = if n == dname {
+                "the contract's type `\{dname}`"
+            } else {
+                "the input twin of the contract's record `\{dname}`"
+            }
+            diags = diags + gqlDefine(defs, n, from)
+        }
     }
 
     // Query / Mutation roots.
@@ -730,15 +845,11 @@ export gen fn sdl(contract: String) -> String {
             queries = queries + gqlRootField(f, iface)
         }
     }
-    doc = doc + "type Query {\n"
-    if queries == "" {
-        doc = doc + "  _placeholder: Boolean\n"
-    } else {
-        doc = doc + queries
-    }
-    doc = doc + "}\n"
+    doc = doc + "type Query " + gqlBlock(queries)
+    diags = diags + gqlDefine(defs, "Query", "the generated query root")
     if mutations != "" {
-        doc = doc + "type Mutation {\n" + mutations + "}\n"
+        doc = doc + "type Mutation " + gqlBlock(mutations)
+        diags = diags + gqlDefine(defs, "Mutation", "the generated mutation root")
     }
 
     // Bake the whole SDL string into the emitted module via a `vyrn"…"` code
@@ -746,7 +857,11 @@ export gen fn sdl(contract: String) -> String {
     // becomes an escaped Vyrn string LITERAL by construction — the compiler's own
     // escaping replaces the hand-rolled `gqlEscBody` byte loop, so a mis-escape
     // (an unescaped `"`/`\`/newline corrupting the baked SDL) is unrepresentable.
-    return render(vyrn"""/// Generated by std/graphql `sdl` (RFC-0038) — do not edit.
+    //
+    // Any `//@diag` the name registry produced rides in FRONT of the module, so
+    // a document that cannot be defined fails the build with the generator's own
+    // wording rather than reaching a parser as a duplicate definition.
+    return diags + render(vyrn"""/// Generated by std/graphql `sdl` (RFC-0038) — do not edit.
 /// The contract's GraphQL SDL document (deterministic, byte-stable).
 export fn sdlText() -> String {
     return \{doc}
