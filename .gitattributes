@@ -1,4 +1,22 @@
-# `curl … | sh` feeds these bytes straight to /bin/sh on Linux and macOS. A CRLF
-# committed from a Windows checkout would break the installer for everyone, and
-# break it invisibly on the machine that committed it.
-install.sh text eol=lf
+# One line ending in the working tree, on every machine: LF.
+#
+# Not a style preference — a correctness one. Several gates compare generated
+# text against committed bytes:
+#
+#   * `vyrn doc --std --verify` diffs what the doc generator emits (LF) against
+#     `docs/api/*.md` as checked out.
+#   * `vyrn fmt --check` diffs the formatter's output against the `.vyrn` file.
+#   * the release archive ships `std/` and `web/` verbatim, so a CRLF checkout
+#     would publish CRLF sources.
+#   * `curl … | sh` feeds `install.sh` straight to /bin/sh on Linux and macOS. A
+#     CRLF committed from a Windows checkout would break the installer for
+#     everyone, and break it invisibly on the machine that committed it.
+#
+# With `core.autocrlf=true` — Git for Windows' installer default — every one of
+# those reads CRLF on Windows and LF on CI, so the same commit passes on one and
+# fails on the other. `eol=lf` takes the decision away from a per-machine config.
+#
+# `text=auto` still lets Git detect binaries (the one `.png`) and leave them
+# alone. Nothing in this repo needs CRLF: there are no `.bat`/`.cmd` files, and
+# PowerShell reads LF.
+* text=auto eol=lf
