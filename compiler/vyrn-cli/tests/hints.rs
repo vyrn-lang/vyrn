@@ -154,7 +154,11 @@ fn project(tag: &str, widget: &str, app: &str, manifest: Option<&str>) -> PathBu
 fn a_rule_reports_at_the_line_and_column_of_the_vyx_file() {
     let dir = project("anchor", WIDGET, APP, None);
     let r = run_in(&dir, "run", "app.vyrn");
-    assert_eq!(r.code, 0, "advice rides a build that succeeded:\n{}", r.stderr);
+    assert_eq!(
+        r.code, 0,
+        "advice rides a build that succeeded:\n{}",
+        r.stderr
+    );
     assert_eq!(r.stdout, "1\n", "the program ran, and said what it checked");
     // `widgets/Card.vyx` line 7 is the `<img>`; column 16 is its first attribute
     // value. The author never sees the generated module, so a report against it
@@ -185,7 +189,11 @@ fn a_clean_component_earns_a_silent_build() {
 fn hints_change_neither_the_exit_code_nor_a_byte_of_program_output() {
     // The invariant inherited from RFC-0099, restated for a real rule set: the
     // advice is advice.
-    let warned = run_in(&project("same_warned", WIDGET, APP, None), "run", "app.vyrn");
+    let warned = run_in(
+        &project("same_warned", WIDGET, APP, None),
+        "run",
+        "app.vyrn",
+    );
     let clean = run_in(
         &project("same_clean", CLEAN_WIDGET, APP, None),
         "run",
@@ -244,8 +252,14 @@ fn a_broken_hints_config_is_a_refusal_not_a_silent_no_op() {
     // the empty policy. Every one of these must FAIL, because each one would
     // otherwise report "0 problems" over a project that never got checked.
     let cases = [
-        ("trailing comma", "{\n  \"hints\": {\n    \"a11y/img-alt\": \"error\",\n  }\n}\n"),
-        ("unknown level", "{ \"hints\": { \"a11y/img-alt\": \"shout\" } }"),
+        (
+            "trailing comma",
+            "{\n  \"hints\": {\n    \"a11y/img-alt\": \"error\",\n  }\n}\n",
+        ),
+        (
+            "unknown level",
+            "{ \"hints\": { \"a11y/img-alt\": \"shout\" } }",
+        ),
         ("wrong shape", "{ \"hints\": [\"a11y/img-alt\"] }"),
     ];
     for (what, manifest) in cases {
@@ -404,7 +418,8 @@ fn a_third_party_hint_library_needs_nothing_std_has() {
     assert_eq!(r.code, 0, "advice rides the build:\n{}", r.stderr);
     assert_eq!(r.stdout, "2\n");
     assert!(
-        r.stderr.contains("schema.sql:2:1: warning: sql/select-star:"),
+        r.stderr
+            .contains("schema.sql:2:1: warning: sql/select-star:"),
         "{}",
         r.stderr
     );
@@ -440,7 +455,8 @@ fn a_third_party_library_gets_the_same_configuration_and_waivers() {
         r.stderr
     );
     assert!(
-        r.stderr.contains("schema.sql:3:1: warning: sql/select-star:"),
+        r.stderr
+            .contains("schema.sql:3:1: warning: sql/select-star:"),
         "the next one still does:\n{}",
         r.stderr
     );
