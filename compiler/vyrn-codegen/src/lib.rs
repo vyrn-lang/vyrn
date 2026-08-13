@@ -13118,6 +13118,297 @@ mod tests {
         }
     }
 
+    /// Every variant of the type enum, as a value — the other half of the lock
+    /// [`variant_name`] is. The test asserts the seeds cover this list, so a
+    /// variant that gains a `variant_name` arm but no seed still fails.
+    const VARIANTS: &[&str] = &[
+        "Int",
+        "IntN",
+        "Float",
+        "Float32",
+        "F32x4",
+        "I32x4",
+        "F64x2",
+        "Mask32x4",
+        "Mask64x2",
+        "Bool",
+        "Str",
+        "Unit",
+        "Named",
+        "Option",
+        "Result",
+        "Record",
+        "Omit",
+        "Pick",
+        "Merge",
+        "Partial",
+        "Enum",
+        "Param",
+        "App",
+        "Array",
+        "ArrayN",
+        "SmallArray",
+        "ConstInt",
+        "Map",
+        "Stream",
+        "Task",
+        "Logger",
+        "Fn",
+        "Lazy",
+        "Never",
+        "Err",
+    ];
+
+    /// One `Type` per variant of the type enum, held complete by a match the
+    /// compiler will not let go stale.
+    ///
+    /// The match computes nothing. Its only job is to fail to compile when a
+    /// variant is added, which is what makes the list below a list rather than a
+    /// guess — the hand-written `cases` above is exactly what happens without
+    /// one, and it had been missing `Stream` and every vector for as long as
+    /// they had existed.
+    fn variant_name(t: &Type) -> &'static str {
+        match t {
+            Type::Int => "Int",
+            Type::IntN { .. } => "IntN",
+            Type::Float => "Float",
+            Type::Float32 => "Float32",
+            Type::F32x4 => "F32x4",
+            Type::I32x4 => "I32x4",
+            Type::F64x2 => "F64x2",
+            Type::Mask32x4 => "Mask32x4",
+            Type::Mask64x2 => "Mask64x2",
+            Type::Bool => "Bool",
+            Type::Str => "Str",
+            Type::Unit => "Unit",
+            Type::Named(_) => "Named",
+            Type::Option(_) => "Option",
+            Type::Result(..) => "Result",
+            Type::Record(_) => "Record",
+            Type::Omit(..) => "Omit",
+            Type::Pick(..) => "Pick",
+            Type::Merge(..) => "Merge",
+            Type::Partial(_) => "Partial",
+            Type::Enum(_) => "Enum",
+            Type::Param(_) => "Param",
+            Type::App(..) => "App",
+            Type::Array(_) => "Array",
+            Type::ArrayN(..) => "ArrayN",
+            Type::SmallArray(..) => "SmallArray",
+            Type::ConstInt(_) => "ConstInt",
+            Type::Map(..) => "Map",
+            Type::Stream(_) => "Stream",
+            Type::Task(_) => "Task",
+            Type::Logger => "Logger",
+            Type::Fn(..) => "Fn",
+            Type::Lazy(_) => "Lazy",
+            Type::Never => "Never",
+            Type::Err => "Err",
+        }
+    }
+
+    /// One inhabitant of every variant [`variant_name`] knows.
+    fn layout_seeds() -> Vec<Type> {
+        let b = |t: Type| Box::new(t);
+        vec![
+            Type::Int,
+            Type::IntN {
+                bits: 8,
+                signed: false,
+            },
+            Type::IntN {
+                bits: 16,
+                signed: true,
+            },
+            Type::IntN {
+                bits: 32,
+                signed: true,
+            },
+            Type::Float,
+            Type::Float32,
+            Type::F32x4,
+            Type::I32x4,
+            Type::F64x2,
+            Type::Mask32x4,
+            Type::Mask64x2,
+            Type::Bool,
+            Type::Str,
+            Type::Unit,
+            Type::Named("Nowhere".into()),
+            Type::Option(b(Type::Int)),
+            Type::Result(b(Type::Int), b(Type::Str)),
+            Type::Record(Vec::new()),
+            Type::Omit(b(Type::Record(Vec::new())), vec!["f".into()]),
+            Type::Pick(b(Type::Record(Vec::new())), vec!["f".into()]),
+            Type::Merge(b(Type::Record(Vec::new())), b(Type::Record(Vec::new()))),
+            Type::Partial(b(Type::Record(Vec::new()))),
+            Type::Enum(Vec::new()),
+            Type::Param("T".into()),
+            Type::App("Box".into(), vec![Type::Int]),
+            Type::Array(b(Type::Int)),
+            Type::ArrayN(b(Type::Int), 4),
+            Type::SmallArray(b(Type::Int), 3),
+            Type::ConstInt(8),
+            Type::Map(b(Type::Str), b(Type::Int)),
+            Type::Stream(b(Type::Int)),
+            Type::Task(b(Type::Int)),
+            Type::Logger,
+            Type::Fn(vec![Type::Int], b(Type::Unit)),
+            Type::Lazy(b(Type::Int)),
+            Type::Never,
+            Type::Err,
+        ]
+    }
+
+    /// The wrappers [`grow`] has none of, because the mangle it was written for
+    /// collapses a record whole and layout does not.
+    ///
+    /// Three per type: a one-field record, which shows the member's own
+    /// alignment; an `i8`-then-`t` record, which shows the HOLE in front of it,
+    /// where a wrong alignment becomes a wrong offset; and a one-payload enum.
+    fn in_records(ts: &[Type]) -> Vec<Type> {
+        let field = |n: &str, x: &Type| Field {
+            name: n.into(),
+            ty: x.clone(),
+        };
+        let byte = Type::IntN {
+            bits: 8,
+            signed: true,
+        };
+        ts.iter()
+            .flat_map(|t| {
+                [
+                    Type::Record(vec![field("a", t)]),
+                    Type::Record(vec![field("n", &byte), field("a", t)]),
+                    Type::Enum(vec![EnumVariant {
+                        name: "V".into(),
+                        payload: vec![t.clone()],
+                    }]),
+                ]
+            })
+            .collect()
+    }
+
+    /// The leaf spellings in an `llt` string: each scalar word, and each whole
+    /// `<N x T>` vector. The `{ }`, `[N x` and `,` scaffolding is structure, not
+    /// a leaf — and a vector is a leaf rather than structure because it is the
+    /// unit `of_ll` has to know a size for.
+    fn atoms(ll: &str, out: &mut std::collections::BTreeSet<String>) {
+        fn words(s: &str, out: &mut std::collections::BTreeSet<String>) {
+            for w in s.split(|c: char| !c.is_ascii_alphanumeric()) {
+                // Skip the counts and the `x` that separates them from the
+                // element: both are grammar, and neither is a shape.
+                if !w.is_empty() && w != "x" && !w.bytes().all(|c| c.is_ascii_digit()) {
+                    out.insert(w.to_string());
+                }
+            }
+        }
+        let mut rest = ll;
+        while let Some(a) = rest.find('<') {
+            let b = a + rest[a..].find('>').expect("a vector spelling closes");
+            words(&rest[..a], out);
+            out.insert(rest[a..=b].to_string());
+            rest = &rest[b + 1..];
+        }
+        words(rest, out);
+    }
+
+    /// The guard the hand-written list above cannot be.
+    ///
+    /// [`layout::SHAPES`] claims to be the emitter's whole type universe, and
+    /// the check next to it walks a list a human typed — so `Stream` and `Ref`
+    /// sat in `SHAPES` with no case in the test, and RFC-0083's four vector
+    /// spellings were printed by `llt`, refused by `of_ll`, and never once
+    /// compared against clang. A list cannot guard a list.
+    ///
+    /// So derive the cases, on PR #165's generator itself. [`layout_seeds`] is
+    /// one `Type` per variant of the type enum, held complete by
+    /// [`variant_name`] — an exhaustive match, so a new variant is a COMPILE
+    /// error here before it is a missing layout in front of a user. [`grow`],
+    /// which the mangle-injectivity test already owns, composes those through
+    /// every container constructor twice, and [`in_records`] adds the two
+    /// wrappers a mangle does not care about and a layout does. That is a few
+    /// thousand type trees, and two things hold over all of them:
+    ///
+    /// 1. every one has a layout — a shape `llt` can print and `of_ll` cannot
+    ///    parse is this test failing, not a build dying at the user;
+    /// 2. every leaf spelling that appears also appears in `SHAPES`, so a new
+    ///    case in `llt` cannot escape the clang comparison.
+    ///
+    /// # What it cannot derive
+    ///
+    /// The reverse direction is leaf-wise — no DEAD spelling in `SHAPES` —
+    /// rather than "every row is generated", and that is a real limit rather
+    /// than an oversight. Most rows are hand-built PADDING probes:
+    /// `RecordNested`, `SmallArray_i8`, `RecordOfVector` are chosen because
+    /// clang and the engine could plausibly disagree about them, and no
+    /// enumeration of the type enum produces those exact trees. Nor are the
+    /// NAMES derivable: `Ref` is `{ i64, i64 }`, the same string a stored `fn`
+    /// prints, and nothing in the type enum spells a `Ref` at all.
+    #[test]
+    fn llt_prints_every_shape_the_layout_engine_was_verified_on() {
+        let types = HashMap::new();
+        let seeds = layout_seeds();
+        // The lock, in two halves. `variant_name`'s match is exhaustive, so a
+        // new variant of the type enum stops this file compiling; `VARIANTS` is
+        // the same list as a value, so a variant that is named but never seeded
+        // stops the test passing. Neither half alone is a guard.
+        let seeded: std::collections::BTreeSet<&str> = seeds.iter().map(variant_name).collect();
+        for v in VARIANTS {
+            assert!(seeded.contains(v), "no seed for Type::{v}");
+        }
+        assert!(
+            seeded.iter().all(|s| VARIANTS.contains(s)),
+            "a seed names a variant VARIANTS does not list"
+        );
+        let d1 = grow(&seeds, &seeds[..8]);
+        let d2 = grow(&d1[..200], &d1[..20]);
+        let all: Vec<Type> = seeds
+            .iter()
+            .chain(d1.iter())
+            .chain(d2.iter())
+            .chain(in_records(&seeds).iter())
+            .chain(in_records(&d1[..60]).iter())
+            .cloned()
+            .collect();
+
+        let mut printed = std::collections::BTreeSet::new();
+        for ty in &all {
+            let ll = llt_of(ty, &types);
+            let l = layout::of_ll(&ll)
+                .unwrap_or_else(|e| panic!("llt({ty}) = {ll}, which has no layout: {e}"));
+            assert!(l.align.is_power_of_two(), "{ll}: align {}", l.align);
+            assert_eq!(l.size % l.align, 0, "{ll}: size {} is not padded", l.size);
+            atoms(&ll, &mut printed);
+        }
+
+        let mut covered = std::collections::BTreeSet::new();
+        for (_, ll) in layout::SHAPES {
+            atoms(ll, &mut covered);
+        }
+        // `void` is the one leaf that cannot join them, and the reason is C's,
+        // not this crate's: `sizeof(void)` is a GNU extension answering 1 where
+        // the engine answers 0, so a `void` row would make the clang comparison
+        // disagree about a shape that has no bytes and never occupies any. It is
+        // what `llt` prints for `Unit`, `Never`, and every type that resolved
+        // away — none of which can be a member of anything.
+        printed.remove("void");
+        covered.remove("void");
+        let missing: Vec<_> = printed.difference(&covered).collect();
+        assert!(
+            missing.is_empty(),
+            "{} type trees print {missing:?}, which layout::SHAPES does not cover — \
+             so clang is never asked about it",
+            all.len()
+        );
+        let dead: Vec<_> = covered.difference(&printed).collect();
+        assert!(
+            dead.is_empty(),
+            "layout::SHAPES spells {dead:?}, which `llt` no longer prints"
+        );
+        assert!(all.len() > 4_000, "the corpus shrank to {}", all.len());
+    }
+
     // ---- RFC-0086: the shapes `solve_param` cannot descend into ---------
 
     /// Every `.vyrn` file under `rel`, relative to the repository root.

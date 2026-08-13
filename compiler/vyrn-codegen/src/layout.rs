@@ -61,19 +61,29 @@ pub struct Layout {
     pub fields: Vec<u32>,
 }
 
-/// Every shape `llt` can produce, paired with a name for diagnostics. The
-/// emitter's whole type universe, in one list, because the clang comparison has
-/// to know what to compare and a hand-kept list in the test would rot. Kept
-/// honest by `llt_prints_every_shape_the_layout_engine_was_verified_on` in this
-/// crate's tests, which builds a `Type` for every variant of the type enum,
-/// prints each with `llt`, and asserts the set of strings that come out is
-/// exactly this list — so a new case in `llt` cannot escape the clang check, and
-/// a stale row here cannot survive its shape being dropped.
+/// What clang is asked about: a name and the shape `llt` prints for it.
+///
+/// This is a chosen list, not a total one, and the comment that used to call it
+/// "the emitter's whole type universe" was wrong in a way that cost something —
+/// `Stream` and `Ref` sat here with no case in the test that was supposed to
+/// keep them honest, and RFC-0083's four vector spellings were printed by `llt`,
+/// refused by [`of_ll`], and never once compared against clang.
+///
+/// Two different jobs are mixed here on purpose. Most rows are PADDING probes,
+/// chosen because clang and this engine could plausibly disagree about them:
+/// `RecordNested`, `SmallArray_i8`, `RecordOfVector`. The rest are one row per
+/// LEAF spelling `llt` can print, which is the part that has to be complete.
+///
+/// `llt_prints_every_shape_the_layout_engine_was_verified_on` in this crate's
+/// tests is what makes it complete: it builds a `Type` for every variant of the
+/// type enum, composes a few thousand trees out of them, and asserts that every
+/// leaf spelling those print appears somewhere in this list, and that no
+/// spelling in this list has stopped being printed. `void` is the one exception,
+/// and the reason is on the test.
 ///
 /// Concrete instantiations stand in for the parametric shapes — `Array<T>` is
 /// `{ ptr, i64, i64 }` whatever `T` is, but `SmallArray` and `ArrayN` embed the
-/// element type, so those appear at several element widths. The point is to
-/// cover the padding cases, not to enumerate programs.
+/// element type, so those appear at several element widths.
 pub const SHAPES: &[(&str, &str)] = &[
     // Scalars.
     ("Int64", "i64"),
