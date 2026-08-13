@@ -129,6 +129,87 @@ fn fixed_env_i64(key: &str) -> Option<i64> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The host boundary, in the two shapes it has.
+//
+// Everywhere with an operating system underneath — native, `wasm32-wasip1` —
+// output is a file descriptor, input is stdin, and the clock is `std::time`.
+// `wasm32-unknown-unknown` (the browser playground, `compiler/vyrn-play`) has
+// none of the three: writes to stdout go nowhere, stdin is always empty, and
+// `std::time::SystemTime::now` PANICS. So each one is named once here and
+// switched once, and every call site below is spelled the same in both.
+//
+// Nothing about a native build changes: the `cfg` arms below expand to the
+// `println!`, `read_until` and `SystemTime` calls that were written inline.
+// ---------------------------------------------------------------------------
+
+/// One line of program output. `print`'s only sink.
+macro_rules! vyrn_out {
+    ($($arg:tt)*) => {{
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        crate::playhost::out_line(format_args!($($arg)*));
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        println!($($arg)*);
+    }};
+}
+
+/// One line of log output, kept off stdout (RFC-0008).
+macro_rules! vyrn_err {
+    ($($arg:tt)*) => {{
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        crate::playhost::err_line(format_args!($($arg)*));
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        eprintln!($($arg)*);
+    }};
+}
+
+/// The next raw line of stdin: bytes up to and including `\n`, or empty at EOF.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn host_read_line() -> Vec<u8> {
+    use std::io::BufRead;
+    // Locking the global stdin per call still streams: the buffer lives in the
+    // shared handle, not the guard.
+    let mut buf: Vec<u8> = Vec::new();
+    let n = std::io::stdin().lock().read_until(b'\n', &mut buf).unwrap_or(0);
+    if n == 0 {
+        buf.clear();
+    }
+    buf
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn host_read_line() -> Vec<u8> {
+    crate::playhost::read_line()
+}
+
+/// Milliseconds since the Unix epoch, from the host clock.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn host_epoch_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn host_epoch_millis() -> i64 {
+    crate::playhost::now_ms()
+}
+
+/// Nanoseconds since the Unix epoch, from the host clock.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn host_epoch_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn host_epoch_nanos() -> i64 {
+    crate::playhost::now_ms().saturating_mul(1_000_000)
+}
+
 /// Whether an `std::fs::rename` failure is a cross-device (`EXDEV`) rename —
 /// surfaced as a distinct `IoError` per RFC-0044 rather than the generic write
 /// error. `EXDEV` is 18 on Unix/wasi; Windows reports `ERROR_NOT_SAME_DEVICE`
@@ -891,14 +972,35 @@ pub fn run(program: &Program) -> Result<i64, String> {
 /// `args()`). These are the arguments *after* the program name (argv[1..]); the
 /// native/wasm backends read the same slice from their C `main`'s `argv`.
 pub fn run_with_args(program: &Program, args: &[String]) -> Result<i64, String> {
+    on_deep_stack(|| run_inner(program, args))
+}
+
+/// Run `f` with room for [`CALL_DEPTH_LIMIT`] interpreter frames beneath it.
+///
+/// A dedicated thread is how a hosted platform gets that room, because the OS
+/// main-thread stack is only ~1 MB on Windows.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn on_deep_stack(
+    f: impl FnOnce() -> Result<i64, String> + Send,
+) -> Result<i64, String> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(INTERP_STACK_BYTES)
-            .spawn_scoped(s, || run_inner(program, args))
+            .spawn_scoped(s, f)
             .expect("failed to spawn interpreter thread")
             .join()
             .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
     })
+}
+
+/// `wasm32-unknown-unknown` has one thread and cannot make another, so the room
+/// is reserved at LINK time instead: `compiler/vyrn-play` passes
+/// `-z stack-size` for the whole module and measures what depth that buys.
+/// [`CALL_DEPTH_LIMIT`] is the same number here as everywhere else, which is what
+/// makes "too deep" the same diagnostic in a browser as in a terminal.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn on_deep_stack(f: impl FnOnce() -> Result<i64, String>) -> Result<i64, String> {
+    f()
 }
 
 fn run_inner(program: &Program, prog_args: &[String]) -> Result<i64, String> {
@@ -2280,11 +2382,7 @@ impl<'a> Interp<'a> {
                 if let Some(ms) = fixed_env_i64("VYRN_FIXED_TIME") {
                     return Some(Val::Int(ms));
                 }
-                let ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                Some(Val::Int(ms))
+                Some(Val::Int(host_epoch_millis()))
             }
             "hostMonotonicNanos" => {
                 if fixed_env_i64("VYRN_FIXED_TIME").is_some() {
@@ -2293,11 +2391,7 @@ impl<'a> Interp<'a> {
                     self.mono_counter.set(n + 1);
                     return Some(Val::Int(1_000_000_000 + n * 1_000_000));
                 }
-                let ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as i64)
-                    .unwrap_or(0);
-                Some(Val::Int(ns))
+                Some(Val::Int(host_epoch_nanos()))
             }
             "hostRandomSeed" => {
                 if let Some(seed) = fixed_env_i64("VYRN_FIXED_SEED") {
@@ -2306,11 +2400,7 @@ impl<'a> Interp<'a> {
                 // No injected seed: derive one from the wall clock (the CSPRNG
                 // guarantee is a native/wasm property; the interpreter is the
                 // reference for the FIXED path, which is all parity observes).
-                let ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as i64)
-                    .unwrap_or(0);
-                Some(Val::Int(ns))
+                Some(Val::Int(host_epoch_nanos()))
             }
             _ => None,
         }
@@ -4286,23 +4376,23 @@ impl<'a> Interp<'a> {
                     }
                     "print" => {
                         match &vals[0] {
-                            Val::Int(n) => println!("{n}"),
+                            Val::Int(n) => vyrn_out!("{n}"),
                             // A sized int prints its logical value; unsigned
                             // formats the bits as `u64` (native uses %lu).
                             Val::IntN {
                                 v, signed: true, ..
-                            } => println!("{v}"),
+                            } => vyrn_out!("{v}"),
                             Val::IntN {
                                 v, signed: false, ..
-                            } => println!("{}", *v as u64),
+                            } => vyrn_out!("{}", *v as u64),
                             // Fixed 6-decimal precision matches native `printf("%f")`
                             // exactly (Rust's shortest-repr Display would not). A
                             // Float32 promotes to f64 for printing, as C varargs do.
-                            Val::Float(x) => println!("{x:.6}"),
-                            Val::Float32(x) => println!("{:.6}", *x as f64),
-                            Val::Bool(b) => println!("{b}"),
-                            Val::Str(s) => println!("{s}"),
-                            other => println!("{other:?}"),
+                            Val::Float(x) => vyrn_out!("{x:.6}"),
+                            Val::Float32(x) => vyrn_out!("{:.6}", *x as f64),
+                            Val::Bool(b) => vyrn_out!("{b}"),
+                            Val::Str(s) => vyrn_out!("{s}"),
+                            other => vyrn_out!("{other:?}"),
                         }
                         Ok(Val::Unit)
                     }
@@ -4598,8 +4688,8 @@ impl<'a> Interp<'a> {
                             };
                             let line = format!("[{}] {lname}: {msg}", name.to_uppercase());
                             match &self.log_sink {
-                                LogSink::Stderr => eprintln!("{line}"),
-                                LogSink::Stdout => println!("{line}"),
+                                LogSink::Stderr => vyrn_err!("{line}"),
+                                LogSink::Stdout => vyrn_out!("{line}"),
                                 LogSink::File(_) => {
                                     if let Some(f) = self.log_file.borrow_mut().as_mut() {
                                         let _ = writeln!(f, "{line}");
@@ -4708,16 +4798,10 @@ impl<'a> Interp<'a> {
                             .into(),
                     )),
                     "readLine" => {
-                        use std::io::BufRead;
-                        // Read one raw line (bytes up to and including `\n`, or
-                        // EOF). Locking the global stdin per call still streams:
-                        // the buffer lives in the shared handle, not the guard.
-                        let mut buf: Vec<u8> = Vec::new();
-                        let n = std::io::stdin()
-                            .lock()
-                            .read_until(b'\n', &mut buf)
-                            .unwrap_or(0);
-                        if n == 0 {
+                        // One raw line: bytes up to and including `\n`, or empty
+                        // at EOF.
+                        let mut buf = host_read_line();
+                        if buf.is_empty() {
                             return Ok(Val::Option(None)); // EOF
                         }
                         // Strip a trailing `\n`, then a trailing `\r` (so Windows
