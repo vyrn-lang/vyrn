@@ -592,6 +592,83 @@ fn main() -> Int64 { return 0; }
     );
 }
 
+/// A checker diagnostic about an `impl` HEAD squiggles the `impl` keyword.
+///
+/// This is the case the prose-pinning fallback in `analyze` gets WRONG. Pinning
+/// searches the error's line for the diagnostic's backtick-quoted tokens; the
+/// first here is the phrase `` `impl Show for Age` ``, which is no token at all,
+/// so pinning falls through to the second — `Age` — and squiggled `Age` in the
+/// impl head (chars 14-17) for an error about the head itself. The column now
+/// comes from [`vyrn_frontend::ast::ImplBlock::col`], recorded by the parser
+/// where the `impl` keyword was read, so the squiggle covers the keyword.
+#[test]
+fn an_impl_head_diagnostic_squiggles_the_impl_keyword() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": init_id,
+        "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+
+    // `impl` for a validated scalar is refused (RFC-0084 M1). The `impl` head is
+    // on 1-based line 3, 1-based cols 1-5 → LSP line 2, chars 0-4.
+    let uri = "file:///impl/head.vyrn";
+    let src = "\
+type Age = Int64 where value >= 0
+protocol Show { fn show(self) -> String }
+impl Show for Age {
+    fn show(self) -> String { return \"age\" }
+}
+fn main() -> Int64 { return 0 }
+";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src }
+        }
+    }));
+
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("a publishDiagnostics with the impl error");
+    let d = diags
+        .iter()
+        .find(|d| {
+            d.get("message")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.contains("is not supported"))
+        })
+        .unwrap_or_else(|| panic!("expected the impl-head refusal: {diags:?}"));
+
+    let start = d.pointer("/range/start").unwrap();
+    let end = d.pointer("/range/end").unwrap();
+    assert_eq!(
+        start.get("line").unwrap().as_i64().unwrap(),
+        2,
+        "diagnostic on the impl line: {d}"
+    );
+    assert_eq!(
+        start.get("character").unwrap().as_i64().unwrap(),
+        0,
+        "squiggle starts at `impl` (char 0): {d}"
+    );
+    // The load-bearing half: a whole-line fallback would end at the line's
+    // length (18), not just past the keyword.
+    assert_eq!(
+        end.get("character").unwrap().as_i64().unwrap(),
+        4,
+        "squiggle covers exactly `impl` (4 chars), not the whole line: {d}"
+    );
+}
+
 /// `textDocument/completion` at a `.foo` member-access position returns the
 /// built-in methods for the receiver's type (here `Array<Int>` → push/at/pop/
 /// length), NOT the top-level symbol list. Guards the `is_member_context`

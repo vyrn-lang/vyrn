@@ -153,6 +153,7 @@ fn row(
             },
         },
         line: 0,
+        col: 0,
         is_extern: false,
         is_export_extern: false,
         is_gen: false,

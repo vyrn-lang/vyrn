@@ -1338,6 +1338,7 @@ fn f_shell(line: usize) -> Function {
         ret: Type::Unit,
         body: Block { stmts: Vec::new() },
         line,
+        col: 0,
         is_extern: false,
         is_export_extern: false,
         is_gen: false,

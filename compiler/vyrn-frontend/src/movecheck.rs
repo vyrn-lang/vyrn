@@ -585,7 +585,7 @@ fn run(program: &Program, want: Want) -> Run {
         drain(&mut projections, &mc, &f.module);
         stamp(&mc, &f.module);
         for s in mc.errors.borrow_mut().drain(..) {
-            let mut d = Diagnostic::from_rendered(s, "movecheck");
+            let mut d = s;
             d.file = f.module.clone();
             out.push(d);
         }
@@ -600,7 +600,7 @@ fn run(program: &Program, want: Want) -> Run {
         drain(&mut projections, &mc, &t.module);
         stamp(&mc, &t.module);
         for s in mc.errors.borrow_mut().drain(..) {
-            let mut d = Diagnostic::from_rendered(s, "movecheck");
+            let mut d = s;
             d.file = t.module.clone();
             out.push(d);
         }
@@ -612,7 +612,7 @@ fn run(program: &Program, want: Want) -> Run {
         drain(&mut projections, &mc, &b.module);
         stamp(&mc, &b.module);
         for s in mc.errors.borrow_mut().drain(..) {
-            let mut d = Diagnostic::from_rendered(s, "movecheck");
+            let mut d = s;
             d.file = b.module.clone();
             out.push(d);
         }
@@ -698,7 +698,7 @@ struct MoveCheck<'a> {
     exported: &'a HashSet<String>,
     /// Per-function statement-boundary error sink (RFC-0006 accumulation).
     /// Cleared at the start of each function, drained by `check_accum`.
-    errors: RefCell<Vec<String>>,
+    errors: RefCell<Vec<Diagnostic>>,
     /// The declared-types reading (RFC-0089 M2, Phase 4a) — the same one
     /// `own.rs` decides releases with. **Nothing in this pass's diagnostics
     /// reads it yet**; 4b is where it starts to decide.
@@ -1498,7 +1498,7 @@ impl MoveCheck<'_> {
         line: usize,
         outlives: bool,
         consumed: &mut Consumed,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Diagnostic> {
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
@@ -1709,7 +1709,7 @@ impl MoveCheck<'_> {
     /// a whole record with a hole in it. The second message is RFC-0093's own,
     /// and it names the take rather than the read, because the take is the line
     /// the reader has to change.
-    fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), String> {
+    fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic> {
         if consumed.is_empty() {
             return Ok(());
         }
@@ -1742,10 +1742,15 @@ impl MoveCheck<'_> {
         // capability IS the fix, so there is no menu to print.
         if c.fixes.is_empty() {
             let (cline, consumer) = (c.line, &c.by);
-            return Err(format!(
-                "line {line}: `{path}` is used here but was already consumed by \
-                 {consumer} on line {cline}\n  (a `consume` parameter takes \
-                 ownership; the value can't be used afterward)"
+            return Err(Diagnostic::error(
+                line,
+                0,
+                "movecheck",
+                format!(
+                    "`{path}` is used here but was already consumed by \
+                     {consumer} on line {cline}\n  (a `consume` parameter takes \
+                     ownership; the value can't be used afterward)"
+                ),
             ));
         }
         // RFC-0089 rule 1, worded exactly as Phase 4b left it. Both lines name
@@ -1780,7 +1785,7 @@ impl MoveCheck<'_> {
         line: usize,
         scope: &[HashSet<String>],
         by: TakeForm,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let Some((root, path)) = place_path(e) else {
             // A container element is the one place that CAN hold a hole at run
             // time, and `swapRemove` already spells it (RFC-0011). Naming it
@@ -1798,11 +1803,16 @@ impl MoveCheck<'_> {
             return Err(menu(line, by.nothing_to_take(), vec![by.drop_it()]));
         };
         if self.globals.contains(&root) && !Self::in_scope(scope, &root) {
-            return Err(format!(
-                "line {line}: module state `{root}` may not be consumed by {} — \
-                 nothing may take ownership of module state (it lives for the whole module \
-                 and is never dropped)",
-                by.what()
+            return Err(Diagnostic::error(
+                line,
+                0,
+                "movecheck",
+                format!(
+                    "module state `{root}` may not be consumed by {} — \
+                     nothing may take ownership of module state (it lives for the whole module \
+                     and is never dropped)",
+                    by.what()
+                ),
             ));
         }
         if let Some(b) = self.borrow_of(&root) {
@@ -1852,7 +1862,7 @@ impl MoveCheck<'_> {
     /// keep the same verdict until one migration moves them together. What is
     /// refused here is the narrower and unambiguous fact: the root belongs to
     /// somebody else, so no frame below may free it.
-    fn check_handover(&self, arg: &Expr, callee: &str, line: usize) -> Result<(), String> {
+    fn check_handover(&self, arg: &Expr, callee: &str, line: usize) -> Result<(), Diagnostic> {
         let Some(ty) = self.type_of(arg) else {
             return Ok(());
         };
@@ -1903,7 +1913,7 @@ impl MoveCheck<'_> {
     /// M1b). RFC-0091 M1's `Copy` protocol answers it, so `return d.title` out of
     /// a record this frame owns is refused now, and so is a projection or a
     /// pattern binder yielded by a `match` arm.
-    fn check_return(&self, e: &Expr, line: usize) -> Result<(), String> {
+    fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic> {
         self.note_returned_projection(e, line);
         if !self.decl.owns_heap(&self.ret.borrow()) {
             return Ok(());
@@ -2035,7 +2045,7 @@ impl MoveCheck<'_> {
     /// spelled two ways got two menus, one of which sent the reader to a second
     /// error. Fixing that at one exit fixed two spellings and missed the third,
     /// twice, which is what this function exists to stop.
-    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> String {
+    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic {
         // A Vyrn caller reads the lend out of `lending` and releases nothing; a
         // JS caller reads nothing, and since RFC-0089 M3b `wasi-min.js` frees
         // every String an export hands back. So an export owns its result or it
@@ -2520,7 +2530,7 @@ impl MoveCheck<'_> {
         s: &Stmt,
         consumed: &mut Consumed,
         scope: &mut Vec<HashSet<String>>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Diagnostic> {
         match s {
             Stmt::Let {
                 name,
@@ -3144,7 +3154,7 @@ impl MoveCheck<'_> {
     /// `modify` is exclusive in-place access. Handing the same place to a
     /// `modify` parameter and to any other parameter of the same call gives the
     /// callee two names for one value, and the callee was told it had one.
-    fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), String> {
+    fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), Diagnostic> {
         let Some(caps) = self.caps.get(callee) else {
             return Ok(());
         };
@@ -3180,7 +3190,7 @@ impl MoveCheck<'_> {
     /// outlive the call, so it borrows freely — that is the common case and the
     /// rule leaves it alone. A lambda that is stored is a value under RFC-0037's
     /// defunctionalization, and a borrow inside one has no lifetime to stand on.
-    fn check_capture(&self, name: &str, line: usize) -> Result<(), String> {
+    fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
         let Some(&inside) = self.lambda_base.borrow().last() else {
             return Ok(());
         };
@@ -3225,7 +3235,7 @@ impl MoveCheck<'_> {
         body_c: &Consumed,
         scope: &[HashSet<String>],
         body_div: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if body_div {
             return Ok(());
         }
@@ -3250,7 +3260,7 @@ impl MoveCheck<'_> {
         e: &Expr,
         consumed: &mut Consumed,
         scope: &mut Vec<HashSet<String>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         match e {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
             Expr::Var { name, line } => {
@@ -3627,17 +3637,22 @@ impl MoveCheck<'_> {
         callee: &str,
         spawned: bool,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if self.globals.contains(v) {
             let form = if spawned {
                 format!("spawn {callee}(..)")
             } else {
                 format!("{callee}(..)")
             };
-            return Err(format!(
-                "line {line}: module state `{v}` may not be passed to a `consume` parameter \
-                 via `{form}` — nothing may take ownership of module state (it lives for the \
-                 whole module and is never dropped)"
+            return Err(Diagnostic::error(
+                line,
+                0,
+                "movecheck",
+                format!(
+                    "module state `{v}` may not be passed to a `consume` parameter \
+                     via `{form}` — nothing may take ownership of module state (it lives for the \
+                     whole module and is never dropped)"
+                ),
             ));
         }
         Ok(())
@@ -4565,12 +4580,12 @@ fn root_var(e: &Expr) -> (&str, usize) {
 /// Every rule-1/2/3 error names the ways out rather than only the problem. The
 /// shape is fixed — the offending line, then one `fix:` per way out — so the
 /// editor, `vyrn check` and a future `vyrn fix` all read the same thing.
-fn menu(line: usize, message: String, fixes: Vec<String>) -> String {
-    let mut s = format!("line {line}: {message}");
+fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic {
+    let mut s = message;
     for f in fixes {
         s.push_str(&format!("\n  fix: {f}"));
     }
-    s
+    Diagnostic::error(line, 0, "movecheck", s)
 }
 
 /// The payload names a `match` pattern binds.

@@ -767,9 +767,9 @@ fn backtick_tokens(msg: &str) -> Vec<&str> {
 /// as the whole line — leading spaces and unrelated tokens like `return`
 /// included).
 ///
-/// The checker and movecheck internals report errors knowing only the line:
-/// they emit `"line {N}: ..."` strings lifted by `Diagnostic::from_rendered`
-/// with `col == 0`. Nearly every such message backtick-quotes the offending
+/// The checker and movecheck internals report errors knowing only the line —
+/// the AST node they fire on carries a line and no column — so they build their
+/// [`Diagnostic`]s with `col == 0`. Nearly every such message backtick-quotes the offending
 /// keyword or name (`` `if` condition must be Bool ``, `` unknown variable
 /// `x` ``, `` `{x}` is used here but was already consumed ``). For each
 /// quoted token, this looks for its column on the error's line — first among

@@ -24,9 +24,24 @@ pub enum Severity {
 
 /// A single problem found in a Vyrn source, with position and provenance.
 ///
-/// Positions are 1-based. `col`/`end_col` are `0` when a stage knows only the
-/// line (the whole line is then the natural range); `end_col` of `0` otherwise
-/// means "point" (the LSP treats it as a single character).
+/// # The column convention
+///
+/// **Every position in the front end is 1-based and counted in Unicode scalar
+/// values** — `char`s, not bytes and not UTF-16 code units. The lexer sets the
+/// convention (it walks a `Vec<char>` and numbers each line from 1), every other
+/// producer follows it, and the LSP adapter subtracts one to reach LSP's 0-based
+/// `Position`.
+///
+/// Scalar values are not what LSP asks for by default (UTF-16 code units), and
+/// the two disagree only for a character outside the Basic Multilingual Plane
+/// on the same line as, and before, a diagnostic. Vyrn `String`s are UTF-8
+/// bytes, its sources are read as UTF-8, and one convention that every stage
+/// obeys is worth more than three conventions that are each locally right — so
+/// this is the convention, written down, rather than a per-stage guess.
+///
+/// `col`/`end_col` are `0` when a stage knows only the line (the whole line is
+/// then the natural range); `end_col` of `0` otherwise means "point" (the LSP
+/// treats it as a single character).
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     /// The module (file) the problem is in, when it is not the root document —
@@ -93,26 +108,5 @@ impl Diagnostic {
     /// fields can grow without churning the CLI output or the test suite.
     pub fn render(&self) -> String {
         format!("line {}: {}", self.line, self.message)
-    }
-
-    /// Reconstruct a [`Diagnostic`] from one of the front end's historical
-    /// rendered error strings, assigning it `stage`.
-    ///
-    /// The checker and move checker still produce their errors as rendered
-    /// `"line {N}: {message}"` strings (their internals use `?`-propagation
-    /// and `format!("line {N}: ...")`). The accumulation entry points catch
-    /// those strings and lift them into structured diagnostics here. A string
-    /// without the `line {N}: ` prefix (a whole-program error such as
-    /// `"no `main` function found"`) becomes a line-0 diagnostic whose
-    /// [`render`](Self::render) reproduces it as `"line 0: {message}"`.
-    pub fn from_rendered(s: String, stage: &'static str) -> Diagnostic {
-        if let Some(rest) = s.strip_prefix("line ") {
-            if let Some((n, msg)) = rest.split_once(": ") {
-                if let Ok(line) = n.parse::<usize>() {
-                    return Diagnostic::error(line, 0, stage, msg.to_string());
-                }
-            }
-        }
-        Diagnostic::error(0, 0, stage, s)
     }
 }
