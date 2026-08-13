@@ -33,7 +33,7 @@ fn sourceOf(r: ExploreRow) -> String {
 </script>
 
 <template>
-<main id="main" tabindex="-1" class="page">
+<main class="page">
     <aside class="rail">
         <a href="#search"><span class="n">01</span>search</a>
         <a href="#graph"><span class="n">02</span>graph</a>

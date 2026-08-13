@@ -238,7 +238,10 @@ h1 code.copyable.copyfail, h2 code.copyable.copyfail, h3 code.copyable.copyfail,
   padding: var(--s1) var(--s2);
   background: var(--paper);
   border: 1px solid var(--accent);
-  color: var(--bright);
+  /* `--ink` and not `--bright`: in the light theme `--bright` is a pale cyan,
+   * which on `--paper` measured 1.6:1. Ink on paper is the pair the body text
+   * already uses, and it is the readable one in both themes. */
+  color: var(--ink);
   font: 600 14px/1 var(--mono);
   text-decoration: none;
 }
@@ -246,9 +249,12 @@ h1 code.copyable.copyfail, h2 code.copyable.copyfail, h3 code.copyable.copyfail,
   left: var(--s2);
   top: var(--s2);
 }
-/* The target takes focus, and takes no outline for it: the reader asked to be
- * moved, not to be shown a box around the whole page. */
-#main:focus { outline: none; }
+/* Where the link lands: a box with no size, out of the flow, so it adds no row
+ * to the shell's grid and shifts nothing (measured: 0 px on a 21532 px page).
+ * It takes focus and takes no outline for it — the reader asked to be moved,
+ * not to be shown a box around nothing. */
+.skip-target { position: absolute; width: 0; height: 0; overflow: hidden; }
+.skip-target:focus { outline: none; }
 
 /* Said to a screen reader, shown to nobody: the live region every copy reports
  * into. Not `display: none`, which is not announced. */

@@ -23,9 +23,7 @@ head {
 <template>
 <div id="root">
     <!-- The first thing a keyboard reaches. A reference page puts a masthead
-         and a 23-link rail in front of the prose, and this jumps all of it.
-         `<main>` carries `tabindex="-1"` on every route so the focus lands
-         there and does not spring back to the top of the document. -->
+         and a 23-link rail in front of the prose, and this jumps all of it. -->
     <a class="skip" href="#main">Skip to content</a>
     <header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
@@ -33,6 +31,14 @@ head {
             <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
         </nav>
     </header>
+    <!-- Where the skip link lands, and why it is not the `<main>` itself: every
+         route's `<main class="page">` is `display: contents`, so its children
+         can be the grid items of this shell. An element with no box cannot take
+         focus — measured: `main.focus()` left the focus where it was, so the
+         next Tab went back to the masthead the reader had just skipped. This
+         anchor has a box, has no size, and sits out of the grid flow, so focus
+         lands here and the next Tab is the first link in the content. -->
+    <div id="main" class="skip-target" tabindex="-1"></div>
     <slot/>
     <footer class="foot">
         <!-- The two counts are generated; `0 divergences` was not. It was a

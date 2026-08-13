@@ -55,7 +55,7 @@ fn railRows(here: String) -> Array<RailRow> {
 </script>
 
 <template>
-<main id="main" tabindex="-1" class="page">
+<main class="page">
     <aside class="rail toc">
         <p class="eyebrow">The guide</p>
         <a v-for="r in railRows(data.chapter.slug)" :key="r.href" :href="r.href" :aria-current="r.here"><span class="n">{{ r.tag }}</span>{{ r.title }}</a>

@@ -95,7 +95,7 @@ fn axes() -> Array<Axis> {
 </script>
 
 <template>
-<main id="main" tabindex="-1" class="page">
+<main class="page">
     <aside class="rail">
         <a href="#axes"><span class="n">01</span>the axes</a>
         <a href="#rule"><span class="n">02</span>a rule</a>

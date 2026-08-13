@@ -77,7 +77,7 @@ fn capabilities() -> Array<Capability> {
 </script>
 
 <template>
-<main id="main" tabindex="-1" class="page">
+<main class="page">
     <aside class="rail">
         <a href="#intent"><span class="n">01</span>intent</a>
         <a href="#rules"><span class="n">02</span>rules</a>

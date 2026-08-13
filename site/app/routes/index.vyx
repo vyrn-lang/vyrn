@@ -49,7 +49,7 @@ fn builtDigest() -> String {
 </script>
 
 <template>
-<main id="main" tabindex="-1" class="page">
+<main class="page">
     <aside class="rail">
         <a href="#types"><span class="n">01</span>types</a>
         <a href="#memory"><span class="n">02</span>memory</a>

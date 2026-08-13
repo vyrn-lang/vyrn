@@ -63,7 +63,7 @@ fn commands() -> Array<Command> {
 </script>
 
 <template>
-<main id="main" tabindex="-1" class="page">
+<main class="page">
     <aside class="rail">
         <a href="#std"><span class="n">01</span>std</a>
         <a href="#cli"><span class="n">02</span>cli</a>
