@@ -612,3 +612,446 @@ project.
   output matched `sha256sum` on every fixture used in this review.
 * **`vyrn vendor --check` verifies rather than trusts.** It re-hashes every
   vendored blob and reports a corrupt one by specifier (`main.rs:2673-2685`).
+
+---
+
+## Lens 3 — Rust reviewer: correctness and API taste
+
+One scope correction first: `vyrn-frontend/src/project.rs` is not manifest
+handling. It is RFC-0091 place projections. Manifest handling lives in
+`vyrn-cli/src/main.rs` (`Manifest`, `find_manifest`, `load_options`) and
+`audience.rs`.
+
+### R3.1 CONFIRMED — Critical. A `vyrn.json` in any ancestor directory aborts the compiler
+
+`vyrn-frontend/src/schema.rs:87` — `P::value` recurses through `obj`/`arr` back
+into `value` with no depth limit — reached from `main.rs:596` (`find_manifest`,
+which walks **up** from the cwd on every command).
+
+```
+$ python -c "open('vyrn.json','w').write('{\"main\":\"main.vyrn\",\"x\":'+'['*2000000+']'*2000000+'}')"
+$ vyrn run main.vyrn
+thread '<unknown>' (21792) has overflowed its stack
+EXIT=127
+```
+
+The file need not belong to the project being built. A corrupt or hostile
+`vyrn.json` anywhere above the cwd kills every `vyrn` invocation with a process
+abort and no diagnostic. The same parser backs `import type { .. } from
+"./x.json"`, so a dependency's schema file reaches it too. A depth counter in `P`
+is the whole fix.
+
+### R3.2 CONFIRMED — High. A JSON typo silently switches the audience boundary off
+
+`main.rs:596-601` turns a parse failure into a warning and `None`; `main.rs:645-660`
+(`load_options`) then hands the loader no audience map, and the gate at
+`loader.rs:1172` is skipped. Reproduced on a two-file project whose manifest
+declares `server` and `client`:
+
+```
+$ vyrn check main.vyrn                      # valid manifest
+main.vyrn:1:0: `main.vyrn` is server-only and cannot import `client/boot.vyrn`, which is client-only
+exit=1
+
+$ # one trailing comma added to vyrn.json
+$ vyrn check main.vyrn
+warning: ...\vyrn.json is not valid JSON: expected `"` at offset 103
+warning: ...\vyrn.json is not valid JSON: expected `"` at offset 103
+ok
+exit=0
+$ vyrn run main.vyrn
+TOP-SECRET
+exit=0
+```
+
+An unparseable manifest is not "no manifest". `find_manifest` collapses three
+outcomes — absent, unreadable, malformed — into one `None`, and every rule the
+manifest carries evaporates with it. The audience rule is the one that matters:
+it is the mechanism that keeps server-only code out of a client bundle, and a
+comma turns it off while the build reports `ok`. The duplicated warning also
+shows the manifest is parsed twice per command, three times counting
+`audience::from_manifest`'s own re-parse (`audience.rs:149`).
+
+`find_manifest` should return `Result<Option<Manifest>, ManifestError>`, and a
+malformed manifest should be a hard error.
+
+### R3.3 CONFIRMED — High. Generated-module keys are prose parsed back out
+
+`loader.rs:1457` builds a module identity as an English sentence and
+`loader.rs:296-300` reads the importer back out with `rfind(" at ")`. Two
+independent reproductions are recorded under P4.1 (a wrong module linked
+silently, exit 0) and one here, where the same defect surfaces as a load error:
+
+```
+$ cp -r sub "x at y"
+$ vyrn run "x at y/main.vyrn"
+x at y/main.vyrn:0:0: cannot load `y/helper.vyrn`: The system cannot find the path specified. (os error 3)
+```
+
+Four readers re-lex one banner: `generated_importer` (`loader.rs:296`),
+`site_file` (`loader.rs:249`), `audience::source_file` (`audience.rs:284`) and
+`audience::first_generator_arg` (`audience.rs:306`). A module key wants to be
+`Local(path) | Remote(spec) | Generated { generator, args, importer }` with a
+`Display` for the banner.
+
+### R3.4 CONFIRMED — Medium. A corrupt generator-cache entry panics the compiler
+
+`loader.rs:1756` — `Vec::with_capacity(n)` where `n` is parsed off the first line
+of a file in `~/.vyrn/cache/gen`:
+
+```
+$ # first line of the cache entry rewritten from "v2 1" to "v2 18446744073709551615"
+$ vyrn run main.vyrn
+thread '<unnamed>' (24896) panicked at library\alloc\src\raw_vec\mod.rs:28:5:
+capacity overflow
+EXIT=1
+```
+
+`parse_cache_entry` otherwise degrades correctly to a miss, which is the whole
+point of `CACHE_ENTRY_TAG` — but the declared count sizes an allocation before
+any of the claimed lines are read. A truncated write or a full disk produces
+this, not only malice. The count is redundant with the data.
+
+### R3.5 CONFIRMED — Medium. A module outside the project inherits the project's audience vocabulary
+
+`audience.rs:361-375` (`relative_to`) returns a relative path unchanged when the
+base is absolute, which contradicts the comment at `audience.rs:238-243`
+("Outside the project: std, a remote module, a vendored dependency. Nothing
+declared its audience"). With the project at `t7/proj` and a sibling directory
+`t7/client`:
+
+```
+$ cd t7/proj && vyrn check main.vyrn
+server/a.vyrn:1:0: `server/a.vyrn` is server-only and cannot import `../client/lib.vyrn`,
+which is client-only
+```
+
+The key visibly climbs out of the base and the fallback hands it back as
+project-relative, so the `client` segment classifies a file the project declared
+nothing about. The message even quotes the `..`. `relative_to` should reject a
+result whose first component is `..`.
+
+### R3.6 CONFIRMED — Medium. `Lock::load` swallows three different failures
+
+`remote.rs:117-134`. Covered as a supply-chain finding in C2.2 and C2.3; the
+Rust point is the shape. `if let Ok(text)` discards an unreadable file, `if let
+(Some, Some, Some)` with no `else` discards an unparseable line, and `BTreeMap::insert`
+discards a duplicate. The diagnostic then states the opposite of what the user is
+looking at:
+
+```
+$ VYRN_OFFLINE=1 vyrn run main.vyrn      # the lock contains the entry, with spaces for tabs
+main.vyrn:0:0: cannot load `https://x.dev/one.vyrn`: `https://x.dev/one.vyrn` is not in
+vyrn.lock and this is an offline build
+```
+
+`Lock::save` (`remote.rs:136-142`) has no escaping either: a specifier containing
+a tab or a newline round-trips into different entries, and specifiers come from
+source strings the compiler does not constrain.
+
+### R3.7 PLAUSIBLE — Medium. `resolve_to_url` misparses any github ref containing a slash
+
+`remote.rs:226-244`: `rest.find('/')` takes the first slash after `@`, so
+`github:o/r@feature/x/src/m.vyrn` splits as ref `feature`, path `/x/src/m.vyrn`.
+Branch names like `feature/x` and `release/1.2` are ordinary. If a ref named
+`feature` also exists, this resolves the wrong ref, fetches a wrong-but-valid
+file, and pins it. `remote_base` (`loader.rs:311-316`) splits identically, so the
+sandbox anchor agrees with the misparse rather than catching it. Two smaller
+notes on the same function: `ls-remote`'s output is taken as
+`split_whitespace().next()`, so an ambiguous ref (a tag and a branch of one name)
+pins whichever git prints first; and `resolve_spec` accepts a top-level remote
+key containing `..` (`github:o/r@abc/./../../x` resolved to the key
+`github:o/r@abc/../../x.vyrn`), because the escape check at `loader.rs:398-404`
+applies only to relative imports **inside** a remote module. Curl normalizes it
+back to the same host, so the cost is two lock entries for one file.
+
+### R3.8 PLAUSIBLE — Low. The resolver layer's error types carry no structure
+
+`remote.rs:198` is literally `fn read_blob(..) -> Option<Result<String, String>>`,
+where `None` means "not here", `Some(Err)` means "here and tampered with", and
+the caller has to know the convention to be correct. `ModuleResolver`
+(`loader.rs:37-58`) is `Result<String, String>` throughout, so "not found", "not
+UTF-8", "hash mismatch" and "permission denied" are one type; `loader.rs:1300`
+tests `resolver.read(&target).is_err()` to mean "absent", which is also true for
+a permissions failure. `run_generator` (`loader.rs:1375-1387`) takes eleven
+parameters under `#[allow(clippy::too_many_arguments)]`.
+
+### R3.9 Design critique — Low. `adopt_foreign` destroys the structured location it was handed
+
+`symbols.rs:296-304` does `d.file.take()`, folds the file into the message text,
+and sets `d.line = 0`. The rationale is documented at `symbols.rs:282-284` and is
+sound — do not mis-anchor a foreign error in the open document. The critique is
+that it is lossy: `Diagnostic` already carries `file`, and LSP
+`publishDiagnostics` is per-URI, so the editor could anchor the error where it
+belongs. Once the location is inside the message, nothing downstream can recover
+it.
+
+### R3.10 Design critique — Low. The loader's tests assert on rendered prose
+
+The `loader.rs` test module holds 44 `contains("...")` assertions —
+`loader.rs:4440` `"not exported"`, `:4448` ``"does not define `nope`"``, `:4524`
+`"import cycle"`, `:4592` ``"`f` is imported twice"``. The tests join every
+diagnostic into one string before searching it, so an assertion passes when *any*
+diagnostic anywhere contains the substring. Two of them are negative
+(`!e.contains("is declared by both")`), which is the shape most likely to pass
+for the wrong reason. `Diagnostic` already has a `code` field; a narrower code
+vocabulary asserted with the named symbol keeps the coverage and stops pinning
+the wording.
+
+---
+
+## Lens 4 — PL researcher and product: coherence, and what the compiler decided for you
+
+Hardcoding is a first-class lens here. The question each entry answers: does the
+compiler assert a fact about a library, a directory, a file name, or a
+convention that the project is entitled to choose?
+
+### P4.1 CONFIRMED — High. The generated-module key is prose, and re-parsing it links the wrong module
+
+`loader.rs:1457`:
+
+```rust
+let gen_key = format!("generated by {name}({arg_repr}) at {importer}");
+```
+
+`loader.rs:296-299` reads the importer back with `rfind(" at ")`, and
+`audience.rs:307-314` parses the same string a second time. A directory whose
+name contains `at` as a word makes `rfind` land inside the path. The fixture is a
+generator in `gen at home/` whose output imports `./helper`, plus a decoy
+`home/helper.vyrn`:
+
+```
+$ cd "banner/gen at home" && vyrn run app.vyrn
+hihello                          # correct
+
+$ cd banner && vyrn run "gen at home/app.vyrn"
+WRONG-MODULE-hello               # exit 0
+```
+
+Same files, same project. Only the spelling of the path handed to the CLI
+changed, and the compiler linked a different module and exited 0. Without the
+decoy the same command fails with `cannot load 'home/helper.vyrn'`. A key that is
+also a message has no escaping and no delimiter discipline, and three sites
+recover structure from it by string search.
+
+### P4.2 CONFIRMED — Medium. The audience remedy names a vocabulary the project did not declare
+
+`audience.rs:400-408`:
+
+```rust
+pub fn remedy(imported: Audience) -> &'static str {
+    match imported {
+        Audience::Server => "call it through `client(\"./server/api\")` instead",
+        Audience::Client => "move the shared part into a universal module (`shared/`) and import that instead",
+```
+
+The vocabulary is declared per project (`audience.rs:8-13`); the advice is not.
+A manifest declaring `{"server":["backend","shared"], "client":["browser"],
+"universal":["common"]}`:
+
+```
+$ vyrn check common/app.vyrn
+common/page.vyrn:1:0: `common/page.vyrn` is universal and cannot import `backend/store.vyrn`,
+which is server-only
+  note: audience `server` is declared by vyrn.json:audience.server — call it through
+  `client("./server/api")` instead; ...
+```
+
+The project has no `server/` directory and does not import `std/connect`. On the
+other direction the advice is worse than wrong:
+
+```
+  note: audience `client` is declared by vyrn.json:audience.client — move the shared part
+  into a universal module (`shared/`) and import that instead; ...
+```
+
+This manifest declares `shared` **server-only**. Following the compiler's advice
+produces a fresh audience error. The note contradicts itself in one sentence: it
+cites `vyrn.json:audience.client` as its authority and then ignores
+`vyrn.json:audience.server`. RFC-0072:98 records the `client("./server/api")`
+line verbatim in its example diagnostic, so this is a **design critique** with a
+sharp edge: the RFC wrote one project's advice and the compiler shipped it as
+everyone's. The remedy has the map in hand and could name the project's own
+universal segments.
+
+### P4.3 CONFIRMED — Medium-High. `main` is hardcoded server-only, so a wasm entry cannot import its own client modules
+
+`audience.rs:172-176` maps the manifest key `main` to `Audience::Server`, with
+the comment "a program that runs on the machine it was built for".
+`vyrn build --target wasm` is a shipped feature, so that is not a property of
+`main`:
+
+```
+$ vyrn check browser/entry.vyrn         # browser/ is declared client-only; entry is `main`
+browser/entry.vyrn:1:0: `browser/entry.vyrn` is server-only and cannot import
+`browser/boot.vyrn`, which is client-only
+$ vyrn why browser/entry.vyrn
+  audience: server-only — being this project's `main` entry point (vyrn.json:main)
+```
+
+An entry point's audience beating a path segment is right by design
+(`audience.rs:229-237`). The audience it wins with is a guess about the build
+target, not a declaration, and the project's only way out is renaming the key —
+which changes what `vyrn dev` builds.
+
+### P4.4 CONFIRMED — Medium. `layout` and `error` are exempt from every contract, silently
+
+`contracts.rs:89`:
+
+```rust
+pub const DEFAULT_ROLE_EXCEPT: &[&str] = &["layout", "error"];
+```
+
+Applied to every role from a string-valued manifest entry (`contracts.rs:127`)
+and to every discovered role (`contracts.rs:223`). With
+`"roles": {"screens": "./screen:Screen"}` and a project's own contract:
+
+```
+$ vyrn why --contract screens/home.vyrn
+  contract: Screen (./screen)
+  ok        title: shape 1 of 1 — fn() -> String
+
+$ vyrn why --contract screens/error.vyrn
+  no contract: this file is in no role
+```
+
+Identical files; one is graded, one is not, and the exemption prints no reason.
+Nothing here is UI-specific: the role is the project's, the contract is the
+project's, and `std/ui` is not involved. The doc comment concedes the shape —
+"It is the one blessed-name table in this module". It is overridable through the
+object form; the default still applies to contracts that never heard of chrome.
+
+### P4.5 CONFIRMED — Medium. A dotted file stem silently leaves its role
+
+`contracts.rs:298-303` — `is_projection` is true for any stem containing a `.`,
+and `role_for` then returns `None` (`contracts.rs:321`):
+
+```
+$ vyrn why --contract screens/home.detail.vyrn
+  no contract: this file is in no role
+  (its stem is dotted: a projection written OVER the modules beside it (RFC-0074) ...)
+```
+
+`home.detail.vyrn` is a naming style, not a protocol projection. The rule reads
+the file name for a fact only the author knows. It explains itself, which keeps
+it at Medium, but the consequence matches P4.4: contract checking is skipped on a
+legitimate name. RFC-0074's convention was a `std/rpc` scan test promoted to a
+language-wide rule.
+
+### P4.6 CONFIRMED — Medium. The compiler harvests any `fn css()` and reads it as a Tailwind stylesheet
+
+`symbols.rs:1444-1448`:
+
+```rust
+let f = program.functions.iter().find(|f| f.name == "css" && f.params.is_empty())?;
+```
+
+The comment claims that gating on a present `Tw` avoids picking up an unrelated
+user `css()`. It does not: the gate (`symbols.rs:598`) tests for *any*
+sequence-typed validated string anywhere in the linked program. A project with
+its own zero-arg `css()` returning a literal has that literal parsed by
+`css_rule_for` (`symbols.rs:1410`) as `.selector { .. }` and shown in hover.
+Next to it, `symbols.rs:1341` gates class completion on the callee being named
+literally `cls`, so a project's own class helper gets no completion at all.
+
+### P4.7 CONFIRMED — Medium. `github:` means github.com, and `curl`/`git` are the only fetchers
+
+`remote.rs:235,246,260-261,272,234`. The scheme name is generic; the host is not.
+A GitHub Enterprise or self-hosted git user cannot use `github:` at all, and the
+only escape — a full `https://` specifier — loses ref pinning
+(`resolve_to_url` returns it unchanged, `remote.rs:264-266`). `remote.rs:231`
+also decides "this ref is already immutable" from `len() == 40 && all hexdigit`,
+which is SHA-1; a SHA-256 repository's object ids are 64 hex characters and would
+be sent to `git ls-remote` as a branch name. Both are decisions made on the
+project's behalf with no manifest key.
+
+### P4.8 CONFIRMED — Medium. `std/` and `web/` are found by walking up five directories and matching a name
+
+`main.rs:542-549` and `main.rs:556-569`. The behaviour is C2.5; the coherence
+point is that `5` is a magic number tuned to `<repo>/compiler/target/<profile>/vyrn`
+and written twice, that nothing checks the directory found is Vyrn's, and that
+the same problem was solved differently one file over — the generator cache got a
+documented `VYRN_GEN_CACHE_DIR` override (`remote.rs:159`), the standard library
+got a folder-name search.
+
+### The hardcoding census
+
+Every place in scope where the compiler asserts a fact the project is entitled to
+choose. `advice` = the project gets wrong guidance; `behaviour` = the project
+gets a different program or a different rule.
+
+**`audience.rs`**
+
+| site | literal | assumption | kind |
+|---|---|---|---|
+| `audience.rs:402` | ``client("./server/api")`` | the project uses `std/connect` and has `server/api` | advice |
+| `audience.rs:404` | `shared/` | `shared/` is this project's universal directory | advice |
+| `audience.rs:172-176` | `[("server",Server),("client",Client),("main",Server)]` | `main` is always native | behaviour |
+| `audience.rs:294` | `arg.starts_with("std/")` | only std specifiers are not file origins | behaviour |
+| `audience.rs:307` | `"generated by "` | the loader's banner prose, re-parsed | behaviour |
+| `audience.rs:54-57`, `:130-136` | `"audience.server"`, `"(vyrn.json:{k})"` | manifest key paths as strings in prose | advice |
+
+**`loader.rs`**
+
+| site | literal | assumption | kind |
+|---|---|---|---|
+| `loader.rs:296-299` | `"generated by "` + `rfind(" at ")` | no project path contains `" at "` | behaviour |
+| `loader.rs:1457` | the banner format | a module identity is an English sentence | behaviour |
+| `loader.rs:350-351` | `std/result`, `std/option` + export lists | two std modules known by name and contents | behaviour (RFC-0062) |
+| `loader.rs:529,533,564-623` | `json$`, `std/json`, `std/jsondec`, `std/text`, `std/num` | four std modules injected by name | behaviour (RFC-0078 M4c) |
+| `loader.rs:635` | `num$f64Str` | a std function name written in the compiler | behaviour |
+| `loader.rs:303-304` | `github:`, `gist:`, `https://` | the remote schemes are a closed set | behaviour |
+| `loader.rs:369` | `.vyrn`, `.json` | two source extensions | behaviour |
+| `loader.rs:1339-1340` | `20_000_000` fuel, 4 MiB output | no manifest key raises either | behaviour |
+| `loader.rs:199-237` | `split('/')` / `join("/")` | path arithmetic as string arithmetic | behaviour |
+| `loader.rs:249-262` | `"{head} {file}"` | a panic location built as prose | advice |
+| `loader.rs:437-439` | four conventions in one message | — | advice |
+
+**`contracts.rs`**
+
+| site | literal | assumption | kind |
+|---|---|---|---|
+| `contracts.rs:89` | `["layout","error"]` | `std/ui`'s chrome stems, applied to every contract | behaviour |
+| `contracts.rs:298-303` | a dotted stem is a projection | no project names files `home.detail.vyrn` | behaviour |
+| `contracts.rs:94` | `module:Contract` in one string | malformed entries silently dropped | behaviour |
+
+**`symbols.rs`**
+
+| site | literal | assumption | kind |
+|---|---|---|---|
+| `symbols.rs:1448` | `f.name == "css"` | any zero-arg `css()` is a Tailwind stylesheet | behaviour |
+| `symbols.rs:1341` | `cls` | `std/tw`'s function name gates completion | advice |
+| `symbols.rs:2986-2988` | `/std/`, `std/` | any user directory named `std` renders as `defaultLibrary` | behaviour |
+| `symbols.rs:585` | `CLASS_ALPHABET_CAP = 8192` | undocumented cap, silently truncates | behaviour |
+| `symbols.rs:1010-1013` | `import { Result, Ok, Err } from "std/result"` | hover text | advice |
+
+**`remote.rs`**
+
+| site | literal | assumption | kind |
+|---|---|---|---|
+| `remote.rs:194` | `vyrn_vendor/sha256` | a directory in the project tree, no manifest key | behaviour |
+| `remote.rs:343` | vendor dir exists ⇒ auto-vendor | directory existence as an undocumented flag | behaviour |
+| `remote.rs:235,246,260-261` | `github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com` | one host per scheme | behaviour |
+| `remote.rs:231` | 40 hex ⇒ immutable | git object ids are SHA-1 | behaviour |
+| `remote.rs:272,234` | `curl -sL --fail`, `git` | no proxy, CA, auth or fetcher override | behaviour |
+| `remote.rs:153,166` | `~/.vyrn/cache/sha256`, `~/.vyrn/cache/gen` | tool-owned; only the second has an override | advice |
+
+**`main.rs` (manifest surface)**
+
+| site | literal | assumption | kind |
+|---|---|---|---|
+| `main.rs:532-551` | walk 5, name `std` | the first `std` directory near the binary is Vyrn's | behaviour |
+| `main.rs:553-571` | walk 5, name `web` | same, for the browser runtimes | behaviour |
+| `main.rs:1483` | `["main","server","client"]` | the entry keys, third copy after `audience.rs:172` | behaviour |
+| `main.rs:1479-1497` | roots scanned only directly in the app dir | RFC-0072's feature-outer layout finds nothing | advice |
+| `main.rs:3530-3534,3765-3769` | `handle`, `Request`, `Response` | the CLI knows `std/rpc`'s entry shape by name | behaviour |
+| `main.rs:3730,3735,3883,3886` | `.vyrn-dev`, `client.wasm`, `/vyrn-runtime/` | a project asset named `client.wasm` is unreachable | behaviour |
+| `main.rs:671-678` | `src/main.vyrn`, `.gitignore` contents | the scaffold's layout and artefact names | advice |
+| `main.rs:1839,1860`, `:3719`, `:3895` | `docs/api`, `index.md`, `public`, `index.html` | overridable defaults | advice |
+| `vyrn-lsp/src/main.rs:796-800` | `std/rpc`, `rpc`, `rpcServer` | the dev CodeLens knows one library by name | advice |
+
+**Tests that pin rendered prose** (`assert!(x.contains(".."))` on a diagnostic's
+text rather than its structure): `loader.rs` 40 of 42, `symbols.rs` 4,
+`origin.rs` 3, `remote.rs` 2 — **49** in scope. `audience.rs` and `contracts.rs`
+have none; both assert structure (`Verdict`, `Role`), and they are the two files
+whose behaviour this review found wrong without a test noticing.
