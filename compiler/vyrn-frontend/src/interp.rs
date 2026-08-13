@@ -226,7 +226,10 @@ fn host_read_line() -> Vec<u8> {
     // Locking the global stdin per call still streams: the buffer lives in the
     // shared handle, not the guard.
     let mut buf: Vec<u8> = Vec::new();
-    let n = std::io::stdin().lock().read_until(b'\n', &mut buf).unwrap_or(0);
+    let n = std::io::stdin()
+        .lock()
+        .read_until(b'\n', &mut buf)
+        .unwrap_or(0);
     if n == 0 {
         buf.clear();
     }
@@ -1036,9 +1039,7 @@ pub fn run_with_args(program: &Program, args: &[String]) -> Result<i64, String> 
 /// A dedicated thread is how a hosted platform gets that room, because the OS
 /// main-thread stack is only ~1 MB on Windows.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn on_deep_stack(
-    f: impl FnOnce() -> Result<i64, String> + Send,
-) -> Result<i64, String> {
+fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, String> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(INTERP_STACK_BYTES)

@@ -1036,6 +1036,119 @@ svg.graph .node.on circle { fill-opacity: 1; }
    What catches it is measuring a band against the viewport.
    ------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------
+   The playground.
+
+   The editor is TWO boxes in one place: a `<pre>` the compiler colours and a
+   transparent `<textarea>` over it. Every metric that decides where a character
+   lands — font, size, line height, padding, tab size, and `white-space: pre` —
+   is declared once for both, because a single pixel of difference between them
+   is a colour layer that slides out from under the caret.
+
+   Neither box wraps. A wrapped line in one and not the other is the same drift
+   by another route, and a program is read in columns; the editor scrolls
+   sideways inside its own border, which is why the page does not.
+   ------------------------------------------------------------------------- */
+
+.play .editor {
+  position: relative;
+  margin: var(--s3) var(--s2) 0;
+}
+
+.play .editor pre.hl,
+.play .editor textarea {
+  margin: 0;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  font: 13.5px/1.7 var(--mono);
+  tab-size: 2;
+  white-space: pre;
+  word-break: normal;
+  overflow: auto;
+}
+
+.play .editor pre.hl {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+}
+
+.play .editor textarea {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 52vh;
+  min-height: 300px;
+  background: transparent;
+  /* The text is drawn by the layer underneath. Only the caret and the selection
+   * belong to this box, and both stay visible. */
+  color: transparent;
+  caret-color: var(--ink);
+  resize: vertical;
+}
+.play .editor textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.play .editor textarea::selection { background: color-mix(in oklab, var(--accent) 28%, transparent); }
+
+.play .pickbox select {
+  font: 12px/1 var(--mono);
+  padding: 9px 10px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  max-width: 46vw;
+}
+.play .btn.primary { border-color: color-mix(in oklab, var(--accent) 55%, transparent); color: var(--accent); }
+.play .btn[disabled] { opacity: 0.45; cursor: default; }
+
+.play .stdinbox { margin: var(--s2) var(--s2) 0; }
+.play .stdinbox summary { font: 12px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); cursor: pointer; padding: var(--s1) 0; }
+.play .stdinbox textarea {
+  display: block;
+  width: 100%;
+  height: 6.5em;
+  padding: var(--s1) var(--s2);
+  border: 1px solid var(--rule);
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+  color: var(--ink);
+  font: 13px/1.6 var(--mono);
+  resize: vertical;
+}
+.play .stdinbox .cap { border: 0; padding: var(--s1) 0 0; }
+
+/* A diagnostic is a control: it says where the problem is, and pressing it puts
+ * the caret there. */
+.play .diags { margin: var(--s2) var(--s2) 0; display: grid; }
+.play .diag {
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font: 12.5px/1.6 var(--mono);
+  border: 0;
+  border-left: 2px solid var(--danger);
+  padding: 6px var(--s2);
+  background: color-mix(in oklab, var(--danger) 7%, transparent);
+  color: var(--ink);
+}
+.play .diag.warning { border-left-color: var(--amber); background: color-mix(in oklab, var(--amber) 8%, transparent); }
+.play .diag .at { color: var(--muted); margin-right: var(--s2); }
+.play .diag .note { display: block; color: var(--muted); }
+
+.play .out { margin: var(--s2); white-space: pre-wrap; }
+.play .out .stdout { color: var(--ink); }
+.play .out .stderr { color: var(--danger); }
+.play .out .exit { margin-top: var(--s1); color: var(--muted); }
+.play .out .exit.bad { color: var(--danger); }
+.play .out .dim { color: var(--n2); }
+
+kbd {
+  font: 11px/1 var(--mono);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  padding: 3px 5px;
+  color: var(--ink);
+}
+
 @media (max-width: 1024px) {
   #root { grid-template-columns: repeat(6, minmax(0, 1fr)); padding: 0 var(--s3) var(--s5); }
   /* Every one of these has to outrank what it replaces, the shell included. */
@@ -1106,6 +1219,17 @@ svg.graph .node.on circle { fill-opacity: 1; }
 
   /* A long unbroken word in a headline is the one thing `balance` cannot fix. */
   h1, h2, h3, h4 { overflow-wrap: break-word; }
+
+  /* The editor keeps its own margins on a phone: a 16px gutter each side of a
+   * 320px screen leaves 288px, and the editor spending 32px more of that on
+   * symmetry with the plate is 32px of program. Its border stays. */
+  .play .editor, .play .stdinbox, .play .diags, .play .out { margin-left: 0; margin-right: 0; }
+  .play .editor pre.hl, .play .editor textarea { padding: var(--s1); font-size: 12.5px; }
+  .play .editor textarea { height: 46vh; min-height: 220px; }
+  /* Six controls in one head row, and a phone is 320px. The picker takes the
+   * width that is left rather than pushing the buttons off the plate. */
+  .play .pickbox { flex: 1; min-width: 0; }
+  .play .pickbox select { width: 100%; max-width: none; }
 }
 
 /* A phone has no hover, so an affordance that only appears on hover does not

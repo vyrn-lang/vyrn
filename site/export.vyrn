@@ -25,7 +25,7 @@
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, hrefDocsStd, hrefGuide } from pages("./app/routes")
+import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, hrefDocsStd, hrefGuide } from pages("./app/routes")
 import { published, navRows, hrefOf } from "./app/nav"
 import { apiModules, apiEntries, apiHref } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
@@ -41,7 +41,7 @@ import { startsWith } from "std/strpred"
 /// a module added to `std/` is exported here on the next build with nothing
 /// written by hand.
 fn sitePaths() -> Array<String> {
-    let mut out: Array<String> = [rootPath(), philosophyPath(), comparePath(), installPath(), releasesPath(), docsPath(), guidePath(), explorePath()]
+    let mut out: Array<String> = [rootPath(), philosophyPath(), comparePath(), installPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
     for m in apiModules() {
         out.push(hrefDocsStd(m.name))
     }
@@ -195,6 +195,9 @@ fn assets() -> Array<Array<String>> {
         ["site/public/widgets.js", "widgets.js"],
         ["site/public/hero.js", "hero.js"],
         ["site/public/fresh.js", "fresh.js"],
+        ["site/public/play.js", "play.js"],
+        ["site/public/play-wasm.js", "play-wasm.js"],
+        ["site/public/play-worker.js", "play-worker.js"],
         ["web/wasi-min.js", "wasi-min.js"],
         ["web/vyrn-nav.js", "vyrn-nav.js"],
         ["web/vyrn-dom.js", "vyrn-dom.js"],

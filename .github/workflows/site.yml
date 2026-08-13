@@ -61,7 +61,7 @@ jobs:
         # repository counts.
         run: |
           bin=compiler/target/release/vyrn
-          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn site/app/apidoc.vyrn site/app/docs.vyrn site/app/guidecode.vyrn site/app/guide.vyrn site/app/deps.vyrn site/app/explore.vyrn; do
+          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn site/app/apidoc.vyrn site/app/docs.vyrn site/app/guidecode.vyrn site/app/guide.vyrn site/app/deps.vyrn site/app/explore.vyrn site/app/play.vyrn; do
             "$bin" test "$f"
           done
 
@@ -78,6 +78,30 @@ jobs:
 
       - name: Formatting
         run: compiler/target/release/vyrn fmt --check site/app/*.vyrn site/guide/*.vyrn site/export.vyrn
+
+      - name: The playground module
+        # The compiler's own front end, as WebAssembly (`compiler/vyrn-play`).
+        # It is EXCLUDED from the workspace and must be built from its own
+        # directory: `.cargo/config.toml` there sets the linker's stack size,
+        # and cargo reads that file from the working directory upward, so a
+        # `--manifest-path` build from elsewhere silently gets wasm-ld's 1 MB
+        # default and overflows a tenth of the way to the interpreter's limit.
+        #
+        # `writeFile` takes a String, so the export cannot copy a wasm module;
+        # this one lands straight in the output like the hero's.
+        working-directory: compiler/vyrn-play
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release --target wasm32-unknown-unknown
+          mkdir -p ../../out
+          cp target/wasm32-unknown-unknown/release/vyrn_play.wasm ../../out/play.wasm
+          ls -l ../../out/play.wasm
+
+      - name: The playground's own checks
+        # The span offsets, the diagnostics shape and the exit codes, on the
+        # host where a failure is readable.
+        working-directory: compiler/vyrn-play
+        run: cargo test --release
 
       - name: The hero module
         # `writeFile` takes a String, so the export step cannot copy a wasm

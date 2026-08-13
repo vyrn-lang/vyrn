@@ -219,7 +219,12 @@ mod std_modules {
 /// The resolver holds `std/` and nothing else. A relative import has nowhere to
 /// go and says so; `std/` resolves against a root of `std`, which is what makes
 /// the keys `build.rs` wrote the ones the loader asks for.
-fn load(src: &str) -> (Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>, Vec<Diagnostic>) {
+fn load(
+    src: &str,
+) -> (
+    Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>,
+    Vec<Diagnostic>,
+) {
     let opts = LoadOptions {
         std_root: Some("std".into()),
         aliases: Default::default(),
