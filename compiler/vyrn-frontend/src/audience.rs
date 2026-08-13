@@ -435,14 +435,19 @@ mod tests {
         }
     }
 
+    /// The reader takes a parsed document; these tests are written as JSON.
+    fn from_text(json: &str, base: &str) -> Option<AudienceMap> {
+        from_manifest(&crate::schema::parse_json(json).unwrap(), base)
+    }
+
     #[test]
     fn no_audience_key_is_no_map() {
-        assert!(from_manifest("{\"name\":\"x\"}", "/p").is_none());
+        assert!(from_text("{\"name\":\"x\"}", "/p").is_none());
     }
 
     #[test]
     fn manifest_shape_from_the_rfc() {
-        let m = from_manifest(
+        let m = from_text(
             r#"{"audience":{"server":["server"],"client":["client"],"universal":["app","shared"]}}"#,
             "/p/",
         )
@@ -486,7 +491,7 @@ mod tests {
         assert_eq!(v.reason, Reason::Default);
 
         // …but the manifest naming it as the server entry point does say so.
-        let m = from_manifest(
+        let m = from_text(
             r#"{"server":"server.vyrn","client":"client.vyrn",
                 "audience":{"server":["server"],"client":["client"],"universal":["app"]}}"#,
             "/p",

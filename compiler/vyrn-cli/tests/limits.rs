@@ -636,3 +636,81 @@ fn every_limit_has_one_source() {
     assert!(got.contains(&msg), "the interpreter's wording:\n{got}");
     assert_eq!(out.status.code(), Some(1));
 }
+
+// -------------------------------------------------------------------------
+// A manifest read from an ancestor directory
+// -------------------------------------------------------------------------
+
+/// The sixth death, and the only one reachable through a file the user never
+/// named.
+///
+/// `find_manifest` walks UP from the working directory on every command, and the
+/// JSON parser it uses had no depth limit. A `vyrn.json` anywhere above the cwd —
+/// corrupt, hostile, or simply belonging to a project that is not this one —
+/// ended every `vyrn` invocation in a stack overflow: exit 127, nothing on
+/// stderr, no file named. The compiler died reading a file it was never asked
+/// about.
+///
+/// The bound is the parser's own, read from where it is enforced.
+#[test]
+fn a_deeply_nested_manifest_above_the_cwd_is_a_diagnostic_not_an_abort() {
+    use vyrn_frontend::schema::MAX_JSON_DEPTH;
+    let root = std::env::temp_dir().join(format!("vyrn-limits-manifest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let sub = root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        sub.join("main.vyrn"),
+        "fn main() -> Int64 {\n    return 0\n}\n",
+    )
+    .unwrap();
+
+    let manifest = |depth: usize| {
+        format!(
+            "{{\"main\":\"main.vyrn\",\"x\":{}{}}}",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        )
+    };
+    let check_in_sub = || {
+        Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .arg("check")
+            .arg("main.vyrn")
+            .current_dir(&sub)
+            .output()
+            .unwrap()
+    };
+
+    // At the limit the manifest is read and the program checks, so the bound is
+    // a bound and not a refusal to read manifests. The manifest OBJECT is the
+    // first enclosing level, so the arrays inside it may go one less deep.
+    std::fs::write(root.join("vyrn.json"), manifest(MAX_JSON_DEPTH - 1)).unwrap();
+    let at = check_in_sub();
+    assert_eq!(at.status.code(), Some(0), "at the limit:\n{}", text(&at));
+
+    // One level past it, and at a depth that used to abort the process.
+    for depth in [MAX_JSON_DEPTH, 200_000] {
+        std::fs::write(root.join("vyrn.json"), manifest(depth)).unwrap();
+        let out = check_in_sub();
+        let got = text(&out);
+        assert_ne!(
+            out.status.code(),
+            Some(127),
+            "depth {depth}: a stack overflow is not a diagnostic:\n{got}"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "depth {depth}: an unreadable manifest is a refusal:\n{got}"
+        );
+        assert!(
+            got.contains("vyrn.json"),
+            "depth {depth}: the diagnostic must name the file it could not read:\n{got}"
+        );
+        assert!(
+            got.contains(&MAX_JSON_DEPTH.to_string()),
+            "depth {depth}: and the limit it hit:\n{got}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

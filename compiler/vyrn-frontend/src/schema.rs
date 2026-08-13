@@ -920,6 +920,32 @@ mod tests {
         assert!(parse_json("[1, 2] trailing").is_err());
     }
 
+    /// The parser recurses, so a document's nesting is the process's stack, and
+    /// `find_manifest` reads a `vyrn.json` from every ancestor of the working
+    /// directory on every command. Without a bound the answer to a deep one was a
+    /// stack overflow: an abort, no diagnostic. The limit is read from the code
+    /// that enforces it, so this cannot pin a number the parser no longer takes.
+    #[test]
+    fn a_document_deeper_than_the_limit_is_refused_not_crashed() {
+        let nest = |d: usize| format!("{}{}", "[".repeat(d), "]".repeat(d));
+        assert!(
+            parse_json(&nest(MAX_JSON_DEPTH)).is_ok(),
+            "at the limit is inside it"
+        );
+        let e = parse_json(&nest(MAX_JSON_DEPTH + 1)).unwrap_err();
+        assert!(e.contains(&MAX_JSON_DEPTH.to_string()), "{e}");
+        // Objects nest through the same door, and so does the mixture.
+        let obj = format!(
+            "{}1{}",
+            "{\"a\":".repeat(MAX_JSON_DEPTH + 1),
+            "}".repeat(MAX_JSON_DEPTH + 1)
+        );
+        assert!(parse_json(&obj).is_err());
+        // Depth is not length: a million siblings at one level are fine.
+        let wide = format!("[{}]", vec!["1"; 100_000].join(","));
+        assert!(parse_json(&wide).is_ok());
+    }
+
     fn synth(doc: &str) -> Vec<TypeDecl> {
         synthesize(doc, None, "t.json").unwrap()
     }

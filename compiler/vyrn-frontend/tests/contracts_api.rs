@@ -165,10 +165,17 @@ fn members_carry_their_declaration_position() {
 // Roles
 // ---------------------------------------------------------------------------
 
+/// The reader takes a parsed document — "no roles declared" and "the manifest
+/// did not parse" are different answers, and only the first one is its business.
+/// These tests are written as JSON.
+fn roles_from_text(json: &str) -> Vec<vyrn_frontend::contracts::Role> {
+    roles_from_manifest(&vyrn_frontend::schema::parse_json(json).unwrap())
+}
+
 /// The `vyrn.json` form RFC-0071 specifies (and RFC-0072 inherits).
 #[test]
 fn roles_come_from_the_manifest() {
-    let roles = roles_from_manifest(
+    let roles = roles_from_text(
         r#"{ "name": "app", "roles": { "routes": "std/ui:Page", "widgets": "std/vyx:Component" } }"#,
     );
     assert_eq!(roles.len(), 2);
@@ -202,7 +209,7 @@ fn roles_come_from_the_manifest() {
 /// the role axis compose in one scope instead of one of them silently winning.
 #[test]
 fn a_role_scope_may_span_the_audience_segment() {
-    let roles = roles_from_manifest(
+    let roles = roles_from_text(
         r#"{ "roles": { "server/api": "std/rpc:Api", "client/api": "std/ui:Page" } }"#,
     );
     assert_eq!(
@@ -234,7 +241,7 @@ fn a_role_scope_may_span_the_audience_segment() {
 /// applied to role scopes so the two axes agree about "more specific".
 #[test]
 fn the_nearest_scope_wins() {
-    let roles = roles_from_manifest(
+    let roles = roles_from_text(
         r#"{ "roles": { "routes": "std/ui:Page", "widgets": "std/vyx:Component" } }"#,
     );
     assert_eq!(
@@ -251,7 +258,7 @@ fn the_nearest_scope_wins() {
 /// A project may override the chrome stems for its own layout.
 #[test]
 fn a_role_may_declare_its_own_exceptions() {
-    let roles = roles_from_manifest(
+    let roles = roles_from_text(
         r#"{ "roles": { "routes": { "contract": "std/ui:Page", "except": ["_shell"] } } }"#,
     );
     assert!(role_for("/app/routes/_shell.vyx", &roles).is_none());

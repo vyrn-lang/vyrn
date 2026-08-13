@@ -107,6 +107,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 /// `vyrn.lock`: `specifier ⇥ resolved-url ⇥ sha256` per line, sorted by
 /// specifier. Line-based and diff-friendly by design.
+#[derive(Debug)]
 pub struct Lock {
     pub path: PathBuf,
     pub entries: BTreeMap<String, (String, String)>,
@@ -442,12 +443,18 @@ mod tests {
         );
     }
 
+    /// A directory of this file's own, so two lock tests never share a path.
+    fn lock_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vyrn-lock-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn lock_round_trips() {
-        let dir = std::env::temp_dir().join("vyrn-lock-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("vyrn.lock");
-        let mut lock = Lock::load(path.clone());
+        let path = lock_dir("roundtrip").join("vyrn.lock");
+        let mut lock = Lock::load(path.clone()).unwrap();
         lock.entries.insert(
             "github:a/b@v1/x.vyrn".into(),
             (
@@ -456,8 +463,65 @@ mod tests {
             ),
         );
         lock.save().unwrap();
-        let reloaded = Lock::load(path);
+        let reloaded = Lock::load(path).unwrap();
         assert_eq!(lock.entries, reloaded.entries);
+    }
+
+    /// A lock file that exists and does not parse is not an unpinned project.
+    /// Every one of these used to read as "this specifier was never pinned",
+    /// which fetches from the network and re-pins to whatever arrives.
+    #[test]
+    fn a_lock_file_that_does_not_parse_stops_the_build() {
+        let dir = lock_dir("damaged");
+        let good = "github:a/b@v1/x.vyrn\thttps://x.dev/x.vyrn\tabc123\n";
+
+        // Absent is still `Ok`: never pinned, and never claimed otherwise.
+        let absent = Lock::load(dir.join("absent.lock")).unwrap();
+        assert!(absent.entries.is_empty());
+
+        // A duplicate specifier: the second line used to replace the first in
+        // silence, so appending a line changed what was built while leaving the
+        // reviewed line in place.
+        let path = dir.join("dupe.lock");
+        std::fs::write(
+            &path,
+            format!("{good}github:a/b@v1/x.vyrn\thttps://evil.dev/x.vyrn\tdef456\n"),
+        )
+        .unwrap();
+        let e = Lock::load(path).unwrap_err();
+        assert!(e.contains("dupe.lock:2"), "names the line: {e}");
+        assert!(e.contains("github:a/b@v1/x.vyrn"), "names the pin: {e}");
+
+        // Tabs turned to spaces by an editor, a merge tool or a CI checkout.
+        let path = dir.join("spaces.lock");
+        std::fs::write(&path, good.replace('\t', " ")).unwrap();
+        let e = Lock::load(path).unwrap_err();
+        assert!(e.contains("spaces.lock:1"), "{e}");
+
+        // A truncated write.
+        let path = dir.join("cut.lock");
+        std::fs::write(&path, "github:a/b@v1/x.vyrn\thttps://x.dev\n").unwrap();
+        assert!(Lock::load(path).is_err());
+
+        // A blank line is not damage.
+        let path = dir.join("blank.lock");
+        std::fs::write(&path, format!("{good}\n")).unwrap();
+        assert_eq!(Lock::load(path).unwrap().entries.len(), 1);
+    }
+
+    /// The write side of the same invariant: a field carrying the separator is a
+    /// line the reader would split differently from the writer, and specifiers
+    /// come from source strings the compiler does not constrain.
+    #[test]
+    fn a_specifier_carrying_a_separator_is_never_written() {
+        let path = lock_dir("separator").join("vyrn.lock");
+        let mut lock = Lock::load(path.clone()).unwrap();
+        lock.entries.insert(
+            "https://x.dev/a.vyrn\tb\tc".into(),
+            ("https://x.dev/a.vyrn".into(), "abc123".into()),
+        );
+        assert!(lock.save().is_err(), "a tab in a specifier is not writable");
+        assert!(!path.is_file(), "and nothing was written");
     }
 
     #[test]
@@ -490,7 +554,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join("vyrn-remote-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut lock = Lock::load(dir.join("vyrn.lock"));
+        let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         lock.entries.insert(
             "https://x.dev/one.vyrn".into(),
             ("https://x.dev/one.vyrn".into(), sha.clone()),
@@ -515,7 +579,7 @@ mod tests {
     fn offline_without_lock_is_a_clear_error() {
         let dir = std::env::temp_dir().join("vyrn-remote-test2");
         std::fs::create_dir_all(&dir).unwrap();
-        let lock = Lock::load(dir.join("vyrn.lock"));
+        let lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         let r = RemoteResolver {
             lock: RefCell::new(lock),
             project_dir: None,

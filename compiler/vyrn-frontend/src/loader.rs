@@ -6126,14 +6126,103 @@ fn main() -> Int64 { return shape().byteLength }"#;
     #[test]
     fn a_cache_entry_from_an_older_format_misses_instead_of_being_misread() {
         // A `v1` entry recorded only the inputs that succeeded, so it cannot say
-        // whether a missing file has since appeared. Reject it: re-run, and the
-        // run overwrites it in place.
+        // whether a missing file has since appeared; a `v2` entry was believed on
+        // sight. Reject both: re-run, and the run overwrites the entry in place.
+        let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
-        let v2 = render_cache_entry(&inputs, "export fn n() -> Int64 { return 1 }");
-        assert!(v2.starts_with("v2 1\n"), "{v2}");
-        assert!(parse_cache_entry(&v2).is_some());
-        let v1 = v2.strip_prefix("v2 ").unwrap();
-        assert!(parse_cache_entry(v1).is_none(), "a v1 entry must not parse");
+        let v3 = render_cache_entry(key, &inputs, "export fn n() -> Int64 { return 1 }");
+        assert!(read_cache_entry(key, &v3).is_some());
+        for older in ["v2 1\ndata/a.txt\tdeadbeef\nx", "v1\ndata/a.txt\tdeadbeef\nx"] {
+            assert!(
+                read_cache_entry(key, older).is_none(),
+                "an entry in an older format must not parse: {older:?}"
+            );
+        }
+    }
+
+    /// A cache entry decides what the compiler LINKS, and a hit never re-runs the
+    /// generator, so an entry is only as trustworthy as whoever could have
+    /// written it. Every one of these was written by something that is not this
+    /// compiler, and none of them may be read back.
+    #[test]
+    fn a_cache_entry_this_compiler_did_not_write_is_refused() {
+        let key = "k";
+        let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
+        let output = "export fn n() -> Int64 { return 1 }";
+        let honest = render_cache_entry(key, &inputs, output);
+        assert!(read_cache_entry(key, &honest).is_some(), "the control");
+
+        // The reproduction: an entry declaring ZERO inputs, whose recorded list
+        // therefore satisfies `all` by saying nothing.
+        let vacuous = format!("{CACHE_ENTRY_TAG} {} 0\nexport fn n() -> Int64 {{ return 999 }}", {
+            let body = "0\nexport fn n() -> Int64 { return 999 }";
+            entry_tag(key, body)
+        });
+        assert!(
+            read_cache_entry(key, &vacuous).is_none(),
+            "an entry recording no inputs describes no generation"
+        );
+
+        // The output swapped under an otherwise honest record.
+        let swapped = honest.replace("return 1", "return 999");
+        assert!(
+            read_cache_entry(key, &swapped).is_none(),
+            "the tag covers the generated source"
+        );
+
+        // The recorded inputs rewritten to files that happen to match.
+        let relabelled = honest.replace("data/a.txt", "data/z.txt");
+        assert!(
+            read_cache_entry(key, &relabelled).is_none(),
+            "the tag covers the recorded inputs"
+        );
+
+        // A valid entry moved to a different lookup key: a real generation of one
+        // module is not a generation of another.
+        assert!(
+            read_cache_entry("other-key", &honest).is_none(),
+            "the tag covers the lookup key"
+        );
+
+        // A file in no format at all.
+        for junk in ["", "\n", "v3\n", "v3 x y\n", "not an entry at all\n"] {
+            assert!(read_cache_entry(key, junk).is_none(), "junk: {junk:?}");
+        }
+    }
+
+    /// The input count used to size a `Vec` before a single claimed line was
+    /// read, so a count off the first line of a file aborted the process on the
+    /// allocation. A truncated write is enough to produce one.
+    #[test]
+    fn an_impossible_input_count_is_a_miss_not_an_abort() {
+        let key = "k";
+        let body = format!("{}\ndata/a.txt\tdeadbeef\nout", u64::MAX);
+        let entry = format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body));
+        assert!(read_cache_entry(key, &entry).is_none());
+    }
+
+    /// End to end through the loader: a poisoned entry sitting at the right key
+    /// does not reach the program, and the generator runs instead.
+    #[test]
+    fn a_poisoned_entry_does_not_reach_the_program() {
+        let r = CachingResolver::new(&[("gen.vyrn", COUNTER), ("data/a.txt", "1")]);
+        let before = gen_run_count();
+        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+        let keys: Vec<String> = r.cache.borrow().keys().cloned().collect();
+        assert_eq!(keys.len(), 1, "one generation, one entry");
+
+        // What an attacker with write access to the cache directory writes.
+        r.gen_cache_put(
+            &keys[0],
+            "v2 0\nexport fn count() -> Int64 { return 999 }\n",
+        );
+        assert_eq!(
+            run_with(COUNTER_ROOT, &r).unwrap(),
+            1,
+            "the generator's own answer, not the entry's"
+        );
+        assert_eq!(gen_run_count(), before + 2, "the refused entry re-ran it");
     }
 
     #[test]
