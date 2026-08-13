@@ -60,12 +60,10 @@ pub fn file_sig(path: &std::path::Path) -> u64 {
 /// fallback affordable.
 pub fn role_roots(app_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(app_dir.join("vyrn.json")) {
-        if let Ok(doc) = vyrn_frontend::schema::parse_json(&text) {
-            for key in ["main", "server", "client"] {
-                if let Some(vyrn_frontend::schema::Json::Str(p)) = doc.get(key) {
-                    paths.push(app_dir.join(p));
-                }
+    if let Some(doc) = crate::manifest_doc(app_dir) {
+        for key in ["main", "server", "client"] {
+            if let Some(vyrn_frontend::schema::Json::Str(p)) = doc.get(key) {
+                paths.push(app_dir.join(p));
             }
         }
     }

@@ -1880,20 +1880,29 @@ fn warn_foreign_entry(key: &str) {
     );
 }
 
+fn entry_tag(key: &str, body: &str) -> String {
+    gen_cache_tag(key, body.as_bytes())
+}
+
 /// Authenticate `body` under `key`: `H(secret ‖ H(secret ‖ key ‖ body))`.
 ///
-/// The key is inside the tag, so an entry cannot be moved to another lookup key
-/// — a valid generation of one module is not a valid generation of a different
-/// one. Nested rather than prefixed because SHA-256 extends, and the outer hash
-/// is over a digest of fixed length.
-fn entry_tag(key: &str, body: &str) -> String {
+/// The key is inside the tag, so an artifact cannot be moved to another lookup
+/// key — a valid generation of one module is not a valid generation of a
+/// different one. Nested rather than prefixed because SHA-256 extends, and the
+/// outer hash is over a digest of fixed length.
+///
+/// Public because the generator cache directory holds a SECOND kind of file: the
+/// cranelift artifact `vyrn-genwasm` writes beside the entries, which it maps in
+/// as native code. That file needs the same answer to the same question, and one
+/// secret answers both.
+pub fn gen_cache_tag(key: &str, body: &[u8]) -> String {
     let secret = gen_cache_secret();
     let mut inner = Vec::with_capacity(secret.len() + key.len() + body.len() + 2);
     inner.extend_from_slice(secret);
     inner.push(0);
     inner.extend_from_slice(key.as_bytes());
     inner.push(0);
-    inner.extend_from_slice(body.as_bytes());
+    inner.extend_from_slice(body);
     let inner = crate::hash::sha256_hex(&inner);
     let mut outer = Vec::with_capacity(secret.len() + inner.len() + 1);
     outer.extend_from_slice(secret);

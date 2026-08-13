@@ -1101,18 +1101,31 @@ fn artifact_dir() -> PathBuf {
 /// artifacts and cost ~900 ms, all of it clang and cranelift.
 ///
 /// The one `unsafe` in this workspace, confined here. `Module::deserialize`
-/// trusts its input completely — it maps in native code — so what makes this
-/// sound is that the input is a file THIS process's cache directory wrote, keyed
-/// by a content hash that includes the compiler build. wasmtime's own header
-/// carries its version and configuration and refuses anything foreign, and every
-/// failure (missing, truncated, foreign, corrupt) is a cache MISS that
-/// recompiles rather than an error the user ever sees.
+/// trusts its input completely — it maps in NATIVE CODE — so the whole soundness
+/// argument is that these bytes are ones this user's compiler wrote.
+///
+/// "Our own cache directory" is not that argument: any process running as the
+/// user can write a file there, and `VYRN_GEN_CACHE_DIR` moves the directory
+/// from a shell profile. So the artifact carries the same authentication tag its
+/// neighbouring cache entries do (`vyrn_frontend::loader::gen_cache_tag`), under
+/// a per-user secret that lives outside the cache tree — and a file without a
+/// verifying tag is never deserialized. wasmtime's own header still refuses a
+/// foreign build on top of that, and every failure (missing, truncated, foreign,
+/// corrupt, unauthenticated) is a cache MISS that recompiles rather than an
+/// error the user ever sees.
 fn load_artifact(key: &str) -> Option<wasmtime::Module> {
     let bytes = std::fs::read(artifact_dir().join(key)).ok()?;
-    // SAFETY: see above — our own cache directory, our own serialization, and a
-    // rejection is a miss.
-    unsafe { wasmtime::Module::deserialize(wasm_engine(), &bytes) }.ok()
+    let (tag, module) = bytes.split_at_checked(ARTIFACT_TAG_LEN)?;
+    if vyrn_frontend::loader::gen_cache_tag(key, module).as_bytes() != tag {
+        return None;
+    }
+    // SAFETY: see above — bytes this user's compiler serialized, proved by a tag
+    // nothing else in that directory can produce, and a rejection is a miss.
+    unsafe { wasmtime::Module::deserialize(wasm_engine(), module) }.ok()
 }
+
+/// The authentication tag prefixed to every stored artifact: a sha256 in hex.
+const ARTIFACT_TAG_LEN: usize = 64;
 
 /// Store an artifact for the next session. Best-effort: a full disk or a
 /// read-only home costs a recompile, nothing more.
@@ -1120,6 +1133,10 @@ fn store_artifact(key: &str, module: &wasmtime::Module) {
     let Ok(bytes) = module.serialize() else {
         return;
     };
+    let mut tagged = vyrn_frontend::loader::gen_cache_tag(key, &bytes).into_bytes();
+    debug_assert_eq!(tagged.len(), ARTIFACT_TAG_LEN);
+    tagged.extend_from_slice(&bytes);
+    let bytes = tagged;
     let dir = artifact_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -1786,4 +1803,57 @@ fn run_wasm(
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     String::from_utf8(streams.stdout)
         .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `load_artifact` maps its bytes in as native code, so what it will and will
+    /// not deserialize IS that `unsafe` block's soundness argument. It used to
+    /// deserialize whatever the file held, on the strength of the file being in
+    /// "our own cache directory" — a per-user directory any process running as
+    /// the user can write, and one an environment variable relocates.
+    #[test]
+    fn an_artifact_this_compiler_did_not_write_is_never_deserialized() {
+        let tmp = std::env::temp_dir().join(format!("vyrn-artifact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("VYRN_GEN_CACHE_DIR", &tmp);
+
+        // The smallest module there is: an empty one.
+        let module = wasmtime::Module::new(wasm_engine(), [0, b'a', b's', b'm', 1, 0, 0, 0])
+            .expect("an empty module compiles");
+        let key = "artifacttest";
+        store_artifact(key, &module);
+        let path = artifact_dir().join(key);
+        assert!(path.is_file(), "the control: it was stored");
+        assert!(load_artifact(key).is_some(), "the control: it reads back");
+        let stored = std::fs::read(&path).unwrap();
+
+        // The serialized module replaced under an otherwise honest tag.
+        let mut swapped = stored.clone();
+        let last = swapped.len() - 1;
+        swapped[last] ^= 0xff;
+        std::fs::write(&path, &swapped).unwrap();
+        assert!(load_artifact(key).is_none(), "the tag covers the module");
+
+        // The same artifact filed under another key.
+        std::fs::write(artifact_dir().join("otherkey"), &stored).unwrap();
+        assert!(
+            load_artifact("otherkey").is_none(),
+            "the tag covers the key"
+        );
+
+        // An untagged file — every artifact written before this tag existed, and
+        // every artifact written by something that is not `vyrn`.
+        std::fs::write(&path, &stored[ARTIFACT_TAG_LEN..]).unwrap();
+        assert!(load_artifact(key).is_none(), "untagged is not trusted");
+
+        // And a file too short to hold a tag at all.
+        std::fs::write(&path, b"short").unwrap();
+        assert!(load_artifact(key).is_none());
+
+        std::env::remove_var("VYRN_GEN_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
