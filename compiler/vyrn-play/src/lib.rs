@@ -16,10 +16,11 @@
 //! `vyrn_frontend::playhost`), because a browser tab has no stdout, no stdin and
 //! no clock a module may call.
 //!
-//! ONE FILE, NO IMPORTS. The resolver is empty, so an `import` reports the
-//! loader's own `module not found: …`. Embedding `std/` is a `build.rs` that
-//! `include_str!`s the directory into the map below; it is not here because
-//! nothing on the page needs it yet.
+//! ONE FILE, PLUS `std/`. The standard library is embedded by `build.rs` — the
+//! whole directory, walked rather than listed — because the guide book's run
+//! links come here and twenty of its twenty-five programs import it. A RELATIVE
+//! import still has nowhere to go, and reports the loader's own
+//! `module not found: …`.
 //!
 //! THE CALLING CONVENTION. No bindgen, no dependencies. One input buffer and one
 //! output buffer, both owned by the module:
@@ -203,20 +204,34 @@ fn tokens_json(src: &str) -> String {
 // Checking and running
 // ---------------------------------------------------------------------------
 
+/// The standard library, as `build.rs` walked it out of `std/`.
+mod std_modules {
+    include!(concat!(env!("OUT_DIR"), "/std_modules.rs"));
+}
+
 /// Load `src` as a one-file program, the way `vyrn run` loads a file.
 ///
 /// The same entry point the CLI uses (`load_warned`), so the page cannot disagree
 /// with the compiler about what compiles: imports resolve through a resolver,
 /// generators run, the JSON encoders are synthesized, and the move checker sees
-/// the finished program. The resolver here is empty — see the module note.
+/// the finished program.
+///
+/// The resolver holds `std/` and nothing else. A relative import has nowhere to
+/// go and says so; `std/` resolves against a root of `std`, which is what makes
+/// the keys `build.rs` wrote the ones the loader asks for.
 fn load(src: &str) -> (Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>, Vec<Diagnostic>) {
     let opts = LoadOptions {
-        std_root: None,
+        std_root: Some("std".into()),
         aliases: Default::default(),
         alias_base: String::new(),
         audience: None,
     };
-    let resolver = MapResolver(Default::default());
+    let resolver = MapResolver(
+        std_modules::STD
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    );
     vyrn_frontend::load_warned(src, "play.vyrn", &opts, &resolver)
 }
 
@@ -434,18 +449,27 @@ mod tests {
     }
 
     #[test]
-    fn an_import_is_refused_by_the_loader_in_its_own_words() {
-        // The loader's own wording, not one invented here. A relative import gets
-        // `module not found: …` from the empty resolver; `std/` never reaches it,
-        // because no std root is configured for a page that has no filesystem.
-        let std_import =
-            check_json("import { trim } from \"std/strings\"\nfn main() -> Int64 { return 0 }\n");
-        assert!(
-            std_import.contains("std library not available"),
-            "{std_import}"
+    fn the_standard_library_is_here_and_a_second_file_is_not() {
+        // Every guide chapter with a run link imports `std/`, so this is the test
+        // that keeps those links working.
+        let std_import = check_json(
+            "import { joinWith } from \"std/strings\"\nfn main() -> Int64 { return 0 }\n",
         );
+        assert_eq!(std_import, "{\"diagnostics\":[]}");
+        // A relative import has nowhere to go, in the loader's own words.
         let local = check_json("import { f } from \"./other\"\nfn main() -> Int64 { return 0 }\n");
         assert!(local.contains("module not found"), "{local}");
+    }
+
+    #[test]
+    fn a_program_that_calls_the_standard_library_runs() {
+        let json = run_json(
+            "import { joinWith } from \"std/strings\"\n\
+             fn main() -> Int64 {\n    print(joinWith([\"a\", \"b\"], \"-\"))\n    return 0\n}\n",
+            b"",
+            0,
+        );
+        assert!(json.contains("\"exitCode\":0"), "{json}");
     }
 
     #[test]
