@@ -197,7 +197,7 @@ fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
             .ins(&Instruction::Call(proc_exit));
     });
     m.export("_start", start);
-    (m.finish(), n)
+    (m.finish().unwrap(), n)
 }
 
 fn run(wasmtime: &Path, shim: &Path, name: &str, wasm: &[u8]) -> (i32, Vec<u8>, String) {

@@ -398,6 +398,63 @@ fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
 }
 
 // -------------------------------------------------------------------------
+// The statics
+// -------------------------------------------------------------------------
+
+/// A program with more static data than the module can hold killed the compiler.
+///
+/// The limit was already written down and already compared — as `assert!`, in
+/// `Module::finish`, which returned `Vec<u8>` while its only caller returned
+/// `Result<_, String>`. So the number was right and the refusal was a Rust panic:
+/// no `error:` line, no exit code the other refusals use, and nothing naming the
+/// program. A big i18n catalogue, a generator's output or any large corpus of
+/// literals reached it.
+///
+/// Ninety DISTINCT literals, because `Module::data` shares identical contents —
+/// ninety copies of one string are one address and 100 KB, and the first attempt
+/// at this row built fine for exactly that reason.
+///
+/// The control lives with the code, in `wasm.rs`: a module whose statics end
+/// exactly on the line still finishes. It is there rather than here because the
+/// build at the limit is an 8 MB module to link, and this row is about the
+/// refusal reaching the user.
+#[test]
+fn statics_past_what_the_module_holds_are_a_diagnostic_not_a_panic() {
+    let mut src = String::from("fn main() -> Int64 {\n");
+    for i in 0..90 {
+        src.push_str(&format!("    print(\"s{i}-{}\")\n", "q".repeat(100_000)));
+    }
+    src.push_str("    return 0\n}\n");
+
+    let (out, module) = build_wasm(&src, "bigstatics");
+    let got = text(&out);
+    assert!(
+        got.contains(vyrn_codegen::STATICS_LIMIT_NEEDLE),
+        "expected the statics limit, got:\n{got}"
+    );
+    // The numbers are the code's, not this file's — the room is where the data
+    // segments start and where the shim's stack does.
+    let room = vyrn_codegen::wasm::STATICS_LIMIT - vyrn_codegen::wasm::DATA_BASE;
+    assert!(
+        got.contains(&format!("past the statics limit of {room}")),
+        "the refusal must name the room a module actually has ({room}), got:\n{got}"
+    );
+    assert!(
+        !got.contains("panicked at"),
+        "a limit is a sentence, not a Rust panic:\n{got}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a refusal exits 1, like every other one — got:\n{got}"
+    );
+    assert!(
+        !module.exists(),
+        "a refused build must not leave a module behind"
+    );
+}
+
+// -------------------------------------------------------------------------
 // One source per limit
 // -------------------------------------------------------------------------
 

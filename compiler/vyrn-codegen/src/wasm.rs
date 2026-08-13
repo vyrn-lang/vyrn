@@ -546,17 +546,31 @@ impl Module {
         }
     }
 
-    /// The finished bytes.
+    /// The finished bytes, or the one refusal a program can earn here.
     ///
     /// Sections go out in the order the format fixes: type, import, function,
     /// memory, global, export, code, data. Nothing else in this file may emit a
     /// section, so this list is the whole ordering constraint.
-    pub fn finish(mut self) -> Vec<u8> {
-        assert!(
-            self.data_end() <= STATICS_LIMIT,
-            "statics end at {} — past the {STATICS_LIMIT}-byte line the shim's stack needs",
-            self.data_end()
-        );
+    ///
+    /// `Result` for [`STATICS_LIMIT`] alone. The other checks below are asserts
+    /// because a reservation nobody filled is a bug in this file, which no source
+    /// can provoke; statics past the line is a PROGRAM — a large catalogue, a
+    /// generator's output, a corpus of literals — and a program that is too big
+    /// gets a sentence, like every other limit the backends enforce.
+    pub fn finish(mut self) -> Result<Vec<u8>, String> {
+        if self.data_end() > STATICS_LIMIT {
+            let room = STATICS_LIMIT - DATA_BASE;
+            return Err(format!(
+                "this module's statics need {} bytes, {} of {room}\n  \
+                 note: the data segments begin at {DATA_BASE}, where the shadow stack ends, and \
+                 must end below {STATICS_LIMIT}, where the runtime shim's own stack begins\n  \
+                 note: the size is the sum of every string literal, regex table and \
+                 module-state binding in the program AND in everything it imports; a large \
+                 catalogue belongs in a file the program reads at run time, not in the module",
+                self.data_end() - DATA_BASE,
+                crate::STATICS_LIMIT_NEEDLE,
+            ));
+        }
         if self.sweep {
             self.prune();
         }
@@ -717,7 +731,7 @@ impl Module {
                 data: payload.as_slice().into(),
             });
         }
-        m.finish()
+        Ok(m.finish())
     }
 }
 
@@ -909,7 +923,7 @@ mod tests {
             b.ins(&Instruction::I32Const(0));
         });
         m.export("vyrn_entry", f);
-        let ids = section_ids(&m.finish());
+        let ids = section_ids(&m.finish().unwrap());
         assert_eq!(ids, vec![1, 2, 3, 5, 6, 7, 10, 11]);
         assert!(
             ids.windows(2).all(|w| w[0] < w[1]),
@@ -926,7 +940,7 @@ mod tests {
         m.import_memory();
         let f = m.func(&[], &[], &[], 0, |_| {});
         m.export("vyrn_entry", f);
-        let bytes = m.finish();
+        let bytes = m.finish().unwrap();
         assert_eq!(section_ids(&bytes), vec![1, 2, 3, 6, 7, 10]);
         assert!(
             bytes.windows(6).any(|w| w == b"memory"),
@@ -1075,7 +1089,7 @@ mod tests {
         m.fill(later, f);
         m.export("vyrn_entry", caller);
         // Two bodies out, in index order rather than in the order they arrived.
-        assert_eq!(section_ids(&m.finish()), vec![1, 3, 5, 6, 7, 10]);
+        assert_eq!(section_ids(&m.finish().unwrap()), vec![1, 3, 5, 6, 7, 10]);
     }
 
     /// The sweep, at the section level: an import nothing reaches leaves the
@@ -1099,7 +1113,7 @@ mod tests {
         });
         m.export("_start", start);
         m.sweep();
-        let bytes = m.finish();
+        let bytes = m.finish().unwrap();
         assert!(
             bytes.windows(9).any(|w| w == b"proc_exit"),
             "the reached import stays"
@@ -1122,7 +1136,7 @@ mod tests {
         });
         m.export("_start", start);
         m.sweep();
-        m.finish();
+        let _ = m.finish();
     }
 
     #[test]
@@ -1130,7 +1144,7 @@ mod tests {
     fn a_reservation_nobody_filled_is_not_a_module() {
         let mut m = Module::new();
         m.reserve_func(&[], &[]);
-        m.finish();
+        let _ = m.finish();
     }
 
     #[test]
@@ -1141,11 +1155,36 @@ mod tests {
         m.import("env", "late", &[], &[]);
     }
 
+    /// The one limit here a PROGRAM can reach, so the one that is a sentence.
+    ///
+    /// It was `assert!`, and `finish` returned `Vec<u8>` while its only caller
+    /// returned `Result` — so a program with more statics than the module holds
+    /// killed `vyrn build --target wasm` with a Rust panic and no source.
     #[test]
-    #[should_panic(expected = "past the")]
-    fn statics_may_not_cross_the_line_the_shim_needs() {
+    fn statics_past_the_line_the_shim_needs_are_a_diagnostic() {
         let mut m = Module::new();
         m.data(&vec![0u8; STATICS_LIMIT as usize], 1);
-        m.finish();
+        let e = m
+            .finish()
+            .expect_err("statics past the limit must be refused");
+        assert!(
+            e.contains(crate::STATICS_LIMIT_NEEDLE),
+            "the refusal must carry the needle a test can pin: {e}"
+        );
+        assert!(
+            e.contains(&(STATICS_LIMIT - DATA_BASE).to_string()),
+            "the refusal must name the room a module actually has: {e}"
+        );
+    }
+
+    /// The control. Statics right up to the line still finish — a bound that
+    /// refused the ordinary case would pass the test above and be worthless.
+    #[test]
+    fn statics_that_just_fit_still_finish() {
+        let mut m = Module::new();
+        m.data(&vec![0u8; (STATICS_LIMIT - DATA_BASE) as usize], 1);
+        let f = m.func(&[], &[], &[], 0, |_| {});
+        m.export("_start", f);
+        assert!(m.finish().is_ok());
     }
 }

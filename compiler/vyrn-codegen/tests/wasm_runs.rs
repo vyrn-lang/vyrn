@@ -92,7 +92,7 @@ fn a_module_that_only_returns_a_constant() {
             .ins(&Instruction::Call(exit));
     });
     m.export("_start", start);
-    let Some((code, _, err)) = run("constant", &m.finish()) else {
+    let Some((code, _, err)) = run("constant", &m.finish().unwrap()) else {
         eprintln!("NOTE: no wasmtime — the M1 encoder is unverified on this machine");
         return;
     };
@@ -125,7 +125,7 @@ fn a_frame_and_a_data_segment_and_an_imported_call() {
         b.ins(&Instruction::Call(fd_write)).ins(&Instruction::Drop);
     });
     m.export("_start", start);
-    let Some((code, out, err)) = run("hello", &m.finish()) else {
+    let Some((code, out, err)) = run("hello", &m.finish().unwrap()) else {
         return;
     };
     assert_eq!(code, 0, "{err}");
@@ -200,7 +200,7 @@ fn a_struct_round_trips_through_the_shadow_stack_at_the_computed_offsets() {
         b.ins(&Instruction::Call(fd_write)).ins(&Instruction::Drop);
     });
     m.export("_start", start);
-    let Some((code, out, err)) = run("roundtrip", &m.finish()) else {
+    let Some((code, out, err)) = run("roundtrip", &m.finish().unwrap()) else {
         return;
     };
     assert_eq!(code, 0, "{err}");
@@ -252,7 +252,7 @@ fn a_swept_module_still_calls_what_it_meant_to() {
     });
     m.export("_start", start);
     m.sweep();
-    let bytes = m.finish();
+    let bytes = m.finish().unwrap();
     let _ = (unused, dead_a, dead_b);
     let Some((code, _, err)) = run("swept", &bytes) else {
         return;
@@ -287,7 +287,7 @@ fn a_frame_past_the_bottom_of_memory_traps_rather_than_wrapping_into_data() {
         b.slot(0).ins(&Instruction::I32Const(1)).ins(&i32_store(0));
     });
     m.export("_start", start);
-    let Some((code, _, err)) = run("overflow", &m.finish()) else {
+    let Some((code, _, err)) = run("overflow", &m.finish().unwrap()) else {
         return;
     };
     assert_ne!(code, 0, "an overflowing frame must not succeed");
