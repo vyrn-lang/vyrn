@@ -48,7 +48,7 @@
 /// neither has an honest use. Everything else is a warning, and a project can
 /// move any of them in either direction.
 
-import { report, reportHere, Severity } from "std/diag"
+import { reportHere, Severity } from "std/diag"
 import { hint, noPolicy, policyOf, Policy } from "std/hints"
 import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
