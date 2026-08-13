@@ -42,14 +42,19 @@ run time, so a new release is live the moment the workflow finishes.
 
 ## What gets published
 
-Four assets per release:
+Five assets per release:
 
 ```
 vyrn-x86_64-linux.tar.gz
+vyrn-aarch64-linux.tar.gz
 vyrn-aarch64-macos.tar.gz
 vyrn-x86_64-windows.zip
 SHA256SUMS
 ```
+
+`aarch64-linux` is not a niche: Docker on an Apple Silicon Mac defaults to
+`linux/arm64`, so without it `install.sh` had nothing to offer inside an
+ordinary container.
 
 The names carry no version. That keeps them predictable for a script and lets
 `https://github.com/vyrn-lang/vyrn/releases/latest/download/<name>` work once a

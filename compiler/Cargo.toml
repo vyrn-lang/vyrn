@@ -34,5 +34,45 @@ exclude = [
     "vyrn-genwasm",
 ]
 
+[profile.dev]
+# Full debuginfo, for a workspace of 54 test targets, is the single most
+# expensive thing about `cargo test`. MEASURED both places it is paid — `cargo
+# test --no-run` from `cargo clean`, median of three runs:
+#
+#                                Windows/MSVC     ubuntu-latest
+#   default (debug = 2)             19.6 s           24.5 s
+#   debug = "line-tables-only"      14.7 s  -25%     19.3 s  -21%
+#
+# What it costs: a debugger can no longer show local variables or struct fields.
+# What it does not cost: a panic backtrace. `line-tables-only` keeps exactly the
+# file:line mapping a backtrace resolves, and the two configurations print a
+# BYTE-IDENTICAL backtrace for the same panic — checked, not assumed. Test
+# failures are the debuginfo this project actually reads.
+#
+# Set `debug = 2` locally (or `CARGO_PROFILE_DEV_DEBUG=2`) for a stepping
+# session; nothing else in the build depends on this.
+#
+# FASTER LINKERS WERE MEASURED AND DECLINED, on both platforms, so nobody has
+# to measure them again. Same three reps, same clean builds:
+#
+#   Windows: rust-lld       21.6 s   +2.0 s vs default   (SLOWER)
+#            rust-lld + ltl 15.6 s   +0.9 s vs ltl alone (SLOWER)
+#   Linux:   mold 2.30      24.9 s   +0.4 s vs default   (SLOWER)
+#            mold + ltl     21.1 s   +1.9 s vs ltl alone (SLOWER)
+#
+# Both link correctly. Neither is the bottleneck: this workspace has one
+# external crate and 57 small executables, so per-link startup costs more than
+# the link saves. `mold` would also have been an answer for one leg of a
+# four-platform matrix — it has no Windows and no macOS port.
+#
+# The default `clang` linker for `vyrn build` is likewise NOT pinned to
+# `-fuse-ld=lld`. It would make the linker uniform across the three platforms,
+# but `vyrn build`'s only stated requirement is "clang on PATH", and on Linux
+# `lld` is a separate package — pinning it turns a working install into a
+# broken one. It would not buy reproducibility on its own either: a PE
+# timestamp needs `-Wl,/Brepro` and a Mach-O UUID needs `-Wl,-no_uuid`,
+# regardless of which linker runs.
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3

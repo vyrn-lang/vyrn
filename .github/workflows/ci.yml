@@ -56,8 +56,35 @@ env:
 
 jobs:
   test:
-    name: tests (workspace + LSP)
-    runs-on: ubuntu-latest
+    name: tests (workspace + LSP) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # The opposite of the release matrix's setting, for the opposite reason:
+      # there a partial matrix must not publish, so the first failure cancels the
+      # rest. Here the whole point is to learn WHICH platforms are broken. One
+      # red leg cancelling the other three would hide a second bug behind the
+      # first and cost another round trip to find it.
+      fail-fast: false
+      matrix:
+        # The platforms release.yml ships, and only those: every published binary
+        # is now built by a machine whose tests ran. Before this, no test had
+        # ever executed on macOS, and Windows was covered only by the
+        # maintainer's dev machine — informally, and never on a pull request.
+        #
+        # This is the cheap tier on purpose: pure Rust, no clang, no wasi
+        # sysroot, no wasmtime download. The expensive jobs below stay on
+        # ubuntu-latest, where a second architecture buys little — `layout_vs_
+        # clang` compiles for wasm32-wasip1, so the HOST architecture does not
+        # change the ABI it verifies.
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        # Every step below is a POSIX shell script — `set -e`, `$(…)`, `for f
+        # in`. windows-latest defaults to pwsh, which parses none of it. Git Bash
+        # ships on that runner and brings `grep` with it, so one line here keeps
+        # the four legs running byte-identical scripts instead of forking every
+        # step on `runner.os`.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Rust cache
@@ -117,6 +144,33 @@ jobs:
 
   parity:
     name: three-way parity (interp == native == wasm)
+    # x86-64 only, on purpose, and here is the case for the ARM leg that is NOT
+    # here so the next reader does not have to rebuild it.
+    #
+    # What an `ubuntu-24.04-arm` copy of this job would NOT add: a second layout
+    # ABI. `vyrn-codegen/tests/layout_vs_clang.rs` compiles for wasm32-wasip1 and
+    # runs under wasmtime — the host architecture changes neither the target nor
+    # the answer. The layout engine exists for the direct wasm backend; on the
+    # native path LLVM computes layout, so there is nothing of ours to diverge.
+    # The SIMD types are the same story: `<4 x float>` lowers to wasm SIMD in the
+    # column this engine owns.
+    #
+    # What it WOULD add: the NATIVE column on aarch64. That column is text IR
+    # through clang to a real binary, and the harness compares its stdout byte
+    # for byte against the interpreter — so it is a genuine second ABI for
+    # everything the emitter decides (integer widths, float formatting, struct
+    # returns, trap wording).
+    #
+    # What it would cost, measured against run 31724777591 (warm caches): this
+    # job takes about 8 minutes and runs in parallel with the others, so the
+    # added WALL time is zero and the added runner minutes are free — the repo
+    # is public. The one-time work is a second cache slot and the aarch64
+    # wasmtime asset (`wasmtime-v46.0.1-aarch64-linux.tar.xz`); the wasi sysroot
+    # and the builtins archive are wasm32 target libraries and are the same file
+    # on every host. clang is preinstalled on the ARM image.
+    #
+    # A cheap, real addition — deliberately left as its own change, because a
+    # matrix leg nobody has watched go green is a claim, not a gate.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

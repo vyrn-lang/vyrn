@@ -28,11 +28,18 @@ os=$(uname -s)
 arch=$(uname -m)
 case "$os/$arch" in
   Linux/x86_64|Linux/amd64)      asset=vyrn-x86_64-linux.tar.gz ;;
+  # `uname -m` says `aarch64` on a Linux kernel and `arm64` on Darwin; both
+  # spellings appear on Linux in the wild (some musl/BusyBox userlands, and
+  # containers started with `--platform linux/arm64`), so accept either. This is
+  # the Docker-on-Apple-Silicon case: the default platform there is linux/arm64,
+  # and before the aarch64-linux release stanza this line fell through to "build
+  # from source" for an ordinary audience.
+  Linux/aarch64|Linux/arm64)     asset=vyrn-aarch64-linux.tar.gz ;;
   Darwin/arm64|Darwin/aarch64)   asset=vyrn-aarch64-macos.tar.gz ;;
   *)
     die "no published build for $os $arch.
-  The alpha ships Linux x86_64 and macOS arm64. On anything else, build from
-  source: https://github.com/$REPO#build-from-source" ;;
+  The alpha ships Linux x86_64, Linux arm64 and macOS arm64. On anything else,
+  build from source: https://github.com/$REPO#build-from-source" ;;
 esac
 
 # --- how to download --------------------------------------------------------

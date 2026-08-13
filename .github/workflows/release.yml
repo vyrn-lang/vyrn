@@ -36,6 +36,16 @@ jobs:
             name: x86_64-linux
             target: x86_64-unknown-linux-gnu
             bin: vyrn
+          # Docker on an Apple Silicon Mac defaults to `linux/arm64`, so without
+          # this stanza `install.sh` had no binary for an ordinary and large
+          # audience — inside a container it fell through to "build from source".
+          # `ubuntu-24.04-arm` is a GA runner label, free for public repos, so
+          # this is a native build rather than a cross one: the smoke step below
+          # runs the binary on the architecture it will ship to.
+          - os: ubuntu-24.04-arm
+            name: aarch64-linux
+            target: aarch64-unknown-linux-gnu
+            bin: vyrn
           - os: macos-latest
             name: aarch64-macos
             target: aarch64-apple-darwin
@@ -103,6 +113,59 @@ jobs:
             tar czf "$stage.tar.gz" "$stage"
           fi
           ls -l "$stage".*
+
+      - name: Run the artifact before anyone else has to
+        shell: bash
+        # Until now the release workflow built binaries that NOBODY ran before
+        # they were published. A `vyrn` that cannot start — a stripped symbol it
+        # needed, a `std/` that did not survive `7z`, a target that builds but
+        # does not execute — reached users and only then a bug report.
+        #
+        # So: unpack the archive that is about to be uploaded (not the staging
+        # directory it was made from — the archive is what a user gets, and
+        # `tar`/`7z` are between the two) and use it.
+        #
+        # Every leg is a NATIVE build for its own runner, so there is nothing to
+        # emulate. And the three things exercised are exactly the three the
+        # release notes promise need "nothing beyond this archive":
+        #
+        #   vyrn run                the interpreter, plus the walk-up that finds
+        #                           `std/` beside the binary — `hello.vyrn`
+        #                           imports from it on purpose, so a `std/` that
+        #                           did not make it into the archive fails here.
+        #   vyrn fmt --check        the formatter, on a file already canonical.
+        #   vyrn build --target wasm  the direct wasm backend, which since
+        #                           RFC-0077 M5 needs no clang, no wasi sysroot
+        #                           and no builtins — hence no skip and no
+        #                           reason to state one. `vyrn build` NATIVE is
+        #                           the one thing not tested here, because it
+        #                           needs clang on PATH and the notes say so.
+        #
+        # `fail-fast: true` above is what makes this a gate: a leg that cannot
+        # run its own binary takes `publish` down with it.
+        run: |
+          set -eux
+          stage="vyrn-${{ matrix.name }}"
+          mkdir smoke && cd smoke
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z x "../$stage.zip" > /dev/null
+          else
+            tar xzf "../$stage.tar.gz"
+          fi
+          vyrn="$PWD/$stage/${{ matrix.bin }}"
+          "$vyrn" --version
+          cat > hello.vyrn <<'EOF'
+          import { toUpper } from "std/strings"
+
+          fn main() -> Int64 {
+              print(toUpper("hello from the release archive"))
+              return 0
+          }
+          EOF
+          "$vyrn" run hello.vyrn
+          "$vyrn" fmt --check hello.vyrn
+          "$vyrn" build hello.vyrn --target wasm -o hello.wasm
+          test -s hello.wasm
 
       - uses: actions/upload-artifact@v4
         with:
