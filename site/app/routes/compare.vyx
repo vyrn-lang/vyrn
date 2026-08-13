@@ -95,7 +95,7 @@ fn axes() -> Array<Axis> {
 </script>
 
 <template>
-<main class="page">
+<main id="main" tabindex="-1" class="page">
     <aside class="rail">
         <a href="#axes"><span class="n">01</span>the axes</a>
         <a href="#rule"><span class="n">02</span>a rule</a>
@@ -143,7 +143,7 @@ fn axes() -> Array<Axis> {
                     <span class="eyebrow">the same rule, four ways</span>
                 </div>
                 <div class="tabs">
-                    <button type="button" v-for="s in typeSpecs()" :key="s.id" :data-tab="s.id" role="tab" aria-selected="false">{{ s.label }}</button>
+                    <button type="button" v-for="s in typeSpecs()" :key="s.id" :data-tab="s.id">{{ s.label }}</button>
                 </div>
                 <div class="stage panes">
                     <div v-for="s in typeSpecs()" :key="s.id" :data-pane="s.id">
@@ -164,7 +164,7 @@ fn axes() -> Array<Axis> {
                     <span class="eyebrow">the same three functions, four ways</span>
                 </div>
                 <div class="tabs">
-                    <button type="button" v-for="s in memorySpecs()" :key="s.id" :data-tab="s.id" role="tab" aria-selected="false">{{ s.label }}</button>
+                    <button type="button" v-for="s in memorySpecs()" :key="s.id" :data-tab="s.id">{{ s.label }}</button>
                 </div>
                 <div class="stage panes">
                     <div v-for="s in memorySpecs()" :key="s.id" :data-pane="s.id">
@@ -185,7 +185,7 @@ fn axes() -> Array<Axis> {
                     <span class="eyebrow">the same missing seat, four ways</span>
                 </div>
                 <div class="tabs">
-                    <button type="button" v-for="s in failureSpecs()" :key="s.id" :data-tab="s.id" role="tab" aria-selected="false">{{ s.label }}</button>
+                    <button type="button" v-for="s in failureSpecs()" :key="s.id" :data-tab="s.id">{{ s.label }}</button>
                 </div>
                 <div class="stage panes">
                     <div v-for="s in failureSpecs()" :key="s.id" :data-pane="s.id">

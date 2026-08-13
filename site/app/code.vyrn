@@ -30,10 +30,9 @@ export fn goWords() -> Array<String> {
     return ["func", "var", "const", "if", "else", "for", "range", "return", "true", "false", "type", "struct", "interface", "package", "import", "go", "defer", "chan", "select", "switch", "case", "map", "nil", "make", "new"]
 }
 
-/// One HTML-safe byte. Only the three that can change the markup are replaced;
-/// a quote inside a `<pre>` is text. A byte that is not valid UTF-8 on its own
-/// is a continuation byte of a character the caller split, which cannot happen
-/// here — every caller passes whole runs — so the fallback is unreachable.
+/// One HTML-safe byte. A byte that is not valid UTF-8 on its own is a
+/// continuation byte of a character the caller split, which cannot happen here —
+/// every caller passes whole runs — so the fallback is unreachable.
 fn escapeByte(b: UInt8) -> String {
     if b == '&' {
         return "&amp;"
@@ -44,12 +43,28 @@ fn escapeByte(b: UInt8) -> String {
     if b == '>' {
         return "&gt;"
     }
+    if b == '"' {
+        return "&quot;"
+    }
+    if b == '\'' {
+        return "&#39;"
+    }
     return fromBytesOr([b], "")
 }
 
-/// `s` with the markup-significant bytes replaced. Multi-byte characters pass
-/// through whole: only ASCII `&`, `<` and `>` are replaced, and neither byte of
-/// a longer character can equal one of them.
+/// `s` with every markup-significant byte replaced. Multi-byte characters pass
+/// through whole: only ASCII bytes are replaced, and no byte of a longer
+/// character can equal one of them.
+///
+/// THE QUOTES ARE ESCAPED TOO, and they used to not be. The argument for leaving
+/// them was that a quote inside a `<pre>` is text — true, and it made the
+/// function safe only because of where its callers happened to put the result.
+/// A name like `escapeHtml` is a promise about the OUTPUT, not about the six
+/// call sites it has today: the day a signature or a title is routed into an
+/// attribute, an unescaped `"` closes the attribute and the rest of the
+/// signature becomes markup. The safety is now a property of this function.
+/// In element content the two forms render identically, so nothing on the page
+/// changes.
 export fn escapeHtml(s: String) -> String {
     let raw = bytes(s)
     let mut out = ""
@@ -57,7 +72,7 @@ export fn escapeHtml(s: String) -> String {
     let mut i = 0
     while i < raw.length {
         let b = raw[i]
-        if b == '&' || b == '<' || b == '>' {
+        if b == '&' || b == '<' || b == '>' || b == '"' || b == '\'' {
             out = out + substring(s, plain, i) + escapeByte(b)
             plain = i + 1
         }
@@ -243,7 +258,18 @@ test "markup in a snippet cannot escape the pre" {
 }
 
 test "an escaped quote does not end the string" {
-    assertEq(highlightWith("\"a\\\"b\" c", goWords()), "<span class=\"s\">\"a\\\"b\"</span> c")
+    // The quotes reach the page as `&quot;`, which is what makes a highlighted
+    // signature safe in an attribute as well as in a `<pre>`. A browser renders
+    // the two identically.
+    assertEq(highlightWith("\"a\\\"b\" c", goWords()), "<span class=\"s\">&quot;a\\&quot;b&quot;</span> c")
+}
+
+test "a signature cannot break out of an attribute" {
+    // The invariant `escapeHtml` used to keep only by circumstance: it was safe
+    // because every call site landed in element content. Now it is safe because
+    // of what it returns.
+    assertEq(escapeHtml("\" onerror=\"alert(1)"), "&quot; onerror=&quot;alert(1)")
+    assertEq(escapeHtml("it's"), "it&#39;s")
 }
 
 test "a shell block marks the program, its flags and its comments" {

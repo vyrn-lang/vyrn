@@ -19,7 +19,7 @@ fn tagOf(c: Chapter) -> String {
 </script>
 
 <template>
-<main class="page">
+<main id="main" tabindex="-1" class="page">
     <aside class="rail">
         <a href="#read"><span class="n">01</span>how to read it</a>
         <a href="#chapters"><span class="n">02</span>chapters</a>

@@ -227,6 +227,29 @@ h1 code.copyable:hover, h2 code.copyable:hover, h3 code.copyable:hover, h4 code.
 h1 code.copyable.copied, h2 code.copyable.copied, h3 code.copyable.copied, h4 code.copyable.copied { background: none; color: var(--bright); }
 h1 code.copyable.copyfail, h2 code.copyable.copyfail, h3 code.copyable.copyfail, h4 code.copyable.copyfail { background: none; color: var(--danger); }
 
+/* The skip link. Off screen until it is focused, and then it is the first thing
+ * on the page — a keyboard reader on a reference page would otherwise tab the
+ * masthead and a 23-link rail before the first paragraph. */
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: var(--s1) var(--s2);
+  background: var(--paper);
+  border: 1px solid var(--accent);
+  color: var(--bright);
+  font: 600 14px/1 var(--mono);
+  text-decoration: none;
+}
+.skip:focus {
+  left: var(--s2);
+  top: var(--s2);
+}
+/* The target takes focus, and takes no outline for it: the reader asked to be
+ * moved, not to be shown a box around the whole page. */
+#main:focus { outline: none; }
+
 /* Said to a screen reader, shown to nobody: the live region every copy reports
  * into. Not `display: none`, which is not announced. */
 .sr-only {
@@ -638,16 +661,18 @@ pre.code {
 .columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); }
 .columns > div { background: var(--paper); padding: var(--s2); }
 .columns h4 { font: 11px/1.4 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: var(--s1); }
-/* The markup already holds the final state, so a widget that is never scrolled
- * into view — or whose script never runs — shows the answer rather than an
- * empty box. `arming` is what a script adds for the moment before it animates. */
-.columns pre { margin: 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; transition: opacity 380ms var(--expo); }
-.columns.arming pre { opacity: 0; }
+/* A column says WHERE its number came from, under the number: the build, this
+ * browser, or the harness that is not in the page. The label is the smallest
+ * thing on the plate and it is the thing that makes the plate honest. */
+.columns pre { margin: 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+.columns .eyebrow { margin-top: var(--s1); font-size: 10px; }
 .columns .digest { color: var(--accent); }
-.columns.broken > div:last-child .digest { color: var(--danger); }
+/* The digest the reader corrupted, wherever it sits. It used to be the last
+ * column by position, from when the widget rewrote that column's text. */
+.columns .digest.bad, .columns.broken .digest.muted { color: var(--danger); }
+.columns .digest.muted { color: var(--muted); }
 
-.verdict { margin-top: var(--s2); font: 600 1.1rem/1 var(--mono); color: var(--accent); transition: opacity 300ms var(--expo); }
-.columns.arming ~ .verdict { opacity: 0; }
+.verdict { margin-top: var(--s2); font: 600 1.1rem/1 var(--mono); color: var(--accent); }
 .verdict.bad { color: var(--danger); }
 
 /* -------------------------------------------------------------------------
@@ -794,7 +819,6 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
   .staged > * { opacity: 1; transform: none; }
-  .columns.arming pre { opacity: 1; }
 }
 
 

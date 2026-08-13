@@ -139,22 +139,35 @@ export extern fn heroFrame(cols: Int64, rows: Int64, t: Float64, charAr: Float64
     return frame(cols, rows, t, charAr)
 }
 
-fn main() -> Int64 {
-    // A small frame, printed as it paints: noise, gate, lattice.
-    print(frame(60, 11, 0.35, 0.5))
+/// Everything `main` prints: a small frame, then the raw bits behind it.
+///
+/// This is the parity payload, and it is a VALUE rather than a sequence of
+/// prints so that both sides of the website's parity widget can hash the same
+/// bytes. The page runs this module as wasm and hashes what the module writes to
+/// stdout; the site's export calls this function in the interpreter and hashes
+/// what it returns. `main` is `print(parityReport())`, so the two are the same
+/// text by construction and cannot drift.
+export fn parityReport() -> String {
+    // A small frame, as it paints: noise, gate, lattice. It already ends in a
+    // newline, and the blank line after it is the one `print` used to add.
+    let mut out = frame(60, 11, 0.35, 0.5) + "\n"
 
     // The bits behind it. This is the parity claim: three backends, one number.
     let mut i = 0
     while i < 5 {
         let t = 0.25 * Float64(i)
         let x = field(0.31, 0.17, t)
-        print("field(0.31, 0.17, \{t}) bits = \{floatBits(x)}")
+        out = out + "field(0.31, 0.17, \{t}) bits = \{floatBits(x)}\n"
         i = i + 1
     }
-    print("sin(1) bits = \{floatBits(sin(1.0))}")
-    print("noise bits = \{floatBits(noise(0.4, 0.0 - 0.2, 1.5))}")
-    print("lattice bits = \{floatBits(lattice(0.4, 0.0 - 0.2, 1.5))}")
-    print("luminance sweep = \{luminance(0.0, 0.0, 0.0)} \{luminance(0.5, 0.5, 1.0)} \{luminance(0.9, 0.1, 2.0)}")
+    out = out + "sin(1) bits = \{floatBits(sin(1.0))}\n"
+    out = out + "noise bits = \{floatBits(noise(0.4, 0.0 - 0.2, 1.5))}\n"
+    out = out + "lattice bits = \{floatBits(lattice(0.4, 0.0 - 0.2, 1.5))}\n"
+    return out + "luminance sweep = \{luminance(0.0, 0.0, 0.0)} \{luminance(0.5, 0.5, 1.0)} \{luminance(0.9, 0.1, 2.0)}"
+}
+
+fn main() -> Int64 {
+    print(parityReport())
     return 0
 }
 

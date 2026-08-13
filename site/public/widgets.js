@@ -9,6 +9,7 @@
 // fresh.js.
 import { mountHero } from "/hero.js";
 import { refreshRelease } from "/fresh.js";
+import { runVyrn } from "/wasi-min.js";
 
 // Soft navigation across a static host: the payload for /philosophy.html lives
 // beside it in /philosophy.data.json, because a file host cannot vary on
@@ -205,13 +206,20 @@ async function copySpan(el) {
 /// Give every inline code span the affordance, once the script that backs it is
 /// running. Without JavaScript the spans stay plain text and advertise nothing,
 /// which is the honest state.
+///
+/// WHAT THIS DELIBERATELY DOES NOT DO IS PUT THEM IN THE TAB ORDER. Each span
+/// used to take `tabIndex = 0` and `role="button"`, and `std/http` — the longest
+/// reference page — turned into 143 copy buttons out of 222 tab stops, every one
+/// of them between a keyboard reader and the next paragraph. The copy is a
+/// POINTER convenience over text that is already selectable: a keyboard reader
+/// selects the span and presses Ctrl+C, which needs no widget, and every command
+/// worth copying whole sits in a `.cmd` plate that has its own Copy button in
+/// the tab order. An affordance that costs 143 stops to save one drag is not
+/// worth what it charges.
 function markCopyable() {
   for (const el of $$("code")) {
     if (!inlineCode(el)) continue;
     el.classList.add("copyable");
-    el.tabIndex = 0;
-    el.setAttribute("role", "button");
-    el.setAttribute("aria-label", "Copy " + codeText(el));
   }
 }
 
@@ -234,42 +242,90 @@ document.addEventListener("click", (e) => {
   if (isPlainCopyClick(copyDownAt, e, selected)) copySpan(el);
 });
 
-document.addEventListener("keydown", (e) => {
-  if (e.key !== "Enter" && e.key !== " ") return;
-  const el = inlineCode(e.target);
-  if (!el) return;
-  // A span with `role="button"` gets no synthetic click from the browser, so
-  // this is the only keyboard path and it cannot double-fire. Space would
-  // scroll the page.
-  e.preventDefault();
-  copySpan(el);
-});
 
 /// Pick the platform tab that matches the visitor, and let them override it.
+///
+/// The picker IS the tab widget below — same buttons, same panes, same keyboard
+/// contract — with one difference: which tab starts selected is a guess about
+/// the reader rather than the first one.
 function installPicker(root) {
   const guess = /Win/i.test(navigator.platform)
     ? "windows"
     : /Mac/i.test(navigator.platform)
       ? "macos"
       : "linux";
-  const select = (id) => {
-    for (const btn of $$("[data-plat]", root)) {
-      btn.setAttribute("aria-selected", String(btn.dataset.plat === id));
-    }
-    for (const pane of $$("[data-plat-pane]", root)) {
-      pane.hidden = pane.dataset.platPane !== id;
-    }
-  };
-  for (const btn of $$("[data-plat]", root)) {
-    btn.addEventListener("click", () => select(btn.dataset.plat));
-  }
-  select($(`[data-plat="${guess}"]`, root) ? guess : "linux");
+  tabsWidget(root, { tab: "plat", pane: "plat-pane", initial: guess });
 }
 
 // ---------------------------------------------------------------------------
-// W2 — the parity strip. The three columns fill, then the verdict lands.
-// The pause before it is the widget.
+// W2 — the parity check. It RUNS.
+//
+// This widget used to be a 900 ms timer that revealed a digest written into the
+// markup. On the one page whose argument is "believe the measurement", that was
+// the picture of a green tick the design brief said not to build.
+//
+// What happens now:
+//
+//   - The INTERP column is a digest the site's export computed while this page
+//     was built. The interpreter ran `examples/herofield.vyrn`'s
+//     `parityReport()` and hashed what it returned. It is in the markup because
+//     it was measured, not because it was typed.
+//   - The WASM column is empty until it runs. Then `/hero.wasm` — the same
+//     module compiled from the same file — is fetched, instantiated by
+//     `wasi-min.js`, and its `main` runs IN THIS BROWSER. The number that
+//     appears is the FNV-1a-64 of the bytes that module wrote to stdout,
+//     computed here, from that run.
+//   - The verdict compares the two, byte for byte.
+//
+// The NATIVE column cannot run in a page and does not pretend to: it says so,
+// and names the harness that does compare it.
+//
+// No digest is written into this file, and nothing is on a timer.
 // ---------------------------------------------------------------------------
+
+/// FNV-1a-64 of a string's UTF-8 bytes, as sixteen lowercase hex digits.
+///
+/// This is `std/hash`'s `fnv1a` in the language the browser has — same offset
+/// basis, same prime, same wrapping 64-bit multiply, which is why a digest this
+/// computes can be compared with one the export computed. `BigInt` because a
+/// `Number` loses the low bits of a 64-bit product.
+function fnv1aHex(text) {
+  const PRIME = 1099511628211n;
+  const MASK = 0xffffffffffffffffn;
+  let h = 14695981039346656037n;
+  for (const b of new TextEncoder().encode(text)) {
+    h = ((h ^ BigInt(b)) * PRIME) & MASK;
+  }
+  return h.toString(16).padStart(16, "0");
+}
+
+/// How many of the eight digest bytes differ. Two hex digits are one byte.
+function digestBytesDiffer(a, b) {
+  if (a.length !== b.length) return 8;
+  let n = 0;
+  for (let i = 0; i < a.length; i += 2) {
+    if (a.slice(i, i + 2) !== b.slice(i, i + 2)) n += 1;
+  }
+  return n;
+}
+
+/// Run `examples/herofield.vyrn` as wasm, here, and hash what it printed.
+///
+/// Returns the digest, or null if the module could not be fetched or would not
+/// instantiate — a page served without `hero.wasm` beside it says that, rather
+/// than showing a number it did not compute.
+async function wasmDigest() {
+  try {
+    const res = await fetch("/hero.wasm");
+    if (!res.ok) return null;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const run = await runVyrn(bytes, { onStdout: () => {}, onStderr: () => {} });
+    if (run.exitCode !== 0 || !run.stdout) return null;
+    return fnv1aHex(run.stdout);
+  } catch (err) {
+    return null;
+  }
+}
 
 function parityWidget(root) {
   const cols = $("[data-parity-cols]", root);
@@ -277,44 +333,83 @@ function parityWidget(root) {
   const num = $("[data-parity-num]", root);
   const runBtn = $("[data-parity-run]", root);
   const breakBtn = $("[data-parity-break]", root);
+  const interpPane = $('[data-col="interp"]', root);
   const wasmPane = $('[data-col="wasm"]', root);
-  const good = wasmPane.textContent.trim();
-  // One byte of the last column, flipped. Nothing else about the run changes,
-  // which is the point: the check is a byte comparison, not a green tick.
-  const bad = good.slice(0, -1) + (good.endsWith("3") ? "7" : "3");
-  let broken = false;
+  if (!interpPane || !wasmPane || !runBtn) return;
 
+  // What the build measured. The only number this file trusts, and it came off
+  // the page rather than out of a constant here.
+  const built = interpPane.textContent.trim();
+  // The same digest with one byte flipped. "Break one byte" corrupts the number
+  // the run is compared AGAINST — the run itself is real either way, which is
+  // the honest way to show that the check is a byte comparison.
+  const flipped = built.slice(0, -1) + (built.endsWith("3") ? "7" : "3");
+  let breaking = false;
+  let measured = null;
+  let running = false;
+
+  const expected = () => (breaking ? flipped : built);
+
+  /// Everything the widget shows, as a function of what has actually happened.
   const settle = () => {
-    cols.classList.toggle("broken", broken);
-    verdict.classList.toggle("bad", broken);
-    wasmPane.textContent = broken ? bad : good;
-    verdict.textContent = broken ? "1 byte differs — the harness fails" : "0 bytes differ";
-    num.firstChild.textContent = broken ? "1 " : "0 ";
-    num.querySelector("small").textContent = broken ? "byte differs" : "bytes differ";
-  };
-
-  function run() {
-    if (REDUCED) {
-      settle();
+    interpPane.textContent = expected();
+    interpPane.classList.toggle("bad", breaking);
+    wasmPane.textContent = measured || "—";
+    const differ = measured ? digestBytesDiffer(measured, expected()) : -1;
+    cols.classList.toggle("broken", differ > 0);
+    verdict.classList.toggle("bad", differ > 0);
+    if (differ < 0) {
+      verdict.textContent = running
+        ? "running examples/herofield.vyrn here…"
+        : "nothing has run yet — press Run it here";
+      num.firstChild.textContent = "— ";
+      num.querySelector("small").textContent = "bytes differ";
       return;
     }
-    cols.classList.add("arming");
-    setTimeout(() => cols.classList.remove("arming"), 120);
-    // Hold before the payoff, per the brief: the pause is the widget.
-    setTimeout(settle, 900);
+    verdict.textContent =
+      differ === 0
+        ? "0 bytes differ — this browser and the build agree"
+        : differ + (differ === 1 ? " byte differs" : " bytes differ") + " — the harness fails";
+    num.firstChild.textContent = differ + " ";
+    num.querySelector("small").textContent = differ === 1 ? "byte differs" : "bytes differ";
+  };
+
+  /// Fetch, instantiate, run, hash. The wait is the module doing the work.
+  async function run() {
+    if (running) return;
+    running = true;
+    runBtn.disabled = true;
+    pinWidth(runBtn);
+    const label = runBtn.textContent;
+    runBtn.textContent = "Running";
+    settle();
+    measured = await wasmDigest();
+    running = false;
+    runBtn.disabled = false;
+    runBtn.textContent = label;
+    if (!measured) {
+      verdict.classList.add("bad");
+      verdict.textContent = "/hero.wasm did not load — nothing ran, so there is nothing to compare";
+      return;
+    }
+    settle();
   }
 
   settle();
   runBtn.addEventListener("click", run);
-  breakBtn.addEventListener("click", () => {
-    broken = !broken;
-    breakBtn.setAttribute("aria-pressed", String(broken));
-    breakBtn.textContent = broken ? "Put the byte back" : "Break one byte";
-    run();
-  });
-  // No callback at all — a widget never scrolled into view — leaves the markup
-  // as the export wrote it, which is already the answer.
-  onView(root, (animate) => animate && run());
+  if (breakBtn) {
+    breakBtn.addEventListener("click", () => {
+      breaking = !breaking;
+      breakBtn.setAttribute("aria-pressed", String(breaking));
+      breakBtn.textContent = breaking ? "Put the byte back" : "Break one byte";
+      settle();
+    });
+  }
+  // Run it when the reader reaches it, so the number is theirs before they ask.
+  // `onView` fires immediately under reduced motion, which is right here: this
+  // is a computation, not an animation, and a reader who asked for less motion
+  // did not ask for less measurement.
+  onView(root, () => run());
 }
 
 // ---------------------------------------------------------------------------
@@ -481,23 +576,83 @@ function stripWidget(root) {
 }
 
 // ---------------------------------------------------------------------------
-// W5 — the comparison tabs.
+// W5 — the comparison tabs, and the install picker, which is the same widget.
+//
+// The markup ships plain buttons and every pane visible, stacked, because that
+// is what the page IS with no script: four specimens one after another, and
+// nothing to press. It used to ship `role="tab"` as well — a promise of a
+// keyboard contract that nothing kept: no tablist, no tabpanel, no
+// `aria-controls`, and arrow keys that moved nothing.
+//
+// So the roles are installed HERE, by the code that makes them true, and all of
+// them: a tablist, ids pairing each tab with its panel in both directions,
+// `aria-selected`, ONE tab in the page's tab order at a time (roving tabindex),
+// and Left/Right/Home/End to move between them.
 // ---------------------------------------------------------------------------
 
-function tabsWidget(root) {
-  const select = (id) => {
-    for (const btn of $$("[data-tab]", root)) {
-      btn.setAttribute("aria-selected", String(btn.dataset.tab === id));
+/// Ids have to be unique in a document, and a page carries up to four groups.
+let tabGroups = 0;
+
+/// Whether `el` already contains something a keyboard can reach.
+function hasFocusable(el) {
+  return Boolean($("a[href], button, input, select, textarea, [tabindex]", el));
+}
+
+function tabsWidget(root, opts = {}) {
+  const tabAttr = "data-" + (opts.tab || "tab");
+  const paneAttr = "data-" + (opts.pane || "pane");
+  const tabs = $$("[" + tabAttr + "]", root);
+  const panes = $$("[" + paneAttr + "]", root);
+  if (!tabs.length || !panes.length) return;
+  const group = "tabs" + (tabGroups += 1);
+  const keyOf = (el, attr) => el.getAttribute(attr);
+  const paneFor = (id) => panes.find((p) => keyOf(p, paneAttr) === id);
+
+  const list = tabs[0].parentElement;
+  if (list) list.setAttribute("role", "tablist");
+  tabs.forEach((tab, i) => {
+    tab.id = group + "-tab-" + i;
+    tab.setAttribute("role", "tab");
+    const pane = paneFor(keyOf(tab, tabAttr));
+    if (!pane) return;
+    pane.id = group + "-panel-" + i;
+    pane.setAttribute("role", "tabpanel");
+    pane.setAttribute("aria-labelledby", tab.id);
+    tab.setAttribute("aria-controls", pane.id);
+    // A panel whose whole content is a code block has nothing to focus, and
+    // that block scrolls sideways — so the panel itself takes the stop. One
+    // that already holds a button does not need a second.
+    if (!hasFocusable(pane)) pane.tabIndex = 0;
+  });
+
+  const select = (id, focus) => {
+    for (const tab of tabs) {
+      const on = keyOf(tab, tabAttr) === id;
+      tab.setAttribute("aria-selected", String(on));
+      // Roving: the group is ONE tab stop, and the arrows move inside it.
+      tab.tabIndex = on ? 0 : -1;
+      if (on && focus) tab.focus();
     }
-    for (const pane of $$("[data-pane]", root)) pane.hidden = pane.dataset.pane !== id;
+    for (const pane of panes) pane.hidden = keyOf(pane, paneAttr) !== id;
   };
-  for (const btn of $$("[data-tab]", root)) {
-    btn.addEventListener("click", () => select(btn.dataset.tab));
-  }
-  // Every pane is visible in the exported markup, stacked, so a reader with no
-  // JavaScript still sees all four. Selecting one is what a script adds.
-  const first = $("[data-tab]", root);
-  if (first) select(first.dataset.tab);
+
+  const step = (from, by) =>
+    select(keyOf(tabs[(from + by + tabs.length) % tabs.length], tabAttr), true);
+
+  tabs.forEach((tab, i) => {
+    tab.addEventListener("click", () => select(keyOf(tab, tabAttr), false));
+    tab.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") return e.preventDefault(), step(i, 1);
+      if (e.key === "ArrowLeft") return e.preventDefault(), step(i, -1);
+      if (e.key === "Home") return e.preventDefault(), select(keyOf(tabs[0], tabAttr), true);
+      if (e.key === "End") {
+        return e.preventDefault(), select(keyOf(tabs[tabs.length - 1], tabAttr), true);
+      }
+    });
+  });
+
+  const wanted = opts.initial && paneFor(opts.initial) ? opts.initial : keyOf(tabs[0], tabAttr);
+  select(wanted, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +870,9 @@ function entrance() {
 
 // ---------------------------------------------------------------------------
 
+/// The hero mounted by the last `boot`, if the page it was on had one.
+let hero = null;
+
 function boot() {
   copyButtons();
   markCopyable();
@@ -734,8 +892,16 @@ function boot() {
   for (const el of $$("[data-install]")) installPicker(el);
   exploreSearch();
   for (const el of $$("svg.graph")) graphWidget(el);
+  // One hero at a time. `boot` runs again after every soft navigation, and a
+  // mount that was never torn down keeps a window `resize`, a document
+  // `visibilitychange` and a `matchMedia` listener alive over a canvas that is
+  // no longer in the document.
+  if (hero) {
+    hero.destroy();
+    hero = null;
+  }
   const canvas = document.getElementById("field");
-  if (canvas) mountHero(canvas, { cellPx: 6 });
+  if (canvas) hero = mountHero(canvas, { cellPx: 6 });
   refreshRelease();
 }
 

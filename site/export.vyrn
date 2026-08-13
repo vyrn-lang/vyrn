@@ -127,12 +127,44 @@ fn withLang(html: String) -> String {
     }
 }
 
+/// `html` with the site's own mark declared as its icon.
+///
+/// Without a `<link rel="icon">` a browser asks for `/favicon.ico`, which this
+/// site does not publish, so every page fetched a 404 and showed the blank
+/// sheet. The mark exists — `editor/vscode/icons/vyrn.svg` is where the
+/// stylesheet's palette was sampled from — and `assets()` copies it to
+/// `favicon.svg`. Stamped here, beside the language, for the reason `withLang`
+/// is: the document skeleton comes from `std/ui`, whose `Head` has entries for a
+/// stylesheet, a script and a meta, and none for a link of another `rel`.
+///
+/// SVG only. `writeFile` takes a `String`, so this export cannot write the
+/// binary `.ico` a very old browser would want; a browser that cannot read the
+/// SVG shows the blank sheet it showed before, and asks for nothing.
+fn withIcon(html: String) -> String {
+    return match indexOf(html, "<head>") {
+        Some(at) => substring(html, 0, at) + "<head><link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">" + substring(html, at + 6, html.byteLength),
+        None => html.copy(),
+    }
+}
+
 /// Write one file. Returns 1 if it failed, so failures add up.
+///
+/// The reason is PRINTED rather than counted. A CI log that says
+/// `export failed: 3 file(s)` tells the operator how many and not one thing
+/// about why; `no such file or directory` names the missing `out/docs/std` in
+/// the line where it happened.
 fn emit(file: String, body: String) -> Int64 {
     return match writeFile(file, body) {
         Ok(done) => 0,
-        Err(why) => 1,
+        Err(why) => failed(file, why),
     }
+}
+
+/// Say what went wrong with `what`, and count one failure. A match arm is an
+/// expression, so the message and the count live here rather than in a block.
+fn failed(what: String, why: String) -> Int64 {
+    print("FAIL \{what}: \{why}")
+    return 1
 }
 
 /// Export one route: its document and its navigation payload. Returns the number
@@ -146,7 +178,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
     }
     let data = route(dataRequest(path))
     let json = payloadName(name)
-    let bad = emit("\{outDir}/\{name}", withLang(markCurrent(doc.body, path))) + emit("\{outDir}/\{json}", data.body)
+    let bad = emit("\{outDir}/\{name}", withIcon(withLang(markCurrent(doc.body, path)))) + emit("\{outDir}/\{json}", data.body)
     print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
     return bad
 }
@@ -166,18 +198,28 @@ fn assets() -> Array<Array<String>> {
         ["web/wasi-min.js", "wasi-min.js"],
         ["web/vyrn-nav.js", "vyrn-nav.js"],
         ["web/vyrn-dom.js", "vyrn-dom.js"],
+        ["editor/vscode/icons/vyrn.svg", "favicon.svg"],
     ]
 }
 
 /// Copy one asset. A missing source is a failure, not a warning: a page that
 /// links a stylesheet the export did not write is a broken page.
+///
+/// A missing file and an empty one are two different failures, and they used to
+/// share one message — `unreadable or empty`, which named neither. Each says
+/// what happened now, in the OS's own words where the OS is the one that knows.
 fn copyAsset(outDir: String, source: String, name: String) -> Int64 {
-    let body = match readFile(source) {
-        Ok(text) => text,
-        Err(why) => "",
+    return match readFile(source) {
+        Ok(body) => written(outDir, source, name, body),
+        Err(why) => failed(source, why),
     }
+}
+
+/// The write half of `copyAsset`, once the read has succeeded. A file that read
+/// as nothing is its own failure and says so in its own words.
+fn written(outDir: String, source: String, name: String, body: String) -> Int64 {
     if body.byteLength == 0 {
-        print("FAIL \{source}: unreadable or empty")
+        print("FAIL \{source}: read, but empty — the site links it, so it cannot be nothing")
         return 1
     }
     return emit("\{outDir}/\{name}", body)
@@ -353,6 +395,23 @@ test "every published document declares its language" {
         let html = withLang(route(documentRequest(path)).body)
         assert(has(html, "<html lang=\"en\">"))
         assert(!has(html, "<html>"))
+    }
+}
+
+test "every published document points at an icon this export writes" {
+    // A `<link rel="icon">` on every page, and the file it names in `assets()`.
+    // Without both, a browser asks for `/favicon.ico` and gets a 404 on every
+    // page of the site.
+    let mut copied = false
+    for asset in assets() {
+        if asset[1] == "favicon.svg" {
+            copied = true
+        }
+    }
+    assert(copied)
+    for path in sitePaths() {
+        let html = withIcon(route(documentRequest(path)).body)
+        assert(has(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">"))
     }
 }
 
