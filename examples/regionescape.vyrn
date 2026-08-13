@@ -1,0 +1,102 @@
+// Who owns a block while a `region` is open — the question, asked once per
+// escape route, with a detector that can see the wrong answer.
+//
+// `examples/region.vyrn` walks the same routes and never allocates afterwards,
+// so it passed on all three engines while the two compiling backends owned
+// different sets of blocks. The textual backend routes at the ALLOCATION
+// (`Gen::heap_alloc`: every `Gen::str_alloc` made while a region is open is the
+// arena's) and the direct one used to route at the EXPRESSION (`region_keep`
+// where `own::str_temporary` said yes), so a String an expression's INTERIOR
+// allocated — a `copy`, an element under a container — was the arena's on one
+// engine and the ownership walk's on the other. One block, two owners.
+//
+// A double free is invisible on its own: the block simply lands on its size
+// class's free list twice. `detect` is what makes it visible — four allocations
+// of one size class, with distinct contents. If two of them are the same
+// address, two of the four lines carry the same bytes and the three engines
+// disagree.
+
+type Tagged = { label: String, size: Int64 }
+
+// Four distinct 12-byte Strings, printed. Four distinct lines means no block of
+// that class was on the free list twice.
+fn detect(tag: String) -> Int64 {
+    let mut ds: Array<String> = []
+    ds.push("A1" + "3456789012")
+    ds.push("B2" + "3456789012")
+    ds.push("C3" + "3456789012")
+    ds.push("D4" + "3456789012")
+    let mut i = 0
+    while i < 4 {
+        print(tag + ds[i])
+        i = i + 1
+    }
+    return ds.length
+}
+
+fn main() -> Int64 {
+    let six = "abcdef"
+    let sixb = "ghijkl"
+    let mut n = 0
+
+    // A String the arena recorded, reached by the walk through a container.
+    region {
+        let mut es: Array<String> = []
+        es.push(six + sixb)
+        n = es.length
+    }
+    n = n + detect("container ")
+
+    // The same, through a record field.
+    region {
+        let tag = Tagged { label: six + sixb, size: 1 }
+        n = n + tag.label.byteLength
+    }
+    n = n + detect("field     ")
+
+    // Through a `copy`. This is the route no verdict about the expression node
+    // could reach: the node is `copy` and the buffer is the copy walk's, which is
+    // `Gen::deep_copy`'s `Gen::str_alloc` on one backend and `Fn_::str_dup` on
+    // the other.
+    region {
+        let orig = six + sixb
+        let cp = orig.copy()
+        n = n + cp.byteLength
+    }
+    n = n + detect("copy      ")
+
+    // Through an element store, which replaces an element the arena recorded.
+    // The snapshot the store takes is a second owner unless it stands aside
+    // inside a region, which is what `Gen::slot_owns` says and `Fn_::place_owns`
+    // did not.
+    region {
+        let mut sl: Array<String> = [six + sixb]
+        sl[0] = six + "!!!!!!"
+        n = n + sl[0].byteLength
+    }
+    n = n + detect("elemstore ")
+
+    // Through a Map store: the second store over one key replaces both halves,
+    // and both are the arena's.
+    region {
+        let mut mp: Map<String, String> = [:]
+        mp[six + sixb] = six + sixb
+        mp[six + sixb] = sixb + six
+        n = n + mp.length
+    }
+    n = n + detect("mapstore  ")
+
+    // Through `drop`. `own` says `Leak::Region` for a String bound inside a
+    // region, so no automatic row reaches the release — but `drop s` mints a row
+    // of its own and knew nothing about the arena. Both compiling backends freed
+    // the block here and again at the closing brace.
+    region {
+        let s = six + sixb
+        n = n + s.byteLength
+        drop s
+    }
+    n = n + detect("dropped   ")
+
+    print(n) // 74
+    return 0
+}

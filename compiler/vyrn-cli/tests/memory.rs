@@ -809,6 +809,23 @@ const ROWS: &[Row] = &[
               Take `region_keep` out and this row leaks",
     },
     Row {
+        export: "regionCopy",
+        census: "RFC-0004 §4, the routing",
+        today: Shape::Steady,
+        why: "the arena's SET. The row above proves the arena reclaims; this one proves the two \
+              backends put the same blocks in it. The textual backend routes at the ALLOCATION \
+              — every `Gen::str_alloc` made while a region is open draws from the arena — and \
+              this one routed at the EXPRESSION, keeping the value of a node `own::str_temporary` \
+              said yes to. A `copy` is not one of those nodes and its buffer is not the node's \
+              value, it is one level down, so `let t = s.copy()` inside a region was the arena's \
+              natively and nobody's here: `own` answers `Leak::Region` for `t`, so the walk \
+              stands off, and nothing recorded it. 400,000 turns read 17.5 MB against native's \
+              3.6 MB. The routing is at the allocation on both backends now (`Fn_::str_owned`, \
+              at the sites `Gen::str_alloc` is called from), and the same key partitions the \
+              release side (`Fn_::rel_at`'s `Str` arm), so a block under a container is the \
+              arena's at every depth rather than the arena's and the walk's at once",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -1160,6 +1177,20 @@ export extern fn regionArena() {{
         let b = tag() + a
         let c = b + "!"
         seen = seen + Int64(c.byteLength)
+    }}
+}}
+
+/// The same arena, asked about the block a `copy` makes rather than the one a
+/// `+` makes. `own` answers `Leak::Region` for both bindings, so the walk frees
+/// neither and the arena is the only owner either can have — which means a
+/// routing rule that misses the copy is a leak, not a second owner. It missed
+/// it: the expression-level rule read the NODE, and a copy allocates one level
+/// under its node.
+export extern fn regionCopy() {{
+    region {{
+        let s = tag() + "!"
+        let t = s.copy()
+        seen = seen + Int64(t.byteLength)
     }}
 }}
 

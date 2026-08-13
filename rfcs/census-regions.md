@@ -427,6 +427,60 @@ both halves now — an `Array` copy and a `String` copy, then a `String` reached
 through a container and through a record field — so the corpus gates the shape on
 all three engines.
 
+**Fixed on the other backend too, and the gate above was not one.** The paragraph
+above says "the corpus gates the shape on all three engines". It did not. Every
+region example walks the routes and then allocates nothing, and a double free is
+not visible until something allocates: the block lands on its size class's free
+list twice and the next two allocations of that class are the same address. So
+`examples/region.vyrn` passed on all three engines while the two compiling
+backends owned **different sets of blocks**.
+
+The sets differed because the two backends answered the routing question in
+different places. The textual backend routes at the **allocation** —
+`Gen::heap_alloc` draws from the arena whenever `region_depth > 0`, and
+`Gen::str_alloc` is its only caller — so it holds a `String` an expression's
+*interior* allocated. The direct backend routed at the **expression**:
+`Fn_::expr` called `region_keep` where `own::str_temporary` said yes, which is
+`@str`, `@concat` and a String `+`, and nothing else. Two consequences, both
+measured at `855b9d5`:
+
+- `let t = s.copy()` inside a region. The node is `copy` and the buffer is one
+  level under it, so nothing recorded it; `own` answers `Leak::Region` for `t`, so
+  the walk stood off as well. Nobody freed it. 400,000 turns read **17.5 MB**
+  against native's **3.6 MB**, and **3.9 MB** after.
+- a `String` the arena DID record, reached by the walk through a container. The
+  direct backend's release walk (`Fn_::rel_at`) had no region key, so it freed
+  what the arena also freed. Under wasmtime, a program that pushes `a + b` into an
+  `Array<String>` inside a region and then builds two more Strings prints the
+  **same bytes twice**; the interpreter and native print two different values.
+
+Three more sites of the same rule were open. `Fn_::place_owns` had no region test
+where `Gen::slot_owns` has one, so a store inside a region snapshotted and freed
+what the place held — and a global answers yes with no release row at all, so
+`g = a + b` in module state inside a region freed a block the arena had already
+freed. And `drop s` inside a region freed on **both** backends: `own` denies the
+automatic row (`Leak::Region`) and says nothing about an explicit `drop`, which
+mints `Fate::Dropped` of its own. `region { let s = a + b  drop s }` exits
+`0xC0000374` natively and aliases under wasmtime.
+
+The rule is now one sentence on both backends: **while a region is open the
+emitted code frees no `String` and takes no store snapshot, and the arena holds
+every `String` the emitter allocated lexically inside the block.** The direct
+backend's keep moved from `Fn_::expr` to `Fn_::str_owned`, called at the sites
+that mirror `Gen::str_alloc`'s callers one for one — `rt.concat` at `+` and at
+`@concat`, `rt.int_str` at `@str` of an integer, and `Fn_::str_dup`, the funnel
+the copy walk and `@str` of a `String`/`Bool` share. Two of `Gen::str_alloc`'s
+callers are unreachable or absent here and the doc on `str_owned` says which.
+`@str` of a `Float` is in neither set: both backends call `std/num`'s `f64Str`,
+so the block is the callee's.
+
+`examples/regionescape.vyrn` is the gate that was missing. It walks six routes —
+a container, a record field, a `copy`, an element store, a `Map` store, a `drop`
+— and after each one allocates four distinct Strings of one size class and prints
+them. Four distinct lines means no block was on the free list twice. Every route
+diverges on wasm without the fix. `regionCopy` in the wasm memory census is the
+leak half.
+
 ### Defect 2 — `vyrn why --memory` reports 21 discharged bindings as leaks
 
 `release_kind` answers `None` for `Stream<T>` and `Task<T>` deliberately, because
