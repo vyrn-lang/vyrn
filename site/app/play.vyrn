@@ -129,11 +129,6 @@ fn main() -> Int64 {
     ]
 }
 
-/// The example the page opens on, when the URL carries no program.
-export fn defaultExample() -> String {
-    return "hello"
-}
-
 test "every example is a whole program with a unique id" {
     let all = playExamples()
     assert(all.length > 0)
@@ -150,16 +145,6 @@ test "every example is a whole program with a unique id" {
         }
         assertEq(seen, 1)
     }
-}
-
-test "the default example is one of them" {
-    let mut found = false
-    for e in playExamples() {
-        if e.id == defaultExample() {
-            found = true
-        }
-    }
-    assert(found)
 }
 
 /// Whether `needle` occurs in `haystack`. Only the tests above use it.

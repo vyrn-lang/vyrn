@@ -63,6 +63,7 @@ export fn navRows() -> Array<NavRow> {
         NavRow { href: hrefOf("/guide"), label: "Guide" },
         NavRow { href: hrefOf("/docs"), label: "Docs" },
         NavRow { href: hrefOf("/explore"), label: "Explore" },
+        NavRow { href: hrefOf("/play"), label: "Play" },
     ]
 }
 
@@ -79,5 +80,5 @@ test "a route becomes one file, and a nested route keeps its directory" {
 }
 
 test "the navigation covers every route but the home page" {
-    assertEq(navRows().length, 7)
+    assertEq(navRows().length, 8)
 }

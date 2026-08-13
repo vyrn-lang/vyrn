@@ -9,6 +9,7 @@
 // fresh.js.
 import { mountHero } from "/hero.js";
 import { refreshRelease } from "/fresh.js";
+import { mountPlay } from "/play.js";
 import { runVyrn } from "/wasi-min.js";
 
 // Soft navigation across a static host: the payload for /philosophy.html lives
@@ -891,6 +892,7 @@ function boot() {
   for (const el of $$("[data-tabs]")) tabsWidget(el);
   for (const el of $$("[data-install]")) installPicker(el);
   exploreSearch();
+  for (const el of $$('[data-widget="play"]')) mountPlay(el);
   for (const el of $$("svg.graph")) graphWidget(el);
   // One hero at a time. `boot` runs again after every soft navigation, and a
   // mount that was never torn down keeps a window `resize`, a document

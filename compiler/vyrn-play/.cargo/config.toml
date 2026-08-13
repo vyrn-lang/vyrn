@@ -8,11 +8,17 @@
 # (`--stack-first`, which rustc passes for this target). It is also what the
 # module's initial memory costs the page, so bigger is not free.
 #
-# MEASURED, and the reason this number is not larger: the binding constraint in a
-# browser is NOT this stack. V8 gives each wasm call a frame on its own native
-# stack, and that runs out at ~996 nested Vyrn calls — just under the language's
-# 1,000. Raising the number here buys nothing; `play-worker.js` catches the
-# engine's `RangeError` and says what happened.
+# MEASURED, and the reason this number is not larger: the binding constraint is
+# NOT this stack. V8 gives each wasm call a frame on its own NATIVE stack, and
+# that gives out first — at ~996 nested Vyrn calls in node, and at 466 to 468 in
+# a Chrome worker, whose native stack is about half a main thread's. Both are
+# under the language's 1,000, and neither moves when this number changes: the
+# same binary search returned 995 with 32 MB here and 996 with 16 MB.
+#
+# So this is sized for the deepest run the ENGINE will allow — ~470 frames at
+# ~8.5 KB is ~4 MB — with 4x of margin for a browser whose stack is larger, and
+# `play-worker.js` catches the engine's `RangeError` and says whose ceiling it
+# was. Raising it further only costs the page initial memory.
 #
 # Cargo reads this file from the working directory upward, so it only applies to
 # builds started in `compiler/vyrn-play`. See the note in Cargo.toml.
