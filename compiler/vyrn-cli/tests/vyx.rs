@@ -613,8 +613,8 @@ fn std_vyx_unit_tests_run_green() {
         "std/vyx unit tests failed:\n{combined}"
     );
     assert!(
-        combined.contains("40 passed, 0 failed"),
-        "expected 40 green tests:\n{combined}"
+        combined.contains("48 passed, 0 failed"),
+        "expected 48 green tests:\n{combined}"
     );
 }
 
@@ -749,4 +749,143 @@ fn audit_html_comment_in_template_is_stripped() {
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(ok, "an HTML comment must not break the template:\n{err}");
+}
+
+// ---- the template section is markup, and is scanned by markup's rules -------
+//
+// Each fixture below is well-formed markup that the code-mode scanner misread:
+// the oracle is that the generated module PARSES and runs, not that the
+// generator survived.
+
+/// A bare `"` in text content is a quotation mark. Read as the start of a string
+/// literal it swallowed the real `</template>`, and the component came back with
+/// `VYX_NO_TEMPLATE` for a template that was right there.
+#[test]
+fn an_odd_double_quote_in_text_is_a_character() {
+    let dir = scratch("oddquote");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<li>a 6\" nail</li>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(
+        ok,
+        "an odd quote in text must not hide the template:\n{err}"
+    );
+    assert!(
+        !err.contains("VYX_NO_TEMPLATE"),
+        "the template is present:\n{err}"
+    );
+}
+
+/// An attribute value may be `'`-quoted (the documented Vue convention), and then
+/// it may carry a `"`.
+#[test]
+fn a_single_quoted_attribute_may_hold_a_double_quote() {
+    let dir = scratch("sqattr");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<li title='2\"'>x</li>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(
+        ok,
+        "a single-quoted value holding a double quote must compile:\n{err}"
+    );
+}
+
+/// An HTML comment holds no tags: a `</template>` inside one closed the section
+/// early and truncated everything after it.
+#[test]
+fn a_close_tag_inside_a_comment_does_not_truncate_the_template() {
+    let dir = scratch("cmtclose");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<ul><!-- </template> --><li>kept</li></ul>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(ok, "a commented close tag must close nothing:\n{err}");
+
+    // And the content past the comment really is in the module.
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        src.contains("kept"),
+        "content past the comment survives:\n{src}"
+    );
+}
+
+/// A nested `<template>` element is closed by its own tag, so the section's
+/// extent reaches the outer one.
+#[test]
+fn a_nested_template_element_does_not_end_the_section() {
+    let dir = scratch("nested");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<ul><template><li>kept</li></template></ul>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(ok, "a nested template must not end the section:\n{err}");
+}
+
+/// An empty template is found — and then fails on its own terms (no root), never
+/// as a missing section.
+#[test]
+fn an_empty_template_is_found_not_missing() {
+    let dir = scratch("empty");
+    write(&dir.join("comp/Widget.vyx"), "<template></template>\n");
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(!ok, "an empty template has no root element");
+    assert!(
+        !err.contains("VYX_NO_TEMPLATE"),
+        "the section was found, so the diagnostic is not 'no template':\n{err}"
+    );
+}
+
+// ---- the event-argument arity guard counts brackets, not comparisons --------
+
+/// `pick(a > b, c)` is two arguments. Counting `>` as a closing bracket drove the
+/// depth negative, hid the comma, and emitted a two-argument call into a
+/// one-argument call site — `expected RParen, found Comma`.
+#[test]
+fn a_comparison_in_a_multi_arg_event_still_reports_the_arity() {
+    let dir = scratch("cmpevent");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<button @click=\"pick(a > b, c)\">x</button>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(!ok, "a multi-argument event handler must fail to load");
+    assert!(
+        err.contains("VYX_NON_SCALAR_EVENT_ARG"),
+        "the arity diagnostic, not a parse error:\n{err}"
+    );
+    assert!(
+        !err.contains("expected RParen"),
+        "the generator must not emit unparseable Vyrn:\n{err}"
+    );
+}
+
+/// And one argument stays one argument, comparison or not.
+#[test]
+fn a_comparison_inside_a_single_event_argument_compiles() {
+    let dir = scratch("cmpone");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\nprops { a: Int64, b: Int64 }\n</script>\n\
+         <template>\n<button @click=\"pick(a > b)\">x</button>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(ok, "one comparison is one argument:\n{err}");
 }

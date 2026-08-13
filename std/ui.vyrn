@@ -61,6 +61,11 @@ import { el, empty, Html, Attr } from "std/html"
 // below, instead of hunted for by name.
 import { checkContract, matchedMember } from "std/contract"
 import { endsWith, startsWith } from "std/strpred"
+// RFC-0099: a slug and an identifier are different alphabets, and the conversion
+// between them is many-to-one. When two routes land on one helper name this says
+// so as a diagnostic, at a severity this generator chooses, instead of emitting a
+// module with a duplicate export.
+import { reportHere, Severity } from "std/diag"
 
 // ===========================================================================
 // PageError (RFC-0041 §3) — the failure a page's `data` may carry. `data ->
@@ -709,8 +714,53 @@ gen fn uiRoutePathBranch(segs: Array<String>, dynTypes: Array<String>) -> String
     return "/" + joinWith(parts, "/")
 }
 
+/// One URL slug as an identifier fragment.
+///
+/// THE RULE: a URL slug and a Vyrn identifier are DIFFERENT ALPHABETS, so the
+/// conversion is deliberate and total, never a copy. Every run of bytes that is
+/// not ASCII alphanumeric is a word break and disappears; every word after the
+/// first is capitalised, which is this project's lowerCamelCase convention:
+///
+///     about-us -> aboutUs      sign-in  -> signIn      a.b -> aB
+///     terms_of_service -> termsOfService              2fa -> 2fa
+///
+/// The conversion is MANY-TO-ONE (`about-us` and `aboutUs` share a fragment), and
+/// it cannot fix a digit-leading fragment. Neither is papered over here:
+/// `uiHelperCollisions` reports the first, and `uiIdentLead` handles the second at
+/// the one place a fragment becomes a whole name.
+gen fn uiSegIdent(s: String) -> String {
+    let mut out: Array<UInt8> = []
+    let mut atWordStart = false
+    for b in bytes(s) {
+        if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
+            if atWordStart && b >= 'a' && b <= 'z' {
+                out.push(b - 32)
+            } else {
+                out.push(b)
+            }
+            atWordStart = false
+        } else {
+            atWordStart = true
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// `name` made legal to START an identifier. A slug may begin with a digit
+/// (`/2fa`), and no capitalisation rule can rescue that, so a leading `_` does —
+/// `2faPath` becomes `_2faPath`. A RESERVED WORD needs no handling: every name
+/// this module builds carries a mandatory affix (`href…`, `…Path`), so it can
+/// never come out equal to a keyword.
+gen fn uiIdentLead(name: String) -> String {
+    let ba = bytes(name)
+    if ba.length > 0 && ba[0] >= '0' && ba[0] <= '9' {
+        return "_" + name
+    }
+    return name.copy()
+}
+
 /// The camelCase name of a static route's typed-URL helper (`/items/sub` →
-/// `itemsSubPath`; `/` → `rootPath`).
+/// `itemsSubPath`; `/about-us` → `aboutUsPath`; `/` → `rootPath`).
 gen fn uiStaticHelperName(segs: Array<String>) -> String {
     if segs.length == 0 {
         return "rootPath"
@@ -719,25 +769,34 @@ gen fn uiStaticHelperName(segs: Array<String>) -> String {
     let mut i = 0
     for s in segs {
         if i == 0 {
-            out = out + s
+            out = out + uiSegIdent(s)
         } else {
-            out = out + uiUpperFirst(s)
+            out = out + uiUpperFirst(uiSegIdent(s))
         }
         i = i + 1
     }
-    return out + "Path"
+    return uiIdentLead(out + "Path")
 }
 
 /// The name of a dynamic route's typed-URL helper: `href` + PascalCase of its
-/// STATIC segments (`/users/[id]` → `hrefUsers`).
+/// STATIC segments (`/users/[id]` → `hrefUsers`; `/sign-in/[t]` → `hrefSignIn`).
 gen fn uiDynHelperName(segs: Array<String>) -> String {
     let mut out = "href"
     for s in segs {
         if uiIsDynSeg(s) == false {
-            out = out + uiUpperFirst(s)
+            out = out + uiUpperFirst(uiSegIdent(s))
         }
     }
     return out
+}
+
+/// The one name a page's typed-URL helper is exported under — the single place
+/// that decides, so the emitter and the collision check can never disagree.
+gen fn uiHelperNameOf(p: UiPageInfo) -> String {
+    if p.dynNames.length > 0 {
+        return uiDynHelperName(p.segs)
+    }
+    return uiStaticHelperName(p.segs)
 }
 
 /// The typed-URL body of a dynamic helper: a Vyrn string literal with a uiHole per
@@ -1449,7 +1508,8 @@ gen fn uiErrorIndex(p: UiPageInfo, errors: Array<UiChrome>) -> Int64 {
 }
 
 /// Detect two pages claiming the same route. One diagnostic line per collision,
-/// naming both files.
+/// naming both files. Two pages that claim DIFFERENT routes but one helper NAME
+/// are caught here too, by `uiHelperCollisions`.
 gen fn uiCollisionErrors(pages: Array<UiPageInfo>) -> String {
     let mut err = ""
     let mut i = 0
@@ -1463,7 +1523,36 @@ gen fn uiCollisionErrors(pages: Array<UiPageInfo>) -> String {
         }
         i = i + 1
     }
-    return err
+    return err + uiHelperCollisions(pages)
+}
+
+/// Two DISTINCT routes whose typed-URL helpers would carry ONE name — `/about-us`
+/// and `/aboutUs` both reach `aboutUsPath`. Slug-to-identifier is many-to-one, so
+/// this is reported (RFC-0099) rather than resolved: which of the two routes gets
+/// renamed is the author's decision, not the generator's. `reportHere` is the
+/// right anchor — the fault is a contradiction BETWEEN two input files, not a
+/// position inside either one. Same-route pairs are left to
+/// `PAGES_ROUTE_COLLISION` above, so one mistake gets one diagnostic.
+gen fn uiHelperCollisions(pages: Array<UiPageInfo>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < pages.length {
+        let mut j = i + 1
+        while j < pages.length {
+            let sameName = uiHelperNameOf(pages[i]) == uiHelperNameOf(pages[j])
+            let sameRoute = uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs)
+            if sameName && sameRoute == false {
+                out = out
+                + reportHere(
+                    Error,
+                    "routes `\{uiUrlPatternOf(pages[i].segs)}` and `\{uiUrlPatternOf(pages[j].segs)}` both name the typed-URL helper `\{uiHelperNameOf(pages[i])}` — a URL slug and a Vyrn identifier are different alphabets, and these two slugs convert to one identifier; rename one route",
+                )
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
 }
 
 // ===========================================================================
@@ -2031,9 +2120,9 @@ gen fn uiEmitTypedUrl(p: UiPageInfo) -> String {
                 k = k + 1
             }
         }
-        return "export fn " + uiDynHelperName(p.segs) + "(" + joinWith(params, ", ") + ") -> RoutePath {\n    return " + uiDynHelperBody(p.segs) + "\n}\n"
+        return "export fn " + uiHelperNameOf(p) + "(" + joinWith(params, ", ") + ") -> RoutePath {\n    return " + uiDynHelperBody(p.segs) + "\n}\n"
     }
-    return "export fn " + uiStaticHelperName(p.segs) + "() -> RoutePath {\n    return " + uiStrLit(uiUrlPatternOf(p.segs)) + "\n}\n"
+    return "export fn " + uiHelperNameOf(p) + "() -> RoutePath {\n    return " + uiStrLit(uiUrlPatternOf(p.segs)) + "\n}\n"
 }
 
 /// Whether any page in the set is a `.vyx` page (so the router imports the
@@ -2682,6 +2771,35 @@ test "typed-URL helper names and bodies" {
     assertEq(uiStaticHelperName(["items"]), "itemsPath")
     assertEq(uiDynHelperName(["users", "[id]"]), "hrefUsers")
     assertEq(uiDynHelperBody(["users", "[id]"]), "\"/users/" + uiHole("id") + "\"")
+}
+
+test "a slug converts to an identifier, and an alphanumeric slug is unchanged" {
+    // The conversion: non-alphanumeric runs are word breaks, later words capitalise.
+    assertEq(uiSegIdent("about-us"), "aboutUs")
+    assertEq(uiSegIdent("sign-in"), "signIn")
+    assertEq(uiSegIdent("terms-of-service"), "termsOfService")
+    assertEq(uiSegIdent("a.b"), "aB")
+    assertEq(uiSegIdent("2fa"), "2fa")
+    // An already-alphanumeric slug passes through byte for byte, so no existing
+    // route's helper name moves.
+    assertEq(uiSegIdent("items"), "items")
+    assertEq(uiSegIdent("philosophy"), "philosophy")
+    assertEq(uiSegIdent("guide"), "guide")
+}
+
+test "an awkward slug still makes a legal helper name" {
+    assertEq(uiStaticHelperName(["about-us"]), "aboutUsPath")
+    assertEq(uiStaticHelperName(["items", "sub-page"]), "itemsSubPagePath")
+    // A digit-leading name is impossible to capitalise out of, so it takes a `_`.
+    assertEq(uiStaticHelperName(["2fa"]), "_2faPath")
+    // A reserved word needs no handling: the mandatory affix means the name can
+    // never come out equal to a keyword.
+    assertEq(uiStaticHelperName(["return"]), "returnPath")
+    assertEq(uiDynHelperName(["sign-in", "[token]"]), "hrefSignIn")
+}
+
+test "two slugs may reach one helper name — that is the collision to report" {
+    assertEq(uiStaticHelperName(["about-us"]), uiStaticHelperName(["aboutUs"]))
 }
 
 test "record-field parsing pulls names and types" {

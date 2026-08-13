@@ -1249,3 +1249,90 @@ fn a_page_on_the_declaration_forms_is_silent() {
     assert!(out.status.success(), "must build:\n{err}");
     assert!(!err.contains("warning:"), "nothing to say:\n{err}");
 }
+
+// ---- a URL slug is not an identifier ---------------------------------------
+//
+// `pages/about-us.vyrn` used to produce an export literally named
+// `hrefAbout-us` / `about-usPath`, and the router then failed to parse at the
+// hyphen (`expected LParen, found Minus`). The conversion is now deliberate:
+// every run of non-alphanumeric bytes is a word break, each later word is
+// capitalised, and a digit-leading name takes a `_`.
+
+/// The oracle is that the generated router PARSES and that the helpers come out
+/// under their converted names — the app imports each one by name, so a changed
+/// mapping is a failed import, not a silent pass.
+#[test]
+fn awkward_slugs_convert_to_identifiers_and_the_router_parses() {
+    let dir = scratch("slugs");
+    let page = "import { el, Html } from \"std/html\"\n\
+                export fn page() -> Html { return el(\"main\", [], []) }\n";
+    for stem in ["about-us", "sign-in", "2fa", "a.b", "return"] {
+        write(&dir.join(format!("pages/{stem}.vyrn")), page);
+    }
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route, aboutUsPath, signInPath, _2faPath, aBPath, returnPath } from pages(\"./pages\")\n\
+         fn main() -> Int64 { return 0 }\n",
+    );
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("check");
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "the generated router must parse and check:\n{err}"
+    );
+}
+
+/// Slug-to-identifier is many-to-one, so two routes can reach one helper name.
+/// That is a diagnostic (RFC-0099), not a silently duplicated export.
+#[test]
+fn two_slugs_reaching_one_helper_name_are_a_diagnostic() {
+    let dir = scratch("slugclash");
+    let page = "import { el, Html } from \"std/html\"\n\
+                export fn page() -> Html { return el(\"main\", [], []) }\n";
+    write(&dir.join("pages/about-us.vyrn"), page);
+    write(&dir.join("pages/aboutUs.vyrn"), page);
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("check");
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "one identifier for two routes must fail:\n{err}"
+    );
+    assert!(
+        err.contains("aboutUsPath"),
+        "the diagnostic names the helper:\n{err}"
+    );
+    assert!(
+        err.contains("/about-us") && err.contains("/aboutUs"),
+        "the diagnostic names both routes:\n{err}"
+    );
+}
+
+/// `std/ui`'s own unit tests — the slug-to-identifier mapping is decided there,
+/// and nothing else in this file would run them.
+#[test]
+fn std_ui_unit_tests_run_green() {
+    let module = repo_file("std/ui.vyrn");
+    let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "std/ui unit tests failed:\n{combined}"
+    );
+    assert!(
+        combined.contains("9 passed, 0 failed"),
+        "expected 9 green tests:\n{combined}"
+    );
+}
