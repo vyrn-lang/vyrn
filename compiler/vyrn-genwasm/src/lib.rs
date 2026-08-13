@@ -388,6 +388,7 @@ fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function
         ret,
         body: Block { stmts },
         line: 0,
+        col: 0,
         is_extern: false,
         is_export_extern: false,
         is_gen: false,

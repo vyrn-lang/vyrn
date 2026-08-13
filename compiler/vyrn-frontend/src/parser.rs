@@ -1999,7 +1999,7 @@ impl Parser {
     /// `Type::Param` reaches codegen and lowers to `void` — a smaller function,
     /// not an error. One ordering rule with a diagnostic is the cheaper trade.
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
-        let line = self.line();
+        let (line, col) = (self.line(), self.col());
         self.eat(&Tok::Impl)?;
         let (type_params, type_bounds) = self.type_param_binder()?;
         self.type_params = type_params.clone();
@@ -2088,6 +2088,7 @@ impl Parser {
             methods,
             places,
             line,
+            col,
         })
     }
 
@@ -2102,6 +2103,7 @@ impl Parser {
     fn place_member(&mut self, self_ty: &Type) -> Result<Function, Diagnostic> {
         let line = self.line();
         self.advance(); // `place`
+        let col = self.col();
         let name = self.expect_ident()?;
         self.eat(&Tok::LParen)?;
         let (cline, ccol) = (self.line(), self.col());
@@ -2165,6 +2167,7 @@ impl Parser {
             ret,
             body: body?,
             line,
+            col,
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
@@ -2205,6 +2208,7 @@ impl Parser {
     fn impl_method(&mut self, self_ty: &Type) -> Result<Function, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Fn)?;
+        let col = self.col();
         let name = self.expect_ident()?;
         self.eat(&Tok::LParen)?;
         let capability = self.parse_self_capability();
@@ -2245,6 +2249,7 @@ impl Parser {
             ret,
             body,
             line,
+            col,
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
@@ -2757,6 +2762,7 @@ impl Parser {
     fn function(&mut self, is_gen: bool) -> Result<Function, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Fn)?;
+        let col = self.col();
         let name = self.expect_ident()?;
 
         // optional generic parameters with bounds: `<T: Ord, U>`
@@ -2806,6 +2812,7 @@ impl Parser {
             ret,
             body,
             line,
+            col,
             is_extern: false,
             is_export_extern: false,
             is_gen,
@@ -2898,6 +2905,7 @@ impl Parser {
         let line = self.line();
         self.advance(); // `extern` (a contextual Ident)
         self.eat(&Tok::Fn)?;
+        let col = self.col();
         let name = self.expect_ident()?;
         // No generic parameters on an extern (the ABI is monomorphic).
         self.eat(&Tok::LParen)?;
@@ -2952,6 +2960,7 @@ impl Parser {
                 ret,
                 body,
                 line,
+                col,
                 is_extern: false,
                 is_export_extern: true,
                 is_gen: false,
@@ -2978,6 +2987,7 @@ impl Parser {
             ret,
             body: Block { stmts: Vec::new() },
             line,
+            col,
             is_extern: true,
             is_export_extern: false,
             is_gen: false,

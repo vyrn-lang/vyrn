@@ -561,6 +561,22 @@ pub struct ImplBlock {
     /// accepts `yield` only inside a projection and `return` only outside one.
     pub places: Vec<Function>,
     pub line: usize,
+    /// 1-based column of the `impl` keyword, in Unicode scalar values — `0` when
+    /// the block was synthesized rather than parsed. A diagnostic about the
+    /// impl HEAD (a missing method, a clashing head, an unbound associated type)
+    /// points here; see [`crate::diagnostics`] for the column convention.
+    pub col: usize,
+}
+
+impl ImplBlock {
+    /// The `impl` keyword's column span, for a diagnostic about the impl HEAD
+    /// (`(0, 0)` — "whole line" — for a synthesized block with no column).
+    pub fn head_span(&self) -> (usize, usize) {
+        match self.col {
+            0 => (0, 0),
+            c => (c, c + "impl".len()),
+        }
+    }
 }
 
 /// A function definition. `type_params` holds any generic parameters
@@ -582,6 +598,12 @@ pub struct Function {
     pub ret: Type,
     pub body: Block,
     pub line: usize,
+    /// 1-based column of the function's NAME, in Unicode scalar values — `0`
+    /// when the function was synthesized rather than parsed. A diagnostic about
+    /// the declaration (a reserved or duplicated name, a signature that does not
+    /// match its protocol, a malformed projection) points here; see
+    /// [`crate::diagnostics`] for the column convention.
+    pub col: usize,
     /// `extern fn ..` — a JS-interop import (RFC-0012). A body-less declaration
     /// whose implementation the wasm host supplies from the `vyrn` import
     /// namespace; on native/interpreter a *call* traps (declaring is fine). The
@@ -620,6 +642,17 @@ pub struct Function {
     /// word (`let mut` already has it); `export mut fn` is the only combination,
     /// with `export` outermost like `export gen fn` / `export extern fn`.
     pub is_mut: bool,
+}
+
+impl Function {
+    /// The declared name's column span, for a diagnostic about the DECLARATION
+    /// (`(0, 0)` — "whole line" — for a synthesized function with no column).
+    pub fn name_span(&self) -> (usize, usize) {
+        match self.col {
+            0 => (0, 0),
+            c => (c, c + self.name.chars().count()),
+        }
+    }
 }
 
 /// A capability declares what a function does with a parameter (RFC-0004):

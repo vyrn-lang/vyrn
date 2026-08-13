@@ -24,9 +24,24 @@ pub enum Severity {
 
 /// A single problem found in a Vyrn source, with position and provenance.
 ///
-/// Positions are 1-based. `col`/`end_col` are `0` when a stage knows only the
-/// line (the whole line is then the natural range); `end_col` of `0` otherwise
-/// means "point" (the LSP treats it as a single character).
+/// # The column convention
+///
+/// **Every position in the front end is 1-based and counted in Unicode scalar
+/// values** — `char`s, not bytes and not UTF-16 code units. The lexer sets the
+/// convention (it walks a `Vec<char>` and numbers each line from 1), every other
+/// producer follows it, and the LSP adapter subtracts one to reach LSP's 0-based
+/// `Position`.
+///
+/// Scalar values are not what LSP asks for by default (UTF-16 code units), and
+/// the two disagree only for a character outside the Basic Multilingual Plane
+/// on the same line as, and before, a diagnostic. Vyrn `String`s are UTF-8
+/// bytes, its sources are read as UTF-8, and one convention that every stage
+/// obeys is worth more than three conventions that are each locally right — so
+/// this is the convention, written down, rather than a per-stage guess.
+///
+/// `col`/`end_col` are `0` when a stage knows only the line (the whole line is
+/// then the natural range); `end_col` of `0` otherwise means "point" (the LSP
+/// treats it as a single character).
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     /// The module (file) the problem is in, when it is not the root document —

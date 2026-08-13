@@ -40,6 +40,20 @@ macro_rules! cerr {
     };
 }
 
+/// A checker error at a known column span: `cerr_at!(f.line, f.name_span(), ..)`
+/// points the squiggle at the declaration's own name instead of at its whole
+/// line. `$span` is `(col, end_col)`, both 1-based; `(0, 0)` means "whole line",
+/// which is what a synthesized declaration gives.
+macro_rules! cerr_at {
+    ($line:expr, $span:expr, $($arg:tt)*) => {{
+        let (col, end_col) = $span;
+        let mut d = cerr!($line, $($arg)*);
+        d.col = col;
+        d.end_col = end_col;
+        d
+    }};
+}
+
 /// The line a `cerr!` was given, by value. AST nodes hand out their line as
 /// `usize` when they are matched by value and `&usize` when they are matched by
 /// reference; the old `format!("line {line}: ..")` accepted both through
@@ -429,24 +443,36 @@ fn check_accum_inner(
     let mut generics: HashMap<String, Vec<String>> = HashMap::new();
     for f in &program.functions {
         if RESERVED.contains(&f.name.as_str()) {
-            out.push(cerr!(f.line, "`{}` is a reserved name", f.name));
+            out.push(cerr_at!(
+                f.line,
+                f.name_span(),
+                "`{}` is a reserved name",
+                f.name
+            ));
             continue;
         }
         if variants.contains_key(&f.name) {
-            out.push(cerr!(
+            out.push(cerr_at!(
                 f.line,
+                f.name_span(),
                 "`{}` is both a function and an enum variant",
                 f.name
             ));
             continue;
         }
         if sigs.contains_key(&f.name) {
-            out.push(cerr!(f.line, "function `{}` defined twice", f.name));
+            out.push(cerr_at!(
+                f.line,
+                f.name_span(),
+                "function `{}` defined twice",
+                f.name
+            ));
             continue;
         }
         if types.contains_key(&f.name) {
-            out.push(cerr!(
+            out.push(cerr_at!(
                 f.line,
+                f.name_span(),
                 "`{}` is both a type and a function name",
                 f.name
             ));
@@ -592,8 +618,9 @@ fn check_accum_inner(
         if let Some(declared) = protocol_decls.get(imp.protocol.as_str()).map(|p| &p.assoc) {
             for name in declared.iter() {
                 if !imp.assoc.contains(name) {
-                    out.push(cerr!(
+                    out.push(cerr_at!(
                         imp.line,
+                        imp.head_span(),
                         "`impl {} for {}` does not bind the associated type `{name}` \
                              — add `type {name} = ..` (protocol `{}` declares it)",
                         imp.protocol,
@@ -604,8 +631,9 @@ fn check_accum_inner(
             }
             for name in &imp.assoc {
                 if !declared.contains(name) {
-                    out.push(cerr!(
+                    out.push(cerr_at!(
                         imp.line,
+                        imp.head_span(),
                         "`impl {} for {}` binds `type {name}`, which protocol `{}` \
                              does not declare",
                         imp.protocol,
@@ -640,8 +668,9 @@ fn check_accum_inner(
                 |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
                 let Some(f) = imp.methods.iter().find(|m| m.name == sig.name) else {
-                    out.push(cerr!(
+                    out.push(cerr_at!(
                         imp.line,
+                        imp.head_span(),
                         "`impl {} for {}` does not provide `{}`, which protocol `{}` \
                              declares — a protocol's methods are all required, so anything \
                              holding a `T: {}` may call it",
@@ -680,8 +709,9 @@ fn check_accum_inner(
                     && got_caps == sig.param_caps
                     && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
                 if !agrees {
-                    out.push(cerr!(
+                    out.push(cerr_at!(
                         f.line,
+                        f.name_span(),
                         "`{}` does not match protocol `{}` — it declares `{}`, this \
                              provides `{}`",
                         render_impl_head(imp),
@@ -746,8 +776,9 @@ fn check_accum_inner(
                     .first()
                     .map(|p| p.capability)
                     .unwrap_or(Capability::Read);
-                out.push(cerr!(
+                out.push(cerr_at!(
                     m.line,
+                    m.name_span(),
                     "`{}` provides `{}`, which protocol `{}` does not declare — \
                          dispatch knows only a protocol's own method names, so this one is \
                          reachable from nowhere; {fix}",
@@ -789,8 +820,9 @@ fn check_accum_inner(
                     // keys on the constructor (see `types::type_key`), so the
                     // constructor is what admits one impl. The generic form is
                     // the answer in both cases, so the message names it.
-                    Some((prev_line, prev)) => out.push(cerr!(
+                    Some((prev_line, prev)) => out.push(cerr_at!(
                         imp.line,
+                        imp.head_span(),
                         "`{head}` collides with `{prev}` (line {prev_line}) — Vyrn \
                              dispatches on the type constructor, so `{key}` may have only one \
                              impl of `{}`; write one generic impl (`impl<T> {} for {key}<T>`) to \
@@ -827,8 +859,9 @@ fn check_accum_inner(
                      or `Result`"
                         .to_string()
                 };
-                out.push(cerr!(
+                out.push(cerr_at!(
                     imp.line,
+                    imp.head_span(),
                     "`impl {} for {}` is not supported — {why}",
                     imp.protocol,
                     imp.ty
@@ -1006,15 +1039,17 @@ fn check_accum_inner(
                 // domain crosses the host boundary (closures do not cross wasm),
                 // and never on a `gen fn` (generation-time signatures are wire-ish).
                 if checker.contains_fn(&p.ty) && (f.is_extern || f.is_export_extern) {
-                    return Err(cerr!(
+                    return Err(cerr_at!(
                         f.line,
+                        f.name_span(),
                         "an `extern` function may not take a `fn`-typed \
                          parameter (RFC-0023)"
                     ));
                 }
                 if checker.contains_fn(&p.ty) && f.is_gen {
-                    return Err(cerr!(
+                    return Err(cerr_at!(
                         f.line,
+                        f.name_span(),
                         "a `gen fn` may not take a `fn`-typed parameter in v1 \
                          (RFC-0023)"
                     ));
@@ -1022,15 +1057,17 @@ fn check_accum_inner(
                 checker.ensure_param_type(&p.ty, f.line)?;
             }
             if checker.contains_fn(&f.ret) && (f.is_extern || f.is_export_extern) {
-                return Err(cerr!(
+                return Err(cerr_at!(
                     f.line,
+                    f.name_span(),
                     "an `extern` function may not return a function value \
                      (RFC-0037 — closures do not cross the host boundary)"
                 ));
             }
             if checker.contains_fn(&f.ret) && f.is_gen {
-                return Err(cerr!(
+                return Err(cerr_at!(
                     f.line,
+                    f.name_span(),
                     "a `gen fn` may not return a function value (RFC-0037)"
                 ));
             }
@@ -1164,8 +1201,9 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
                 Some(Stmt::Return { value: Some(_), .. })
             )
         {
-            push(cerr!(
+            push(cerr_at!(
                 f.line,
+                f.name_span(),
                 "`place {}` must end with exactly one `yield <place>` — \
                  a projection is inlined at the access site, so it has one exit",
                 f.name
@@ -1178,13 +1216,14 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         // `e?` propagates by RETURNING, and a projection has no frame to
         // return from — inlined, it would exit the access site's function.
         if crate::project::has_try(&f.body) {
-            push(cerr!(f.line, "`place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.", f.name
+            push(cerr_at!(f.line, f.name_span(), "`place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.", f.name
             ));
             continue;
         }
         if !crate::project::is_place(y) {
-            push(cerr!(
+            push(cerr_at!(
                 f.line,
+                f.name_span(),
                 "`place {}` yields a value, not a place — write \
                  `yield <field or element of self>`; a projection that computes \
                  a new value is an ordinary `fn`",
@@ -1194,8 +1233,9 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         }
         match crate::project::place_root(y) {
             Some(root) if root == "self" || f.params.iter().any(|p| p.name == root) => {}
-            Some(root) => push(cerr!(
+            Some(root) => push(cerr_at!(
                 f.line,
+                f.name_span(),
                 "`place {}` yields a place rooted at `{root}`, which the \
                  access site does not own — a projection may only yield into \
                  `self` or one of its parameters",
@@ -1275,6 +1315,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             ret: Type::Unit,
             body: t.body.clone(),
             line: t.line,
+            col: 0,
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
@@ -1327,6 +1368,7 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
             ret: Type::Unit,
             body: b.body.clone(),
             line: b.line,
+            col: 0,
             is_extern: false,
             is_export_extern: false,
             is_gen: false,
@@ -2678,8 +2720,9 @@ impl<'a> Checker<'a> {
         self.errors.borrow_mut().clear();
         for p in &f.params {
             if !extern_abi_type_ok(&p.ty, false) {
-                self.errors.borrow_mut().push(cerr!(
+                self.errors.borrow_mut().push(cerr_at!(
                     f.line,
+                    f.name_span(),
                     "extern fn `{}` parameter `{}` has type {}, which cannot cross \
                      the JS boundary (allowed: Int64, sized ints, Float64, Float32, Bool, String)",
                     f.name,
@@ -2694,8 +2737,9 @@ impl<'a> Checker<'a> {
             // here reads as ownership and delivers a dangling pointer, so the
             // one honest way to keep the value is to copy it.
             if matches!(p.capability, Capability::Consume) && matches!(p.ty, Type::Str) {
-                self.errors.borrow_mut().push(cerr!(
+                self.errors.borrow_mut().push(cerr_at!(
                     f.line,
+                    f.name_span(),
                     "extern fn `{}` parameter `{}` may not be `consume` — the caller \
                      across this boundary is JS, and it releases the String when the call \
                      returns\n  fix: take `{}: String` and store `{}.copy()`",
@@ -2707,8 +2751,9 @@ impl<'a> Checker<'a> {
             }
         }
         if !extern_abi_type_ok(&f.ret, true) {
-            self.errors.borrow_mut().push(cerr!(
+            self.errors.borrow_mut().push(cerr_at!(
                 f.line,
+                f.name_span(),
                 "extern fn `{}` returns {}, which cannot cross the JS boundary \
                  (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)",
                 f.name,
@@ -2865,8 +2910,9 @@ impl<'a> Checker<'a> {
         if f.ret != Type::Unit && !returns {
             // A missing-return diagnostic is reported alongside any body errors
             // (it is about the function as a whole, not one statement).
-            self.errors.borrow_mut().push(cerr!(
+            self.errors.borrow_mut().push(cerr_at!(
                 f.line,
+                f.name_span(),
                 "function `{}` must return {} on all paths",
                 f.name,
                 f.ret
