@@ -63,17 +63,10 @@ impl<'a> Context<'a> {
     /// Read `source`'s lexical structure once, for both the origin table and the
     /// `//@diag` scan.
     pub fn new(source: &str, importer_dir: &'a str, project: &'a str) -> Self {
-        let comment_lines = crate::lexer::lex_with_trivia(source).ok().map(|trivia| {
-            trivia
-                .iter()
-                .filter(|t| t.kind == crate::lexer::TrivKind::Comment)
-                .map(|t| t.start_line)
-                .collect()
-        });
         Context {
             importer_dir,
             project,
-            comment_lines,
+            comment_lines: comment_lines(source),
         }
     }
 
@@ -85,6 +78,26 @@ impl<'a> Context<'a> {
             None => true,
         }
     }
+}
+
+/// The 1-based lines of `source` on which the lexer says a `//` comment BEGINS,
+/// or `None` when the text does not lex.
+///
+/// The one reading every control-line scan over generated text shares. A scan
+/// that reads a line's first characters and nothing else cannot tell a directive
+/// from data that looks like one, and a generator copies its input through
+/// verbatim — so the lexer decides, once, and every consumer asks it. `None`
+/// means there is no lexical structure to read, and the caller then honours every
+/// line: a module that does not lex fails the build regardless (RFC-0053).
+pub fn comment_lines(source: &str) -> Option<HashSet<usize>> {
+    Some(
+        crate::lexer::lex_with_trivia(source)
+            .ok()?
+            .iter()
+            .filter(|t| t.kind == crate::lexer::TrivKind::Comment)
+            .map(|t| t.start_line)
+            .collect(),
+    )
 }
 
 /// A resolved origin position an origin directive points at.

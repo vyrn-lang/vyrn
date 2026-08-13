@@ -539,6 +539,25 @@ fn both_halves_of_a_universal_page_mount_from_their_own_root() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    // Checking is not rendering. The SSR half's whole job is to reach the server
+    // and produce HTML, so the test runs it and reads what came out — a rule that
+    // let the build pass while the page rendered nothing would pass the check
+    // above and fail here.
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the SSR half must render: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let html = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        html.contains("<main><p>7</p></main>"),
+        "the server-rendered page carries the server's own value:\n{html}"
+    );
 }
 
 /// Audience is a property of a FILE. A second spelling of one path — a different

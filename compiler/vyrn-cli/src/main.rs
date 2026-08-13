@@ -1035,7 +1035,16 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     // directory reached through two roots generates the same table twice.
     let mut rows: Vec<(String, String, String, String)> = Vec::new();
     for (_, src) in &mods {
-        for line in src.lines() {
+        // The third scan over generated text, and it reads its control lines the
+        // way the other two do: a `//@route` counts where the LEXER says a comment
+        // begins. A generator copies its input through verbatim, so a string
+        // literal a component author wrote could otherwise add a route to this
+        // table that no procedure serves.
+        let comments = vyrn_frontend::origin::comment_lines(src);
+        for (i, line) in src.lines().enumerate() {
+            if comments.as_ref().is_some_and(|c| !c.contains(&(i + 1))) {
+                continue;
+            }
             let Some(rest) = line.strip_prefix("//@route ") else {
                 continue;
             };
