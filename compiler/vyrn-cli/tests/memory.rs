@@ -809,6 +809,37 @@ const ROWS: &[Row] = &[
               Take `region_keep` out and this row leaks",
     },
     Row {
+        export: "regionCopy",
+        census: "RFC-0004 §4, the routing",
+        today: Shape::Steady,
+        why: "the arena's SET. The row above proves the arena reclaims; this one proves the two \
+              backends put the same blocks in it. The textual backend routes at the ALLOCATION \
+              — every `Gen::str_alloc` made while a region is open draws from the arena — and \
+              this one routed at the EXPRESSION, keeping the value of a node `own::str_temporary` \
+              said yes to. A `copy` is not one of those nodes and its buffer is not the node's \
+              value, it is one level down, so `let t = s.copy()` inside a region was the arena's \
+              natively and nobody's here: `own` answers `Leak::Region` for `t`, so the walk \
+              stands off, and nothing recorded it. 400,000 turns read 17.5 MB against native's \
+              3.6 MB. The routing is at the allocation on both backends now (`Fn_::str_owned`, \
+              at the sites `Gen::str_alloc` is called from), and the same key partitions the \
+              release side (`Fn_::rel_at`'s `Str` arm), so a block under a container is the \
+              arena's at every depth rather than the arena's and the walk's at once",
+    },
+    Row {
+        export: "regionRebind",
+        census: "RFC-0004 §4, the routing's price",
+        today: Shape::Leaks,
+        why: "the other half of the row above, and the one place this rule is deliberately \
+              inexact. A store inside a region takes no snapshot at all — it cannot, because \
+              a `String` the place holds is the arena's and the snapshot would free it a \
+              second time — but an `Array` buffer is never the arena's, so a container \
+              reassigned inside a region hands its old buffer to nobody. BOTH backends leak \
+              it identically, which is the point: a leak both engines share is a parity \
+              citizen, and it was the trade for a double free. Making it exact means \
+              filtering the `String` entry out of `Fn_::store_bufs` rather than refusing the \
+              snapshot, on both backends at once; do that and this row flips to Steady",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -1160,6 +1191,42 @@ export extern fn regionArena() {{
         let b = tag() + a
         let c = b + "!"
         seen = seen + Int64(c.byteLength)
+    }}
+}}
+
+/// The same arena, asked about the block a `copy` makes rather than the one a
+/// `+` makes. `own` answers `Leak::Region` for both bindings, so the walk frees
+/// neither and the arena is the only owner either can have — which means a
+/// routing rule that misses the copy is a leak, not a second owner. It missed
+/// it: the expression-level rule read the NODE, and a copy allocates one level
+/// under its node.
+export extern fn regionCopy() {{
+    region {{
+        let s = tag() + "!"
+        let t = s.copy()
+        seen = seen + Int64(t.byteLength)
+    }}
+}}
+
+/// The price of the same routing, paid in the other direction. Inside a region
+/// `Fn_::place_owns` and `Gen::slot_owns` refuse the store snapshot outright,
+/// because a `String` block is the arena's and the snapshot would free it twice.
+/// The refusal is blunt: an `Array` buffer is NEVER the arena's
+/// (`Gen::array_n_to_heap`), so reassigning a container inside a region hands
+/// its old buffer to nobody. Both backends leak it, which is why this row is a
+/// parity citizen rather than a divergence — and it is measured here so that the
+/// day someone makes the refusal exact, by filtering `Fn_::store_bufs`'s `String`
+/// entry instead of dropping the whole snapshot, this row flips and says so.
+export extern fn regionRebind() {{
+    region {{
+        let mut xs: Array<Int64> = []
+        let mut i = 0
+        while i < 100 {{
+            xs.push(i)
+            i = i + 1
+        }}
+        xs = []
+        seen = seen + xs.length
     }}
 }}
 

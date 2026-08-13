@@ -2024,6 +2024,13 @@ impl Fn_<'_> {
                 let elem = elem.clone();
                 self.stream_release(m, b, p, &elem, line)
             }
+            // Inside a `region` the arena owns it ([`Fn_::str_owned`]), so this
+            // stands aside exactly as [`Fn_::rel_at`]'s `Str` arm does. `own`
+            // denies the automatic block-exit row inside a region
+            // (`Fate::Leaked(Leak::Region)`), so the arm that reaches here at all
+            // is `drop s`, which mints `Fate::Dropped` and knows nothing about the
+            // arena: `region { let s = a + b  drop s }` freed the block twice.
+            Rel::Str if self.region_depth > 0 => Ok(()),
             Rel::Str => {
                 // A `String` is a scalar, so a `Place::Local` holds the pointer —
                 // the opposite of what a local holding an aggregate means, which is
@@ -2297,13 +2304,25 @@ impl Fn_<'_> {
             return Ok(());
         }
         match self.cx.resolve(ty) {
-            Type::Str => {
+            // A `String` buffer allocated inside a `region` belongs to the arena
+            // — [`Fn_::str_owned`] records it and `region_free` hands it back.
+            // `own` states the same exception one binding at a time
+            // (`Fate::Leaked(Leak::Region)` for `DropKind::FreeStr`), and it can
+            // only see the binding's OWN type: the `String` under an
+            // `Array<String>`, under a record field, under a `Map` key reached
+            // this line and was freed a second time
+            // (`rfcs/census-regions.md` defect 1). The key is the key the
+            // allocation side records by, so the two sides partition the same way
+            // at every depth — the sentence [`crate::Gen::deep_release`] states
+            // for the textual backend.
+            Type::Str if self.region_depth == 0 => {
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word()));
                 str_hdr(b);
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
+            Type::Str => Ok(()),
             // The elements first, then the buffer they live in — the reverse of
             // the order `copy_at` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.
@@ -2522,12 +2541,24 @@ impl Fn_<'_> {
         line: usize,
     ) -> Result<(), String> {
         match w {
+            // The sixth site of the rule [`Fn_::str_owned`] states, and the one a
+            // container and a record field do not reach: those descend through
+            // [`Fn_::rel_at`], whose `Str` arm draws the region key, and a sum
+            // payload comes here instead. A `String` payload that rides IN the
+            // word is freed on this line, so `Some(a + b)` inside a region — and
+            // `Ok`, `Err`, and every user variant carrying a `String` — handed the
+            // arena's block to the allocator a second time. Both encodings route
+            // through this one function, so both are answered here: the boxed arm
+            // below frees only the BOX, which is `malloc`'s at every depth the way
+            // an `Array` buffer is, and the `String` inside it is `rel_at`'s.
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
-                str_hdr(b);
-                b.ins(&Instruction::Call(self.cx.rt.free));
+                if self.region_depth == 0 {
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I64Load(at(off)));
+                    b.ins(&Instruction::I32WrapI64);
+                    str_hdr(b);
+                    b.ins(&Instruction::Call(self.cx.rt.free));
+                }
                 Ok(())
             }
             Word::Boxed => {
@@ -2584,9 +2615,26 @@ impl Fn_<'_> {
     /// refuses a borrow at a store. A local owns its contents when this block
     /// already releases it at the exit — the same `droppable` fact, read as a
     /// property of the slot rather than of the block, which is what RFC-0087 §4
-    /// asked for.
+    /// asked for. Inside a `region` nothing is released: the arena owns what was
+    /// allocated there, which is the sentence [`crate::Gen::slot_owns`] states in
+    /// the same words and this one did not.
+    ///
+    /// A global answers yes with no release row at all, so `g = a + b` in module
+    /// state inside a region snapshotted the old `g` and freed it — a block the
+    /// arena had already freed at the previous closing brace. The free list then
+    /// held it twice and the next two allocations of its size class were the same
+    /// address.
+    ///
+    /// The test is blunt where [`Fn_::rel_at`] is exact: only a `String` block is
+    /// ever the arena's, and an `Array` or `Map` buffer never is
+    /// (`Gen::array_n_to_heap`), so a container reassigned inside a region leaks
+    /// the buffer it held. Both backends leak it, which is the point; making both
+    /// exact means filtering [`Fn_::store_bufs`]'s `String` entry rather than
+    /// refusing the whole snapshot, on both sides at once.
     fn place_owns(&self, p: Place) -> bool {
-        matches!(p, Place::Static(_)) || self.releases.iter().flatten().any(|(q, _)| *q == p)
+        self.region_depth == 0
+            && (matches!(p, Place::Static(_))
+                || self.releases.iter().flatten().any(|(q, _)| *q == p))
     }
 
     /// The address of `p` plus `off`, in a fresh local. A wasm local holding an
@@ -2684,12 +2732,43 @@ impl Fn_<'_> {
     /// `region_keep` and `rt.region_free` are.
     ///
     /// Routing is LEXICAL, as `Gen::heap_alloc` routes in the textual backend:
-    /// `Fn_::expr` keeps the value of an expression that allocated a `String`
-    /// while the emitter is inside a region. Routing on the *runtime* depth
-    /// instead would arena-allocate a callee's `String` that the region escape
-    /// guard never examined, and free it under its caller.
+    /// [`Fn_::str_owned`] records a `String` the emitter allocated while it was
+    /// inside a region. Routing on the *runtime* depth instead — inside
+    /// `rt.str_new`, which is the one funnel a wasm module has — would
+    /// arena-allocate a callee's `String` that the region escape guard never
+    /// examined, and free it under its caller. That is why the routing is written
+    /// at the emitter's allocation sites and not at the allocator.
     fn region_exit(&mut self, b: &mut Frame) {
         b.ins(&Instruction::Call(self.cx.rt.region_free));
+    }
+
+    /// The `String` on the stack is a block THIS emitter just allocated. Inside a
+    /// `region` it is the arena's, so record it; the closing brace hands it back
+    /// ([`Fn_::region_exit`]). Stack-neutral: `region_keep` takes the pointer and
+    /// gives it straight back.
+    ///
+    /// This is `Gen::heap_alloc`'s `region_depth > 0` test, and the set of call
+    /// sites is `Gen::str_alloc`'s set of call sites — the two must stay equal,
+    /// because a block one backend gives the arena and the other gives the
+    /// ownership walk is a block the two backends own differently. The mapping,
+    /// site for site:
+    ///
+    /// | `Gen::str_alloc` caller | here |
+    /// |---|---|
+    /// | `Gen::emit_str_concat`'s region path | `rt.concat`, at `+` and at `@concat` |
+    /// | `Gen::deep_copy`'s `Str` arm | [`Fn_::str_dup`], the funnel `copy_stack`, `copy_at` and `copy_word` share |
+    /// | `@str` of an `Int` / a sized int | `rt.int_str` |
+    /// | `@str` of a `Bool` / a `String` | `str_dup` again |
+    /// | `Gen::emit_str_append`'s take-ownership path | unreachable: both backends refuse the in-place append inside a region |
+    /// | `stringFromBytes`'s `Err` message | no block: this backend hands out the interned message itself |
+    ///
+    /// `@str` of a `Float` is in NEITHER set: both backends format it by calling
+    /// `std/num`'s `f64Str`, so the block is the callee's and the arena of the
+    /// caller's region never sees it.
+    fn str_owned(&mut self, b: &mut Frame) {
+        if self.region_depth > 0 {
+            b.ins(&Instruction::Call(self.cx.rt.region_keep));
+        }
     }
 
     /// Leave a region WITHOUT freeing its blocks, for a `return` (and a `?`) that
@@ -3971,36 +4050,26 @@ impl Fn_<'_> {
     /// Evaluate `e`, leaving its value (a scalar) or its address (an aggregate)
     /// on the stack, and giving the Vyrn type of what it left.
     ///
-    /// The wrapper keeps TWO facts.
+    /// The wrapper keeps one fact: whether this expression is a call argument
+    /// whose value the CALLER releases once the call is done with it
+    /// (`rfcs/census-call-arguments.md`). `own` decided that, per argument node;
+    /// this tees the pointer into a local so [`Fn_::call`] can hand it back after
+    /// the call. The tee is HERE — where the argument is evaluated — rather than
+    /// at the call, so the evaluation order stays the one the program wrote.
     ///
-    /// One: whether this expression is a call argument whose value the CALLER
-    /// releases once the call is done with it (`rfcs/census-call-arguments.md`).
-    /// `own` decided that, per argument node; this tees the pointer into a local
-    /// so [`Fn_::call`] can hand it back after the call. The tee is HERE — where
-    /// the argument is evaluated — rather than at the call, so the evaluation
-    /// order stays the one the program wrote.
+    /// Inside a `region` it stands down, because the arena is the single owner
+    /// there — the same condition [`crate::Gen::gen_expr`] reads.
     ///
-    /// Two: whether this expression ALLOCATED a `String` while the emitter is
-    /// inside a `region`, in which case the arena owns the block and frees it at
-    /// the closing brace ([`Fn_::region_exit`]). This is the lexical routing the
-    /// textual backend does inside `Gen::heap_alloc`, at the one funnel this
-    /// backend has for it. Inside a region the two facts never both fire: the
-    /// arena is the single owner there, which is why the argument release above
-    /// stands down.
-    ///
-    /// ponytail: [`vyrn_frontend::own::str_temporary`] answers for `@concat`,
-    /// `@str` and a String `+` — every allocating shape a region has been used
-    /// for, and the audit's own repro. A `String` a runtime helper builds
-    /// (`slice`, `join`, `readLine`) is still the recorded leak it is outside a
-    /// region; widening this means asking `own` for a per-call verdict, not a
-    /// second rule here.
+    /// It used to keep a SECOND fact: whether the expression allocated a `String`
+    /// while a region was open, judged by [`vyrn_frontend::own::str_temporary`].
+    /// That was the arena's routing rule, and it was a different rule from the
+    /// one the textual backend uses — that backend routes at the ALLOCATION
+    /// (`Gen::heap_alloc`), so it holds a `String` an expression's INTERIOR
+    /// allocated, which no verdict about the expression node can see. The routing
+    /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.region_depth > 0 {
-            if t == Type::Str && vyrn_frontend::own::str_temporary(e) {
-                b.ins(&Instruction::Call(self.cx.rt.region_keep));
-            }
-        } else if self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
+        if self.region_depth == 0 && self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push(l);
@@ -5225,6 +5294,7 @@ impl Fn_<'_> {
             if op == BinOp::Add {
                 let kr = self.tee_str_temp(b, rhs);
                 b.ins(&Instruction::Call(self.cx.rt.concat));
+                self.str_owned(b);
                 self.free_str_temp(b, kl);
                 self.free_str_temp(b, kr);
                 return Ok(Type::Str);
@@ -6036,6 +6106,7 @@ impl Fn_<'_> {
                         widen(b, n);
                         b.ins(&Instruction::I32Const(n.signed as i32));
                         b.ins(&Instruction::Call(self.cx.rt.int_str));
+                        self.str_owned(b);
                     }
                     ref f if matches!(f, Type::Float | Type::Float32) => {
                         self.f64_str(b, f, line)?;
@@ -6069,6 +6140,7 @@ impl Fn_<'_> {
                 self.expr_as(m, b, &args[1], &Type::Str)?;
                 let kb = self.tee_str_temp(b, &args[1]);
                 b.ins(&Instruction::Call(self.cx.rt.concat));
+                self.str_owned(b);
                 // The interpolation spine (RFC-0096 M3): `"a\{x}b\{y}"` folds
                 // left into nested `@concat`s, so every hole's `@str` and every
                 // inner join is released by the `@concat` above it.
@@ -9641,6 +9713,13 @@ impl Fn_<'_> {
     /// A `String` pointer on the stack, replaced by a fresh buffer holding the
     /// same bytes. The length is a header load since RFC-0089 M1a, so nothing
     /// scans.
+    ///
+    /// The funnel `copy_stack`, `copy_at` and `copy_word` share, which is what
+    /// makes one [`Fn_::str_owned`] here answer for every `String` a `copy`
+    /// reaches — an element of an `Array<String>`, a record field, a `Map` key —
+    /// the way one `Gen::str_alloc` inside `Gen::deep_copy` answers for all of
+    /// them on the textual backend. `@str` of a `String` and of a `Bool` come
+    /// here too, and `Gen`'s two arms for those are `str_alloc` as well.
     fn str_dup(&mut self, b: &mut Frame) {
         let (s, n, d) = (
             b.local(ValType::I32),
@@ -9663,6 +9742,7 @@ impl Fn_<'_> {
             dst_mem: 0,
         });
         b.ins(&Instruction::LocalGet(d));
+        self.str_owned(b);
     }
 
     /// A fresh heap block of `bytes` holding a copy of `live` bytes from `src`,

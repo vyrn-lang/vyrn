@@ -4238,7 +4238,15 @@ impl<'a> Gen<'a> {
     /// (extracting its slot/generation from the reference aggregate).
     fn emit_drop(&mut self, slot: &str, kind: &DropKind) {
         match kind {
-            DropKind::FreeStr => {
+            // Inside a `region` the arena owns every `String` this function
+            // allocated ([`Gen::heap_alloc`]), so the drop stands aside exactly as
+            // [`Gen::deep_release`] and [`Gen::slot_owns`] do. `own` states the
+            // rule for the AUTOMATIC row — `Fate::Leaked(Leak::Region)`, so no
+            // row reaches here — and says nothing about `drop s`, which mints its
+            // own `Fate::Dropped`. `region { let s = a + b  drop s }` therefore
+            // freed the block here and again at the closing brace, and the native
+            // heap corrupted.
+            DropKind::FreeStr if self.region_depth == 0 => {
                 // The header says whether there is anything to hand back:
                 // `cap == STR_STATIC` is a data-segment literal (RFC-0089 M1a), and
                 // `@__vyrn_str_free` returns on it. The block base is the
@@ -4247,6 +4255,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{p} = load ptr, ptr {slot}"));
                 self.emit(format!("call void @__vyrn_str_free(ptr {p})"));
             }
+            DropKind::FreeStr => {}
             DropKind::CloseStream => {
                 // RFC-0075 M2b: one call, and the variant is settled inside it.
                 // `emit_drop` runs mid-block, immediately before an early `ret`,

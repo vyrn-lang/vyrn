@@ -1,0 +1,167 @@
+// Who owns a block while a `region` is open — the question, asked once per
+// escape route, with a detector that can see the wrong answer.
+//
+// `examples/region.vyrn` walks the same routes and never allocates afterwards,
+// so it passed on all three engines while the two compiling backends owned
+// different sets of blocks. The textual backend routes at the ALLOCATION
+// (`Gen::heap_alloc`: every `Gen::str_alloc` made while a region is open is the
+// arena's) and the direct one used to route at the EXPRESSION (`region_keep`
+// where `own::str_temporary` said yes), so a String an expression's INTERIOR
+// allocated — a `copy`, an element under a container — was the arena's on one
+// engine and the ownership walk's on the other. One block, two owners.
+//
+// A double free is invisible on its own: the block simply lands on its size
+// class's free list twice. `detect` is what makes it visible — four allocations
+// of one size class, with distinct contents. If two of them are the same
+// address, two of the four lines carry the same bytes and the three engines
+// disagree.
+
+import { slice } from "std/strpred"
+import { joinWith } from "std/strings"
+
+type Tagged = { label: String, size: Int64 }
+
+// A sum payload. `Wrapped`'s String rides in its own word beside the Int64, and
+// `Option<String>`'s rides in the single word an Option carries. Both reach
+// `Fn_::rel_word`, which is a second walk over the same rule: a container and a
+// record field descend through `Fn_::rel_at` and never come here.
+type Boxed =
+    | Empty
+    | Wrapped(String, Int64)
+
+// Module state, for the store route no local can reach: `Fn_::place_owns`
+// answers yes for a `Place::Static` with no release row behind it at all.
+let mut held: String = ""
+
+// Four distinct 12-byte Strings, printed. Four distinct lines means no block of
+// that class was on the free list twice.
+fn detect(tag: String) -> Int64 {
+    let mut ds: Array<String> = []
+    ds.push("A1" + "3456789012")
+    ds.push("B2" + "3456789012")
+    ds.push("C3" + "3456789012")
+    ds.push("D4" + "3456789012")
+    let mut i = 0
+    while i < 4 {
+        print(tag + ds[i])
+        i = i + 1
+    }
+    return ds.length
+}
+
+fn main() -> Int64 {
+    let six = "abcdef"
+    let sixb = "ghijkl"
+    let mut n = 0
+
+    // A String the arena recorded, reached by the walk through a container.
+    region {
+        let mut es: Array<String> = []
+        es.push(six + sixb)
+        n = es.length
+    }
+    n = n + detect("container ")
+
+    // The same, through a record field.
+    region {
+        let tag = Tagged { label: six + sixb, size: 1 }
+        n = n + tag.label.byteLength
+    }
+    n = n + detect("field     ")
+
+    // Through a `copy`. This is the route no verdict about the expression node
+    // could reach: the node is `copy` and the buffer is the copy walk's, which is
+    // `Gen::deep_copy`'s `Gen::str_alloc` on one backend and `Fn_::str_dup` on
+    // the other.
+    region {
+        let orig = six + sixb
+        let cp = orig.copy()
+        n = n + cp.byteLength
+    }
+    n = n + detect("copy      ")
+
+    // Through an element store, which replaces an element the arena recorded.
+    // The snapshot the store takes is a second owner unless it stands aside
+    // inside a region, which is what `Gen::slot_owns` says and `Fn_::place_owns`
+    // did not.
+    region {
+        let mut sl: Array<String> = [six + sixb]
+        sl[0] = six + "!!!!!!"
+        n = n + sl[0].byteLength
+    }
+    n = n + detect("elemstore ")
+
+    // Through a Map store: the second store over one key replaces both halves,
+    // and both are the arena's.
+    region {
+        let mut mp: Map<String, String> = [:]
+        mp[six + sixb] = six + sixb
+        mp[six + sixb] = sixb + six
+        n = n + mp.length
+    }
+    n = n + detect("mapstore  ")
+
+    // Through `drop`. `own` says `Leak::Region` for a String bound inside a
+    // region, so no automatic row reaches the release — but `drop s` mints a row
+    // of its own and knew nothing about the arena. Both compiling backends freed
+    // the block here and again at the closing brace.
+    region {
+        let s = six + sixb
+        n = n + s.byteLength
+        drop s
+    }
+    n = n + detect("dropped   ")
+
+    // Through a store into module state. A local reaches `place_owns` by its
+    // release row; a global answers yes with no row at all, so this is the arm
+    // the five routes above never touch. The second store is the one that
+    // matters: it snapshots what the first left, and the arena had it.
+    region {
+        held = six + sixb
+        held = sixb + six
+        n = n + held.byteLength
+    }
+    n = n + detect("global    ")
+
+    // Through a CALLEE's allocation. `slice` and `joinWith` are `std` functions,
+    // so their blocks are allocated at the callee's depth 0 and no arena holds
+    // them on either backend — which is the whole reason the routing is lexical
+    // and not read off the runtime depth inside `rt.str_new`. The route is here
+    // so that answer stays measured rather than argued.
+    region {
+        let s = six + sixb
+        n = n + match slice(s, 0, 4) {
+            Ok(v) => v.byteLength,
+            Err(e) => 0,
+        }
+        let mut parts: Array<String> = []
+        parts.push(six + sixb)
+        parts.push(sixb + six)
+        n = n + joinWith(parts, "-").byteLength
+    }
+    n = n + detect("callee    ")
+
+    // Through a sum payload. A container and a record field descend through
+    // `Fn_::rel_at`, whose `Str` arm draws the region key; a payload word goes to
+    // `Fn_::rel_word` instead, which is a second walk over the same rule.
+    region {
+        let o: Option<String> = Some(six + sixb)
+        n = n + match o {
+            Some(v) => v.byteLength,
+            None => 0,
+        }
+    }
+    n = n + detect("payload   ")
+
+    region {
+        let w: Boxed = Wrapped(six + sixb, 7)
+        n = n + match w {
+            Wrapped(s, k) => s.byteLength + k,
+            Empty => 0,
+        }
+    }
+    n = n + detect("variant   ")
+
+    print(n) // 162
+    return 0
+}
