@@ -34,5 +34,33 @@ exclude = [
     "vyrn-genwasm",
 ]
 
+[profile.dev]
+# Full debuginfo, for a workspace of 54 test targets, is the single most
+# expensive thing about `cargo test`. MEASURED on Windows/MSVC, `cargo test
+# --no-run` from `cargo clean`, median of three:
+#
+#   default (debug = 2)                19.6 s
+#   debug = "line-tables-only"         14.7 s   -25%
+#
+# What it costs: a debugger can no longer show local variables or struct fields.
+# What it does not cost: a panic backtrace. `line-tables-only` keeps exactly the
+# file:line mapping a backtrace resolves, and the two configurations print a
+# BYTE-IDENTICAL backtrace for the same panic — checked, not assumed. Test
+# failures are the debuginfo this project actually reads.
+#
+# Set `debug = 2` locally (or `CARGO_PROFILE_DEV_DEBUG=2`) for a stepping
+# session; nothing else in the build depends on this.
+#
+# Two things measured and NOT adopted, so nobody re-measures them:
+#   * `rust-lld` (`[target.x86_64-pc-windows-msvc] linker = "rust-lld.exe"`) is
+#     2.0 s SLOWER here, 21.6 s median — it links correctly, it is simply not
+#     the bottleneck, and its per-invocation overhead over 57 links outweighs
+#     what it saves. Combined with this setting it is still 0.9 s behind this
+#     setting alone.
+#   * `mold` is Linux-only (no Windows, no macOS port), so it could speed up one
+#     leg of a four-platform matrix while the other three keep the default. The
+#     Windows result above already says link time is a minority of the build.
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
