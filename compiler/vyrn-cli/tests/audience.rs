@@ -575,6 +575,21 @@ fn a_second_spelling_of_one_path_is_the_same_module() {
             "{name} names the file it really imported:\n{err}"
         );
     }
+
+    // And the report reaches the same file by either spelling: a chain keyed on
+    // the spelling would deny an edge the checker had just refused.
+    let out = vyrn()
+        .arg("why")
+        .arg(dir.join("server/store.vyrn"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    for name in ["as-written", "as-typed"] {
+        assert!(
+            text.contains(&format!("client/{name}.vyrn -> server/store.vyrn")),
+            "`why` must reach the file by either spelling:\n{text}"
+        );
+    }
 }
 
 #[test]
