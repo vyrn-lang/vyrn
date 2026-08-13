@@ -138,6 +138,12 @@ fn emitVon(v: Von) -> String
 
 One value as canonical VON text, with no header.
 
+The writer recurses per level like the reader, and returns a `String` with no
+room to refuse anything — so the bound is [`vonMaxDepth`], spent at the read
+side: nothing `parseVon` hands back can be deep enough to reach the engine's
+call cap here, which makes the read → write round trip whole. A value a
+program built past that depth itself is the program's own bound to keep.
+
 ## toVon
 
 ```vyrn

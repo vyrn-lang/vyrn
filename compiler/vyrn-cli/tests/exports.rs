@@ -535,6 +535,94 @@ export fn getRec(req: IdReq) -> Rec {
         "padded Url description:\n{sdl}");
 }
 
+/// A `///` doc is arbitrary prose, and GraphQL block strings define exactly ONE
+/// escape — `\"""`. So a doc whose last byte is a backslash turns the CLOSING
+/// delimiter into that escape: `"""Ends with a backslash \"""` never terminates,
+/// and every definition after it is swallowed until the next `"""` in the
+/// document. `graphql-js` on the result: "Syntax Error: Unexpected description,
+/// only GraphQL definitions support descriptions."
+///
+/// A trailing backslash is not exotic — a Windows path, a line-continuation habit,
+/// a TeX fragment. The cases here are the ones that live at the delimiter: a
+/// trailing `\`, a doc that is ONLY `\`, an embedded `"""`, a literal `\"""`, and
+/// a type with no doc at all.
+#[test]
+fn graphql_sdl_descriptions_close_around_a_trailing_backslash() {
+    // The minimal document first: ONE type, and nothing after its description to
+    // close the runaway block string. Unfixed, the scan reaches the end of the
+    // document without finding a terminator, which is exactly what `graphql-js`
+    // reports as "Unexpected description".
+    let dir = gql_fixture(
+        "/// Ends with a backslash \\\n\
+         export type Thing = { name: String }\n\
+         export fn getThing() -> Thing { return Thing { name: \"x\" } }\n",
+    );
+    let sdl = run(&dir.join("gql.vyrn"));
+    sdl_definitions_are_valid(&sdl);
+    sdl_block_strings_wellformed(&sdl);
+
+    // And the awkward set together, where a LATER description's opener would
+    // otherwise close the runaway one and hide it — the definitions in between are
+    // swallowed all the same, so they are looked for in the body a lexer sees
+    // rather than in the raw bytes.
+    let dir = gql_fixture(
+        "/// Ends with a backslash \\\n\
+         export type Slash = { name: String }\n\
+         /// \\\n\
+         export type Lone = { a: Int64 }\n\
+         /// Holds a \"\"\" triple quote inside\n\
+         export type Triple = { b: Int64 }\n\
+         /// Holds a literal \\\"\"\" escape inside\n\
+         export type Escaped = { c: Int64 }\n\
+         export type Plain = { d: Int64 }\n\
+         export fn getSlash() -> Slash { return Slash { name: \"x\" } }\n\
+         export fn getLone() -> Lone { return Lone { a: 1 } }\n\
+         export fn getTriple() -> Triple { return Triple { b: 1 } }\n\
+         export fn getEscaped() -> Escaped { return Escaped { c: 1 } }\n\
+         export fn getPlain() -> Plain { return Plain { d: 1 } }\n",
+    );
+    let sdl = run(&dir.join("gql.vyrn"));
+    // Both checks: every block string terminates, AND the definitions after each
+    // description are still definitions rather than string content.
+    sdl_block_strings_wellformed(&sdl);
+    sdl_definitions_are_valid(&sdl);
+    let body = sdl_without_descriptions(&sdl);
+    for name in [
+        "type Slash {",
+        "type Lone {",
+        "type Triple {",
+        "type Escaped {",
+        "type Plain {",
+    ] {
+        assert!(
+            body.contains(name),
+            "{name} was swallowed into a description:\n{sdl}"
+        );
+    }
+    // A backslash-terminated body takes the own-line form the trailing-quote body
+    // already took — the newline is what keeps it away from the delimiter.
+    assert!(
+        sdl.contains("\"\"\"\nEnds with a backslash \\\n\"\"\""),
+        "trailing backslash not padded:\n{sdl}"
+    );
+    assert!(sdl.contains("\"\"\"\n\\\n\"\"\""), "lone backslash:\n{sdl}");
+    // An interior `"""` is escaped, and a body that ALREADY holds `\"""` emits
+    // `\\"""` — a literal backslash, then the escape — so it round-trips.
+    assert!(
+        sdl.contains("\"\"\"Holds a \\\"\"\" triple quote inside\"\"\""),
+        "embedded triple quote:\n{sdl}"
+    );
+    assert!(
+        sdl.contains("\"\"\"Holds a literal \\\\\"\"\" escape inside\"\"\""),
+        "literal escape sequence:\n{sdl}"
+    );
+    // No doc, no description: the definition sits directly under the one above it.
+    assert!(
+        sdl.contains("type Plain {") && !sdl.contains("\"\"\"\"\"\""),
+        "an absent doc emitted an empty description:\n{sdl}"
+    );
+}
+
 /// A block-string-aware SDL well-formedness check (no new dependency): scans the
 /// document as a GraphQL lexer would, treating `"""…"""` descriptions as OPAQUE
 /// (their interior braces/quotes are content, not code) and honoring `\"""` as the
@@ -836,7 +924,11 @@ fn graphql_sdl_answers_the_awkward_contract_instead_of_emitting_an_invalid_docum
 
 /// The document with every `"""…"""` description removed, so the checks below
 /// read definitions and never a description's contents. `\"""` is the sole
-/// block-string escape, as in the lexer.
+/// block-string escape, as in the lexer — which is also why the scan can run off
+/// the end: a body whose last byte is a backslash turns the CLOSING delimiter into
+/// that escape, and the block string never terminates. That is a document no
+/// GraphQL parser accepts, so the scan reports it rather than returning a
+/// silently-truncated document for the definition checks to pass over.
 fn sdl_without_descriptions(sdl: &str) -> String {
     let b = sdl.as_bytes();
     let n = b.len();
@@ -845,6 +937,7 @@ fn sdl_without_descriptions(sdl: &str) -> String {
     let mut i = 0;
     while i < n {
         if is_tq(i) {
+            let opened = i;
             i += 3;
             while i < n && !is_tq(i) {
                 i += if b[i] == b'\\' && i + 3 < n && b[i + 1] == b'"' {
@@ -853,6 +946,12 @@ fn sdl_without_descriptions(sdl: &str) -> String {
                     1
                 };
             }
+            assert!(
+                i < n,
+                "the block-string description at byte {opened} never closes — its \
+                 last bytes read as the `\\\"\"\"` escape, so a parser swallows every \
+                 definition after it:\n{sdl}"
+            );
             i += 3;
         } else {
             out.push(b[i] as char);

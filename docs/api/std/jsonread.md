@@ -33,4 +33,6 @@ fn parseJson(src: String) -> Result<Json, String>
 Parse a whole JSON document into a `Json` tree, or a `line N, col M: <reason>`
 error. STRICT: commas required, trailing commas rejected, duplicate keys
 rejected, full escapes (incl. `\uXXXX` surrogate pairs), numbers validated and
-stored raw, object field order preserved.
+stored raw, object field order preserved, and nesting bounded — a document
+nested past [`maxDepth`] is an `Err`, not the trap an unbounded recursive
+descent would take the process down with.

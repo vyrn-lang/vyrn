@@ -36,8 +36,16 @@ Mapping rules (documented and DUMB on purpose — RFC-0038):
     `FnInfo.mutates` (RFC-0074 M4a) — nothing here guesses from a name, so
     renaming a procedure cannot silently move it between roots. A
     1-parameter procedure takes `(input: <Req>Input)`; the return maps by the
-    table above. An empty `Query` gets a `_placeholder` field (GraphQL needs a
-    non-empty query root); an empty `Mutation` is omitted.
+    table above. An empty `Mutation` is omitted.
+  - an OBJECT with no fields gets a `_placeholder: Boolean` field, wherever it
+    comes from — an empty query root, or a zero-field record (`type Empty =
+    {}`). GraphQL requires an object type to define at least one field, so
+    `type Empty {}` is a syntax error that poisons every field referencing it.
+  - a NAME the document would define twice (a contract type called `Query`,
+    `Mutation` or `JSON`; a record `Foo` beside a type `FooInput`), or one
+    beginning with the introspection-reserved `__`, is REPORTED (RFC-0099)
+    and not repaired: these names are the wire surface, and renaming one is
+    the author's decision.
   - `///` docs on TYPES become SDL descriptions. Procedure/param/module docs
     are NOT in `moduleInterface` reflection, so operation descriptions are
     absent (gap recorded in RFC-0038).

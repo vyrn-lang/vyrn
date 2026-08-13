@@ -718,3 +718,172 @@ fn a_stream_route_that_shadows_a_buffered_one_is_a_startup_error() {
     assert!(out.contains("is unreachable"), "{out}");
     assert!(out.contains("the stream route /notes/{id}"), "{out}");
 }
+
+// ---- the SSE frame, read back by the EventSource grammar --------------------
+
+/// One dispatched event: the field lines the stream actually carried, and the
+/// payload the client rebuilds.
+struct SseEvent {
+    fields: Vec<(String, String)>,
+    data: String,
+}
+
+impl SseEvent {
+    /// Every value written under `name` — the count is the injection check: a
+    /// frame `event()` was asked for one `id` of must carry exactly one.
+    fn all(&self, name: &str) -> Vec<&str> {
+        self.fields
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+}
+
+/// Decode a stream by the WHATWG EventSource rules rather than by looking for the
+/// bytes this library happens to write: lines end at CR, LF or CRLF; a line is
+/// `name: value` with ONE optional leading space stripped; a line starting with
+/// `:` is a comment; a blank line dispatches the buffered event, and dispatches
+/// nothing when the data buffer is empty; `data` lines join with `\n`, minus one
+/// trailing newline.
+///
+/// This is what makes the test a claim about the format instead of a snapshot: a
+/// `\n` smuggled through `id` shows up here as a SECOND field in the frame, and a
+/// `\r` in `data` shows up as a truncated payload.
+fn sse_decode(stream: &str) -> Vec<SseEvent> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let b: Vec<char> = stream.chars().collect();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == '\r' || b[i] == '\n' {
+            if b[i] == '\r' && i + 1 < b.len() && b[i + 1] == '\n' {
+                i += 1;
+            }
+            lines.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(b[i]);
+        }
+        i += 1;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+
+    let mut out = Vec::new();
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut data = String::new();
+    for line in lines {
+        if line.is_empty() {
+            if data.is_empty() {
+                fields.clear();
+                continue;
+            }
+            data.pop(); // the trailing `\n` the join left
+            out.push(SseEvent {
+                fields: std::mem::take(&mut fields),
+                data: std::mem::take(&mut data),
+            });
+            continue;
+        }
+        if line.starts_with(':') {
+            continue;
+        }
+        let (name, value) = match line.find(':') {
+            Some(k) => (
+                line[..k].to_string(),
+                line[k + 1..]
+                    .strip_prefix(' ')
+                    .unwrap_or(&line[k + 1..])
+                    .to_string(),
+            ),
+            None => (line.clone(), String::new()),
+        };
+        if name == "data" {
+            data.push_str(&value);
+            data.push('\n');
+        }
+        fields.push((name, value));
+    }
+    out
+}
+
+/// `event()` builds one frame from three arguments, and the wire has to carry
+/// exactly that — no field the caller did not write, no byte of the payload lost.
+///
+/// Before: a `\n` in `id` or `name` was written raw, so the rest of the argument
+/// was read as further SSE fields — an `id` of `1\nevent: x\ndata: y` shipped a
+/// whole second event AHEAD of the real one — and a `\r` in `data` survived into
+/// the `data:` line, where it is a line terminator too, truncating the payload at
+/// the CR. The doc reasoned about `\n`-in-`data` only, which is one of the three
+/// terminators the grammar defines.
+#[test]
+fn an_sse_frame_carries_the_fields_it_was_given_and_no_others() {
+    // Unfixed, the first frame decodes with TWO `event` fields — `["hijack",
+    // "msg"]` — because the newline in `id` opened one of its own.
+    let dir = scratch("sseframe");
+    write(
+        &dir,
+        "frames.vyrn",
+        r#"import { event } from "std/http"
+
+fn main() -> Int64 {
+    print(event("1\nevent: hijack\ndata: pwned", "msg", "hello"))
+    print(event("2", "msg", "line-a\rinjected"))
+    print(event("3", "msg\ndata: x", "hi"))
+    print(event("7", "tick", "{\"a\":1}"))
+    print(event("", "", "a\r\nb"))
+    print(event("\r\n\r", "trimmed", "z"))
+    return 0
+}
+"#,
+    );
+    let (ok, out) = run(&dir, "frames.vyrn");
+    assert!(ok, "frames.vyrn must run:\n{out}");
+    let events = sse_decode(&out);
+    assert_eq!(events.len(), 6, "one event per call:\n{out}");
+
+    // 1. A newline in `id` wrote a second `event:` and a second `data:` before the
+    //    real ones. Now the frame carries one of each and the payload is the one
+    //    the caller passed.
+    assert_eq!(events[0].all("id").len(), 1, "one id line:\n{out}");
+    assert_eq!(events[0].all("event"), vec!["msg"], "{out}");
+    assert_eq!(events[0].data, "hello", "{out}");
+    assert!(
+        !events[0].all("id")[0].contains('\n') && !events[0].all("id")[0].contains('\r'),
+        "no terminator survives in an id:\n{out}"
+    );
+
+    // 2. A CR in `data` is a line terminator, so it splits into a second `data:`
+    //    line and the client rejoins the whole payload — nothing is truncated.
+    assert_eq!(events[1].data, "line-a\ninjected", "{out}");
+    assert_eq!(
+        events[1].all("data").len(),
+        2,
+        "one data line a break:\n{out}"
+    );
+
+    // 3. A newline in the event name wrote a `data: x` line of its own.
+    assert_eq!(events[2].all("event").len(), 1, "one event line:\n{out}");
+    assert_eq!(events[2].data, "hi", "{out}");
+
+    // 4. The ordinary frame is untouched by any of this.
+    assert_eq!(events[3].all("id"), vec!["7"], "{out}");
+    assert_eq!(events[3].all("event"), vec!["tick"], "{out}");
+    assert_eq!(events[3].data, "{\"a\":1}", "{out}");
+
+    // 5. A CRLF is ONE terminator, not two, so a Windows payload round-trips
+    //    without a phantom blank line. An empty id/name still writes no field.
+    assert_eq!(events[4].data, "a\nb", "{out}");
+    assert!(events[4].all("id").is_empty(), "no empty id field:\n{out}");
+    assert!(
+        events[4].all("event").is_empty(),
+        "no empty event field:\n{out}"
+    );
+
+    // 6. An id that is NOTHING BUT terminators strips to nothing, and an empty id
+    //    writes no field — the same answer `event("")` has always given.
+    assert!(events[5].all("id").is_empty(), "{out}");
+    assert_eq!(events[5].all("event"), vec!["trimmed"], "{out}");
+    assert_eq!(events[5].data, "z", "{out}");
+}

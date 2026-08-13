@@ -380,9 +380,29 @@ fn entryLine(es: Array<VonEntry>, key: String) -> Int64 {
     return -1
 }
 
+/// The deepest nesting `parseVon` accepts — 128 enclosing records, variant
+/// payloads, arrays or maps. The same budget, for the same reason, as
+/// `std/jsonread`'s `maxDepth`: a recursive-descent reader with no limit of its
+/// own reaches the engine's 1000-frame call cap and TRAPS, and a trap is not the
+/// `Err` this reader's type promises. A `.von` document nests a handful of
+/// levels; 128 is far past anything a schema writes and far short of the cap.
+fn vonMaxDepth() -> Int64 {
+    return 128
+}
+
+/// One level deeper, or the refusal — the ONE place the depth rule is spent, so
+/// every descent (a record, a variant payload, an array, a map) reports it the
+/// same way.
+fn deeper(p: VonP, depth: Int64) -> Result<Int64, String> {
+    if depth >= vonMaxDepth() {
+        return Err(errAt(p, "nesting deeper than " + vonMaxDepth().toString() + " levels"))
+    }
+    return Ok(depth + 1)
+}
+
 /// Read a record literal's field list (the cursor is ON `{`). Trailing commas are
 /// legal, duplicate fields are not.
-fn readRecord(p: modify VonP, name: String) -> Result<Von, String> {
+fn readRecord(p: modify VonP, name: String, depth: Int64) -> Result<Von, String> {
     bump(p) // {
     let mut fs: Array<VonField> = []
     while true {
@@ -408,7 +428,7 @@ fn readRecord(p: modify VonP, name: String) -> Result<Von, String> {
             return Err(errAt(p, "expected `:` after the field name, found " + showTok(p)))
         }
         bump(p)
-        let v = readValue(p)?
+        let v = readValue(p, depth)?
         fs.push(VonField { name: fname, value: v, line: fline })
         if atPunct(p, ",") {
             bump(p)
@@ -420,7 +440,7 @@ fn readRecord(p: modify VonP, name: String) -> Result<Von, String> {
 }
 
 /// Read a variant's payload list (the cursor is ON `(`).
-fn readVariantArgs(p: modify VonP, name: String) -> Result<Von, String> {
+fn readVariantArgs(p: modify VonP, name: String, depth: Int64) -> Result<Von, String> {
     bump(p) // (
     let mut args: Array<Von> = []
     while true {
@@ -429,7 +449,7 @@ fn readVariantArgs(p: modify VonP, name: String) -> Result<Von, String> {
             bump(p)
             return Ok(VVariant(name, args))
         }
-        let v = readValue(p)?
+        let v = readValue(p, depth)?
         args.push(v)
         if atPunct(p, ",") {
             bump(p)
@@ -441,7 +461,7 @@ fn readVariantArgs(p: modify VonP, name: String) -> Result<Von, String> {
 }
 
 /// Read an array literal's elements (the cursor is just past `[`).
-fn readArray(p: modify VonP) -> Result<Von, String> {
+fn readArray(p: modify VonP, depth: Int64) -> Result<Von, String> {
     let mut xs: Array<Von> = []
     while true {
         skipDocs(p)
@@ -449,7 +469,7 @@ fn readArray(p: modify VonP) -> Result<Von, String> {
             bump(p)
             return Ok(VArray(xs))
         }
-        let v = readValue(p)?
+        let v = readValue(p, depth)?
         xs.push(v)
         if atPunct(p, ",") {
             bump(p)
@@ -461,7 +481,7 @@ fn readArray(p: modify VonP) -> Result<Von, String> {
 }
 
 /// Read a map literal's entries (the cursor is just past `[`, on the first key).
-fn readMap(p: modify VonP) -> Result<Von, String> {
+fn readMap(p: modify VonP, depth: Int64) -> Result<Von, String> {
     let mut es: Array<VonEntry> = []
     while true {
         skipDocs(p)
@@ -483,7 +503,7 @@ fn readMap(p: modify VonP) -> Result<Von, String> {
             return Err(errAt(p, "expected `:` after the map key, found " + showTok(p)))
         }
         bump(p)
-        let v = readValue(p)?
+        let v = readValue(p, depth)?
         es.push(VonEntry { key: key, value: v, line: kline })
         if atPunct(p, ",") {
             bump(p)
@@ -497,7 +517,7 @@ fn readMap(p: modify VonP) -> Result<Von, String> {
 /// Read a `[` literal: the empty map `[:]`, an array, or a map (a quoted key
 /// followed by `:` is what tells them apart — the same rule Vyrn's own parser
 /// uses).
-fn readBracket(p: modify VonP) -> Result<Von, String> {
+fn readBracket(p: modify VonP, depth: Int64) -> Result<Von, String> {
     bump(p) // [
     if atPunct(p, ":") {
         bump(p)
@@ -508,28 +528,32 @@ fn readBracket(p: modify VonP) -> Result<Von, String> {
         return Ok(VMap([]))
     }
     if kindAt(p) == "string" && kindAhead(p, 1) == "punct" && textAhead(p, 1) == ":" {
-        return readMap(p)
+        let d = deeper(p, depth)?
+        return readMap(p, d)
     }
-    return readArray(p)
+    let d = deeper(p, depth)?
+    return readArray(p, d)
 }
 
 /// Read a name-led value: a record `N { … }`, a variant `N(…)`, or a bare
 /// variant `N`. A bare word is ALWAYS a variant name here — never a boolean and
 /// never an unquoted string.
-fn readNamed(p: modify VonP) -> Result<Von, String> {
+fn readNamed(p: modify VonP, depth: Int64) -> Result<Von, String> {
     let name = textAt(p)
     bump(p)
     if atPunct(p, "{") {
-        return readRecord(p, name)
+        let d = deeper(p, depth)?
+        return readRecord(p, name, d)
     }
     if atPunct(p, "(") {
-        return readVariantArgs(p, name)
+        let d = deeper(p, depth)?
+        return readVariantArgs(p, name, d)
     }
     return Ok(VVariant(name, []))
 }
 
 /// Read one value.
-fn readValue(p: modify VonP) -> Result<Von, String> {
+fn readValue(p: modify VonP, depth: Int64) -> Result<Von, String> {
     skipDocs(p)
     let k = kindAt(p)
     if k == "string" {
@@ -555,10 +579,10 @@ fn readValue(p: modify VonP) -> Result<Von, String> {
         return Ok(VBool(false))
     }
     if k == "ident" {
-        return readNamed(p)
+        return readNamed(p, depth)
     }
     if atPunct(p, "[") {
-        return readBracket(p)
+        return readBracket(p, depth)
     }
     if k == "" {
         return Err(errAt(p, "expected a value, found the end of the file"))
@@ -720,7 +744,7 @@ fn walkVon(toks: consume Array<VonTok>, src: String) -> Result<VonDoc, String> {
     if imports.length == 0 {
         return Err(errAt(p, "a VON document starts with its schema: `import type { T } from \"…\"`"))
     }
-    let v = readValue(p)?
+    let v = readValue(p, 0)?
     skipDocs(p)
     if p.i < p.n {
         return Err(errAt(p, "a VON document holds ONE value, and " + showTok(p) + " follows it"))
@@ -1051,6 +1075,12 @@ fn emitAt(v: Von, depth: Int64) -> String {
 }
 
 /// One value as canonical VON text, with no header.
+///
+/// The writer recurses per level like the reader, and returns a `String` with no
+/// room to refuse anything — so the bound is [`vonMaxDepth`], spent at the read
+/// side: nothing `parseVon` hands back can be deep enough to reach the engine's
+/// call cap here, which makes the read → write round trip whole. A value a
+/// program built past that depth itself is the program's own bound to keep.
 export fn emitVon(v: Von) -> String {
     return emitAt(v, 0)
 }
@@ -1452,4 +1482,32 @@ test "the conversion refuses what VON has no spelling for" {
     assertEq(converted(JObj([JsonField { key: "size", value: JNum("1e9") }])), "ERR: size: `1e9` is written with an exponent, and VON has no exponent form — write the digits out")
     assertEq(converted(JObj([JsonField { key: "a-b", value: JNum("1") }])), "ERR: `a-b` is not a Vyrn identifier, so it cannot be a field of `Manifest` — hold those members in a `Map<String, V>` field instead")
     assertEq(converted(JArr([])), "ERR: a VON document's top value is a named record, and this JSON document is not an object")
+}
+
+/// `open` repeated `n` times then `close` repeated `n` times, under a header — a
+/// document nested exactly `n` deep and nothing else.
+gen fn nested(open: String, close: String, n: Int64) -> String {
+    let mut out = "import type { T } from \"./t\"\n"
+    let mut i = 0
+    while i < n {
+        out = out + open
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        out = out + close
+        i = i + 1
+    }
+    return out
+}
+
+test "nesting past vonMaxDepth is an Err, not a trap" {
+    // The reader's `Result` is only worth its type if a deep document comes back
+    // through it: unbounded, the descent reaches the engine's call cap and traps,
+    // which the caller's `Err` arm never sees.
+    assertEq(parseErr(nested("[", "]", 129)), "line 2, col 130: nesting deeper than 128 levels")
+    assertEq(parseErr(nested("[", "]", 1000)), "line 2, col 130: nesting deeper than 128 levels")
+    // At the limit the document parses, and the writer walks the tree it made.
+    assertEq(parseErr(nested("[", "]", 128)), "ok")
+    assertEq(roundTrip(nested("[", "]", 128)).charCount() > 0, true)
 }

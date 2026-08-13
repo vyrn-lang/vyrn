@@ -33,6 +33,23 @@ import { Json, JsonField, emit, emitPretty, jsonEq } from "std/json"
 /// The reader cursor: the source bytes and a 1-based `line`/`col` position.
 type Parser = { src: Array<UInt8>, n: Int64, pos: Int64, line: Int64, col: Int64 }
 
+/// The deepest nesting `parseJson` accepts — 128 enclosing arrays or objects.
+///
+/// A recursive-descent reader whose only limit is the engine's is not the total
+/// parser its `Result` type advertises: the recursion reaches the 1000-frame call
+/// cap and TRAPS, which no `Err` arm can catch, so a nested-enough body takes down
+/// any handler decoding an untrusted document. The budget is the fix. Each level
+/// costs about two frames here and about two more in `emit`, so 128 levels spend
+/// roughly a quarter of the cap on the parse and leave the same again for a
+/// re-emit, a `fromJson` decode over the tree, and the caller's own stack under
+/// all of it. Real documents are nowhere near: an OpenAPI schema or a config file
+/// nests tens of levels, and 128 is already twice the strictest mainstream default
+/// (.NET's `JsonSerializerOptions.MaxDepth`, 64). Past it the answer is an `Err`,
+/// which is what the signature always promised.
+fn maxDepth() -> Int64 {
+    return 128
+}
+
 fn newParser(s: String) -> Parser {
     let ba = bytes(s)
     return Parser { src: ba, n: ba.length, pos: 0, line: 1, col: 1 }
@@ -289,16 +306,23 @@ fn parseKeyword(p: modify Parser, word: String, val: Json) -> Result<Json, Strin
 }
 
 /// Parse one JSON value (leading whitespace already skipped by the caller).
-fn parseValue(p: modify Parser) -> Result<Json, String> {
+/// `depth` is how many arrays and objects already enclose it — the one place the
+/// reader descends, so the one place [`maxDepth`] is checked.
+fn parseValue(p: modify Parser, depth: Int64) -> Result<Json, String> {
     let b = cur(p)
     if b < 0 {
         return Err(errAt(p, "unexpected end of input"))
     }
+    if b == '{' || b == '[' {
+        if depth >= maxDepth() {
+            return Err(errAt(p, "nesting deeper than " + maxDepth().toString() + " levels"))
+        }
+    }
     if b == '{' {
-        return parseObject(p)
+        return parseObject(p, depth + 1)
     }
     if b == '[' {
-        return parseArray(p)
+        return parseArray(p, depth + 1)
     }
     if b == '"' {
         return match parseString(p) {
@@ -325,7 +349,8 @@ fn parseValue(p: modify Parser) -> Result<Json, String> {
 }
 
 /// Parse a JSON array (the cursor is ON `[`). Commas required, no trailing comma.
-fn parseArray(p: modify Parser) -> Result<Json, String> {
+/// `depth` counts this array, so its elements are parsed at the same `depth`.
+fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
     step(p) // [
     let mut items: Array<Json> = []
     skipWs(p)
@@ -335,7 +360,7 @@ fn parseArray(p: modify Parser) -> Result<Json, String> {
     }
     while true {
         skipWs(p)
-        let v = parseValue(p)?
+        let v = parseValue(p, depth)?
         items.push(v)
         skipWs(p)
         let b = cur(p)
@@ -369,7 +394,8 @@ fn hasKey(fields: Array<JsonField>, key: String) -> Bool {
 
 /// Parse a JSON object (the cursor is ON `{`). Commas required, no trailing comma,
 /// duplicate keys rejected (naming the key), field order preserved.
-fn parseObject(p: modify Parser) -> Result<Json, String> {
+/// `depth` counts this object, so its members are parsed at the same `depth`.
+fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
     step(p) // {
     let mut fields: Array<JsonField> = []
     skipWs(p)
@@ -392,7 +418,7 @@ fn parseObject(p: modify Parser) -> Result<Json, String> {
         }
         step(p) // :
         skipWs(p)
-        let v = parseValue(p)?
+        let v = parseValue(p, depth)?
         fields.push(JsonField { key: key, value: v })
         skipWs(p)
         let b = cur(p)
@@ -417,11 +443,13 @@ fn parseObject(p: modify Parser) -> Result<Json, String> {
 /// Parse a whole JSON document into a `Json` tree, or a `line N, col M: <reason>`
 /// error. STRICT: commas required, trailing commas rejected, duplicate keys
 /// rejected, full escapes (incl. `\uXXXX` surrogate pairs), numbers validated and
-/// stored raw, object field order preserved.
+/// stored raw, object field order preserved, and nesting bounded — a document
+/// nested past [`maxDepth`] is an `Err`, not the trap an unbounded recursive
+/// descent would take the process down with.
 export fn parseJson(src: String) -> Result<Json, String> {
     let mut p = newParser(src)
     skipWs(p)
-    let v = parseValue(p)?
+    let v = parseValue(p, 0)?
     skipWs(p)
     if p.pos < p.n {
         return Err(errAt(p, "trailing content after the JSON value"))
@@ -568,4 +596,45 @@ test "the round-trip law holds for the awkward keys and values too" {
         Err(e) => JStr("ERR:" + e),
     }
     assert(jsonEq(pretty, j))
+}
+
+/// `open` repeated `n` times, then `core`, then `close` repeated `n` times — a
+/// document nested exactly `n` deep and nothing else.
+fn nest(open: String, core: String, close: String, n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + open
+        i = i + 1
+    }
+    out = out + core
+    i = 0
+    while i < n {
+        out = out + close
+        i = i + 1
+    }
+    return out
+}
+
+test "nesting past maxDepth is an Err, not a trap" {
+    // The whole point of the budget: past it the caller gets the `Err` the
+    // signature promises. Unbounded, this recursion reaches the engine's call cap
+    // and takes the process down, which no `Err` arm can catch.
+    assertEq(parseErr(nest("[", "", "]", 129)), "line 1, col 129: nesting deeper than 128 levels")
+    assertEq(parseErr(nest("[", "", "]", 4000)), "line 1, col 129: nesting deeper than 128 levels")
+    // The same shape in object form — `{"a":{"a":…}}` — reports the same refusal,
+    // at the 129th `{` (five source columns a level).
+    assertEq(
+        parseErr(nest("{\"a\":", "1", "}", 400)),
+        "line 1, col 641: nesting deeper than 128 levels",
+    )
+}
+
+test "nesting at maxDepth parses, and re-emits" {
+    // 128 is the limit rather than one short of it, and the tree the reader hands
+    // back is one `emit` can walk — the budget covers the round trip, not just the
+    // parse.
+    assertEq(parseErr(nest("[", "", "]", 128)), "")
+    assertEq(emit(parseOr(nest("[", "", "]", 128))), nest("[", "", "]", 128))
+    assertEq(parseErr(nest("{\"a\":", "1", "}", 128)), "")
 }
