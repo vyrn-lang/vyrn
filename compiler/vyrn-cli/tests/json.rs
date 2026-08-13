@@ -53,7 +53,7 @@ fn std_jsonread_unit_tests_run_green() {
     // only by case; a character above the BMP; empty containers; and every
     // number form `JNum` may carry. `read(emit(x))` is the oracle — the writer's
     // output is checked by the toolchain's own strict reader, not by eye.
-    unit_tests_green("std/jsonread.vyrn", "14 passed, 0 failed");
+    unit_tests_green("std/jsonread.vyrn", "16 passed, 0 failed");
 }
 
 /// `JNum` is a public, unvalidated `String` constructor and `emit` copies its

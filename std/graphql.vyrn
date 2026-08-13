@@ -359,11 +359,19 @@ fn gqlDocOf(name: String, iface: ModuleInterface) -> String {
 ///     (three-close-plus-stray), so such a body is emitted on its OWN line
 ///     (`"""\n<body>\n"""`) — the reference-`printBlockString` shape — which keeps
 ///     the trailing quote away from the delimiter while preserving the text.
-/// A quote-free body (the common case) stays a single-line `"""<body>"""`, so an
-/// existing description without quotes is byte-identical.
+///   - a body that ENDS in `\` is the SAME hazard read from the other side: the
+///     closing `"""` would complete `\"""`, the one escape the spec defines, so
+///     the block never closes and swallows every definition after it. The
+///     trailing backslash gets the own-line treatment too, which puts a newline
+///     between it and the delimiter. Only the LAST byte can do this — an interior
+///     `\` before an escaped `"""` emits `\\"""`, which re-lexes as a literal
+///     backslash then the escape, so it round-trips.
+/// A body with neither a trailing quote nor a trailing backslash (the common
+/// case) stays a single-line `"""<body>"""`, so an existing plain description is
+/// byte-identical.
 fn gqlDescBlock(body: String) -> String {
     let esc = gqlEscTripleQuote(body)
-    if esc.endsWith("\"") {
+    if esc.endsWith("\"") || esc.endsWith("\\") {
         return "\"\"\"\n" + esc + "\n\"\"\"\n"
     }
     return "\"\"\"" + esc + "\"\"\"\n"
@@ -972,7 +980,7 @@ fn gqlIsNumByte(b: Int64) -> Bool {
 /// handed to `std/json`'s own reader over their source span, rather than a second
 /// escape decoder and a second number grammar that could disagree with the ones
 /// every other value in this system goes through.
-fn gqlValue(sc: modify Scanner) -> GqlVal {
+fn gqlValue(sc: modify Scanner, depth: Int64) -> GqlVal {
     skipWs(sc)
     if atEnd(sc) {
         return gqlValErr("expected a value")
@@ -990,11 +998,16 @@ fn gqlValue(sc: modify Scanner) -> GqlVal {
             Err(e) => gqlValErr("malformed string value: " + e),
         }
     }
+    if gqlAt(sc, '[') || gqlAt(sc, '{') {
+        if depth >= gqlMaxDepth() {
+            return gqlValErr(gqlTooDeep())
+        }
+    }
     if gqlAt(sc, '[') {
-        return gqlListValue(sc)
+        return gqlListValue(sc, depth + 1)
     }
     if gqlAt(sc, '{') {
-        return gqlObjectValue(sc)
+        return gqlObjectValue(sc, depth + 1)
     }
     let b = peek(sc)
     if b == 45 || (b >= 48 && b <= 57) {
@@ -1017,6 +1030,26 @@ fn gqlValue(sc: modify Scanner) -> GqlVal {
     return GqlVal { value: JStr(word), err: "" }
 }
 
+/// The deepest nesting `gqlParseQuery` accepts — 128 enclosing selection sets,
+/// list values or input objects.
+///
+/// A query arrives from a client, and this parser descends per level with no
+/// budget of its own: `{a{a{a…}}}` reaches the engine's 1000-frame call cap and
+/// TRAPS, which takes the serving process down rather than answering the `err`
+/// this parser reports every other malformed query through. The same limit and
+/// the same reasoning as `std/jsonread`'s `maxDepth`, which the value parser
+/// already leans on for numbers and strings. A real query nests a handful of
+/// levels deep.
+fn gqlMaxDepth() -> Int64 {
+    return 128
+}
+
+/// The one wording for the one rule, so a selection set and an argument value
+/// refuse alike.
+fn gqlTooDeep() -> String {
+    return "nesting deeper than " + gqlMaxDepth().toString() + " levels"
+}
+
 /// A number token, validated by the same reader that validates one in a body.
 fn gqlNumberValue(sc: modify Scanner) -> GqlVal {
     let start = sc.pos
@@ -1031,7 +1064,7 @@ fn gqlNumberValue(sc: modify Scanner) -> GqlVal {
 }
 
 /// A list value `[a, b]`. Commas are insignificant, as everywhere else.
-fn gqlListValue(sc: modify Scanner) -> GqlVal {
+fn gqlListValue(sc: modify Scanner, depth: Int64) -> GqlVal {
     advance(sc)
     let mut items: Array<Json> = []
     skipWs(sc)
@@ -1041,7 +1074,7 @@ fn gqlListValue(sc: modify Scanner) -> GqlVal {
             skipWs(sc)
             continue
         }
-        let v = gqlValue(sc)
+        let v = gqlValue(sc, depth)
         if v.err != "" {
             return v
         }
@@ -1058,7 +1091,7 @@ fn gqlListValue(sc: modify Scanner) -> GqlVal {
 /// An input-object value `{ a: 1, b: "x" }` — the shape a procedure's input
 /// record arrives as. The keys are unquoted here and quoted on the wire, which is
 /// the whole of the difference `emit` then removes.
-fn gqlObjectValue(sc: modify Scanner) -> GqlVal {
+fn gqlObjectValue(sc: modify Scanner, depth: Int64) -> GqlVal {
     advance(sc)
     let mut fields: Array<JsonField> = []
     skipWs(sc)
@@ -1077,7 +1110,7 @@ fn gqlObjectValue(sc: modify Scanner) -> GqlVal {
             return gqlValErr("input object field `" + key + "`: expected `:`")
         }
         advance(sc)
-        let v = gqlValue(sc)
+        let v = gqlValue(sc, depth)
         if v.err != "" {
             return v
         }
@@ -1098,7 +1131,7 @@ fn gqlObjectValue(sc: modify Scanner) -> GqlVal {
 /// out-parameter, because reading `parsed.args` was a projection and
 /// `Array<JsonField>` reaches `Json`, which refers to itself and has no
 /// structural copy.
-fn gqlArgList(sc: modify Scanner) -> GqlArgs {
+fn gqlArgList(sc: modify Scanner, depth: Int64) -> GqlArgs {
     advance(sc)
     let mut out: Array<JsonField> = []
     skipWs(sc)
@@ -1117,7 +1150,7 @@ fn gqlArgList(sc: modify Scanner) -> GqlArgs {
             return GqlArgs { args: [], err: "argument `" + name + "`: expected `:`" }
         }
         advance(sc)
-        let v = gqlValue(sc)
+        let v = gqlValue(sc, depth)
         if v.err != "" {
             return GqlArgs { args: [], err: consume v.err }
         }
@@ -1135,7 +1168,7 @@ fn gqlArgList(sc: modify Scanner) -> GqlArgs {
 ///
 /// Commas are insignificant in GraphQL — the spec lists them with whitespace —
 /// so they are skipped rather than required.
-fn gqlSelSet(sc: modify Scanner) -> GqlSet {
+fn gqlSelSet(sc: modify Scanner, depth: Int64) -> GqlSet {
     if gqlAt(sc, '{') == false {
         return gqlSetErr("expected `{` to open a selection set")
     }
@@ -1167,7 +1200,7 @@ fn gqlSelSet(sc: modify Scanner) -> GqlSet {
         }
         let mut args: Array<JsonField> = []
         if gqlAt(sc, '(') {
-            let parsed = gqlArgList(sc)
+            let parsed = gqlArgList(sc, depth)
             if parsed.err != "" {
                 return gqlSetErr("field `" + name + "`: " + parsed.err)
             }
@@ -1176,7 +1209,10 @@ fn gqlSelSet(sc: modify Scanner) -> GqlSet {
         }
         let mut subs: Array<GqlSel> = []
         if gqlAt(sc, '{') {
-            let inner = gqlSelSet(sc)
+            if depth >= gqlMaxDepth() {
+                return gqlSetErr(gqlTooDeep())
+            }
+            let inner = gqlSelSet(sc, depth + 1)
             if inner.err != "" {
                 return inner
             }
@@ -1227,7 +1263,7 @@ export fn gqlParseQuery(src: String) -> GqlQuery {
             return GqlQuery { root: root, sels: [], err: "variable definitions are not supported" }
         }
     }
-    let set = gqlSelSet(sc)
+    let set = gqlSelSet(sc, 1)
     if set.err != "" {
         return GqlQuery { root: root, sels: [], err: consume set.err }
     }
@@ -2011,6 +2047,18 @@ test "gqlDescBlock keeps a quote-free body single-line, pads a quote-ending body
     assertEq(gqlDescBlock("re \"x\""), "\"\"\"\nre \"x\"\n\"\"\"\n")
 }
 
+test "gqlDescBlock keeps a trailing backslash away from the closing delimiter" {
+    // `"""Ends with \"""` reads its last four bytes as the `\"""` escape, so the
+    // block string never closes and swallows the definitions after it.
+    assertEq(gqlDescBlock("Ends with \\"), "\"\"\"\nEnds with \\\n\"\"\"\n")
+    assertEq(gqlDescBlock("\\"), "\"\"\"\n\\\n\"\"\"\n")
+    // An INTERIOR backslash is not the hazard: `\` + an escaped `"""` emits
+    // `\\"""`, which re-lexes as a literal backslash then the escape.
+    assertEq(gqlDescBlock("a\\b"), "\"\"\"a\\b\"\"\"\n")
+    assertEq(gqlDescBlock("a\\\"\"\"b"), "\"\"\"a\\\\\"\"\"b\"\"\"\n")
+    assertEq(gqlDescBlock(""), "\"\"\"\"\"\"\n")
+}
+
 // ---- the executor (RFC-0085 M1/M2) -----------------------------------------
 
 /// The shape a shelf `browse` returns, as the value tree a projection sees. The
@@ -2106,6 +2154,51 @@ test "gqlParseQuery reads arguments as the JSON tree fromJson decodes" {
     assertEq(q.sels[0].args[0].key, "input")
     // The unquoted GraphQL keys reach `fromJson` as the quoted JSON ones.
     assertEq(emit(q.sels[0].args[0].value), "{\"id\":7,\"tags\":[\"a\"],\"ok\":true}")
+}
+
+/// `{ a { a { … } } }` nested `n` deep, and a list value nested `n` deep — the two
+/// places this parser descends, both written by whoever sent the query.
+fn gqlNestedSel(n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + "{ a "
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        out = out + "}"
+        i = i + 1
+    }
+    return out
+}
+
+test "a query nested past gqlMaxDepth is an err, not a trap" {
+    // The parser reports every other malformed query through `err`; an unbounded
+    // descent answers this one by taking the serving process down instead.
+    assertEq(gqlParseQuery(gqlNestedSel(129)).err, "nesting deeper than 128 levels")
+    assertEq(gqlParseQuery(gqlNestedSel(2000)).err, "nesting deeper than 128 levels")
+    // At the limit it still parses.
+    assertEq(gqlParseQuery(gqlNestedSel(128)).err, "")
+    // An argument VALUE descends on the same budget, so a deep list refuses too.
+    assert(gqlParseQuery("{ a(input: " + gqlListNest(200) + ") { b } }").err.contains("nesting deeper than 128 levels"))
+}
+
+/// `[` repeated `n` times then `]` repeated `n` times — a list value nested `n`
+/// deep, the argument-side twin of [`gqlNestedSel`].
+fn gqlListNest(n: Int64) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + "["
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        out = out + "]"
+        i = i + 1
+    }
+    return out
 }
 
 test "gqlParseQuery refuses what it cannot mean rather than dropping it" {

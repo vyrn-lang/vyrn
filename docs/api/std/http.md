@@ -357,10 +357,27 @@ fn event(id: String, name: String, data: String) -> String
 One SSE frame: `id:`, `event:`, the `data:` lines, and the blank line that
 ends it. An empty `id` or `name` writes no field rather than an empty one.
 
-`data` is split on newlines because the wire format has no other way to carry
-one — a raw `\n` inside a `data:` line would end the field, and a JSON payload
-with a newline in it would silently become two events. Every `\n` in the
-payload therefore becomes a second `data:` line, which the client rejoins.
+**A line terminator is CR, LF or CRLF** — all three, per the EventSource
+grammar, not `\n` alone. So every one of them is a field terminator, and the
+single rule here is that **no argument can end a line the caller did not ask
+for**:
+
+  - `data` KEEPS every byte, because the format has a way to carry a line
+    break: each break becomes a second `data:` line, which the client rejoins
+    with `\n`. CR, LF and CRLF all split alike, so a payload with Windows line
+    endings arrives whole instead of truncating at the first CR.
+  - `id` and `name` have no such way — the field is one line by construction —
+    so a CR or an LF in them is REMOVED rather than written. Left in, a newline
+    would close the field and the rest of the argument would be read as further
+    SSE fields: an `id` of `1\nevent: x\ndata: y` writes a whole second event.
+    Stripping is what keeps an untrusted id from injecting one. This is
+    `std/html`'s answer to an unsafe name — refuse the bytes rather than
+    pretend to escape them — and the value is otherwise preserved.
+
+The spec's third `id` hazard, a NUL (a client discards an id carrying one), is
+unreachable here rather than handled: a Vyrn `String` is NUL-terminated, and
+every way to make one — a literal, `stringFromBytes`, `readFile`, `readLine` —
+refuses an embedded NUL before this function could see it.
 
 ## Socket
 

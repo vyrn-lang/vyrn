@@ -58,7 +58,7 @@ fn std_von_unit_tests_run_green() {
         .expect("vyrn test");
     let text = combined(&out);
     assert!(out.status.success(), "std/von unit tests failed:\n{text}");
-    assert!(text.contains("15 passed, 0 failed"), "{text}");
+    assert!(text.contains("16 passed, 0 failed"), "{text}");
 }
 
 /// RFC-0097 M0, and the whole thesis in one command: the formatter that formats

@@ -279,6 +279,18 @@ fn emitObj(fields: Array<JsonField>) -> String {
 }
 
 /// Emit `j` as compact JSON (no insignificant whitespace), field order as stored.
+///
+/// **The writers recurse per level, and they have no error channel to refuse a
+/// tree with.** `emit`, `emitPretty`, `copyJson` and `jsonEq` all walk `Json`
+/// structurally at about two frames a level, so a value nested past roughly 450
+/// reaches the engine's 1000-frame call cap and traps. Where the depth comes from
+/// UNTRUSTED bytes that is a defect, and it is fixed at the reader:
+/// `std/jsonread`'s `maxDepth` refuses a document past 128 levels with an `Err`,
+/// so nothing parsed can reach the ceiling here, and the round trip
+/// `parse → emit` is covered end to end. What is left is a tree a program BUILT
+/// that deep on purpose, which is the program's own bound to keep — a `String`
+/// return has nowhere to say otherwise, and adding a `Result` to the serializer
+/// every caller uses would pay for a case no input can cause.
 export fn emit(j: Json) -> String {
     return match j {
         JNull => "null",
