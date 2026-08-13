@@ -849,10 +849,16 @@ impl Frame {
     /// Take `size` bytes of frame at `align`, giving the offset from the frame
     /// base. Offsets are handed out for the whole function, never reused — a
     /// slot inside a loop is one slot, written afresh each turn.
+    /// Saturating, so a frame past 4 GB is a REFUSAL and not a panic: the caller
+    /// compares [`Self::bytes`] against `FRAME_LIMIT` once the body is walked,
+    /// and it cannot do that if the running total aborted the process first. A
+    /// frame that saturates reports the clamp rather than its true size, which
+    /// is a number nobody reads for anything but the comparison it loses by five
+    /// orders of magnitude. Nothing under the limit moves at all.
     pub fn alloc(&mut self, size: u32, align: u32) -> u32 {
         debug_assert!(align.is_power_of_two());
         let at = round_up(self.frame, align.max(1));
-        self.frame = at + size;
+        self.frame = at.saturating_add(size);
         at
     }
 
@@ -882,7 +888,7 @@ impl Frame {
 }
 
 fn round_up(n: u32, align: u32) -> u32 {
-    (n + align - 1) & !(align - 1)
+    n.saturating_add(align - 1) & !(align - 1)
 }
 
 #[cfg(test)]

@@ -398,6 +398,122 @@ fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
 }
 
 // -------------------------------------------------------------------------
+// The shape that does not fit in the number describing it
+// -------------------------------------------------------------------------
+
+/// A fixed array bigger than the address space was measured with wrapping
+/// arithmetic, so the compiler believed a small number about a huge shape.
+///
+/// `Array<T, N>` takes any non-negative literal — the parser accepts it and the
+/// checker never bounds it, unlike `SmallArray`'s 1..=64 — and `layout.rs`
+/// multiplied `N` by the element size in `u32`. Debug panicked on the multiply,
+/// with no `file:line` and nothing a program could observe. Release wrapped, and
+/// the wrapped figure was what every bound downstream then compared: the frame
+/// limit refused `Array<Int64, 600000000>` while REPORTING 505,032,704 bytes for
+/// a 4.8 GB shape.
+///
+/// The exact-multiple case is why the refusal has to be at the measurement.
+/// `536870912 * 8` is 2^32, so the wrap is ZERO: a 4 GiB array that claimed to
+/// need no stack at all passed the frame limit and got a module written for it.
+/// That one is a silent miscompile, and the number it turns on is the element
+/// count — nothing about the program looks wrong.
+#[test]
+fn a_shape_past_the_address_space_is_a_diagnostic_not_a_wrapped_number() {
+    let cases = [
+        // A parameter, which is where a big fixed array is cheapest to write.
+        (
+            "hugeparam",
+            "fn sum(xs: Array<Int64, 600000000>) -> Int64 {\n    return xs[0]\n}\n\n\
+             fn main() -> Int64 {\n    return 0\n}\n",
+            "4800000000",
+        ),
+        // The wrap that lands on zero.
+        (
+            "wrapstozero",
+            "fn sum(xs: Array<Int64, 536870912>) -> Int64 {\n    return xs[0]\n}\n\n\
+             fn main() -> Int64 {\n    return 0\n}\n",
+            "4294967296",
+        ),
+        // Nested, where the product is far past 64 bits' worth of plausibility
+        // and each factor on its own is unremarkable.
+        (
+            "hugefield",
+            "type Grid = { cells: Array<Array<Int64, 100000>, 100000> }\n\n\
+             fn first(g: Grid) -> Int64 {\n    return g.cells[0][0]\n}\n\n\
+             fn main() -> Int64 {\n    return 0\n}\n",
+            "80000000000",
+        ),
+    ];
+    for (name, src, bytes) in cases {
+        let (out, module) = build_wasm(src, name);
+        let got = text(&out);
+        assert!(
+            got.contains(&format!("needs {bytes} bytes")),
+            "{name}: the refusal must state the TRUE size, got:\n{got}"
+        );
+        assert!(
+            got.contains("past the 4294967295 one shape may occupy")
+                && got.contains("belongs on the heap as `Array<T>`"),
+            "{name}: the refusal must name the limit and the remedy, got:\n{got}"
+        );
+        assert!(
+            got.contains("at line "),
+            "{name}: the refusal must carry a source position, got:\n{got}"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{name}: a refusal exits 1:\n{got}"
+        );
+        assert!(
+            !module.exists(),
+            "{name}: a refused build left a module behind"
+        );
+    }
+}
+
+/// A shape under the bound is still measured, and still refused by the bound it
+/// actually breaks.
+///
+/// Without this the test above passes on a compiler that refuses every fixed
+/// array, which is a different bug wearing the same diagnostic. Both of these
+/// are too big for a frame and neither is too big to DESCRIBE, so the answer has
+/// to come from the frame limit — naming the function, which is the diagnostic
+/// that was always meant to fire here.
+#[test]
+fn a_shape_under_the_bound_is_still_measured() {
+    for (name, n, bytes) in [
+        // 8 MB: nowhere near the address space, and reported to the byte.
+        (
+            "undersize",
+            1_000_000usize,
+            Some("`sum` needs 8000000 bytes"),
+        ),
+        // 4 GB minus 8, the largest `[N x i64]` there is. The frame counter
+        // clamps at the top of its own range rather than wrapping, so the figure
+        // is the clamp and not the shape; what matters is which limit answers.
+        ("justunder", 536_870_911, None),
+    ] {
+        let src = format!(
+            "fn sum(xs: Array<Int64, {n}>) -> Int64 {{\n    return xs[0]\n}}\n\n\
+             fn main() -> Int64 {{\n    return 0\n}}\n"
+        );
+        let got = text(&build_wasm(&src, name).0);
+        assert!(
+            got.contains(vyrn_codegen::FRAME_LIMIT_NEEDLE),
+            "{name}: the frame limit is the bound this breaks, got:\n{got}"
+        );
+        assert!(
+            !got.contains("one shape may occupy"),
+            "{name}: the layout engine can describe this and must not refuse it, got:\n{got}"
+        );
+        if let Some(exact) = bytes {
+            assert!(got.contains(exact), "{name}: expected {exact}, got:\n{got}");
+        }
+    }
+}
+
+// -------------------------------------------------------------------------
 // The statics
 // -------------------------------------------------------------------------
 

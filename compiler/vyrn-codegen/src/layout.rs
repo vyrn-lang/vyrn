@@ -37,6 +37,20 @@
 //! and the size is rounded up to that so an array of the struct stays aligned.
 //! LLVM lays literal structs out this way and clang lays plain C structs out this
 //! way, which is what makes the C comparison meaningful.
+//!
+//! A vector (`<4 x float>` and its three siblings, RFC-0083) is the one shape
+//! that is not a struct rule: its size is its lanes, and its alignment is that
+//! size rounded to a power of two, which is what LLVM and clang both do.
+//!
+//! # The one limit
+//!
+//! Every number here is a `u32`, which is also the whole of a wasm32 address
+//! space, so the arithmetic is CHECKED against it rather than left to wrap. That
+//! is not tidiness: `Array<Int64, 600000000>` is 4.8 GB, and a wrapped product
+//! is a SMALL number describing a huge shape. Nothing downstream can catch it —
+//! the frame bound compares the wrapped size, `malloc` takes the wrapped byte
+//! count, and `memory.copy` reads the same number as unsigned — so the shape has
+//! to be refused where it is measured. [`fits`] is where.
 
 /// Where one shape's bytes are: its size, its alignment, and the offset of each
 /// field (empty for scalars; for `[N x T]` the stride is `size / N`).
@@ -47,16 +61,29 @@ pub struct Layout {
     pub fields: Vec<u32>,
 }
 
-/// Every shape `llt` can produce, paired with a name for diagnostics. The
-/// emitter's whole type universe, in one list, because the clang comparison has
-/// to know what to compare and a hand-kept list in the test would rot. Kept
-/// honest by `llt_covers_every_shape` in this crate's tests, which asserts these
-/// strings are the ones `llt` actually prints.
+/// What clang is asked about: a name and the shape `llt` prints for it.
+///
+/// This is a chosen list, not a total one, and the comment that used to call it
+/// "the emitter's whole type universe" was wrong in a way that cost something —
+/// `Stream` and `Ref` sat here with no case in the test that was supposed to
+/// keep them honest, and RFC-0083's four vector spellings were printed by `llt`,
+/// refused by [`of_ll`], and never once compared against clang.
+///
+/// Two different jobs are mixed here on purpose. Most rows are PADDING probes,
+/// chosen because clang and this engine could plausibly disagree about them:
+/// `RecordNested`, `SmallArray_i8`, `RecordOfVector`. The rest are one row per
+/// LEAF spelling `llt` can print, which is the part that has to be complete.
+///
+/// `llt_prints_every_shape_the_layout_engine_was_verified_on` in this crate's
+/// tests is what makes it complete: it builds a `Type` for every variant of the
+/// type enum, composes a few thousand trees out of them, and asserts that every
+/// leaf spelling those print appears somewhere in this list, and that no
+/// spelling in this list has stopped being printed. `void` is the one exception,
+/// and the reason is on the test.
 ///
 /// Concrete instantiations stand in for the parametric shapes — `Array<T>` is
 /// `{ ptr, i64, i64 }` whatever `T` is, but `SmallArray` and `ArrayN` embed the
-/// element type, so those appear at several element widths. The point is to
-/// cover the padding cases, not to enumerate programs.
+/// element type, so those appear at several element widths.
 pub const SHAPES: &[(&str, &str)] = &[
     // Scalars.
     ("Int64", "i64"),
@@ -77,6 +104,17 @@ pub const SHAPES: &[(&str, &str)] = &[
     ("Map", "{ ptr, ptr, i64, i64 }"),
     ("Ref", "{ i64, i64 }"),
     ("Fn", "{ i64, i64 }"),
+    // The vectors (RFC-0083). Four Vyrn types under four spellings and one
+    // machine shape — 16 bytes, 16-aligned — but written out separately because
+    // the point of this list is what `llt` PRINTS, and clang is asked about each
+    // spelling rather than told they agree.
+    ("F32x4", "<4 x float>"),
+    ("I32x4/Mask32x4", "<4 x i32>"),
+    ("F64x2", "<2 x double>"),
+    ("Mask64x2", "<2 x i64>"),
+    // A vector inside a record, which is the padding case the bare vector cannot
+    // show: 16-alignment pushes the member to 16 and the struct to 32.
+    ("RecordOfVector", "{ i8, <4 x float> }"),
     // Enums: one i64 tag plus one i64 per payload slot of the widest variant.
     ("Enum0", "{ i64 }"),
     ("Enum1", "{ i64, i64 }"),
@@ -142,6 +180,7 @@ impl P<'_> {
         match self.s.get(self.i) {
             Some(b'{') => self.strukt(),
             Some(b'[') => self.array(),
+            Some(b'<') => self.vector(),
             Some(_) => self.scalar(),
             None => Err("unexpected end of type".to_string()),
         }
@@ -149,15 +188,17 @@ impl P<'_> {
 
     fn strukt(&mut self) -> Result<Layout, String> {
         self.i += 1; // '{'
-        let (mut size, mut align, mut fields) = (0u32, 1u32, Vec::new());
+                     // In 64 bits, because a member past 4 GB is a shape to REFUSE and a
+                     // wrapped running total is one to accept by mistake.
+        let (mut size, mut align, mut fields) = (0u64, 1u32, Vec::<u64>::new());
         if !self.eat(b'}') {
             loop {
                 let f = self.ty()?;
                 // Each member starts at the next multiple of its own alignment;
                 // the hole before it is the padding.
-                size = round_up(size, f.align);
+                size = round_up(size, f.align as u64);
                 fields.push(size);
-                size += f.size;
+                size += f.size as u64;
                 align = align.max(f.align);
                 if !self.eat(b',') {
                     break;
@@ -168,25 +209,18 @@ impl P<'_> {
             }
         }
         // Tail padding, so `[N x S]` keeps every element aligned.
+        let size = fits(round_up(size, align as u64), "a record")?;
         Ok(Layout {
-            size: round_up(size, align),
+            size,
             align,
-            fields,
+            // Every offset is below the size that just fit, so none can overflow.
+            fields: fields.iter().map(|f| *f as u32).collect(),
         })
     }
 
     fn array(&mut self) -> Result<Layout, String> {
         self.i += 1; // '['
-        self.ws();
-        let start = self.i;
-        while self.s.get(self.i).is_some_and(u8::is_ascii_digit) {
-            self.i += 1;
-        }
-        let n: u32 = std::str::from_utf8(&self.s[start..self.i])
-            .ok()
-            .and_then(|d| d.parse().ok())
-            .ok_or_else(|| format!("expected an element count at byte {start}"))?;
-        self.ws();
+        let n = self.count()?;
         if !self.s[self.i..].starts_with(b"x") {
             return Err(format!("expected `x` at byte {}", self.i));
         }
@@ -198,10 +232,58 @@ impl P<'_> {
         // `elem.size` is already rounded to `elem.align` (every shape here is),
         // so it IS the stride.
         Ok(Layout {
-            size: n * elem.size,
+            size: fits(n as u64 * elem.size as u64, "a fixed array")?,
             align: elem.align,
             fields: Vec::new(),
         })
+    }
+
+    /// `<N x T>` — LLVM's own vector (RFC-0083), the one shape whose bytes are
+    /// not a struct rule.
+    ///
+    /// It needs a layout here for the same reason every other shape does: `repr`
+    /// already reads `<4 x float>` back as a wasm `v128` VALUE, but a vector
+    /// inside a record, an array or a `Map` is bytes in memory, and an aggregate
+    /// containing one has no size until this does.
+    ///
+    /// Size is the lanes, unpadded. Alignment is that size rounded up to a power
+    /// of two — LLVM's rule for a vector with no explicit alignment in the data
+    /// layout, and clang's for `__attribute__((vector_size))`. All four spellings
+    /// `llt` prints come out 16/16; the rule is written rather than the number so
+    /// a fifth width would not need a fifth line.
+    fn vector(&mut self) -> Result<Layout, String> {
+        self.i += 1; // '<'
+        let n = self.count()?;
+        if !self.s[self.i..].starts_with(b"x") {
+            return Err(format!("expected `x` at byte {}", self.i));
+        }
+        self.i += 1;
+        let elem = self.ty()?;
+        if !self.eat(b'>') {
+            return Err(format!("expected `>` at byte {}", self.i));
+        }
+        let size = fits(n as u64 * elem.size as u64, "a vector")?;
+        Ok(Layout {
+            size,
+            align: size.max(1).next_power_of_two(),
+            fields: Vec::new(),
+        })
+    }
+
+    /// The lane or element count leading an `[N x T]` / `<N x T>`, and the `x`'s
+    /// leading whitespace with it.
+    fn count(&mut self) -> Result<u32, String> {
+        self.ws();
+        let start = self.i;
+        while self.s.get(self.i).is_some_and(u8::is_ascii_digit) {
+            self.i += 1;
+        }
+        let n = std::str::from_utf8(&self.s[start..self.i])
+            .ok()
+            .and_then(|d| d.parse().ok())
+            .ok_or_else(|| format!("expected an element count at byte {start}"))?;
+        self.ws();
+        Ok(n)
     }
 
     fn scalar(&mut self) -> Result<Layout, String> {
@@ -240,7 +322,28 @@ impl P<'_> {
     }
 }
 
-fn round_up(n: u32, align: u32) -> u32 {
+/// `bytes` as the `u32` a size is, or the refusal that says why it is not one.
+///
+/// The limit is the type's, not a policy: every offset this engine hands out is
+/// a `u32` and a wasm32 memory is exactly that wide. What matters is that the
+/// check happens HERE. `Array<Int64, 600000000>` is 4.8 GB; wrapped, it is
+/// 505,032,704, and every bound downstream would take that at face value — the
+/// frame limit compares it, `malloc` allocates it, and `memory.copy` copies the
+/// same product read as unsigned. A refusal at the measurement is the only place
+/// the two numbers are still the same number.
+fn fits(bytes: u64, what: &str) -> Result<u32, String> {
+    u32::try_from(bytes).map_err(|_| {
+        format!(
+            "{what} needs {bytes} bytes, past the {} one shape may occupy; \
+             a fixed array this big belongs on the heap as `Array<T>`",
+            u32::MAX
+        )
+    })
+}
+
+/// `n` rounded up to a multiple of `align`, in 64 bits — the width the callers
+/// accumulate in, so the rounding cannot be what overflows.
+fn round_up(n: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two());
     (n + align - 1) & !(align - 1)
 }
@@ -309,5 +412,48 @@ mod tests {
         assert!(of_ll("i64 i64").is_err());
         assert!(of_ll("i128").is_err());
         assert!(of_ll("[x i8]").is_err());
+        assert!(of_ll("<4 x float").is_err());
+        assert!(of_ll("<4 x >").is_err());
+    }
+
+    /// All four vector spellings, and the record that shows their alignment
+    /// doing something: 16 pushes the member off byte 1 and the struct to 32.
+    #[test]
+    fn a_vector_is_sixteen_bytes_sixteen_aligned() {
+        for ll in ["<4 x float>", "<4 x i32>", "<2 x double>", "<2 x i64>"] {
+            let v = of_ll(ll).unwrap_or_else(|e| panic!("{ll}: {e}"));
+            assert_eq!((v.size, v.align), (16, 16), "{ll}");
+        }
+        let r = of_ll("{ i8, <4 x float> }").unwrap();
+        assert_eq!((r.size, r.align, &r.fields[..]), (32, 16, &[0, 16][..]));
+        // And in the two containers a vector reaches memory through.
+        assert_eq!(of_ll("[3 x <2 x i64>]").unwrap().size, 48);
+    }
+
+    /// A shape past 4 GB is refused, not wrapped. `600000000 * 8` is the one
+    /// that shipped: it is 4,800,000,000, and `as u32` makes it 505,032,704 —
+    /// a number every bound downstream would accept.
+    ///
+    /// The exact-multiple case is the one that proves the refusal has to be
+    /// here. `536870912 * 8` is 2^32, so the wrap is ZERO: a 4 GiB array that
+    /// claims to need no bytes at all sails past the frame limit and gets a
+    /// module written for it.
+    #[test]
+    fn a_shape_past_four_gigabytes_is_refused_rather_than_wrapped() {
+        for (ll, wrapped) in [
+            ("[600000000 x i64]", 505_032_704u64),
+            ("[536870912 x i64]", 0),
+            ("[100000 x [100000 x i64]]", 2_690_588_672),
+            ("{ i8, [600000000 x i64] }", 505_032_712),
+        ] {
+            let e = of_ll(ll).expect_err(&format!("{ll} wrapped to {wrapped} instead"));
+            assert!(
+                e.contains("bytes, past the 4294967295 one shape may occupy")
+                    && e.contains("belongs on the heap as `Array<T>`"),
+                "{ll}: {e}"
+            );
+        }
+        // The largest shape that still fits is still described, exactly.
+        assert_eq!(of_ll("[536870911 x i64]").unwrap().size, 4_294_967_288);
     }
 }
