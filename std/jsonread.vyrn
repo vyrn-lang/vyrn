@@ -22,7 +22,7 @@
 /// is an error). Every error carries a `line N, col M:` prefix. Object field order
 /// is preserved in source order, so deterministic generators can depend on it.
 
-import { Json, JsonField, emit, jsonEq } from "std/json"
+import { Json, JsonField, emit, emitPretty, jsonEq } from "std/json"
 
 // ===========================================================================
 // Reader — recursive descent over a mutable cursor. Every parse step advances
@@ -531,4 +531,41 @@ test "round-trip law: parse(emit(j)) is structurally j" {
     assert(jsonEq(round, j))
     // and the writer is idempotent through a parse (byte-stable).
     assertEq(emit(round), emit(j))
+}
+
+test "the round-trip law holds for the awkward keys and values too" {
+    // Every input a reasonable-input test never feeds a writer: a key holding
+    // the document's own punctuation, a quote, a backslash and a control byte;
+    // two keys differing only by case; a character above the BMP; empty
+    // containers; and the number forms `JNum` is allowed to carry.
+    let ctrl = match stringFromBytes(['k', '\x01', 'v']) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let j = JObj([
+            JsonField { key: "a\"quoted\": {key}, [here]", value: JStr("}\",") },
+            JsonField { key: "back\\slash", value: JStr("\\") },
+            JsonField { key: ctrl, value: JStr("\n\t") },
+            JsonField { key: "Case", value: JNum("0") },
+            JsonField { key: "case", value: JNum("-0") },
+            JsonField { key: "𝄞 above the BMP", value: JStr("𝄞") },
+            JsonField { key: "", value: JArr([]) },
+            JsonField { key: "empty", value: JObj([]) },
+            JsonField {
+                key: "nums",
+                value: JArr([JNum("1e-9"), JNum("-2.5"), JNum("1E+30"), JNum("9007199254740993")]),
+            },
+        ])
+    let round = match parseJson(emit(j)) {
+        Ok(v) => v,
+        Err(e) => JStr("ERR:" + e),
+    }
+    assert(jsonEq(round, j))
+    assertEq(emit(round), emit(j))
+    // The same tree through the pretty writer reads back as the same tree.
+    let pretty = match parseJson(emitPretty(j, 2)) {
+        Ok(v) => v,
+        Err(e) => JStr("ERR:" + e),
+    }
+    assert(jsonEq(pretty, j))
 }

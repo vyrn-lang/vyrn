@@ -396,6 +396,9 @@ fn graphql_sdl_is_wellformed_and_deterministic() {
     sdl_grammar_sane(&sdl);
     // Stronger: block-string-aware well-formedness (descriptions are opaque).
     sdl_block_strings_wellformed(&sdl);
+    // Stronger still: the two rules braces cannot see — no empty body, no name
+    // defined twice.
+    sdl_definitions_are_valid(&sdl);
 
     // The honest mappings.
     // A record => type/input pair.
@@ -691,4 +694,204 @@ fn graphql_executor_unit_tests_run_green() {
 #[test]
 fn graphql_example_unit_tests_run_green() {
     assert_suite_green("examples/graphql.vyrn", 10);
+}
+
+// ---- std/graphql: the awkward contract ---------------------------------------
+
+/// A fixture directory holding just `contract.vyrn` and the SDL root.
+fn gql_fixture(contract: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_gql_awkward_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write(&dir.join("contract.vyrn"), contract);
+    write(&dir.join("gql.vyrn"), GQL_ROOT);
+    dir
+}
+
+/// Generate the SDL for `contract`, expecting the generator to REFUSE it, and
+/// return what it said.
+fn gql_refusal(contract: &str) -> String {
+    let dir = gql_fixture(contract);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("gql.vyrn"))
+        .output()
+        .expect("run");
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the generator emitted a document it cannot define:\n{text}"
+    );
+    text
+}
+
+/// A contract whose types GraphQL cannot express, and a contract whose names
+/// GraphQL cannot define — the inputs this generator had never been given.
+///
+/// Before: a zero-field record emitted `type Empty {}` and `input EmptyInput {}`
+/// (the spec requires at least one field, so graphql-js reports "Expected Name,
+/// found }") and the invalid types poisoned every field referencing them; a
+/// contract type named `Query` emitted a SECOND `type Query`, which no document
+/// may do.
+///
+/// After: an empty body gets the `_placeholder: Boolean` field the query root
+/// has always used for the same reason, and a name the document cannot define
+/// twice — or one carrying the introspection-reserved `__` — is an RFC-0099
+/// `Error` rather than a rename, because these names are the wire surface.
+#[test]
+fn graphql_sdl_answers_the_awkward_contract_instead_of_emitting_an_invalid_document() {
+    // 1. A zero-field record, referenced by another type: repaired, not refused.
+    let dir = gql_fixture(
+        "/// A record with nothing in it.\n\
+         export type Empty = {}\n\
+         export type Wrap = { inner: Empty, label: String }\n\
+         export fn getWrap() -> Wrap {\n\
+         return Wrap { inner: Empty {}, label: \"hi\" }\n\
+         }\n",
+    );
+    let sdl = run(&dir.join("gql.vyrn"));
+    sdl_grammar_sane(&sdl);
+    sdl_block_strings_wellformed(&sdl);
+    sdl_definitions_are_valid(&sdl);
+    assert!(
+        sdl.contains("type Empty {\n  _placeholder: Boolean\n}"),
+        "the empty object is not repaired:\n{sdl}"
+    );
+    assert!(
+        sdl.contains("input EmptyInput {\n  _placeholder: Boolean\n}"),
+        "the empty input twin is not repaired:\n{sdl}"
+    );
+    // The referencing field still names it, so the repair kept the graph whole.
+    assert!(sdl.contains("inner: Empty!"), "reference lost:\n{sdl}");
+
+    // 2. A contract type named `Query` — the generated root's name.
+    let text = gql_refusal(
+        "export type Query = { hits: Int64 }\n\
+         export fn getQuery() -> Query { return Query { hits: 1 } }\n",
+    );
+    assert!(
+        text.contains(
+            "the GraphQL document would define `Query` twice — the contract's type `Query`, \
+             and the generated query root"
+        ),
+        "the collision is not reported:\n{text}"
+    );
+
+    // 3. A record `Foo` beside a type `FooInput`: the twin's name, taken.
+    let text = gql_refusal(
+        "export type Foo = { a: Int64 }\n\
+         export type FooInput = { b: Int64 }\n\
+         export fn getFoo() -> Foo { return Foo { a: 1 } }\n",
+    );
+    assert!(
+        text.contains("would define `FooInput` twice"),
+        "the input-twin collision is not reported:\n{text}"
+    );
+
+    // 4. `JSON` — the scalar the document always defines.
+    let text = gql_refusal(
+        "export type JSON = { a: Int64 }\n\
+         export fn getJson() -> JSON { return JSON { a: 1 } }\n",
+    );
+    assert!(
+        text.contains("would define `JSON` twice"),
+        "the built-in scalar collision is not reported:\n{text}"
+    );
+
+    // 5. A name reserved by the target grammar: `__` is the introspection prefix.
+    let text = gql_refusal(
+        "export type __Secret = { a: Int64 }\n\
+         export fn getSecret() -> __Secret { return __Secret { a: 1 } }\n",
+    );
+    assert!(
+        text.contains("reserved for introspection"),
+        "the reserved prefix is not reported:\n{text}"
+    );
+    assert_eq!(
+        text.matches("reserved for introspection").count(),
+        1,
+        "one mistake, one diagnostic:\n{text}"
+    );
+
+    // 6. Two names differing only by case are DISTINCT in GraphQL, and must not
+    //    be refused — the check is a collision check, not a similarity check.
+    let dir = gql_fixture(
+        "export type Item = { a: Int64 }\n\
+         export type ITEM = { b: Int64 }\n\
+         export fn getItem() -> Item { return Item { a: 1 } }\n",
+    );
+    let sdl = run(&dir.join("gql.vyrn"));
+    sdl_definitions_are_valid(&sdl);
+    for name in [
+        "type Item {",
+        "input ItemInput {",
+        "type ITEM {",
+        "input ITEMInput {",
+    ] {
+        assert!(sdl.contains(name), "{name} missing:\n{sdl}");
+    }
+}
+
+/// The document with every `"""…"""` description removed, so the checks below
+/// read definitions and never a description's contents. `\"""` is the sole
+/// block-string escape, as in the lexer.
+fn sdl_without_descriptions(sdl: &str) -> String {
+    let b = sdl.as_bytes();
+    let n = b.len();
+    let is_tq = |j: usize| j + 2 < n && b[j] == b'"' && b[j + 1] == b'"' && b[j + 2] == b'"';
+    let mut out = String::new();
+    let mut i = 0;
+    while i < n {
+        if is_tq(i) {
+            i += 3;
+            while i < n && !is_tq(i) {
+                i += if b[i] == b'\\' && i + 3 < n && b[i + 1] == b'"' {
+                    4
+                } else {
+                    1
+                };
+            }
+            i += 3;
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Two rules a GraphQL parser enforces that balanced braces cannot see, checked
+/// without a new dependency: (1) no definition has an EMPTY body — the spec
+/// requires an object or input type to define at least one field, and `{}` is
+/// where a parser reports "Expected Name, found }"; (2) no NAME is defined
+/// twice — a document may define a name once.
+///
+/// What it does not verify: that every type REFERENCE resolves, argument and
+/// directive syntax, or the rest of the grammar. It is the smallest check that
+/// catches the two defects this generator had, and a `graphql-js` parse would
+/// subsume it.
+fn sdl_definitions_are_valid(sdl: &str) {
+    let body = sdl_without_descriptions(sdl).replace("\r\n", "\n");
+    assert!(
+        !body.contains("{\n}"),
+        "a definition with no fields (a parser reports `Expected Name, found }}`):\n{sdl}"
+    );
+    let mut seen: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        let mut tokens = t.split_whitespace();
+        let kind = tokens.next().unwrap_or("");
+        if !["type", "input", "enum", "scalar", "interface", "union"].contains(&kind) {
+            continue;
+        }
+        let name = tokens.next().unwrap_or("").trim_end_matches('{');
+        assert!(
+            !seen.contains(&name),
+            "`{name}` is defined twice in the document:\n{sdl}"
+        );
+        seen.push(name);
+    }
+    assert!(seen.len() >= 2, "no definitions found in:\n{sdl}");
 }
