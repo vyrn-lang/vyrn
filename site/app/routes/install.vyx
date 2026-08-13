@@ -71,7 +71,7 @@ fn lspBuild() -> String {
 </script>
 
 <template>
-<main id="main" tabindex="-1" class="page">
+<main class="page">
     <aside class="rail">
         <a href="#get"><span class="n">01</span>get it</a>
         <a href="#check"><span class="n">02</span>check it</a>
