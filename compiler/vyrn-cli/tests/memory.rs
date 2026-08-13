@@ -826,6 +826,20 @@ const ROWS: &[Row] = &[
               arena's at every depth rather than the arena's and the walk's at once",
     },
     Row {
+        export: "regionRebind",
+        census: "RFC-0004 §4, the routing's price",
+        today: Shape::Leaks,
+        why: "the other half of the row above, and the one place this rule is deliberately \
+              inexact. A store inside a region takes no snapshot at all — it cannot, because \
+              a `String` the place holds is the arena's and the snapshot would free it a \
+              second time — but an `Array` buffer is never the arena's, so a container \
+              reassigned inside a region hands its old buffer to nobody. BOTH backends leak \
+              it identically, which is the point: a leak both engines share is a parity \
+              citizen, and it was the trade for a double free. Making it exact means \
+              filtering the `String` entry out of `Fn_::store_bufs` rather than refusing the \
+              snapshot, on both backends at once; do that and this row flips to Steady",
+    },
+    Row {
         export: "consumingLoop",
         census: "U4's price, one keyword over",
         today: Shape::Steady,
@@ -1191,6 +1205,28 @@ export extern fn regionCopy() {{
         let s = tag() + "!"
         let t = s.copy()
         seen = seen + Int64(t.byteLength)
+    }}
+}}
+
+/// The price of the same routing, paid in the other direction. Inside a region
+/// `Fn_::place_owns` and `Gen::slot_owns` refuse the store snapshot outright,
+/// because a `String` block is the arena's and the snapshot would free it twice.
+/// The refusal is blunt: an `Array` buffer is NEVER the arena's
+/// (`Gen::array_n_to_heap`), so reassigning a container inside a region hands
+/// its old buffer to nobody. Both backends leak it, which is why this row is a
+/// parity citizen rather than a divergence — and it is measured here so that the
+/// day someone makes the refusal exact, by filtering `Fn_::store_bufs`'s `String`
+/// entry instead of dropping the whole snapshot, this row flips and says so.
+export extern fn regionRebind() {{
+    region {{
+        let mut xs: Array<Int64> = []
+        let mut i = 0
+        while i < 100 {{
+            xs.push(i)
+            i = i + 1
+        }}
+        xs = []
+        seen = seen + xs.length
     }}
 }}
 

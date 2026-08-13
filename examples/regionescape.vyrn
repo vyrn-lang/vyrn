@@ -16,7 +16,14 @@
 // address, two of the four lines carry the same bytes and the three engines
 // disagree.
 
+import { slice } from "std/strpred"
+import { joinWith } from "std/strings"
+
 type Tagged = { label: String, size: Int64 }
+
+// Module state, for the store route no local can reach: `Fn_::place_owns`
+// answers yes for a `Place::Static` with no release row behind it at all.
+let mut held: String = ""
 
 // Four distinct 12-byte Strings, printed. Four distinct lines means no block of
 // that class was on the free list twice.
@@ -97,6 +104,35 @@ fn main() -> Int64 {
     }
     n = n + detect("dropped   ")
 
-    print(n) // 74
+    // Through a store into module state. A local reaches `place_owns` by its
+    // release row; a global answers yes with no row at all, so this is the arm
+    // the five routes above never touch. The second store is the one that
+    // matters: it snapshots what the first left, and the arena had it.
+    region {
+        held = six + sixb
+        held = sixb + six
+        n = n + held.byteLength
+    }
+    n = n + detect("global    ")
+
+    // Through a CALLEE's allocation. `slice` and `joinWith` are `std` functions,
+    // so their blocks are allocated at the callee's depth 0 and no arena holds
+    // them on either backend — which is the whole reason the routing is lexical
+    // and not read off the runtime depth inside `rt.str_new`. The route is here
+    // so that answer stays measured rather than argued.
+    region {
+        let s = six + sixb
+        n = n + match slice(s, 0, 4) {
+            Ok(v) => v.byteLength,
+            Err(e) => 0,
+        }
+        let mut parts: Array<String> = []
+        parts.push(six + sixb)
+        parts.push(sixb + six)
+        n = n + joinWith(parts, "-").byteLength
+    }
+    n = n + detect("callee    ")
+
+    print(n) // 123
     return 0
 }
