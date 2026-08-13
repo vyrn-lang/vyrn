@@ -193,8 +193,8 @@ cannot match is a hard failure: nothing is installed. Then:
 vyrn run examples/fib.vyrn
 ```
 
-Published builds are **Linux x86_64, macOS arm64 and Windows x86_64**. On any
-other platform, build from source. To install a specific tag rather than the
+Published builds are **Linux x86_64, Linux arm64, macOS arm64 and Windows
+x86_64**. On any other platform, build from source. To install a specific tag rather than the
 newest, set `VYRN_VERSION=v0.1.0-alpha.1`; to install elsewhere, set
 `VYRN_INSTALL_DIR`. You can also download the archive and `SHA256SUMS` from the
 [releases page](https://github.com/vyrn-lang/vyrn/releases) and check it by

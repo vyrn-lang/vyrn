@@ -56,8 +56,35 @@ env:
 
 jobs:
   test:
-    name: tests (workspace + LSP)
-    runs-on: ubuntu-latest
+    name: tests (workspace + LSP) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # The opposite of the release matrix's setting, for the opposite reason:
+      # there a partial matrix must not publish, so the first failure cancels the
+      # rest. Here the whole point is to learn WHICH platforms are broken. One
+      # red leg cancelling the other three would hide a second bug behind the
+      # first and cost another round trip to find it.
+      fail-fast: false
+      matrix:
+        # The platforms release.yml ships, and only those: every published binary
+        # is now built by a machine whose tests ran. Before this, no test had
+        # ever executed on macOS, and Windows was covered only by the
+        # maintainer's dev machine — informally, and never on a pull request.
+        #
+        # This is the cheap tier on purpose: pure Rust, no clang, no wasi
+        # sysroot, no wasmtime download. The expensive jobs below stay on
+        # ubuntu-latest, where a second architecture buys little — `layout_vs_
+        # clang` compiles for wasm32-wasip1, so the HOST architecture does not
+        # change the ABI it verifies.
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        # Every step below is a POSIX shell script — `set -e`, `$(…)`, `for f
+        # in`. windows-latest defaults to pwsh, which parses none of it. Git Bash
+        # ships on that runner and brings `grep` with it, so one line here keeps
+        # the four legs running byte-identical scripts instead of forking every
+        # step on `runner.os`.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Rust cache
