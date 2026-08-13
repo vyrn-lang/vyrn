@@ -1,5 +1,5 @@
 <template>
-<main class="prose">
+<main id="main" tabindex="-1" class="prose">
     <h1>{{ error.status }}</h1>
     <p>{{ error.message }}</p>
     <p><a href="/">Back to the front page</a></p>

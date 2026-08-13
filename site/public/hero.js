@@ -170,13 +170,38 @@ export function mountHero(canvas, opts = {}) {
   // causes after the first frame is already painted.
   const remeasure = () =>
     guarded(() => { measure(); paint(reduced ? 0.6 : (performance.now() - t0) / 1000); });
-  new ResizeObserver(remeasure).observe(canvas);
-  addEventListener("resize", remeasure, { passive: true });
-  new IntersectionObserver((es) => (es[0].isIntersecting ? start() : stop()), {
+
+  // Everything this mount registered, so `destroy` can hand all of it back.
+  //
+  // The two observers are dropped with the canvas they observe, but the window,
+  // the document and the media query outlive it: a soft navigation back to this
+  // page mounts a SECOND hero, and every listener the first one left holds the
+  // detached canvas, its context and its ink table, and repaints it on every
+  // real resize and every theme toggle. `widgets.js` avoids this by registering
+  // its own document listeners once at module scope; a hero is per-canvas, so it
+  // gives back what it took instead.
+  const onVisibility = () => (document.hidden ? stop() : start());
+  const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+  const ro = new ResizeObserver(remeasure);
+  ro.observe(canvas);
+  const io = new IntersectionObserver((es) => (es[0].isIntersecting ? start() : stop()), {
     threshold: 0.1,
-  }).observe(canvas);
-  document.addEventListener("visibilitychange", () => (document.hidden ? stop() : start()));
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", remeasure);
+  });
+  io.observe(canvas);
+  addEventListener("resize", remeasure, { passive: true });
+  document.addEventListener("visibilitychange", onVisibility);
+  darkQuery.addEventListener("change", remeasure);
+
+  /// Stop painting and give back every listener, so a second mount starts from
+  /// nothing. Safe to call twice.
+  function destroy() {
+    stop();
+    ro.disconnect();
+    io.disconnect();
+    removeEventListener("resize", remeasure);
+    document.removeEventListener("visibilitychange", onVisibility);
+    darkQuery.removeEventListener("change", remeasure);
+  }
 
   // Swap the fallback for the real module as soon as it lands. Until then the
   // hero is already painting, so nothing waits on the network.
@@ -187,7 +212,7 @@ export function mountHero(canvas, opts = {}) {
     remeasure();
   });
 
-  return { start, stop };
+  return { start, stop, destroy };
 }
 
 /// Instantiate examples/herofield.vyrn and hand back its exported `heroFrame`,

@@ -120,7 +120,7 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
 </script>
 
 <template>
-<main class="page docpage">
+<main id="main" tabindex="-1" class="page docpage">
     <!-- The export index IS the rail. It was a full-width band of its own, two
          horizontal rules and a screen of whitespace around thirteen short names,
          and it sat far above the entries it indexes while the page's own left

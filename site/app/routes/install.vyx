@@ -71,7 +71,7 @@ fn lspBuild() -> String {
 </script>
 
 <template>
-<main class="page">
+<main id="main" tabindex="-1" class="page">
     <aside class="rail">
         <a href="#get"><span class="n">01</span>get it</a>
         <a href="#check"><span class="n">02</span>check it</a>
@@ -94,7 +94,7 @@ fn lspBuild() -> String {
                     <span class="eyebrow">from source</span>
                 </div>
                 <div class="tabs">
-                    <button type="button" v-for="p in platforms()" :key="p.id" :data-plat="p.id" role="tab" aria-selected="false">{{ p.name }}</button>
+                    <button type="button" v-for="p in platforms()" :key="p.id" :data-plat="p.id">{{ p.name }}</button>
                 </div>
                 <div class="stage panes">
                     <div v-for="p in platforms()" :key="p.id" :data-plat-pane="p.id">

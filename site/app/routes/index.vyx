@@ -16,6 +16,9 @@ import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
 import { exampleCount, rfcCount, stdCount, backendCount } from "../repo"
 import { shellHtml } from "../code"
 import { ownRows, lifetimes, lineCount, moduleRatio, targetsBox, targetsNodes, targetsEdges, OwnRow, Life, Node, Edge } from "../chart"
+import { parityReport } from "../../../examples/herofield"
+import { fnv1aStr } from "std/hash"
+import { toHex } from "std/strings"
 
 export fn head() -> Head {
     return pageHead("Vyrn — a systems language with the expressiveness of TypeScript")
@@ -27,10 +30,26 @@ export fn head() -> Head {
 fn quickstart() -> String {
     return "git clone https://github.com/vyrn-lang/vyrn.git && cd vyrn/compiler && cargo build --release -p vyrn-cli"
 }
+
+/// The parity digest, MEASURED while this page is built.
+///
+/// The interpreter is running this file, so it can run the program the parity
+/// claim is about: `parityReport()` is exactly what `examples/herofield.vyrn`
+/// prints — a frame, then the raw bits behind it — and this hashes it. The page
+/// then runs the same file as wasm in the reader's browser and hashes what the
+/// module printed. Two engines, two digests, one comparison the reader watches
+/// happen.
+///
+/// `main` is `print(parityReport())`, and `print` ends the line, so the bytes
+/// the wasm module writes to stdout are these bytes plus one newline. That
+/// newline is the only difference between the two sides, and it is here.
+fn builtDigest() -> String {
+    return toHex(fnv1aStr(parityReport() + "\n"))
+}
 </script>
 
 <template>
-<main class="page">
+<main id="main" tabindex="-1" class="page">
     <aside class="rail">
         <a href="#types"><span class="n">01</span>types</a>
         <a href="#memory"><span class="n">02</span>memory</a>
@@ -175,11 +194,11 @@ fn quickstart() -> String {
             <p>Not a reason to use Vyrn — the reason to believe the rest. CI fails unless all three backends agree on stdout, stderr and exit code, trap messages included.</p>
             <div class="plate" data-widget="parity">
                 <div class="plate-head">
-                    <span class="pill live">Live check</span>
+                    <span class="pill live">Runs in your browser</span>
                     <span class="eyebrow">examples/herofield.vyrn</span>
                     <span class="spacer"></span>
                     <div class="controls">
-                        <button type="button" data-parity-run>Run all three</button>
+                        <button type="button" data-parity-run>Run it here</button>
                         <button type="button" class="danger" data-parity-break aria-pressed="false">Break one byte</button>
                     </div>
                 </div>
@@ -188,20 +207,23 @@ fn quickstart() -> String {
                     <div class="columns" data-parity-cols>
                         <div>
                             <h4>interp</h4>
-                            <pre class="digest" data-col="interp">4605754516372531133</pre>
+                            <pre class="digest" data-col="interp">{{ builtDigest() }}</pre>
+                            <p class="eyebrow">computed while this page was built</p>
                         </div>
                         <div>
                             <h4>native</h4>
-                            <pre class="digest" data-col="native">4605754516372531133</pre>
+                            <pre class="digest muted" data-col="native">not here</pre>
+                            <p class="eyebrow">a page cannot run a binary — CI compares it</p>
                         </div>
                         <div>
                             <h4>wasm</h4>
-                            <pre class="digest" data-col="wasm">4605754516372531133</pre>
+                            <pre class="digest" data-col="wasm">—</pre>
+                            <p class="eyebrow">computed by this browser, when you press Run</p>
                         </div>
                     </div>
-                    <p class="verdict" data-parity-verdict>0 bytes differ</p>
+                    <p class="verdict" data-parity-verdict>The wasm column runs in the browser. With no JavaScript, this page shows only the digest the build measured.</p>
                 </div>
-                <p class="cap">The number is the IEEE-754 bit pattern of <code>sin(1)</code> as <code>examples/herofield.vyrn</code> prints it. All three print it because the build forbids the fused multiply-add that would change a bit. Break one byte to watch the harness turn red.</p>
+                <p class="cap">The digest is <code>FNV-1a-64</code> of everything <code>examples/herofield.vyrn</code> prints — a frame, and the raw IEEE-754 bits behind it. The interpreter hashed it while this page was built; press Run and your browser fetches <code>hero.wasm</code>, runs it, and hashes what the module printed. Two engines, one number. <strong>Break one byte</strong> corrupts the digest the build recorded, so the comparison fails against a run that is still real.</p>
             </div>
             <p class="notice">Run it yourself: <code>cargo test -p vyrn-cli --test parity -- --ignored</code>.</p>
         </section>

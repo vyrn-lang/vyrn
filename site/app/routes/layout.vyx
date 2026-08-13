@@ -22,6 +22,11 @@ head {
 
 <template>
 <div id="root">
+    <!-- The first thing a keyboard reaches. A reference page puts a masthead
+         and a 23-link rail in front of the prose, and this jumps all of it.
+         `<main>` carries `tabindex="-1"` on every route so the focus lands
+         there and does not spring back to the top of the document. -->
+    <a class="skip" href="#main">Skip to content</a>
     <header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
         <nav class="nav">
@@ -30,7 +35,12 @@ head {
     </header>
     <slot/>
     <footer class="foot">
-        <span>{{ exampleCount() }} examples, {{ backendCount() }} backends, 0 divergences</span>
+        <!-- The two counts are generated; `0 divergences` was not. It was a
+             string literal on every page, asserting the result of a harness this
+             build never ran — exactly the number-by-hand the site's own data
+             rule forbids. The parity claim is made where it can be shown: on the
+             landing page, by a check that runs. -->
+        <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
         <a href="https://github.com/vyrn-lang/vyrn">Source on GitHub</a>
         <a href="https://github.com/vyrn-lang/vyrn/tree/main/rfcs">The design record</a>
         <span>Early. No versioned release yet.</span>
