@@ -2541,12 +2541,24 @@ impl Fn_<'_> {
         line: usize,
     ) -> Result<(), String> {
         match w {
+            // The sixth site of the rule [`Fn_::str_owned`] states, and the one a
+            // container and a record field do not reach: those descend through
+            // [`Fn_::rel_at`], whose `Str` arm draws the region key, and a sum
+            // payload comes here instead. A `String` payload that rides IN the
+            // word is freed on this line, so `Some(a + b)` inside a region — and
+            // `Ok`, `Err`, and every user variant carrying a `String` — handed the
+            // arena's block to the allocator a second time. Both encodings route
+            // through this one function, so both are answered here: the boxed arm
+            // below frees only the BOX, which is `malloc`'s at every depth the way
+            // an `Array` buffer is, and the `String` inside it is `rel_at`'s.
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(off)));
-                b.ins(&Instruction::I32WrapI64);
-                str_hdr(b);
-                b.ins(&Instruction::Call(self.cx.rt.free));
+                if self.region_depth == 0 {
+                    b.ins(&Instruction::LocalGet(a));
+                    b.ins(&Instruction::I64Load(at(off)));
+                    b.ins(&Instruction::I32WrapI64);
+                    str_hdr(b);
+                    b.ins(&Instruction::Call(self.cx.rt.free));
+                }
                 Ok(())
             }
             Word::Boxed => {

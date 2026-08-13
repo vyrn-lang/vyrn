@@ -21,6 +21,14 @@ import { joinWith } from "std/strings"
 
 type Tagged = { label: String, size: Int64 }
 
+// A sum payload. `Wrapped`'s String rides in its own word beside the Int64, and
+// `Option<String>`'s rides in the single word an Option carries. Both reach
+// `Fn_::rel_word`, which is a second walk over the same rule: a container and a
+// record field descend through `Fn_::rel_at` and never come here.
+type Boxed =
+    | Empty
+    | Wrapped(String, Int64)
+
 // Module state, for the store route no local can reach: `Fn_::place_owns`
 // answers yes for a `Place::Static` with no release row behind it at all.
 let mut held: String = ""
@@ -133,6 +141,27 @@ fn main() -> Int64 {
     }
     n = n + detect("callee    ")
 
-    print(n) // 123
+    // Through a sum payload. A container and a record field descend through
+    // `Fn_::rel_at`, whose `Str` arm draws the region key; a payload word goes to
+    // `Fn_::rel_word` instead, which is a second walk over the same rule.
+    region {
+        let o: Option<String> = Some(six + sixb)
+        n = n + match o {
+            Some(v) => v.byteLength,
+            None => 0,
+        }
+    }
+    n = n + detect("payload   ")
+
+    region {
+        let w: Boxed = Wrapped(six + sixb, 7)
+        n = n + match w {
+            Wrapped(s, k) => s.byteLength + k,
+            Empty => 0,
+        }
+    }
+    n = n + detect("variant   ")
+
+    print(n) // 162
     return 0
 }
