@@ -30,7 +30,75 @@
 //!    the synthesized module's existing analysis.
 
 use crate::diagnostics::{Diagnostic, Severity};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// What a synthesized module's directives are read under: where they resolve,
+/// how far they may reach, and which lines may carry one at all.
+///
+/// **Generated text is data until the compiler decides otherwise.** A directive
+/// used to be any line whose first non-blank characters were `//@origin` or
+/// `//@diag`, found by a scan with no lexical context — so a string literal a
+/// component author wrote, copied through verbatim by a trusted generator
+/// (RFC-0048 §1 is `std/vyx` doing exactly that), could fail the build at a path
+/// outside the project with wording the compiler never wrote. The lexer already
+/// knows which lines are comments and which are data; this asks it once.
+pub struct Context<'a> {
+    /// Directory of the module that wrote the generator call — what a directive
+    /// path resolves against (RFC-0033: paths are relative to the importer).
+    pub importer_dir: &'a str,
+    /// The project directory. RFC-0033 maps generated source to USER source, so
+    /// a directive that names a file outside the project is not a map — it is
+    /// refused as malformed and the diagnostic keeps its generated location.
+    /// Empty when no manifest was found; the directive is then bounded by
+    /// `importer_dir`'s own root only.
+    pub project: &'a str,
+    /// The lines on which the lexer says a `//` comment BEGINS — the only lines
+    /// a directive may be read from. `None` when the text does not lex: the
+    /// line-scan then honours every line, because a module that cannot lex still
+    /// owes its errors an origin map (RFC-0053) and fails the build regardless.
+    comment_lines: Option<HashSet<usize>>,
+}
+
+impl<'a> Context<'a> {
+    /// Read `source`'s lexical structure once, for both the origin table and the
+    /// `//@diag` scan.
+    pub fn new(source: &str, importer_dir: &'a str, project: &'a str) -> Self {
+        Context {
+            importer_dir,
+            project,
+            comment_lines: comment_lines(source),
+        }
+    }
+
+    /// Whether a directive found on 1-based `line` is a control line and not data
+    /// that happens to look like one.
+    fn honors(&self, line: usize) -> bool {
+        match &self.comment_lines {
+            Some(lines) => lines.contains(&line),
+            None => true,
+        }
+    }
+}
+
+/// The 1-based lines of `source` on which the lexer says a `//` comment BEGINS,
+/// or `None` when the text does not lex.
+///
+/// The one reading every control-line scan over generated text shares. A scan
+/// that reads a line's first characters and nothing else cannot tell a directive
+/// from data that looks like one, and a generator copies its input through
+/// verbatim — so the lexer decides, once, and every consumer asks it. `None`
+/// means there is no lexical structure to read, and the caller then honours every
+/// line: a module that does not lex fails the build regardless (RFC-0053).
+pub fn comment_lines(source: &str) -> Option<HashSet<usize>> {
+    Some(
+        crate::lexer::lex_with_trivia(source)
+            .ok()?
+            .iter()
+            .filter(|t| t.kind == crate::lexer::TrivKind::Comment)
+            .map(|t| t.start_line)
+            .collect(),
+    )
+}
 
 /// A resolved origin position an origin directive points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,9 +156,9 @@ impl OriginMaps {
     }
 
     /// Parse the `//@origin` directives out of one synthesized module's source.
-    /// `banner` is the module key; `importer_dir` is the slash directory the
-    /// origin paths resolve against (the loader computes it from the banner).
-    pub fn add_module(&mut self, banner: &str, source: &str, importer_dir: &str) {
+    /// `banner` is the module key; `ctx` says where the paths resolve, how far
+    /// they may reach, and which lines are comments rather than data.
+    pub fn add_module(&mut self, banner: &str, source: &str, ctx: &Context<'_>) {
         let mut dirs: Vec<Directive> = Vec::new();
         let mut total = 0usize;
         for (i, raw) in source.lines().enumerate() {
@@ -99,6 +167,9 @@ impl OriginMaps {
             let Some(rest) = trimmed.strip_prefix("//@origin") else {
                 continue;
             };
+            if !ctx.honors(i + 1) {
+                continue;
+            }
             let rest = rest.trim();
             let gen_line = i + 2; // the directive governs the NEXT line onward
             if rest == "end" {
@@ -109,7 +180,7 @@ impl OriginMaps {
                 });
                 continue;
             }
-            match parse_origin_body(rest, importer_dir) {
+            match parse_origin_body(rest, ctx) {
                 Ok(origin) => dirs.push(Directive {
                     gen_line,
                     origin: Some(origin),
@@ -278,10 +349,13 @@ impl OriginMaps {
 /// build on an older compiler, and must not vanish either.
 pub const NO_POSITION: &str = "-";
 
-pub fn diagnostics(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagnostic> {
+pub fn diagnostics(banner: &str, source: &str, ctx: &Context<'_>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (i, raw) in source.lines().enumerate() {
         let trimmed = raw.trim_start();
+        if !ctx.honors(i + 1) {
+            continue;
+        }
         let (severity, rest, unknown) = if let Some(body) = trimmed.strip_prefix("//@diag") {
             let body = body.trim();
             match body.split_once(char::is_whitespace) {
@@ -305,7 +379,7 @@ pub fn diagnostics(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagno
                 // than kept, or every unpositioned report would read `- \`fn old\`
                 // is deprecated`.
                 Some((NO_POSITION, tail)) => (None, tail.trim()),
-                Some((head, tail)) => match parse_origin_body(head, importer_dir) {
+                Some((head, tail)) => match parse_origin_body(head, ctx) {
                     Ok(origin) => (Some(origin), tail.trim()),
                     Err(_) => (None, rest),
                 },
@@ -348,7 +422,7 @@ pub fn diagnostics(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagno
 /// `importer_dir`. The two trailing colon-separated fields are the position, so
 /// a path may itself contain colons only if they are not the last two — v1 input
 /// paths are plain relative specifiers, so this is exact.
-fn parse_origin_body(body: &str, importer_dir: &str) -> Result<Origin, String> {
+fn parse_origin_body(body: &str, ctx: &Context<'_>) -> Result<Origin, String> {
     // Split from the right so the path keeps any interior separators.
     let (rest, col) = body
         .rsplit_once(':')
@@ -365,7 +439,7 @@ fn parse_origin_body(body: &str, importer_dir: &str) -> Result<Origin, String> {
         return Err("empty path".to_string());
     }
     Ok(Origin {
-        file: resolve_origin_path(importer_dir, path),
+        file: resolve_origin_path(ctx, path)?,
         line,
         col,
     })
@@ -374,13 +448,50 @@ fn parse_origin_body(body: &str, importer_dir: &str) -> Result<Origin, String> {
 /// Resolve a directive `path` (relative to the generator's importing module)
 /// into a normalized slash key, mirroring the loader's relative-import
 /// resolution for local paths.
-fn resolve_origin_path(importer_dir: &str, path: &str) -> String {
-    let joined = if importer_dir.is_empty() {
+///
+/// **An anchor resolves; it does not roam** (RFC-0099's Containment section, in
+/// the words it already used). A map from generated text to user source is only
+/// a map while it points at source the user wrote, so three claims are refused
+/// rather than followed: an absolute path (a directive path is relative to the
+/// importer by definition), a path that climbs out of the importer's own root,
+/// and a path that lands outside the project directory. The refusal is a
+/// malformed directive, which the never-lose rule already handles: the
+/// diagnostic stays at its generated location and says why.
+fn resolve_origin_path(ctx: &Context<'_>, path: &str) -> Result<String, String> {
+    if crate::audience::is_absolute(path) {
+        return Err(format!(
+            "path `{path}` is absolute; an origin path is relative to the importing module"
+        ));
+    }
+    let joined = if ctx.importer_dir.is_empty() {
         path.to_string()
     } else {
-        format!("{importer_dir}/{path}")
+        format!("{}/{path}", ctx.importer_dir)
     };
-    normalize_slashes(&joined)
+    let resolved = normalize_slashes(&joined);
+    // `..` popped past the importer directory's own root: an absolute base that
+    // came back relative lost its drive, and a relative one kept a `..`.
+    let climbed = if crate::audience::is_absolute(ctx.importer_dir) {
+        !crate::audience::is_absolute(&resolved)
+    } else {
+        resolved == ".." || resolved.starts_with("../")
+    };
+    if climbed {
+        return Err(format!("path `{path}` climbs out of the importing module"));
+    }
+    if !ctx.project.is_empty() {
+        let base = OriginMaps::norm_path_key(ctx.project);
+        let under = OriginMaps::norm_path_key(&resolved);
+        // A relative path against an absolute project base is the same project
+        // spelled from inside it, not a file outside it — the allowance
+        // `audience::relative_to` makes for module keys, for the same reason.
+        let relative_spelling =
+            !crate::audience::is_absolute(&resolved) && crate::audience::is_absolute(ctx.project);
+        if !relative_spelling && under != base && !under.starts_with(&format!("{base}/")) {
+            return Err(format!("path `{path}` names a file outside the project"));
+        }
+    }
+    Ok(resolved)
 }
 
 /// Collapse `.`/`..` segments in a slash path (a local copy of the loader's
@@ -425,12 +536,22 @@ mod tests {
         d
     }
 
+    /// The reading context for a generated text with no project directory to be
+    /// bounded by — the shape an in-memory load has.
+    fn ctx<'a>(source: &str, importer_dir: &'a str) -> Context<'a> {
+        Context::new(source, importer_dir, "")
+    }
+
+    fn resolved(importer_dir: &str, path: &str) -> Result<String, String> {
+        resolve_origin_path(&ctx("", importer_dir), path)
+    }
+
     #[test]
     fn remaps_a_governed_line_to_its_origin() {
         let banner = "generated by components(\"./comp\") at app.vyrn";
         let src = "line1\n//@origin ./comp/Item.vyx:14:9\nrow.push(x)\nmore\n";
         let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, "");
+        maps.add_module(banner, src, &ctx(src, ""));
         // The generated error is on line 3 (`row.push(x)`), governed by the
         // directive on line 2.
         let mut d = diag(banner, 3, 5);
@@ -448,21 +569,21 @@ mod tests {
     #[test]
     fn unix_absolute_importer_dir_keeps_its_root() {
         assert_eq!(
-            resolve_origin_path("/tmp/probe/app", "./comp/Widget.vyx"),
+            resolved("/tmp/probe/app", "./comp/Widget.vyx").unwrap(),
             "/tmp/probe/app/comp/Widget.vyx"
         );
         // Windows drive-letter paths are unaffected either way.
         assert_eq!(
-            resolve_origin_path("n:/lang/examples", "./routes/index.vyx"),
+            resolved("n:/lang/examples", "./routes/index.vyx").unwrap(),
             "n:/lang/examples/routes/index.vyx"
         );
         // A relative importer dir stays relative.
-        assert_eq!(resolve_origin_path("examples", "./a.vyx"), "examples/a.vyx");
+        assert_eq!(resolved("examples", "./a.vyx").unwrap(), "examples/a.vyx");
 
         let banner = "generated by components(\"./comp\") at /tmp/probe/app.vyrn";
         let src = "//@origin ./comp/Widget.vyx:6:8\n<expr>\n";
         let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, "/tmp/probe");
+        maps.add_module(banner, src, &ctx(src, "/tmp/probe"));
         assert_eq!(
             maps.input_files(),
             vec!["/tmp/probe/comp/Widget.vyx".to_string()]
@@ -475,7 +596,7 @@ mod tests {
         let banner = "b";
         let src = "//@origin ./a.vyx:1:1\nx\n//@origin end\ny\n";
         let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, "");
+        maps.add_module(banner, src, &ctx(src, ""));
         let mut governed = diag(banner, 2, 1);
         assert!(maps.remap(&mut governed));
         // Line 4 is after `//@origin end` → not remapped.
@@ -489,7 +610,7 @@ mod tests {
         let banner = "b";
         let src = "//@origin not-a-valid-directive\nx\n";
         let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, "");
+        maps.add_module(banner, src, &ctx(src, ""));
         let mut d = diag(banner, 2, 1);
         assert!(!maps.remap(&mut d));
         assert_eq!(d.file.as_deref(), Some("b")); // stays at generated location
@@ -501,7 +622,7 @@ mod tests {
         let banner = "b";
         let src = "//@origin ./ItemRow.vyx:2:3\nx\n";
         let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, "src/ui");
+        maps.add_module(banner, src, &ctx(src, "src/ui"));
         let mut d = diag(banner, 2, 1);
         maps.remap(&mut d);
         assert_eq!(d.file.as_deref(), Some("src/ui/ItemRow.vyx"));
@@ -512,7 +633,7 @@ mod tests {
         let banner = "b";
         let src = "a\n//@origin ./x.vyx:5:2\nb\nc\n//@origin end\nd\n";
         let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, "");
+        maps.add_module(banner, src, &ctx(src, ""));
         let regions = maps.regions_for("x.vyx");
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].gen_start_line, 3);
@@ -527,7 +648,7 @@ mod tests {
         let src = "//@warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated
 fn x() {}
 ";
-        let ds = diagnostics("b", src, "app");
+        let ds = diagnostics("b", src, &ctx(src, "app"));
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].severity, crate::diagnostics::Severity::Warning);
         assert_eq!(ds[0].file.as_deref(), Some("app/routes/p/[id].vyx"));
@@ -549,7 +670,7 @@ fn x() {}
         // reach the user's screen as the first word of the message.
         let src = "//@warning - `fn old` is deprecated
 ";
-        let ds = diagnostics("b", src, "app");
+        let ds = diagnostics("b", src, &ctx(src, "app"));
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].message, "`fn old` is deprecated");
         assert_eq!(ds[0].file.as_deref(), Some("b")); // reported where it was generated
@@ -561,7 +682,7 @@ fn x() {}
         // Never lose the notice: an unparseable first field is text, not a bug.
         let src = "//@warning whoops something is off
 ";
-        let ds = diagnostics("b", src, "");
+        let ds = diagnostics("b", src, &ctx(src, ""));
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].message, "whoops something is off");
         assert_eq!(ds[0].file.as_deref(), Some("b"));
@@ -569,16 +690,8 @@ fn x() {}
 
     #[test]
     fn an_empty_directive_says_nothing() {
-        assert!(diagnostics(
-            "b",
-            "//@warning
-//@warning
-//@diag
-//@diag
-",
-            ""
-        )
-        .is_empty());
+        let src = "//@warning\n//@warning\n//@diag\n//@diag\n";
+        assert!(diagnostics("b", src, &ctx(src, "")).is_empty());
     }
 
     #[test]
@@ -586,7 +699,7 @@ fn x() {}
         let src = "//@diag error ./schema/users.tbl:14:3 column `id` is declared twice
 //@diag warning ./schema/users.tbl:9:3 column `email` has no length limit
 ";
-        let ds = diagnostics("b", src, "app");
+        let ds = diagnostics("b", src, &ctx(src, "app"));
         assert_eq!(ds.len(), 2);
         assert_eq!(ds[0].severity, Severity::Error);
         assert_eq!(ds[0].file.as_deref(), Some("app/schema/users.tbl"));
@@ -601,8 +714,16 @@ fn x() {}
     fn the_warning_directive_is_the_warning_severity() {
         // The RFC-0071 M2b spelling and the RFC-0099 one must be one mechanism,
         // or the older emitters quietly mean something else.
-        let a = diagnostics("b", "//@warning ./x.vyx:1:1 hi\n", "app");
-        let d = diagnostics("b", "//@diag warning ./x.vyx:1:1 hi\n", "app");
+        let a = diagnostics(
+            "b",
+            "//@warning ./x.vyx:1:1 hi\n",
+            &ctx("//@warning ./x.vyx:1:1 hi\n", "app"),
+        );
+        let d = diagnostics(
+            "b",
+            "//@diag warning ./x.vyx:1:1 hi\n",
+            &ctx("//@diag warning ./x.vyx:1:1 hi\n", "app"),
+        );
         assert_eq!(a.len(), 1);
         assert_eq!(d.len(), 1);
         assert_eq!(a[0].severity, d[0].severity);
@@ -614,14 +735,100 @@ fn x() {}
     fn an_unrecognized_severity_neither_escalates_nor_vanishes() {
         // A generator written for a later compiler must not fail a build here,
         // and must not be silently dropped either.
-        let ds = diagnostics(
-            "b",
-            "//@diag hint ./x.vyx:1:1 consider a shorter name\n",
-            "",
-        );
+        let src = "//@diag hint ./x.vyx:1:1 consider a shorter name\n";
+        let ds = diagnostics("b", src, &ctx(src, ""));
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].severity, Severity::Warning);
         assert_eq!(ds[0].message, "hint ./x.vyx:1:1 consider a shorter name");
         assert!(ds[0].note.as_deref().unwrap().contains("hint"));
+    }
+
+    // ---- generated text is data until the compiler decides otherwise --------
+
+    /// A generator copies its input through verbatim (`std/vyx` does, RFC-0048
+    /// §1), so a multi-line string literal in a component file can put any text
+    /// at the start of a generated line. That text is DATA: it may not fail a
+    /// build, choose a severity, or name a file.
+    #[test]
+    fn a_directive_inside_a_string_literal_is_data_not_a_control_line() {
+        let src = "fn banner() -> String {\n    return \"first\n\
+                   //@diag error ./elsewhere.vyx:1:1 injected by a string literal\n\
+                   last\"\n}\n";
+        assert!(diagnostics("b", src, &ctx(src, "app")).is_empty());
+
+        // The same line, moved out of the literal, IS a control line — so the
+        // test cannot pass by the scan having stopped working.
+        let real = format!("//@diag error ./elsewhere.vyx:1:1 reported by the generator\n{src}");
+        let ds = diagnostics("b", &real, &ctx(&real, "app"));
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].severity, Severity::Error);
+    }
+
+    /// The same root cause on the origin side: a directive inside string data
+    /// used to displace the valid directive above it, attributing a real error
+    /// to a file the generator never read.
+    #[test]
+    fn an_origin_inside_a_string_literal_does_not_hijack_the_map() {
+        let src = "//@origin ./real.vyx:3:1\n\
+                   fn s() -> String {\n    return \"a\n\
+                   //@origin ./hijacked.vyx:7:7\n\
+                   b\"\n}\nlet x = nope()\n";
+        let mut maps = OriginMaps::new();
+        maps.add_module("b", src, &ctx(src, "app"));
+        let mut d = diag("b", 7, 1);
+        assert!(maps.remap(&mut d));
+        assert_eq!(d.file.as_deref(), Some("app/real.vyx"));
+        assert_eq!(d.line, 3);
+        // The hijacker contributed no region at all.
+        assert!(maps.regions_for("app/hijacked.vyx").is_empty());
+    }
+
+    /// Text that does not lex has no lexical context to read, and RFC-0053 says
+    /// its errors still owe the input file a map — so the scan keeps every line.
+    #[test]
+    fn text_that_does_not_lex_keeps_its_directives() {
+        let src = "//@origin ./x.vyx:2:2\n<not vyrn at all$$$\n";
+        assert!(crate::lexer::lex_with_trivia(src).is_err());
+        let mut maps = OriginMaps::new();
+        maps.add_module("b", src, &ctx(src, ""));
+        let mut d = diag("b", 2, 1);
+        assert!(maps.remap(&mut d));
+        assert_eq!(d.file.as_deref(), Some("x.vyx"));
+    }
+
+    /// An anchor resolves; it does not roam (RFC-0099, Containment). Three
+    /// claims a map may not make, each degrading to the never-lose rule.
+    #[test]
+    fn an_origin_may_not_name_a_file_outside_the_project() {
+        // Absolute: a directive path is relative to the importing module.
+        assert!(resolved("n:/proj/app", "/etc/passwd").is_err());
+        assert!(resolved("n:/proj/app", "c:/Windows/win.ini").is_err());
+        // Climbing out of the importer's own root — the shape that used to pop
+        // a whole absolute prefix and come back as a relative key.
+        assert!(resolved("n:/proj/app", "../../../../../../../../x.vyx").is_err());
+        assert!(resolved("", "../x.vyx").is_err());
+        // Inside the project directory, in a sibling of the importer: legal, and
+        // the shape every `.vyx` page mount actually has.
+        assert_eq!(
+            resolved("n:/proj/client", "../app/routes/index.vyx").unwrap(),
+            "n:/proj/app/routes/index.vyx"
+        );
+
+        // With a project directory declared, a file elsewhere on the same drive
+        // is refused too, and the diagnostic keeps its generated location.
+        let c = Context::new("", "n:/proj/app", "n:/proj");
+        assert!(resolve_origin_path(&c, "../../other/x.vyx").is_err());
+        assert_eq!(
+            resolve_origin_path(&c, "../shared/x.vyx").unwrap(),
+            "n:/proj/shared/x.vyx"
+        );
+
+        let src = "//@origin ../../../../../../../../outside.vyx:1:1\nlet x = nope()\n";
+        let mut maps = OriginMaps::new();
+        maps.add_module("b", src, &ctx(src, "n:/proj/app"));
+        let mut d = diag("b", 2, 1);
+        assert!(!maps.remap(&mut d));
+        assert_eq!(d.file.as_deref(), Some("b"));
+        assert!(d.note.as_deref().unwrap().contains("malformed"));
     }
 }

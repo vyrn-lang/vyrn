@@ -645,3 +645,52 @@ fn a_module_vyrn_is_configuration_not_wire_surface() {
         "a config module must not be mounted:\n{table}"
     );
 }
+
+/// The route table is the THIRD scan over generated text, and generated text is
+/// data until the compiler says otherwise.
+///
+/// A generator copies its input through verbatim, so a string literal a
+/// component author wrote can put any characters at the start of a generated
+/// line. `//@route` there is not a route: the table `vyrn routes` prints answers
+/// "what does this server serve", and a row no procedure serves is a lie about
+/// the wire. The lexer says which lines are comments, and only those carry a
+/// directive.
+#[test]
+fn a_route_directive_inside_a_string_literal_is_not_a_route() {
+    let dir = scratch("ghostroute");
+    write(&dir, "vyrn.json", "{ \"name\": \"ghost\" }\n");
+    write(
+        &dir,
+        "gen.vyrn",
+        "export gen fn surface(x: String) -> String {\n    \
+         return \"//@route GET /_/real/row real/row convention\\n\
+         export fn body() -> String {\\n    return \\\"a\\n\
+         //@route GET /_/ghost/row ghost/row convention\\n\
+         b\\\"\\n}\\n\"\n}\n",
+    );
+    write(
+        &dir,
+        "app.vyrn",
+        "import { surface } from \"./gen\"\n\
+         import { body } from surface(\"x\")\n\
+         fn main() -> Int64 {\n    print(body())\n    return 0\n}\n",
+    );
+    let out = vyrn()
+        .arg("routes")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let table = String::from_utf8_lossy(&out.stdout);
+    // The generator's own directive is a comment, and it is honoured — so the
+    // test cannot pass by the scan having stopped working.
+    assert!(table.contains("/_/real/row"), "{table}");
+    assert!(
+        !table.contains("/_/ghost/row"),
+        "a string literal must not add a route:\n{table}"
+    );
+}
