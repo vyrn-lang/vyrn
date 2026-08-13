@@ -17,6 +17,37 @@ use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
 use crate::types::FALLIBLE;
 
+/// A checker error, positioned: `cerr!(line, "msg {x}")` is the structured
+/// [`Diagnostic`] the checker used to build as the string `"line {N}: msg"` and
+/// then parse back apart.
+///
+/// The message is the rendering MINUS its `"line {N}: "` prefix —
+/// [`Diagnostic::render`] puts the prefix back, so `check()` and the CLI print
+/// exactly what they always did.
+///
+/// The column is `0` ("whole line"): the checker works on an AST whose nodes
+/// carry a line and no column, so it has no column to give. Every position the
+/// front end reports is 1-based and counted in Unicode scalar values — see
+/// [`crate::diagnostics`].
+macro_rules! cerr {
+    ($line:expr, $($arg:tt)*) => {
+        $crate::diagnostics::Diagnostic::error(
+            $crate::checker::line_of($line),
+            0,
+            "check",
+            format!($($arg)*),
+        )
+    };
+}
+
+/// The line a `cerr!` was given, by value. AST nodes hand out their line as
+/// `usize` when they are matched by value and `&usize` when they are matched by
+/// reference; the old `format!("line {line}: ..")` accepted both through
+/// `Display`, and this keeps that true without a `*` at two hundred call sites.
+pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
+    *l.borrow()
+}
+
 /// Type-check the program, returning **all** problems found across functions
 /// and types as structured [`Diagnostic`]s, plus a table of the (inferred or
 /// declared) type of each `let` binding and `for`-in loop variable that
@@ -347,22 +378,13 @@ fn check_accum_inner(
     let mut types: HashMap<String, TypeDecl> = HashMap::new();
     for t in &program.type_decls {
         if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
-            let mut d = Diagnostic::from_rendered(
-                format!(
-                    "line {}: cannot redefine built-in type `{}`",
-                    t.line, t.name
-                ),
-                "check",
-            );
+            let mut d = cerr!(t.line, "cannot redefine built-in type `{}`", t.name);
             d.file = t.module.clone();
             out.push(d);
             continue;
         }
         if types.contains_key(&t.name) {
-            let mut d = Diagnostic::from_rendered(
-                format!("line {}: type `{}` defined twice", t.line, t.name),
-                "check",
-            );
+            let mut d = cerr!(t.line, "type `{}` defined twice", t.name);
             d.file = t.module.clone();
             out.push(d);
             continue;
@@ -376,29 +398,18 @@ fn check_accum_inner(
         if let Type::Enum(vs) = &t.base {
             for v in vs {
                 if RESERVED.contains(&v.name.as_str()) {
-                    out.push(Diagnostic::from_rendered(
-                        format!("line {}: `{}` is a reserved name", t.line, v.name),
-                        "check",
-                    ));
+                    out.push(cerr!(t.line, "`{}` is a reserved name", v.name));
                     continue;
                 }
                 if variants.contains_key(&v.name) {
-                    out.push(Diagnostic::from_rendered(
-                        format!(
-                            "line {}: enum variant `{}` is defined twice",
-                            t.line, v.name
-                        ),
-                        "check",
-                    ));
+                    out.push(cerr!(t.line, "enum variant `{}` is defined twice", v.name));
                     continue;
                 }
                 if types.contains_key(&v.name) {
-                    out.push(Diagnostic::from_rendered(
-                        format!(
-                            "line {}: enum variant `{}` clashes with a type name",
-                            t.line, v.name
-                        ),
-                        "check",
+                    out.push(cerr!(
+                        t.line,
+                        "enum variant `{}` clashes with a type name",
+                        v.name
                     ));
                     continue;
                 }
@@ -418,36 +429,26 @@ fn check_accum_inner(
     let mut generics: HashMap<String, Vec<String>> = HashMap::new();
     for f in &program.functions {
         if RESERVED.contains(&f.name.as_str()) {
-            out.push(Diagnostic::from_rendered(
-                format!("line {}: `{}` is a reserved name", f.line, f.name),
-                "check",
-            ));
+            out.push(cerr!(f.line, "`{}` is a reserved name", f.name));
             continue;
         }
         if variants.contains_key(&f.name) {
-            out.push(Diagnostic::from_rendered(
-                format!(
-                    "line {}: `{}` is both a function and an enum variant",
-                    f.line, f.name
-                ),
-                "check",
+            out.push(cerr!(
+                f.line,
+                "`{}` is both a function and an enum variant",
+                f.name
             ));
             continue;
         }
         if sigs.contains_key(&f.name) {
-            out.push(Diagnostic::from_rendered(
-                format!("line {}: function `{}` defined twice", f.line, f.name),
-                "check",
-            ));
+            out.push(cerr!(f.line, "function `{}` defined twice", f.name));
             continue;
         }
         if types.contains_key(&f.name) {
-            out.push(Diagnostic::from_rendered(
-                format!(
-                    "line {}: `{}` is both a type and a function name",
-                    f.line, f.name
-                ),
-                "check",
+            out.push(cerr!(
+                f.line,
+                "`{}` is both a type and a function name",
+                f.name
             ));
             continue;
         }
@@ -591,25 +592,25 @@ fn check_accum_inner(
         if let Some(declared) = protocol_decls.get(imp.protocol.as_str()).map(|p| &p.assoc) {
             for name in declared.iter() {
                 if !imp.assoc.contains(name) {
-                    out.push(Diagnostic::from_rendered(
-                        format!(
-                            "line {}: `impl {} for {}` does not bind the associated type `{name}` \
+                    out.push(cerr!(
+                        imp.line,
+                        "`impl {} for {}` does not bind the associated type `{name}` \
                              — add `type {name} = ..` (protocol `{}` declares it)",
-                            imp.line, imp.protocol, imp.ty, imp.protocol
-                        ),
-                        "check",
+                        imp.protocol,
+                        imp.ty,
+                        imp.protocol
                     ));
                 }
             }
             for name in &imp.assoc {
                 if !declared.contains(name) {
-                    out.push(Diagnostic::from_rendered(
-                        format!(
-                            "line {}: `impl {} for {}` binds `type {name}`, which protocol `{}` \
+                    out.push(cerr!(
+                        imp.line,
+                        "`impl {} for {}` binds `type {name}`, which protocol `{}` \
                              does not declare",
-                            imp.line, imp.protocol, imp.ty, imp.protocol
-                        ),
-                        "check",
+                        imp.protocol,
+                        imp.ty,
+                        imp.protocol
                     ));
                 }
             }
@@ -639,25 +640,22 @@ fn check_accum_inner(
                 |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
                 let Some(f) = imp.methods.iter().find(|m| m.name == sig.name) else {
-                    out.push(Diagnostic::from_rendered(
-                        format!(
-                            "line {}: `impl {} for {}` does not provide `{}`, which protocol `{}` \
+                    out.push(cerr!(
+                        imp.line,
+                        "`impl {} for {}` does not provide `{}`, which protocol `{}` \
                              declares — a protocol's methods are all required, so anything \
                              holding a `T: {}` may call it",
-                            imp.line,
-                            imp.protocol,
-                            imp.ty,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
-                            imp.protocol,
-                            imp.protocol
+                        imp.protocol,
+                        imp.ty,
+                        render_method_sig(
+                            &sig.name,
+                            sig.recv,
+                            &sig.params,
+                            &sig.param_caps,
+                            &sig.ret
                         ),
-                        "check",
+                        imp.protocol,
+                        imp.protocol
                     ));
                     continue;
                 };
@@ -682,23 +680,20 @@ fn check_accum_inner(
                     && got_caps == sig.param_caps
                     && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
                 if !agrees {
-                    out.push(Diagnostic::from_rendered(
-                        format!(
-                            "line {}: `{}` does not match protocol `{}` — it declares `{}`, this \
+                    out.push(cerr!(
+                        f.line,
+                        "`{}` does not match protocol `{}` — it declares `{}`, this \
                              provides `{}`",
-                            f.line,
-                            render_impl_head(imp),
-                            imp.protocol,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
-                            render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                        render_impl_head(imp),
+                        imp.protocol,
+                        render_method_sig(
+                            &sig.name,
+                            sig.recv,
+                            &sig.params,
+                            &sig.param_caps,
+                            &sig.ret
                         ),
-                        "check",
+                        render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
                     ));
                 }
             }
@@ -751,17 +746,14 @@ fn check_accum_inner(
                     .first()
                     .map(|p| p.capability)
                     .unwrap_or(Capability::Read);
-                out.push(Diagnostic::from_rendered(
-                    format!(
-                        "line {}: `{}` provides `{}`, which protocol `{}` does not declare — \
+                out.push(cerr!(
+                    m.line,
+                    "`{}` provides `{}`, which protocol `{}` does not declare — \
                          dispatch knows only a protocol's own method names, so this one is \
                          reachable from nowhere; {fix}",
-                        m.line,
-                        render_impl_head(imp),
-                        render_method_sig(&m.name, recv, &got, &got_caps, &m.ret),
-                        imp.protocol
-                    ),
-                    "check",
+                    render_impl_head(imp),
+                    render_method_sig(&m.name, recv, &got, &got_caps, &m.ret),
+                    imp.protocol
                 ));
             }
         }
@@ -797,15 +789,14 @@ fn check_accum_inner(
                     // keys on the constructor (see `types::type_key`), so the
                     // constructor is what admits one impl. The generic form is
                     // the answer in both cases, so the message names it.
-                    Some((prev_line, prev)) => out.push(Diagnostic::from_rendered(
-                        format!(
-                            "line {}: `{head}` collides with `{prev}` (line {prev_line}) — Vyrn \
+                    Some((prev_line, prev)) => out.push(cerr!(
+                        imp.line,
+                        "`{head}` collides with `{prev}` (line {prev_line}) — Vyrn \
                              dispatches on the type constructor, so `{key}` may have only one \
                              impl of `{}`; write one generic impl (`impl<T> {} for {key}<T>`) to \
                              cover every instantiation",
-                            imp.line, imp.protocol, imp.protocol
-                        ),
-                        "check",
+                        imp.protocol,
+                        imp.protocol
                     )),
                     None => {
                         impl_heads.insert((imp.protocol.clone(), key.clone()), (imp.line, head));
@@ -836,12 +827,11 @@ fn check_accum_inner(
                      or `Result`"
                         .to_string()
                 };
-                out.push(Diagnostic::from_rendered(
-                    format!(
-                        "line {}: `impl {} for {}` is not supported — {why}",
-                        imp.line, imp.protocol, imp.ty
-                    ),
-                    "check",
+                out.push(cerr!(
+                    imp.line,
+                    "`impl {} for {}` is not supported — {why}",
+                    imp.protocol,
+                    imp.ty
                 ))
             }
         }
@@ -911,7 +901,7 @@ fn check_accum_inner(
     // 3. Validate each type decl (base kind, referenced-type existence, predicate).
     for t in &program.type_decls {
         if let Err(s) = checker.check_type_decl(t) {
-            out.push(Diagnostic::from_rendered(s, "check"));
+            out.push(s);
         }
     }
 
@@ -921,7 +911,7 @@ fn check_accum_inner(
     //     the failure mode the RFC exists to remove.
     for c in &program.contracts {
         for s in checker.check_contract_decl(c) {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = c.module.clone();
             out.push(d);
         }
@@ -933,7 +923,7 @@ fn check_accum_inner(
     //     being the one every reader writes.
     for p in &program.protocols {
         for s in checker.check_protocol_decl(p) {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = p.module.clone();
             out.push(d);
         }
@@ -964,16 +954,10 @@ fn check_accum_inner(
         || !program.benches.is_empty()
         || has_served_handle;
     match sigs.get("main") {
-        None if !is_library => out.push(Diagnostic::from_rendered(
-            "no `main` function found".to_string(),
-            "check",
-        )),
+        None if !is_library => out.push(cerr!(0, "no `main` function found")),
         None => {}
         Some(main) if !main.0.is_empty() || main.1 != Type::Int => {
-            out.push(Diagnostic::from_rendered(
-                "`main` must have signature `fn main() -> Int64`".to_string(),
-                "check",
-            ))
+            out.push(cerr!(0, "`main` must have signature `fn main() -> Int64`"))
         }
         _ => {}
     }
@@ -1015,39 +999,39 @@ fn check_accum_inner(
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
         *checker.in_gen.borrow_mut() = f.is_gen;
-        let r = (|| -> Result<(), String> {
+        let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
                 // A function-value type is legal only on an ordinary function
                 // (RFC-0023/0037): never on an `extern` import/export, whose ABI
                 // domain crosses the host boundary (closures do not cross wasm),
                 // and never on a `gen fn` (generation-time signatures are wire-ish).
                 if checker.contains_fn(&p.ty) && (f.is_extern || f.is_export_extern) {
-                    return Err(format!(
-                        "line {}: an `extern` function may not take a `fn`-typed \
-                         parameter (RFC-0023)",
-                        f.line
+                    return Err(cerr!(
+                        f.line,
+                        "an `extern` function may not take a `fn`-typed \
+                         parameter (RFC-0023)"
                     ));
                 }
                 if checker.contains_fn(&p.ty) && f.is_gen {
-                    return Err(format!(
-                        "line {}: a `gen fn` may not take a `fn`-typed parameter in v1 \
-                         (RFC-0023)",
-                        f.line
+                    return Err(cerr!(
+                        f.line,
+                        "a `gen fn` may not take a `fn`-typed parameter in v1 \
+                         (RFC-0023)"
                     ));
                 }
                 checker.ensure_param_type(&p.ty, f.line)?;
             }
             if checker.contains_fn(&f.ret) && (f.is_extern || f.is_export_extern) {
-                return Err(format!(
-                    "line {}: an `extern` function may not return a function value \
-                     (RFC-0037 — closures do not cross the host boundary)",
-                    f.line
+                return Err(cerr!(
+                    f.line,
+                    "an `extern` function may not return a function value \
+                     (RFC-0037 — closures do not cross the host boundary)"
                 ));
             }
             if checker.contains_fn(&f.ret) && f.is_gen {
-                return Err(format!(
-                    "line {}: a `gen fn` may not return a function value (RFC-0037)",
-                    f.line
+                return Err(cerr!(
+                    f.line,
+                    "a `gen fn` may not return a function value (RFC-0037)"
                 ));
             }
             checker.ensure_type_exists(&f.ret, f.line)?;
@@ -1067,13 +1051,13 @@ fn check_accum_inner(
             Ok(())
         })();
         if let Err(s) = r {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = f.module.clone();
             out.push(d);
         }
         // Drain the rest of this function's accumulated body errors.
         for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = f.module.clone();
             out.push(d);
         }
@@ -1127,15 +1111,13 @@ fn check_accum_inner(
         let ext = extend_spawn_safe(program, &spawn_safe, &effects);
         for (caller, callee, line) in checker.spawn_sites.borrow().iter() {
             if !ext.contains(callee.as_str()) {
-                let mut d = Diagnostic::from_rendered(
-                    format!(
-                        "line {line}: `spawn {callee}(..)` is not allowed: `{callee}` \
+                let mut d = cerr!(
+                    line,
+                    "`spawn {callee}(..)` is not allowed: `{callee}` \
                          (or something it calls) invokes a stored function value \
                          (RFC-0037) whose possible targets do I/O or touch shared \
                          mutable state, so running it as a task could race. A \
                          spawned function must be isolated (pure)."
-                    ),
-                    "check",
                 );
                 d.file = program
                     .functions
@@ -1170,8 +1152,8 @@ fn check_accum_inner(
 ///    a local of its own body yields a place that the access site does not own.
 fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
     for (imp, f) in crate::project::all(program) {
-        let mut push = |msg: String| {
-            let mut d = Diagnostic::from_rendered(msg, "check");
+        let mut push = |msg: Diagnostic| {
+            let mut d = msg;
             d.file = f.module.clone();
             out.push(d);
         };
@@ -1182,10 +1164,11 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
                 Some(Stmt::Return { value: Some(_), .. })
             )
         {
-            push(format!(
-                "line {}: `place {}` must end with exactly one `yield <place>` — \
+            push(cerr!(
+                f.line,
+                "`place {}` must end with exactly one `yield <place>` — \
                  a projection is inlined at the access site, so it has one exit",
-                f.line, f.name
+                f.name
             ));
             continue;
         }
@@ -1195,28 +1178,28 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         // `e?` propagates by RETURNING, and a projection has no frame to
         // return from — inlined, it would exit the access site's function.
         if crate::project::has_try(&f.body) {
-            push(format!(
-                "line {}: `place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.",
-                f.line, f.name
+            push(cerr!(f.line, "`place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.", f.name
             ));
             continue;
         }
         if !crate::project::is_place(y) {
-            push(format!(
-                "line {}: `place {}` yields a value, not a place — write \
+            push(cerr!(
+                f.line,
+                "`place {}` yields a value, not a place — write \
                  `yield <field or element of self>`; a projection that computes \
                  a new value is an ordinary `fn`",
-                f.line, f.name
+                f.name
             ));
             continue;
         }
         match crate::project::place_root(y) {
             Some(root) if root == "self" || f.params.iter().any(|p| p.name == root) => {}
-            Some(root) => push(format!(
-                "line {}: `place {}` yields a place rooted at `{root}`, which the \
+            Some(root) => push(cerr!(
+                f.line,
+                "`place {}` yields a place rooted at `{root}`, which the \
                  access site does not own — a projection may only yield into \
                  `self` or one of its parameters",
-                f.line, f.name
+                f.name
             )),
             None => {}
         }
@@ -1265,12 +1248,10 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
     for t in &program.tests {
         let key = (t.module.clone(), t.name.clone());
         if let Some(prev) = seen.get(&key) {
-            let mut d = Diagnostic::from_rendered(
-                format!(
-                    "line {}: duplicate test name {:?} (already declared on line {prev})",
-                    t.line, t.name
-                ),
-                "check",
+            let mut d = cerr!(
+                t.line,
+                "duplicate test name {:?} (already declared on line {prev})",
+                t.name
             );
             d.file = t.module.clone();
             out.push(d);
@@ -1300,12 +1281,12 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             is_mut: false,
         };
         if let Err(s) = checker.function(&synthetic) {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = t.module.clone();
             out.push(d);
         }
         for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = t.module.clone();
             out.push(d);
         }
@@ -1322,12 +1303,10 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
     for b in &program.benches {
         let key = (b.module.clone(), b.name.clone());
         if let Some(prev) = seen.get(&key) {
-            let mut d = Diagnostic::from_rendered(
-                format!(
-                    "line {}: duplicate bench name {:?} (already declared on line {prev})",
-                    b.line, b.name
-                ),
-                "check",
+            let mut d = cerr!(
+                b.line,
+                "duplicate bench name {:?} (already declared on line {prev})",
+                b.name
             );
             d.file = b.module.clone();
             out.push(d);
@@ -1354,12 +1333,12 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
             is_mut: false,
         };
         if let Err(s) = checker.function(&synthetic) {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = b.module.clone();
             out.push(d);
         }
         for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = Diagnostic::from_rendered(s, "check");
+            let mut d = s;
             d.file = b.module.clone();
             out.push(d);
         }
@@ -1431,7 +1410,7 @@ struct Checker<'a> {
     /// top-level "every function's error, within a function first-error" rule).
     /// A failed `let`/`for` binds its name to [`Type::Err`] so later uses don't
     /// cascade "unknown variable".
-    errors: RefCell<Vec<String>>,
+    errors: RefCell<Vec<Diagnostic>>,
     /// Module-state bindings (RFC-0013): name -> (type, mutable). Populated once
     /// (in declaration order) before any function is checked; every function's
     /// scope stack bottoms out on these, which [`Scope`] reads when its frames
@@ -1579,7 +1558,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         fn_ret: Option<&Type>,
         line: usize,
-    ) -> Result<Option<Type>, String> {
+    ) -> Result<Option<Type>, Diagnostic> {
         // Every `a[i]` in the program reaches this. A builtin container leaves
         // by the first line, and nothing below it runs.
         if crate::project::is_builtin_container(recv) || self.impl_blocks.is_empty() {
@@ -1595,8 +1574,9 @@ impl<'a> Checker<'a> {
         };
         let recv = recv.clone();
         if args.len() - 1 != f.params.len() - 1 {
-            return Err(format!(
-                "line {line}: `place {method}` expects {} argument(s) besides `self`, got {}",
+            return Err(cerr!(
+                line,
+                "`place {method}` expects {} argument(s) besides `self`, got {}",
                 f.params.len() - 1,
                 args.len() - 1
             ));
@@ -1609,8 +1589,9 @@ impl<'a> Checker<'a> {
             let want = crate::types::substitute(&p.ty, &subst);
             let got = self.expr(arg, scope, Some(&want), fn_ret)?;
             if !self.coercible(&got, &want) {
-                return Err(format!(
-                    "line {line}: `place {method}` argument is {got}, expected {want}"
+                return Err(cerr!(
+                    line,
+                    "`place {method}` argument is {got}, expected {want}"
                 ));
             }
             self.prove_coercion(arg, &want, line)?;
@@ -1982,7 +1963,7 @@ impl<'a> Checker<'a> {
     /// compiler can prove costs nothing and fails early). Non-constant values
     /// pass through to the runtime check. Also proves record literals whose
     /// fields are all constants against a cross-field predicate.
-    fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), String> {
+    fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {
         let decl = match to {
             Type::Named(n) => match self.types.get(n) {
                 Some(d) if d.predicate.is_some() => d,
@@ -1996,8 +1977,9 @@ impl<'a> Checker<'a> {
             let mut env = HashMap::new();
             env.insert("value".to_string(), cv.clone());
             if consteval::eval(pred, &env).and_then(ConstVal::as_bool) == Some(false) {
-                return Err(format!(
-                    "line {line}: {cv} does not satisfy `{}` (predicate `where {}` is false)",
+                return Err(cerr!(
+                    line,
+                    "{cv} does not satisfy `{}` (predicate `where {}` is false)",
                     decl.name,
                     pred_summary(pred),
                 ));
@@ -2016,8 +1998,9 @@ impl<'a> Checker<'a> {
                 }
             }
             if consteval::eval(pred, &env).and_then(ConstVal::as_bool) == Some(false) {
-                return Err(format!(
-                    "line {line}: this value does not satisfy `{}` (predicate `where {}` \
+                return Err(cerr!(
+                    line,
+                    "this value does not satisfy `{}` (predicate `where {}` \
                      is false)",
                     decl.name,
                     pred_summary(pred),
@@ -2042,7 +2025,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         fn_ret: Option<&Type>,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let resolve = |e: &Expr| self.expr(e, scope, None, fn_ret).ok();
         match crate::finite::prove_string_flow(expr, to, self.types, &resolve) {
             crate::finite::Proof::Witness(witness) => {
@@ -2053,8 +2036,9 @@ impl<'a> Checker<'a> {
                     _ => unreachable!("witness implies a named target"),
                 };
                 let pred = decl.predicate.as_ref().unwrap();
-                Err(format!(
-                    "line {line}: \"{witness}\" (a possible value of this interpolation) \
+                Err(cerr!(
+                    line,
+                    "\"{witness}\" (a possible value of this interpolation) \
                      does not satisfy `{}` (predicate `where {}` is false)",
                     decl.name,
                     pred_summary(pred),
@@ -2071,10 +2055,11 @@ impl<'a> Checker<'a> {
     /// payloads are validated one at a time, so each arrives at the root position
     /// the guard there deliberately allows. This is that same rule, spelled for
     /// the two sites where "root" is a lie.
-    fn ensure_no_stream(&self, ty: &Type, line: usize, where_: &str) -> Result<(), String> {
+    fn ensure_no_stream(&self, ty: &Type, line: usize, where_: &str) -> Result<(), Diagnostic> {
         if self.contains_stream(ty) {
-            return Err(format!(
-                "line {line}: `{ty}` may not be {where_} — a stream's lifetime is a scope, \
+            return Err(cerr!(
+                line,
+                "`{ty}` may not be {where_} — a stream's lifetime is a scope, \
                  so it may be a binding, a parameter, or a return type, and nothing may \
                  store it (RFC-0075)"
             ));
@@ -2082,7 +2067,7 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
-    fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), String> {
+    fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), Diagnostic> {
         // RFC-0075: a stream's lifetime is a SCOPE, which is what makes the
         // obligation checkable. A `Stream` inside a record, an array, a `Ref` or
         // an enum payload would outlive the binding movecheck can see, so the
@@ -2091,8 +2076,9 @@ impl<'a> Checker<'a> {
         // of a binding, parameter, or return type; rejected anywhere below that,
         // here, at the one walk every declared type passes through.
         if !matches!(self.base(ty), Type::Stream(_)) && self.contains_stream(ty) {
-            return Err(format!(
-                "line {line}: `{ty}` holds a `Stream`, but a stream's lifetime is a scope — \
+            return Err(cerr!(
+                line,
+                "`{ty}` holds a `Stream`, but a stream's lifetime is a scope — \
                  it may be a binding, a parameter, or a return type, and nothing may \
                  store it (RFC-0075)"
             ));
@@ -2104,8 +2090,9 @@ impl<'a> Checker<'a> {
             // emitted). It has no fields and no declaration.
             Type::Named(n) if n == "Code" && !self.types.contains_key("Code") => {
                 if !*self.in_gen.borrow() {
-                    return Err(format!(
-                        "line {line}: the `Code` type is only available during generation"
+                    return Err(cerr!(
+                        line,
+                        "the `Code` type is only available during generation"
                     ));
                 }
                 return Ok(());
@@ -2115,8 +2102,9 @@ impl<'a> Checker<'a> {
             // `type Token` wins and is validated normally.
             Type::Named(n) if n == "Token" && !self.types.contains_key("Token") => {
                 if !*self.in_gen.borrow() {
-                    return Err(format!(
-                        "line {line}: the `Token` type is only available during generation"
+                    return Err(cerr!(
+                        line,
+                        "the `Token` type is only available during generation"
                     ));
                 }
                 return Ok(());
@@ -2134,18 +2122,20 @@ impl<'a> Checker<'a> {
             // rather than three near-misses. A user `type Self = ..` still wins,
             // the rule `Code` and `Token` follow above.
             Type::Named(n) if n == "Self" && !self.types.contains_key("Self") => {
-                return Err(format!(
-                    "line {line}: `Self` is not a type in Vyrn — a protocol that must name the \
+                return Err(cerr!(
+                    line,
+                    "`Self` is not a type in Vyrn — a protocol that must name the \
                      implementing type declares an associated type instead: `protocol P {{ type \
                      Out  fn m(self) -> Out }}`, and each impl binds it with `type Out = ..` \
                      (RFC-0080)"
                 ))
             }
             Type::Named(n) => match self.types.get(n) {
-                None => return Err(format!("line {line}: unknown type `{n}`")),
+                None => return Err(cerr!(line, "unknown type `{n}`")),
                 Some(d) if !d.type_params.is_empty() => {
-                    return Err(format!(
-                        "line {line}: `{n}` is generic; write `{n}<...>` with type arguments"
+                    return Err(cerr!(
+                        line,
+                        "`{n}` is generic; write `{n}<...>` with type arguments"
                     ))
                 }
                 _ => {}
@@ -2155,17 +2145,16 @@ impl<'a> Checker<'a> {
                 // A user generic carrying one (`Box<3>`) is a checker error —
                 // checked before arity so the diagnostic names the real problem.
                 if args.iter().any(|a| matches!(a, Type::ConstInt(_))) {
-                    return Err(format!(
-                        "line {line}: type {name} does not take an integer argument"
-                    ));
+                    return Err(cerr!(line, "type {name} does not take an integer argument"));
                 }
                 let d = self
                     .types
                     .get(name)
-                    .ok_or_else(|| format!("line {line}: unknown type `{name}`"))?;
+                    .ok_or_else(|| cerr!(line, "unknown type `{name}`"))?;
                 if d.type_params.len() != args.len() {
-                    return Err(format!(
-                        "line {line}: `{name}` takes {} type argument(s), got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{name}` takes {} type argument(s), got {}",
                         d.type_params.len(),
                         args.len()
                     ));
@@ -2186,13 +2175,13 @@ impl<'a> Checker<'a> {
             }
             Type::Omit(base, keys) | Type::Pick(base, keys) => {
                 self.ensure_type_exists(base, line)?;
-                let fields = crate::types::record_fields(base, self.types).ok_or_else(|| {
-                    format!("line {line}: the transformer's base must be a record type")
-                })?;
+                let fields = crate::types::record_fields(base, self.types)
+                    .ok_or_else(|| cerr!(line, "the transformer's base must be a record type"))?;
                 for k in keys {
                     if !fields.iter().any(|f| &f.name == k) {
-                        return Err(format!(
-                            "line {line}: field `{k}` is not in the transformer's base record"
+                        return Err(cerr!(
+                            line,
+                            "field `{k}` is not in the transformer's base record"
                         ));
                     }
                 }
@@ -2203,13 +2192,13 @@ impl<'a> Checker<'a> {
                 if crate::types::record_fields(a, self.types).is_none()
                     || crate::types::record_fields(b, self.types).is_none()
                 {
-                    return Err(format!("line {line}: `Merge` requires two record types"));
+                    return Err(cerr!(line, "`Merge` requires two record types"));
                 }
             }
             Type::Partial(base) => {
                 self.ensure_type_exists(base, line)?;
                 if crate::types::record_fields(base, self.types).is_none() {
-                    return Err(format!("line {line}: `Partial` requires a record type"));
+                    return Err(cerr!(line, "`Partial` requires a record type"));
                 }
             }
             Type::Enum(vs) => {
@@ -2229,17 +2218,16 @@ impl<'a> Checker<'a> {
             // and the element type must be a real type (not a stray integer).
             Type::SmallArray(inner, n) => {
                 if *n < 1 || *n > 64 {
-                    return Err(format!(
-                        "line {line}: smallArray capacity must be between 1 and 64"
-                    ));
+                    return Err(cerr!(line, "smallArray capacity must be between 1 and 64"));
                 }
                 self.ensure_type_exists(inner, line)?;
             }
             // A bare integer type argument reached a position no constructor
             // consumes it (only `SmallArray<T, N>` takes one) — reject it.
             Type::ConstInt(_) => {
-                return Err(format!(
-                    "line {line}: an integer is not a type; only `SmallArray<T, N>` \
+                return Err(cerr!(
+                    line,
+                    "an integer is not a type; only `SmallArray<T, N>` \
                      takes an integer argument"
                 ))
             }
@@ -2247,8 +2235,9 @@ impl<'a> Checker<'a> {
             // task result slot has no dispatcher to receive one yet.
             Type::Task(inner) => {
                 if self.contains_fn(inner) {
-                    return Err(format!(
-                        "line {line}: a `Task` cannot hold a function value \
+                    return Err(cerr!(
+                        line,
+                        "a `Task` cannot hold a function value \
                          (RFC-0037 defers it)"
                     ));
                 }
@@ -2261,8 +2250,9 @@ impl<'a> Checker<'a> {
                 self.ensure_type_exists(key, line)?;
                 self.ensure_type_exists(val, line)?;
                 if crate::types::resolve(key, self.types) != Type::Str {
-                    return Err(format!(
-                        "line {line}: a `Map` key must be `String` in v1, found `{key}` \
+                    return Err(cerr!(
+                        line,
+                        "a `Map` key must be `String` in v1, found `{key}` \
                          (RFC-0028; validated string types are allowed)"
                     ));
                 }
@@ -2281,8 +2271,9 @@ impl<'a> Checker<'a> {
             Type::Fn(ptys, ret) => {
                 for p in ptys {
                     if self.contains_fn(p) {
-                        return Err(format!(
-                            "line {line}: a function type may not take another \
+                        return Err(cerr!(
+                            line,
+                            "a function type may not take another \
                              function value (RFC-0037 defers higher-order function \
                              types)"
                         ));
@@ -2290,8 +2281,9 @@ impl<'a> Checker<'a> {
                     self.ensure_type_exists(p, line)?;
                 }
                 if self.contains_fn(ret) {
-                    return Err(format!(
-                        "line {line}: a function type may not return another \
+                    return Err(cerr!(
+                        line,
+                        "a function type may not return another \
                          function value (RFC-0037 defers higher-order function \
                          types)"
                     ));
@@ -2307,21 +2299,23 @@ impl<'a> Checker<'a> {
     /// is the one legal function-type position; its own parameter and return types
     /// must not themselves be function types (no higher-order-of-higher-order in
     /// v1). Every other parameter type is validated normally.
-    fn ensure_param_type(&self, ty: &Type, line: usize) -> Result<(), String> {
+    fn ensure_param_type(&self, ty: &Type, line: usize) -> Result<(), Diagnostic> {
         match ty {
             Type::Fn(ptys, ret) => {
                 for p in ptys {
                     if self.contains_fn(p) {
-                        return Err(format!(
-                            "line {line}: a `fn`-typed parameter may not itself take a \
+                        return Err(cerr!(
+                            line,
+                            "a `fn`-typed parameter may not itself take a \
                              function value in v1 (RFC-0023)"
                         ));
                     }
                     self.ensure_type_exists(p, line)?;
                 }
                 if self.contains_fn(ret) {
-                    return Err(format!(
-                        "line {line}: a `fn`-typed parameter may not return a function \
+                    return Err(cerr!(
+                        line,
+                        "a `fn`-typed parameter may not return a function \
                          value in v1 (RFC-0023)"
                     ));
                 }
@@ -2345,7 +2339,7 @@ impl<'a> Checker<'a> {
     ///
     /// An associated type (RFC-0080 M2) reaches here as a [`Type::Param`], which
     /// the walk admits — so `fn get(self) -> Output` needs no exception.
-    fn check_protocol_decl(&self, p: &ProtocolDecl) -> Vec<String> {
+    fn check_protocol_decl(&self, p: &ProtocolDecl) -> Vec<Diagnostic> {
         let mut errs = Vec::new();
         for m in &p.methods {
             for t in m.params.iter().chain(std::iter::once(&m.ret)) {
@@ -2373,7 +2367,7 @@ impl<'a> Checker<'a> {
     /// * the open rule may not be optional or valueless — it describes a shape
     ///   for arbitrarily-named exports, so a default would have nothing to
     ///   attach to (rejected in the parser, where the `=` is seen).
-    fn check_contract_decl(&self, c: &ContractDecl) -> Vec<String> {
+    fn check_contract_decl(&self, c: &ContractDecl) -> Vec<Diagnostic> {
         let mut errs = Vec::new();
         for m in &c.members {
             let where_ = format!("contract `{}` member `{}`", c.name, m.name);
@@ -2424,7 +2418,7 @@ impl<'a> Checker<'a> {
         ty: &Type,
         where_: &str,
         line: usize,
-        errs: &mut Vec<String>,
+        errs: &mut Vec<Diagnostic>,
     ) {
         let Some(d) = default else { return };
         let scope = Scope::closed();
@@ -2432,20 +2426,21 @@ impl<'a> Checker<'a> {
         let expected = if open { None } else { Some(ty) };
         match self.expr(d, &scope, expected, None) {
             Err(e) => errs.push(e),
-            Ok(vty) if !open && !self.coercible(&vty, ty) => errs.push(format!(
-                "line {line}: {where_} defaults to {vty}, but is declared `{ty}`"
+            Ok(vty) if !open && !self.coercible(&vty, ty) => errs.push(cerr!(
+                line,
+                "{where_} defaults to {vty}, but is declared `{ty}`"
             )),
             Ok(_) => {}
         }
     }
 
-    fn check_type_decl(&self, t: &TypeDecl) -> Result<(), String> {
+    fn check_type_decl(&self, t: &TypeDecl) -> Result<(), Diagnostic> {
         // A function type (RFC-0037) has no value domain a `where` predicate
         // could constrain — a named fn type is a transparent alias only.
         if t.predicate.is_some() && self.contains_fn(&t.base) {
-            return Err(format!(
-                "line {}: a function type cannot carry a `where` predicate (RFC-0037)",
-                t.line
+            return Err(cerr!(
+                t.line,
+                "a function type cannot carry a `where` predicate (RFC-0037)"
             ));
         }
         // Structural record declaration (RFC-0002). A record may carry a `where`
@@ -2455,9 +2450,11 @@ impl<'a> Checker<'a> {
             let mut seen = std::collections::HashSet::new();
             for f in fields {
                 if !seen.insert(&f.name) {
-                    return Err(format!(
-                        "line {}: duplicate field `{}` in record `{}`",
-                        t.line, f.name, t.name
+                    return Err(cerr!(
+                        t.line,
+                        "duplicate field `{}` in record `{}`",
+                        f.name,
+                        t.name
                     ));
                 }
                 self.ensure_no_stream(&f.ty, t.line, "a record field")?;
@@ -2465,9 +2462,10 @@ impl<'a> Checker<'a> {
             }
             if let Some(pred) = &t.predicate {
                 if consteval::contains_call(pred) {
-                    return Err(format!(
-                        "line {}: cross-field predicate for `{}` may not contain calls (v0.1)",
-                        t.line, t.name
+                    return Err(cerr!(
+                        t.line,
+                        "cross-field predicate for `{}` may not contain calls (v0.1)",
+                        t.name
                     ));
                 }
                 // The predicate sees every field in scope, by name.
@@ -2483,9 +2481,10 @@ impl<'a> Checker<'a> {
                 }
                 let pty = self.expr(pred, &scope, None, None)?;
                 if self.base(&pty) != Type::Bool {
-                    return Err(format!(
-                        "line {}: cross-field predicate for `{}` must be Bool, found {pty}",
-                        t.line, t.name
+                    return Err(cerr!(
+                        t.line,
+                        "cross-field predicate for `{}` must be Bool, found {pty}",
+                        t.name
                     ));
                 }
             }
@@ -2494,16 +2493,10 @@ impl<'a> Checker<'a> {
         // Enum declaration (RFC-0002 §4).
         if let Type::Enum(vs) = &t.base {
             if t.predicate.is_some() {
-                return Err(format!(
-                    "line {}: an enum type cannot have a `where` clause",
-                    t.line
-                ));
+                return Err(cerr!(t.line, "an enum type cannot have a `where` clause"));
             }
             if vs.is_empty() {
-                return Err(format!(
-                    "line {}: enum `{}` has no variants",
-                    t.line, t.name
-                ));
+                return Err(cerr!(t.line, "enum `{}` has no variants", t.name));
             }
             for v in vs {
                 for p in &v.payload {
@@ -2520,9 +2513,9 @@ impl<'a> Checker<'a> {
         // payloads carry their own refinements); the payload types must exist.
         if matches!(t.base, Type::Result(..) | Type::Option(..)) {
             if t.predicate.is_some() {
-                return Err(format!(
-                    "line {}: a `{}` alias cannot have a `where` clause",
+                return Err(cerr!(
                     t.line,
+                    "a `{}` alias cannot have a `where` clause",
                     if matches!(t.base, Type::Result(..)) {
                         "Result"
                     } else {
@@ -2539,9 +2532,9 @@ impl<'a> Checker<'a> {
         // clause; the element/value types must exist.
         if matches!(t.base, Type::Map(..) | Type::Array(_) | Type::ArrayN(..)) {
             if t.predicate.is_some() {
-                return Err(format!(
-                    "line {}: a `{}` alias cannot have a `where` clause",
+                return Err(cerr!(
                     t.line,
+                    "a `{}` alias cannot have a `where` clause",
                     if matches!(t.base, Type::Map(..)) {
                         "Map"
                     } else {
@@ -2565,17 +2558,11 @@ impl<'a> Checker<'a> {
             Type::Omit(..) | Type::Pick(..) | Type::Merge(..) | Type::Partial(..)
         ) {
             if t.predicate.is_some() {
-                return Err(format!(
-                    "line {}: a record type cannot have a `where` clause",
-                    t.line
-                ));
+                return Err(cerr!(t.line, "a record type cannot have a `where` clause"));
             }
             self.ensure_type_exists(&t.base, t.line)?;
             if crate::types::record_fields(&t.base, self.types).is_none() {
-                return Err(format!(
-                    "line {}: `{}` does not resolve to a record",
-                    t.line, t.name
-                ));
+                return Err(cerr!(t.line, "`{}` does not resolve to a record", t.name));
             }
             return Ok(());
         }
@@ -2586,18 +2573,20 @@ impl<'a> Checker<'a> {
             t.base,
             Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
         ) {
-            return Err(format!(
-                "line {}: `{}` must have a scalar base (Int64, sized int, Float64, Bool, or String)",
-                t.line, t.name
+            return Err(cerr!(
+                t.line,
+                "`{}` must have a scalar base (Int64, sized int, Float64, Bool, or String)",
+                t.name
             ));
         }
         // `String` refinements are allowed (e.g. `value.byteLength >= 3`); like all
         // predicates they must be call-free and const-analyzable (checked below).
         if let Some(pred) = &t.predicate {
             if consteval::contains_call(pred) {
-                return Err(format!(
-                    "line {}: refinement predicate for `{}` may not contain calls (v0.1)",
-                    t.line, t.name
+                return Err(cerr!(
+                    t.line,
+                    "refinement predicate for `{}` may not contain calls (v0.1)",
+                    t.name
                 ));
             }
             // Predicate is checked in an environment where `value` has the base type.
@@ -2611,9 +2600,10 @@ impl<'a> Checker<'a> {
             );
             let pty = self.expr(pred, &scope, None, None)?;
             if self.base(&pty) != Type::Bool {
-                return Err(format!(
-                    "line {}: refinement predicate for `{}` must be Bool, found {pty}",
-                    t.line, t.name
+                return Err(cerr!(
+                    t.line,
+                    "refinement predicate for `{}` must be Bool, found {pty}",
+                    t.name
                 ));
             }
         }
@@ -2684,14 +2674,17 @@ impl<'a> Checker<'a> {
     /// boundary in v1 — reject it, naming the offending parameter/return type.
     /// Accumulates every offender (mirroring `function`): the first is the `Err`,
     /// the rest stay in the sink for `check_accum` to drain.
-    fn check_extern_sig(&self, f: &Function) -> Result<(), String> {
+    fn check_extern_sig(&self, f: &Function) -> Result<(), Diagnostic> {
         self.errors.borrow_mut().clear();
         for p in &f.params {
             if !extern_abi_type_ok(&p.ty, false) {
-                self.errors.borrow_mut().push(format!(
-                    "line {}: extern fn `{}` parameter `{}` has type {}, which cannot cross \
+                self.errors.borrow_mut().push(cerr!(
+                    f.line,
+                    "extern fn `{}` parameter `{}` has type {}, which cannot cross \
                      the JS boundary (allowed: Int64, sized ints, Float64, Float32, Bool, String)",
-                    f.line, f.name, p.name, p.ty
+                    f.name,
+                    p.name,
+                    p.ty
                 ));
             }
             // `consume` is not sayable across this boundary (RFC-0089 M3b).
@@ -2701,24 +2694,30 @@ impl<'a> Checker<'a> {
             // here reads as ownership and delivers a dangling pointer, so the
             // one honest way to keep the value is to copy it.
             if matches!(p.capability, Capability::Consume) && matches!(p.ty, Type::Str) {
-                self.errors.borrow_mut().push(format!(
-                    "line {}: extern fn `{}` parameter `{}` may not be `consume` — the caller \
+                self.errors.borrow_mut().push(cerr!(
+                    f.line,
+                    "extern fn `{}` parameter `{}` may not be `consume` — the caller \
                      across this boundary is JS, and it releases the String when the call \
                      returns\n  fix: take `{}: String` and store `{}.copy()`",
-                    f.line, f.name, p.name, p.name, p.name
+                    f.name,
+                    p.name,
+                    p.name,
+                    p.name
                 ));
             }
         }
         if !extern_abi_type_ok(&f.ret, true) {
-            self.errors.borrow_mut().push(format!(
-                "line {}: extern fn `{}` returns {}, which cannot cross the JS boundary \
+            self.errors.borrow_mut().push(cerr!(
+                f.line,
+                "extern fn `{}` returns {}, which cannot cross the JS boundary \
                  (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)",
-                f.line, f.name, f.ret
+                f.name,
+                f.ret
             ));
         }
         let mut errs = self.errors.borrow_mut();
         if let Some(first) = errs.first().cloned() {
-            let rest: Vec<String> = errs.drain(1..).collect();
+            let rest: Vec<Diagnostic> = errs.drain(1..).collect();
             *errs = rest;
             Err(first)
         } else {
@@ -2764,7 +2763,7 @@ impl<'a> Checker<'a> {
         // Ready-so-far names (the earlier globals) grow as we go.
         let mut ready: HashSet<String> = HashSet::new();
         for g in &program.globals {
-            let bty = (|| -> Result<Type, String> {
+            let bty = (|| -> Result<Type, Diagnostic> {
                 // Initializer restrictions (walked before typing so the messages
                 // are precise): no user/extern call, no later-global read.
                 init_restrictions(
@@ -2786,9 +2785,10 @@ impl<'a> Checker<'a> {
                 let scope = Scope::open();
                 let vty = self.expr(&g.init, &scope, g.ty.as_ref(), None)?;
                 if self.base(&vty) == Type::Unit {
-                    return Err(format!(
-                        "line {}: cannot bind module state `{}` to a Unit value",
-                        g.line, g.name
+                    return Err(cerr!(
+                        g.line,
+                        "cannot bind module state `{}` to a Unit value",
+                        g.name
                     ));
                 }
                 // RFC-0075: module state lives for the whole module and is never
@@ -2796,18 +2796,20 @@ impl<'a> Checker<'a> {
                 // disposed by anything movecheck can see — the obligation would
                 // be unsatisfiable rather than merely unchecked.
                 if matches!(self.base(&vty), Type::Stream(_)) {
-                    return Err(format!(
-                        "line {}: module state `{}` may not be a `Stream` — a stream's \
+                    return Err(cerr!(
+                        g.line,
+                        "module state `{}` may not be a `Stream` — a stream's \
                          lifetime is a scope, and module state is never dropped \
                          (RFC-0075)",
-                        g.line, g.name
+                        g.name
                     ));
                 }
                 if let Some(declared) = &g.ty {
                     if !self.coercible(&vty, declared) {
-                        return Err(format!(
-                            "line {}: `{}` declared {declared} but initializer is {vty}",
-                            g.line, g.name
+                        return Err(cerr!(
+                            g.line,
+                            "`{}` declared {declared} but initializer is {vty}",
+                            g.name
                         ));
                     }
                     self.prove_coercion(&g.init, declared, g.line)?;
@@ -2820,7 +2822,7 @@ impl<'a> Checker<'a> {
                     mutable: g.mutable,
                 },
                 Err(s) => {
-                    let mut d = Diagnostic::from_rendered(s, "check");
+                    let mut d = s;
                     d.file = g.module.clone();
                     out.push(d);
                     Binding {
@@ -2834,7 +2836,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn function(&self, f: &Function) -> Result<(), String> {
+    fn function(&self, f: &Function) -> Result<(), Diagnostic> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
         *self.in_gen.borrow_mut() = f.is_gen;
@@ -2863,9 +2865,11 @@ impl<'a> Checker<'a> {
         if f.ret != Type::Unit && !returns {
             // A missing-return diagnostic is reported alongside any body errors
             // (it is about the function as a whole, not one statement).
-            self.errors.borrow_mut().push(format!(
-                "line {}: function `{}` must return {} on all paths",
-                f.line, f.name, f.ret
+            self.errors.borrow_mut().push(cerr!(
+                f.line,
+                "function `{}` must return {} on all paths",
+                f.name,
+                f.ret
             ));
         }
         // Surface this function's collected errors as the "result": the first
@@ -2876,7 +2880,7 @@ impl<'a> Checker<'a> {
         if let Some(first) = errs.first().cloned() {
             // Keep the remaining (2..n) errors in the sink for `check_accum` to
             // drain after this `Err`; drop the first (it's the `Err` payload).
-            let rest: Vec<String> = errs.drain(1..).collect();
+            let rest: Vec<Diagnostic> = errs.drain(1..).collect();
             *errs = rest;
             Err(first)
         } else {
@@ -2941,7 +2945,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<bool, String> {
+    fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<bool, Diagnostic> {
         match stmt {
             Stmt::Let {
                 name,
@@ -2956,15 +2960,16 @@ impl<'a> Checker<'a> {
                 let vty = self.expr(value, scope, ty.as_ref(), Some(ret))?;
                 if let Some(declared) = ty {
                     if !self.coercible(&vty, declared) {
-                        return Err(format!(
-                            "line {line}: `{name}` declared {declared} but initializer is {vty}"
+                        return Err(cerr!(
+                            line,
+                            "`{name}` declared {declared} but initializer is {vty}"
                         ));
                     }
                     self.prove_coercion(value, declared, *line)?;
                     self.prove_string_interpolation(value, declared, scope, Some(ret), *line)?;
                 }
                 if self.base(&vty) == Type::Unit {
-                    return Err(format!("line {line}: cannot bind `{name}` to a Unit value"));
+                    return Err(cerr!(line, "cannot bind `{name}` to a Unit value"));
                 }
                 // The binding takes the declared type when present, else the value's.
                 let bty = ty.clone().unwrap_or(vty);
@@ -2983,20 +2988,18 @@ impl<'a> Checker<'a> {
                 Ok(false)
             }
             Stmt::Assign { name, value, line } => {
-                let b = self.lookup(scope, name).ok_or_else(|| {
-                    format!("line {line}: assignment to unknown variable `{name}`")
-                })?;
+                let b = self
+                    .lookup(scope, name)
+                    .ok_or_else(|| cerr!(line, "assignment to unknown variable `{name}`"))?;
                 if !b.mutable {
-                    return Err(format!(
-                        "line {line}: cannot assign to `{name}` (declared without `mut`)"
+                    return Err(cerr!(
+                        line,
+                        "cannot assign to `{name}` (declared without `mut`)"
                     ));
                 }
                 let vty = self.expr(value, scope, Some(&b.ty), Some(ret))?;
                 if !self.coercible(&vty, &b.ty) {
-                    return Err(format!(
-                        "line {line}: `{name}` is {} but assigned {}",
-                        b.ty, vty
-                    ));
+                    return Err(cerr!(line, "`{name}` is {} but assigned {}", b.ty, vty));
                 }
                 self.prove_coercion(value, &b.ty, *line)?;
                 self.prove_string_interpolation(value, &b.ty, scope, Some(ret), *line)?;
@@ -3010,11 +3013,12 @@ impl<'a> Checker<'a> {
                 line,
             } => {
                 let b = self.lookup(scope, name).ok_or_else(|| {
-                    format!("line {line}: assignment to field of unknown variable `{name}`")
+                    cerr!(line, "assignment to field of unknown variable `{name}`")
                 })?;
                 if !b.mutable {
-                    return Err(format!(
-                        "line {line}: cannot mutate a field of `{name}` (declared without `mut`)"
+                    return Err(cerr!(
+                        line,
+                        "cannot mutate a field of `{name}` (declared without `mut`)"
                     ));
                 }
                 // Validated data is rebuilt, not mutated: a field write on a
@@ -3023,23 +3027,25 @@ impl<'a> Checker<'a> {
                 // (`r = T { .. }`), which re-validates automatically.
                 if let Type::Named(n) = &b.ty {
                     if self.types.get(n).is_some_and(|d| d.predicate.is_some()) {
-                        return Err(format!(
-                            "line {line}: cannot mutate a field of `{n}` in place (its \
+                        return Err(cerr!(
+                            line,
+                            "cannot mutate a field of `{n}` in place (its \
                              `where` invariant could be broken mid-update); rebuild it: \
                              `{name} = {n} {{ .. }}`"
                         ));
                     }
                 }
                 let fields = crate::types::record_fields(&b.ty, self.types).ok_or_else(|| {
-                    format!("line {line}: `{name}` is not a record, so it has no field `{field}`")
+                    cerr!(
+                        line,
+                        "`{name}` is not a record, so it has no field `{field}`"
+                    )
                 })?;
                 let fty = fields
                     .iter()
                     .find(|f| &f.name == field)
                     .map(|f| f.ty.clone())
-                    .ok_or_else(|| {
-                        format!("line {line}: record `{name}` has no field `{field}`")
-                    })?;
+                    .ok_or_else(|| cerr!(line, "record `{name}` has no field `{field}`"))?;
                 // A predicated FIELD type cannot be written in place either: the
                 // interpreter's record values are type-erased, so the field's
                 // check has no reliable runtime hook there. Only the exact named
@@ -3049,15 +3055,14 @@ impl<'a> Checker<'a> {
                 let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
                 if field_is_predicated {
                     if !self.assignable(&vty, &fty) {
-                        return Err(format!(
-                            "line {line}: field `{field}` is {fty} (validated); assign an \
+                        return Err(cerr!(
+                            line,
+                            "field `{field}` is {fty} (validated); assign an \
                              already-constructed `{fty}` value, e.g. `{fty}(..)`"
                         ));
                     }
                 } else if !self.coercible(&vty, &fty) {
-                    return Err(format!(
-                        "line {line}: field `{field}` is {fty} but assigned {vty}"
-                    ));
+                    return Err(cerr!(line, "field `{field}` is {fty} but assigned {vty}"));
                 }
                 self.region_store_guard(name, &fty, scope, *line)?;
                 Ok(false)
@@ -3073,12 +3078,13 @@ impl<'a> Checker<'a> {
                 value,
                 line,
             } => {
-                let b = self.lookup(scope, name).ok_or_else(|| {
-                    format!("line {line}: index-assignment to unknown variable `{name}`")
-                })?;
+                let b = self
+                    .lookup(scope, name)
+                    .ok_or_else(|| cerr!(line, "index-assignment to unknown variable `{name}`"))?;
                 if !b.mutable {
-                    return Err(format!(
-                        "line {line}: cannot store into `{name}` (declared without `mut`)"
+                    return Err(cerr!(
+                        line,
+                        "cannot store into `{name}` (declared without `mut`)"
                     ));
                 }
                 // `m[k] = v` on a Map (RFC-0028) inserts or updates in place: the
@@ -3088,14 +3094,13 @@ impl<'a> Checker<'a> {
                     let k = self.base(&self.expr(index, scope, Some(&Type::Str), Some(ret))?);
                     if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str
                     {
-                        return Err(format!(
-                            "line {line}: a map key must be a String, found {k}"
-                        ));
+                        return Err(cerr!(line, "a map key must be a String, found {k}"));
                     }
                     let vty = self.expr(value, scope, Some(&val), Some(ret))?;
                     if !self.coercible(&vty, &val) {
-                        return Err(format!(
-                            "line {line}: `{name}` holds values of type {val} but the stored \
+                        return Err(cerr!(
+                            line,
+                            "`{name}` holds values of type {val} but the stored \
                              value is {vty}"
                         ));
                     }
@@ -3127,8 +3132,9 @@ impl<'a> Checker<'a> {
                                 self.solve_head(imp, &b.ty, &f.ret, *line)
                             }
                             None => {
-                                return Err(format!(
-                                    "line {line}: `{name}[i] = ..` needs an Array, a Map, or a \
+                                return Err(cerr!(
+                                    line,
+                                    "`{name}[i] = ..` needs an Array, a Map, or a \
                                      type that declares `place atSet`, found {other}"
                                 ))
                             }
@@ -3138,15 +3144,16 @@ impl<'a> Checker<'a> {
                 let i = self.expr(index, scope, Some(&key), Some(ret))?;
                 if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
                     return Err(if key == Type::Int {
-                        format!("line {line}: array index must be an Int64, found {i}")
+                        cerr!(line, "array index must be an Int64, found {i}")
                     } else {
-                        format!("line {line}: `{name}[..] = ..` is keyed by {key}, found {i}")
+                        cerr!(line, "`{name}[..] = ..` is keyed by {key}, found {i}")
                     });
                 }
                 let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
                 if !self.coercible(&vty, &elem) {
-                    return Err(format!(
-                        "line {line}: `{name}` holds {elem} but the stored value is {vty}"
+                    return Err(cerr!(
+                        line,
+                        "`{name}` holds {elem} but the stored value is {vty}"
                     ));
                 }
                 self.prove_coercion(value, &elem, *line)?;
@@ -3178,8 +3185,9 @@ impl<'a> Checker<'a> {
                     // a `return <wrong type>` does return, so it must NOT also
                     // trigger the "must return on all paths" diagnostic (that
                     // would be a cascade). Push to the sink and return `Ok(true)`.
-                    self.errors.borrow_mut().push(format!(
-                        "line {line}: return type mismatch: expected {ret}, found {vty}"
+                    self.errors.borrow_mut().push(cerr!(
+                        line,
+                        "return type mismatch: expected {ret}, found {vty}"
                     ));
                     return Ok(true);
                 }
@@ -3193,9 +3201,7 @@ impl<'a> Checker<'a> {
             } => {
                 let cty = self.expr(cond, scope, None, Some(ret))?;
                 if self.base(&cty) != Type::Bool {
-                    return Err(format!(
-                        "line {line}: `if` condition must be Bool, found {cty}"
-                    ));
+                    return Err(cerr!(line, "`if` condition must be Bool, found {cty}"));
                 }
                 let then_ret = self.block(then_block, ret, scope);
                 match else_block {
@@ -3244,7 +3250,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Break { line } => {
                 if !*self.in_loop.borrow() {
-                    return Err(format!("line {line}: `break` outside a loop"));
+                    return Err(cerr!(line, "`break` outside a loop"));
                 }
                 // `break` diverges but does not return — it never satisfies the
                 // "returns on all paths" obligation.
@@ -3252,16 +3258,14 @@ impl<'a> Checker<'a> {
             }
             Stmt::Continue { line } => {
                 if !*self.in_loop.borrow() {
-                    return Err(format!("line {line}: `continue` outside a loop"));
+                    return Err(cerr!(line, "`continue` outside a loop"));
                 }
                 Ok(false)
             }
             Stmt::While { cond, body, line } => {
                 let cty = self.expr(cond, scope, None, Some(ret))?;
                 if self.base(&cty) != Type::Bool {
-                    return Err(format!(
-                        "line {line}: `while` condition must be Bool, found {cty}"
-                    ));
+                    return Err(cerr!(line, "`while` condition must be Bool, found {cty}"));
                 }
                 let prev = self.in_loop.replace(true);
                 self.block(body, ret, scope);
@@ -3305,8 +3309,9 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             None => {
-                                return Err(format!(
-                                    "line {line}: `for` needs an Array, a String, or a type that \
+                                return Err(cerr!(
+                                    line,
+                                    "`for` needs an Array, a String, or a type that \
                                      declares `impl Iterate` (a `size` method and a `place nth`), \
                                      found {other}"
                                 ))
@@ -3342,14 +3347,15 @@ impl<'a> Checker<'a> {
                 // Module state (RFC-0013) is never dropped — it has module
                 // lifetime and is reclaimed only at process exit.
                 if self.resolves_to_global(scope, name) {
-                    return Err(format!(
-                        "line {line}: cannot `drop` module state `{name}` — it lives for the \
+                    return Err(cerr!(
+                        line,
+                        "cannot `drop` module state `{name}` — it lives for the \
                          whole module and is reclaimed at process exit"
                     ));
                 }
                 let b = self
                     .lookup(scope, name)
-                    .ok_or_else(|| format!("line {line}: `drop` of unbound variable `{name}`"))?;
+                    .ok_or_else(|| cerr!(line, "`drop` of unbound variable `{name}`"))?;
                 // Phase 5 made `drop` deep, so an `Option`/`Result` carrying heap
                 // is droppable too — the two aggregates rule 4 now releases. A
                 // record and a user enum are NOT here, and `own::release_kind`
@@ -3402,8 +3408,9 @@ impl<'a> Checker<'a> {
                 {
                     return Ok(false);
                 }
-                Err(format!(
-                    "line {line}: `drop` needs a heap value (a String, an Array, a Map, a Ref, \
+                Err(cerr!(
+                    line,
+                    "`drop` needs a heap value (a String, an Array, a Map, a Ref, \
                      or an Option/Result carrying one, or a type declaring `impl Owned`), but \
                      `{name}` is {t}"
                 ))
@@ -3475,12 +3482,13 @@ impl<'a> Checker<'a> {
         stored_ty: &Type,
         scope: &Scope,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if let Some(&floor) = self.region_floor.borrow().last() {
             let idx = scope.iter().rposition(|f| f.contains_key(name));
             if idx.map_or(false, |i| i < floor) && self.contains_heap(stored_ty) {
-                return Err(format!(
-                    "line {line}: cannot store a heap value into `{name}`, which \
+                return Err(cerr!(
+                    line,
+                    "cannot store a heap value into `{name}`, which \
                      outlives the enclosing `region` (it would dangle when the \
                      region frees). Move `{name}` inside the region, or compute a \
                      non-heap result to carry out."
@@ -3515,12 +3523,13 @@ impl<'a> Checker<'a> {
         idx: usize,
         arg_ty: &Type,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if self.region_floor.borrow().is_empty() || !self.contains_heap(arg_ty) {
             return Ok(());
         }
-        Err(format!(
-            "line {line}: cannot hand a heap value to argument {} of `{callee}`, which is \
+        Err(cerr!(
+            line,
+            "cannot hand a heap value to argument {} of `{callee}`, which is \
              `consume`, inside a `region`. The region frees the value at its closing brace, \
              so the callee cannot own it. Move the call out of the region, or pass a value \
              that holds no heap.",
@@ -3539,7 +3548,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         // RFC-0037: an expected function type makes this a STORED-function-value
         // position (a `let` annotation, record field, array/map element,
         // `Option`/`Result` payload, return, assignment, or module state). A
@@ -3575,7 +3584,8 @@ impl<'a> Checker<'a> {
                     if int_literal_fits(*n, bits, signed) {
                         Ok(t)
                     } else {
-                        Err(format!(
+                        Err(cerr!(
+                            0,
                             "integer literal {} does not fit {} (its range is {})",
                             render_int_literal(*n),
                             intn_name(bits, signed),
@@ -3585,7 +3595,8 @@ impl<'a> Checker<'a> {
                 }
                 _ => {
                     if *n < 0 {
-                        Err(format!(
+                        Err(cerr!(
+                            0,
                             "integer literal {} exceeds Int64's maximum \
                              (9223372036854775807); only `UInt64` can hold it — \
                              annotate the binding (`let x: UInt64 = ...`)",
@@ -3608,7 +3619,8 @@ impl<'a> Checker<'a> {
                         if int_literal_fits(v, bits, signed) {
                             Ok(t)
                         } else {
-                            Err(format!(
+                            Err(cerr!(
+                                0,
                                 "byte literal {} does not fit {} (its range is {})",
                                 render_int_literal(v),
                                 intn_name(bits, signed),
@@ -3639,8 +3651,9 @@ impl<'a> Checker<'a> {
                     // its name.
                     return match expected.map(|t| self.base(t)) {
                         Some(Type::Option(_)) => Ok(expected.unwrap().clone()),
-                        _ => Err(format!(
-                            "line {line}: cannot infer the type of `None`; \
+                        _ => Err(cerr!(
+                            line,
+                            "cannot infer the type of `None`; \
                              add an annotation (e.g. `let x: Option<Int64> = None;`)"
                         )),
                     };
@@ -3648,8 +3661,9 @@ impl<'a> Checker<'a> {
                 // A nullary enum variant used as a value, e.g. `Empty`.
                 if let Some(info) = self.variants.get(name) {
                     if !info.payload.is_empty() {
-                        return Err(format!(
-                            "line {line}: variant `{name}` needs {} argument(s)",
+                        return Err(cerr!(
+                            line,
+                            "variant `{name}` needs {} argument(s)",
                             info.payload.len()
                         ));
                     }
@@ -3663,8 +3677,9 @@ impl<'a> Checker<'a> {
                         Some(Type::App(en, _)) if en == &info.enum_name => {
                             Ok(expected.unwrap().clone())
                         }
-                        _ => Err(format!(
-                            "line {line}: cannot infer the type of `{name}`; add an annotation"
+                        _ => Err(cerr!(
+                            line,
+                            "cannot infer the type of `{name}`; add an annotation"
                         )),
                     };
                 }
@@ -3684,7 +3699,7 @@ impl<'a> Checker<'a> {
                     });
                     return Ok(sig);
                 }
-                Err(format!("line {line}: unknown variable `{name}`"))
+                Err(cerr!(line, "unknown variable `{name}`"))
             }
             Expr::Unary { op, expr, line } => {
                 // `-9223372036854775808` is the one literal whose magnitude only
@@ -3747,13 +3762,9 @@ impl<'a> Checker<'a> {
                     {
                         Ok(t)
                     }
-                    UnOp::Neg => Err(format!(
-                        "line {line}: unary `-` needs a numeric type, found {t}"
-                    )),
-                    UnOp::Not => Err(format!("line {line}: unary `!` needs Bool, found {t}")),
-                    UnOp::BitNot => Err(format!(
-                        "line {line}: unary `~` needs an integer type, found {t}"
-                    )),
+                    UnOp::Neg => Err(cerr!(line, "unary `-` needs a numeric type, found {t}")),
+                    UnOp::Not => Err(cerr!(line, "unary `!` needs Bool, found {t}")),
+                    UnOp::BitNot => Err(cerr!(line, "unary `~` needs an integer type, found {t}")),
                 }
             }
             Expr::Binary { op, lhs, rhs, line } => {
@@ -3766,8 +3777,9 @@ impl<'a> Checker<'a> {
                 if l == Type::Int {
                     if let (Expr::Int(n), Type::IntN { bits, signed }) = (&**lhs, &r) {
                         if !int_literal_fits(*n, *bits, *signed) {
-                            return Err(format!(
-                                "line {line}: integer literal {} does not fit {} \
+                            return Err(cerr!(
+                                line,
+                                "integer literal {} does not fit {} \
                                  (its range is {})",
                                 render_int_literal(*n),
                                 intn_name(*bits, *signed),
@@ -3780,8 +3792,9 @@ impl<'a> Checker<'a> {
                 if r == Type::Int {
                     if let (Expr::Int(n), Type::IntN { bits, signed }) = (&**rhs, &l) {
                         if !int_literal_fits(*n, *bits, *signed) {
-                            return Err(format!(
-                                "line {line}: integer literal {} does not fit {} \
+                            return Err(cerr!(
+                                line,
+                                "integer literal {} does not fit {} \
                                  (its range is {})",
                                 render_int_literal(*n),
                                 intn_name(*bits, *signed),
@@ -3837,13 +3850,14 @@ impl<'a> Checker<'a> {
                     match &**rhs {
                         Expr::Str(pat) => {
                             if let Err(e) = crate::regex::compile(pat) {
-                                return Err(format!("line {line}: invalid regex `{pat}`: {e}"));
+                                return Err(cerr!(line, "invalid regex `{pat}`: {e}"));
                             }
                         }
                         _ => {
-                            return Err(format!(
-                            "line {line}: the right side of `=~` must be a string-literal pattern"
-                        ))
+                            return Err(cerr!(
+                                line,
+                                "the right side of `=~` must be a string-literal pattern"
+                            ))
                         }
                     }
                 }
@@ -3859,8 +3873,9 @@ impl<'a> Checker<'a> {
                         crate::consteval::eval(rhs, &std::collections::HashMap::new())
                     {
                         if amt < 0 || amt >= bits {
-                            return Err(format!(
-                                "line {line}: shift amount {amt} is out of range for a \
+                            return Err(cerr!(
+                                line,
+                                "shift amount {amt} is out of range for a \
                                  {bits}-bit value (valid range is 0..{bits})"
                             ));
                         }
@@ -3915,8 +3930,9 @@ impl<'a> Checker<'a> {
                     Type::Str if field == "byteLength" => Ok(Type::Int),
                     // `String` has no `.length`: the name promised characters but
                     // delivered bytes. Refuse it with a targeted hint (RFC-0058).
-                    Type::Str if field == "length" => Err(format!(
-                        "line {line}: String has no `length`: use `byteLength` for bytes \
+                    Type::Str if field == "length" => Err(cerr!(
+                        line,
+                        "String has no `length`: use `byteLength` for bytes \
                          or `charCount()` for Unicode scalars"
                     )),
                     // Reading a `lazy T` field yields `T` — the read IS the
@@ -3927,9 +3943,10 @@ impl<'a> Checker<'a> {
                         .iter()
                         .find(|f| &f.name == field)
                         .map(|f| crate::types::forced(&f.ty))
-                        .ok_or_else(|| format!("line {line}: type {ety} has no field `{field}`")),
-                    other => Err(format!(
-                        "line {line}: cannot access field `{field}` on non-record type {other}"
+                        .ok_or_else(|| cerr!(line, "type {ety} has no field `{field}`")),
+                    other => Err(cerr!(
+                        line,
+                        "cannot access field `{field}` on non-record type {other}"
                     )),
                 }
             }
@@ -3939,33 +3956,38 @@ impl<'a> Checker<'a> {
                         d.base.clone()
                     }
                     Some(_) => {
-                        return Err(format!(
-                            "line {line}: `{name}?(..)` is only for validated/nominal scalar types"
+                        return Err(cerr!(
+                            line,
+                            "`{name}?(..)` is only for validated/nominal scalar types"
                         ))
                     }
-                    None => return Err(format!("line {line}: unknown type `{name}`")),
+                    None => return Err(cerr!(line, "unknown type `{name}`")),
                 };
                 if args.len() != 1 {
-                    return Err(format!(
-                        "line {line}: `{name}?` takes 1 argument, got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{name}?` takes 1 argument, got {}",
                         args.len()
                     ));
                 }
                 let aty = self.expr(&args[0], scope, Some(&base), fn_ret)?;
                 if !self.assignable(&aty, &base) {
-                    return Err(format!(
-                        "line {line}: `{name}` is built from {base}, but the argument is {aty}"
+                    return Err(cerr!(
+                        line,
+                        "`{name}` is built from {base}, but the argument is {aty}"
                     ));
                 }
                 Ok(Type::Option(Box::new(Type::Named(name.clone()))))
             }
             Expr::Spawn { name, args, line } => {
-                let (params, ret) = self.sigs.get(name).ok_or_else(|| {
-                    format!("line {line}: cannot spawn unknown function `{name}`")
-                })?;
+                let (params, ret) = self
+                    .sigs
+                    .get(name)
+                    .ok_or_else(|| cerr!(line, "cannot spawn unknown function `{name}`"))?;
                 if !self.spawn_safe.contains(name) {
-                    return Err(format!(
-                        "line {line}: `spawn {name}(..)` is not allowed: `{name}` (or something it \
+                    return Err(cerr!(
+                        line,
+                        "`spawn {name}(..)` is not allowed: `{name}` (or something it \
                          calls) does I/O or touches shared mutable state, so running it as a task \
                          could race or interleave. A spawned function must be isolated (pure)."
                     ));
@@ -3974,8 +3996,9 @@ impl<'a> Checker<'a> {
                 // per-callee thunk carries plain data only (RFC-0037 keeps the
                 // v1 rejection, now with a named diagnostic).
                 if params.iter().any(|p| self.contains_fn(p)) {
-                    return Err(format!(
-                        "line {line}: cannot `spawn {name}(..)`: a spawned function \
+                    return Err(cerr!(
+                        line,
+                        "cannot `spawn {name}(..)`: a spawned function \
                          may not take function-value parameters (RFC-0037)"
                     ));
                 }
@@ -3988,8 +4011,9 @@ impl<'a> Checker<'a> {
                     *line,
                 ));
                 if params.len() != args.len() {
-                    return Err(format!(
-                        "line {line}: `{name}` expects {} argument(s), got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{name}` expects {} argument(s), got {}",
                         params.len(),
                         args.len()
                     ));
@@ -3997,8 +4021,9 @@ impl<'a> Checker<'a> {
                 for (arg, pty) in args.iter().zip(params) {
                     let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
                     if !self.coercible(&aty, pty) {
-                        return Err(format!(
-                            "line {line}: `spawn {name}` argument expects {pty}, found {aty}"
+                        return Err(cerr!(
+                            line,
+                            "`spawn {name}` argument expects {pty}, found {aty}"
                         ));
                     }
                     self.prove_coercion(arg, pty, *line)?;
@@ -4024,13 +4049,15 @@ impl<'a> Checker<'a> {
                         // An annotation IS present and it is not an array. Saying
                         // "annotate it" to somebody who annotated sends them to
                         // fix the one thing that is right.
-                        Some(_) => Err(format!(
-                            "line {line}: `[]` is an array literal, but {} is not an \
+                        Some(_) => Err(cerr!(
+                            line,
+                            "`[]` is an array literal, but {} is not an \
                              array type",
                             written.unwrap()
                         )),
-                        None => Err(format!(
-                            "line {line}: cannot infer the element type of `[]`; annotate it, \
+                        None => Err(cerr!(
+                            line,
+                            "cannot infer the element type of `[]`; annotate it, \
                              e.g. `let a: Array<Int64> = [];`"
                         )),
                     };
@@ -4054,8 +4081,9 @@ impl<'a> Checker<'a> {
                 // interpreter, and then die `LLVM ERROR: out of memory` after
                 // clang had run for over two minutes.
                 if elems.len() > crate::interp::ARRAY_LIT_LIMIT {
-                    return Err(format!(
-                        "line {line}: this array literal has {} elements, past the limit of {}\n  \
+                    return Err(cerr!(
+                        line,
+                        "this array literal has {} elements, past the limit of {}\n  \
                          note: a literal is lowered element by element into one call frame, so \
                          its length is a compile-time cost on both backends\n  \
                          note: a table this long belongs in a file the program reads, not in \
@@ -4070,8 +4098,9 @@ impl<'a> Checker<'a> {
                 };
                 if let Some(n) = small_cap {
                     if elems.len() > n {
-                        return Err(format!(
-                            "line {line}: this literal has {} elements but the slot is \
+                        return Err(cerr!(
+                            line,
+                            "this literal has {} elements but the slot is \
                              SmallArray<_, {n}>",
                             elems.len()
                         ));
@@ -4095,8 +4124,9 @@ impl<'a> Checker<'a> {
                 // Every element (including the first) is a value boundary into
                 // the element type — auto-validated when it is predicated.
                 if !self.coercible(&first, &elem_ty) {
-                    return Err(format!(
-                        "line {line}: array elements must share a type: expected {elem_ty}, \
+                    return Err(cerr!(
+                        line,
+                        "array elements must share a type: expected {elem_ty}, \
                          found {first}"
                     ));
                 }
@@ -4105,8 +4135,9 @@ impl<'a> Checker<'a> {
                 for e in &elems[1..] {
                     let t = self.expr(e, scope, Some(&elem_ty), fn_ret)?;
                     if !self.coercible(&t, &elem_ty) {
-                        return Err(format!(
-                            "line {line}: array elements must share a type: expected {elem_ty}, found {t}"
+                        return Err(cerr!(
+                            line,
+                            "array elements must share a type: expected {elem_ty}, found {t}"
                         ));
                     }
                     self.prove_coercion(e, &elem_ty, *line)?;
@@ -4137,12 +4168,14 @@ impl<'a> Checker<'a> {
                         (Some(k), Some(v)) => {
                             Ok(Type::Map(Box::new(k.clone()), Box::new(v.clone())))
                         }
-                        _ if written.is_some() => Err(format!(
-                            "line {line}: `[:]` is a map literal, but {} is not a map type",
+                        _ if written.is_some() => Err(cerr!(
+                            line,
+                            "`[:]` is a map literal, but {} is not a map type",
                             written.unwrap()
                         )),
-                        _ => Err(format!(
-                            "line {line}: cannot infer the type of `[:]`; annotate it, \
+                        _ => Err(cerr!(
+                            line,
+                            "cannot infer the type of `[:]`; annotate it, \
                              e.g. `let m: Map<String, Int64> = [:];`"
                         )),
                     };
@@ -4161,16 +4194,15 @@ impl<'a> Checker<'a> {
                 for (k, v) in entries {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
                     if crate::types::resolve(&self.base(&kt), self.types) != Type::Str {
-                        return Err(format!(
-                            "line {line}: a map key must be a String, found {kt}"
-                        ));
+                        return Err(cerr!(line, "a map key must be a String, found {kt}"));
                     }
                     self.prove_coercion(k, &key_ty, *line)?;
                     self.prove_string_interpolation(k, &key_ty, scope, fn_ret, *line)?;
                     let vt = self.expr(v, scope, Some(&val_ty), fn_ret)?;
                     if !self.coercible(&vt, &val_ty) {
-                        return Err(format!(
-                            "line {line}: map values must share a type: expected {val_ty}, \
+                        return Err(cerr!(
+                            line,
+                            "map values must share a type: expected {val_ty}, \
                              found {vt}"
                         ));
                     }
@@ -4186,8 +4218,9 @@ impl<'a> Checker<'a> {
             // `call` where its `fn`-typed parameter supplies its types. Everywhere
             // else — `let` initializers, returns, operands, non-`fn` arguments — it
             // is rejected here.
-            Expr::Lambda { line, .. } => Err(format!(
-                "line {line}: a lambda `|..|` needs a function type from context: \
+            Expr::Lambda { line, .. } => Err(cerr!(
+                line,
+                "a lambda `|..|` needs a function type from context: \
                  pass it to a `fn`-typed parameter, or give the binding a function \
                  type (e.g. `let f: fn(Int64) -> Int64 = |x| x * 2`) (RFC-0037)"
             )),
@@ -4204,14 +4237,14 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         let decl = self
             .types
             .get(name)
-            .ok_or_else(|| format!("line {line}: unknown type `{name}`"))?;
+            .ok_or_else(|| cerr!(line, "unknown type `{name}`"))?;
         // Field types (they may mention this type's generic parameters).
         let rfields = crate::types::record_fields(&Type::Named(name.to_string()), self.types)
-            .ok_or_else(|| format!("line {line}: `{name}` is not a record type"))?;
+            .ok_or_else(|| cerr!(line, "`{name}` is not a record type"))?;
         // Each provided field must exist and typecheck; generic parameters are
         // inferred from the field values (there is no turbofish in expressions).
         let mut provided = std::collections::HashSet::new();
@@ -4245,12 +4278,10 @@ impl<'a> Checker<'a> {
         // still report the field the reader's eye reaches first.
         for (fname, _) in fields {
             if !rfields.iter().any(|f| &f.name == fname) {
-                return Err(format!(
-                    "line {line}: record `{name}` has no field `{fname}`"
-                ));
+                return Err(cerr!(line, "record `{name}` has no field `{fname}`"));
             }
             if !provided.insert(fname.clone()) {
-                return Err(format!("line {line}: field `{fname}` set twice"));
+                return Err(cerr!(line, "field `{fname}` set twice"));
             }
         }
         // The solve runs in DECLARED order, not the order the literal wrote its
@@ -4281,10 +4312,7 @@ impl<'a> Checker<'a> {
         // Every declared field must be provided.
         for f in &rfields {
             if !provided.contains(&f.name) {
-                return Err(format!(
-                    "line {line}: missing field `{}` for `{name}`",
-                    f.name
-                ));
+                return Err(cerr!(line, "missing field `{}` for `{name}`", f.name));
             }
         }
         // Cross-field predicate: if every field is a compile-time constant, the
@@ -4305,8 +4333,9 @@ impl<'a> Checker<'a> {
             }
             if all_const {
                 if let Some(false) = consteval::eval(pred, &env).and_then(ConstVal::as_bool) {
-                    return Err(format!(
-                        "line {line}: `{name} {{ .. }}` violates `where {}`",
+                    return Err(cerr!(
+                        line,
+                        "`{name} {{ .. }}` violates `where {}`",
                         pred_summary(pred)
                     ));
                 }
@@ -4326,8 +4355,9 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|p| if p == tp { "..".to_string() } else { p.clone() })
                     .collect();
-                return Err(format!(
-                    "line {line}: cannot infer type parameter `{tp}` of `{name}`; no field \
+                return Err(cerr!(
+                    line,
+                    "cannot infer type parameter `{tp}` of `{name}`; no field \
                      value determines it, so annotate the binding (e.g. `let x: {name}<{}> = \
                      {name} {{ .. }}`)",
                     shape.join(", ")
@@ -4356,26 +4386,28 @@ impl<'a> Checker<'a> {
         line: usize,
         scope: &Scope,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         let ety = self.expr(expr, scope, None, fn_ret)?;
-        let ret =
-            fn_ret.ok_or_else(|| format!("line {line}: `?` can only be used inside a function"))?;
+        let ret = fn_ret.ok_or_else(|| cerr!(line, "`?` can only be used inside a function"))?;
         match &ety {
             Type::Option(t) => match ret {
                 Type::Option(_) => Ok((**t).clone()),
-                _ => Err(format!(
-                    "line {line}: `?` on an Option requires the function to return Option, \
+                _ => Err(cerr!(
+                    line,
+                    "`?` on an Option requires the function to return Option, \
                      but it returns {ret}"
                 )),
             },
             Type::Result(t, e) => match ret {
                 Type::Result(_, re) if self.assignable(e, re) => Ok((**t).clone()),
-                Type::Result(_, re) => Err(format!(
-                    "line {line}: `?` propagates error {e}, but the function returns \
+                Type::Result(_, re) => Err(cerr!(
+                    line,
+                    "`?` propagates error {e}, but the function returns \
                      Result<_, {re}>"
                 )),
-                _ => Err(format!(
-                    "line {line}: `?` on a Result requires the function to return Result, \
+                _ => Err(cerr!(
+                    line,
+                    "`?` on a Result requires the function to return Result, \
                      but it returns {ret}"
                 )),
             },
@@ -4383,8 +4415,9 @@ impl<'a> Checker<'a> {
                 let key = crate::types::type_key(other)
                     .filter(|k| self.impls.contains(&(FALLIBLE.to_string(), k.clone())));
                 let Some(key) = key else {
-                    return Err(format!(
-                        "line {line}: `?` needs an Option, a Result, or a type that implements \
+                    return Err(cerr!(
+                        line,
+                        "`?` needs an Option, a Result, or a type that implements \
                          `{FALLIBLE}`, found {other}"
                     ));
                 };
@@ -4393,8 +4426,9 @@ impl<'a> Checker<'a> {
                 // `Result`'s `assignable(e, re)` above does) because the failing
                 // variants are part of the value being copied.
                 if !self.assignable(other, ret) {
-                    return Err(format!(
-                        "line {line}: `?` propagates the whole {other}, but the function \
+                    return Err(cerr!(
+                        line,
+                        "`?` propagates the whole {other}, but the function \
                          returns {ret}"
                     ));
                 }
@@ -4425,7 +4459,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         let raw_sty = self.expr(scrutinee, scope, None, fn_ret)?;
         // Resolve a transparent alias so `match` over `type X = Result<..>` (or an
         // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
@@ -4450,9 +4484,10 @@ impl<'a> Checker<'a> {
             Type::Option(_) => ["Some", "None"],
             Type::Result(_, _) => ["Ok", "Err"],
             other => {
-                return Err(format!(
-                "line {line}: `match` scrutinee must be an Option, Result, or enum, found {other}"
-            ))
+                return Err(cerr!(
+                    line,
+                    "`match` scrutinee must be an Option, Result, or enum, found {other}"
+                ))
             }
         };
         let mut seen: Vec<&str> = Vec::new();
@@ -4474,18 +4509,20 @@ impl<'a> Checker<'a> {
                     matches!(sty, Type::Result(..)).then_some(b.as_str()),
                 ),
                 Pattern::Variant(n, _) => {
-                    return Err(format!(
-                        "line {line}: pattern `{n}` does not match scrutinee of type {sty}"
+                    return Err(cerr!(
+                        line,
+                        "pattern `{n}` does not match scrutinee of type {sty}"
                     ))
                 }
             };
             if !want.contains(&tag) {
-                return Err(format!(
-                    "line {line}: pattern `{tag}` does not match scrutinee of type {sty}"
+                return Err(cerr!(
+                    line,
+                    "pattern `{tag}` does not match scrutinee of type {sty}"
                 ));
             }
             if seen.contains(&tag) {
-                return Err(format!("line {line}: duplicate `{tag}` arm"));
+                return Err(cerr!(line, "duplicate `{tag}` arm"));
             }
             seen.push(tag);
 
@@ -4505,12 +4542,14 @@ impl<'a> Checker<'a> {
             self.unify_arm(&mut result, bty, line)?;
         }
         if !want.iter().all(|w| seen.contains(w)) {
-            return Err(format!(
-                "line {line}: `match` must cover both `{}` and `{}`",
-                want[0], want[1]
+            return Err(cerr!(
+                line,
+                "`match` must cover both `{}` and `{}`",
+                want[0],
+                want[1]
             ));
         }
-        result.ok_or_else(|| format!("line {line}: empty `match`"))
+        result.ok_or_else(|| cerr!(line, "empty `match`"))
     }
 
     /// Check a `match` over a user enum: every arm a valid variant pattern,
@@ -4524,7 +4563,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         let mut seen: Vec<String> = Vec::new();
         let mut result: Option<Type> = expected.cloned();
         for arm in arms {
@@ -4539,25 +4578,27 @@ impl<'a> Checker<'a> {
                 // so in the source's own words rather than naming a pattern nobody
                 // wrote.
                 Pattern::Success(_) | Pattern::Failure(_) => {
-                    return Err(format!(
-                        "line {line}: `??` works on an Option or a Result, not on {sty} — \
+                    return Err(cerr!(
+                        line,
+                        "`??` works on an Option or a Result, not on {sty} — \
                          `match` names the variant to fall back on"
                     ))
                 }
-                _ => return Err(format!("line {line}: expected an enum variant pattern")),
+                _ => return Err(cerr!(line, "expected an enum variant pattern")),
             };
             let ev = evs
                 .iter()
                 .find(|v| v.name == vname)
-                .ok_or_else(|| format!("line {line}: `{vname}` is not a variant of {sty}"))?;
+                .ok_or_else(|| cerr!(line, "`{vname}` is not a variant of {sty}"))?;
             if seen.contains(&vname) {
-                return Err(format!("line {line}: duplicate `{vname}` arm"));
+                return Err(cerr!(line, "duplicate `{vname}` arm"));
             }
             seen.push(vname.clone());
 
             if ev.payload.len() != bind.len() {
-                return Err(format!(
-                    "line {line}: variant `{vname}` has {} payload(s), but the pattern binds {}",
+                return Err(cerr!(
+                    line,
+                    "variant `{vname}` has {} payload(s), but the pattern binds {}",
                     ev.payload.len(),
                     bind.len()
                 ));
@@ -4580,13 +4621,10 @@ impl<'a> Checker<'a> {
         }
         for v in evs {
             if !seen.contains(&v.name) {
-                return Err(format!(
-                    "line {line}: `match` is missing variant `{}`",
-                    v.name
-                ));
+                return Err(cerr!(line, "`match` is missing variant `{}`", v.name));
             }
         }
-        result.ok_or_else(|| format!("line {line}: empty `match`"))
+        result.ok_or_else(|| cerr!(line, "empty `match`"))
     }
 
     /// Check an `if` used as an expression (RFC-0030): a two-branch boolean
@@ -4605,19 +4643,18 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         // Totality: an expression must yield a value on every path.
         let Some(else_branch) = else_branch else {
-            return Err(format!(
-                "line {line}: `if` used as an expression needs an `else` (every branch \
+            return Err(cerr!(
+                line,
+                "`if` used as an expression needs an `else` (every branch \
                  must yield a value)"
             ));
         };
         let cty = self.expr(cond, scope, Some(&Type::Bool), fn_ret)?;
         if self.base(&cty) != Type::Bool && !matches!(cty, Type::Err) {
-            return Err(format!(
-                "line {line}: `if` condition must be Bool, found {cty}"
-            ));
+            return Err(cerr!(line, "`if` condition must be Bool, found {cty}"));
         }
         // Branches unify exactly like match arms: the first branch is checked
         // against the expected type, the second against the accumulated result.
@@ -4626,11 +4663,16 @@ impl<'a> Checker<'a> {
         self.unify_arm(&mut result, tty, line)?;
         let ety = self.expr(else_branch, scope, result.as_ref(), fn_ret)?;
         self.unify_arm(&mut result, ety, line)?;
-        result.ok_or_else(|| format!("line {line}: empty `if` expression"))
+        result.ok_or_else(|| cerr!(line, "empty `if` expression"))
     }
 
     /// Fold an arm's body type into the match's result type.
-    fn unify_arm(&self, result: &mut Option<Type>, bty: Type, line: usize) -> Result<(), String> {
+    fn unify_arm(
+        &self,
+        result: &mut Option<Type>,
+        bty: Type,
+        line: usize,
+    ) -> Result<(), Diagnostic> {
         match result {
             None => *result = Some(bty),
             Some(rt) => {
@@ -4643,8 +4685,9 @@ impl<'a> Checker<'a> {
                     // launder the raw arm past its refinement without any check.
                     *result = Some(bty);
                 } else {
-                    return Err(format!(
-                        "line {line}: `match` arms have differing types: {rt} vs {bty}"
+                    return Err(cerr!(
+                        line,
+                        "`match` arms have differing types: {rt} vs {bty}"
                     ));
                 }
             }
@@ -4692,23 +4735,25 @@ impl<'a> Checker<'a> {
         sty: &Type,
         pattern: &Pattern,
         line: usize,
-    ) -> Result<Vec<(String, Type)>, String> {
+    ) -> Result<Vec<(String, Type)>, Diagnostic> {
         if let Type::Enum(evs) = self.base(sty) {
             let (vname, binds) = match pattern {
                 Pattern::Variant(n, b) => (n.clone(), b.clone()),
                 _ => {
-                    return Err(format!(
-                        "line {line}: pattern does not match scrutinee of type {sty}"
+                    return Err(cerr!(
+                        line,
+                        "pattern does not match scrutinee of type {sty}"
                     ))
                 }
             };
             let ev = evs
                 .iter()
                 .find(|v| v.name == vname)
-                .ok_or_else(|| format!("line {line}: `{vname}` is not a variant of {sty}"))?;
+                .ok_or_else(|| cerr!(line, "`{vname}` is not a variant of {sty}"))?;
             if ev.payload.len() != binds.len() {
-                return Err(format!(
-                    "line {line}: variant `{vname}` has {} payload(s), but the pattern binds {}",
+                return Err(cerr!(
+                    line,
+                    "variant `{vname}` has {} payload(s), but the pattern binds {}",
                     ev.payload.len(),
                     binds.len()
                 ));
@@ -4726,8 +4771,9 @@ impl<'a> Checker<'a> {
                 unreachable!("the `??` patterns are produced only inside a `match`")
             }
             Pattern::Variant(n, _) => {
-                return Err(format!(
-                    "line {line}: pattern `{n}` does not match scrutinee of type {sty}"
+                return Err(cerr!(
+                    line,
+                    "pattern `{n}` does not match scrutinee of type {sty}"
                 ))
             }
         };
@@ -4735,14 +4781,16 @@ impl<'a> Checker<'a> {
             Type::Option(_) => ["Some", "None"],
             Type::Result(_, _) => ["Ok", "Err"],
             other => {
-                return Err(format!(
-                "line {line}: `if let` scrutinee must be an Option, Result, or enum, found {other}"
-            ))
+                return Err(cerr!(
+                    line,
+                    "`if let` scrutinee must be an Option, Result, or enum, found {other}"
+                ))
             }
         };
         if !want.contains(&tag) {
-            return Err(format!(
-                "line {line}: pattern `{tag}` does not match scrutinee of type {sty}"
+            return Err(cerr!(
+                line,
+                "pattern `{tag}` does not match scrutinee of type {sty}"
             ));
         }
         match bind {
@@ -4751,7 +4799,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn binop_type(&self, op: BinOp, l: Type, r: Type, line: usize) -> Result<Type, String> {
+    fn binop_type(&self, op: BinOp, l: Type, r: Type, line: usize) -> Result<Type, Diagnostic> {
         use BinOp::*;
         // A recovered `Err` operand yields `Err` without a spurious "needs Int"
         // diagnostic (cascade-free recovery).
@@ -4762,9 +4810,7 @@ impl<'a> Checker<'a> {
         // same `Param`, and the required bound must be present.
         if let Type::Param(t) = &l {
             if &r != &l {
-                return Err(format!(
-                    "line {line}: cannot combine type parameter `{t}` with {r}"
-                ));
+                return Err(cerr!(line, "cannot combine type parameter `{t}` with {r}"));
             }
             return match op {
                 Add | Sub | Mul | Div | Rem if self.param_has_bound(t, "Num") => {
@@ -4772,21 +4818,18 @@ impl<'a> Checker<'a> {
                 }
                 Lt | LtEq | Gt | GtEq if self.param_has_bound(t, "Ord") => Ok(Type::Bool),
                 Eq | NotEq if self.param_has_bound(t, "Eq") => Ok(Type::Bool),
-                Add | Sub | Mul | Div | Rem => Err(format!(
-                    "line {line}: `{t}` needs a `Num` bound for arithmetic"
-                )),
-                Lt | LtEq | Gt | GtEq => Err(format!(
-                    "line {line}: `{t}` needs an `Ord` bound to compare"
-                )),
-                Eq | NotEq => Err(format!("line {line}: `{t}` needs an `Eq` bound")),
-                And | Or => Err(format!("line {line}: `&&`/`||` need Bool operands")),
-                Match => Err(format!(
-                    "line {line}: `=~` needs a String operand, not `{t}`"
-                )),
+                Add | Sub | Mul | Div | Rem => {
+                    Err(cerr!(line, "`{t}` needs a `Num` bound for arithmetic"))
+                }
+                Lt | LtEq | Gt | GtEq => Err(cerr!(line, "`{t}` needs an `Ord` bound to compare")),
+                Eq | NotEq => Err(cerr!(line, "`{t}` needs an `Eq` bound")),
+                And | Or => Err(cerr!(line, "`&&`/`||` need Bool operands")),
+                Match => Err(cerr!(line, "`=~` needs a String operand, not `{t}`")),
                 // Bitwise ops (RFC-0045) need a concrete integer type; there is
                 // no protocol bound that grants them on a type parameter.
-                BitAnd | BitOr | BitXor | Shl | Shr => Err(format!(
-                    "line {line}: bitwise operators need a concrete integer type, not `{t}`"
+                BitAnd | BitOr | BitXor | Shl | Shr => Err(cerr!(
+                    line,
+                    "bitwise operators need a concrete integer type, not `{t}`"
                 )),
             };
         }
@@ -4821,8 +4864,9 @@ impl<'a> Checker<'a> {
             // it by name so the answer is not "arithmetic needs matching numeric
             // operands" on two operands that plainly match.
             Add | Sub | Mul if l == Type::I32x4 && r == Type::I32x4 => Ok(l),
-            Div if l == Type::I32x4 && r == Type::I32x4 => Err(format!(
-                "line {line}: `I32x4` has no `/` — no hardware has SIMD integer \
+            Div if l == Type::I32x4 && r == Type::I32x4 => Err(cerr!(
+                line,
+                "`I32x4` has no `/` — no hardware has SIMD integer \
                  divide, so there is no instruction to emit. Read the lanes out \
                  and divide them, or use `F32x4`"
             )),
@@ -4882,12 +4926,14 @@ impl<'a> Checker<'a> {
                 if l == r && numeric(&l) {
                     Ok(l)
                 } else if op == Add && (l == Type::Str || r == Type::Str) {
-                    Err(format!(
-                        "line {line}: `+` concatenates two Strings, found {l} and {r}"
+                    Err(cerr!(
+                        line,
+                        "`+` concatenates two Strings, found {l} and {r}"
                     ))
                 } else {
-                    Err(format!(
-                        "line {line}: arithmetic needs matching numeric operands, \
+                    Err(cerr!(
+                        line,
+                        "arithmetic needs matching numeric operands, \
                          found {l} and {r}"
                     ))
                 }
@@ -4904,12 +4950,11 @@ impl<'a> Checker<'a> {
                     } else {
                         &r
                     };
-                    Err(format!(
-                        "line {line}: no `%` on {f}; integer remainder only"
-                    ))
+                    Err(cerr!(line, "no `%` on {f}; integer remainder only"))
                 } else {
-                    Err(format!(
-                        "line {line}: `%` needs matching integer operands, found {l} and {r}"
+                    Err(cerr!(
+                        line,
+                        "`%` needs matching integer operands, found {l} and {r}"
                     ))
                 }
             }
@@ -4920,8 +4965,9 @@ impl<'a> Checker<'a> {
                 if l == r && (numeric(&l) || l == Type::Str) {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!(
-                        "line {line}: comparison needs matching numeric or String operands, \
+                    Err(cerr!(
+                        line,
+                        "comparison needs matching numeric or String operands, \
                          found {l} and {r}"
                     ))
                 }
@@ -4930,8 +4976,9 @@ impl<'a> Checker<'a> {
                 if l == r && (numeric(&l) || matches!(l, Type::Bool | Type::Str)) {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!(
-                        "line {line}: `==`/`!=` needs matching scalar operands, found {l} and {r}"
+                    Err(cerr!(
+                        line,
+                        "`==`/`!=` needs matching scalar operands, found {l} and {r}"
                     ))
                 }
             }
@@ -4939,8 +4986,9 @@ impl<'a> Checker<'a> {
                 if l == Type::Bool && r == Type::Bool {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!(
-                        "line {line}: `&&`/`||` needs Bool operands, found {l} and {r}"
+                    Err(cerr!(
+                        line,
+                        "`&&`/`||` needs Bool operands, found {l} and {r}"
                     ))
                 }
             }
@@ -4957,13 +5005,15 @@ impl<'a> Checker<'a> {
                 if l == r && integral(&l) {
                     Ok(l)
                 } else if integral(&l) && integral(&r) {
-                    Err(format!(
-                        "line {line}: bitwise operators need matching integer operands, \
+                    Err(cerr!(
+                        line,
+                        "bitwise operators need matching integer operands, \
                          found {l} and {r}"
                     ))
                 } else {
-                    Err(format!(
-                        "line {line}: bitwise operators need integer operands, found {l} and {r}"
+                    Err(cerr!(
+                        line,
+                        "bitwise operators need integer operands, found {l} and {r}"
                     ))
                 }
             }
@@ -4971,8 +5021,9 @@ impl<'a> Checker<'a> {
                 if l == Type::Str && r == Type::Str {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!(
-                        "line {line}: `=~` needs a String and a pattern, found {l} and {r}"
+                    Err(cerr!(
+                        line,
+                        "`=~` needs a String and a pattern, found {l} and {r}"
                     ))
                 }
             }
@@ -5001,16 +5052,16 @@ impl<'a> Checker<'a> {
         line: usize,
         scope: &Scope,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         // A lane argument, with a plain literal adapting to the lane type exactly
         // as it does beside a `Float32` / `Int32` operand in a binary expression.
-        let lane_arg = |e: &Expr, lane: &Type, what: &str| -> Result<Option<Type>, String> {
+        let lane_arg = |e: &Expr, lane: &Type, what: &str| -> Result<Option<Type>, Diagnostic> {
             let t = self.base(&self.expr(e, scope, Some(lane), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Some(Type::Err));
             }
             if t != *lane {
-                return Err(format!("line {line}: {what} takes {lane} lanes, found {t}"));
+                return Err(cerr!(line, "{what} takes {lane} lanes, found {t}"));
             }
             Ok(None)
         };
@@ -5040,8 +5091,9 @@ impl<'a> Checker<'a> {
             "F32x4" | "I32x4" | "F64x2" => {
                 let (vec, lane, what, lanes) = width(name);
                 if args.len() as i64 != lanes {
-                    return Err(format!(
-                        "line {line}: `{what}(..)` takes {lanes} lanes, got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{what}(..)` takes {lanes} lanes, got {}",
                         args.len()
                     ));
                 }
@@ -5055,8 +5107,9 @@ impl<'a> Checker<'a> {
             "@f32x4Splat" | "@i32x4Splat" | "@f64x2Splat" => {
                 let (vec, lane, what, _) = width(name);
                 if args.len() != 1 {
-                    return Err(format!(
-                        "line {line}: `{what}.splat(..)` takes 1 argument, got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{what}.splat(..)` takes 1 argument, got {}",
                         args.len()
                     ));
                 }
@@ -5067,8 +5120,9 @@ impl<'a> Checker<'a> {
             }
             "@lane" => {
                 if args.len() != 2 {
-                    return Err(format!(
-                        "line {line}: `lane` takes a vector and a lane index, got {} argument(s)",
+                    return Err(cerr!(
+                        line,
+                        "`lane` takes a vector and a lane index, got {} argument(s)",
                         args.len()
                     ));
                 }
@@ -5085,8 +5139,9 @@ impl<'a> Checker<'a> {
                     Type::F64x2 => Type::Float,
                     Type::Mask32x4 | Type::Mask64x2 => Type::Bool,
                     other => {
-                        return Err(format!(
-                            "line {line}: `lane` must be called on a vector or a mask \
+                        return Err(cerr!(
+                            line,
+                            "`lane` must be called on a vector or a mask \
                              (e.g. `v.lane(0)`), found {other}"
                         ))
                     }
@@ -5096,8 +5151,7 @@ impl<'a> Checker<'a> {
                 // through.
                 let lanes = lanes_of(&v);
                 if crate::types::const_lane(&args[1], lanes).is_none() {
-                    return Err(format!(
-                        "line {line}: a lane index must be a compile-time constant in 0..{} \
+                    return Err(cerr!(line, "a lane index must be a compile-time constant in 0..{} \
                          (that is what makes `lane` total — there is no bounds check to fall back on)",
                         lanes - 1
                     ));
@@ -5116,8 +5170,9 @@ impl<'a> Checker<'a> {
             // reduction or `lane`.
             "@replaceLane" => {
                 if args.len() != 3 {
-                    return Err(format!(
-                        "line {line}: `replaceLane` takes a lane index and a value \
+                    return Err(cerr!(
+                        line,
+                        "`replaceLane` takes a lane index and a value \
                          (it is `v.replaceLane(k, x)`), got {} argument(s)",
                         args.len() - 1
                     ));
@@ -5131,8 +5186,9 @@ impl<'a> Checker<'a> {
                     Type::I32x4 => INT32,
                     Type::F64x2 => Type::Float,
                     _ => {
-                        return Err(format!(
-                            "line {line}: `replaceLane` must be called on a vector \
+                        return Err(cerr!(
+                            line,
+                            "`replaceLane` must be called on a vector \
                              (e.g. `v.replaceLane(0, x)`), found {v}"
                         ))
                     }
@@ -5143,8 +5199,9 @@ impl<'a> Checker<'a> {
                 // immediate. The range is the receiver's, as it is for the read.
                 let lanes = lanes_of(&v);
                 if crate::types::const_lane(&args[1], lanes).is_none() {
-                    return Err(format!(
-                        "line {line}: a lane index must be a compile-time constant in 0..{} \
+                    return Err(cerr!(
+                        line,
+                        "a lane index must be a compile-time constant in 0..{} \
                          (that is what makes `replaceLane` total — there is no bounds check \
                          to fall back on)",
                         lanes - 1
@@ -5167,8 +5224,9 @@ impl<'a> Checker<'a> {
                     "allTrue"
                 };
                 if args.len() != 1 {
-                    return Err(format!(
-                        "line {line}: `{what}` takes no arguments (it is `m.{what}()`), \
+                    return Err(cerr!(
+                        line,
+                        "`{what}` takes no arguments (it is `m.{what}()`), \
                          got {}",
                         args.len() - 1
                     ));
@@ -5182,8 +5240,9 @@ impl<'a> Checker<'a> {
                 // shape, which is what makes the second mask a table entry here
                 // rather than a second surface.
                 if !matches!(m, Type::Mask32x4 | Type::Mask64x2) {
-                    return Err(format!(
-                        "line {line}: `{what}` must be called on a mask \
+                    return Err(cerr!(
+                        line,
+                        "`{what}` must be called on a mask \
                          (e.g. `(a < b).{what}()`), found {m}"
                     ));
                 }
@@ -5198,8 +5257,9 @@ impl<'a> Checker<'a> {
                 let store = name.ends_with("Store");
                 let want = if store { 3 } else { 2 };
                 if args.len() != want {
-                    return Err(format!(
-                        "line {line}: `{what}.{}(..)` takes {want} arguments, got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{what}.{}(..)` takes {want} arguments, got {}",
                         if store { "store" } else { "load" },
                         args.len()
                     ));
@@ -5209,8 +5269,9 @@ impl<'a> Checker<'a> {
                 // `xs.pop()` has: the interpreter's arrays are copy-on-write, so a
                 // store into a temporary would be a store into a copy.
                 if store && !matches!(&args[0], Expr::Var { .. }) {
-                    return Err(format!(
-                        "line {line}: `{what}.store` needs an array binding as its first \
+                    return Err(cerr!(
+                        line,
+                        "`{what}.store` needs an array binding as its first \
                          argument, not an expression"
                     ));
                 }
@@ -5221,8 +5282,9 @@ impl<'a> Checker<'a> {
                 match &a {
                     Type::Array(inner) if self.base(inner) == lane => {}
                     other => {
-                        return Err(format!(
-                            "line {line}: `{what}.{}` needs an Array<{lane}>, found {other}",
+                        return Err(cerr!(
+                            line,
+                            "`{what}.{}` needs an Array<{lane}>, found {other}",
                             if store { "store" } else { "load" }
                         ))
                     }
@@ -5232,8 +5294,9 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if i != Type::Int {
-                    return Err(format!(
-                        "line {line}: a vector load/store index must be an Int64, found {i}"
+                    return Err(cerr!(
+                        line,
+                        "a vector load/store index must be an Int64, found {i}"
                     ));
                 }
                 if !store {
@@ -5244,9 +5307,7 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if v != vec {
-                    return Err(format!(
-                        "line {line}: `{what}.store` stores an {what}, found {v}"
-                    ));
+                    return Err(cerr!(line, "`{what}.store` stores an {what}, found {v}"));
                 }
                 Ok(Type::Unit)
             }
@@ -5313,8 +5374,9 @@ impl<'a> Checker<'a> {
                 let want = if m == "Min" || m == "Max" { 2 } else { 1 };
                 let what = m.to_lowercase();
                 if args.len() != want {
-                    return Err(format!(
-                        "line {line}: `{ty}.{what}(..)` takes {want} arguments, got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{ty}.{what}(..)` takes {want} arguments, got {}",
                         args.len()
                     ));
                 }
@@ -5324,7 +5386,7 @@ impl<'a> Checker<'a> {
                         return Ok(Type::Err);
                     }
                     if t != vec {
-                        return Err(format!("line {line}: `{ty}.{what}` takes {ty}, found {t}"));
+                        return Err(cerr!(line, "`{ty}.{what}` takes {ty}, found {t}"));
                     }
                 }
                 Ok(vec)
@@ -5342,7 +5404,7 @@ impl<'a> Checker<'a> {
                     Some(c) => c.to_lowercase().collect::<String>() + it.as_str(),
                     None => m.to_string(),
                 };
-                Err(format!("line {line}: `{ty}` has no `{m}`"))
+                Err(cerr!(line, "`{ty}` has no `{m}`"))
             }
         }
     }
@@ -5399,7 +5461,7 @@ impl<'a> Checker<'a> {
         line: usize,
         scope: &Scope,
         fn_ret: Option<&Type>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Diagnostic> {
         if let Type::Param(p) = t {
             return Ok(self.param_has_bound(p, crate::types::SHOW));
         }
@@ -5409,8 +5471,9 @@ impl<'a> Checker<'a> {
         let r = self.call(&m, args, line, scope, Some(&Type::Str), fn_ret)?;
         match self.base(&r) {
             Type::Str | Type::Err => Ok(true),
-            other => Err(format!(
-                "line {line}: `{}`'s `show` must hand back a String to render through, found \
+            other => Err(cerr!(
+                line,
+                "`{}`'s `show` must hand back a String to render through, found \
                  {other}",
                 crate::types::SHOW
             )),
@@ -5425,7 +5488,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         // Calling a function value (RFC-0023/0037): `f(x)` where `f` is a
         // binding of function type — a v1 `fn`-typed parameter, or any stored
         // fn-typed `let`/`for`-var/field-bound local/module state (RFC-0037,
@@ -5435,8 +5498,9 @@ impl<'a> Checker<'a> {
         if let Some(binding) = self.lookup(scope, name) {
             if let Type::Fn(ptys, ret) = self.base(&binding.ty) {
                 if ptys.len() != args.len() {
-                    return Err(format!(
-                        "line {line}: `{name}` is a function value taking {} argument(s), got {}",
+                    return Err(cerr!(
+                        line,
+                        "`{name}` is a function value taking {} argument(s), got {}",
                         ptys.len(),
                         args.len()
                     ));
@@ -5444,8 +5508,9 @@ impl<'a> Checker<'a> {
                 for (i, (arg, pty)) in args.iter().zip(&ptys).enumerate() {
                     let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
                     if !self.coercible(&aty, pty) {
-                        return Err(format!(
-                            "line {line}: `{name}` argument {} expects {pty}, found {aty}",
+                        return Err(cerr!(
+                            line,
+                            "`{name}` argument {} expects {pty}, found {aty}",
                             i + 1
                         ));
                     }
@@ -5473,57 +5538,57 @@ impl<'a> Checker<'a> {
         // guard.
         match name {
             "str" => {
-                return Err(format!(
-                    "line {line}: `str(x)` was removed; render a value with `x.toString()`"
+                return Err(cerr!(
+                    line,
+                    "`str(x)` was removed; render a value with `x.toString()`"
                 ))
             }
             "concat" => {
-                return Err(format!(
-                    "line {line}: `concat(a, b)` was removed; concatenate Strings with `a + b`"
+                return Err(cerr!(
+                    line,
+                    "`concat(a, b)` was removed; concatenate Strings with `a + b`"
                 ))
             }
             "len" => {
-                return Err(format!(
-                    "line {line}: `len(s)` was removed; a String's byte length is `s.byteLength`"
+                return Err(cerr!(
+                    line,
+                    "`len(s)` was removed; a String's byte length is `s.byteLength`"
                 ))
             }
             "list" => {
-                return Err(format!(
-                    "line {line}: `list([..])` was removed; write the array literal `[..]` \
+                return Err(cerr!(
+                    line,
+                    "`list([..])` was removed; write the array literal `[..]` \
                      directly where an `Array<T>` is expected"
                 ))
             }
             "join" => {
-                return Err(format!(
-                    "line {line}: `join(t)` was removed; await a task's result with `t.join()`"
+                return Err(cerr!(
+                    line,
+                    "`join(t)` was removed; await a task's result with `t.join()`"
                 ))
             }
-            "toString" => {
-                return Err(format!(
-                    "line {line}: `toString` is a method; write `x.toString()`"
-                ))
-            }
+            "toString" => return Err(cerr!(line, "`toString` is a method; write `x.toString()`")),
             // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]`
             // are the whole surface; the verb forms were the second spelling of
             // each, which is what this repo removes.
             "push" => {
-                return Err(format!(
-                    "line {line}: `push(xs, v)` was removed; push with `xs.push(v)`"
+                return Err(cerr!(
+                    line,
+                    "`push(xs, v)` was removed; push with `xs.push(v)`"
                 ))
             }
-            "at" => {
-                return Err(format!(
-                    "line {line}: `at(xs, i)` was removed; index with `xs[i]`"
-                ))
-            }
+            "at" => return Err(cerr!(line, "`at(xs, i)` was removed; index with `xs[i]`")),
             "alen" => {
-                return Err(format!(
-                    "line {line}: `alen(xs)` was removed; a collection's length is `xs.length`"
+                return Err(cerr!(
+                    line,
+                    "`alen(xs)` was removed; a collection's length is `xs.length`"
                 ))
             }
             "array" => {
-                return Err(format!(
-                    "line {line}: `array()` was removed; write the array literal `[]`"
+                return Err(cerr!(
+                    line,
+                    "`array()` was removed; write the array literal `[]`"
                 ))
             }
             _ => {}
@@ -5533,15 +5598,17 @@ impl<'a> Checker<'a> {
         // programmer to the production tools (validated types / `Result`).
         if name == "assert" || name == "assertEq" {
             if !*self.in_test.borrow() {
-                return Err(format!(
-                    "line {line}: `{name}` is only available inside a `test` block — in ordinary \
+                return Err(cerr!(
+                    line,
+                    "`{name}` is only available inside a `test` block — in ordinary \
                      code, use a validated type or return a `Result` to signal failure"
                 ));
             }
             if name == "assert" {
                 if args.len() != 1 {
-                    return Err(format!(
-                        "line {line}: `assert` takes 1 Bool argument, got {}",
+                    return Err(cerr!(
+                        line,
+                        "`assert` takes 1 Bool argument, got {}",
                         args.len()
                     ));
                 }
@@ -5550,14 +5617,15 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Unit);
                 }
                 if t != Type::Bool {
-                    return Err(format!("line {line}: `assert` needs a Bool, found {t}"));
+                    return Err(cerr!(line, "`assert` needs a Bool, found {t}"));
                 }
                 return Ok(Type::Unit);
             }
             // assertEq(a, b): both sides the same equatable scalar type.
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `assertEq` takes 2 arguments, got {}",
+                return Err(cerr!(
+                    line,
+                    "`assertEq` takes 2 arguments, got {}",
                     args.len()
                 ));
             }
@@ -5578,8 +5646,9 @@ impl<'a> Checker<'a> {
                 )
             };
             if a != b || !equatable(&a) {
-                return Err(format!(
-                    "line {line}: `assertEq` needs two equal, equatable values, found {a} and {b}"
+                return Err(cerr!(
+                    line,
+                    "`assertEq` needs two equal, equatable values, found {a} and {b}"
                 ));
             }
             return Ok(Type::Unit);
@@ -5591,14 +5660,16 @@ impl<'a> Checker<'a> {
         // `test` body (same steering rule/wording style as `assert`).
         if name == "blackBox" {
             if !*self.in_test.borrow() && !*self.in_bench.borrow() {
-                return Err(format!(
-                    "line {line}: `blackBox` is only available inside a `bench` or `test` block — \
+                return Err(cerr!(
+                    line,
+                    "`blackBox` is only available inside a `bench` or `test` block — \
                      it exists to defeat the optimizer while measuring, not for ordinary code"
                 ));
             }
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `blackBox` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`blackBox` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -5617,8 +5688,9 @@ impl<'a> Checker<'a> {
         if crate::ast::is_panic(name) {
             let want = if name == "panic" { 1 } else { 2 };
             if args.len() != want {
-                return Err(format!(
-                    "line {line}: `panic` takes 1 String argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`panic` takes 1 String argument, got {}",
                     args.len()
                 ));
             }
@@ -5627,7 +5699,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `panic` needs a String, found {t}"));
+                return Err(cerr!(line, "`panic` needs a String, found {t}"));
             }
             return Ok(Type::Never);
         }
@@ -5635,10 +5707,7 @@ impl<'a> Checker<'a> {
         // built-in: print(Int|Bool) -> Unit
         if name == "print" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: print expects 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "print expects 1 argument, got {}", args.len()));
             }
             let written = self.expr(&args[0], scope, None, fn_ret)?;
             let t = self.base(&written);
@@ -5650,8 +5719,9 @@ impl<'a> Checker<'a> {
                 if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
                     return Ok(Type::Unit);
                 }
-                return Err(format!(
-                    "line {line}: print needs a number, Bool, or String, found {t}{}",
+                return Err(cerr!(
+                    line,
+                    "print needs a number, Bool, or String, found {t}{}",
                     self.show_hint(&written)
                 ));
             }
@@ -5661,19 +5731,14 @@ impl<'a> Checker<'a> {
         // built-in: logger(String) -> Logger (RFC-0008).
         if name == "logger" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `logger` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`logger` takes 1 argument, got {}", args.len()));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!(
-                    "line {line}: `logger` needs a String name, found {t}"
-                ));
+                return Err(cerr!(line, "`logger` needs a String name, found {t}"));
             }
             return Ok(Type::Logger);
         }
@@ -5681,8 +5746,9 @@ impl<'a> Checker<'a> {
         // subject-first via method sugar: `log.info("..")`.
         if matches!(name, "trace" | "debug" | "info" | "warn" | "error") {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `{name}` takes a Logger and a String, got {} argument(s)",
+                return Err(cerr!(
+                    line,
+                    "`{name}` takes a Logger and a String, got {} argument(s)",
                     args.len()
                 ));
             }
@@ -5691,8 +5757,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if l != Type::Logger {
-                return Err(format!(
-                    "line {line}: `{name}` must be called on a Logger (e.g. `log.{name}(..)`), \
+                return Err(cerr!(
+                    line,
+                    "`{name}` must be called on a Logger (e.g. `log.{name}(..)`), \
                      found {l}"
                 ));
             }
@@ -5701,9 +5768,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if m != Type::Str {
-                return Err(format!(
-                    "line {line}: `{name}` message must be a String, found {m}"
-                ));
+                return Err(cerr!(line, "`{name}` message must be a String, found {m}"));
             }
             return Ok(Type::Unit);
         }
@@ -5715,17 +5780,15 @@ impl<'a> Checker<'a> {
         // the codegen, kept byte-identical.
         if name == "args" {
             if !args.is_empty() {
-                return Err(format!(
-                    "line {line}: `args` takes no arguments, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`args` takes no arguments, got {}", args.len()));
             }
             return Ok(Type::Array(Box::new(Type::Str)));
         }
         if name == "readLine" {
             if !args.is_empty() {
-                return Err(format!(
-                    "line {line}: `readLine` takes no arguments, got {}",
+                return Err(cerr!(
+                    line,
+                    "`readLine` takes no arguments, got {}",
                     args.len()
                 ));
             }
@@ -5733,8 +5796,9 @@ impl<'a> Checker<'a> {
         }
         if name == "readFile" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `readFile` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`readFile` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -5743,9 +5807,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!(
-                    "line {line}: `readFile` needs a String path, found {t}"
-                ));
+                return Err(cerr!(line, "`readFile` needs a String path, found {t}"));
             }
             return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
         }
@@ -5768,8 +5830,9 @@ impl<'a> Checker<'a> {
         // has to live below them. Any generator gets it, not just std.
         if name == "lineAt" || name == "colAt" {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `{name}` takes 2 arguments (bytes, offset), got {}",
+                return Err(cerr!(
+                    line,
+                    "`{name}` takes 2 arguments (bytes, offset), got {}",
                     args.len()
                 ));
             }
@@ -5809,20 +5872,22 @@ impl<'a> Checker<'a> {
                 _ => false,
             };
             if !matches!(b, Type::Err) && !is_bytes {
-                return Err(format!(
-                    "line {line}: `{name}` needs an `Array<UInt8>` buffer, found {b}"
+                return Err(cerr!(
+                    line,
+                    "`{name}` needs an `Array<UInt8>` buffer, found {b}"
                 ));
             }
             let o = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(o, Type::Err | Type::Int) {
-                return Err(format!("line {line}: `{name}`'s offset must be an `Int64`"));
+                return Err(cerr!(line, "`{name}`'s offset must be an `Int64`"));
             }
             return Ok(Type::Int);
         }
         if name == "listDir" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `listDir` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`listDir` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -5831,9 +5896,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!(
-                    "line {line}: `listDir` needs a String path, found {t}"
-                ));
+                return Err(cerr!(line, "`listDir` needs a String path, found {t}"));
             }
             return Ok(Type::Result(
                 Box::new(Type::Array(Box::new(Type::Str))),
@@ -5854,13 +5917,15 @@ impl<'a> Checker<'a> {
         // lack a lowering for it.
         if name == "moduleInterface" {
             if !*self.in_gen.borrow() {
-                return Err(format!(
-                    "line {line}: `moduleInterface` is only available during generation"
+                return Err(cerr!(
+                    line,
+                    "`moduleInterface` is only available during generation"
                 ));
             }
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `moduleInterface` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`moduleInterface` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -5869,8 +5934,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!(
-                    "line {line}: `moduleInterface` needs a String path, found {t}"
+                return Err(cerr!(
+                    line,
+                    "`moduleInterface` needs a String path, found {t}"
                 ));
             }
             return Ok(Type::Named("ModuleInterface".to_string()));
@@ -5896,9 +5962,7 @@ impl<'a> Checker<'a> {
                     "lex" => "`lex` is",
                     _ => "`vyrn\"…\"` code quotes are",
                 };
-                return Err(format!(
-                    "line {line}: {surface} only available during generation"
-                ));
+                return Err(cerr!(line, "{surface} only available during generation"));
             }
             let code = || Type::Named("Code".to_string());
             match name {
@@ -5925,8 +5989,9 @@ impl<'a> Checker<'a> {
                             | Type::Err
                     ) || t == code();
                     if !ok {
-                        return Err(format!(
-                            "line {line}: cannot splice {t} into a code quote \
+                        return Err(cerr!(
+                            line,
+                            "cannot splice {t} into a code quote \
                              (expected String, number, Bool, or Code)"
                         ));
                     }
@@ -5935,16 +6000,11 @@ impl<'a> Checker<'a> {
                 // `render(Code) -> String`.
                 "render" => {
                     if args.len() != 1 {
-                        return Err(format!(
-                            "line {line}: `render` takes 1 argument, got {}",
-                            args.len()
-                        ));
+                        return Err(cerr!(line, "`render` takes 1 argument, got {}", args.len()));
                     }
                     let t = self.base(&self.expr(&args[0], scope, Some(&code()), fn_ret)?);
                     if !matches!(t, Type::Err) && t != code() {
-                        return Err(format!(
-                            "line {line}: `render` needs a Code value, found {t}"
-                        ));
+                        return Err(cerr!(line, "`render` needs a Code value, found {t}"));
                     }
                     return Ok(Type::Str);
                 }
@@ -5952,8 +6012,9 @@ impl<'a> Checker<'a> {
                 // origin, so `render` maps diagnostics inside it back (RFC-0033).
                 "rawAt" => {
                     if args.len() != 4 {
-                        return Err(format!(
-                            "line {line}: `rawAt` takes 4 arguments (text, path, line, col), got {}",
+                        return Err(cerr!(
+                            line,
+                            "`rawAt` takes 4 arguments (text, path, line, col), got {}",
                             args.len()
                         ));
                     }
@@ -5967,10 +6028,7 @@ impl<'a> Checker<'a> {
                 // escape hatch; new code should use `vyrn"…"` quotes instead).
                 "raw" => {
                     if args.len() != 1 {
-                        return Err(format!(
-                            "line {line}: `raw` takes 1 argument, got {}",
-                            args.len()
-                        ));
+                        return Err(cerr!(line, "`raw` takes 1 argument, got {}", args.len()));
                     }
                     self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
                     return Ok(code());
@@ -5978,10 +6036,7 @@ impl<'a> Checker<'a> {
                 // `lex(source) -> Array<Token>` — the compiler's real lexer.
                 "lex" => {
                     if args.len() != 1 {
-                        return Err(format!(
-                            "line {line}: `lex` takes 1 argument, got {}",
-                            args.len()
-                        ));
+                        return Err(cerr!(line, "`lex` takes 1 argument, got {}", args.len()));
                     }
                     self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
                     return Ok(Type::Array(Box::new(Type::Named("Token".to_string()))));
@@ -5991,8 +6046,9 @@ impl<'a> Checker<'a> {
         }
         if name == "writeFile" {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `writeFile` takes 2 arguments, got {}",
+                return Err(cerr!(
+                    line,
+                    "`writeFile` takes 2 arguments, got {}",
                     args.len()
                 ));
             }
@@ -6002,9 +6058,7 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if t != Type::Str {
-                    return Err(format!(
-                        "line {line}: `writeFile` needs String arguments, found {t}"
-                    ));
+                    return Err(cerr!(line, "`writeFile` needs String arguments, found {t}"));
                 }
             }
             return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
@@ -6014,8 +6068,9 @@ impl<'a> Checker<'a> {
         // with canonical `@.io.*` wording.
         if name == "renameFile" {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `renameFile` takes 2 arguments (from, to), got {}",
+                return Err(cerr!(
+                    line,
+                    "`renameFile` takes 2 arguments (from, to), got {}",
                     args.len()
                 ));
             }
@@ -6025,8 +6080,9 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if t != Type::Str {
-                    return Err(format!(
-                        "line {line}: `renameFile` needs String arguments, found {t}"
+                    return Err(cerr!(
+                        line,
+                        "`renameFile` needs String arguments, found {t}"
                     ));
                 }
             }
@@ -6036,8 +6092,9 @@ impl<'a> Checker<'a> {
         // power-durability upgrade over `writeAtomic`'s crash-consistency).
         if name == "fsyncFile" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `fsyncFile` takes 1 argument (a path), got {}",
+                return Err(cerr!(
+                    line,
+                    "`fsyncFile` takes 1 argument (a path), got {}",
                     args.len()
                 ));
             }
@@ -6046,17 +6103,16 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!(
-                    "line {line}: `fsyncFile` needs a String path, found {t}"
-                ));
+                return Err(cerr!(line, "`fsyncFile` needs a String path, found {t}"));
             }
             return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
         }
         // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
         if name == "readFileBytes" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `readFileBytes` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`readFileBytes` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -6065,8 +6121,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!(
-                    "line {line}: `readFileBytes` needs a String path, found {t}"
+                return Err(cerr!(
+                    line,
+                    "`readFileBytes` needs a String path, found {t}"
                 ));
             }
             return Ok(Type::Result(
@@ -6079,8 +6136,9 @@ impl<'a> Checker<'a> {
         }
         if name == "stringFromBytes" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `stringFromBytes` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`stringFromBytes` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -6093,8 +6151,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != want {
-                return Err(format!(
-                    "line {line}: `stringFromBytes` needs an Array<UInt8>, found {t}"
+                return Err(cerr!(
+                    line,
+                    "`stringFromBytes` needs an Array<UInt8>, found {t}"
                 ));
             }
             return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
@@ -6123,10 +6182,7 @@ impl<'a> Checker<'a> {
         // RFC-0078 M3.
         if name == "floatBits" || name == "floatFromBits" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `{name}` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
             }
             let (want, got) = if name == "floatBits" {
                 (
@@ -6150,7 +6206,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != want {
-                return Err(format!("line {line}: `{name}` needs a {want}, found {t}"));
+                return Err(cerr!(line, "`{name}` needs a {want}, found {t}"));
             }
             return Ok(got);
         }
@@ -6165,17 +6221,14 @@ impl<'a> Checker<'a> {
         // it is the VIEW every runtime module stands on (`prelude::lends`).
         if name == "bytes" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `bytes` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`bytes` takes 1 argument, got {}", args.len()));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `bytes` needs a String, found {t}"));
+                return Err(cerr!(line, "`bytes` needs a String, found {t}"));
             }
             return Ok(Type::Array(Box::new(Type::IntN {
                 bits: 8,
@@ -6188,8 +6241,9 @@ impl<'a> Checker<'a> {
         // never by user source. Heap-allocated result.
         if name == "@concat" {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `@concat` takes 2 arguments, got {}",
+                return Err(cerr!(
+                    line,
+                    "`@concat` takes 2 arguments, got {}",
                     args.len()
                 ));
             }
@@ -6199,7 +6253,7 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if t != Type::Str {
-                    return Err(format!("line {line}: `@concat` needs Strings, found {t}"));
+                    return Err(cerr!(line, "`@concat` needs Strings, found {t}"));
                 }
             }
             return Ok(Type::Str);
@@ -6208,16 +6262,12 @@ impl<'a> Checker<'a> {
         // `@join` — the internal spelling of `t.join()`: await a spawned task.
         if name == "@join" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `join` takes no arguments"));
+                return Err(cerr!(line, "`join` takes no arguments"));
             }
             match self.base(&self.expr(&args[0], scope, None, fn_ret)?) {
                 Type::Task(inner) => return Ok((*inner).clone()),
                 Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(format!(
-                        "line {line}: `.join()` needs a Task, found {other}"
-                    ))
-                }
+                other => return Err(cerr!(line, "`.join()` needs a Task, found {other}")),
             }
         }
 
@@ -6226,7 +6276,7 @@ impl<'a> Checker<'a> {
         // fallible inverse.
         if name == "@str" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `toString` takes no arguments"));
+                return Err(cerr!(line, "`toString` takes no arguments"));
             }
             // `str` renders a scalar to a fresh String — Int, sized IntN, Float,
             // Bool, or String (String is copied). Interpolation lowers to this.
@@ -6241,8 +6291,9 @@ impl<'a> Checker<'a> {
                 if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
                     return Ok(Type::Str);
                 }
-                return Err(format!(
-                    "line {line}: `toString` renders a number, Bool, or String, found {t}{}",
+                return Err(cerr!(
+                    line,
+                    "`toString` renders a number, Bool, or String, found {t}{}",
                     self.show_hint(&written)
                 ));
             }
@@ -6253,32 +6304,30 @@ impl<'a> Checker<'a> {
         // non-continuation bytes (`b & 0xC0 != 0x80`) of validated UTF-8.
         if name == "@charCount" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `charCount` takes no arguments"));
+                return Err(cerr!(line, "`charCount` takes no arguments"));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!(
-                    "line {line}: `charCount` counts the Unicode scalars of a String, found {t}"
+                return Err(cerr!(
+                    line,
+                    "`charCount` counts the Unicode scalars of a String, found {t}"
                 ));
             }
             return Ok(Type::Int);
         }
         if name == "parse" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `parse` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`parse` takes 1 argument, got {}", args.len()));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `parse` needs a String, found {t}"));
+                return Err(cerr!(line, "`parse` needs a String, found {t}"));
             }
             return Ok(Type::Option(Box::new(Type::Int)));
         }
@@ -6288,10 +6337,7 @@ impl<'a> Checker<'a> {
         // never arrives here at all.
         if name == "@push" {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `push` takes 2 arguments, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`push` takes 2 arguments, got {}", args.len()));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             // `push` returns the SAME collection kind it received, so
@@ -6304,15 +6350,17 @@ impl<'a> Checker<'a> {
                 ),
                 Type::Err => return Ok(Type::Err),
                 other => {
-                    return Err(format!(
-                        "line {line}: `push` needs an Array as its first argument, found {other}"
+                    return Err(cerr!(
+                        line,
+                        "`push` needs an Array as its first argument, found {other}"
                     ))
                 }
             };
             let v = self.expr(&args[1], scope, Some(&elem), fn_ret)?;
             if !self.coercible(&v, &elem) {
-                return Err(format!(
-                    "line {line}: `push` value is {v} but the array holds {elem}"
+                return Err(cerr!(
+                    line,
+                    "`push` value is {v} but the array holds {elem}"
                 ));
             }
             self.prove_coercion(&args[1], &elem, line)?;
@@ -6333,10 +6381,7 @@ impl<'a> Checker<'a> {
         // type alike; only `@at` dispatches.
         if name == crate::project::AT || name == crate::project::ELEM {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `at` takes 2 arguments, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`at` takes 2 arguments, got {}", args.len()));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             // A container of the user's own: the projection's declared return
@@ -6355,9 +6400,7 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if crate::types::resolve(&k, self.types) != Type::Str {
-                    return Err(format!(
-                        "line {line}: a map key must be a String, found {k}"
-                    ));
+                    return Err(cerr!(line, "a map key must be a String, found {k}"));
                 }
                 return Ok(Type::Option(val));
             }
@@ -6375,8 +6418,9 @@ impl<'a> Checker<'a> {
                 },
                 Type::Err => return Ok(Type::Err),
                 other => {
-                    return Err(format!(
-                        "line {line}: indexing needs an Array or String, found {other}"
+                    return Err(cerr!(
+                        line,
+                        "indexing needs an Array or String, found {other}"
                     ))
                 }
             };
@@ -6385,9 +6429,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if i != Type::Int {
-                return Err(format!(
-                    "line {line}: `at` index must be an Int64, found {i}"
-                ));
+                return Err(cerr!(line, "`at` index must be an Int64, found {i}"));
             }
             return Ok(elem);
         }
@@ -6398,8 +6440,9 @@ impl<'a> Checker<'a> {
         // `Stream`.
         if name == "fromArray" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `fromArray` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`fromArray` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -6409,9 +6452,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             let Type::Array(inner) = at else {
-                return Err(format!(
-                    "line {line}: `fromArray` needs an `Array<T>`, found {at}"
-                ));
+                return Err(cerr!(line, "`fromArray` needs an `Array<T>`, found {at}"));
             };
             return Ok(Type::Stream(inner));
         }
@@ -6435,8 +6476,9 @@ impl<'a> Checker<'a> {
         // `movecheck` checks that release like any other.
         if name == "fromStep" {
             if args.len() != 3 {
-                return Err(format!(
-                    "line {line}: `fromStep` takes 3 arguments, got {}",
+                return Err(cerr!(
+                    line,
+                    "`fromStep` takes 3 arguments, got {}",
                     args.len()
                 ));
             }
@@ -6447,31 +6489,26 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if st != Type::Int {
-                    return Err(format!(
-                        "line {line}: `fromStep` needs an `Int64` cursor {what}, found {st}"
+                    return Err(cerr!(
+                        line,
+                        "`fromStep` needs an `Int64` cursor {what}, found {st}"
                     ));
                 }
             }
             let ft = self.expr(&args[2], scope, None, fn_ret)?;
             let want = "fn(Int64, Int64, Bool) -> Option<T>";
             let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
-                return Err(format!(
-                    "line {line}: `fromStep` needs a `{want}` step, found {ft}"
-                ));
+                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
             };
             if ps.len() != 3
                 || self.base(&ps[0]) != Type::Int
                 || self.base(&ps[1]) != Type::Int
                 || self.base(&ps[2]) != Type::Bool
             {
-                return Err(format!(
-                    "line {line}: `fromStep` needs a `{want}` step, found {ft}"
-                ));
+                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
             }
             let Type::Option(inner) = self.base(&ret) else {
-                return Err(format!(
-                    "line {line}: `fromStep` needs a `{want}` step, found {ft}"
-                ));
+                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
             };
             return Ok(Type::Stream(inner));
         }
@@ -6491,8 +6528,9 @@ impl<'a> Checker<'a> {
         // close its source does not compile.
         if name == "boxStream" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `boxStream` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`boxStream` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -6502,24 +6540,20 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Int);
             }
             if !matches!(st, Type::Stream(_)) {
-                return Err(format!(
-                    "line {line}: `boxStream` needs a `Stream<T>`, found {st}"
-                ));
+                return Err(cerr!(line, "`boxStream` needs a `Stream<T>`, found {st}"));
             }
             return Ok(Type::Int);
         }
         if name == "unboxStream" || name == "pullAt" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `{name}` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
             }
             let at = self.expr(&args[0], scope, Some(&Type::Int), fn_ret)?;
             let at = self.base(&at);
             if !matches!(at, Type::Err) && at != Type::Int {
-                return Err(format!(
-                    "line {line}: `{name}` needs a boxed stream's address, found {at}"
+                return Err(cerr!(
+                    line,
+                    "`{name}` needs a boxed stream's address, found {at}"
                 ));
             }
             // Both answer a type nothing in the call carries, for the reason
@@ -6530,8 +6564,7 @@ impl<'a> Checker<'a> {
                 "Option<T>"
             };
             let Some(exp) = expected else {
-                return Err(format!(
-                    "line {line}: `{name}` needs the element type from context —                      write `let x: {want} = {name}(a)`"
+                return Err(cerr!(line, "`{name}` needs the element type from context —                      write `let x: {want} = {name}(a)`"
                 ));
             };
             let ok = match name {
@@ -6539,18 +6572,13 @@ impl<'a> Checker<'a> {
                 _ => matches!(self.base(exp), Type::Option(_)),
             };
             if !ok {
-                return Err(format!(
-                    "line {line}: `{name}` answers a `{want}`, not {exp}"
-                ));
+                return Err(cerr!(line, "`{name}` answers a `{want}`, not {exp}"));
             }
             return Ok(exp.clone());
         }
         if name == "close" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `close` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`close` takes 1 argument, got {}", args.len()));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             let at = self.base(&at);
@@ -6558,9 +6586,7 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Unit);
             }
             if !matches!(at, Type::Stream(_)) {
-                return Err(format!(
-                    "line {line}: `close` needs a `Stream<T>`, found {at}"
-                ));
+                return Err(cerr!(line, "`close` needs a `Stream<T>`, found {at}"));
             }
             return Ok(Type::Unit);
         }
@@ -6580,8 +6606,9 @@ impl<'a> Checker<'a> {
         // with a different encoder.
         if name == "serveStream" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `serveStream` takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`serveStream` takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -6595,8 +6622,9 @@ impl<'a> Checker<'a> {
                 _ => false,
             };
             if !ok {
-                return Err(format!(
-                    "line {line}: `serveStream` needs a `Stream<String>` of encoded frames, found {at}"
+                return Err(cerr!(
+                    line,
+                    "`serveStream` needs a `Stream<String>` of encoded frames, found {at}"
                 ));
             }
             return Ok(Type::Unit);
@@ -6607,7 +6635,7 @@ impl<'a> Checker<'a> {
         // rejected with a message naming `Array<T>`.
         if name == "@pop" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `pop` takes no arguments"));
+                return Err(cerr!(line, "`pop` takes no arguments"));
             }
             let elem = self.mut_array_receiver(&args[0], scope, line, name, "pop")?;
             return Ok(match elem {
@@ -6621,16 +6649,18 @@ impl<'a> Checker<'a> {
         // rules as `pop`.
         if name == "@swapRemove" {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `swapRemove` takes 1 argument (an index), got {}",
+                return Err(cerr!(
+                    line,
+                    "`swapRemove` takes 1 argument (an index), got {}",
                     args.len() - 1
                 ));
             }
             let elem = self.mut_array_receiver(&args[0], scope, line, name, "swapRemove")?;
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
-                return Err(format!(
-                    "line {line}: `swapRemove` index must be an Int64, found {i}"
+                return Err(cerr!(
+                    line,
+                    "`swapRemove` index must be an Int64, found {i}"
                 ));
             }
             return Ok(elem);
@@ -6642,17 +6672,13 @@ impl<'a> Checker<'a> {
         // uniformly, but its primary use is on a SmallArray.
         if name == "@toArray" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `toArray` takes no arguments"));
+                return Err(cerr!(line, "`toArray` takes no arguments"));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             let elem = match self.base(&at) {
                 Type::SmallArray(inner, _) | Type::Array(inner) => (*inner).clone(),
                 Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(format!(
-                        "line {line}: `toArray` needs a SmallArray, found {other}"
-                    ))
-                }
+                other => return Err(cerr!(line, "`toArray` needs a SmallArray, found {other}")),
             };
             return Ok(Type::Array(Box::new(elem)));
         }
@@ -6680,7 +6706,7 @@ impl<'a> Checker<'a> {
         // same `x.copy()` is a String in one instance and an `Int64` in the next.
         if name == "@copy" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `copy` takes no arguments"));
+                return Err(cerr!(line, "`copy` takes no arguments"));
             }
             let t = self.expr(&args[0], scope, None, fn_ret)?;
             if matches!(self.base(&t), Type::Err) {
@@ -6700,16 +6726,18 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Some(declared) = self.declared_owned_in(&t, 0) {
-                return Err(format!(
-                    "line {line}: `copy` cannot copy `{declared}`: it declares `impl Owned for \
+                return Err(cerr!(
+                    line,
+                    "`copy` cannot copy `{declared}`: it declares `impl Owned for \
                      {declared}`, so only `{declared}` knows what duplicating it means. Say what \
                      duplicating it means with `impl Copy for {declared}`, or copy the parts you \
                      need"
                 ));
             }
             if matches!(self.base(&t), Type::Stream(_)) {
-                return Err(format!(
-                    "line {line}: `copy` cannot copy a Stream: a stream is a cursor over a \
+                return Err(cerr!(
+                    line,
+                    "`copy` cannot copy a Stream: a stream is a cursor over a \
                      producer, not a container. Collect it first (`collect`), then copy the array"
                 ));
             }
@@ -6720,8 +6748,9 @@ impl<'a> Checker<'a> {
             // (`std/json`'s `copyJson` is the worked example), and since
             // RFC-0091 M1 `impl Copy for T` is where that function goes.
             if let Some(name) = crate::own::self_referring(&t, &self.types) {
-                return Err(format!(
-                    "line {line}: `copy` cannot copy `{name}`: it refers to itself, so a \
+                return Err(cerr!(
+                    line,
+                    "`copy` cannot copy `{name}`: it refers to itself, so a \
                      structural copy has no bottom to stop at. Write a recursive function that \
                      copies it one variant at a time, and declare it with `impl Copy for {name}`"
                 ));
@@ -6737,44 +6766,45 @@ impl<'a> Checker<'a> {
                 Type::Map(_, v) => (*v).clone(),
                 Type::Err => return Ok(Type::Err),
                 other => {
-                    return Err(format!(
-                        "line {line}: `{op}` needs a Map as its receiver, found {other}"
+                    return Err(cerr!(
+                        line,
+                        "`{op}` needs a Map as its receiver, found {other}"
                     ))
                 }
             };
             let _ = val;
             if name == "@keys" {
                 if args.len() != 1 {
-                    return Err(format!("line {line}: `keys` takes no arguments"));
+                    return Err(cerr!(line, "`keys` takes no arguments"));
                 }
                 return Ok(Type::Array(Box::new(Type::Str)));
             }
             // `has(k)` / `remove(k)` take one String key.
             if args.len() != 2 {
-                return Err(format!("line {line}: `{op}` takes 1 argument (a key)"));
+                return Err(cerr!(line, "`{op}` takes 1 argument (a key)"));
             }
             if name == "@remove" {
                 // Mutating: the receiver must be a plain `mut` Map binding.
                 if let Expr::Var { name: recv, .. } = &args[0] {
-                    let b = self.lookup(scope, recv).ok_or_else(|| {
-                        format!("line {line}: `remove` on unknown variable `{recv}`")
-                    })?;
+                    let b = self
+                        .lookup(scope, recv)
+                        .ok_or_else(|| cerr!(line, "`remove` on unknown variable `{recv}`"))?;
                     if !b.mutable {
-                        return Err(format!(
-                            "line {line}: cannot `remove` from `{recv}` (declared without `mut`)"
+                        return Err(cerr!(
+                            line,
+                            "cannot `remove` from `{recv}` (declared without `mut`)"
                         ));
                     }
                 } else {
-                    return Err(format!(
-                        "line {line}: `remove` needs a plain map variable as its receiver"
+                    return Err(cerr!(
+                        line,
+                        "`remove` needs a plain map variable as its receiver"
                     ));
                 }
             }
             let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
             if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str {
-                return Err(format!(
-                    "line {line}: a map key must be a String, found {k}"
-                ));
+                return Err(cerr!(line, "a map key must be a String, found {k}"));
             }
             return Ok(Type::Bool);
         }
@@ -6782,8 +6812,9 @@ impl<'a> Checker<'a> {
         // number to the named numeric type. No implicit conversions elsewhere.
         if let Some(target) = crate::types::numeric_conv_target(name) {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `{name}` conversion takes 1 argument, got {}",
+                return Err(cerr!(
+                    line,
+                    "`{name}` conversion takes 1 argument, got {}",
                     args.len()
                 ));
             }
@@ -6795,9 +6826,7 @@ impl<'a> Checker<'a> {
                 src,
                 Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
             ) {
-                return Err(format!(
-                    "line {line}: `{name}(..)` converts a number, found {src}"
-                ));
+                return Err(cerr!(line, "`{name}(..)` converts a number, found {src}"));
             }
             return Ok(target);
         }
@@ -6819,8 +6848,9 @@ impl<'a> Checker<'a> {
         // name*, not a value; the bounds are extracted from the type declaration.
         if name == "schemaOf" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `schemaOf` takes 1 argument (a type name), got {}",
+                return Err(cerr!(
+                    line,
+                    "`schemaOf` takes 1 argument (a type name), got {}",
                     args.len()
                 ));
             }
@@ -6829,11 +6859,12 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Named("Schema".to_string()))
                 }
                 Expr::Var { name: tn, .. } => {
-                    return Err(format!(
-                        "line {line}: `schemaOf` needs a declared type name; `{tn}` is not a type"
+                    return Err(cerr!(
+                        line,
+                        "`schemaOf` needs a declared type name; `{tn}` is not a type"
                     ))
                 }
-                _ => return Err(format!("line {line}: `schemaOf` needs a type name")),
+                _ => return Err(cerr!(line, "`schemaOf` needs a type name")),
             }
         }
         // built-in: contractOf(ContractName) -> ContractInfo — compile-time
@@ -6844,13 +6875,15 @@ impl<'a> Checker<'a> {
         if name == "contractOf" {
             // Generation-only, and gated for the reason `moduleInterface` is.
             if !*self.in_gen.borrow() {
-                return Err(format!(
-                    "line {line}: `contractOf` is only available during generation"
+                return Err(cerr!(
+                    line,
+                    "`contractOf` is only available during generation"
                 ));
             }
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `contractOf` takes 1 argument (a contract name), got {}",
+                return Err(cerr!(
+                    line,
+                    "`contractOf` takes 1 argument (a contract name), got {}",
                     args.len()
                 ));
             }
@@ -6859,11 +6892,10 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Named("ContractInfo".to_string()))
                 }
                 Expr::Var { name: cn, .. } => {
-                    return Err(format!(
-                        "line {line}: `contractOf` needs a declared contract name;                          `{cn}` is not a contract"
+                    return Err(cerr!(line, "`contractOf` needs a declared contract name;                          `{cn}` is not a contract"
                     ))
                 }
-                _ => return Err(format!("line {line}: `contractOf` needs a contract name")),
+                _ => return Err(cerr!(line, "`contractOf` needs a contract name")),
             }
         }
         // built-in: jsonSchema(TypeName) -> String — compile-time rendering of a
@@ -6871,19 +6903,21 @@ impl<'a> Checker<'a> {
         // the argument is a *type name*; the string is computed from the declaration.
         if name == "jsonSchema" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `jsonSchema` takes 1 argument (a type name), got {}",
+                return Err(cerr!(
+                    line,
+                    "`jsonSchema` takes 1 argument (a type name), got {}",
                     args.len()
                 ));
             }
             match &args[0] {
                 Expr::Var { name: tn, .. } if self.types.contains_key(tn) => return Ok(Type::Str),
                 Expr::Var { name: tn, .. } => {
-                    return Err(format!(
-                        "line {line}: `jsonSchema` needs a declared type name; `{tn}` is not a type"
+                    return Err(cerr!(
+                        line,
+                        "`jsonSchema` needs a declared type name; `{tn}` is not a type"
                     ))
                 }
-                _ => return Err(format!("line {line}: `jsonSchema` needs a type name")),
+                _ => return Err(cerr!(line, "`jsonSchema` needs a type name")),
             }
         }
         // built-in: toJson(x) -> String (RFC-0018) — encode any *codable* value
@@ -6892,8 +6926,9 @@ impl<'a> Checker<'a> {
         // scalars, records, Option, Array/ArrayN, payload-less enums).
         if name == "toJson" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `toJson` takes 1 argument (a value), got {}",
+                return Err(cerr!(
+                    line,
+                    "`toJson` takes 1 argument (a value), got {}",
                     args.len()
                 ));
             }
@@ -6902,8 +6937,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Str);
             }
             if let Err(off) = crate::codec::encodable(&at, self.types) {
-                return Err(format!(
-                    "line {line}: `toJson` cannot encode `{off}` (not a codable type)"
+                return Err(cerr!(
+                    line,
+                    "`toJson` cannot encode `{off}` (not a codable type)"
                 ));
             }
             // RFC-0078 M2b: record the argument type so the encoder for it exists
@@ -6917,30 +6953,34 @@ impl<'a> Checker<'a> {
         // accumulated into the returned `Validation<T>`.
         if name == "fromJson" {
             if args.len() != 2 {
-                return Err(format!(
-                    "line {line}: `fromJson` takes 2 arguments (a type name and a String), got {}",
+                return Err(cerr!(
+                    line,
+                    "`fromJson` takes 2 arguments (a type name and a String), got {}",
                     args.len()
                 ));
             }
             let tn = match &args[0] {
                 Expr::Var { name: tn, .. } if self.types.contains_key(tn) => tn.clone(),
                 Expr::Var { name: tn, .. } => {
-                    return Err(format!(
-                        "line {line}: `fromJson` needs a declared type name; `{tn}` is not a type"
+                    return Err(cerr!(
+                        line,
+                        "`fromJson` needs a declared type name; `{tn}` is not a type"
                     ))
                 }
-                _ => return Err(format!("line {line}: `fromJson` needs a type name")),
+                _ => return Err(cerr!(line, "`fromJson` needs a type name")),
             };
             let target = Type::Named(tn.clone());
             if let Err(off) = crate::codec::decodable(&target, self.types) {
-                return Err(format!(
-                    "line {line}: `fromJson` cannot decode into `{off}` (not a codable type)"
+                return Err(cerr!(
+                    line,
+                    "`fromJson` cannot decode into `{off}` (not a codable type)"
                 ));
             }
             let sty = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
             if !matches!(sty, Type::Str | Type::Err) {
-                return Err(format!(
-                    "line {line}: `fromJson`'s second argument must be a String, found {sty}"
+                return Err(cerr!(
+                    line,
+                    "`fromJson`'s second argument must be a String, found {sty}"
                 ));
             }
             // RFC-0078 M3: record the target so its decoder exists in the linked
@@ -6952,10 +6992,7 @@ impl<'a> Checker<'a> {
         // type (RFC-0007). What a tagged template's holes desugar to.
         if name == "value" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `value` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`value` takes 1 argument, got {}", args.len()));
             }
             let written = self.expr(&args[0], scope, None, fn_ret)?;
             let t = self.base(&written);
@@ -6971,8 +7008,9 @@ impl<'a> Checker<'a> {
                 if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
                     return Ok(Type::Named("Value".to_string()));
                 }
-                return Err(format!(
-                    "line {line}: `value` boxes an Int64, Bool, or String, found {t}{}",
+                return Err(cerr!(
+                    line,
+                    "`value` boxes an Int64, Bool, or String, found {t}{}",
                     self.show_hint(&written)
                 ));
             }
@@ -6985,30 +7023,20 @@ impl<'a> Checker<'a> {
         // growable one. (User source uses a contextual array literal instead.)
         if name == "@list" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `@list` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`@list` takes 1 argument, got {}", args.len()));
             }
             let a = self.expr(&args[0], scope, None, fn_ret)?;
             match self.base(&a) {
                 Type::ArrayN(inner, _) | Type::Array(inner) => return Ok(Type::Array(inner)),
                 Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(format!(
-                        "line {line}: `@list` needs an Array, found {other}"
-                    ))
-                }
+                other => return Err(cerr!(line, "`@list` needs an Array, found {other}")),
             }
         }
 
         // built-in: Some(x) -> Option<typeof x>
         if name == "Some" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `Some` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`Some` takes 1 argument, got {}", args.len()));
             }
             // Resolved, as `Ok`/`Err` below do: `type MaybeAge = Option<Age>` is
             // a named Option, and the payload's refinement rides on `Age`.
@@ -7023,14 +7051,13 @@ impl<'a> Checker<'a> {
             // [`Checker::mentions_open_param`]).
             let inner_expected = inner_expected.filter(|want| !self.is_open_param(want));
             if matches!(aty, Type::Option(_) | Type::Result(..)) {
-                return Err(format!(
-                    "line {line}: nested Option/Result is not supported in v0.1"
-                ));
+                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
             }
             if let Some(want) = &inner_expected {
                 if !self.coercible(&aty, want) {
-                    return Err(format!(
-                        "line {line}: `Some` payload is {aty} but Option<{want}> was expected"
+                    return Err(cerr!(
+                        line,
+                        "`Some` payload is {aty} but Option<{want}> was expected"
                     ));
                 }
                 self.prove_coercion(&args[0], want, line)?;
@@ -7042,10 +7069,7 @@ impl<'a> Checker<'a> {
         // built-in: Ok(x) / Err(e) — need the other type parameter from context.
         if name == "Ok" || name == "Err" {
             if args.len() != 1 {
-                return Err(format!(
-                    "line {line}: `{name}` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
             }
             // Resolve a named alias (`type DeleteResult = Result<..>`) so the
             // expected `Result<T, E>` is visible for payload inference (RFC-0024).
@@ -7060,15 +7084,14 @@ impl<'a> Checker<'a> {
             };
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
             if matches!(aty, Type::Option(_) | Type::Result(..)) {
-                return Err(format!(
-                    "line {line}: nested Option/Result is not supported in v0.1"
-                ));
+                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
             }
             let (mut t, mut e) = match &expected_res {
                 Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
                 _ => {
-                    return Err(format!(
-                        "line {line}: cannot infer the type of `{name}(..)`; add an annotation \
+                    return Err(cerr!(
+                        line,
+                        "cannot infer the type of `{name}(..)`; add an annotation \
                          (e.g. `-> Result<Int64, Int64>`)"
                     ))
                 }
@@ -7084,8 +7107,9 @@ impl<'a> Checker<'a> {
             let want_ty = if name == "Ok" { &t } else { &e };
             self.prove_coercion(&args[0], want_ty, line)?;
             if !self.coercible(&aty, want_ty) {
-                return Err(format!(
-                    "line {line}: `{name}` payload is {aty} but {want_ty} was expected"
+                return Err(cerr!(
+                    line,
+                    "`{name}` payload is {aty} but {want_ty} was expected"
                 ));
             }
             return Ok(Type::Result(Box::new(t), Box::new(e)));
@@ -7095,11 +7119,12 @@ impl<'a> Checker<'a> {
         if let Some(info) = self.variants.get(name) {
             let payload = info.payload.clone();
             if payload.is_empty() {
-                return Err(format!("line {line}: variant `{name}` takes no arguments"));
+                return Err(cerr!(line, "variant `{name}` takes no arguments"));
             }
             if args.len() != payload.len() {
-                return Err(format!(
-                    "line {line}: `{name}` takes {} argument(s), got {}",
+                return Err(cerr!(
+                    line,
+                    "`{name}` takes {} argument(s), got {}",
                     payload.len(),
                     args.len()
                 ));
@@ -7125,8 +7150,9 @@ impl<'a> Checker<'a> {
             }
             for tp in &tps {
                 if !subst.contains_key(tp) {
-                    return Err(format!(
-                        "line {line}: cannot infer type parameter `{tp}` of `{}`",
+                    return Err(cerr!(
+                        line,
+                        "cannot infer type parameter `{tp}` of `{}`",
                         info.enum_name
                     ));
                 }
@@ -7146,7 +7172,7 @@ impl<'a> Checker<'a> {
         // use the protocol's declared signature (dispatch is deferred to codegen).
         if let Some((proto, sig)) = self.protocol_methods.get(name).cloned() {
             if args.is_empty() {
-                return Err(format!("line {line}: `{name}` needs a `self` receiver"));
+                return Err(cerr!(line, "`{name}` needs a `self` receiver"));
             }
             // Key on the raw (non-decayed) receiver type so enums keep their name.
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
@@ -7168,8 +7194,9 @@ impl<'a> Checker<'a> {
                         });
                     }
                     if let Some(a) = assoc {
-                        return Err(format!(
-                            "line {line}: `{name}` mentions `{proto}`'s associated type `{a}`, and \
+                        return Err(cerr!(
+                            line,
+                            "`{name}` mentions `{proto}`'s associated type `{a}`, and \
                              a `<{t}: {proto}>` bound cannot name it — call `.{name}(..)` on a \
                              concrete type, where the impl (and so `{a}`) is known"
                         ));
@@ -7178,8 +7205,9 @@ impl<'a> Checker<'a> {
                     // signature (a bare `zip` would silently drop extras and
                     // leave them entirely unchecked).
                     if args.len() - 1 != sig.params.len() {
-                        return Err(format!(
-                            "line {line}: `{name}` expects {} argument(s) besides `self`, got {}",
+                        return Err(cerr!(
+                            line,
+                            "`{name}` expects {} argument(s) besides `self`, got {}",
                             sig.params.len(),
                             args.len() - 1
                         ));
@@ -7195,9 +7223,7 @@ impl<'a> Checker<'a> {
                     for (i, (arg, pty)) in args[1..].iter().zip(&sig.params).enumerate() {
                         let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
                         if !self.coercible(&aty, pty) {
-                            return Err(format!(
-                                "line {line}: `{name}` argument is {aty}, expected {pty}"
-                            ));
+                            return Err(cerr!(line, "`{name}` argument is {aty}, expected {pty}"));
                         }
                         self.prove_coercion(arg, pty, line)?;
                         if sig.param_caps.get(i) == Some(&Capability::Modify) {
@@ -7213,8 +7239,9 @@ impl<'a> Checker<'a> {
                     return self.call(&mangled, args, line, scope, expected, fn_ret);
                 }
                 _ => {
-                    return Err(format!(
-                        "line {line}: {recv} does not implement protocol `{proto}` \
+                    return Err(cerr!(
+                        line,
+                        "{recv} does not implement protocol `{proto}` \
                          (needed for `.{name}(..)`)"
                     ))
                 }
@@ -7225,15 +7252,17 @@ impl<'a> Checker<'a> {
             .sigs
             .get(name)
             .ok_or_else(|| match moved_to_std(name) {
-                Some(module) => format!(
-                    "line {line}: `{name}` is `{module}`'s — add \
+                Some(module) => cerr!(
+                    line,
+                    "`{name}` is `{module}`'s — add \
                  `import {{ {name} }} from \"{module}\"`"
                 ),
-                None => format!("line {line}: call to unknown function `{name}`"),
+                None => cerr!(line, "call to unknown function `{name}`"),
             })?;
         if params.len() != args.len() {
-            return Err(format!(
-                "line {line}: `{name}` expects {} argument(s), got {}",
+            return Err(cerr!(
+                line,
+                "`{name}` expects {} argument(s), got {}",
                 params.len(),
                 args.len()
             ));
@@ -7303,8 +7332,9 @@ impl<'a> Checker<'a> {
             }
             for tp in type_params {
                 if !subst.contains_key(tp) {
-                    return Err(format!(
-                        "line {line}: cannot infer type parameter `{tp}` of `{name}`"
+                    return Err(cerr!(
+                        line,
+                        "cannot infer type parameter `{tp}` of `{name}`"
                     ));
                 }
             }
@@ -7314,8 +7344,7 @@ impl<'a> Checker<'a> {
                     let concrete = &subst[tp];
                     for b in bs {
                         if !self.type_satisfies(concrete, b) {
-                            return Err(format!(
-                                "line {line}: `{name}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
+                            return Err(cerr!(line, "`{name}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
                             ));
                         }
                     }
@@ -7331,8 +7360,9 @@ impl<'a> Checker<'a> {
                 .chain(std::iter::once(rty.clone()))
                 .any(|t| has_nested_wrap(&t));
             if nested {
-                return Err(format!(
-                    "line {line}: nested Option/Result is not supported in v0.1 \
+                return Err(cerr!(
+                    line,
+                    "nested Option/Result is not supported in v0.1 \
                      (inferred through `{name}`)"
                 ));
             }
@@ -7351,8 +7381,9 @@ impl<'a> Checker<'a> {
             }
             let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
             if !self.coercible(&aty, pty) {
-                return Err(format!(
-                    "line {line}: `{name}` argument {} expects {pty}, found {aty}",
+                return Err(cerr!(
+                    line,
+                    "`{name}` argument {} expects {pty}, found {aty}",
                     i + 1
                 ));
             }
@@ -7412,7 +7443,7 @@ impl<'a> Checker<'a> {
         fn_ret: Option<&Type>,
         subst: &mut HashMap<String, Type>,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let (ptys, ret) = match expected_fn {
             Type::Fn(ps, r) => (ps.clone(), (**r).clone()),
             _ => return Ok(()),
@@ -7424,8 +7455,9 @@ impl<'a> Checker<'a> {
                 line: lline,
             } => {
                 if params.len() != ptys.len() {
-                    return Err(format!(
-                        "line {lline}: this lambda takes {} parameter(s), but `{callee}` \
+                    return Err(cerr!(
+                        lline,
+                        "this lambda takes {} parameter(s), but `{callee}` \
                          argument {} expects {}",
                         params.len(),
                         i + 1,
@@ -7465,8 +7497,9 @@ impl<'a> Checker<'a> {
                     }
                     LambdaBody::Block(b) => {
                         if !ret_known {
-                            return Err(format!(
-                                "line {lline}: cannot infer the return type of a \
+                            return Err(cerr!(
+                                lline,
+                                "cannot infer the return type of a \
                                  block-bodied lambda passed to a generic `fn` parameter; \
                                  use an expression body `|..| expr`"
                             ));
@@ -7478,9 +7511,7 @@ impl<'a> Checker<'a> {
                         let returns = self.block(b, &ret, &mut inner);
                         self.in_loop.replace(prev_loop);
                         if ret != Type::Unit && !returns {
-                            return Err(format!(
-                                "line {lline}: this lambda must return {ret} on all paths"
-                            ));
+                            return Err(cerr!(lline, "this lambda must return {ret} on all paths"));
                         }
                         ret.clone()
                     }
@@ -7490,8 +7521,9 @@ impl<'a> Checker<'a> {
                 }
                 if ret_known {
                     if !self.coercible(&body_ty, &ret) {
-                        return Err(format!(
-                            "line {lline}: this lambda returns {body_ty}, but `{callee}` \
+                        return Err(cerr!(
+                            lline,
+                            "this lambda returns {body_ty}, but `{callee}` \
                              expects it to return {ret}"
                         ));
                     }
@@ -7513,8 +7545,9 @@ impl<'a> Checker<'a> {
                     self.lookup(scope, vn).map(|b| self.base(&b.ty))
                 {
                     if vptys.len() != ptys.len() {
-                        return Err(format!(
-                            "line {line}: `{vn}` is a {}-argument function value, but \
+                        return Err(cerr!(
+                            line,
+                            "`{vn}` is a {}-argument function value, but \
                              `{callee}` argument {} expects {}",
                             vptys.len(),
                             i + 1,
@@ -7524,8 +7557,9 @@ impl<'a> Checker<'a> {
                     for (a, b) in vptys.iter().zip(&ptys) {
                         let b = &self.solve_fn_param(b, a, subst, line);
                         if !self.assignable(a, b) && !self.assignable(b, a) {
-                            return Err(format!(
-                                "line {line}: `{vn}` has parameter type {a}, but `{callee}` \
+                            return Err(cerr!(
+                                line,
+                                "`{vn}` has parameter type {a}, but `{callee}` \
                                  expects {b}"
                             ));
                         }
@@ -7534,8 +7568,9 @@ impl<'a> Checker<'a> {
                     return Ok(());
                 }
                 let sig = self.sigs.get(vn).ok_or_else(|| {
-                    format!(
-                        "line {line}: `{callee}` argument {} expects a function; `{vn}` is \
+                    cerr!(
+                        line,
+                        "`{callee}` argument {} expects a function; `{vn}` is \
                          neither a lambda nor a known function",
                         i + 1
                     )
@@ -7543,14 +7578,16 @@ impl<'a> Checker<'a> {
                 // A generic function cannot be passed as a monomorphic function
                 // value in v1 (its type parameters have nothing to solve against).
                 if self.generics.contains_key(vn.as_str()) {
-                    return Err(format!(
-                        "line {line}: `{vn}` is generic and cannot be passed as a function \
+                    return Err(cerr!(
+                        line,
+                        "`{vn}` is generic and cannot be passed as a function \
                          value in v1 (RFC-0023)"
                     ));
                 }
                 if sig.0.len() != ptys.len() {
-                    return Err(format!(
-                        "line {line}: `{vn}` takes {} argument(s), but `{callee}` argument \
+                    return Err(cerr!(
+                        line,
+                        "`{vn}` takes {} argument(s), but `{callee}` argument \
                          {} expects a {}-argument function",
                         sig.0.len(),
                         i + 1,
@@ -7560,8 +7597,9 @@ impl<'a> Checker<'a> {
                 for (a, b) in sig.0.iter().zip(&ptys) {
                     let b = &self.solve_fn_param(b, a, subst, line);
                     if !self.assignable(b, a) {
-                        return Err(format!(
-                            "line {line}: `{vn}` expects a {a} argument, but `{callee}` will \
+                        return Err(cerr!(
+                            line,
+                            "`{vn}` expects a {a} argument, but `{callee}` will \
                              pass it {b}"
                         ));
                     }
@@ -7579,17 +7617,18 @@ impl<'a> Checker<'a> {
             other => {
                 let aty = self.expr(other, scope, None, fn_ret)?;
                 let Type::Fn(vptys, vret) = self.base(&aty) else {
-                    return Err(format!(
-                        "line {}: `{callee}` argument {} must be a lambda `|..| ..`, a \
+                    return Err(cerr!(
+                        other.line(),
+                        "`{callee}` argument {} must be a lambda `|..| ..`, a \
                          function name, or an expression of `fn` type (RFC-0023); \
                          found {aty}",
-                        other.line(),
                         i + 1
                     ));
                 };
                 if vptys.len() != ptys.len() {
-                    return Err(format!(
-                        "line {line}: this is a {}-argument function value, but \
+                    return Err(cerr!(
+                        line,
+                        "this is a {}-argument function value, but \
                          `{callee}` argument {} expects {}",
                         vptys.len(),
                         i + 1,
@@ -7603,8 +7642,9 @@ impl<'a> Checker<'a> {
                     // (RFC-0071 M2b).
                     let b = &self.solve_fn_param(b, a, subst, line);
                     if !self.assignable(a, b) && !self.assignable(b, a) {
-                        return Err(format!(
-                            "line {line}: this function value has parameter type {a}, \
+                        return Err(cerr!(
+                            line,
+                            "this function value has parameter type {a}, \
                              but `{callee}` expects {b}"
                         ));
                     }
@@ -7627,7 +7667,7 @@ impl<'a> Checker<'a> {
         exp: &Type,
         scope: &Scope,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         let Expr::Lambda { params, body, line } = expr else {
             unreachable!()
         };
@@ -7637,8 +7677,9 @@ impl<'a> Checker<'a> {
         };
         let ret = (**ret).clone();
         if params.len() != ptys.len() {
-            return Err(format!(
-                "line {line}: this lambda takes {} parameter(s), but the expected \
+            return Err(cerr!(
+                line,
+                "this lambda takes {} parameter(s), but the expected \
                  function type `{exp}` takes {}",
                 params.len(),
                 ptys.len()
@@ -7670,8 +7711,9 @@ impl<'a> Checker<'a> {
                 let t = self.expr(e, &inner, Some(&ret), fn_ret)?;
                 if ret != Type::Unit {
                     if !self.coercible(&t, &ret) {
-                        return Err(format!(
-                            "line {line}: this lambda returns {t}, but the expected \
+                        return Err(cerr!(
+                            line,
+                            "this lambda returns {t}, but the expected \
                              function type `{exp}` returns {ret}"
                         ));
                     }
@@ -7684,9 +7726,7 @@ impl<'a> Checker<'a> {
                 let returns = self.block(b, &ret, &mut inner);
                 self.in_loop.replace(prev_loop);
                 if ret != Type::Unit && !returns {
-                    return Err(format!(
-                        "line {line}: this lambda must return {ret} on all paths"
-                    ));
+                    return Err(cerr!(line, "this lambda must return {ret} on all paths"));
                 }
             }
         }
@@ -7748,7 +7788,7 @@ impl<'a> Checker<'a> {
     /// (RFC-0037): the named function's signature must match the expected
     /// `fn(P..) -> R`; generic, `extern`, and `gen` functions are rejected with
     /// named diagnostics. Records the source (an empty-payload enum variant).
-    fn stored_fn_named(&self, name: &str, exp: &Type, line: usize) -> Result<Type, String> {
+    fn stored_fn_named(&self, name: &str, exp: &Type, line: usize) -> Result<Type, Diagnostic> {
         let sig = self.base(exp);
         let Type::Fn(ptys, ret) = &sig else {
             unreachable!()
@@ -7772,8 +7812,9 @@ impl<'a> Checker<'a> {
         let open = self.open_params(&sig);
         if let Some(first) = open.first() {
             let names: Vec<String> = open.iter().map(|p| format!("`{p}`")).collect();
-            return Err(format!(
-                "line {line}: `{name}` cannot be stored as `{exp}`: nothing has solved {} \
+            return Err(cerr!(
+                line,
+                "`{name}` cannot be stored as `{exp}`: nothing has solved {} \
                  here, so there is no signature to check `{name}` against. Annotate the \
                  binding with a type that names `{first}`",
                 names.join(" or ")
@@ -7781,8 +7822,9 @@ impl<'a> Checker<'a> {
         }
         let (sptys, sret) = &self.sigs[name];
         if sptys.len() != ptys.len() {
-            return Err(format!(
-                "line {line}: `{name}` takes {} argument(s), but the expected \
+            return Err(cerr!(
+                line,
+                "`{name}` takes {} argument(s), but the expected \
                  function type `{exp}` takes {}",
                 sptys.len(),
                 ptys.len()
@@ -7790,15 +7832,17 @@ impl<'a> Checker<'a> {
         }
         for (a, b) in sptys.iter().zip(ptys) {
             if !self.assignable(b, a) {
-                return Err(format!(
-                    "line {line}: `{name}` expects a {a} argument, but `{exp}` will \
+                return Err(cerr!(
+                    line,
+                    "`{name}` expects a {a} argument, but `{exp}` will \
                      pass it {b}"
                 ));
             }
         }
         if **ret != Type::Unit && !self.coercible(sret, ret) {
-            return Err(format!(
-                "line {line}: `{name}` returns {sret}, but the expected function \
+            return Err(cerr!(
+                line,
+                "`{name}` returns {sret}, but the expected function \
                  type `{exp}` returns {ret}"
             ));
         }
@@ -7812,22 +7856,25 @@ impl<'a> Checker<'a> {
 
     /// The RFC-0037 gate on using a named function as a value: generic,
     /// `extern`, and `gen` functions are rejected with named diagnostics.
-    fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), String> {
+    fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
         if self.generics.contains_key(name) {
-            return Err(format!(
-                "line {line}: `{name}` is generic and cannot be used as a function \
+            return Err(cerr!(
+                line,
+                "`{name}` is generic and cannot be used as a function \
                  value in v1 (RFC-0023)"
             ));
         }
         if self.extern_fns.contains(name) {
-            return Err(format!(
-                "line {line}: an `extern` function cannot be used as a function \
+            return Err(cerr!(
+                line,
+                "an `extern` function cannot be used as a function \
                  value — the host boundary dispatches by name (RFC-0037)"
             ));
         }
         if self.gen_fns.contains(name) {
-            return Err(format!(
-                "line {line}: a `gen fn` runs at generation time and cannot be \
+            return Err(cerr!(
+                line,
+                "a `gen fn` runs at generation time and cannot be \
                  used as a function value (RFC-0037)"
             ));
         }
@@ -7844,12 +7891,12 @@ impl<'a> Checker<'a> {
         outer: &Scope,
         locals: &mut HashSet<String>,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         match body {
             LambdaBody::Expr(e) => self.captures_expr(e, outer, locals),
             LambdaBody::Block(b) => self.captures_block(b, outer, &mut locals.clone()),
         }
-        .map_err(|m| format!("line {line}: {m}"))
+        .map_err(|m| cerr!(line, "{m}"))
     }
 
     fn captures_block(
@@ -8074,31 +8121,34 @@ impl<'a> Checker<'a> {
         pty: &Type,
         scope: &Scope,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         match arg {
             Expr::Var { name: vn, .. } => {
                 let b = self
                     .lookup(scope, vn)
-                    .ok_or_else(|| format!("line {line}: unknown variable `{vn}`"))?;
+                    .ok_or_else(|| cerr!(line, "unknown variable `{vn}`"))?;
                 if !b.mutable {
-                    return Err(format!(
-                        "line {line}: `{fname}` argument {} is `modify`, so `{vn}` must be \
+                    return Err(cerr!(
+                        line,
+                        "`{fname}` argument {} is `modify`, so `{vn}` must be \
                          declared `mut`",
                         i + 1
                     ));
                 }
             }
             _ => {
-                return Err(format!(
-                    "line {line}: `{fname}` argument {} is `modify`; pass a mutable \
+                return Err(cerr!(
+                    line,
+                    "`{fname}` argument {} is `modify`; pass a mutable \
                      variable, not a temporary",
                     i + 1
                 ))
             }
         }
         if !matches!(aty, Type::Err) && !matches!(pty, Type::Err) && aty != pty {
-            return Err(format!(
-                "line {line}: `{fname}` argument {} is `modify` and needs exactly \
+            return Err(cerr!(
+                line,
+                "`{fname}` argument {} is `modify` and needs exactly \
                  {pty}, found {aty} (width subtyping is read-only: a wider \
                  record could lose fields on write-back)",
                 i + 1
@@ -8115,7 +8165,7 @@ impl<'a> Checker<'a> {
         aty: &Type,
         subst: &mut HashMap<String, Type>,
         line: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         // A recovered `Err` unifies with anything (no spurious mismatch), and so
         // does a `Never` (RFC-0079) — `f(panic(".."))` places no demand on `T`,
         // and binding `T = Never` would fix the parameter to a type no value has.
@@ -8126,8 +8176,9 @@ impl<'a> Checker<'a> {
             Type::Param(t) => match subst.get(t) {
                 Some(bound) => {
                     if !self.assignable(aty, bound) {
-                        Err(format!(
-                            "line {line}: type parameter `{t}` is both {bound} and {aty}"
+                        Err(cerr!(
+                            line,
+                            "type parameter `{t}` is both {bound} and {aty}"
                         ))
                     } else {
                         Ok(())
@@ -8140,14 +8191,14 @@ impl<'a> Checker<'a> {
             },
             Type::Option(inner) => match aty {
                 Type::Option(a) => self.unify(inner, a, subst, line),
-                _ => Err(format!("line {line}: expected Option, found {aty}")),
+                _ => Err(cerr!(line, "expected Option, found {aty}")),
             },
             Type::Result(pt, pe) => match aty {
                 Type::Result(at, ae) => {
                     self.unify(pt, at, subst, line)?;
                     self.unify(pe, ae, subst, line)
                 }
-                _ => Err(format!("line {line}: expected Result, found {aty}")),
+                _ => Err(cerr!(line, "expected Result, found {aty}")),
             },
             Type::App(pn, pargs) => match aty {
                 Type::App(an, aargs) if pn == an && pargs.len() == aargs.len() => {
@@ -8156,18 +8207,18 @@ impl<'a> Checker<'a> {
                     }
                     Ok(())
                 }
-                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic `Array<T>` / `Array<T, N>` binds `T` from the element type
             // (RFC-0023 relies on this so `map<T, U>(xs: Array<T>, ..)` infers `T`).
             // A transparent named alias to a collection resolves first.
             Type::Array(inner) => match crate::types::resolve(aty, self.types) {
                 Type::Array(a) => self.unify(inner, &a, subst, line),
-                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             Type::ArrayN(inner, n) => match aty {
                 Type::ArrayN(a, m) if m == n => self.unify(inner, a, subst, line),
-                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic `Stream<T>` binds `T` from the element type, exactly as
             // `Array<T>` does — RFC-0075 M2's combinators are `map<T, U>(s:
@@ -8176,13 +8227,13 @@ impl<'a> Checker<'a> {
             // so `type Feed = Stream<Paste>` unifies like the stream it is.
             Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
                 Type::Stream(a) => self.unify(inner, &a, subst, line),
-                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic `SmallArray<T, N>` binds `T` from the element type; `N`
             // must match exactly (RFC-0056 — integer arguments do not infer).
             Type::SmallArray(inner, n) => match crate::types::resolve(aty, self.types) {
                 Type::SmallArray(a, m) if m == *n => self.unify(inner, &a, subst, line),
-                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic function type binds its parameters through the function
             // value's own signature — `{ run: fn() -> T }` learns `T` from a
@@ -8198,7 +8249,7 @@ impl<'a> Checker<'a> {
                         }
                         self.unify(pr, &ar, subst, line)
                     }
-                    _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                    _ => Err(cerr!(line, "expected {pty}, found {aty}")),
                 }
             }
             // A generic `Map<String, V>` binds `V` from the value type. A
@@ -8208,11 +8259,11 @@ impl<'a> Checker<'a> {
                     self.unify(pk, &ak, subst, line)?;
                     self.unify(pv, &av, subst, line)
                 }
-                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             _ => {
                 if !self.coercible(aty, pty) {
-                    Err(format!("line {line}: argument expects {pty}, found {aty}"))
+                    Err(cerr!(line, "argument expects {pty}, found {aty}"))
                 } else {
                     Ok(())
                 }
@@ -8230,19 +8281,22 @@ impl<'a> Checker<'a> {
         line: usize,
         scope: &Scope,
         fn_ret: Option<&Type>,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         if args.len() != 1 {
-            return Err(format!(
-                "line {line}: `{}` construction takes 1 argument, got {}",
+            return Err(cerr!(
+                line,
+                "`{}` construction takes 1 argument, got {}",
                 decl.name,
                 args.len()
             ));
         }
         let aty = self.expr(&args[0], scope, Some(&decl.base), fn_ret)?;
         if !self.assignable(&aty, &decl.base) {
-            return Err(format!(
-                "line {line}: `{}` is built from {}, but the argument is {aty}",
-                decl.name, decl.base
+            return Err(cerr!(
+                line,
+                "`{}` is built from {}, but the argument is {aty}",
+                decl.name,
+                decl.base
             ));
         }
         // Compile-time validation when the argument is a constant.
@@ -8253,8 +8307,9 @@ impl<'a> Checker<'a> {
                 match consteval::eval(pred, &env).and_then(ConstVal::as_bool) {
                     Some(true) => {}
                     Some(false) => {
-                        return Err(format!(
-                            "line {line}: {} does not satisfy `{}` (predicate `where {}` is false)",
+                        return Err(cerr!(
+                            line,
+                            "{} does not satisfy `{}` (predicate `where {}` is false)",
                             cv,
                             decl.name,
                             pred_summary(pred),
@@ -8312,19 +8367,21 @@ impl<'a> Checker<'a> {
         line: usize,
         call: &str,
         op: &str,
-    ) -> Result<Type, String> {
+    ) -> Result<Type, Diagnostic> {
         let Expr::Var { name, .. } = recv else {
-            return Err(format!(
-                "line {line}: `{op}` needs a plain array variable as its receiver"
+            return Err(cerr!(
+                line,
+                "`{op}` needs a plain array variable as its receiver"
             ));
         };
         let b = self
             .lookup(scope, name)
-            .ok_or_else(|| format!("line {line}: `{op}` on unknown variable `{name}`"))?;
+            .ok_or_else(|| cerr!(line, "`{op}` on unknown variable `{name}`"))?;
         let writes_back = crate::prelude::capability(call, 0) == Some(Capability::Modify);
         if writes_back && !b.mutable {
-            return Err(format!(
-                "line {line}: cannot `{op}` from `{name}` (declared without `mut`)"
+            return Err(cerr!(
+                line,
+                "cannot `{op}` from `{name}` (declared without `mut`)"
             ));
         }
         match self.base(&b.ty) {
@@ -8332,13 +8389,12 @@ impl<'a> Checker<'a> {
             // A `SmallArray<T, N>` (RFC-0056) can shrink like a growable Array.
             Type::SmallArray(inner, _) => Ok((*inner).clone()),
             Type::Err => Ok(Type::Err),
-            Type::ArrayN(..) => Err(format!(
-                "line {line}: `{op}` is not available on a fixed-size array \
+            Type::ArrayN(..) => Err(cerr!(
+                line,
+                "`{op}` is not available on a fixed-size array \
                  (it cannot shrink); use a growable `Array<T>`"
             )),
-            other => Err(format!(
-                "line {line}: `{op}` needs an `Array<T>`, found {other}"
-            )),
+            other => Err(cerr!(line, "`{op}` needs an `Array<T>`, found {other}")),
         }
     }
 }
@@ -8732,19 +8788,21 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             let (violation, edges) = &facts[cur];
             if let Some(reason) = violation.clone() {
                 let msg = if path.len() == 1 {
-                    format!(
-                        "line {}: `gen fn {}` is not comptime-pure: it {reason} ({HINT})",
-                        g.line, g.name
+                    cerr!(
+                        g.line,
+                        "`gen fn {}` is not comptime-pure: it {reason} ({HINT})",
+                        g.name
                     )
                 } else {
                     let chain = path.join(" -> ");
-                    format!(
-                        "line {}: `gen fn {}` is not comptime-pure: it reaches `{cur}` (via \
+                    cerr!(
+                        g.line,
+                        "`gen fn {}` is not comptime-pure: it reaches `{cur}` (via \
                          {chain}), which {reason} ({HINT})",
-                        g.line, g.name
+                        g.name
                     )
                 };
-                let mut d = Diagnostic::from_rendered(msg, "check");
+                let mut d = msg;
                 d.file = g.module.clone();
                 out.push(d);
                 break;
@@ -9272,7 +9330,7 @@ fn init_restrictions(
     ready: &HashSet<String>,
     own_name: &str,
     line: usize,
-) -> Result<(), String> {
+) -> Result<(), Diagnostic> {
     let recur = |e: &Expr| {
         init_restrictions(
             e,
@@ -9289,13 +9347,15 @@ fn init_restrictions(
         Expr::Var { name, .. } => {
             if all_globals.contains(name.as_str()) && !ready.contains(name) {
                 if name == own_name {
-                    return Err(format!(
-                        "line {line}: module state `{own_name}` may not read itself in its \
+                    return Err(cerr!(
+                        line,
+                        "module state `{own_name}` may not read itself in its \
                          own initializer"
                     ));
                 }
-                return Err(format!(
-                    "line {line}: initializer of `{own_name}` reads `{name}`, a module-state \
+                return Err(cerr!(
+                    line,
+                    "initializer of `{own_name}` reads `{name}`, a module-state \
                      binding declared later — a global may only read earlier ones"
                 ));
             }
@@ -9315,8 +9375,9 @@ fn init_restrictions(
                 // imported modules are guaranteed initialized first (RFC-0029).
                 || matches!(fn_module.get(name), Some(m) if m == own_module);
             if forbidden_here {
-                return Err(format!(
-                    "line {line}: initializer of `{own_name}` may not call `{name}` — a \
+                return Err(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not call `{name}` — a \
                      module-state initializer runs before `main`, so it may use only \
                      literals, operators, built-ins, and functions imported from another \
                      module (whose state initializes first)"
@@ -9327,8 +9388,9 @@ fn init_restrictions(
             }
             Ok(())
         }
-        Expr::Spawn { name, .. } => Err(format!(
-            "line {line}: initializer of `{own_name}` may not `spawn {name}` — a \
+        Expr::Spawn { name, .. } => Err(cerr!(
+            line,
+            "initializer of `{own_name}` may not `spawn {name}` — a \
              module-state initializer runs before `main` (no user calls)"
         )),
         Expr::TryConstruct { args, .. } => {

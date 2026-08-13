@@ -94,25 +94,4 @@ impl Diagnostic {
     pub fn render(&self) -> String {
         format!("line {}: {}", self.line, self.message)
     }
-
-    /// Reconstruct a [`Diagnostic`] from one of the front end's historical
-    /// rendered error strings, assigning it `stage`.
-    ///
-    /// The checker and move checker still produce their errors as rendered
-    /// `"line {N}: {message}"` strings (their internals use `?`-propagation
-    /// and `format!("line {N}: ...")`). The accumulation entry points catch
-    /// those strings and lift them into structured diagnostics here. A string
-    /// without the `line {N}: ` prefix (a whole-program error such as
-    /// `"no `main` function found"`) becomes a line-0 diagnostic whose
-    /// [`render`](Self::render) reproduces it as `"line 0: {message}"`.
-    pub fn from_rendered(s: String, stage: &'static str) -> Diagnostic {
-        if let Some(rest) = s.strip_prefix("line ") {
-            if let Some((n, msg)) = rest.split_once(": ") {
-                if let Ok(line) = n.parse::<usize>() {
-                    return Diagnostic::error(line, 0, stage, msg.to_string());
-                }
-            }
-        }
-        Diagnostic::error(0, 0, stage, s)
-    }
 }
