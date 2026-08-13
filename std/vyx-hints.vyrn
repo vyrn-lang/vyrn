@@ -259,10 +259,9 @@ fn vhElem(
 
     // --- attribute-shaped rules, reported at the offending attribute ---------
     for a in attrs {
-        // sec/inline-handler. Every HTML attribute beginning `on` is an event
-        // handler; the template already has `@click`, which dispatches through
-        // the export table and needs no `script-src 'unsafe-inline'`.
-        if a.evt == false && startsWith(a.name, "on") && vhIsLower(a.name) {
+        // sec/inline-handler. The template already has `@click`, which dispatches
+        // through the export table and needs no `script-src 'unsafe-inline'`.
+        if a.evt == false && vhIsHandlerAttr(a.name) {
             out = out
             + hint(
                 p,
@@ -492,6 +491,11 @@ fn vhIsNameable(tag: String, attrs: Array<VyxAttr>) -> Bool {
     if tag != "input" {
         return false
     }
+    // A `:type="…"` may be any of the kinds below at run time, so the rule
+    // cannot know and says nothing.
+    if vhHas(attrs, "type") && vhValue(attrs, "type") == "" {
+        return false
+    }
     let ty = vhValue(attrs, "type")
     return ty != "hidden" && ty != "submit" && ty != "reset" && ty != "button" && ty != "image"
 }
@@ -545,22 +549,50 @@ fn vhSlice(s: String, from: Int64, to: Int64) -> String {
     }
 }
 
-/// Whether every byte of an attribute name is a lowercase ASCII letter — the
-/// shape of an HTML event handler attribute, and not of `data-…`, `:bound` or a
-/// custom `x-thing`.
-fn vhIsLower(name: String) -> Bool {
-    let n = name.byteLength
-    if n < 3 {
-        return false
-    }
-    let mut i = 0
-    while i < n {
-        if name[i] < 'a' || name[i] > 'z' {
-            return false
-        }
-        i = i + 1
-    }
-    return true
+/// Whether `name` is an HTML event handler attribute.
+///
+/// A NAMED LIST, not `startsWith("on")`, and the reason is that this rule is an
+/// ERROR: `once` begins with `on` and is a perfectly ordinary attribute on a
+/// custom element, so a prefix test would fail a build over markup that is fine.
+/// A handler this list has not heard of goes unreported, which is the right way
+/// round — a rule at error severity may miss, and may not guess.
+fn vhIsHandlerAttr(name: String) -> Bool {
+    return vhPointerHandler(name) || vhKeyboardHandler(name) || vhFormHandler(name)
+    || vhLoadHandler(name)
+}
+
+fn vhPointerHandler(name: String) -> Bool {
+    return name == "onclick" || name == "ondblclick" || name == "onmousedown"
+    || name == "onmouseup" || name == "onmouseover" || name == "onmouseout"
+    || name == "onmousemove" || name == "onmouseenter" || name == "onmouseleave"
+    || name == "oncontextmenu" || name == "onwheel" || name == "onscroll"
+    || name == "onpointerdown" || name == "onpointerup" || name == "onpointermove"
+    || name == "ontouchstart" || name == "ontouchend" || name == "ontouchmove"
+    || name == "ondrag" || name == "ondragstart" || name == "ondragend"
+    || name == "ondragover" || name == "ondragenter" || name == "ondragleave"
+    || name == "ondrop"
+}
+
+fn vhKeyboardHandler(name: String) -> Bool {
+    return name == "onkeydown" || name == "onkeyup" || name == "onkeypress"
+    || name == "onfocus" || name == "onblur" || name == "onfocusin"
+    || name == "onfocusout"
+}
+
+fn vhFormHandler(name: String) -> Bool {
+    return name == "oninput" || name == "onchange" || name == "onsubmit"
+    || name == "onreset" || name == "onselect" || name == "oninvalid"
+    || name == "onsearch" || name == "ontoggle" || name == "oncopy"
+    || name == "oncut" || name == "onpaste"
+}
+
+fn vhLoadHandler(name: String) -> Bool {
+    return name == "onload" || name == "onerror" || name == "onabort"
+    || name == "onbeforeunload" || name == "onunload" || name == "onresize"
+    || name == "onhashchange" || name == "onpopstate" || name == "onmessage"
+    || name == "onstorage" || name == "onanimationend" || name == "ontransitionend"
+    || name == "onplay" || name == "onpause" || name == "onended"
+    || name == "oncanplay"
 }
 
 /// `onclick` -> `click`, for the message that names the replacement.
@@ -707,6 +739,9 @@ test "an inline on* handler is an error; @click and data- attributes are not" {
     assert(fires("<div @click=\"go()\" role=\"button\" tabindex=\"0\">x</div>", "sec/inline-handler") == false)
     assert(fires("<div data-nav=\"prefetch\">x</div>", "sec/inline-handler") == false)
     assert(fires("<ol start=\"2\"><li>x</li></ol>", "sec/inline-handler") == false)
+    // The near miss that decides the shape of the predicate: `once` begins with
+    // `on` and is not a handler, and this rule is an error.
+    assert(fires("<my-el once=\"true\" only=\"1\">x</my-el>", "sec/inline-handler") == false)
 }
 
 test "a literal javascript: URL is an error; http, relative and dynamic are not" {
@@ -764,6 +799,7 @@ test "an unlabelled input fires; a wrapping label, an id or an aria-label names 
     assert(fires("<input class=\"q\" aria-label=\"quantity\"/>", "a11y/input-label") == false)
     assert(fires("<input type=\"hidden\" name=\"t\"/>", "a11y/input-label") == false)
     assert(fires("<input type=\"submit\" value=\"go\"/>", "a11y/input-label") == false)
+    assert(fires("<input :type=\"kind\"/>", "a11y/input-label") == false)
     assert(fires("<textarea></textarea>", "a11y/input-label"))
 }
 
