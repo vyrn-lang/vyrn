@@ -144,6 +144,33 @@ jobs:
 
   parity:
     name: three-way parity (interp == native == wasm)
+    # x86-64 only, on purpose, and here is the case for the ARM leg that is NOT
+    # here so the next reader does not have to rebuild it.
+    #
+    # What an `ubuntu-24.04-arm` copy of this job would NOT add: a second layout
+    # ABI. `vyrn-codegen/tests/layout_vs_clang.rs` compiles for wasm32-wasip1 and
+    # runs under wasmtime — the host architecture changes neither the target nor
+    # the answer. The layout engine exists for the direct wasm backend; on the
+    # native path LLVM computes layout, so there is nothing of ours to diverge.
+    # The SIMD types are the same story: `<4 x float>` lowers to wasm SIMD in the
+    # column this engine owns.
+    #
+    # What it WOULD add: the NATIVE column on aarch64. That column is text IR
+    # through clang to a real binary, and the harness compares its stdout byte
+    # for byte against the interpreter — so it is a genuine second ABI for
+    # everything the emitter decides (integer widths, float formatting, struct
+    # returns, trap wording).
+    #
+    # What it would cost, measured against run 31724777591 (warm caches): this
+    # job takes about 8 minutes and runs in parallel with the others, so the
+    # added WALL time is zero and the added runner minutes are free — the repo
+    # is public. The one-time work is a second cache slot and the aarch64
+    # wasmtime asset (`wasmtime-v46.0.1-aarch64-linux.tar.xz`); the wasi sysroot
+    # and the builtins archive are wasm32 target libraries and are the same file
+    # on every host. clang is preinstalled on the ARM image.
+    #
+    # A cheap, real addition — deliberately left as its own change, because a
+    # matrix leg nobody has watched go green is a claim, not a gate.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
