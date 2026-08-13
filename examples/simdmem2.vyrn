@@ -1,0 +1,84 @@
+/// A vector in MEMORY — a record field, an array element, a map value
+/// (RFC-0083, and the layout hole that made this file necessary).
+///
+/// `examples/simdmem.vyrn` loads and stores four lanes through an
+/// `Array<Float32>`, which is the vector as a WINDOW on somebody else's bytes.
+/// This is the other half: an `F32x4` that IS a field, an element, a value —
+/// where the vector's own 16 bytes have to be laid out, padded for, stored and
+/// loaded back.
+///
+/// The direct wasm backend could not do any of it. Its layout engine read a
+/// type spelling one alphanumeric word at a time, so `<4 x float>` came back as
+/// `unknown scalar type ""`, and every aggregate holding a vector was a build
+/// that failed on wasm and succeeded natively. A vector is 16 bytes, 16-aligned
+/// — verified against clang on wasm32, not asserted — which is why `slot` below
+/// starts at offset 16 rather than 1.
+///
+/// The three engines have to agree here for the same reason they do anywhere:
+/// the interpreter holds four `Float32`s in a `Val`, the native build holds an
+/// xmm register, and wasm holds a `v128`, and none of that is observable. Only
+/// the numbers are.
+type Slot = { tag: UInt8, v: F32x4 }
+
+/// Every lane, one per line — the vector's value, with nothing else in it.
+fn lanes(v: F32x4) {
+    print(v.lane(0))
+    print(v.lane(1))
+    print(v.lane(2))
+    print(v.lane(3))
+}
+
+fn main() -> Int64 {
+    // ---- a field ---------------------------------------------------------
+    // The `UInt8` in front is not decoration: it is the byte that makes the
+    // vector's alignment do something. A layout that got 16 wrong would put the
+    // field at 1 and read three lanes of somebody else's memory.
+    let s = Slot { tag: 7, v: F32x4(1.0, 2.0, 3.0, 4.0) }
+    print(s.tag)
+    lanes(s.v)
+
+    // A field REPLACED, so the store lands on the same offset the load reads.
+    let mut t = s
+    t.v = t.v * F32x4.splat(2.0)
+    lanes(t.v)
+
+    // ---- an element ------------------------------------------------------
+    // Stride, this time: three vectors in one buffer, and element 2 is only at
+    // byte 32 if element 1 was 16 bytes wide.
+    let mut vs: Array<F32x4> = []
+    vs.push(F32x4.splat(1.5))
+    vs.push(F32x4(10.0, 20.0, 30.0, 40.0))
+    vs.push(F32x4.splat(-2.5))
+    print(vs.length)
+    lanes(vs[1])
+    lanes(vs[2])
+
+    // Written back through the index, which is the store side of the same
+    // stride.
+    vs[1] = vs[1] + F32x4.splat(0.5)
+    lanes(vs[1])
+    drop vs
+
+    // ---- a map value -----------------------------------------------------
+    // The read hands back an `Option<F32x4>`, whose payload is wider than the
+    // word a sum carries — so the vector travels boxed, and the round trip is
+    // what says the box was written and read at the same width.
+    let mut m: Map<String, F32x4> = [:]
+    m["one"] = F32x4.splat(1.0)
+    m["two"] = F32x4(2.0, 4.0, 6.0, 8.0)
+    print(m.length)
+    if let Some(v) = m["two"] {
+        lanes(v)
+    }
+    if let Some(v) = m["one"] {
+        print(v.lane(3))
+    }
+    // A miss is still a miss.
+    match m["three"] {
+        Some(v) => print(v.lane(0)),
+        None => print("no three"),
+    }
+    drop m
+
+    return 0
+}
