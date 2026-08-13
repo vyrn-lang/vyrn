@@ -118,6 +118,56 @@ fn a_universal_page_importing_a_server_module_is_an_error_naming_both_files() {
     assert!(err.contains("client(\"./server/api\")"), "{err}");
 }
 
+/// Absent and unreadable are different states, and the difference is the whole
+/// boundary.
+///
+/// A `vyrn.json` that failed to parse was treated as no `vyrn.json` at all, so
+/// every rule it carries evaporated with it. The one that matters is this one:
+/// the mechanism that keeps server-only code out of a client bundle switched off
+/// on a trailing comma, and the build printed `ok` and ran the program.
+///
+/// Asserted structurally — the exit codes and whether the program's output
+/// escaped — because a downgrade produces no message to grep for.
+#[test]
+fn a_manifest_that_does_not_parse_never_downgrades_to_no_rules() {
+    let dir = scratch("badmanifest");
+    widening_project(&dir, MANIFEST_WITH_AUDIENCE);
+    // The control: with the manifest readable, the widening import is refused.
+    let ok = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        ok.status.code(),
+        Some(1),
+        "the boundary holds when readable"
+    );
+
+    // One trailing comma, which is the whole attack.
+    let broken = MANIFEST_WITH_AUDIENCE.replace("\"shared\"] }", "\"shared\"], }");
+    assert_ne!(broken, MANIFEST_WITH_AUDIENCE, "the edit must land");
+    write(&dir, "vyrn.json", &broken);
+
+    for cmd in ["check", "run"] {
+        let out = vyrn().arg(cmd).arg(dir.join("main.vyrn")).output().unwrap();
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "`vyrn {cmd}` reported success with rules it could not read"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+            "`vyrn {cmd}` produced output from a program it should not have run"
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("vyrn.json"),
+            "names the file it could not read"
+        );
+    }
+}
+
 #[test]
 fn the_same_project_without_an_audience_key_compiles() {
     let dir = scratch("optout");

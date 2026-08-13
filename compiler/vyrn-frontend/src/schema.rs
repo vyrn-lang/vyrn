@@ -50,9 +50,28 @@ impl Json {
     }
 }
 
+/// How many `{`/`[` may enclose a value before the parser refuses the document.
+///
+/// This parser is recursive descent, so a document's nesting depth is the
+/// process's stack depth, and it is reached from `find_manifest` — which walks
+/// **up** from the working directory on every command and reads a `vyrn.json`
+/// the user may not own. Without a bound, a manifest anywhere above the cwd ends
+/// every `vyrn` invocation in a stack overflow: an abort, no diagnostic, exit
+/// 127.
+///
+/// The number is the one `std/jsonread` and `std/von` took: about two frames per
+/// enclosing level against the smallest stack any build profile gets, leaving
+/// the rest for the caller and for the synthesis pass that runs over the parsed
+/// document. No schema or manifest anyone writes by hand comes near it.
+pub const MAX_JSON_DEPTH: usize = 128;
+
 pub fn parse_json(src: &str) -> Result<Json, String> {
     let bytes: Vec<char> = src.chars().collect();
-    let mut p = P { b: &bytes, i: 0 };
+    let mut p = P {
+        b: &bytes,
+        i: 0,
+        depth: 0,
+    };
     p.ws();
     let v = p.value()?;
     p.ws();
@@ -65,6 +84,8 @@ pub fn parse_json(src: &str) -> Result<Json, String> {
 struct P<'a> {
     b: &'a [char],
     i: usize,
+    /// Objects and arrays currently open — the recursion this parser bounds.
+    depth: usize,
 }
 
 impl P<'_> {
@@ -84,10 +105,32 @@ impl P<'_> {
             Err(format!("expected `{c}` at offset {}", self.i))
         }
     }
+    /// Enter one enclosing level, or refuse. Every recursive call goes through
+    /// here, so the bound is the parser's and not one caller's.
+    fn nest(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_JSON_DEPTH {
+            return Err(format!(
+                "nested deeper than {MAX_JSON_DEPTH} levels at offset {}",
+                self.i
+            ));
+        }
+        Ok(())
+    }
     fn value(&mut self) -> Result<Json, String> {
         match self.peek() {
-            Some('{') => self.obj(),
-            Some('[') => self.arr(),
+            Some('{') => {
+                self.nest()?;
+                let v = self.obj();
+                self.depth -= 1;
+                v
+            }
+            Some('[') => {
+                self.nest()?;
+                let v = self.arr();
+                self.depth -= 1;
+                v
+            }
             Some('"') => Ok(Json::Str(self.string()?)),
             Some('t') => self.lit("true", Json::Bool(true)),
             Some('f') => self.lit("false", Json::Bool(false)),
@@ -117,6 +160,14 @@ impl P<'_> {
             self.expect(':')?;
             self.ws();
             let v = self.value()?;
+            // A name defined twice is a document with two meanings, and this
+            // one has two readers: `Json::get` answers with the FIRST pair, and
+            // the `$defs` walk below keeps the LAST. Whichever a caller asks,
+            // the other one is wrong. Refused where `std/von` and `std/jsonread`
+            // refuse it.
+            if out.iter().any(|(prev, _)| prev == &k) {
+                return Err(format!("`{k}` is defined twice at offset {}", self.i));
+            }
             out.push((k, v));
             self.ws();
             match self.peek() {
@@ -875,6 +926,45 @@ mod tests {
         }
         assert!(parse_json("{\"a\": }").is_err());
         assert!(parse_json("[1, 2] trailing").is_err());
+    }
+
+    /// The parser recurses, so a document's nesting is the process's stack, and
+    /// `find_manifest` reads a `vyrn.json` from every ancestor of the working
+    /// directory on every command. Without a bound the answer to a deep one was a
+    /// stack overflow: an abort, no diagnostic. The limit is read from the code
+    /// that enforces it, so this cannot pin a number the parser no longer takes.
+    #[test]
+    fn a_document_deeper_than_the_limit_is_refused_not_crashed() {
+        let nest = |d: usize| format!("{}{}", "[".repeat(d), "]".repeat(d));
+        assert!(
+            parse_json(&nest(MAX_JSON_DEPTH)).is_ok(),
+            "at the limit is inside it"
+        );
+        let e = parse_json(&nest(MAX_JSON_DEPTH + 1)).unwrap_err();
+        assert!(e.contains(&MAX_JSON_DEPTH.to_string()), "{e}");
+        // Objects nest through the same door, and so does the mixture.
+        let obj = format!(
+            "{}1{}",
+            "{\"a\":".repeat(MAX_JSON_DEPTH + 1),
+            "}".repeat(MAX_JSON_DEPTH + 1)
+        );
+        assert!(parse_json(&obj).is_err());
+        // Depth is not length: a million siblings at one level are fine.
+        let wide = format!("[{}]", vec!["1"; 100_000].join(","));
+        assert!(parse_json(&wide).is_ok());
+    }
+
+    /// One name, one meaning. The two readers of an object disagreed about a
+    /// repeated key — `get` took the first pair and the `$defs` walk took the
+    /// last — so the document said different things depending on who asked.
+    #[test]
+    fn a_name_defined_twice_is_refused() {
+        let e = parse_json(r#"{"main":"a.vyrn","main":"b.vyrn"}"#).unwrap_err();
+        assert!(e.contains("main"), "names the key: {e}");
+        assert!(
+            parse_json(r#"{"a":{"x":1},"b":{"x":2}}"#).is_ok(),
+            "a repeat in a SIBLING object is a different name"
+        );
     }
 
     fn synth(doc: &str) -> Vec<TypeDecl> {
