@@ -1425,6 +1425,19 @@ fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
             }
         }
     }
+    // Both ends of every edge as the FILESYSTEM names them, because that is what
+    // decides audience (`real_path`) and what the queried path was resolved to.
+    // An import spelled `../Server/store` on Windows names the same file as
+    // `../server/store`, and a graph keyed on the spelling would report that
+    // nothing reaches it while the checker refuses that very edge.
+    for (from, to) in out.iter_mut() {
+        if let Some(p) = real_path(from) {
+            *from = p;
+        }
+        if let Some(p) = real_path(to) {
+            *to = p;
+        }
+    }
     out.sort();
     out.dedup();
     out
