@@ -79,7 +79,7 @@ fn examples() -> Array<Example> {
             <dt>What refuses</dt>
             <dd><code>readFile</code>, <code>writeFile</code> and <code>listDir</code> answer with the same <code>Err</code> the compiler defines everywhere else — <code>cannot read `x`</code>, <code>cannot write `x`</code> — because a tab has no filesystem. <code>args()</code> is empty. The clock is read once, when the run starts.</dd>
             <dt>How deep it recurses</dt>
-            <dd>The interpreter's limit is 1,000 nested calls, in every backend. A browser gives out first: this page reaches about 460 before the engine's own stack runs out, measured by binary search against the worker below. Past that it says so, and names whose ceiling it was.</dd>
+            <dd>The interpreter's limit is 1,000 nested calls, and it is the same number in every backend. A browser gives out before that: 466 to 468 here, measured by binary search against this page's own worker, because the engine puts every WebAssembly call on a native stack a worker gets half of. Past that the page says so, and says whose ceiling it was — <code>vyrn run</code> takes the same program to 1,000.</dd>
             <dt>How long it may run</dt>
             <dd>Five seconds. The program runs in a Web Worker, and terminating one is the only way to stop running WebAssembly — so a program that loops forever is stopped rather than asked to stop.</dd>
         </dl>
