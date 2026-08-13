@@ -1514,16 +1514,28 @@ fn run_generator(
     let sources_hash = generator_cache_key(&gen_mod_key, name, &arg_repr, &allowed);
     let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
-    // 5a. Cache hit: every recorded input still hashes as it did ⇒ reuse output.
-    //     An input recorded as ABSENT must still be absent — a file or directory
-    //     that appeared since the run is a change like any other.
+    // 5a. Cache hit: the entry is one this compiler wrote for THIS key, it
+    //     records the generator's own module, and every recorded input still
+    //     hashes as it did. An input recorded as ABSENT must still be absent — a
+    //     file or directory that appeared since the run is a change like any
+    //     other.
     if !no_cache {
         if let Some(cached) = resolver.gen_cache_get(&sources_hash) {
-            if let Some((inputs, output)) = parse_cache_entry(&cached) {
-                if inputs.iter().all(|(path, hash)| {
-                    current_input_hash(resolver, path).unwrap_or_else(|| ABSENT.to_string())
-                        == *hash
-                }) {
+            if let Some((inputs, output)) = read_cache_entry(&sources_hash, &cached) {
+                // `inputs` comes out of the entry, so on its own it can only
+                // ever agree with itself: a list of length zero passes `all`
+                // vacuously, and a list an attacker wrote passes it by
+                // construction. The call site's own facts decide first — a
+                // generation reads the generator's module, so an entry that does
+                // not record `gen_mod_key` is not a record of this generation
+                // whatever else it claims.
+                let records_generator = inputs.iter().any(|(path, _)| path == &gen_mod_key);
+                if records_generator
+                    && inputs.iter().all(|(path, hash)| {
+                        current_input_hash(resolver, path).unwrap_or_else(|| ABSENT.to_string())
+                            == *hash
+                    })
+                {
                     return Ok((gen_key, Some(output)));
                 }
             }
@@ -1636,8 +1648,19 @@ fn run_generator(
         // whole generator graph, on every keystroke). Hashed above, before the
         // run, because the engine needs the same hashes for its artifact key.
         inputs.extend(gen_sources);
+        // Recorded unconditionally, because validation requires it: the reader
+        // asks for the generator module the CALL SITE named, which is the one
+        // fact about a hit that does not come out of the entry.
+        if !inputs.iter().any(|(p, _)| p == &gen_mod_key) {
+            if let Some(h) = current_input_hash(resolver, &gen_mod_key) {
+                inputs.push((gen_mod_key.clone(), h));
+            }
+        }
         if describable {
-            resolver.gen_cache_put(&sources_hash, &render_cache_entry(&inputs, &out.source));
+            resolver.gen_cache_put(
+                &sources_hash,
+                &render_cache_entry(&sources_hash, &inputs, &out.source),
+            );
         }
     }
     Ok((gen_key, Some(out.source)))
@@ -1724,36 +1747,109 @@ fn current_input_hash_uncached(resolver: &dyn ModuleResolver, path: &str) -> Opt
 /// always disagrees.
 const ABSENT: &str = "absent";
 
-/// The cache entry format tag. Bumped when the meaning of the recorded inputs
-/// changes, because an entry written by an older compiler cannot be re-read
-/// under the new meaning. `v2` records absent inputs; a `v1` entry recorded only
-/// the inputs that succeeded, so it cannot tell whether a missing file has since
-/// appeared. [`parse_cache_entry`] rejects anything else, which is a miss: the
-/// generator re-runs and overwrites the entry in place.
-const CACHE_ENTRY_TAG: &str = "v2";
+/// The cache entry format tag. Bumped when the meaning of an entry changes,
+/// because an entry written by an older compiler cannot be re-read under the new
+/// meaning. `v1` recorded only the inputs that succeeded, so it could not tell
+/// whether a missing file had since appeared; `v2` recorded absent ones too, and
+/// was believed on sight; `v3` carries the tag below. [`read_cache_entry`]
+/// rejects anything else, and rejecting is a miss: the generator re-runs and
+/// overwrites the entry in place, so an older entry is ignored cleanly rather
+/// than misread under the newer rules.
+const CACHE_ENTRY_TAG: &str = "v3";
 
-/// Serialize a cache entry: a format tag and input count (`v2 N`), then
-/// `path⇥hash` lines, then the generated source verbatim.
-fn render_cache_entry(inputs: &[(String, String)], output: &str) -> String {
-    let mut s = format!("{CACHE_ENTRY_TAG} {}\n", inputs.len());
+/// Formats this compiler used to write. An entry in one of them is stale, not
+/// suspicious, so it is ignored without a word — which is the difference between
+/// a format bump and a file nobody here wrote.
+const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2"];
+
+/// Serialize a cache entry: `v3 <tag> <N>`, then `path⇥hash` lines, then the
+/// generated source verbatim. The tag authenticates everything after it,
+/// [`entry_tag`] included the lookup key.
+fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &str) -> String {
+    let mut body = format!("{}\n", inputs.len());
     for (p, h) in inputs {
-        s.push_str(&format!("{p}\t{h}\n"));
+        body.push_str(&format!("{p}\t{h}\n"));
     }
-    s.push_str(output);
-    s
+    body.push_str(output);
+    format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body))
 }
 
-/// Inverse of [`render_cache_entry`].
-fn parse_cache_entry(text: &str) -> Option<(Vec<(String, String)>, String)> {
-    let first_nl = text.find('\n')?;
-    let n: usize = text[..first_nl]
-        .trim()
-        .strip_prefix(CACHE_ENTRY_TAG)?
-        .trim()
-        .parse()
-        .ok()?;
+/// Inverse of [`render_cache_entry`], for an entry this compiler wrote.
+///
+/// The generator cache holds compiler INPUT — its entries are linked into the
+/// program as a synthesized module, and a hit never re-runs the generator, so a
+/// file dropped in that directory is permanent. Every other cache in the design
+/// is content-addressed against a hash from somewhere trusted: the blob cache
+/// re-hashes each remote module against the sha256 in `vyrn.lock`, which lives
+/// in the project and is reviewed like source. A generated module has no such
+/// anchor — its content is whatever the generator produces from inputs that
+/// change — so this cache authenticates its entries instead, with a per-user key
+/// that lives OUTSIDE the cache directory ([`gen_cache_secret`]).
+///
+/// What that buys: an entry written by anything other than this user's compiler
+/// is refused — a cache directory restored from a CI artifact, a shipped or
+/// shared `~/.vyrn/cache/gen`, a `VYRN_GEN_CACHE_DIR` pointed at a tree someone
+/// else filled, an entry moved between lookup keys. What it does not buy:
+/// nothing stops a process already running as this user, which can read the key
+/// like it can read the source it would rather edit. A cache cannot be made more
+/// trustworthy than the account that owns it.
+///
+/// Two rejections, deliberately different. A format this compiler used to write
+/// is an old entry, and a silent miss: the generator re-runs and replaces it,
+/// which is what a format bump means. Anything else in that directory — a `v3`
+/// entry that fails its tag, a file in no format at all — is something else
+/// writing here, and it says so.
+fn read_cache_entry(key: &str, text: &str) -> Option<(Vec<(String, String)>, String)> {
+    let Some(first_nl) = text.find('\n') else {
+        warn_foreign_entry(key);
+        return None;
+    };
+    let header = &text[..first_nl];
+    // Every format this compiler has written ends its header with the input
+    // count, so the count is read before the format is judged. A generation
+    // always reads at least the generator's own module, so an entry recording
+    // NOTHING describes no generation — in any format, authentic or not. That
+    // rule comes first because "the artifact's own list decides whether the
+    // artifact is valid" is the defect, independent of any hashing: a list of
+    // length zero satisfies `all` by saying nothing.
+    let count = header.rsplit(' ').next().unwrap_or("");
+    if count.parse::<usize>() == Ok(0) {
+        warn_foreign_entry(key);
+        return None;
+    }
+    let Some(rest) = header
+        .strip_prefix(CACHE_ENTRY_TAG)
+        .and_then(|r| r.strip_prefix(' '))
+    else {
+        // `v1`/`v2` are this compiler's own earlier formats.
+        if !SUPERSEDED_ENTRY_TAGS
+            .iter()
+            .any(|t| header.starts_with(&format!("{t} ")))
+        {
+            warn_foreign_entry(key);
+        }
+        return None;
+    };
+    let Some((tag, count)) = rest.split_once(' ') else {
+        warn_foreign_entry(key);
+        return None;
+    };
+    let Ok(n) = count.parse::<usize>() else {
+        warn_foreign_entry(key);
+        return None;
+    };
+    // `count` is the tail of the header line, so the body starts where it does.
+    let body = &text[first_nl - count.len()..];
+    if entry_tag(key, body) != tag {
+        warn_foreign_entry(key);
+        return None;
+    }
     let mut idx = first_nl + 1;
-    let mut inputs = Vec::with_capacity(n);
+    // No `with_capacity(n)`: `n` came off the first line of a file, and a
+    // truncated write is enough to make it `usize::MAX`, which aborts on the
+    // allocation before a single claimed line is read. Growing the vector as the
+    // lines actually arrive costs nothing and cannot be told a size.
+    let mut inputs = Vec::new();
     for _ in 0..n {
         let nl = text[idx..].find('\n')? + idx;
         let (p, h) = text[idx..nl].split_once('\t')?;
@@ -1761,6 +1857,125 @@ fn parse_cache_entry(text: &str) -> Option<(Vec<(String, String)>, String)> {
         idx = nl + 1;
     }
     Some((inputs, text[idx..].to_string()))
+}
+
+thread_local! {
+    /// Keys already reported by [`warn_foreign_entry`]. The LSP validates the
+    /// same entry on every keystroke, and one line per keystroke is a log, not
+    /// a warning.
+    static WARNED_ENTRIES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+fn warn_foreign_entry(key: &str) {
+    let first = WARNED_ENTRIES.with(|w| w.borrow_mut().insert(key.to_string()));
+    if !first {
+        return;
+    }
+    eprintln!("warning: ignoring generator cache entry `{key}`: this compiler did not write it");
+    eprintln!(
+        "  note: the generator ran instead, so this build is correct — but something \
+         other than `vyrn` is writing to the generator cache (`VYRN_GEN_CACHE_DIR`, \
+         else `~/.vyrn/cache/gen`)"
+    );
+}
+
+/// Authenticate `body` under `key`: `H(secret ‖ H(secret ‖ key ‖ body))`.
+///
+/// The key is inside the tag, so an entry cannot be moved to another lookup key
+/// — a valid generation of one module is not a valid generation of a different
+/// one. Nested rather than prefixed because SHA-256 extends, and the outer hash
+/// is over a digest of fixed length.
+fn entry_tag(key: &str, body: &str) -> String {
+    let secret = gen_cache_secret();
+    let mut inner = Vec::with_capacity(secret.len() + key.len() + body.len() + 2);
+    inner.extend_from_slice(secret);
+    inner.push(0);
+    inner.extend_from_slice(key.as_bytes());
+    inner.push(0);
+    inner.extend_from_slice(body.as_bytes());
+    let inner = crate::hash::sha256_hex(&inner);
+    let mut outer = Vec::with_capacity(secret.len() + inner.len() + 1);
+    outer.extend_from_slice(secret);
+    outer.push(0);
+    outer.extend_from_slice(inner.as_bytes());
+    crate::hash::sha256_hex(&outer)
+}
+
+static GEN_CACHE_SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// The per-user key that tells entries this compiler wrote from files something
+/// else left in the cache directory. Read from `~/.vyrn/gen-cache.key`, created
+/// on first use.
+///
+/// It sits beside `~/.vyrn/cache`, not inside it, and `VYRN_GEN_CACHE_DIR` does
+/// not move it: an archived, shared or redirected cache directory therefore
+/// carries entries but never the key that would make them believable.
+///
+/// When there is no home directory to read, or the file cannot be created, the
+/// process keeps a key of its own: entries it writes are then unreadable by the
+/// next process, which is a cache that misses rather than a cache that is
+/// believed.
+fn gen_cache_secret() -> &'static [u8] {
+    GEN_CACHE_SECRET
+        .get_or_init(|| {
+            let path = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .ok()
+                .map(|home| std::path::Path::new(&home).join(".vyrn").join("gen-cache.key"));
+            let Some(path) = path else {
+                return fresh_secret();
+            };
+            if let Some(k) = read_secret(&path) {
+                return k;
+            }
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            // `create_new` so two compilers starting together agree on one key
+            // instead of overwriting each other's.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            if let Ok(mut f) = opts.open(&path) {
+                use std::io::Write;
+                let _ = f.write_all(&fresh_secret());
+                let _ = f.flush();
+            }
+            read_secret(&path).unwrap_or_else(fresh_secret)
+        })
+        .as_slice()
+}
+
+/// The key file's bytes, if it holds a whole one. A short read is a file caught
+/// mid-creation by another process; this run keeps its own key and misses.
+fn read_secret(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    (bytes.len() >= 32).then_some(bytes)
+}
+
+/// A fresh key. `RandomState` is seeded from the operating system's randomness
+/// once per thread — the same source `HashMap` relies on not to be predictable —
+/// and the process id and clock join it so that two keys minted in one process
+/// still differ.
+fn fresh_secret() -> Vec<u8> {
+    use std::hash::{BuildHasher, Hasher};
+    let state = std::collections::hash_map::RandomState::new();
+    let mut seed: Vec<u8> = Vec::new();
+    for i in 0..4u64 {
+        let mut h = state.build_hasher();
+        h.write_u64(i);
+        seed.extend_from_slice(&h.finish().to_le_bytes());
+    }
+    seed.extend_from_slice(&std::process::id().to_le_bytes());
+    if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        seed.extend_from_slice(&d.as_nanos().to_le_bytes());
+    }
+    crate::hash::sha256_hex(&seed).into_bytes()
 }
 
 /// Whether a type decl is one of the parser-injected builtins (`Value`,

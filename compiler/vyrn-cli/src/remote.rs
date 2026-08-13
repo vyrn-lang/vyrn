@@ -114,28 +114,73 @@ pub struct Lock {
 }
 
 impl Lock {
-    pub fn load(path: PathBuf) -> Lock {
-        let mut entries = BTreeMap::new();
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            for line in text.lines() {
-                let mut parts = line.split('\t');
-                if let (Some(spec), Some(url), Some(sha)) =
-                    (parts.next(), parts.next(), parts.next())
-                {
-                    entries.insert(spec.to_string(), (url.to_string(), sha.to_string()));
-                }
+    /// Read the lock, or say which line stopped it.
+    ///
+    /// A lock file that exists and does not parse is not an unpinned project.
+    /// Every way of damaging one — tabs turned to spaces by an editor or a CI
+    /// checkout, a truncated write, a merge that appended instead of replacing —
+    /// used to read as "this specifier was never pinned", and an unpinned
+    /// specifier is fetched from the network and re-pinned to whatever arrives.
+    /// The one artifact whose whole job is that it cannot drift failed toward
+    /// the network in every direction. A missing file is still `Ok`: never
+    /// pinned and never claimed otherwise.
+    pub fn load(path: PathBuf) -> Result<Lock, String> {
+        let mut entries: BTreeMap<String, (String, String)> = BTreeMap::new();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        for (i, line) in text.lines().enumerate() {
+            let no = i + 1;
+            if line.trim().is_empty() {
+                continue;
             }
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [spec, url, sha] = fields[..] else {
+                return Err(format!(
+                    "{}:{no}: expected `specifier<TAB>url<TAB>sha256`, found {} \
+                     tab-separated field(s)",
+                    path.display(),
+                    fields.len()
+                ));
+            };
+            // Two pins for one specifier: the second used to replace the first
+            // in silence, so appending a line changed what was built while
+            // leaving the reviewed line in place, and the next `save` erased the
+            // evidence. A specifier has exactly one pin.
+            if entries.contains_key(spec) {
+                return Err(format!(
+                    "{}:{no}: `{spec}` is pinned twice; a specifier has exactly one pin",
+                    path.display()
+                ));
+            }
+            entries.insert(spec.to_string(), (url.to_string(), sha.to_string()));
         }
-        Lock {
+        Ok(Lock {
             path,
             entries,
             dirty: false,
-        }
+        })
     }
 
     pub fn save(&self) -> Result<(), String> {
         let mut out = String::new();
         for (spec, (url, sha)) in &self.entries {
+            // The format is one line of three tab-separated fields, so a field
+            // carrying a tab or a newline is a line the reader would split
+            // differently from the writer. Specifiers come from source strings
+            // the compiler does not constrain, so this is refused where it is
+            // written rather than discovered where it is read.
+            for field in [spec, url, sha] {
+                if field.contains('\t') || field.contains('\n') || field.contains('\r') {
+                    return Err(format!(
+                        "`{field}` contains a tab or a line break and cannot be written to \
+                         {}",
+                        self.path.display()
+                    ));
+                }
+            }
             out.push_str(&format!("{spec}\t{url}\t{sha}\n"));
         }
         std::fs::write(&self.path, out).map_err(|e| e.to_string())

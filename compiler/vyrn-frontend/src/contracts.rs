@@ -112,10 +112,11 @@ fn split_spec(spec: &str) -> Option<(String, String)> {
 ///
 /// Returns an empty vector when the manifest has no `roles` key, which is the
 /// signal to fall back to [`discovered_roles`].
-pub fn roles_from_manifest(json_text: &str) -> Vec<Role> {
-    let Ok(doc) = crate::schema::parse_json(json_text) else {
-        return Vec::new();
-    };
+///
+/// It takes the PARSED document rather than the text: "no roles declared" and
+/// "the manifest did not parse" are different answers, and only the first one
+/// belongs here. Whoever read the file owns the second.
+pub fn roles_from_manifest(doc: &Json) -> Vec<Role> {
     let Some(Json::Obj(entries)) = doc.get("roles") else {
         return Vec::new();
     };

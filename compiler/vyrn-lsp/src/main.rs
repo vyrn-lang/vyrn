@@ -78,11 +78,37 @@ use templates::VyxCursor;
 /// (`.vyx`, …) reflect unsaved edits (RFC-0033); the gen cache re-verifies the
 /// overlaid bytes and regenerates when they differ from disk.
 fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Analysis {
-    let (opts, resolver, path) = match load_context(uri, overlays) {
+    let (opts, resolver, path, manifest_error) = match load_context(uri, overlays) {
         Some(ctx) => ctx,
         None => return analyze(text),
     };
-    vyrn_frontend::analyze_linked(text, &path, &opts, &resolver)
+    let mut analysis = vyrn_frontend::analyze_linked(text, &path, &opts, &resolver);
+    // A manifest that exists and does not parse is the one state the editor may
+    // not answer from: the import map and the audience vocabulary both come out
+    // of that file, and dropping them silently makes the editor agree with a
+    // build that is about to refuse. Reported against the open document, the way
+    // an error in an imported file is.
+    if let Some(e) = manifest_error {
+        analysis.diagnostics.insert(
+            0,
+            vyrn_frontend::diagnostics::Diagnostic {
+                file: None,
+                line: 1,
+                col: 0,
+                end_col: 0,
+                severity: vyrn_frontend::diagnostics::Severity::Error,
+                stage: "parse",
+                message: e,
+                note: Some(
+                    "note: the project's import map and audience rules cannot be read, \
+                     so this file is analyzed without them"
+                        .to_string(),
+                ),
+                from_generated: false,
+            },
+        );
+    }
+    analysis
 }
 
 /// Build the load options + overlay-aware resolver + slash path for `uri`, or
@@ -90,7 +116,12 @@ fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Ana
 fn load_context(
     uri: &Url,
     overlays: &HashMap<String, String>,
-) -> Option<(vyrn_frontend::loader::LoadOptions, EditorResolver, String)> {
+) -> Option<(
+    vyrn_frontend::loader::LoadOptions,
+    EditorResolver,
+    String,
+    Option<String>,
+)> {
     let path = uri
         .to_file_path()
         .ok()?
@@ -100,20 +131,28 @@ fn load_context(
         std_root: std_root(),
         ..Default::default()
     };
-    let manifest_dir = std::path::Path::new(&path)
-        .parent()
-        .and_then(|d| find_manifest(d))
-        .map(|m| {
+    let found = match std::path::Path::new(&path).parent() {
+        Some(d) => find_manifest(d),
+        None => Ok(None),
+    };
+    let mut manifest_error = None;
+    let manifest_dir = match found {
+        Ok(m) => m.map(|m| {
             opts.aliases = m.deps.into_iter().collect();
             opts.alias_base = m.dir.clone();
             opts.audience = m.audience;
             m.dir
-        });
+        }),
+        Err(e) => {
+            manifest_error = Some(e);
+            None
+        }
+    };
     let resolver = EditorResolver {
         manifest_dir,
         overlays: overlays.clone(),
     };
-    Some((opts, resolver, path))
+    Some((opts, resolver, path, manifest_error))
 }
 
 /// The std-library root: `$VYRN_STD`, or `std/` found by walking up from the
@@ -140,14 +179,21 @@ fn std_root() -> Option<String> {
 /// Find `vyrn.json` by walking up from `start`; returns the manifest's
 /// directory (slash-separated) and its `dependencies` import map. A compact
 /// duplicate of `vyrn`'s reader (the CLI is a binary crate, not linkable).
-fn find_manifest(start: &std::path::Path) -> Option<Manifest> {
+///
+/// Like the CLI's, it keeps "no manifest" and "a manifest I cannot read" apart:
+/// the audience vocabulary and the import map both live in this file, and an
+/// editor that quietly drops them answers a different question from the one the
+/// build answers.
+fn find_manifest(start: &std::path::Path) -> Result<Option<Manifest>, String> {
     use vyrn_frontend::schema::Json;
     let mut dir = start.to_path_buf();
     loop {
         let candidate = dir.join("vyrn.json");
         if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).ok()?;
-            let doc = vyrn_frontend::schema::parse_json(&text).ok()?;
+            let text = std::fs::read_to_string(&candidate)
+                .map_err(|e| format!("cannot read {}: {e}", candidate.display()))?;
+            let doc = vyrn_frontend::schema::parse_json(&text)
+                .map_err(|e| format!("{} is not valid JSON: {e}", candidate.display()))?;
             let deps = match doc.get("dependencies") {
                 Some(Json::Obj(entries)) => entries
                     .iter()
@@ -159,15 +205,27 @@ fn find_manifest(start: &std::path::Path) -> Option<Manifest> {
                 _ => Vec::new(),
             };
             let slash = dir.to_string_lossy().replace('\\', "/");
-            let audience = vyrn_frontend::audience::from_manifest(&text, &slash);
-            return Some(Manifest {
+            let audience = vyrn_frontend::audience::from_manifest(&doc, &slash);
+            return Ok(Some(Manifest {
                 dir: slash,
                 deps,
                 audience,
-            });
+            }));
         }
-        dir = dir.parent()?.to_path_buf();
+        match dir.parent() {
+            Some(p) => dir = p.to_path_buf(),
+            None => return Ok(None),
+        }
     }
+}
+
+/// The parsed `vyrn.json` governing `dir`, for the readers that want one key out
+/// of it. `None` covers both "no manifest" and "unreadable"; the reader that
+/// REPORTS the unreadable one is [`find_manifest`], on the analysis path every
+/// buffer takes.
+pub fn manifest_doc(dir: &std::path::Path) -> Option<vyrn_frontend::schema::Json> {
+    let text = std::fs::read_to_string(dir.join("vyrn.json")).ok()?;
+    vyrn_frontend::schema::parse_json(&text).ok()
 }
 
 /// The manifest facts a load needs: dependency aliases and, since RFC-0072, the
@@ -1052,7 +1110,7 @@ fn import_path_definition(
         return None;
     }
     let overlays = overlays_of(server);
-    let (opts, _resolver, importer) = load_context(uri, &overlays)?;
+    let (opts, _resolver, importer, _) = load_context(uri, &overlays)?;
     let target = import_target_file(&spec, &importer, &opts)?;
     let url = Url::from_file_path(target.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
     Some(GotoDefinitionResponse::Scalar(Location {
@@ -1675,7 +1733,7 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
 /// the banner isn't among its generated modules.
 fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSynth>> {
     let overlays = overlays_of(server);
-    let (opts, resolver, owner_path) = load_context(owner, &overlays)?;
+    let (opts, resolver, owner_path, _) = load_context(owner, &overlays)?;
     let owner_text = server
         .docs
         .get(owner)
@@ -2529,7 +2587,7 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let dir = std::path::Path::new(&path).parent()?.to_path_buf();
     let app_dir = app_root_for(&dir);
     let overlays = overlays_of(server);
-    let (opts, resolver, _) = load_context(uri, &overlays)?;
+    let (opts, resolver, _, _) = load_context(uri, &overlays)?;
 
     let mut cache = server.contract_cache.borrow_mut();
     let roots = contracts::role_roots(&app_dir);
@@ -3248,7 +3306,7 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
     // reaches the declaration through a dependency alias resolves the same way
     // the linker resolves it.
     let opts = load_context(&uri, &overlays)
-        .map(|(o, _, _)| o)
+        .map(|(o, _, _, _)| o)
         .unwrap_or_else(|| vyrn_frontend::loader::LoadOptions {
             std_root: std_root(),
             ..Default::default()

@@ -174,7 +174,7 @@ fn native_target_for(root: &str) -> Result<NativeTarget, String> {
         .map(|p| p.to_path_buf())
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| std::env::current_dir().ok());
-    let Some(m) = start.and_then(|d| find_manifest(&d)) else {
+    let Some(m) = start.and_then(|d| nearest_manifest(&d)) else {
         return Ok(DEFAULT_NATIVE_TARGET);
     };
     let Some(v) = m.native_target else {
@@ -575,6 +575,11 @@ fn web_root() -> Option<String> {
 struct Manifest {
     /// Directory the manifest lives in (slash-separated).
     dir: String,
+    /// The parsed document. Every rule the manifest carries is read from this
+    /// one parse: `audience`, `roles`, `dependencies`, and the rewrite `vyrn
+    /// add` performs. Re-reading the file to re-parse it is how a second reader
+    /// gets a different answer from the first.
+    doc: vyrn_frontend::schema::Json,
     main: Option<String>,
     dependencies: Vec<(String, String)>,
     /// RFC-0072 M1: the declared audience vocabulary, or `None` when the
@@ -587,19 +592,22 @@ struct Manifest {
 }
 
 /// Find `vyrn.json` by walking up from `start` (a directory).
-fn find_manifest(start: &Path) -> Option<Manifest> {
+///
+/// Three outcomes, and they are three: `Ok(None)` is "this project declares
+/// nothing", `Ok(Some)` is what it declares, and `Err` is "it declares
+/// something and I cannot read it". Collapsing the third into the first is how a
+/// trailing comma silently switched RFC-0072's audience boundary off while the
+/// build printed `ok` — every rule the manifest carries evaporated with the
+/// manifest, and an unreadable policy is not the empty policy.
+fn find_manifest(start: &Path) -> Result<Option<Manifest>, String> {
     let mut dir = start.to_path_buf();
     loop {
         let candidate = dir.join("vyrn.json");
         if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).ok()?;
-            let doc = match vyrn_frontend::schema::parse_json(&text) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("warning: {} is not valid JSON: {e}", candidate.display());
-                    return None;
-                }
-            };
+            let text = std::fs::read_to_string(&candidate)
+                .map_err(|e| format!("cannot read {}: {e}", candidate.display()))?;
+            let doc = vyrn_frontend::schema::parse_json(&text)
+                .map_err(|e| format!("{} is not valid JSON: {e}", candidate.display()))?;
             use vyrn_frontend::schema::Json;
             let main = match doc.get("main") {
                 Some(Json::Str(s)) => Some(s.clone()),
@@ -620,23 +628,41 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                 _ => None,
             };
             let slash_dir = dir.to_string_lossy().replace('\\', "/");
-            let audience = vyrn_frontend::audience::from_manifest(&text, &slash_dir);
-            return Some(Manifest {
+            let audience = vyrn_frontend::audience::from_manifest(&doc, &slash_dir);
+            return Ok(Some(Manifest {
                 dir: slash_dir,
+                doc,
                 main,
                 dependencies,
                 audience,
                 native_target,
-            });
+            }));
         }
-        dir = dir.parent()?.to_path_buf();
+        match dir.parent() {
+            Some(p) => dir = p.to_path_buf(),
+            None => return Ok(None),
+        }
+    }
+}
+
+/// [`find_manifest`], with the CLI's answer to an unreadable one: say which file
+/// and why, and stop. Every command reads the manifest, and none of them can do
+/// the right thing without it — so the policy lives here once rather than in
+/// eleven call sites that would each have to remember.
+fn nearest_manifest(start: &Path) -> Option<Manifest> {
+    match find_manifest(start) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
     }
 }
 
 /// The manifest's `main`, resolved relative to the manifest's directory.
 fn manifest_main() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    let m = find_manifest(&cwd)?;
+    let m = nearest_manifest(&cwd)?;
     let main = m.main?;
     Some(format!("{}/{main}", m.dir))
 }
@@ -652,7 +678,7 @@ fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
         .map(|p| p.to_path_buf())
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| std::env::current_dir().ok());
-    if let Some(m) = start.and_then(|d| find_manifest(&d)) {
+    if let Some(m) = start.and_then(|d| nearest_manifest(&d)) {
         opts.aliases = m.dependencies.into_iter().collect();
         opts.alias_base = m.dir;
         opts.audience = m.audience;
@@ -762,13 +788,18 @@ fn why_cmd(args: &[String]) -> ExitCode {
 
     // The app root: the nearest `vyrn.json` upward, else the file's own
     // directory. Roles hang off a project, so a loose file simply has none.
-    let app_dir = find_manifest(&dir)
-        .map(|m| PathBuf::from(m.dir))
+    let manifest = nearest_manifest(&dir);
+    let app_dir = manifest
+        .as_ref()
+        .map(|m| PathBuf::from(&m.dir))
         .unwrap_or_else(|| dir.clone());
     let roots = contract_roots(&app_dir);
-    let roles = match std::fs::read_to_string(app_dir.join("vyrn.json"))
-        .ok()
-        .map(|t| vyrn_frontend::contracts::roles_from_manifest(&t))
+    // The declared roles come from the manifest this command already read, not
+    // from a second read of the same file: two readers of one file are two
+    // policies whenever one of them fails.
+    let roles = match manifest
+        .as_ref()
+        .map(|m| vyrn_frontend::contracts::roles_from_manifest(&m.doc))
         .filter(|r| !r.is_empty())
     {
         Some(declared) => declared,
@@ -1296,7 +1327,7 @@ fn why_audience(file: &str) -> ExitCode {
         eprintln!("error: {file} has no directory");
         return ExitCode::from(2);
     };
-    let manifest = find_manifest(&dir);
+    let manifest = nearest_manifest(&dir);
     let app_dir = manifest
         .as_ref()
         .map(|m| PathBuf::from(&m.dir))
@@ -1963,7 +1994,7 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
     let std_root = opts.std_root.as_deref().map(normalize_slashes);
     // The project base for local module names: the manifest dir, else the root
     // file's own directory.
-    let base = find_manifest(Path::new(&root_key).parent().unwrap_or(Path::new(".")))
+    let base = nearest_manifest(Path::new(&root_key).parent().unwrap_or(Path::new(".")))
         .map(|m| m.dir)
         .unwrap_or_else(|| {
             root_key
@@ -2201,7 +2232,7 @@ fn lock_home(root_key: &str) -> (PathBuf, Option<String>) {
         .map(|p| p.to_path_buf())
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| std::env::current_dir().ok());
-    if let Some(m) = start.clone().and_then(|d| find_manifest(&d)) {
+    if let Some(m) = start.clone().and_then(|d| nearest_manifest(&d)) {
         return (Path::new(&m.dir).join("vyrn.lock"), Some(m.dir));
     }
     let dir = start.unwrap_or_else(|| PathBuf::from("."));
@@ -2209,12 +2240,28 @@ fn lock_home(root_key: &str) -> (PathBuf, Option<String>) {
 }
 
 /// Build the CLI resolver (fs + lock/cache/network remote handling).
+///
+/// A lock file that will not parse stops the command here. Continuing would mean
+/// building against whatever the network serves now, and re-pinning to it.
 fn make_resolver(root_key: &str) -> remote::RemoteResolver {
     let (lock_path, project_dir) = lock_home(root_key);
     remote::RemoteResolver {
-        lock: std::cell::RefCell::new(remote::Lock::load(lock_path)),
+        lock: std::cell::RefCell::new(load_lock(lock_path)),
         project_dir,
         offline: std::env::var("VYRN_OFFLINE").is_ok(),
+    }
+}
+
+/// [`remote::Lock::load`], with the CLI's answer to a damaged one: name the line
+/// and stop. The same policy as an unreadable manifest, for the same reason —
+/// a pin the compiler cannot read is not the absence of a pin.
+fn load_lock(path: PathBuf) -> remote::Lock {
+    match remote::Lock::load(path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
     }
 }
 
@@ -2557,7 +2604,7 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = find_manifest(&cwd) else {
+    let Some(manifest) = nearest_manifest(&cwd) else {
         eprintln!("error: no vyrn.json found — run `vyrn new` or create one first");
         return ExitCode::FAILURE;
     };
@@ -2610,12 +2657,12 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
 /// one alias) and rewrite their pins.
 fn update(alias: Option<&str>) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = find_manifest(&cwd) else {
+    let Some(manifest) = nearest_manifest(&cwd) else {
         eprintln!("error: no vyrn.json found");
         return ExitCode::FAILURE;
     };
     let (lock_path, project_dir) = lock_home(&format!("{}/vyrn.json", manifest.dir));
-    let mut lock = remote::Lock::load(lock_path);
+    let mut lock = load_lock(lock_path);
     let targets: Vec<(String, String)> = manifest
         .dependencies
         .iter()
@@ -2661,12 +2708,12 @@ fn update(alias: Option<&str>) -> ExitCode {
 /// verify it is already there), making the checkout self-contained forever.
 fn vendor(check: bool) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = find_manifest(&cwd) else {
+    let Some(manifest) = nearest_manifest(&cwd) else {
         eprintln!("error: no vyrn.json found");
         return ExitCode::FAILURE;
     };
     let (lock_path, _) = lock_home(&format!("{}/vyrn.json", manifest.dir));
-    let lock = remote::Lock::load(lock_path);
+    let lock = load_lock(lock_path);
     let vend = remote::vendor_dir(&manifest.dir);
     let cache = remote::cache_dir();
     let mut missing = 0;
@@ -3688,7 +3735,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = find_manifest(&cwd) else {
+    let Some(manifest) = nearest_manifest(&cwd) else {
         eprintln!("error: `vyrn dev` needs a vyrn.json with `server` and `client` keys");
         return ExitCode::FAILURE;
     };

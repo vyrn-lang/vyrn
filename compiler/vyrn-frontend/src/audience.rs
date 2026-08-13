@@ -145,8 +145,13 @@ impl Verdict {
 /// `None` is load-bearing: it is the entire compatibility story. A project that
 /// has not opted in gets no map, the loader runs no check, and nothing it
 /// compiles today can start failing.
-pub fn from_manifest(json_text: &str, base: &str) -> Option<AudienceMap> {
-    let doc = crate::schema::parse_json(json_text).ok()?;
+///
+/// It takes the PARSED document rather than the text, so that "this manifest
+/// declares no audience" cannot be reached by a manifest that failed to parse.
+/// A parse failure belongs to whoever read the file, and it is that reader's job
+/// to refuse; this function only reads a rule out of a document that already
+/// exists.
+pub fn from_manifest(doc: &Json, base: &str) -> Option<AudienceMap> {
     let Some(Json::Obj(entries)) = doc.get("audience") else {
         return None;
     };

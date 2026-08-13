@@ -50,9 +50,28 @@ impl Json {
     }
 }
 
+/// How many `{`/`[` may enclose a value before the parser refuses the document.
+///
+/// This parser is recursive descent, so a document's nesting depth is the
+/// process's stack depth, and it is reached from `find_manifest` — which walks
+/// **up** from the working directory on every command and reads a `vyrn.json`
+/// the user may not own. Without a bound, a manifest anywhere above the cwd ends
+/// every `vyrn` invocation in a stack overflow: an abort, no diagnostic, exit
+/// 127.
+///
+/// The number is the one `std/jsonread` and `std/von` took: about two frames per
+/// enclosing level against the smallest stack any build profile gets, leaving
+/// the rest for the caller and for the synthesis pass that runs over the parsed
+/// document. No schema or manifest anyone writes by hand comes near it.
+pub const MAX_JSON_DEPTH: usize = 128;
+
 pub fn parse_json(src: &str) -> Result<Json, String> {
     let bytes: Vec<char> = src.chars().collect();
-    let mut p = P { b: &bytes, i: 0 };
+    let mut p = P {
+        b: &bytes,
+        i: 0,
+        depth: 0,
+    };
     p.ws();
     let v = p.value()?;
     p.ws();
@@ -65,6 +84,8 @@ pub fn parse_json(src: &str) -> Result<Json, String> {
 struct P<'a> {
     b: &'a [char],
     i: usize,
+    /// Objects and arrays currently open — the recursion this parser bounds.
+    depth: usize,
 }
 
 impl P<'_> {
@@ -84,10 +105,32 @@ impl P<'_> {
             Err(format!("expected `{c}` at offset {}", self.i))
         }
     }
+    /// Enter one enclosing level, or refuse. Every recursive call goes through
+    /// here, so the bound is the parser's and not one caller's.
+    fn nest(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_JSON_DEPTH {
+            return Err(format!(
+                "nested deeper than {MAX_JSON_DEPTH} levels at offset {}",
+                self.i
+            ));
+        }
+        Ok(())
+    }
     fn value(&mut self) -> Result<Json, String> {
         match self.peek() {
-            Some('{') => self.obj(),
-            Some('[') => self.arr(),
+            Some('{') => {
+                self.nest()?;
+                let v = self.obj();
+                self.depth -= 1;
+                v
+            }
+            Some('[') => {
+                self.nest()?;
+                let v = self.arr();
+                self.depth -= 1;
+                v
+            }
             Some('"') => Ok(Json::Str(self.string()?)),
             Some('t') => self.lit("true", Json::Bool(true)),
             Some('f') => self.lit("false", Json::Bool(false)),

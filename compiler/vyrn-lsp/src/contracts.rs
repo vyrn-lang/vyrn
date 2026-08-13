@@ -109,8 +109,8 @@ pub fn roles_of(
     opts: &LoadOptions,
     resolver: &dyn vyrn_frontend::loader::ModuleResolver,
 ) -> Vec<Role> {
-    if let Ok(text) = std::fs::read_to_string(app_dir.join("vyrn.json")) {
-        let declared = vyrn_frontend::contracts::roles_from_manifest(&text);
+    if let Some(doc) = crate::manifest_doc(app_dir) {
+        let declared = vyrn_frontend::contracts::roles_from_manifest(&doc);
         if !declared.is_empty() {
             return declared;
         }
