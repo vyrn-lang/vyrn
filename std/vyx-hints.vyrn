@@ -186,12 +186,12 @@ fn vhNode(
 ) -> String {
     return match n {
         VNElem(tag, isComp, attrs, kids, line) =>
-            vhElem(p, src, file, tag, isComp, attrs, kids, line, inFor, inLabel, inForm),
+        vhElem(p, src, file, tag, isComp, attrs, kids, line, inFor, inLabel, inForm),
         // `vyxParseTemplate` does not group, so the two control-flow nodes cannot
         // appear. Walked anyway: a rule that reads a grouped tree stays correct.
         VNFor(v, it, key, body, line, col) => vhNodes(p, src, file, body, true, inLabel, inForm),
         VNIf(conds, cl, cc, bodies, els, has) =>
-            vhBodies(p, src, file, bodies, els, has, inFor, inLabel, inForm),
+        vhBodies(p, src, file, bodies, els, has, inFor, inLabel, inForm),
         VNText(s) => "",
         VNInterp(x, line, col) => "",
         VNRaw(x, line, col) => "",
@@ -428,7 +428,7 @@ fn vhElem(
     // no `aria-label`, no `title` and no `<label>` ancestor, it has no name.
     if vhIsNameable(tag, attrs) && inLabel == false {
         if vhHasAny(attrs, "aria-label", "aria-labelledby", "title") == false
-            && vhHas(attrs, "id") == false
+        && vhHas(attrs, "id") == false
         {
             out = out
             + hint(
@@ -479,7 +479,7 @@ fn vhNeedsAlt(tag: String, attrs: Array<VyxAttr>) -> Bool {
 /// Elements whose accessible name comes from their own content.
 fn vhNamedByContent(tag: String) -> Bool {
     return tag == "button" || tag == "a" || tag == "h1" || tag == "h2" || tag == "h3"
-        || tag == "h4" || tag == "h5" || tag == "h6"
+    || tag == "h4" || tag == "h5" || tag == "h6"
 }
 
 /// Form controls that carry their own name, minus the ones named some other way:
@@ -499,15 +499,15 @@ fn vhIsNameable(tag: String, attrs: Array<VyxAttr>) -> Bool {
 /// Elements a pointer AND a keyboard can both operate without help.
 fn vhInteractive(tag: String) -> Bool {
     return tag == "button" || tag == "a" || tag == "input" || tag == "select"
-        || tag == "textarea" || tag == "summary" || tag == "details" || tag == "label"
-        || tag == "option"
+    || tag == "textarea" || tag == "summary" || tag == "details" || tag == "label"
+    || tag == "option"
 }
 
 /// Attributes whose value is a URL the browser may navigate to or fetch.
 fn vhIsUrlAttr(name: String) -> Bool {
     return name == "href" || name == "src" || name == "action" || name == "formaction"
-        || name == "poster" || name == "srcdoc" || name == "xlink:href" || name == "data"
-        || name == "ping"
+    || name == "poster" || name == "srcdoc" || name == "xlink:href" || name == "data"
+    || name == "ping"
 }
 
 /// Whether a static URL value is a `javascript:` URL. Blanks and control bytes
