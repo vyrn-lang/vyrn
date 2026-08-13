@@ -1922,7 +1922,11 @@ fn gen_cache_secret() -> &'static [u8] {
             let path = std::env::var("USERPROFILE")
                 .or_else(|_| std::env::var("HOME"))
                 .ok()
-                .map(|home| std::path::Path::new(&home).join(".vyrn").join("gen-cache.key"));
+                .map(|home| {
+                    std::path::Path::new(&home)
+                        .join(".vyrn")
+                        .join("gen-cache.key")
+                });
             let Some(path) = path else {
                 return fresh_secret();
             };
@@ -6132,7 +6136,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
         let v3 = render_cache_entry(key, &inputs, "export fn n() -> Int64 { return 1 }");
         assert!(read_cache_entry(key, &v3).is_some());
-        for older in ["v2 1\ndata/a.txt\tdeadbeef\nx", "v1\ndata/a.txt\tdeadbeef\nx"] {
+        for older in [
+            "v2 1\ndata/a.txt\tdeadbeef\nx",
+            "v1\ndata/a.txt\tdeadbeef\nx",
+        ] {
             assert!(
                 read_cache_entry(key, older).is_none(),
                 "an entry in an older format must not parse: {older:?}"
@@ -6154,10 +6161,13 @@ fn main() -> Int64 { return shape().byteLength }"#;
 
         // The reproduction: an entry declaring ZERO inputs, whose recorded list
         // therefore satisfies `all` by saying nothing.
-        let vacuous = format!("{CACHE_ENTRY_TAG} {} 0\nexport fn n() -> Int64 {{ return 999 }}", {
-            let body = "0\nexport fn n() -> Int64 { return 999 }";
-            entry_tag(key, body)
-        });
+        let vacuous = format!(
+            "{CACHE_ENTRY_TAG} {} 0\nexport fn n() -> Int64 {{ return 999 }}",
+            {
+                let body = "0\nexport fn n() -> Int64 { return 999 }";
+                entry_tag(key, body)
+            }
+        );
         assert!(
             read_cache_entry(key, &vacuous).is_none(),
             "an entry recording no inputs describes no generation"

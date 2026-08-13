@@ -138,7 +138,11 @@ fn a_manifest_that_does_not_parse_never_downgrades_to_no_rules() {
         .arg(dir.join("main.vyrn"))
         .output()
         .unwrap();
-    assert_eq!(ok.status.code(), Some(1), "the boundary holds when readable");
+    assert_eq!(
+        ok.status.code(),
+        Some(1),
+        "the boundary holds when readable"
+    );
 
     // One trailing comma, which is the whole attack.
     let broken = MANIFEST_WITH_AUDIENCE.replace("\"shared\"] }", "\"shared\"], }");
@@ -157,7 +161,10 @@ fn a_manifest_that_does_not_parse_never_downgrades_to_no_rules() {
             "`vyrn {cmd}` produced output from a program it should not have run"
         );
         let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("vyrn.json"), "names the file it could not read");
+        assert!(
+            err.contains("vyrn.json"),
+            "names the file it could not read"
+        );
     }
 }
 

@@ -160,6 +160,14 @@ impl P<'_> {
             self.expect(':')?;
             self.ws();
             let v = self.value()?;
+            // A name defined twice is a document with two meanings, and this
+            // one has two readers: `Json::get` answers with the FIRST pair, and
+            // the `$defs` walk below keeps the LAST. Whichever a caller asks,
+            // the other one is wrong. Refused where `std/von` and `std/jsonread`
+            // refuse it.
+            if out.iter().any(|(prev, _)| prev == &k) {
+                return Err(format!("`{k}` is defined twice at offset {}", self.i));
+            }
             out.push((k, v));
             self.ws();
             match self.peek() {
@@ -944,6 +952,19 @@ mod tests {
         // Depth is not length: a million siblings at one level are fine.
         let wide = format!("[{}]", vec!["1"; 100_000].join(","));
         assert!(parse_json(&wide).is_ok());
+    }
+
+    /// One name, one meaning. The two readers of an object disagreed about a
+    /// repeated key — `get` took the first pair and the `$defs` walk took the
+    /// last — so the document said different things depending on who asked.
+    #[test]
+    fn a_name_defined_twice_is_refused() {
+        let e = parse_json(r#"{"main":"a.vyrn","main":"b.vyrn"}"#).unwrap_err();
+        assert!(e.contains("main"), "names the key: {e}");
+        assert!(
+            parse_json(r#"{"a":{"x":1},"b":{"x":2}}"#).is_ok(),
+            "a repeat in a SIBLING object is a different name"
+        );
     }
 
     fn synth(doc: &str) -> Vec<TypeDecl> {

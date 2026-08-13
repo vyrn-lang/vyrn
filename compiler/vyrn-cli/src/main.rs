@@ -793,7 +793,7 @@ fn why_cmd(args: &[String]) -> ExitCode {
         .as_ref()
         .map(|m| PathBuf::from(&m.dir))
         .unwrap_or_else(|| dir.clone());
-    let roots = contract_roots(&app_dir);
+    let roots = contract_roots(&app_dir, manifest.as_ref());
     // The declared roles come from the manifest this command already read, not
     // from a second read of the same file: two readers of one file are two
     // policies whenever one of them fails.
@@ -1507,14 +1507,15 @@ fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
 /// The `.vyrn` modules role discovery reads: the manifest's entry points plus
 /// every `.vyrn` directly in the app directory. Generator imports live in an
 /// app's ROOT modules by construction, so this stays a shallow scan.
-fn contract_roots(app_dir: &Path) -> Vec<(String, String)> {
+fn contract_roots(app_dir: &Path, manifest: Option<&Manifest>) -> Vec<(String, String)> {
     let mut paths: Vec<PathBuf> = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(app_dir.join("vyrn.json")) {
-        if let Ok(doc) = vyrn_frontend::schema::parse_json(&text) {
-            for key in ["main", "server", "client"] {
-                if let Some(vyrn_frontend::schema::Json::Str(p)) = doc.get(key) {
-                    paths.push(app_dir.join(p));
-                }
+    // The manifest the caller already read. Re-reading and re-parsing it here is
+    // how a second reader silently answers "this project declares no entry
+    // points" to a file the first reader refused.
+    if let Some(m) = manifest {
+        for key in ["main", "server", "client"] {
+            if let Some(vyrn_frontend::schema::Json::Str(p)) = m.doc.get(key) {
+                paths.push(app_dir.join(p));
             }
         }
     }
@@ -2621,18 +2622,11 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
     }
 
     // Record the alias in vyrn.json (a small textual JSON rewrite through the
-    // frontend's parser + this serializer keeps key order stable).
+    // frontend's parser + this serializer keeps key order stable). The document
+    // is the one this command already read.
     let manifest_path = Path::new(&manifest.dir).join("vyrn.json");
-    let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|_| "{}".into());
-    let doc = match vyrn_frontend::schema::parse_json(&text) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: vyrn.json is not valid JSON: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
     use vyrn_frontend::schema::Json;
-    let mut fields = match doc {
+    let mut fields = match manifest.doc {
         Json::Obj(f) => f,
         _ => Vec::new(),
     };
@@ -3739,15 +3733,8 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         eprintln!("error: `vyrn dev` needs a vyrn.json with `server` and `client` keys");
         return ExitCode::FAILURE;
     };
-    let manifest_path = Path::new(&manifest.dir).join("vyrn.json");
-    let text = std::fs::read_to_string(&manifest_path).unwrap_or_default();
-    let doc = match vyrn_frontend::schema::parse_json(&text) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: vyrn.json is not valid JSON: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // The document this command already read, not a second read of it.
+    let doc = &manifest.doc;
     use vyrn_frontend::schema::Json;
     let get_str = |key: &str| -> Option<String> {
         match doc.get(key) {
