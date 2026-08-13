@@ -368,6 +368,165 @@ fn main() -> Int64 {
     );
 }
 
+/// A GENERATOR import is an import, and the rule decides it the same way.
+///
+/// A `.vyx` that lives under `server/` lends its module the server's audience
+/// (RFC-0072 M1 — as landed), and mounting it from the client root is the widest
+/// edge in the language: the generated module goes into the client bundle
+/// carrying whatever the page reached for. The edge from the caller to the
+/// generated module used to be checked by nothing at all, so `check` printed
+/// `ok` and the client build printed the secret.
+#[test]
+fn a_server_page_mounted_by_the_client_root_is_refused() {
+    let dir = scratch("genedge");
+    write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
+    write(
+        &dir,
+        "server/store.vyrn",
+        "export fn secret() -> String {\n    return \"TOP-SECRET\"\n}\n",
+    );
+    write(
+        &dir,
+        "server/pages/Leak.vyx",
+        "<template>\n  <main><p>{{ secret() }}</p></main>\n</template>\n\
+         <script>\nimport { secret } from \"../store\"\n</script>\n",
+    );
+    write(
+        &dir,
+        "client/boot.vyrn",
+        "import { vyxPage } from \"std/vyx\"\n\
+         import { page } from vyxPage(\"../server/pages/Leak.vyx\")\n\
+         import { toHtmlString } from \"std/html\"\n\
+         fn main() -> Int64 {\n    print(toHtmlString(page()))\n    return 0\n}\n",
+    );
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("client/boot.vyrn"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the client build must not compile a server-only page: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("TOP-SECRET"),
+        "the secret must never reach the output"
+    );
+    // The objection names both ends of the edge it is about.
+    assert!(err.contains("`client/boot.vyrn` is client-only"), "{err}");
+    assert!(
+        err.contains("`server/pages/Leak.vyx`, which is server-only"),
+        "{err}"
+    );
+
+    // …and the tool a developer would ask agrees with the checker: the client
+    // root reaches the page, through the generator call that mounts it.
+    let out = vyrn()
+        .arg("why")
+        .arg(dir.join("server/pages/Leak.vyx"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("audience: server-only"), "{text}");
+    assert!(
+        text.contains("client/boot.vyrn -> server/pages/Leak.vyx"),
+        "`why` must not deny an edge the checker enforces:\n{text}"
+    );
+}
+
+/// The other half of the same rule, which the edge check must not break: ONE
+/// universal page compiles to two modules that go to opposite sides of the wire
+/// (RFC-0072 M5), and each is legal from the root that mounts it — the SSR half
+/// reaching the server is what server-side rendering IS.
+#[test]
+fn both_halves_of_a_universal_page_mount_from_their_own_root() {
+    let dir = scratch("halves");
+    write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
+    write(
+        &dir,
+        "shared/wire.vyrn",
+        "export type Note = { n: Int64 }\n",
+    );
+    write(
+        &dir,
+        "server/api/notes.vyrn",
+        "import { Note } from \"../../shared/wire\"\n\
+         export fn one() -> Note {\n    return Note { n: 7 }\n}\n",
+    );
+    write(
+        &dir,
+        "app/routes/index.vyx",
+        "<script>\nimport { one } from \"../../server/api/notes\"\n\
+         import { Note } from \"../../shared/wire\"\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn data() -> Query<Note> {\n    return query(one)\n}\n</script>\n\n\
+         <template>\n<main><p>{{ data.n }}</p></main>\n</template>\n",
+    );
+    write(
+        &dir,
+        "server.vyrn",
+        "import { vyxPage } from \"std/vyx\"\nimport { Note } from \"./shared/wire\"\n\
+         import { page } from vyxPage(\"./app/routes/index.vyx\")\n\
+         import { toHtmlString } from \"std/html\"\n\
+         fn main() -> Int64 {\n    print(toHtmlString(page(Note { n: 7 })))\n    return 0\n}\n",
+    );
+    write(
+        &dir,
+        "client/boot.vyrn",
+        "import { vyxPageClient } from \"std/vyx\"\nimport { Note } from \"../shared/wire\"\n\
+         import { page } from vyxPageClient(\"../app/routes/index.vyx\")\n\
+         import { toHtmlString } from \"std/html\"\n\
+         export extern fn v() -> String {\n    return toHtmlString(page(Note { n: 7 }))\n}\n\
+         fn main() -> Int64 {\n    return 0\n}\n",
+    );
+    for root in ["server.vyrn", "client/boot.vyrn"] {
+        let out = vyrn().arg("check").arg(dir.join(root)).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{root} must still mount its own half: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// Audience is a property of a FILE. A second spelling of one path — a different
+/// case on Windows — used to lose the audience with no diagnostic, and a file
+/// with no audience is importable from anywhere.
+#[test]
+#[cfg(windows)]
+fn a_second_spelling_of_one_path_is_the_same_module() {
+    let dir = scratch("spelling");
+    write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
+    write(
+        &dir,
+        "server/store.vyrn",
+        "export fn secret() -> Int64 {\n    return 7\n}\n",
+    );
+    for (name, spelling) in [
+        ("as-written", "../server/store"),
+        ("as-typed", "../Server/store"),
+    ] {
+        write(
+            &dir,
+            &format!("client/{name}.vyrn"),
+            &format!("import {{ secret }} from \"{spelling}\"\nfn main() -> Int64 {{\n    return secret()\n}}\n"),
+        );
+        let out = vyrn()
+            .arg("check")
+            .arg(dir.join(format!("client/{name}.vyrn")))
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{name} was accepted: {err}");
+        assert!(
+            err.contains("`server/store.vyrn`, which is server-only"),
+            "{name} names the file it really imported:\n{err}"
+        );
+    }
+}
+
 #[test]
 fn why_prints_the_audience_the_deciding_segment_and_the_chains() {
     let dir = scratch("why");
