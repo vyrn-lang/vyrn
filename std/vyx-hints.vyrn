@@ -1,0 +1,797 @@
+/// std/vyx-hints — accessibility, security and performance rules for `.vyx`
+/// components (RFC-0100), in the spirit of `nuxt/hints`.
+///
+/// This library is ordinary Vyrn and holds no privilege. It reads a `.vyx` file
+/// with `std/vyx`'s exported `vyxParseTemplate`, decides what is worth saying
+/// with its own rules, and says it through `std/hints` — which filters by the
+/// project's configuration and by the author's waivers before handing the report
+/// to `std/diag`. Every one of those is a public import. A project that wants
+/// different rules writes `their-hints` beside this and changes one line:
+///
+/// ```vyrn
+/// import { vyxHints } from "std/vyx-hints"
+/// import * as _hints from vyxHints("./app/widgets")
+/// ```
+///
+/// The second import runs the checks. It binds a namespace nothing has to use;
+/// the diagnostics are the point. To configure, name a JSON file instead — the
+/// project manifest is the obvious one, since `vyrn.json` ignores keys it does
+/// not know:
+///
+/// ```vyrn
+/// import { vyxHintsConfigured } from "std/vyx-hints"
+/// import * as _hints from vyxHintsConfigured("./app/widgets", "./vyrn.json")
+/// ```
+///
+/// ```json
+/// { "hints": { "perf/img-size": "off", "a11y/img-alt": "error" } }
+/// ```
+///
+/// A generator may only read under the paths it was GIVEN, so the config is an
+/// argument rather than a file this library goes looking for. That is the same
+/// facility a third-party hint library gets, and it is why the manifest is not
+/// special here.
+///
+/// ## What is checked, and what is deliberately not
+///
+/// `docs/research/vyx-hints.md` ranked sixty-odd rules from `nuxt/hints`,
+/// `html-validate`, Lighthouse, axe-core and OWASP. The ones below are the ones
+/// a template's own text decides. A rule that needs a rendered page (which
+/// element was the LCP, how far the layout shifted), a rule that needs to know
+/// what the author meant (is this PNG a photo or a logo), and a rule that a
+/// component boundary can hide (heading level order) are not here, because a
+/// hint that fires when it is not sure is worse than no hint at all.
+///
+/// Two reports are errors rather than advice — an inline `on*` handler and a
+/// `javascript:` URL. Both are markup the template language already has a
+/// correct spelling for (`@click`), both defeat a content-security policy, and
+/// neither has an honest use. Everything else is a warning, and a project can
+/// move any of them in either direction.
+
+import { report, reportHere, Severity } from "std/diag"
+import { hint, noPolicy, policyOf, Policy } from "std/hints"
+import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
+import { contains, endsWith, slice, startsWith } from "std/strpred"
+import { toLower, trim } from "std/strings"
+
+/// The config key this library reads. A third-party library picks its own, so
+/// two hint libraries in one project configure independently. A function rather
+/// than a `let`, because module state is not comptime-pure and a generator runs
+/// at compile time.
+fn hintsKey() -> String {
+    return "hints"
+}
+
+/// `vyxHints(dir)` — check every `<Name>.vyx` under `dir` at this library's
+/// default severities. Emits `//@diag` reports and one trivial declaration, so
+/// the import that runs it may bind a name or a namespace.
+export gen fn vyxHints(dir: String) -> String {
+    let entries = match listDir(dir) {
+        Ok(ns) => ns,
+        Err(e) => [],
+    }
+    let mut out = ""
+    let mut checked = 0
+    for name in entries {
+        if name.endsWith(".vyx") {
+            let path = dir + "/" + name
+            let src = match readFile(path) {
+                Ok(v) => v,
+                Err(e) => "",
+            }
+            out = out + vhCheck(noPolicy(), src, path)
+            checked = checked + 1
+        }
+    }
+    return out + vhModule(checked)
+}
+
+/// `vyxHintsConfigured(dir, config)` — the same rules, under the `"hints"` object
+/// of the JSON document at `config`.
+///
+/// A config that cannot be read, does not parse, or names a level word nobody
+/// defined is an ERROR, and no file is checked. The alternative — carry on with
+/// the defaults — tells a project its policy is in force while it is not, which
+/// is the fault `find_manifest` was hardened against.
+export gen fn vyxHintsConfigured(dir: String, config: String) -> String {
+    let text = match readFile(config) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    if text == "" {
+        return reportHere(Error, "vyx-hints: cannot read the hints config `\{config}`")
+        + vhModule(0)
+    }
+    let pol = vhPolicy(text)
+    if pol.err != "" {
+        return reportHere(Error, "vyx-hints: `\{config}` is not a usable hints config — \{pol.err}")
+        + vhModule(0)
+    }
+    let entries = match listDir(dir) {
+        Ok(ns) => ns,
+        Err(e) => [],
+    }
+    let mut out = ""
+    let mut checked = 0
+    for name in entries {
+        if name.endsWith(".vyx") {
+            let path = dir + "/" + name
+            let src = match readFile(path) {
+                Ok(v) => v,
+                Err(e) => "",
+            }
+            out = out + vhCheck(pol.policy, src, path)
+            checked = checked + 1
+        }
+    }
+    return out + vhModule(checked)
+}
+
+/// A parsed policy, or the refusal that explains why there is none.
+type VhPolicy = { policy: Policy, err: String }
+
+fn vhPolicy(text: String) -> VhPolicy {
+    return match policyOf(text, hintsKey()) {
+        Ok(v) => VhPolicy { policy: v, err: "" },
+        Err(e) => VhPolicy { policy: noPolicy(), err: e.copy() },
+    }
+}
+
+/// The synthesized module. One declaration, so a selective import has something
+/// to bind and `vyrn emit-gen` shows the file count that was checked.
+fn vhModule(checked: Int64) -> String {
+    return "/// Generated by `std/vyx-hints` (RFC-0100).\n"
+    + "export fn vyxHintsChecked() -> Int64 { return \{checked.toString()} }\n"
+}
+
+/// Every report `src` (the text of the `.vyx` file at `file`) earns.
+///
+/// Exported so a rule set can be tested, and so a third-party library may reuse
+/// these rules under its own configuration rather than fork them.
+export gen fn vhCheck(p: Policy, src: String, file: String) -> String {
+    let t = vyxParseTemplate(src)
+    if t.err != "" {
+        // The template does not parse. The compile is already failing, with a
+        // better message than a lint has; adding advice about half a tree would
+        // bury it.
+        return ""
+    }
+    return vhNodes(p, src, file, t.nodes, false, false, false)
+}
+
+fn vhNodes(
+    p: Policy,
+    src: String,
+    file: String,
+    nodes: Array<VyxNode>,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+) -> String {
+    let mut out = ""
+    for n in nodes {
+        out = out + vhNode(p, src, file, n, inFor, inLabel, inForm)
+    }
+    return out
+}
+
+fn vhNode(
+    p: Policy,
+    src: String,
+    file: String,
+    n: VyxNode,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+) -> String {
+    return match n {
+        VNElem(tag, isComp, attrs, kids, line) =>
+            vhElem(p, src, file, tag, isComp, attrs, kids, line, inFor, inLabel, inForm),
+        // `vyxParseTemplate` does not group, so the two control-flow nodes cannot
+        // appear. Walked anyway: a rule that reads a grouped tree stays correct.
+        VNFor(v, it, key, body, line, col) => vhNodes(p, src, file, body, true, inLabel, inForm),
+        VNIf(conds, cl, cc, bodies, els, has) =>
+            vhBodies(p, src, file, bodies, els, has, inFor, inLabel, inForm),
+        VNText(s) => "",
+        VNInterp(x, line, col) => "",
+        VNRaw(x, line, col) => "",
+        VNChildren => "",
+    }
+}
+
+fn vhBodies(
+    p: Policy,
+    src: String,
+    file: String,
+    bodies: Array<VyxBody>,
+    els: VyxBody,
+    has: Bool,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+) -> String {
+    let mut out = ""
+    for b in bodies {
+        out = out + vhNodes(p, src, file, b.nodes, inFor, inLabel, inForm)
+    }
+    if has {
+        out = out + vhNodes(p, src, file, els.nodes, inFor, inLabel, inForm)
+    }
+    return out
+}
+
+// ===========================================================================
+// The rules. One element at a time; every report anchors at the attribute that
+// earned it, or at the element's own line when no attribute did.
+// ===========================================================================
+
+fn vhElem(
+    p: Policy,
+    src: String,
+    file: String,
+    tag: String,
+    isComp: Bool,
+    attrs: Array<VyxAttr>,
+    kids: Array<VyxNode>,
+    line: Int64,
+    inFor: Bool,
+    inLabel: Bool,
+    inForm: Bool,
+) -> String {
+    let kidsOut = vhNodes(
+        p,
+        src,
+        file,
+        kids,
+        inFor || vhHas(attrs, "v-for"),
+        inLabel || tag == "label",
+        inForm || tag == "form",
+    )
+    if isComp {
+        // A component call is a Vyrn function, not an HTML element: its tag name
+        // says nothing about the markup it renders, and the rules below would be
+        // guessing. The component's own file is checked on its own terms.
+        return kidsOut
+    }
+    let aLine = vhAnchorLine(attrs, line)
+    let aCol = vhAnchorCol(attrs)
+    let mut out = ""
+
+    // --- attribute-shaped rules, reported at the offending attribute ---------
+    for a in attrs {
+        // sec/inline-handler. Every HTML attribute beginning `on` is an event
+        // handler; the template already has `@click`, which dispatches through
+        // the export table and needs no `script-src 'unsafe-inline'`.
+        if a.evt == false && startsWith(a.name, "on") && vhIsLower(a.name) {
+            out = out
+            + hint(
+                p,
+                "sec/inline-handler",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is an inline script handler; write `@\{vhEventOf(a.name)}`, which dispatches through the export table",
+            )
+        }
+        // sec/unsafe-url. Static only: a literal `javascript:` URL is certain,
+        // and a dynamic one is a value this library cannot see.
+        if a.dyn == false && vhIsUrlAttr(a.name) && vhIsJavascriptUrl(a.value) {
+            out = out
+            + hint(
+                p,
+                "sec/unsafe-url",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is a `javascript:` URL; only http, https, mailto, tel and relative URLs are safe here",
+            )
+        }
+        // sec/raw-html. `v-html` writes unescaped markup — the one XSS sink the
+        // stack has. Waive it at the line where the value is proved safe; the
+        // count of waivers is the audit.
+        if a.name == "v-html" {
+            out = out
+            + hint(
+                p,
+                "sec/raw-html",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`v-html` writes unescaped markup from `\{a.value}`; the value must never come from user input",
+            )
+        }
+        // a11y/tabindex-positive. A positive `tabindex` reorders the whole page's
+        // focus sequence, not just this element's.
+        if a.name == "tabindex" && a.dyn == false && vhPositive(a.value) {
+            out = out
+            + hint(
+                p,
+                "a11y/tabindex-positive",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`tabindex=\"\{a.value}\"` reorders focus for the whole page; use `0`, or `-1` for a programmatic target",
+            )
+        }
+        // a11y/dup-id inside a `v-for`. Not a heuristic: the loop body renders
+        // once per row, so a STATIC id is duplicated by construction.
+        if a.name == "id" && a.dyn == false && a.value != "" && inFor {
+            out = out
+            + hint(
+                p,
+                "a11y/dup-id",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`id=\"\{a.value}\"` is inside a `v-for`, so every row renders the same id; write `:id` with the row key in it",
+            )
+        }
+        // sec/blank-target. `noopener` is implied by modern browsers; the live
+        // half of the rule is the referrer the new document is handed.
+        if a.name == "target" && a.dyn == false && a.value == "_blank" {
+            if contains(toLower(vhValue(attrs, "rel")), "noreferrer") == false {
+                out = out
+                + hint(
+                    p,
+                    "sec/blank-target",
+                    Warning,
+                    src,
+                    file,
+                    a.line,
+                    a.col,
+                    "`target=\"_blank\"` hands the new document this page's referrer; add `rel=\"noopener noreferrer\"`",
+                )
+            }
+        }
+    }
+
+    // --- element-shaped rules ------------------------------------------------
+    // a11y/img-alt. The highest-value rule in every source, and the information
+    // is already in hand. `alt=""` counts: an empty alt is how markup says
+    // "decorative", which is a decision, not an omission.
+    if vhNeedsAlt(tag, attrs) && vhHas(attrs, "alt") == false {
+        out = out
+        + hint(
+            p,
+            "a11y/img-alt",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<\{tag}>` has no `alt`; describe the image, or write `alt=\"\"` if it is decorative",
+        )
+    }
+    // perf/img-size. An image with no intrinsic size is a layout shift when it
+    // loads. Both attributes, or the browser cannot reserve the box.
+    if tag == "img" && (vhHas(attrs, "width") == false || vhHas(attrs, "height") == false) {
+        out = out
+        + hint(
+            p,
+            "perf/img-size",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<img>` has no `width` and `height`; the box cannot be reserved, so the page shifts when it loads",
+        )
+    }
+    // a11y/click-target. axe finds this at runtime; the template knows the tag
+    // and the handler at compile time. A `role` or a `tabindex` is the author
+    // saying they have handled it.
+    if vhHasEvent(attrs, "click") && vhInteractive(tag) == false {
+        if vhHas(attrs, "role") == false && vhHas(attrs, "tabindex") == false {
+            out = out
+            + hint(
+                p,
+                "a11y/click-target",
+                Warning,
+                src,
+                file,
+                aLine,
+                aCol,
+                "`@click` on `<\{tag}>` is not reachable by keyboard; use `<button>`, or add `role` and `tabindex`",
+            )
+        }
+    }
+    // a11y/control-name. An empty control has no accessible name at all. Only
+    // fires when the children are empty or whitespace — any element, any
+    // interpolation, any `<slot/>` may be the name, so none of them fire.
+    if vhNamedByContent(tag) && vhHasContent(kids) == false {
+        if vhHasAny(attrs, "aria-label", "aria-labelledby", "title") == false {
+            out = out
+            + hint(
+                p,
+                "a11y/control-name",
+                Warning,
+                src,
+                file,
+                aLine,
+                aCol,
+                "`<\{tag}>` is empty, so it has no accessible name; give it text or an `aria-label`",
+            )
+        }
+    }
+    // a11y/input-label. Airtight, and that is why it is narrow: a control with
+    // NO `id` cannot be reached by any `<label for>` anywhere, so if it also has
+    // no `aria-label`, no `title` and no `<label>` ancestor, it has no name.
+    if vhIsNameable(tag, attrs) && inLabel == false {
+        if vhHasAny(attrs, "aria-label", "aria-labelledby", "title") == false
+            && vhHas(attrs, "id") == false
+        {
+            out = out
+            + hint(
+                p,
+                "a11y/input-label",
+                Warning,
+                src,
+                file,
+                aLine,
+                aCol,
+                "`<\{tag}>` has no accessible name and no `id` for a `<label for>` to reach; wrap it in a `<label>` or add `aria-label`",
+            )
+        }
+    }
+    // a11y/button-type. A `<button>` in a `<form>` submits it, so a button whose
+    // job is a `@click` handler runs the handler AND navigates. Narrow on
+    // purpose: outside a form the default is harmless, and a button with no
+    // handler probably is the submit button.
+    if tag == "button" && inForm && vhHas(attrs, "type") == false && vhAnyEvent(attrs) {
+        out = out
+        + hint(
+            p,
+            "a11y/button-type",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<button>` in a `<form>` submits it by default; write `type=\"button\"` next to the `@click`",
+        )
+    }
+    return out + kidsOut
+}
+
+// ===========================================================================
+// Predicates. Small, named, and each one the whole reason a rule is precise.
+// ===========================================================================
+
+/// The tags whose accessible name is an `alt`: `<img>`, `<area>` in an image
+/// map, and the button spelled as an image input.
+fn vhNeedsAlt(tag: String, attrs: Array<VyxAttr>) -> Bool {
+    if tag == "img" || tag == "area" {
+        return true
+    }
+    return tag == "input" && vhValue(attrs, "type") == "image"
+}
+
+/// Elements whose accessible name comes from their own content.
+fn vhNamedByContent(tag: String) -> Bool {
+    return tag == "button" || tag == "a" || tag == "h1" || tag == "h2" || tag == "h3"
+        || tag == "h4" || tag == "h5" || tag == "h6"
+}
+
+/// Form controls that carry their own name, minus the ones named some other way:
+/// a hidden field is not perceivable, and a `submit`/`reset`/`button` input is
+/// named by its `value`.
+fn vhIsNameable(tag: String, attrs: Array<VyxAttr>) -> Bool {
+    if tag == "select" || tag == "textarea" {
+        return true
+    }
+    if tag != "input" {
+        return false
+    }
+    let ty = vhValue(attrs, "type")
+    return ty != "hidden" && ty != "submit" && ty != "reset" && ty != "button" && ty != "image"
+}
+
+/// Elements a pointer AND a keyboard can both operate without help.
+fn vhInteractive(tag: String) -> Bool {
+    return tag == "button" || tag == "a" || tag == "input" || tag == "select"
+        || tag == "textarea" || tag == "summary" || tag == "details" || tag == "label"
+        || tag == "option"
+}
+
+/// Attributes whose value is a URL the browser may navigate to or fetch.
+fn vhIsUrlAttr(name: String) -> Bool {
+    return name == "href" || name == "src" || name == "action" || name == "formaction"
+        || name == "poster" || name == "srcdoc" || name == "xlink:href" || name == "data"
+        || name == "ping"
+}
+
+/// Whether a static URL value is a `javascript:` URL. Blanks and control bytes
+/// are stripped first, because `java\tscript:` is one to the browser.
+fn vhIsJavascriptUrl(value: String) -> Bool {
+    return startsWith(toLower(vhStripBlank(value)), "javascript:")
+}
+
+fn vhStripBlank(s: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    let n = s.byteLength
+    let mut start = 0
+    while i < n {
+        if s[i] <= ' ' {
+            if start < i {
+                out = out + vhSlice(s, start, i)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < n {
+        out = out + vhSlice(s, start, n)
+    }
+    return out
+}
+
+/// `s[from..to]`, where both bounds are ASCII byte positions this module walked
+/// to, so the slice cannot split a character.
+fn vhSlice(s: String, from: Int64, to: Int64) -> String {
+    return match slice(s, from, to) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// Whether every byte of an attribute name is a lowercase ASCII letter — the
+/// shape of an HTML event handler attribute, and not of `data-…`, `:bound` or a
+/// custom `x-thing`.
+fn vhIsLower(name: String) -> Bool {
+    let n = name.byteLength
+    if n < 3 {
+        return false
+    }
+    let mut i = 0
+    while i < n {
+        if name[i] < 'a' || name[i] > 'z' {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// `onclick` -> `click`, for the message that names the replacement.
+fn vhEventOf(name: String) -> String {
+    return vhSlice(name, 2, name.byteLength)
+}
+
+/// Whether a static attribute value is an integer above zero.
+fn vhPositive(value: String) -> Bool {
+    return match parse(trim(value)) {
+        Some(n) => n > 0,
+        None => false,
+    }
+}
+
+/// Whether `attrs` carries `name`, in any spelling — static, `:bound`, or a
+/// `v-` directive. An `:alt="…"` is an `alt`.
+fn vhHas(attrs: Array<VyxAttr>, name: String) -> Bool {
+    for a in attrs {
+        if a.evt == false && a.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhHasAny(attrs: Array<VyxAttr>, a1: String, a2: String, a3: String) -> Bool {
+    return vhHas(attrs, a1) || vhHas(attrs, a2) || vhHas(attrs, a3)
+}
+
+/// The static value of `name`, or `""` when it is absent or dynamic.
+fn vhValue(attrs: Array<VyxAttr>, name: String) -> String {
+    for a in attrs {
+        if a.evt == false && a.dyn == false && a.name == name {
+            return a.value.copy()
+        }
+    }
+    return ""
+}
+
+/// Whether `attrs` binds the `@name` event.
+fn vhHasEvent(attrs: Array<VyxAttr>, name: String) -> Bool {
+    for a in attrs {
+        if a.evt && a.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhAnyEvent(attrs: Array<VyxAttr>) -> Bool {
+    for a in attrs {
+        if a.evt {
+            return true
+        }
+    }
+    return false
+}
+
+/// Whether a child list can name its parent. Any node but whitespace text can:
+/// an interpolation, a nested element, a `<slot/>` — none of them are provably
+/// empty, so none of them fire a rule.
+fn vhHasContent(kids: Array<VyxNode>) -> Bool {
+    for k in kids {
+        if vhNodeHasContent(k) {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhNodeHasContent(n: VyxNode) -> Bool {
+    return match n {
+        VNText(s) => trim(s) != "",
+        VNInterp(x, line, col) => true,
+        VNRaw(x, line, col) => true,
+        VNChildren => true,
+        VNElem(tag, isComp, attrs, kids, line) => true,
+        VNIf(conds, cl, cc, bodies, els, has) => true,
+        VNFor(v, it, key, body, line, col) => true,
+    }
+}
+
+/// The line an element-shaped report anchors at: its first attribute's, or the
+/// element's own when it has none. A `VNElem` carries a line but no column, and
+/// the first attribute is both on the tag and precise.
+fn vhAnchorLine(attrs: Array<VyxAttr>, line: Int64) -> Int64 {
+    for a in attrs {
+        return a.line
+    }
+    return line
+}
+
+fn vhAnchorCol(attrs: Array<VyxAttr>) -> Int64 {
+    for a in attrs {
+        return a.col
+    }
+    return 1
+}
+
+// ===========================================================================
+// Tests — one fixture that fires each rule, and one near miss that must not.
+// The assertions are on the `//@diag` line: severity, anchor and message.
+// ===========================================================================
+
+/// A one-element template around `markup`, checked with no policy.
+fn checkOf(markup: String) -> String {
+    return vhCheck(noPolicy(), "<template>\n" + markup + "\n</template>\n", "T.vyx")
+}
+
+/// Whether the reports for `markup` mention `code`.
+fn fires(markup: String, code: String) -> Bool {
+    return contains(checkOf(markup), code)
+}
+
+test "img without alt fires; alt=\"\" and :alt do not" {
+    assert(fires("<img src=\"/a.png\" width=\"1\" height=\"1\"/>", "a11y/img-alt"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"1\" height=\"1\"/>", "a11y/img-alt") == false)
+    assert(fires("<img src=\"/a.png\" :alt=\"cap\" width=\"1\" height=\"1\"/>", "a11y/img-alt") == false)
+    assert(fires("<area shape=\"rect\"/>", "a11y/img-alt"))
+    assert(fires("<input type=\"image\" src=\"/go.png\"/>", "a11y/img-alt"))
+    assert(fires("<div>x</div>", "a11y/img-alt") == false)
+}
+
+test "an unsized image fires; a sized one does not" {
+    assert(fires("<img src=\"/a.png\" alt=\"\"/>", "perf/img-size"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"16\"/>", "perf/img-size"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"16\" height=\"16\"/>", "perf/img-size") == false)
+    assert(fires("<img src=\"/a.png\" alt=\"\" :width=\"w\" :height=\"h\"/>", "perf/img-size") == false)
+}
+
+test "a click handler on a non-interactive element fires unless it is made reachable" {
+    assert(fires("<div @click=\"go()\">x</div>", "a11y/click-target"))
+    assert(fires("<button @click=\"go()\">x</button>", "a11y/click-target") == false)
+    assert(fires("<a @click=\"go()\" href=\"/x\">x</a>", "a11y/click-target") == false)
+    assert(fires("<div @click=\"go()\" role=\"button\" tabindex=\"0\">x</div>", "a11y/click-target") == false)
+    assert(fires("<div>x</div>", "a11y/click-target") == false)
+}
+
+test "an inline on* handler is an error; @click and data- attributes are not" {
+    let out = checkOf("<div onclick=\"go()\">x</div>")
+    assert(contains(out, "//@diag error T.vyx:2:15 sec/inline-handler:"))
+    assert(contains(out, "write `@click`"))
+    assert(fires("<div @click=\"go()\" role=\"button\" tabindex=\"0\">x</div>", "sec/inline-handler") == false)
+    assert(fires("<div data-nav=\"prefetch\">x</div>", "sec/inline-handler") == false)
+    assert(fires("<ol start=\"2\"><li>x</li></ol>", "sec/inline-handler") == false)
+}
+
+test "a literal javascript: URL is an error; http, relative and dynamic are not" {
+    assert(contains(checkOf("<a href=\"javascript:go()\">x</a>"), "//@diag error T.vyx:2:10 sec/unsafe-url:"))
+    assert(fires("<a href=\"JavaScript:go()\">x</a>", "sec/unsafe-url"))
+    assert(fires("<a href=\"java\tscript:go()\">x</a>", "sec/unsafe-url"))
+    assert(fires("<a href=\"/p/1\">x</a>", "sec/unsafe-url") == false)
+    assert(fires("<a href=\"https://x.test/\">x</a>", "sec/unsafe-url") == false)
+    assert(fires("<a :href=\"url\">x</a>", "sec/unsafe-url") == false)
+    assert(fires("<p title=\"javascript: the language\">x</p>", "sec/unsafe-url") == false)
+}
+
+test "v-html fires and can be waived at the line that earns it" {
+    assert(fires("<div v-html=\"body\"></div>", "sec/raw-html"))
+    let waived = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div v-html=\"body\"></div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(waived, "sec/raw-html") == false)
+}
+
+test "a positive tabindex fires; 0 and -1 do not" {
+    assert(fires("<div tabindex=\"3\" @click=\"go()\">x</div>", "a11y/tabindex-positive"))
+    assert(fires("<div tabindex=\"0\" @click=\"go()\">x</div>", "a11y/tabindex-positive") == false)
+    assert(fires("<div tabindex=\"-1\">x</div>", "a11y/tabindex-positive") == false)
+}
+
+test "a static id inside a v-for fires; outside one, or bound, it does not" {
+    assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\"><b id=\"row\">x</b></li></ul>", "a11y/dup-id"))
+    assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\"><b :id=\"r.id\">x</b></li></ul>", "a11y/dup-id") == false)
+    assert(fires("<ul><li><b id=\"row\">x</b></li></ul>", "a11y/dup-id") == false)
+}
+
+test "target=_blank without noreferrer fires" {
+    assert(fires("<a href=\"/x\" target=\"_blank\">x</a>", "sec/blank-target"))
+    assert(fires("<a href=\"/x\" target=\"_blank\" rel=\"noopener noreferrer\">x</a>", "sec/blank-target") == false)
+    assert(fires("<a href=\"/x\" target=\"_self\">x</a>", "sec/blank-target") == false)
+}
+
+test "an empty control fires; content or an aria-label names it" {
+    assert(fires("<button @click=\"go()\"></button>", "a11y/control-name"))
+    assert(fires("<button @click=\"go()\">  </button>", "a11y/control-name"))
+    assert(fires("<button @click=\"go()\" aria-label=\"close\"></button>", "a11y/control-name") == false)
+    assert(fires("<button @click=\"go()\">ok</button>", "a11y/control-name") == false)
+    assert(fires("<button @click=\"go()\">{{ label }}</button>", "a11y/control-name") == false)
+    assert(fires("<button @click=\"go()\"><span>ok</span></button>", "a11y/control-name") == false)
+    assert(fires("<h2></h2>", "a11y/control-name"))
+}
+
+test "an unlabelled input fires; a wrapping label, an id or an aria-label names it" {
+    assert(fires("<input class=\"q\" @input=\"setQty()\"/>", "a11y/input-label"))
+    assert(fires("<label>Qty<input class=\"q\"/></label>", "a11y/input-label") == false)
+    assert(fires("<input class=\"q\" id=\"qty\"/>", "a11y/input-label") == false)
+    assert(fires("<input class=\"q\" aria-label=\"quantity\"/>", "a11y/input-label") == false)
+    assert(fires("<input type=\"hidden\" name=\"t\"/>", "a11y/input-label") == false)
+    assert(fires("<input type=\"submit\" value=\"go\"/>", "a11y/input-label") == false)
+    assert(fires("<textarea></textarea>", "a11y/input-label"))
+}
+
+test "a handler button inside a form fires unless it names its type" {
+    assert(fires("<form><button @click=\"add()\">add</button></form>", "a11y/button-type"))
+    assert(fires("<form><button type=\"button\" @click=\"add()\">add</button></form>", "a11y/button-type") == false)
+    assert(fires("<form><button>submit</button></form>", "a11y/button-type") == false)
+    assert(fires("<div><button @click=\"add()\">add</button></div>", "a11y/button-type") == false)
+}
+
+test "a component call is not an HTML element" {
+    // `<Row img="x"/>` is a function call. Nothing about its tag name says what
+    // markup it renders, so no element rule may read it.
+    assert(fires("<div><Img src=\"/a.png\"/></div>", "a11y/img-alt") == false)
+    assert(fires("<div><Row @click=\"go()\"/></div>", "a11y/click-target") == false)
+}
+
+test "configuration turns a rule off and moves another to error" {
+    let p = match policyOf("{\"hints\": {\"perf/img-size\": \"off\", \"a11y/img-alt\": \"error\"}}", "hints") {
+        Ok(v) => v,
+        Err(e) => noPolicy(),
+    }
+    let out = vhCheck(p, "<template>\n<img src=\"/a.png\"/>\n</template>\n", "T.vyx")
+    assert(contains(out, "perf/img-size") == false)
+    assert(contains(out, "//@diag error T.vyx:2:11 a11y/img-alt:"))
+}
+
+test "a template that does not parse earns no advice" {
+    assertEq(vhCheck(noPolicy(), "<template>\n<div><span>\n</template>\n", "T.vyx"), "")
+    assertEq(vhCheck(noPolicy(), "no template here\n", "T.vyx"), "")
+}
