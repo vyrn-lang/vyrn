@@ -68,13 +68,23 @@ impl std::fmt::Display for Audience {
     }
 }
 
+/// How a consumer turns a path into file IDENTITY — `std::fs::canonicalize`, in
+/// every consumer that has a filesystem. `None` for the path the OS cannot
+/// resolve (a remote key, an in-memory test module, a file that is not there).
+///
+/// A function pointer rather than a filesystem call in this module, because the
+/// frontend does not touch the disk: the CLI and the LSP each hand their map the
+/// same one (`vyrn_cli`'s `real_path`), so `check`, `why` and the editor decide
+/// the rule on one reading of what a file IS.
+pub type RealPath = fn(&str) -> Option<String>;
+
 /// A project's declared audience vocabulary, plus the directory it is rooted at.
 ///
 /// `base` is the manifest's directory: only paths UNDER it are subject to the
 /// rule. Without it a `std/` file living under some ancestor directory named
 /// `client/` would acquire an audience nobody declared, and the std library has
 /// no business having one.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct AudienceMap {
     pub server: Vec<String>,
     pub client: Vec<String>,
@@ -92,6 +102,54 @@ pub struct AudienceMap {
     /// Slash-separated project directory. Empty means "no base" — every path is
     /// subject to the rule, which is what the in-process tests want.
     pub base: String,
+    /// The consumer's file-identity function, or `None` when paths are compared
+    /// as written (the frontend's own tests, an in-memory resolver).
+    ///
+    /// Audience is a property of a FILE, and a path is only a name for one. Two
+    /// spellings of one file — a different case on Windows, a directory junction
+    /// — used to get two different audiences, and the file that lost its
+    /// audience was importable from anywhere. Every decision in this module goes
+    /// through [`AudienceMap::identity`] first, so the rule is stated on the file
+    /// rather than on the spelling that reached it.
+    pub realpath: Option<RealPath>,
+}
+
+/// Two maps are equal when they DECLARE the same thing. `realpath` is the
+/// consumer's own reading of the disk, not part of the declaration, and function
+/// pointers do not compare meaningfully anyway.
+impl PartialEq for AudienceMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.server == other.server
+            && self.client == other.client
+            && self.universal == other.universal
+            && self.entries == other.entries
+            && self.base == other.base
+    }
+}
+
+impl Eq for AudienceMap {}
+
+impl AudienceMap {
+    /// This map, deciding on file identity as `f` reports it: the project base
+    /// and every entry point are put into the same form the keys will be, or
+    /// nothing would match after the keys move.
+    pub fn with_realpath(mut self, f: RealPath) -> Self {
+        self.base = f(&self.base).unwrap_or(self.base);
+        for (path, _, _) in self.entries.iter_mut() {
+            *path = f(path).unwrap_or_else(|| path.clone());
+        }
+        self.realpath = Some(f);
+        self
+    }
+
+    /// `path` as file identity: what the filesystem calls it, or the path itself
+    /// when nothing on disk answers to it.
+    fn identity(&self, path: &str) -> String {
+        match self.realpath {
+            Some(f) => f(path).unwrap_or_else(|| path.to_string()),
+            None => path.to_string(),
+        }
+    }
 }
 
 /// What decided a module's audience.
@@ -194,6 +252,7 @@ pub fn from_manifest(doc: &Json, base: &str) -> Option<AudienceMap> {
         universal: list("universal"),
         entries,
         base,
+        realpath: None,
     })
 }
 
@@ -230,7 +289,7 @@ pub fn audience_of(key: &str, map: &AudienceMap) -> Verdict {
 /// The audience `path` declares for itself: the manifest key naming it as an
 /// entry point, else the nearest audience segment on its path.
 fn declared_audience_of(path: &str, map: &AudienceMap) -> Verdict {
-    let path = source_file(path);
+    let path = map.identity(&source_file(path));
     // An entry point's audience is DECLARED (by the key that names it), so it
     // beats anything read off the path. There is nothing above a composition
     // root for a segment to be nearer than.
@@ -290,20 +349,31 @@ pub fn source_file(key: &str) -> String {
     let importer = crate::loader::generated_importer(key)
         .unwrap_or(key)
         .replace('\\', "/");
-    let Some(arg) = first_generator_arg(key) else {
-        return importer;
-    };
-    // A directory argument names no file: `./app/routes` has no extension on its
-    // last component, so it is not the module's origin.
-    let last = arg.rsplit('/').next().unwrap_or(&arg);
-    if !last.contains('.') || arg.starts_with("std/") {
-        return importer;
+    match first_generator_arg(key).and_then(|arg| generator_input(&importer, &arg)) {
+        Some(input) => input,
+        None => importer,
     }
-    let dir = match importer.rfind('/') {
-        Some(i) => importer[..i].to_string(),
-        None => return importer,
-    };
-    join_normalized(&dir, &arg)
+}
+
+/// The single input FILE a generator call names, resolved against `importer` —
+/// the module that wrote the call. `None` when the argument names no one file:
+/// a DIRECTORY (`pages("./app/routes")`, no extension on its last component),
+/// a `std/` specifier, or an importer with no directory to resolve against.
+///
+/// Two consumers ask this, and they must not answer it differently: the audience
+/// of a generated module ([`source_file`]) and the import edge `vyrn why` draws
+/// from a generator call. `why` used to resolve the argument as an IMPORT
+/// SPECIFIER, which appends `.vyrn` to anything else — so a `.vyx` mount became
+/// `Leak.vyx.vyrn`, matched no file, and `why` reported that nothing reached a
+/// page the client root demonstrably mounts.
+pub fn generator_input(importer: &str, arg: &str) -> Option<String> {
+    let last = arg.rsplit('/').next().unwrap_or(arg);
+    if !last.contains('.') || arg.starts_with("std/") {
+        return None;
+    }
+    let importer = importer.replace('\\', "/");
+    let dir = importer.rfind('/').map(|i| importer[..i].to_string())?;
+    Some(join_normalized(&dir, arg))
 }
 
 /// The first string argument of the INNERMOST generator call in a banner key
@@ -380,7 +450,7 @@ fn relative_to(path: &str, base: &str) -> Option<String> {
 }
 
 /// Whether a slash path is absolute: rooted, or drive-qualified on Windows.
-fn is_absolute(path: &str) -> bool {
+pub(crate) fn is_absolute(path: &str) -> bool {
     path.starts_with('/') || {
         let b = path.as_bytes();
         b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic()
@@ -417,7 +487,7 @@ pub fn remedy(imported: Audience) -> &'static str {
 /// an absolute one from a temp directory is noise around the two names that
 /// matter.
 pub fn display_path(path: &str, map: &AudienceMap) -> String {
-    let path = source_file(path);
+    let path = map.identity(&source_file(path));
     relative_to(&path, &map.base).unwrap_or(path)
 }
 
@@ -432,6 +502,7 @@ mod tests {
             universal: vec!["app".into(), "shared".into()],
             entries: Vec::new(),
             base: "/p".into(),
+            realpath: None,
         }
     }
 
@@ -510,6 +581,58 @@ mod tests {
             audience_of("/elsewhere/server/x.vyrn", &m).audience,
             Audience::Universal
         );
+    }
+
+    /// Audience is a property of a FILE. Two spellings of one file must not get
+    /// two audiences — the second spelling used to lose it silently, and a file
+    /// with no audience is importable from anywhere.
+    #[test]
+    fn a_second_spelling_of_one_file_has_one_audience() {
+        // Stands in for the filesystem: `Server` and the junction `vendor` are
+        // two names the OS resolves to the same real directory.
+        fn realpath(p: &str) -> Option<String> {
+            Some(
+                p.replace("/Server/", "/server/")
+                    .replace("/vendor/", "/server/"),
+            )
+        }
+        let m = map().with_realpath(realpath);
+        for spelling in [
+            "/p/server/store.vyrn",
+            "/p/Server/store.vyrn",
+            "/p/vendor/store.vyrn",
+        ] {
+            assert_eq!(
+                audience_of(spelling, &m).audience,
+                Audience::Server,
+                "{spelling}"
+            );
+            // And every consumer names the one file, not the spelling it arrived as.
+            assert_eq!(display_path(spelling, &m), "server/store.vyrn");
+        }
+    }
+
+    /// The audience of a generated module and the import edge `vyrn why` draws
+    /// are the same question about the same argument, so they are one function.
+    #[test]
+    fn a_generator_argument_names_one_input_file_or_a_directory() {
+        // One file: `.vyx` mounted per page.
+        assert_eq!(
+            generator_input("/p/client/boot.vyrn", "../server/pages/Leak.vyx").as_deref(),
+            Some("/p/server/pages/Leak.vyx")
+        );
+        // A directory has no single origin; its module inherits its caller.
+        assert_eq!(
+            generator_input("/p/client/boot.vyrn", "../app/widgets"),
+            None
+        );
+        assert_eq!(generator_input("/p/main.vyrn", "std/rpc"), None);
+        // …and that is exactly what the generated module's audience reads.
+        let m = map();
+        let banner = "generated by vyxPage(\"../server/pages/Leak.vyx\") at /p/client/boot.vyrn";
+        assert_eq!(audience_of(banner, &m).audience, Audience::Server);
+        let glue = "generated by components(\"../app/widgets\") at /p/client/boot.vyrn";
+        assert_eq!(audience_of(glue, &m).audience, Audience::Client);
     }
 
     #[test]

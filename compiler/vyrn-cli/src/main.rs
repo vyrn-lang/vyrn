@@ -591,6 +591,24 @@ struct Manifest {
     native_target: Option<String>,
 }
 
+/// What the filesystem calls `path`: the one canonicalization the whole
+/// toolchain decides file identity by (RFC-0072).
+///
+/// `vyrn why` canonicalized and `vyrn check` did not, so one file could be
+/// server-only to the tool a developer asks and universal to the checker that
+/// gates the build — a second spelling (a different case on Windows, a directory
+/// junction) walked a server module into a client bundle with no diagnostic.
+/// `None` for a path the OS cannot resolve: a remote key, a module that exists
+/// only in memory, a file that is not there.
+fn real_path(path: &str) -> Option<String> {
+    let p = Path::new(path).canonicalize().ok()?;
+    Some(
+        p.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/"),
+    )
+}
+
 /// Find `vyrn.json` by walking up from `start` (a directory).
 ///
 /// Three outcomes, and they are three: `Ok(None)` is "this project declares
@@ -628,7 +646,17 @@ fn find_manifest(start: &Path) -> Result<Option<Manifest>, String> {
                 _ => None,
             };
             let slash_dir = dir.to_string_lossy().replace('\\', "/");
-            let audience = vyrn_frontend::audience::from_manifest(&doc, &slash_dir);
+            // The audience map decides on file identity, so its base is the
+            // project directory as the FILESYSTEM names it — an empty walk-up
+            // result is the working directory, not the root of everything.
+            let audience_base = real_path(if slash_dir.is_empty() {
+                "."
+            } else {
+                &slash_dir
+            })
+            .unwrap_or_else(|| slash_dir.clone());
+            let audience = vyrn_frontend::audience::from_manifest(&doc, &audience_base)
+                .map(|m| m.with_realpath(real_path));
             return Ok(Some(Manifest {
                 dir: slash_dir,
                 doc,
@@ -1313,15 +1341,9 @@ fn why_memory(file: &str) -> ExitCode {
 /// It REPORTS; it does not gate (the RFC-0071 M4 convention). Exit 0 whenever it
 /// could answer, 2 only when the file cannot be read.
 fn why_audience(file: &str) -> ExitCode {
-    let path = match Path::new(file).canonicalize() {
-        Ok(p) => p
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/"),
-        Err(e) => {
-            eprintln!("error: cannot read {file}: {e}");
-            return ExitCode::from(2);
-        }
+    let Some(path) = real_path(file) else {
+        eprintln!("error: cannot read {file}");
+        return ExitCode::from(2);
     };
     let Some(dir) = Path::new(&path).parent().map(|p| p.to_path_buf()) else {
         eprintln!("error: {file} has no directory");
@@ -1378,9 +1400,14 @@ fn rel_to(path: &str, base: &str) -> String {
 ///
 /// A GENERATOR import contributes edges too: `pages("./routes")` is how a page
 /// reaches the bundle, and a chain that stopped at the generator call would miss
-/// the only edge anybody is actually asking about. The generator's first string
-/// argument is resolved the same way an import path is, then read as a directory
-/// when it is one.
+/// the only edge anybody is actually asking about. A call naming ONE FILE
+/// (`vyxPage("../server/pages/Leak.vyx")`) is resolved by
+/// `audience::generator_input` — the same function that decides that module's
+/// audience, so the report and the checker cannot disagree about which file a
+/// generator was pointed at. Resolving it as an import specifier instead used to
+/// append `.vyrn`, so a `.vyx` mount matched nothing and `why` answered "nothing
+/// in this project reaches it" about a file the client root demonstrably mounts.
+/// A call naming a DIRECTORY still reaches every source under it.
 fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
     let files = project_sources(app_dir);
     let mut out: Vec<(String, String)> = Vec::new();
@@ -1400,7 +1427,13 @@ fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
             let spec = match &imp.source {
                 ImportSource::Path(s) => s.clone(),
                 ImportSource::Generator { args, .. } => match args.first() {
-                    Some(Expr::Str(s)) => s.clone(),
+                    Some(Expr::Str(s)) => {
+                        if let Some(input) = vyrn_frontend::audience::generator_input(path, s) {
+                            out.push((path.clone(), input));
+                            continue;
+                        }
+                        s.clone()
+                    }
                     _ => continue,
                 },
             };

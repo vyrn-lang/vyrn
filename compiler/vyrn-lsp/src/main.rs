@@ -176,6 +176,17 @@ fn std_root() -> Option<String> {
     None
 }
 
+/// What the filesystem calls `path` — the CLI's `real_path`, for the same
+/// reason: audience is a property of a file, not of the spelling that reached it.
+fn real_path(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path).canonicalize().ok()?;
+    Some(
+        p.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/"),
+    )
+}
+
 /// Find `vyrn.json` by walking up from `start`; returns the manifest's
 /// directory (slash-separated) and its `dependencies` import map. A compact
 /// duplicate of `vyrn`'s reader (the CLI is a binary crate, not linkable).
@@ -205,7 +216,11 @@ fn find_manifest(start: &std::path::Path) -> Result<Option<Manifest>, String> {
                 _ => Vec::new(),
             };
             let slash = dir.to_string_lossy().replace('\\', "/");
-            let audience = vyrn_frontend::audience::from_manifest(&doc, &slash);
+            // The same file identity the CLI decides by: the editor must reject
+            // exactly the imports the build rejects, including the second
+            // spelling of a path (case, a junction) that the string would miss.
+            let audience = vyrn_frontend::audience::from_manifest(&doc, &slash)
+                .map(|m| m.with_realpath(real_path));
             return Ok(Some(Manifest {
                 dir: slash,
                 deps,
