@@ -60,6 +60,17 @@ fn gap(what: &str, line: usize) -> String {
     format!("direct backend: no lowering for {what} at line {line}")
 }
 
+/// A size the emitter can name but cannot express. Sibling of [`gap`]: that one
+/// is a shape with no lowering, this one is a shape whose lowering does not fit
+/// in the `u32` every offset, `malloc` argument and copy length here is.
+fn too_big(what: &str, bytes: u64, line: usize) -> String {
+    format!(
+        "direct backend: {what} needs {bytes} bytes at line {line}, past the {} one value may \
+         occupy; a fixed array this big belongs on the heap as `Array<T>`",
+        i32::MAX
+    )
+}
+
 /// The `wasi_snapshot_preview1` calls a directly-emitted module makes.
 ///
 /// **All of them are DECLARED, and then swept.** An import has to be declared
@@ -1099,7 +1110,8 @@ impl Cx {
                 Repr::Scalar(ValType::V128)
             }
             _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(
-                layout::of_ll(&ll).map_err(|e| format!("direct backend: layout of {ll}: {e}"))?,
+                layout::of_ll(&ll)
+                    .map_err(|e| format!("direct backend: layout of {ll} at line {line}: {e}"))?,
             ),
             _ => match wasm::abi(&ll) {
                 Some(v) => Repr::Scalar(v),
@@ -8287,6 +8299,29 @@ impl Fn_<'_> {
         Ok(self.layout_of(elem, line)?.size)
     }
 
+    /// `n` elements of `elem`, in bytes — every allocation size and every
+    /// `memory.copy` length in this file that is a count times a stride.
+    ///
+    /// Checked against `i32::MAX` rather than `u32::MAX`, and the difference is
+    /// the whole defect. Every consumer of this number is an `i32`: a
+    /// `memory.copy` length, a frame offset, a `malloc` argument. A product in
+    /// `[2^31, 2^32)` does not wrap — it goes NEGATIVE, and the consumers then
+    /// disagree about what it means. `malloc` is handed `bytes.max(1)`, so it
+    /// returns a one-byte block; `memory.copy` reads the same bits as an
+    /// unsigned length and copies two billion bytes over the heap behind it.
+    /// That is corruption rather than a trap, which is the worst answer
+    /// available. Nothing is lost by the tighter bound: a frame this big is
+    /// already past `FRAME_LIMIT` by five orders of magnitude.
+    ///
+    /// [`layout::of_ll`] bounds ONE shape; this bounds a count times one.
+    fn extent(&self, elem: &Type, n: usize, line: usize) -> Result<u32, String> {
+        let bytes = self.stride(elem, line)? as u64 * n as u64;
+        if bytes > i32::MAX as u64 {
+            return Err(too_big(&format!("{n} × `{elem}`"), bytes, line));
+        }
+        Ok(bytes as u32)
+    }
+
     // ---- RFC-0075 M2b: `Stream<T>` as a producer ---------------------------
 
     /// The six-word header, whatever the element type — the layout is a function
@@ -9150,7 +9185,7 @@ impl Fn_<'_> {
         };
         let stride = self.stride(&elem, line)?;
         let el = self.layout_of(&elem, line)?;
-        let off = b.alloc(stride * elems.len() as u32, el.align);
+        let off = b.alloc(self.extent(&elem, elems.len(), line)?, el.align);
         let r = self.cx.repr(&elem, line)?;
         for (i, e) in elems.iter().enumerate() {
             b.slot(off + stride * i as u32);
@@ -9189,7 +9224,7 @@ impl Fn_<'_> {
     ) -> Result<(), String> {
         let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(src));
-        let bytes = (self.stride(from, line)? * n as u32) as i32;
+        let bytes = self.extent(from, n, line)? as i32;
         let buf = b.local(ValType::I32);
         b.ins(&Instruction::I64Const(bytes.max(1) as i64));
         b.ins(&Instruction::Call(self.cx.rt.malloc));
@@ -10163,6 +10198,14 @@ impl Fn_<'_> {
         Ok(match self.cx.repr(t, 0)? {
             Repr::Scalar(ValType::I64) => Word::Direct,
             Repr::Scalar(v @ (ValType::F64 | ValType::F32)) => Word::Float(v),
+            // A vector is 128 bits — the two payload words exactly, but as a
+            // wasm VALUE and not an address, so `Inline2`'s `memory.copy` has
+            // nothing to copy from. It boxes instead, which is what every other
+            // payload wider than a word does. `Ext` was the arm it used to fall
+            // into, and `i64.extend_i32_u` on a `v128` is a module wasmtime
+            // refuses to load rather than a diagnostic — the same shape of bug
+            // `Word::Float` was added for.
+            Repr::Scalar(ValType::V128) => Word::Boxed,
             Repr::Scalar(v) => Word::Ext(v),
             Repr::Agg(_) if self.cx.ll(t) == "{ i64, i64 }" => Word::Inline2,
             _ => Word::Boxed,
@@ -11576,9 +11619,7 @@ impl Fn_<'_> {
         if len > 0 {
             b.slot(off + l.fields[3]);
             b.ins(&Instruction::LocalGet(src));
-            b.ins(&Instruction::I32Const(
-                (self.stride(inner, line)? * len as u32) as i32,
-            ));
+            b.ins(&Instruction::I32Const(self.extent(inner, len, line)? as i32));
             b.ins(&Instruction::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
@@ -12108,6 +12149,17 @@ fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
         "i16" if signed => Instruction::I32Load16S(m(1)),
         "i16" => Instruction::I32Load16U(m(1)),
         "i8" if signed => Instruction::I32Load8S(m(0)),
+        // RFC-0083's four spellings, one `v128` — the same collapse `repr`
+        // makes, for the same reason: wasm has one vector type and the lane
+        // interpretation belongs to the instruction, not to the access. Before
+        // this arm they fell through to `i32.load8_u` and a vector in a record
+        // was silently truncated to its first BYTE.
+        //
+        // `align: 0` (a log2 exponent, so one byte) understates on purpose,
+        // exactly as the `@f32x4Load` builtin does: the frame is 8-aligned, so
+        // nothing guarantees the 16 a `v128.load` would like, and an overstated
+        // hint is a validation-legal lie the engine may act on.
+        "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => Instruction::V128Load(m(0)),
         _ => Instruction::I32Load8U(m(0)),
     }
 }
@@ -12124,6 +12176,8 @@ fn store_of(ll: &str) -> Instruction<'static> {
         "float" => Instruction::F32Store(m(2)),
         "i32" | "ptr" => Instruction::I32Store(m(2)),
         "i16" => Instruction::I32Store16(m(1)),
+        // See [`load_of`] for the collapse and for the understated hint.
+        "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => Instruction::V128Store(m(0)),
         _ => Instruction::I32Store8(m(0)),
     }
 }

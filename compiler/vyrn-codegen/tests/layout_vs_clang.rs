@@ -50,6 +50,20 @@ fn c_decl(ll: &str, decl: &str) -> String {
         let (n, elem) = inner.split_once(" x ").expect("array shape is `[N x T]`");
         return c_decl(elem, &format!("{decl}[{}]", n.trim()));
     }
+    // A vector (RFC-0083). C has no vector type, but clang has the extension the
+    // whole target is built with, and `vector_size` is what `<N x T>` MEANS to
+    // LLVM — the size in bytes, and the alignment it derives from it. Asking
+    // clang for `_Alignof` of this is the only reason the 16 in the engine is a
+    // measurement rather than a guess.
+    if let Some(inner) = t.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+        let (n, elem) = inner.split_once(" x ").expect("vector shape is `<N x T>`");
+        let lanes: usize = n.trim().parse().expect("a lane count");
+        let bytes = lanes * lane_bytes(elem.trim());
+        return format!(
+            "{} __attribute__((vector_size({bytes})))",
+            c_decl(elem, decl)
+        );
+    }
     let base = match t {
         // wasm32 is ILP32: `void*` is the 4 bytes `ptr` is.
         "ptr" => "void*",
@@ -68,13 +82,25 @@ fn c_decl(ll: &str, decl: &str) -> String {
     format!("{base} {decl}")
 }
 
-/// Split a struct body on top-level commas (nested `{}` / `[]` do not count).
+/// A vector lane's width in bytes, which `vector_size` wants and the LLVM
+/// spelling states. Written out rather than taken from the engine so that the C
+/// side is not derived from the answer under test.
+fn lane_bytes(ll: &str) -> usize {
+    match ll {
+        "float" | "i32" => 4,
+        "double" | "i64" => 8,
+        other => panic!("no vector lane width for {other:?}"),
+    }
+}
+
+/// Split a struct body on top-level commas (nested `{}` / `[]` / `<>` do not
+/// count).
 fn split_members(body: &str) -> Vec<String> {
     let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0usize);
     for (i, c) in body.char_indices() {
         match c {
-            '{' | '[' => depth += 1,
-            '}' | ']' => depth -= 1,
+            '{' | '[' | '<' => depth += 1,
+            '}' | ']' | '>' => depth -= 1,
             ',' if depth == 0 => {
                 out.push(body[start..i].to_string());
                 start = i + 1;
@@ -253,6 +279,15 @@ fn c_transcription_is_declarator_shaped() {
         "struct { signed char f0; long long f1; } x"
     );
     assert_eq!(c_decl("[2 x [3 x i8]]", "x"), "signed char x[2][3]");
+    assert_eq!(
+        c_decl("<4 x float>", "x"),
+        "float x __attribute__((vector_size(16)))"
+    );
+    assert_eq!(
+        c_decl("{ i8, <2 x i64> }", "x"),
+        "struct { signed char f0; long long f1 __attribute__((vector_size(16))); } x"
+    );
     assert_eq!(split_members("i8, { i8, i64 }, i32").len(), 3);
+    assert_eq!(split_members("i8, <4 x float>").len(), 2);
     assert_eq!(split_members("  ").len(), 0);
 }
