@@ -917,6 +917,13 @@ pub const MONO_LIMIT_NEEDLE: &str = "past the instantiation limit";
 /// sentence pins the sentence, not the limit.
 pub const FRAME_LIMIT_NEEDLE: &str = "past the frame limit";
 
+/// The phrase every statics-size refusal contains, for the reason the two above
+/// exist. This one was an `assert!` in [`wasm::Module::finish`] — a limit stated
+/// as a Rust panic, in a function whose caller already returns `Result`, so a
+/// program with more literals than the module can hold killed
+/// `vyrn build --target wasm` with a backtrace and no source at all.
+pub const STATICS_LIMIT_NEEDLE: &str = "past the statics limit";
+
 /// Refuse an instantiation whose type arguments pass [`MONO_DEPTH_LIMIT`] or
 /// [`MONO_SIZE_LIMIT`].
 ///
@@ -2514,6 +2521,34 @@ impl<'a> Gen<'a> {
 
     fn emit(&mut self, line: String) {
         self.body.push(format!("  {line}"));
+    }
+
+    /// Everything an emission writes, so a failed one can be taken back.
+    ///
+    /// The drop sites in `emit_drop` swallow their errors on purpose — a drop
+    /// this cannot emit is a leak, never a wrong free — but that is an argument
+    /// about the DROP, not about the instructions the failed attempt already
+    /// wrote. `gen_call` and `deep_release` write into `body` and `allocas` as
+    /// they go and can bail at any nested expression, and what they left behind
+    /// went out as half a call: invalid IR, so the reader got a clang parse error
+    /// about a temporary nobody defined instead of a Vyrn diagnostic about the
+    /// cause. The block cursor comes too, because a bail after `emit_label` would
+    /// otherwise leave `cur_block` naming a label the truncation removed.
+    fn mark(&self) -> (usize, usize, String, bool) {
+        (
+            self.body.len(),
+            self.allocas.len(),
+            self.cur_block.clone(),
+            self.terminated,
+        )
+    }
+
+    /// Undo everything emitted since [`Gen::mark`].
+    fn rewind(&mut self, (body, allocas, block, terminated): (usize, usize, String, bool)) {
+        self.body.truncate(body);
+        self.allocas.truncate(allocas);
+        self.cur_block = block;
+        self.terminated = terminated;
     }
 
     /// Emit a terminator and mark the current block finished.
@@ -4297,8 +4332,13 @@ impl<'a> Gen<'a> {
                 // binding nothing took from, which is nearly all of them.
                 self.rel_holes = self.hole_slots.get(slot).cloned().unwrap_or_default();
                 // `emit_drop` is infallible by signature and this walk is not:
-                // a type it cannot name is a leak, never a wrong free.
-                let _ = self.deep_release(&v, &ty);
+                // a type it cannot name is a leak, never a wrong free. The
+                // instructions a failed walk already wrote are neither, so they
+                // go back (see `Gen::mark`).
+                let mark = self.mark();
+                if self.deep_release(&v, &ty).is_err() {
+                    self.rewind(mark);
+                }
                 self.rel_holes.clear();
             }
             // RFC-0086 M1: the type declared `impl Owned`, so its own `release`
@@ -4327,12 +4367,18 @@ impl<'a> Gen<'a> {
                             name: REL_RECV.to_string(),
                             line: 0,
                         }];
-                        let _ = self.gen_call(&f, &recv);
+                        let mark = self.mark();
+                        if self.gen_call(&f, &recv).is_err() {
+                            self.rewind(mark);
+                        }
                         self.scope.pop();
                         let ll = self.llt(&ty);
                         let v = self.fresh_tmp();
+                        let mark = self.mark();
                         self.emit(format!("{v} = load {ll}, ptr {slot}"));
-                        let _ = self.free_declared_boxes(&v, &ty);
+                        if self.free_declared_boxes(&v, &ty).is_err() {
+                            self.rewind(mark);
+                        }
                     }
                     return;
                 }
@@ -4349,8 +4395,12 @@ impl<'a> Gen<'a> {
                 // RFC-0096: the payload boxes are the enum's own storage, and
                 // the declaration cannot reach them. Errors swallowed for the
                 // reason above: a drop this cannot emit is a leak, never a
-                // wrong free.
-                let _ = self.free_declared_boxes(&v, &pty);
+                // wrong free — and taken back, for the reason `Deep` takes them
+                // back.
+                let mark = self.mark();
+                if self.free_declared_boxes(&v, &pty).is_err() {
+                    self.rewind(mark);
+                }
             }
         }
     }
@@ -11543,7 +11593,14 @@ fn append_candidates(body: &Block) -> std::collections::HashSet<String> {
 /// the name is not the global. Without that filter one `let out` among the
 /// hundreds of linked `std/` functions disqualifies a module-state `out`, and the
 /// first measurement of this pass hit exactly that.
-pub(crate) fn global_append_candidates(program: &Program) -> std::collections::HashSet<String> {
+/// The result is a `BTreeSet` and not a `HashSet` because one caller ITERATES
+/// it: the direct backend reserves an ownership word per accumulator, and a
+/// reservation is an address baked into every `i32.const` that reads or writes
+/// it — and it shifts every later reservation, so the whole static map moves.
+/// `RandomState` is seeded per process, so two accumulators were a coin flip and
+/// three built six different modules from one source. Sorted here rather than at
+/// that loop, because the next caller to iterate it would have to know.
+pub(crate) fn global_append_candidates(program: &Program) -> std::collections::BTreeSet<String> {
     let mut targets = std::collections::HashSet::new();
     let mut banned = std::collections::HashSet::new();
     let mut one = |body: &Block, params: &[Param]| {
@@ -11574,7 +11631,7 @@ pub(crate) fn global_append_candidates(program: &Program) -> std::collections::H
     }
     targets.retain(|n| !banned.contains(n));
     targets.retain(|n| program.globals.iter().any(|g| &g.name == n));
-    targets
+    targets.into_iter().collect()
 }
 
 /// Every name a block binds anywhere inside it — `let`s, loop variables, pattern

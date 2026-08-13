@@ -429,6 +429,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // reason the local's word sits in the frame: the helper writes it back, and
     // wasm has no way to pass anything by reference. Reserved zeroed, and the
     // initializer sets it to what the global's own initializer made true.
+    //
+    // This loop is why `global_append_candidates` gives back an ORDERED set: a
+    // reservation is an address, and it moves every reservation after it.
     let gaccs: Vec<String> = crate::global_append_candidates(program)
         .into_iter()
         .filter(|n| {
@@ -607,7 +610,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // This is where that is known.
     m.sweep();
     export_returns(&mut m, &user);
-    Ok(m.finish())
+    m.finish()
 }
 
 /// The `vyrn:exports` custom section (RFC-0012): every `export extern fn` whose
