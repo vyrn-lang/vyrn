@@ -45,7 +45,7 @@ self.onmessage = async (e) => {
     self.postMessage({
       ok: false,
       error: stack
-        ? "This program recurses deeper than the browser's own stack allows — measured at about 460 nested calls in this tab, against the interpreter's limit of 1,000. The ceiling is the engine's, not the language's: `vyrn run` takes this program to 1,000."
+        ? "This program recurses deeper than the browser's own stack allows — measured at 466 nested calls here, against the interpreter's limit of 1,000. The ceiling is the engine's, not the language's: `vyrn run` takes this program to 1,000."
         : String(err && err.message ? err.message : err),
     });
   }
