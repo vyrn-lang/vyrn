@@ -27,22 +27,173 @@ diagnostics), RFC-0071 (contracts), RFC-0072 (audience and roles).
 
 | # | Severity | Lens | Finding | Ref |
 |---|---|---|---|---|
-| 1 | **Critical** | C systems | **The generator cache serves unauthenticated code.** An entry with zero recorded inputs validates vacuously, so any file dropped in `~/.vyrn/cache/gen` becomes the module the compiler links — permanently, and `emit-gen` shows it as if the generator wrote it. Nothing re-verifies a `gen` entry, while every remote blob beside it is hash-checked on every load. | C2.1 |
-| 2 | **Critical** | Rust | **A `vyrn.json` in any ancestor directory aborts the compiler** with a stack overflow (exit 127, no diagnostic). `find_manifest` walks up from the cwd on every command, and the hand-written JSON parser has no depth limit. | R3.1 |
-| 3 | High | Rust / Agda | **A JSON typo turns the audience boundary off and the build says `ok`.** A malformed manifest is treated as no manifest, so the rule that keeps server-only code out of a client bundle disappears with a trailing comma. | R3.2 |
-| 4 | High | C systems | **A duplicate line in `vyrn.lock` silently wins.** The second entry for one specifier replaces the first with no diagnostic, so appending a line to the lock — a diff that never touches the original pin — changes the code that is built. | C2.2 |
-| 5 | High | C systems | **A damaged `vyrn.lock` line is a silent re-pin, not an error.** Tabs turned to spaces, a truncated write, an unreadable file: all become "this specifier was never pinned", and the next online build fetches whatever upstream serves now and writes it back as the pin. | C2.3 |
-| 6 | High | Agda | **A `.vyx` string literal can fail the build at any path, with any wording.** `//@diag` is scanned out of the generated text with no lexical context, so data that a trusted generator copies through becomes a compiler error naming a file outside the project. | A5.1 |
-| 7 | High | C systems | **`vyrn update` ignores `--offline` and `VYRN_OFFLINE`.** The one command that changes a pin hard-codes `offline: false` and shells out to `curl`. | C2.4 |
-| 8 | High | C systems | **The standard library is the one dependency that is not pinned.** It is found by walking up to five parents of the executable looking for a directory named `std`. A planted directory replaces the whole standard library with no diagnostic. | C2.5 |
-| 9 | High | Agda | **An `//@origin` inside a generated string literal hijacks the map** for every line below it, so an error is attributed to a file the generator never read. | A5.2 |
-| 10 | Medium | C systems / Rust | **A corrupt generator-cache entry is permanent.** A truncated entry blames the generator forever; a count field of `usize::MAX` panics the compiler with `capacity overflow`. Neither is repaired by `VYRN_NO_GEN_CACHE`, and no command clears the cache. | C2.6, R3.4 |
-| 11 | Medium | C systems | **A locked specifier is never re-derived.** For `github:owner/repo@<40-hex>/path` the URL is computable offline, but the lock's URL and hash are taken on faith, so the lock line — not the import — decides what is served. `curl` runs with no timeout, no size cap, and no protocol restriction. | C2.7, C2.8 |
-| 12 | Medium | Rust / PL | **A module key is prose that four functions parse back.** A directory named `x at y` breaks module resolution inside every generated module. | R3.3 |
+| 1 | **Critical** | Agda | **A client entry point reads a server-only secret, and `vyrn check` says `ok`.** The audience rule is never applied to a generator import edge, and a generated module inherits the audience of the FILE it was given. Mount a `.vyx` under `server/` with `vyxPage("../server/pages/Leak.vyx")` and the client build prints `TOP-SECRET`. `vyrn why` reports that nothing reaches the file. | A5.1 |
+| 2 | **Critical** | C systems | **The generator cache serves unauthenticated code.** An entry with zero recorded inputs validates vacuously, so any file dropped in `~/.vyrn/cache/gen` becomes the module the compiler links — permanently, and `emit-gen` shows it as if the generator wrote it. Nothing re-verifies a `gen` entry, while every remote blob beside it is hash-checked on every load. | C2.1 |
+| 3 | **Critical** | Rust | **A `vyrn.json` in any ancestor directory aborts the compiler** with a stack overflow (exit 127, no diagnostic). `find_manifest` walks up from the cwd on every command, and the hand-written JSON parser has no depth limit. | R3.1 |
+| 4 | High | Rust / Agda | **A JSON typo turns the audience boundary off and the build says `ok`.** A malformed manifest is treated as no manifest, so the rule that keeps server-only code out of a client bundle disappears with a trailing comma. | R3.2 |
+| 5 | High | Agda | **The audience of a file is decided by the key STRING.** A second spelling of the same file — different case on Windows, or a directory junction — loses its audience with no diagnostic, while `vyrn why` (which canonicalizes) still calls the file server-only. | A5.2 |
+| 6 | High | C systems | **A duplicate line in `vyrn.lock` silently wins.** The second entry for one specifier replaces the first with no diagnostic, so appending a line to the lock — a diff that never touches the original pin — changes the code that is built. | C2.2 |
+| 7 | High | C systems | **A damaged `vyrn.lock` line is a silent re-pin, not an error.** Tabs turned to spaces, a truncated write, an unreadable file: all become "this specifier was never pinned", and the next online build fetches whatever upstream serves now and writes it back as the pin. | C2.3 |
+| 8 | High | Agda | **A `.vyx` string literal can fail the build at any path, with any wording.** `//@diag` and `//@origin` are scanned out of the generated text with no lexical context, so data a trusted generator copies through becomes a compiler error naming a file outside the project. | A5.3, A5.4 |
+| 9 | High | C systems | **`vyrn update` ignores `--offline` and `VYRN_OFFLINE`.** The one command that changes a pin hard-codes `offline: false` and shells out to `curl`. | C2.4 |
+| 10 | High | C systems | **The standard library is the one dependency that is not pinned.** It is found by walking up to five parents of the executable looking for a directory named `std`. A planted directory replaces the whole standard library with no diagnostic. | C2.5 |
+| 11 | High | PL / Rust | **A module key is an English sentence that three functions parse back.** A project directory named `gen at home` makes the loader link a different module and exit 0. | P4.1, R3.3 |
+| 12 | High | Linus | **`resolve_aliases` rewrites a whole module's AST once per renamed name.** 27x at 800 shared private names (2965 ms against a 111 ms control), and the rename is automatic, not requested. | L1.1 |
 
-Below the line, and worth naming: `vyrn deps` cannot resolve a remote import at
-all (C2.9) — the command RFC-0010 offers for inspecting the module graph refuses
-exactly the dependencies whose graph matters.
+Below the line, and worth naming: a corrupt generator-cache entry is permanent
+and no command clears it (C2.6, R3.4); the compiler's advice for an audience
+error names a library and a directory the project never chose (P4.2); `vyrn deps`
+cannot resolve a remote import at all (C2.9); and `vyrn why` drops every
+generator edge whose argument is a `.vyx` file — the exact chain that leaks in
+finding 1 (A5.9).
+
+Counts: **38 CONFIRMED**, **8 PLAUSIBLE**, of which 9 are design critiques.
+
+---
+
+## Lens 1 — Linus Torvalds: taste and performance
+
+Timings are from `compiler/target/release/vyrn.exe` at `3f4974d`, on synthetic
+projects generated in a scratch directory.
+
+### L1.1 CONFIRMED — High. `resolve_aliases` rewrites a whole module's AST once per renamed name
+
+`loader.rs:2273-2282` loops over every entry in `foreign_renames` and calls
+`rename_decl_in_module` (`loader.rs:4155-4184`), which ends in
+`rewrite_module_refs(p, &map, ns)` with a **one-entry** map — a full walk of
+every function body, impl, type, global, test and bench in the target module, to
+substitute one name. R renames against a module of size A cost O(R × A).
+
+The rename count is not exotic. RFC-0046 §3 name privacy renames every
+non-exported top-level name that also appears in another module
+(`loader.rs:2163-2228`), automatically. Two modules, each with N private
+functions, the same N names in both:
+
+| N | with renames | control (names distinct) |
+|---|---|---|
+| 50 | 98 ms | 43 ms |
+| 100 | 110 ms | 46 ms |
+| 200 | 243 ms | 55 ms |
+| 400 | 645 ms | 72 ms |
+| 800 | 2965 ms | 111 ms |
+
+Per-doubling ratio reaches 4.60 against the control's 1.54. Holding the AST fixed
+at 800 functions per module and varying only how many names collide gives 79 /
+109 / 142 / 205 / 339 ms for 0 / 100 / 200 / 400 / 800 collisions — exactly
+linear in the rename count at fixed size, which pins the cost to one whole-module
+walk per rename. Build the per-module rename map first, then walk each module
+once.
+
+Today's repo has only 8 private names shared across `std/*.vyrn`, so this is
+latent rather than burning.
+
+### L1.2 CONFIRMED — Medium. `link` rebuilds the "names I own" set from the whole program per module
+
+`loader.rs:3007-3011`, inside the `for m in &modules` loop at `loader.rs:2919`:
+
+```rust
+let own: HashSet<&str> = owner
+    .iter()
+    .filter(|(_, (module, _))| module == &m.key)
+    .map(|(n, _)| n.as_str())
+    .collect();
+```
+
+`owner` holds every top-level name in the program, so this is O(modules × total
+top-level names). Isolated by fixing the module count and adding declarations:
+
+| modules | extra decls each | ms |
+|---|---|---|
+| 4096 | 0 | 487 |
+| 4096 | 8 | 1420 |
+| 512 | 0 | 89 |
+| 512 | 64 | 399 |
+
+The same declarations cost more when spread over more modules. Fitting gives
+about 5.5 ns per (declaration × module). That term also explains the whole-project
+curve — N modules each importing one other: 256/512/1024/2048/4096/8192/16384/32768
+modules take 75/100/171/290/574/1215/3189/9583 ms, and the per-doubling ratio
+leaves 2.00 exactly where the predicted N² term crosses the linear one. Real
+projects sit far below the crossover, so this is a taste finding: group `owner`
+by module once, before the loop. `loader.rs:2932-2938` repeats the same scan per
+namespace import (L1.7).
+
+### L1.3 CONFIRMED — Low. SHA-256 exists twice, byte for byte, in two crates that already depend on each other
+
+`vyrn-frontend/src/hash.rs:18` and `vyrn-cli/src/remote.rs:43` are the same
+90-line FIPS 180-4 implementation with the same `K` table and the same NIST
+vector test (`hash.rs:64`, `remote.rs:380`). `vyrn-cli/Cargo.toml:12` already
+declares the frontend dependency and `hash::sha256_hex` is `pub`. The frontend's
+own doc comment states the duplication as a fact without giving a reason. RFC-0010's
+"zero new crates" argues for writing SHA-256 once; it does not argue for twice.
+
+Both copies also do `let mut msg = data.to_vec()` before hashing — a full copy of
+every input, paid on every generator-cache input hash (`loader.rs:1710-1720`) and
+every remote blob verification — and end with eight `format!` calls per digest.
+
+### L1.4 PLAUSIBLE — Medium. Every module's AST is walked for a check that only applies to aliased imports
+
+`loader.rs:2102` computes `program_ref_names(&m.program)` unconditionally per
+module. That function (`loader.rs:4097-4148`) walks every body, impl, type,
+global, test and bench and builds a `HashSet<String>` of referenced names. Its
+only consumer is the loop below at `loader.rs:2103-2126`, which does nothing
+unless an import has an alias. Most modules have none, so most of these walks and
+their allocated sets are discarded. Hoisting the walk behind
+`imports.iter().flat_map(|i| &i.names).any(|n| n.alias.is_some())` is two lines.
+
+The loader also scans every module's AST again at `loader.rs:1274-1277` for the
+injected-runtime decision, so a module is walked at least twice after parsing for
+two features most modules never use.
+
+### L1.5 PLAUSIBLE — Medium. The runtime-injection probe reads each runtime module, then the loader reads it again
+
+`loader.rs:1300`:
+
+```rust
+if !states.contains_key(&target) && resolver.read(&target).is_err() { continue; }
+```
+
+The whole file is read and allocated to answer "does this exist?", then dropped;
+four lines later `visit` reads it again (`loader.rs:891`). `FsResolver::read`
+(`main.rs:518`) is a bare `std::fs::read_to_string` with no cache, so both reads
+hit the disk. The runtime table lists `std/json` (15 KB), `std/jsondec` (16 KB),
+`std/text` (16 KB) and `std/num` (35 KB), and its own comment says nearly every
+program links `std/num` because `print` triggers it. Measured cost of the whole
+injection is 4 ms for a `print`-only program, so the doubled read is a few
+hundred microseconds — the objection is the shape. `ModuleResolver` has no
+"exists" question, and inventing one by reading a file and throwing it away is
+the wrong answer to it; `visit` already accepts `Some(source)`.
+
+### L1.6 PLAUSIBLE — Medium. `moduleInterface` materializes each reflected module's source about three times
+
+`interp.rs:1795-1828` reads the module, pushes `source.clone().into_bytes()`,
+then runs a fresh `loader::load` through a `RecordingResolver`, which clones the
+entire source on every successful read (`loader.rs:145-153`). `into_reads`
+(`loader.rs:135-143`) then deduplicates by path — an admission that one link
+reads the same key more than once — and each survivor is cloned twice more at
+`interp.rs:1825-1826`. Each call starts a new load with a fresh `states` map, so
+the reflected module's whole import closure, std included, is re-read per call.
+The loader already knows this pattern hurts: the `HASH_MEMO` doc
+(`loader.rs:1686-1691`) records "a root that imports seven generators validates
+the same std modules seven times — 8.6 ms of a 20 ms load" and memoizes the hash
+path. The load path got no such memo.
+
+### L1.7 PLAUSIBLE — Low. Namespace-import visibility scans the whole program name table per namespace import
+
+`loader.rs:2932-2938` is L1.2 again, inside the per-module import loop, plus a
+`String` clone per granted name. `resolve_aliases` already builds the map this
+wants — `module_exports` (`loader.rs:1822`) — and does not pass it along.
+
+### What this lens found clean
+
+* **The three caches in scope hit.** `examples/shelf/server.vyrn` with a scratch
+  `VYRN_GEN_CACHE_DIR` deleted first: 918 ms cold writing 10 entries, then 275 /
+  307 / 298 ms warm reusing all 10. `PARSE_CACHE` (`loader.rs:1001-1031`) and
+  `HASH_MEMO` (`loader.rs:1692-1707`) each carry a recorded argument and do what
+  they claim.
+* **The hand-rolled `normalize` is right to be hand-rolled** (`loader.rs:168-191`,
+  design critique): module keys are lexical slash paths that must behave
+  identically for in-memory resolvers, which `std::path` would not give.
 
 ---
 
