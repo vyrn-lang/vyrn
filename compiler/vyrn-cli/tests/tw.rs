@@ -213,7 +213,7 @@ fn an_unknown_theme_key_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("TW_UNKNOWN_KEY__shadows"),
+        err.contains("top-level key `shadows`, which names no utility family"),
         "unknown-key diagnostic:\n{err}"
     );
 }
@@ -237,7 +237,7 @@ fn a_non_string_leaf_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("TW_PARSE_ERROR__"),
+        err.contains("is not a usable theme"),
         "parse-error diagnostic:\n{err}"
     );
 }
@@ -268,7 +268,7 @@ fn an_unsafe_class_name_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("TW_UNSAFE_NAME__"),
+        err.contains("which is not a CSS-safe class name"),
         "unsafe-name diagnostic:\n{err}"
     );
 }
@@ -339,7 +339,7 @@ fn a_forging_breakpoint_key_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("TW_UNSAFE_BREAKPOINT__ev_xhack"),
+        err.contains("breakpoint `ev|xhack` is not a CSS-safe class name"),
         "breakpoint diagnostic naming the key:\n{err}"
     );
 }
@@ -373,7 +373,7 @@ fn a_css_injecting_value_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("TW_UNSAFE_VALUE__colors_evil"),
+        err.contains("theme key `colors.evil` has the value"),
         "value diagnostic naming the key:\n{err}"
     );
 }

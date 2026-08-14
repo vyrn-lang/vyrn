@@ -57,6 +57,5 @@ fn tw(theme: String) -> String
 ```
 
 `tw(theme)` — read the flat `theme.json`, derive the utility vocabulary, and
-synthesize the typed module. Malformed input fails the load with a diagnostic
-naming the offending key (the std convention: the offense rides a bare
-top-level identifier so parsing fails immediately, attributed to this call).
+synthesize the typed module. Malformed input fails the load with a `std/diag`
+report (RFC-0099) naming the offending key, attributed to this call.

@@ -144,14 +144,13 @@ fn unclosed_element_fails_naming_the_file_and_line() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "an unclosed element must fail to load");
     assert!(
-        err.contains("VYX_UNCLOSED_ELEMENT"),
+        err.contains("is never closed"),
         "unclosed diagnostic:\n{err}"
     );
     assert!(
-        err.contains("Widget_vyx"),
-        "diagnostic names the file:\n{err}"
+        err.contains("Widget.vyx:2:1"),
+        "diagnostic is anchored in the file, at the line:\n{err}"
     );
-    assert!(err.contains("line_"), "diagnostic carries a line:\n{err}");
 }
 
 #[test]
@@ -165,12 +164,12 @@ fn missing_for_key_fails_naming_the_file() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a keyless {{#for}} must fail to load");
     assert!(
-        err.contains("VYX_MISSING_FOR_KEY"),
+        err.contains("has no `:key`"),
         "missing-key diagnostic:\n{err}"
     );
     assert!(
-        err.contains("Widget_vyx"),
-        "diagnostic names the file:\n{err}"
+        err.contains("Widget.vyx:3:1"),
+        "diagnostic is anchored in the file, at the line:\n{err}"
     );
 }
 
@@ -185,7 +184,7 @@ fn unknown_component_fails_naming_the_tag() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "an unknown component tag must fail to load");
     assert!(
-        err.contains("VYX_UNKNOWN_COMPONENT"),
+        err.contains("names no component"),
         "unknown-component diagnostic:\n{err}"
     );
     assert!(err.contains("Missing"), "diagnostic names the tag:\n{err}");
@@ -202,7 +201,7 @@ fn non_scalar_event_arg_fails() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a multi-argument event handler must fail to load");
     assert!(
-        err.contains("VYX_NON_SCALAR_EVENT_ARG"),
+        err.contains("passes more than one argument"),
         "non-scalar diagnostic:\n{err}"
     );
 }
@@ -218,7 +217,7 @@ fn multiple_roots_fail() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a template with multiple roots must fail to load");
     assert!(
-        err.contains("VYX_MULTIPLE_ROOTS"),
+        err.contains("holds more than one root element"),
         "multiple-roots diagnostic:\n{err}"
     );
 }
@@ -234,10 +233,7 @@ fn malformed_props_fails() {
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a malformed props block must fail to load");
-    assert!(
-        err.contains("VYX_BAD_PROPS"),
-        "bad-props diagnostic:\n{err}"
-    );
+    assert!(err.contains("`props`"), "bad-props diagnostic:\n{err}");
 }
 
 #[test]
@@ -252,16 +248,12 @@ fn props_before_import_fails_naming_the_file_and_line() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a props block before an import must fail to load");
     assert!(
-        err.contains("VYX_IMPORTS_FIRST"),
+        err.contains("an `import` sits after the `props` block"),
         "imports-first diagnostic:\n{err}"
     );
     assert!(
-        err.contains("Widget_vyx"),
-        "diagnostic names the file:\n{err}"
-    );
-    assert!(
-        err.contains("line_3"),
-        "diagnostic carries the import's line:\n{err}"
+        err.contains("Widget.vyx:3:1"),
+        "diagnostic is anchored in the file, at the import's line:\n{err}"
     );
 }
 
@@ -290,7 +282,7 @@ fn missing_template_section_fails() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a .vyx with no <template> must fail to load");
     assert!(
-        err.contains("VYX_NO_TEMPLATE"),
+        err.contains("has no `<template>` section"),
         "no-template diagnostic:\n{err}"
     );
 }
@@ -831,7 +823,7 @@ fn audit_html_comment_in_template_is_stripped() {
 
 /// A bare `"` in text content is a quotation mark. Read as the start of a string
 /// literal it swallowed the real `</template>`, and the component came back with
-/// `VYX_NO_TEMPLATE` for a template that was right there.
+/// a no-`<template>` diagnostic for a template that was right there.
 #[test]
 fn an_odd_double_quote_in_text_is_a_character() {
     let dir = scratch("oddquote");
@@ -846,7 +838,7 @@ fn an_odd_double_quote_in_text_is_a_character() {
         "an odd quote in text must not hide the template:\n{err}"
     );
     assert!(
-        !err.contains("VYX_NO_TEMPLATE"),
+        !err.contains("has no `<template>` section"),
         "the template is present:\n{err}"
     );
 }
@@ -918,7 +910,7 @@ fn an_empty_template_is_found_not_missing() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "an empty template has no root element");
     assert!(
-        !err.contains("VYX_NO_TEMPLATE"),
+        !err.contains("has no `<template>` section"),
         "the section was found, so the diagnostic is not 'no template':\n{err}"
     );
 }
@@ -939,7 +931,7 @@ fn a_comparison_in_a_multi_arg_event_still_reports_the_arity() {
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a multi-argument event handler must fail to load");
     assert!(
-        err.contains("VYX_NON_SCALAR_EVENT_ARG"),
+        err.contains("passes more than one argument"),
         "the arity diagnostic, not a parse error:\n{err}"
     );
     assert!(

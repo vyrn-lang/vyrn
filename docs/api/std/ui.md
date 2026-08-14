@@ -38,10 +38,8 @@ string of the whole route language — plus a `href<Route>(…)` helper per dyna
 route and a `<route>Path()` helper per static route (typed URLs).
 
 Generation failures — a Params/segment mismatch, an unsupported param type, or
-a route collision — fail the load with a diagnostic naming the offending file
-(the std/rpc identifier-carrying convention: the offense rides a bare
-top-level identifier so parsing fails immediately, attributed to the generator
-call site).
+a route collision — fail the load with a `std/diag` report (RFC-0099) in this
+generator's own wording, anchored at the page module that broke the rule.
 
 Inspect the synthesized module with:  vyrn emit-gen <file>
 

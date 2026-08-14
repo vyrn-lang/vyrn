@@ -36,10 +36,8 @@
 /// route and a `<route>Path()` helper per static route (typed URLs).
 ///
 /// Generation failures — a Params/segment mismatch, an unsupported param type, or
-/// a route collision — fail the load with a diagnostic naming the offending file
-/// (the std/rpc identifier-carrying convention: the offense rides a bare
-/// top-level identifier so parsing fails immediately, attributed to the generator
-/// call site).
+/// a route collision — fail the load with a `std/diag` report (RFC-0099) in this
+/// generator's own wording, anchored at the page module that broke the rule.
 ///
 /// Inspect the synthesized module with:  vyrn emit-gen <file>
 
@@ -61,11 +59,11 @@ import { el, empty, Html, Attr } from "std/html"
 // below, instead of hunted for by name.
 import { checkContract, matchedMember } from "std/contract"
 import { endsWith, startsWith } from "std/strpred"
-// RFC-0099: a slug and an identifier are different alphabets, and the conversion
-// between them is many-to-one. When two routes land on one helper name this says
-// so as a diagnostic, at a severity this generator chooses, instead of emitting a
-// module with a duplicate export.
-import { reportHere, Severity } from "std/diag"
+// RFC-0099: every objection this generator raises is a diagnostic in its own
+// wording, at a severity it chooses — a page whose surface does not fit its
+// route, two routes landing on one helper name — instead of a module that fails
+// to parse or exports one name twice.
+import { report, reportHere, Severity } from "std/diag"
 
 // ===========================================================================
 // PageError (RFC-0041 §3) — the failure a page's `data` may carry. `data ->
@@ -540,21 +538,6 @@ gen fn uiHole(name: String) -> String {
     return "\\" + "{" + name + "}"
 }
 
-/// `key` with every non-alphanumeric byte turned into `_`, so a file path is a
-/// legal identifier fragment inside a load-diagnostic name.
-gen fn uiIdentOf(key: String) -> String {
-    let ba = bytes(key)
-    let mut out: Array<UInt8> = []
-    for b in ba {
-        if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
-            out.push(b)
-        } else {
-            out.push('_')
-        }
-    }
-    return fromBytesOr(out, "id")
-}
-
 // ---- emitting Vyrn source: bake a raw string as a `"…"` literal (RFC-0054) ---
 
 /// `raw` baked as a complete Vyrn string literal (surrounding quotes included),
@@ -988,10 +971,9 @@ gen fn uiTypeModule(iface: ModuleInterface, name: String) -> String {
 // ===========================================================================
 
 /// One discovered page and everything the emitter needs about it. `err` is ""
-/// for a clean page, else one or more diagnostic identifier lines.
+/// for a clean page, else one or more reports anchored at the page module.
 type UiPageInfo = {
     modPath: String,
-    fileId: String,
     segs: Array<String>,
     urlPattern: String,
     dynNames: Array<String>,
@@ -1048,9 +1030,12 @@ type UiPageInfo = {
     err: String,
 }
 
-/// A load-diagnostic identifier line (parsing it fails, naming the offense).
-gen fn uiErrLine(tag: String, detail: String) -> String {
-    return tag + "__" + detail + "\n"
+/// A page diagnostic (RFC-0099), anchored at the page module it is about.
+/// Line 1, column 1: reflection hands over a module's SURFACE, not the line a
+/// declaration sits on, so the file is the finest anchor this generator can give
+/// correctly.
+gen fn uiPageErrAt(path: String, message: String) -> String {
+    return report(Error, path, 1, 1, message)
 }
 
 /// The page's contract issues as load diagnostics. `checkContract` decides what
@@ -1060,10 +1045,10 @@ gen fn uiErrLine(tag: String, detail: String) -> String {
 /// Every issue applies. RFC-0071 M2c closed the window that exempted `load`, so
 /// a page still exporting it is now an unknown export like any other, not a
 /// deprecated one.
-gen fn uiContractErrs(iface: ModuleInterface, fid: String) -> String {
+gen fn uiContractErrs(iface: ModuleInterface, path: String) -> String {
     let mut out = ""
     for iss in checkContract(iface, contractOf(Page)) {
-        out = out + uiErrLine("PAGES_CONTRACT", fid + "__" + uiIdentOf(iss.key) + "__" + uiIdentOf(iss.path))
+        out = out + uiPageErrAt(path, iss.message)
     }
     return out
 }
@@ -1073,7 +1058,8 @@ gen fn uiContractErrs(iface: ModuleInterface, fid: String) -> String {
 /// A `gen fn` because it calls `moduleInterface` (generation-only, RFC-0021), so
 /// its body is never lowered into a shipped binary.
 gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<String>) -> UiPageInfo {
-    let fid = uiIdentOf(modPath)
+    // `modPath` is an import specifier; a diagnostic anchor is a file.
+    let srcPath = modPath + ".vyrn"
     let dyns = uiDynNamesOf(segs)
     let iface = moduleInterface(modPath)
     let mut err = ""
@@ -1083,8 +1069,12 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     let hasPage = uiHasFn(iface, "page")
     let hasRespond = uiHasFn(iface, "respond")
     if hasPage == false && hasRespond == false {
-        err = err + uiErrLine("PAGES_MISSING_PAGE_EXPORT", fid)
-        return uiPageErr(modPath, fid, segs, dirPrefix, dyns, err)
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "this page exports neither `page` nor `respond` — a page renders through `fn page(…) -> Html`, or takes over the whole reply with `fn respond(…) -> Response`",
+        )
+        return uiPageErr(modPath, segs, dirPrefix, dyns, err)
     }
     let entry = if hasRespond { "respond" } else { "page" }
     let arity = uiFnArity(iface, entry)
@@ -1098,7 +1088,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     // twice deferred. It names them now, so a typo in a `.vyrn` page's exports is
     // as loud as a typo in a `.vyx` one, which was the point of declaring a
     // contract at all.
-    err = err + uiContractErrs(iface, fid)
+    err = err + uiContractErrs(iface, srcPath)
     let dataForm = matchedMember(iface, contractOf(Page), "data")
     let hasData = dataForm >= 0
     let hasLoad = hasData
@@ -1115,7 +1105,11 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     // would render-then-fill into a view that cannot express "not yet" — so it is
     // named, not quietly downgraded to a blocking load.
     if hasData && vyxDataFormIsLazy(dataForm) {
-        err = err + uiErrLine("PAGES_LAZY_NEEDS_VYX", fid + "__lazy_data_needs_a_vyx_page_view")
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "this page declares a lazy `data`, and a `.vyrn` page's view is a plain `fn page(…) -> Html` with no `Loading` arm to render — write the page as `.vyx`, or drop `lazy`",
+        )
     }
     let needParams = dyns.length > 0 || loadHasParams
 
@@ -1129,12 +1123,20 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     // param type must be supported.
     if needParams {
         if uiHasType(iface, "Params") == false {
-            err = err + uiErrLine("PAGES_MISSING_PARAMS_TYPE", fid)
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` binds parameters, and this page declares no `Params` type — declare `type Params = { … }` with one field per dynamic segment",
+            )
         } else {
             let f = uiParseFields(uiTypeSource(iface, "Params"))
             for d in dyns {
                 if includes(f.names, d) == false {
-                    err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__segment_" + d + "_absent_from_Params")
+                    err = err
+                    + uiPageErrAt(
+                        srcPath,
+                        "route segment `[\{d}]` has no field `\{d}` in `Params` — every dynamic segment binds to a field of the same name",
+                    )
                 }
             }
             // Resolve each dynamic segment's declared type (default Int64).
@@ -1150,10 +1152,18 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
             while i < f.names.length {
                 let fn2 = f.names[i]
                 if includes(dyns, fn2) == false {
-                    err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__Params_field_" + fn2 + "_has_no_segment")
+                    err = err
+                    + uiPageErrAt(
+                        srcPath,
+                        "`Params` declares `\{fn2}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{fn2}]` segment — a `Params` field binds a dynamic segment, so add the segment or drop the field",
+                    )
                 }
                 if uiSupportedParamType(f.types[i]) == false {
-                    err = err + uiErrLine("PAGES_UNSUPPORTED_PARAM_TYPE", fid + "__" + fn2 + "_is_" + uiIdentOf(f.types[i]))
+                    err = err
+                    + uiPageErrAt(
+                        srcPath,
+                        "`Params` field `\{fn2}` is `\{f.types[i]}`, which a URL segment cannot carry — a route parameter is `Int64` or `String`",
+                    )
                 }
                 i = i + 1
             }
@@ -1165,30 +1175,58 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         // A raw-response page owns rendering entirely: no loader, `respond(p)` for
         // a dynamic route or `respond()` for a static one, returning `Response`.
         if hasLoad {
-            err = err + uiErrLine("PAGES_RESPOND_NO_LOAD", fid + "__respond_pages_own_rendering_no_load")
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "this page exports both `respond` and `data` — a `respond` page owns the whole reply, so it loads whatever it needs itself; drop one of the two",
+            )
         }
         if dyns.length > 0 && arity != 1 {
-            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__dynamic_respond_must_be_respond_p_Params")
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` is dynamic, so its entry must be `fn respond(p: Params) -> Response`",
+            )
         }
         if dyns.length == 0 && arity != 0 {
-            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__static_respond_must_be_respond_without_parameters")
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` binds nothing, so its entry must be `fn respond() -> Response`",
+            )
         }
         if uiFnRet(iface, "respond") != "Response" {
-            err = err + uiErrLine("PAGES_RESPOND_SIGNATURE", fid + "__respond_must_return_Response")
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "`respond` returns `\{uiFnRet(iface, "respond")}` — a `respond` page owns the whole reply, so it must return `Response`",
+            )
         }
     } else if hasLoad {
         // A `load(p: Params)` pairs with `page(p, d)` (arity 2); a zero-parameter
         // static `load()` (RFC-0069 §0) pairs with `page(d)` (arity 1).
         if loadHasParams {
             if arity != 2 {
-                err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__loader_page_must_be_page_p_Params_d_Data")
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "this page's `data` takes the route params, so its view must be `fn page(p: Params, d: Data) -> Html`",
+                )
             }
         } else {
             if arity != 1 {
-                err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__static_loader_page_must_be_page_d_Data")
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "this page's `data` takes no params, so its view must be `fn page(d: Data) -> Html`",
+                )
             }
             if dyns.length > 0 {
-                err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__dynamic_route_load_must_take_a_Params_parameter")
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params — its segments would have nowhere to bind, so declare `data` over `Params`",
+                )
             }
         }
         // A loader returns `Validation<Data>` (Invalid → 422 error page),
@@ -1196,10 +1234,18 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         // unwrapped plain data type (RFC-0069 §0 — no failure path).
     } else {
         if dyns.length > 0 && arity != 1 {
-            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__dynamic_page_must_be_page_p_Params")
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` is dynamic and this page has no `data`, so its view must be `fn page(p: Params) -> Html`",
+            )
         }
         if dyns.length == 0 && arity != 0 {
-            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__static_page_must_be_page_without_parameters")
+            err = err
+            + uiPageErrAt(
+                srcPath,
+                "route `\{uiUrlPatternOf(segs)}` binds nothing and this page has no `data`, so its view must be `fn page() -> Html`",
+            )
         }
     }
 
@@ -1227,7 +1273,6 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
 
     return UiPageInfo {
         modPath: modPath.copy(),
-        fileId: fid,
         segs: segs.copy(),
         urlPattern: uiUrlPatternOf(segs),
         dynNames: dyns,
@@ -1253,7 +1298,9 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
 /// exactly as `uiInspectPage` does for a `.vyrn` page. A `gen fn` (it `readFile`s
 /// the `.vyx`). `modPath` is the file path without the `.vyx` extension.
 gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<String>) -> UiPageInfo {
-    let fid = uiIdentOf(modPath)
+    // `modPath` is the `.vyx` path with the extension stripped; put it back for
+    // the diagnostic anchor.
+    let srcPath = modPath + ".vyx"
     let dyns = uiDynNamesOf(segs)
     let src = match readFile(modPath + ".vyx") {
         Ok(v) => v,
@@ -1266,7 +1313,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     // everything after that is the same `checkContract` every other consumer
     // runs, over the same declaration. This is what turns `export fn laod()`
     // from a page that silently rendered empty into an error naming `data`.
-    let mut err = shape.err + uiContractErrs(vyxPageInterface(src), fid)
+    let mut err = shape.err + uiContractErrs(vyxPageInterface(src), srcPath)
     let hasLoad = shape.hasLoad
     // RFC-0070: a `lazy fn load()` view is over `PageData<T>` and gets the instant-
     // skeleton client nav. Only a loader page can be lazy.
@@ -1289,13 +1336,21 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     // A dynamic route whose loader takes no params is a mismatch (its segment has
     // nowhere to bind, RFC-0069 §0).
     if hasLoad && loadHasParams == false && dyns.length > 0 {
-        err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__dynamic_route_load_must_take_a_Params_parameter")
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params — its segments would have nowhere to bind, so declare `data` over `params`",
+        )
     }
     let needParams = dyns.length > 0 || loadHasParams
     if needParams {
         for d in dyns {
             if includes(shape.paramNames, d) == false {
-                err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__segment_" + d + "_absent_from_params")
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "route segment `[\{d}]` has no field `\{d}` in this page's `params` — every dynamic segment binds to a field of the same name",
+                )
             }
         }
         let mut di = 0
@@ -1313,10 +1368,18 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         while i < shape.paramNames.length {
             let nm = shape.paramNames[i]
             if includes(dyns, nm) == false {
-                err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__params_field_" + nm + "_has_no_segment")
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "`params` declares `\{nm}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{nm}]` segment — a `params` field binds a dynamic segment, so add the segment or drop the field",
+                )
             }
             if uiSupportedParamType(shape.paramTypes[i]) == false {
-                err = err + uiErrLine("PAGES_UNSUPPORTED_PARAM_TYPE", fid + "__" + nm + "_is_" + uiIdentOf(shape.paramTypes[i]))
+                err = err
+                + uiPageErrAt(
+                    srcPath,
+                    "`params` field `\{nm}` is `\{shape.paramTypes[i]}`, which a URL segment cannot carry — a route parameter is `Int64` or `String`",
+                )
             }
             i = i + 1
         }
@@ -1331,7 +1394,6 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     }
     return UiPageInfo {
         modPath: modPath.copy(),
-        fileId: fid,
         segs: segs.copy(),
         urlPattern: uiUrlPatternOf(segs),
         dynNames: dyns,
@@ -1353,14 +1415,13 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
 }
 
 /// A `UiPageInfo` carrying only an error (the entry export is missing).
-gen fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dirPrefix: Array<String>, dyns: Array<String>, err: String) -> UiPageInfo {
+gen fn uiPageErr(modPath: String, segs: Array<String>, dirPrefix: Array<String>, dyns: Array<String>, err: String) -> UiPageInfo {
     let mut dynTypes: Array<String> = []
     for d in dyns {
         dynTypes.push("Int64")
     }
     return UiPageInfo {
         modPath: modPath.copy(),
-        fileId: fid.copy(),
         segs: segs.copy(),
         urlPattern: uiUrlPatternOf(segs),
         dynNames: dyns.copy(),
@@ -1517,7 +1578,11 @@ gen fn uiCollisionErrors(pages: Array<UiPageInfo>) -> String {
         let mut j = i + 1
         while j < pages.length {
             if uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs) {
-                err = err + uiErrLine("PAGES_ROUTE_COLLISION", uiIdentOf(uiCollisionKey(pages[i].segs)) + "__" + pages[i].fileId + "__and__" + pages[j].fileId)
+                err = err
+                + reportHere(
+                    Error,
+                    "pages `\{pages[i].modPath}` and `\{pages[j].modPath}` both claim route `\{uiUrlPatternOf(pages[i].segs)}` — one URL reaches one page, so move or rename one of them",
+                )
             }
             j = j + 1
         }
@@ -1532,7 +1597,7 @@ gen fn uiCollisionErrors(pages: Array<UiPageInfo>) -> String {
 /// renamed is the author's decision, not the generator's. `reportHere` is the
 /// right anchor — the fault is a contradiction BETWEEN two input files, not a
 /// position inside either one. Same-route pairs are left to
-/// `PAGES_ROUTE_COLLISION` above, so one mistake gets one diagnostic.
+/// `uiCollisionErrors` above, so one mistake gets one diagnostic.
 gen fn uiHelperCollisions(pages: Array<UiPageInfo>) -> String {
     let mut out = ""
     let mut i = 0
@@ -2399,7 +2464,10 @@ export gen fn pages(dir: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
-        return "PAGES_ERROR__no_page_modules_found_under_the_pages_directory\n"
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
     }
     let mut err = ""
     for p in infos {
@@ -2420,7 +2488,10 @@ export gen fn pagesThemed(dir: String, theme: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
-        return "PAGES_ERROR__no_page_modules_found_under_the_pages_directory\n"
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
     }
     let mut err = ""
     for p in infos {
@@ -2697,7 +2768,10 @@ export gen fn pagesClient(dir: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
-        return "PAGES_ERROR__no_page_modules_found_under_the_pages_directory\n"
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
     }
     let mut err = ""
     for p in infos {
@@ -2716,7 +2790,10 @@ export gen fn pagesClientThemed(dir: String, theme: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
-        return "PAGES_ERROR__no_page_modules_found_under_the_pages_directory\n"
+        return reportHere(
+            Error,
+            "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
+        )
     }
     let mut err = ""
     for p in infos {

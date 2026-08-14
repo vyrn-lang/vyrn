@@ -134,10 +134,13 @@ fn a_non_serializable_parameter_is_a_named_error() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("go__parameter_Array_Int64__is_not_serializable"),
+        err.contains("procedure `go` takes `Array<Int64>`, which cannot cross the wire"),
         "{err}"
     );
-    assert!(err.contains("it_must_be_an_exported_named_type"), "{err}");
+    assert!(
+        err.contains("it must be a type the contract exports by name"),
+        "{err}"
+    );
 }
 
 /// And the RETURN, which nothing checked before RFC-0072 M2 — the server would
@@ -165,10 +168,13 @@ fn a_non_serializable_return_is_a_named_error() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("go__return_Array_Int64__is_not_serializable"),
+        err.contains("procedure `go` returns `Array<Int64>`, which cannot cross the wire"),
         "{err}"
     );
-    assert!(err.contains("it_must_be_an_exported_named_type"), "{err}");
+    assert!(
+        err.contains("it must be a type the contract exports by name"),
+        "{err}"
+    );
 }
 
 /// RFC-0071 M3. A record is nameable by construction — it is a `type`
@@ -203,7 +209,7 @@ fn a_nameable_record_that_cannot_be_encoded_is_refused_at_the_contract() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("go__return_Cb_is_not_serializable__Cb_cannot_cross_a_json_wire"),
+        err.contains("procedure `go` returns `Cb`, which cannot cross the wire: `Cb` cannot cross a JSON wire"),
         "{err}"
     );
     // …and it is the contract that objects, not the generated module.
@@ -252,9 +258,9 @@ fn a_stream_is_refused_by_name_and_pointed_at_sse() {
             .unwrap();
         assert!(!out.status.success(), "{tag}");
         let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("Stream_Req__is_a_stream"), "{tag}: {err}");
+        assert!(err.contains("`Stream<Req>`"), "{tag}: {err}");
         assert!(
-            err.contains("publish_a_feed_with_sse_or_ws"),
+            err.contains("publish a feed with `sse` or `ws`"),
             "{tag}: {err}"
         );
     }
@@ -319,7 +325,10 @@ fn a_vyrn_page_gets_the_closed_rule_too() {
         "an export the contract does not name must fail"
     );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("contract_unknown_didYouMean__hedd"), "{err}");
+    assert!(
+        err.contains("unknown export `hedd` — did you mean `head`?"),
+        "{err}"
+    );
 }
 
 /// …and an honest `.vyrn` page still compiles, because `page` and `respond` are

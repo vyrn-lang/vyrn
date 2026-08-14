@@ -235,7 +235,7 @@ fn params_segment_mismatch_fails_naming_the_file() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("PAGES_PARAM_MISMATCH"),
+        err.contains("`Params` declares `slug`"),
         "mismatch diagnostic:\n{err}"
     );
     assert!(err.contains("users"), "diagnostic names the file:\n{err}");
@@ -310,7 +310,7 @@ fn unsupported_param_type_fails_naming_the_file() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("PAGES_UNSUPPORTED_PARAM_TYPE"),
+        err.contains("which a URL segment cannot carry"),
         "unsupported-type diagnostic:\n{err}"
     );
     assert!(err.contains("tag"), "diagnostic names the file:\n{err}");
@@ -468,7 +468,7 @@ fn route_collision_fails_naming_both_files() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("PAGES_ROUTE_COLLISION"),
+        err.contains("both claim route"),
         "collision diagnostic:\n{err}"
     );
     // Names both offending files.
@@ -485,7 +485,7 @@ fn imported_params_type_works_via_the_closure() {
     let dir = scratch("importedparams");
     // The page's `Params`/`Data` live in a SHARED module the page imports —
     // before RFC-0031 `moduleInterface` saw only the page's own declarations, so
-    // this failed with PAGES_MISSING_PARAMS_TYPE. The closure hands the generator
+    // this failed with a missing-`Params` diagnostic. The closure hands the generator
     // the imported declarations, and the router imports `Params` from its
     // declaring module (it is not reachable as `p0.Params` — namespaces reach a
     // module's own exports only).
@@ -700,7 +700,7 @@ fn a_layout_without_a_slot_is_a_diagnostic() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("VYX_LAYOUT_NO_SLOT"),
+        err.contains("has no `<slot/>`"),
         "no-slot diagnostic:\n{err}"
     );
 }
@@ -790,12 +790,12 @@ fn a_misspelled_page_export_is_an_error() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("PAGES_CONTRACT"),
+        err.contains("unknown export"),
         "contract diagnostic:\n{err}"
     );
     assert!(
-        err.contains("contract_unknown"),
-        "unknown-export class:\n{err}"
+        err.contains("contract `Page`"),
+        "naming the contract it broke:\n{err}"
     );
     assert!(err.contains("laod"), "names the offending export:\n{err}");
 }
@@ -826,7 +826,10 @@ fn a_near_miss_page_export_names_the_member_it_meant() {
     );
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-    assert!(err.contains("didYouMean"), "did-you-mean class:\n{err}");
+    assert!(
+        err.contains("did you mean `data`?"),
+        "did-you-mean class:\n{err}"
+    );
     assert!(err.contains("dta"), "names the offending export:\n{err}");
 }
 
@@ -971,7 +974,7 @@ fn a_head_asking_for_data_a_dataless_page_lacks_is_reported() {
         "a head with nothing to read must be refused"
     );
     assert!(
-        err.contains("VYX_HEAD_SIGNATURE"),
+        err.contains("which is none of the signatures the router calls it with"),
         "naming the offense:\n{err}"
     );
 }
@@ -1114,7 +1117,7 @@ fn a_data_returning_a_non_query_is_reported() {
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "must be refused");
     assert!(
-        err.contains("VYX_DATA_RETURN"),
+        err.contains("a page's `data` returns `Query<T>`"),
         "naming the offense:\n{err}"
     );
 }
@@ -1218,7 +1221,7 @@ fn an_exported_load_in_a_vyx_page_is_an_unknown_export() {
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "must be refused:\n{err}");
     assert!(
-        err.contains("PAGES_CONTRACT"),
+        err.contains("unknown export `load`"),
         "as a contract issue naming `load`:\n{err}"
     );
     assert!(err.contains("load"), "naming the export:\n{err}");

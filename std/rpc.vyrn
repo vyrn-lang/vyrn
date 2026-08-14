@@ -33,6 +33,10 @@ import { fromBytesOr } from "std/strings"
 // `std/ui`'s `Page` and `std/vyx`'s `Component` are.
 import { checkContract } from "std/contract"
 
+// Generator diagnostics (RFC-0099): a contract violation fails the load in this
+// generator's own wording, at the generator's call site.
+import { reportHere, Severity } from "std/diag"
+
 // The symbol map (RFC-0073 M1): `rpc` and `client` bake a `symbolMap()` into the
 // module they emit, mapping every symbol back to the declaration it stands for.
 // Inside the module rather than beside it, so the content-hash cache invalidates
@@ -110,22 +114,10 @@ fn isNamedType(spelling: String, iface: ModuleInterface) -> Bool {
     return false
 }
 
-/// A one-line synthesized module that fails to load, spelling a contract
-/// violation in an identifier. Vyrn has no message-carrying trap primitive, so
-/// the offense rides a bare top-level identifier: parsing fails immediately with
-/// a single diagnostic attributed to the generator call site (its banner) that
-/// names the offender — unmasked by any later import/link error. `detail` must
-/// be a valid identifier.
-fn contractError(detail: String) -> String {
-    return "RPC_CONTRACT_ERROR__" + detail + "\n"
-}
-
 /// THE serializability rule, stated once (RFC-0072 M2, completed in RFC-0071 M3).
 ///
 /// Returns "" when a value of `spelling` can cross the wire, and otherwise the
-/// identifier fragment saying why — a fragment rather than a sentence because a
-/// generator has no message-carrying trap and an objection rides a bare
-/// identifier (`contractError`).
+/// clause saying why, which a caller joins to the end it is asking about.
 ///
 /// `uncodable` is the reflected verdict for the END being asked about
 /// (`ParamInfo.uncodable` for an argument, `FnInfo.retUncodable` for a result),
@@ -161,13 +153,13 @@ fn rpcWhyNotSerializable(spelling: String, uncodable: String, iface: ModuleInter
         return ""
     }
     if spelling.startsWith("Stream<") {
-        return "is_a_stream__a_procedure_answers_all_at_once__publish_a_feed_with_sse_or_ws_from_a_dotted_projection_module"
+        return "a procedure answers all at once, and a stream is still producing — publish a feed with `sse` or `ws` from a dotted projection module beside the procedures"
     }
     if uncodable != "" {
-        return "is_not_serializable__" + rpcIdentOf(uncodable) + "_cannot_cross_a_json_wire"
+        return "`\{uncodable}` cannot cross a JSON wire"
     }
     if isNamedType(spelling, iface) == false {
-        return "is_not_serializable__it_must_be_an_exported_named_type"
+        return "it must be a type the contract exports by name — wrap it in a record, which is what keeps the wire an object and the payload versionable"
     }
     return ""
 }
@@ -190,47 +182,33 @@ fn rpcWhyNotSerializable(spelling: String, uncodable: String, iface: ModuleInter
 /// "what is a procedure" would be two things to drift.
 export gen fn validateContract(iface: ModuleInterface) -> String {
     for iss in checkContract(iface, contractOf(Api)) {
-        return contractError(rpcIdentOf(iss.path) + "__" + rpcIdentOf(iss.key))
+        return reportHere(Error, iss.message)
     }
     for f in iface.functions {
         if f.params.length > 1 {
-            return contractError(
-                f.name + "__takes_" + f.params.length.toString() + "_parameters"
-                + "__a_procedure_takes_at_most_one"
+            return reportHere(
+                Error,
+                "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a procedure takes at most one; gather them into one exported record type",
             )
         }
         if f.params.length == 1 {
             let why = rpcWhyNotSerializable(f.params[0].spelling, f.params[0].uncodable, iface)
             if why != "" {
-                return contractError(
-                    f.name + "__parameter_" + rpcIdentOf(f.params[0].spelling) + "_" + why
+                return reportHere(
+                    Error,
+                    "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which cannot cross the wire: \{why}",
                 )
             }
         }
         let whyRet = rpcWhyNotSerializable(f.ret, f.retUncodable, iface)
         if whyRet != "" {
-            return contractError(f.name + "__return_" + rpcIdentOf(f.ret) + "_" + whyRet)
+            return reportHere(
+                Error,
+                "procedure `\{f.name}` returns `\{f.ret}`, which cannot cross the wire: \{whyRet}",
+            )
         }
     }
     return ""
-}
-
-/// `s` with every character an identifier cannot carry folded to `_`, so a type
-/// spelling (`Array<Paste>`) can ride the identifier a contract violation is
-/// reported through. The same transform `std/ui:uiIdentOf` applies, for the same
-/// reason: there is no message-carrying trap primitive.
-fn rpcIdentOf(s: String) -> String {
-    let raw = bytes(s)
-    let mut out: Array<UInt8> = []
-    for b in raw {
-        let ok = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
-        if ok {
-            out.push(b)
-        } else {
-            out.push('_')
-        }
-    }
-    return fromBytesOr(out, "x")
 }
 
 /// The import block a server / in-process module needs (RFC-0031): the contract's
@@ -860,9 +838,9 @@ fn rpcCollision(routes: Array<RpcRoute>) -> String {
         let mut j = i + 1
         while j < routes.length {
             if routes[i].path == routes[j].path {
-                return contractError(
-                    "two_procedures_derive_the_same_path_" + rpcIdentOf(routes[i].path)
-                    + "__" + rpcIdentOf(routes[i].key) + "__and__" + rpcIdentOf(routes[j].key)
+                return reportHere(
+                    Error,
+                    "procedures `\{routes[i].key}` and `\{routes[j].key}` both answer `\{routes[i].path}` — two procedures may not derive one path, so repin one of them",
                 )
             }
             j = j + 1

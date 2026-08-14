@@ -53,9 +53,9 @@ inline space; other runs have their whitespace collapsed to single spaces.
 `<!-- … -->` comments and a lone `{` in text are inert (the `{` is literal;
 only `{{` opens an interpolation).
 
-Every generation failure is an identifier-carrying load diagnostic naming the
-`.vyx` file and line (the std/ui / std/rpc convention). Inspect the whole
-synthesized module with:  vyrn emit-gen <file>
+Every generation failure is a `std/diag` report (RFC-0099) anchored at the
+line of the `.vyx` file it came out of. Inspect the whole synthesized module
+with:  vyrn emit-gen <file>
 
 ## VyxAttr
 
