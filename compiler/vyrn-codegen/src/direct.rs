@@ -4160,6 +4160,14 @@ impl Fn_<'_> {
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push(l);
         }
+        if crate::observe::on() {
+            crate::observe::record(
+                crate::observe::Site::Wasm,
+                e as *const Expr as usize,
+                &self.cx.subst,
+                &t,
+            );
+        }
         Ok(t)
     }
 
@@ -4753,6 +4761,19 @@ impl Fn_<'_> {
     /// than a guess, and [`Fn_::expr_as`] re-checks the answer against what the
     /// arm actually produced, so a wrong prediction is loud rather than silent.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
+        let t = self.peek_inner(e, line)?;
+        if crate::observe::on() {
+            crate::observe::record(
+                crate::observe::Site::Peek,
+                e as *const Expr as usize,
+                &self.cx.subst,
+                &t,
+            );
+        }
+        Ok(t)
+    }
+
+    fn peek_inner(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
         Ok(match e {
             Expr::Consume { place, .. } => self.peek(place, line)?,
             Expr::Int(_) | Expr::Byte(_) => Type::Int,

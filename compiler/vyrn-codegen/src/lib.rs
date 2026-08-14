@@ -744,6 +744,84 @@ pub(crate) fn set_gen_host(on: bool) {
     GEN_HOST.with(|g| g.set(on));
 }
 
+/// RFC-0101 M1: what each compiled backend decides an expression's type is.
+///
+/// The two backends derive the type of every expression themselves — `peek` and
+/// its satellites on the wasm side, the `(String, Type)` return convention on
+/// the textual one (RFC-0101 §1.2). Nothing outside a backend can see those
+/// answers, so nothing can check them against each other or against the
+/// checker's. This makes them visible, off by default, and adds no decision:
+/// every hook records what the emitter was about to return anyway.
+///
+/// Off, the cost is one thread-local `Cell` read per expression. On, the sink
+/// grows one row per typed expression per instantiation, which is why it is a
+/// gate's tool and not a compiler's.
+pub mod observe {
+    use vyrn_frontend::ast::Type;
+
+    /// Which engine, and which of its derivations, produced a row.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum Site {
+        /// `Gen::gen_expr` — the textual backend's threaded `(String, Type)`.
+        Native,
+        /// `Fn_::expr` — the direct wasm backend's emitting walk.
+        Wasm,
+        /// `Fn_::peek` — the direct wasm backend's second expression typer.
+        Peek,
+    }
+
+    /// One backend answer: this node, under this instantiation, has this type.
+    #[derive(Debug, Clone)]
+    pub struct Row {
+        pub site: Site,
+        /// The AST node's address — the identity `own` and `movecheck` use.
+        pub node: usize,
+        /// The instantiation the emitter was inside, sorted by parameter name.
+        pub subst: Vec<(String, Type)>,
+        pub ty: Type,
+    }
+
+    thread_local! {
+        static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static ROWS: std::cell::RefCell<Vec<Row>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Start recording on this thread, discarding anything already collected.
+    pub fn start() {
+        ROWS.with(|r| r.borrow_mut().clear());
+        ON.with(|o| o.set(true));
+    }
+
+    /// Stop recording and take what was collected.
+    pub fn take() -> Vec<Row> {
+        ON.with(|o| o.set(false));
+        ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    pub(crate) fn on() -> bool {
+        ON.with(|o| o.get())
+    }
+
+    pub(crate) fn record(
+        site: Site,
+        node: usize,
+        subst: &std::collections::HashMap<String, Type>,
+        ty: &Type,
+    ) {
+        let mut subst: Vec<(String, Type)> =
+            subst.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        subst.sort_by(|a, b| a.0.cmp(&b.0));
+        ROWS.with(|r| {
+            r.borrow_mut().push(Row {
+                site,
+                node,
+                subst,
+                ty: ty.clone(),
+            })
+        });
+    }
+}
+
 /// Every `vyrn_gen` import a generator module makes: a signature in LLVM's spelling
 /// and the name it imports under, which [`wasm::declare_sig`] turns into the wasm
 /// one through [`wasm::abi`] — so `i1`, `i8` and `ptr` are widened in exactly one
@@ -879,33 +957,12 @@ pub const TAG_F32: i32 = 6;
 /// reflection redirects and `listDir`'s lowering went with it. A code quote outside
 /// generation is still the checker's error and this emitter still has no lowering
 /// for one, which is what it was before RFC-0076 M3a.
-/// The deepest a type may nest when a generic function is instantiated (audit
-/// A5.2, RFC-0016 addendum).
-///
-/// Monomorphization gives one function one body per distinct instantiation, and
-/// polymorphic recursion has no fixed point: `f<T>` calling `f<P<T>>` asks for a
-/// new type, and a new body, every turn. The `n <= 0` guard a program writes is a
-/// RUN-time test and cannot stop a COMPILE-time worklist. Without a cap the
-/// backends ran forever and printed nothing, and `vyrn check` said `ok` about a
-/// program `vyrn build` could not finish.
-///
-/// 64 is far past anything a real generic reaches — the corpus peaks in single
-/// digits — and bounding the depth bounds the worklist: finitely many
-/// constructors of fixed arity admit finitely many types under a depth bound.
-pub const MONO_DEPTH_LIMIT: usize = 64;
-
-/// The most parts an instantiated type may have once every named type is
-/// expanded ([`vyrn_frontend::types::expanded_size`]).
-///
-/// The depth bound alone does not make the compile FINISH, only finite. A record
-/// is structural, so `type P<T> = { a: T, b: T }` nested d deep is 2^d leaves and
-/// the backends are still asked to lower a billion-member struct at depth 30,
-/// long before depth 64. This is the bound that fires first for that shape — at
-/// depth 17 for two fields, at depth 9 for four — and the depth bound is what
-/// fires first for a spine like `Array<Array<..>>`, which never grows wide.
-///
-/// 65,536 is roughly a thousand times the largest type the corpus builds.
-pub const MONO_SIZE_LIMIT: usize = 65_536;
+// The two instantiation bounds moved to `vyrn_frontend::types` in RFC-0101 M1,
+// and are re-exported here so every existing reader spells them the same way.
+// They moved because a bound on monomorphization is not a property of a backend:
+// `vyrn-lower` runs the same worklist and sits BELOW this crate, so a copy here
+// would be a second number, which is the shape of defect this RFC is about.
+pub use vyrn_frontend::types::{MONO_DEPTH_LIMIT, MONO_SIZE_LIMIT};
 
 /// The phrase every instantiation-limit refusal contains. `vyrn check` promotes
 /// exactly this one codegen error to a check failure, so it has to recognise it,
@@ -5288,6 +5345,14 @@ impl<'a> Gen<'a> {
         let r = self.gen_expr_inner(expr)?;
         if self.region_depth == 0 && self.arg_drops.contains(&(expr as *const Expr as usize)) {
             self.arg_frees.push(r.0.clone());
+        }
+        if crate::observe::on() {
+            crate::observe::record(
+                crate::observe::Site::Native,
+                expr as *const Expr as usize,
+                self.subst,
+                &r.1,
+            );
         }
         Ok(r)
     }

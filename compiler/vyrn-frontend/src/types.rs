@@ -1242,6 +1242,38 @@ pub fn type_depth(ty: &Type) -> usize {
     }
 }
 
+/// The deepest a type may nest when a generic function is instantiated (audit
+/// A5.2, RFC-0016 addendum).
+///
+/// Monomorphization gives one function one body per distinct instantiation, and
+/// polymorphic recursion has no fixed point: `f<T>` calling `f<P<T>>` asks for a
+/// new type, and a new body, every turn. The `n <= 0` guard a program writes is a
+/// RUN-time test and cannot stop a COMPILE-time worklist. Without a cap the
+/// backends ran forever and printed nothing, and `vyrn check` said `ok` about a
+/// program `vyrn build` could not finish.
+///
+/// 64 is far past anything a real generic reaches — the corpus peaks in single
+/// digits — and bounding the depth bounds the worklist: finitely many
+/// constructors of fixed arity admit finitely many types under a depth bound.
+///
+/// It lives beside [`type_depth`] rather than in a backend because it bounds a
+/// WORKLIST, and since RFC-0101 M1 there are two of those: `vyrn-codegen`
+/// re-exports this constant and `vyrn-lower` reads it directly.
+pub const MONO_DEPTH_LIMIT: usize = 64;
+
+/// The most parts an instantiated type may have once every named type is
+/// expanded ([`expanded_size`]).
+///
+/// The depth bound alone does not make the compile FINISH, only finite. A record
+/// is structural, so `type P<T> = { a: T, b: T }` nested d deep is 2^d leaves and
+/// the backends are still asked to lower a billion-member struct at depth 30,
+/// long before depth 64. This is the bound that fires first for that shape — at
+/// depth 17 for two fields, at depth 9 for four — and the depth bound is what
+/// fires first for a spine like `Array<Array<..>>`, which never grows wide.
+///
+/// 65,536 is roughly a thousand times the largest type the corpus builds.
+pub const MONO_SIZE_LIMIT: usize = 65_536;
+
 /// How many parts `ty` has once every named type is expanded, or `None` when
 /// that passes `budget`.
 ///

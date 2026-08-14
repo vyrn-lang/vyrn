@@ -1407,6 +1407,84 @@ pub fn check(program: &Program) -> Result<(), String> {
     }
 }
 
+// ---- RFC-0101 M1: the checker's answers, written down --------------------
+//
+// The checker derives the static type of every expression and the substitution
+// of every generic call, and then throws both away (RFC-0101 §1.2). This is the
+// smallest change that lets one consumer keep them: an OPT-IN sink, off by
+// default, so nothing on the LSP's keystroke path or the ordinary compile path
+// pays for it.
+//
+// A thread-local rather than a sixth element on `check_accum_inner`'s tuple,
+// following `vyrn_codegen`'s `GEN_HOST` (`vyrn-codegen/src/lib.rs:721`) for the
+// same reason it gives: the `Checker` is built at one site that has no opinion
+// about recording, and every method on it is already `&self` over `RefCell`s.
+//
+// The key is the AST node's ADDRESS, which is the identity `own` and `movecheck`
+// already use and which RFC-0101 §2.5 says the migration reuses rather than
+// generalizes: `own.rs:37` — "the backend runs this on the same borrowed AST it
+// emits, so the addresses match one-to-one".
+
+thread_local! {
+    /// Cheap enough to test per expression node; the sink behind it is not.
+    static RECORDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RECORD: RefCell<Recorded> = RefCell::new(Recorded::new());
+    /// The substitution the innermost generic call just solved, handed to the
+    /// [`Checker::expr`] wrapper that knows the call node's address. `call` does
+    /// not take the `&Expr` it is checking, and a nested call has always
+    /// consumed and cleared this slot before its caller writes one.
+    static PENDING_SUBST: RefCell<Option<(String, Vec<(String, Type)>)>> =
+        const { RefCell::new(None) };
+}
+
+/// What the checker decided, keyed by AST node address.
+#[derive(Debug, Clone, Default)]
+pub struct Recorded {
+    /// The static type of every expression the checker typed.
+    pub node_types: HashMap<usize, Type>,
+    /// Every place the checker SOLVES a type parameter: a generic call and a
+    /// generic record literal. The name is the callee or the record, and the
+    /// arguments are in its own type-parameter order where they are solved.
+    /// Keyed by the [`Expr::Call`] / [`Expr::StructLit`] node.
+    ///
+    /// The solution governs the subtree it was solved FROM, because the checker
+    /// types an argument against the still-open declared type and refines
+    /// nothing afterwards.
+    pub node_substs: HashMap<usize, (String, Vec<(String, Type)>)>,
+}
+
+impl Recorded {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Type-check `program` and return what the checker decided about every node.
+///
+/// Diagnostics are dropped: a caller that wants them calls [`check_accum`],
+/// and a caller of this one has already established that the program checks.
+pub fn record(program: &Program) -> Recorded {
+    RECORD.with(|r| *r.borrow_mut() = Recorded::new());
+    PENDING_SUBST.with(|p| *p.borrow_mut() = None);
+    RECORDING.with(|c| c.set(true));
+    let _ = check_accum_full(program);
+    RECORDING.with(|c| c.set(false));
+    RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()))
+}
+
+fn recording() -> bool {
+    RECORDING.with(|c| c.get())
+}
+
+/// Hand the solved type arguments to the [`Checker::expr`] wrapper above.
+fn note_subst(name: &str, subst: &HashMap<String, Type>, type_params: &[String]) {
+    let args: Vec<(String, Type)> = type_params
+        .iter()
+        .filter_map(|p| subst.get(p).map(|t| (p.clone(), t.clone())))
+        .collect();
+    PENDING_SUBST.with(|p| *p.borrow_mut() = Some((name.to_string(), args)));
+}
+
 struct Checker<'a> {
     sigs: &'a HashMap<String, (Vec<Type>, Type)>,
     /// Each function's parameter capabilities (for `modify` call-site checks).
@@ -3585,10 +3663,38 @@ impl<'a> Checker<'a> {
 
     // ---- expressions ----------------------------------------------------
 
+    /// Type-check an expression, and — when [`record`] asked for it — write the
+    /// answer down against this node's address (RFC-0101 M1).
+    ///
+    /// The wrapper is the whole of the recording: every one of the 117 call
+    /// sites goes through it, and the derivation below is untouched.
+    fn expr(
+        &self,
+        expr: &Expr,
+        scope: &Scope,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, Diagnostic> {
+        if !recording() {
+            return self.expr_inner(expr, scope, expected, fn_ret);
+        }
+        let t = self.expr_inner(expr, scope, expected, fn_ret)?;
+        let key = expr as *const Expr as usize;
+        let pending = PENDING_SUBST.with(|p| p.borrow_mut().take());
+        RECORD.with(|r| {
+            let mut r = r.borrow_mut();
+            r.node_types.insert(key, t.clone());
+            if let Some(call) = pending {
+                r.node_substs.insert(key, call);
+            }
+        });
+        Ok(t)
+    }
+
     /// Type-check an expression. `expected` is the type the context wants (used
     /// to infer `None`/`Ok`/`Err` and to target `Some`/`match`). `fn_ret` is the
     /// enclosing function's return type, needed to check the `?` operator.
-    fn expr(
+    fn expr_inner(
         &self,
         expr: &Expr,
         scope: &Scope,
@@ -4415,6 +4521,14 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|tp| subst[tp].clone())
             .collect();
+        // RFC-0101 M1: the same discard the generic-call path makes. A generic
+        // record literal checks its field values against the DECLARED field
+        // type, so `Deque { front: [], back: ["z"] }` writes `Array<T>` on the
+        // empty literal and only then solves `T`; without this the recorded
+        // answer keeps a parameter no instance can substitute.
+        if recording() {
+            note_subst(name, &subst, &decl.type_params);
+        }
         Ok(Type::App(name.to_string(), args))
     }
 
@@ -7412,6 +7526,12 @@ impl<'a> Checker<'a> {
                      (inferred through `{name}`)"
                 ));
             }
+            // RFC-0101 M1: `subst` is complete here and dies at the end of this
+            // block. This is the one place the type arguments of a generic call
+            // exist, and both backends re-solve them afterwards.
+            if recording() {
+                note_subst(name, &subst, type_params);
+            }
             return Ok(rty);
         }
 
@@ -9645,6 +9765,41 @@ mod tests {
 
     fn check_src(s: &str) -> Result<(), String> {
         check(&parse(lex(s).unwrap()).unwrap())
+    }
+
+    // ---- RFC-0101 M1: the recording ----------------------------------------
+
+    /// The two answers [`record`] keeps, and the fact that neither costs
+    /// anything when nobody asked: the sink is empty until [`record`] turns it
+    /// on, and every node in it is one the checker typed on its own.
+    #[test]
+    fn recording_keeps_the_type_of_every_node_and_the_type_arguments_of_a_call() {
+        let p = parse(
+            lex("fn id<T>(x: T) -> T {\n    return x\n}\n\n\
+                 fn main() -> Int64 {\n    let n: Int64 = id(1)\n    return n\n}\n")
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!recording(), "the sink is off unless `record` turns it on");
+        let r = record(&p);
+        assert!(!recording(), "and off again afterwards");
+
+        // `main`'s body is `let n = id(1)` then `return n`: the call, its
+        // argument, and the `return`'s variable.
+        let types: Vec<String> = {
+            let mut v: Vec<String> = r.node_types.values().map(|t| t.to_string()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(types, vec!["Int64", "Int64", "Int64", "T"], "{types:?}");
+
+        // One generic call, solved, keyed on the call node — the answer both
+        // backends re-derive today (RFC-0101 §1.2).
+        let calls: Vec<&(String, Vec<(String, Type)>)> = r.node_substs.values().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "id");
+        assert_eq!(calls[0].1, vec![("T".to_string(), Type::Int)]);
     }
 
     // ---- RFC-0091 M2: place projections ------------------------------------
