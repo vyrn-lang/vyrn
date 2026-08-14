@@ -352,6 +352,165 @@ export fn leakPeak(declared: Bool) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// One program, three engines, measured
+//
+// The only speed comparison this site can make honestly is Vyrn against itself.
+// A cross-language chart needs two programs somebody wrote, and the reader has
+// to trust that neither was written badly on purpose; this needs ONE program,
+// and the three engines print the same forty bytes, which the harness checks
+// before it prints a single time.
+//
+// The program is `examples/threeengines.vyrn`: a SHA-1 chain, where every round
+// hashes the round before it, so no engine can hoist or precompute any of it.
+// The harness is `bench/engines.sh`. Both are in the repository, and the numbers
+// below are its `work` column — the whole process, minus the same process at one
+// round, which removes start-up and the shell that timed it.
+//
+//     sh bench/engines.sh 100000
+//
+// Measured 14 August 2026 on an AMD Ryzen 5 9600X (6 cores) running Windows 11,
+// with vyrn 0.1.0-alpha.1 and wasmtime 46.0.1, best of three runs per engine.
+// One machine, one afternoon: the RATIO is the claim, not the milliseconds, and
+// the milliseconds are here so the ratio can be checked.
+// ---------------------------------------------------------------------------
+
+/// One engine's reading: the work, and the floor it was measured against.
+type Engine = { id: String, name: String, work: Int64, floor: Int64 }
+
+/// The three readings, as `bench/engines.sh` printed them.
+fn engineRuns() -> Array<Engine> {
+    return [
+        Engine { id: "interp", name: "interpreter", work: 38056, floor: 38 },
+        Engine { id: "wasm", name: "wasm (wasmtime)", work: 207, floor: 45 },
+        Engine { id: "native", name: "native", work: 87, floor: 33 },
+    ]
+}
+
+/// How many rounds the reading is of.
+export fn engineRounds() -> String {
+    return "100,000"
+}
+
+/// The command that produced every number here.
+export fn engineCommand() -> String {
+    return "sh bench/engines.sh 100000"
+}
+
+/// The machine, and when. A benchmark without this is an advertisement.
+export fn engineMachine() -> String {
+    return "Ryzen 5 9600X, Windows 11, vyrn 0.1.0-alpha.1, wasmtime 46.0.1, 14 August 2026"
+}
+
+/// A duration in the unit that suits it: milliseconds under a second, seconds
+/// with one decimal above.
+fn msOf(ms: Int64) -> String {
+    if ms < 1000 {
+        return ms.toString() + " ms"
+    }
+    let tenths = (ms + 50) / 100
+    return (tenths / 10).toString() + "." + (tenths % 10).toString() + " s"
+}
+
+/// `a / b` to one decimal, rounded rather than truncated.
+fn ratio1(a: Int64, b: Int64) -> String {
+    let tenths = (a * 10 + b / 2) / b
+    return (tenths / 10).toString() + "." + (tenths % 10).toString()
+}
+
+fn engineWork(id: String) -> Int64 {
+    for e in engineRuns() {
+        if e.id == id {
+            return e.work
+        }
+    }
+    return 0
+}
+
+/// How many times faster the native binary is than the interpreter, whole.
+export fn engineRatio() -> String {
+    return (engineWork("interp") / engineWork("native")).toString()
+}
+
+/// And how much of that the WebAssembly module keeps, to one decimal.
+export fn wasmRatio() -> String {
+    return ratio1(engineWork("wasm"), engineWork("native"))
+}
+
+/// The three engines on one linear scale. The interpreter's bar is the chart and
+/// the other two are slivers, which is what a factor of four hundred looks like.
+export fn engineBars() -> Array<Bar> {
+    let rows = engineRuns()
+    let full = rows[0].work
+    let mut out: Array<Bar> = []
+    let mut i = 0
+    while i < rows.length {
+        let e = rows[i]
+        out.push(Bar {
+                id: e.id.copy(),
+                y: rowY(i),
+                hy: hitY(i),
+                w: px(barRoom() * e.work / full),
+                label: e.name.copy(),
+                value: msOf(e.work),
+                title: e.name + ": " + e.work.toString() + " ms of work, over a floor of " + e.floor.toString() + " ms",
+                href: blob("bench/engines.sh"),
+                tone: if e.id == "native" { "bar focal" } else { "bar" },
+            })
+        i = i + 1
+    }
+    return out
+}
+
+export fn engineBox() -> String {
+    return barViewBox(3)
+}
+
+/// The axis of the three-engine chart: every ten seconds.
+export fn engineGrid() -> Array<Grid> {
+    return gridOf(engineRuns()[0].work, 10, 1000, "s")
+}
+
+export fn enginePlot() -> String {
+    return px(plotHeight(3))
+}
+
+/// The two COMPILED engines alone, where the difference is legible. The same
+/// two bars are a hair's width apart on the chart above.
+export fn compiledBars() -> Array<Bar> {
+    let wasm = engineWork("wasm")
+    let native = engineWork("native")
+    return [
+        Bar {
+            id: "cwasm",
+            y: rowY(0),
+            hy: hitY(0),
+            w: px(barRoom()),
+            label: "wasm (wasmtime)",
+            value: msOf(wasm),
+            title: "the same program as a WebAssembly module, run under wasmtime: " + wasm.toString() + " ms",
+            href: blob("rfcs/RFC-0077-direct-wasm-backend.md"),
+            tone: "bar",
+        },
+        Bar {
+            id: "cnative",
+            y: rowY(1),
+            hy: hitY(1),
+            w: px(barRoom() * native / wasm),
+            label: "native",
+            value: msOf(native),
+            title: "the same program as a native binary: " + native.toString() + " ms",
+            href: blob("examples/threeengines.vyrn"),
+            tone: "bar focal",
+        },
+    ]
+}
+
+/// The compiled axis: every fifty milliseconds.
+export fn compiledGrid() -> Array<Grid> {
+    return gridOf(engineWork("wasm"), 50, 1, "ms")
+}
+
+// ---------------------------------------------------------------------------
 // The RFC strip. One cell per design record, in order, tinted by decade so the
 // eye can count. Real data: the file names in `rfcs/`, counted by the generator.
 // ---------------------------------------------------------------------------
@@ -569,6 +728,35 @@ test "the census figures are plotted as the census recorded them" {
     assertEq(flat[1].w, "52")
     assertEq(grows[1].tone, "bar focal")
     assertEq(grows[0].tone, "bar")
+}
+
+test "the three engines are one scale, and every ratio comes off the readings" {
+    let bars = engineBars()
+    assertEq(bars.length, 3)
+    // The interpreter IS the scale, and the compiled bars are slivers of it.
+    assertEq(bars[0].w, "672")
+    assertEq(bars[0].value, "38.1 s")
+    assertEq(bars[1].value, "207 ms")
+    assertEq(bars[2].value, "87 ms")
+    assertEq(bars[2].tone, "bar focal")
+    // Both headline figures are arithmetic on the same three readings, so no
+    // number on the page can drift from the bar beside it.
+    assertEq(engineRatio(), "437")
+    assertEq(wasmRatio(), "2.4")
+    // The second plate rescales to the larger of the two compiled engines.
+    let compiled = compiledBars()
+    assertEq(compiled[0].w, "672")
+    assertEq(compiled[1].w, "282")
+    assertEq(compiled[1].value, "87 ms")
+}
+
+test "a duration reads in the unit that suits it" {
+    assertEq(msOf(87), "87 ms")
+    assertEq(msOf(999), "999 ms")
+    assertEq(msOf(1000), "1.0 s")
+    assertEq(msOf(38056), "38.1 s")
+    assertEq(ratio1(207, 87), "2.4")
+    assertEq(ratio1(10, 10), "1.0")
 }
 
 test "the RFC strip has one cell per RFC and wraps every twenty" {

@@ -11,12 +11,14 @@
 // renders a number the project cannot produce on demand. The module ladder was
 // measured with the release binary, one `vyrn build --target wasm` per row. The
 // leak-shape figures are the ones `rfcs/census-call-arguments.md` recorded, and
-// the caption names that file. `bench/baseline.json` is still a placeholder, so
-// there is no run-time benchmark chart and the page says why.
+// the caption names that file. The speed chart is `bench/engines.sh` over
+// `examples/threeengines.vyrn` — one program, the three engines it runs on, and
+// the machine and the date printed beside the numbers. There is no cross-
+// language speed chart, and the page says why rather than leaving a hole.
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { typeSpecs, memorySpecs, failureSpecs, Snippet } from "../snippets"
-import { moduleSizes, moduleSizesBox, moduleSizesGrid, moduleLadder, moduleLadderBox, moduleLadderGrid, moduleLadderPlot, twoRowPlot, moduleRatio, largestModule, leakBars, leakBox, leakGrid, leakPeak, barLeft, barRight, barText, barRow, Bar, Grid } from "../chart"
+import { moduleSizes, moduleSizesBox, moduleSizesGrid, moduleLadder, moduleLadderBox, moduleLadderGrid, moduleLadderPlot, twoRowPlot, moduleRatio, largestModule, leakBars, leakBox, leakGrid, leakPeak, engineBars, engineBox, engineGrid, enginePlot, engineRatio, engineRounds, engineCommand, engineMachine, wasmRatio, compiledBars, compiledGrid, barLeft, barRight, barText, barRow, Bar, Grid } from "../chart"
 
 /// One comparison axis: what is being compared, and where each answer stands.
 type Axis = { id: String, name: String, vyrn: String, rust: String, ts: String, go: String }
@@ -103,7 +105,7 @@ fn axes() -> Array<Axis> {
         <a href="#failure"><span class="n">04</span>an absence</a>
         <a href="#numbers"><span class="n">05</span>size</a>
         <a href="#leak"><span class="n">06</span>a leak</a>
-        <a href="#missing"><span class="n">07</span>not measured</a>
+        <a href="#speed"><span class="n">07</span>three engines</a>
     </aside>
         <section class="hero">
             <p class="eyebrow">Compare</p>
@@ -301,10 +303,68 @@ fn axes() -> Array<Axis> {
             </div>
         </section>
 
-        <section class="band" id="missing">
-            <p class="eyebrow">07 — not measured</p>
-            <h2>The chart that is not here</h2>
-            <p class="notice">There is no run-time benchmark on this page, deliberately. <code>vyrn bench</code> exists and CI runs it, but <code>bench/baseline.json</code> is still a placeholder — the file documents how to seed it from a CI run. Until it is seeded, a speed figure here would be a number from a developer's laptop dressed up as a measurement. The chart lands the day the baseline does.</p>
+        <section class="band" id="speed">
+            <p class="eyebrow">07 — measured</p>
+            <h2>One program, three engines</h2>
+            <p>The same source file runs three ways: the tree-walking interpreter, a native binary, and a WebAssembly module. They print the same forty bytes — the harness checks that before it reports a single time — and they take these times to do it.</p>
+            <div class="plate" data-widget="bars">
+                <div class="plate-head">
+                    <span class="pill live">Measured</span>
+                    <span class="eyebrow">{{ engineCommand() }}</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-bars-replay>Replay</button>
+                    </div>
+                </div>
+                <span class="bignum">{{ engineRatio() }}<small>times faster, compiled than interpreted</small></span>
+                <div class="stage">
+                    <svg class="chart" :viewBox="engineBox()" role="img" aria-label="The same program takes 38.1 seconds under the interpreter, 207 milliseconds as WebAssembly and 87 milliseconds as a native binary">
+<g class="axis">
+                            <line v-for="g in engineGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="enginePlot()"/>
+                            <text v-for="g in engineGrid()" :key="g.id" :x="g.x" :y="enginePlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
+                        <g class="row" v-for="b in engineBars()" :key="b.id">
+                            <title>{{ b.title }}</title>
+                            <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
+                            <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">{{ engineRounds() }} rounds of a SHA-1 chain, where each round hashes the one before it, so no engine can hoist or precompute any of it. One linear scale: the interpreter's bar is the chart, and the two compiled bars are slivers. Hover a row for its exact reading.</p>
+            </div>
+
+            <div class="plate" data-widget="bars">
+                <div class="plate-head">
+                    <span class="pill">The two compiled engines</span>
+                    <span class="eyebrow">examples/threeengines.vyrn</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-bars-replay>Replay</button>
+                    </div>
+                </div>
+                <span class="bignum">{{ wasmRatio() }}<small>times the native time, in the browser's engine</small></span>
+                <div class="stage">
+                    <svg class="chart" :viewBox="moduleSizesBox()" role="img" aria-label="The same two compiled engines rescaled: 207 milliseconds as WebAssembly against 87 milliseconds native">
+<g class="axis">
+                            <line v-for="g in compiledGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
+                            <text v-for="g in compiledGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
+                        <g class="row" v-for="b in compiledBars()" :key="b.id">
+                            <title>{{ b.title }}</title>
+                            <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
+                            <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">The two bars a hair apart on the chart above, rescaled. The WebAssembly module came out of the compiler's own encoder — no LLVM, no <code>clang</code> — and ran under <code>wasmtime</code>.</p>
+            </div>
+
+            <p class="notice">Where these numbers come from: <code>{{ engineCommand() }}</code>, on {{ engineMachine() }}, best of three runs per engine. Each reading is the whole process minus the same process at one round, so process start-up and the shell that timed it are out of it; the harness prints both halves. The ratio is the claim — one machine, one afternoon — and the milliseconds are published so it can be checked. The command was run twice: the second pass came in 8% slower on the interpreter and 6% on the native binary, the spread of an ordinary desktop, and the ratios moved by under 3%. There is no cross-language chart here: that would need a second program written by us in someone else's language, and a reader would have to take on trust that we wrote it well.</p>
+            <p class="notice">Per-operation figures are a different instrument: <code>vyrn bench</code> and the <code>bench</code> blocks in <code>examples/</code>. CI runs every one of them on each push and refuses to merge one that stops compiling. It does not yet fail on a slowdown — <code>bench/baseline.json</code> is still an unseeded placeholder, and the file says exactly how to seed it from a CI run — so nothing on this page claims a trend over time.</p>
         </section>
 </main>
 </template>

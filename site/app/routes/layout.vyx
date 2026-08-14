@@ -7,7 +7,7 @@
 // a directory of routes plus one row each in `navRows`, and nothing else here
 // changed.
 import { navRows, NavRow } from "../nav"
-import { exampleCount, backendCount } from "../repo"
+import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "../repo"
 // The stylesheet and the one script module, for every page.
 //
 // The `head { … }` block takes `title`, `stylesheet`, `module` and `script`, and
@@ -17,6 +17,18 @@ import { exampleCount, backendCount } from "../repo"
 head {
     stylesheet "/style.css"
     module "/widgets.js"
+}
+
+/// The footer's standing line: the newest release, baked while the site built,
+/// and the honest sentence before there was one.
+fn standing() -> String {
+    if !hasRelease() {
+        return "Early. No versioned release yet."
+    }
+    if releasePre() {
+        return "Early. " + releaseTag() + " is the newest release, and it is a pre-release."
+    }
+    return "Early. " + releaseTag() + " is the newest release."
 }
 </script>
 
@@ -49,7 +61,7 @@ head {
         <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
         <a href="https://github.com/vyrn-lang/vyrn">Source on GitHub</a>
         <a href="https://github.com/vyrn-lang/vyrn/tree/main/rfcs">The design record</a>
-        <span>Early. No versioned release yet.</span>
+        <span>{{ standing() }}</span>
     </footer>
 </div>
 </template>

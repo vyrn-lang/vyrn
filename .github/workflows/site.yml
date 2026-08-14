@@ -9,13 +9,18 @@ name: Site
 #   - Counts (examples, RFCs, std modules) are read off the repository by a
 #     compile-time generator, `site/app/facts.vyrn`, while the pages render.
 #     There is nothing to gather and nothing to go stale.
-#   - Releases are fetched by the page itself, once per visit, with an hour of
-#     caching (`site/public/fresh.js`). Nothing is baked, so nothing is wrong
-#     between builds.
-#   - Benchmarks are NOT published, because `bench/baseline.json` is still a
-#     placeholder. The comparison page says so rather than printing a number
-#     from an unseeded baseline. When the baseline is seeded, this job gains a
-#     `gh run download` step and the page gains its chart.
+#   - The release IS baked, into `site/release.txt`, by the step below — one
+#     call to the release listing before the pages render, and the committed
+#     file whenever that call is unavailable. The page then knows its own
+#     version and prints the real install command instead of telling every
+#     reader to build from source. `site/public/fresh.js` still asks the same
+#     listing once a visit, and now says ONE thing with it: that a newer
+#     release exists, when the baked tag is not the newest.
+#   - Benchmarks are measured, not gathered: `bench/engines.sh` times one
+#     program on all three engines, and the comparison page publishes the
+#     machine, the date, the version and the command beside the numbers. The
+#     per-operation `vyrn bench` corpus stays out of the site until
+#     `bench/baseline.json` is seeded, because a trend needs a baseline.
 on:
   release:
     types: [published, prereleased, edited]
@@ -69,6 +74,36 @@ jobs:
       - name: Build the CLI
         working-directory: compiler
         run: cargo build --release -p vyrn-cli
+
+      - name: Refresh the baked release
+        # `site/release.txt` holds the newest published tag and its date, and a
+        # compile-time generator reads it into every page that names a version.
+        # This is where it is kept fresh: the listing endpoint (not
+        # `/releases/latest`, which hides pre-releases), one call, with the
+        # workflow's own token so the anonymous 60-an-hour limit is not in play.
+        #
+        # It CANNOT fail the build. A rate limit, an outage, or a fork whose
+        # token cannot read the API leaves the committed file exactly as it is —
+        # the pages still render, with the last tag anyone recorded, and
+        # `fresh.js` says so in the page when that is not the newest one. The
+        # export itself never touches the network.
+        #
+        # The comment header of the file is preserved and the two data lines are
+        # replaced, so the file keeps explaining itself.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fresh=$(gh api "repos/${{ github.repository }}/releases?per_page=1" \
+            --jq 'if length == 0 then "" else "\(.[0].tag_name)\n\(.[0].published_at | split("T")[0])" end') || fresh=''
+          case "$fresh" in
+            v*)
+              { grep '^#' site/release.txt; printf '%s\n' "$fresh"; } > site/release.new
+              mv site/release.new site/release.txt
+              echo "baked release:"; grep -v '^#' site/release.txt ;;
+            *)
+              echo "no release data from the API; keeping the committed file:"
+              grep -v '^#' site/release.txt ;;
+          esac
 
       - name: The site's own tests
         # The export asserts that every navigation row points at a route that

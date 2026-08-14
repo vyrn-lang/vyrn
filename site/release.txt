@@ -1,0 +1,27 @@
+# The newest published release, baked into the site while it builds.
+#
+# Line one is the tag, and it must start with `v` — the only shape
+# `release.yml` publishes. Line two is when GitHub published it. A `#` line is a
+# comment, and a file with no tag in it means "nothing is released yet", which is
+# a state the pages still render correctly.
+#
+# WHO WRITES THIS. `.github/workflows/site.yml` refreshes it from the GitHub
+# release listing before every build, and the site workflow runs on every release
+# event, on every green CI run on main, and once a day. The copy committed here
+# is what a build uses when that call is unavailable — offline, rate-limited, or
+# a checkout with no network at all. The export itself never touches the network.
+#
+# The listing endpoint, not `/releases/latest`: `latest` hides pre-releases, and
+# every release so far is one.
+#
+# WHY A TAG IS ENOUGH. The release URL is the tag under `/releases/tag/`, and a
+# tag carrying a suffix is a pre-release — the same rule `release.yml` applies
+# when it decides whether to pass `--prerelease` to `gh release create`. Nothing
+# else needs baking, because the install commands name no version: both
+# installers resolve the newest release themselves.
+#
+# If this file is ever stale, `site/public/fresh.js` says so on the page: it asks
+# the same listing once a visit and, when the newest tag is not the one below,
+# writes one line saying a newer release exists.
+v0.1.0-alpha.1
+2026-08-11

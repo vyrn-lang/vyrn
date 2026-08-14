@@ -2,18 +2,25 @@
 // GET /install — the quickstart, and the most important page on the site after
 // the landing page.
 //
-// No version string is written by hand, and none is invented. There is no
-// published binary and no git tag yet, so every command here builds from source.
-// `fresh.js` asks the GitHub release feed once per visit; the moment a release
-// exists, the notice at the top of this page fills itself in. Until then the
-// page says plainly that there is nothing to download.
+// It used to say there was no binary and send every reader to `cargo build`.
+// There is one: `install.sh` and `install.ps1` ship in the repository, CI runs
+// both of them on Linux, macOS and Windows on every push, and they download the
+// archive for the machine they are on, verify it against the release's own
+// SHA256SUMS, and refuse to install anything they cannot verify.
+//
+// NO VERSION IS WRITTEN HERE. Neither installer takes one: both resolve the
+// newest release themselves, pre-releases included, which is why the command is
+// the same on the day of a release and the day after. The version SHOWN comes
+// from `site/release.txt` through `../repo`, baked while this page built, and
+// `fresh.js` says so on the page if a newer one appears before the next build.
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { vyrnHtml } from "../snippets"
 import { shellHtml } from "../code"
+import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
 
-/// One platform's setup, in the order a reader does it.
-type Platform = { id: String, name: String, deps: String, build: String, run: String }
+/// One platform: the one-line install, what it fetches, and the first run.
+type Platform = { id: String, name: String, install: String, archive: String, deps: String, run: String }
 
 export fn head() -> Head {
     return pageHead("Install — Vyrn")
@@ -24,23 +31,26 @@ fn platforms() -> Array<Platform> {
         Platform {
             id: "linux",
             name: "Linux",
-            deps: "A recent Rust toolchain. <code>clang</code>, for a native binary.",
-            build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
-            run: "./target/release/vyrn run ../examples/fib.vyrn",
+            install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
+            archive: "vyrn-x86_64-linux.tar.gz, or the arm64 archive on an arm64 kernel",
+            deps: "Nothing. <code>clang</code>, and only for a native binary.",
+            run: "vyrn run examples/fib.vyrn",
         },
         Platform {
             id: "macos",
             name: "macOS",
-            deps: "A recent Rust toolchain. Xcode command line tools supply <code>clang</code>.",
-            build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
-            run: "./target/release/vyrn run ../examples/fib.vyrn",
+            install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
+            archive: "vyrn-aarch64-macos.tar.gz — Apple silicon; an Intel Mac builds from source",
+            deps: "Nothing. Xcode command line tools supply the <code>clang</code> a native binary needs.",
+            run: "vyrn run examples/fib.vyrn",
         },
         Platform {
             id: "windows",
             name: "Windows",
-            deps: "A recent Rust toolchain. <code>clang</code>, for a native binary.",
-            build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
-            run: ".\\target\\release\\vyrn.exe run ..\\examples\\fib.vyrn",
+            install: "irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex",
+            archive: "vyrn-x86_64-windows.zip",
+            deps: "Nothing. <code>clang</code>, and only for a native binary.",
+            run: "vyrn run examples\\fib.vyrn",
         },
     ]
 }
@@ -68,56 +78,125 @@ fn firstProgram() -> String {
 fn lspBuild() -> String {
     return "cargo build --release --manifest-path vyrn-lsp/Cargo.toml"
 }
+
+/// The source build, which is the same three lines everywhere.
+fn sourceBuild() -> String {
+    return "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli"
+}
+
+fn sourceRun() -> String {
+    return "./target/release/vyrn run ../examples/fib.vyrn"
+}
+
+/// Pinning a tag instead of taking the newest release.
+fn pinnedInstall() -> String {
+    return "VYRN_VERSION=" + releaseTag() + " sh install.sh"
+}
+
+/// Checking a manual download by hand, which is what the installer does for you.
+fn manualCheck() -> String {
+    return "sha256sum -c SHA256SUMS"
+}
+
+/// The version line under the heading, or the honest sentence when there is no
+/// release to name. One function, because the two states differ by a fact and
+/// not by a layout.
+fn versionLine() -> String {
+    if !hasRelease() {
+        return "Nothing is published yet, so the commands below build from source."
+    }
+    let kind = if releasePre() { "pre-release" } else { "release" }
+    return releaseTag() + ", published " + releaseDate() + " as a " + kind + "."
+}
 </script>
 
 <template>
 <main class="page">
     <aside class="rail">
-        <a href="#get"><span class="n">01</span>get it</a>
-        <a href="#check"><span class="n">02</span>check it</a>
-        <a href="#first"><span class="n">03</span>first program</a>
-        <a href="#editor"><span class="n">04</span>editor</a>
+        <a href="#get"><span class="n">01</span>install it</a>
+        <a href="#verify"><span class="n">02</span>what it verifies</a>
+        <a href="#source"><span class="n">03</span>from source</a>
+        <a href="#check"><span class="n">04</span>check it</a>
+        <a href="#first"><span class="n">05</span>first program</a>
+        <a href="#editor"><span class="n">06</span>editor</a>
     </aside>
         <section class="hero">
             <p class="eyebrow">Install</p>
-            <h1 class="display">Three commands, and it runs</h1>
-            <p class="lede">Vyrn is early. There is no versioned release and no published binary, so you build the compiler from source. It takes one clone and one <code>cargo build</code>.</p>
-            <p class="notice" data-release-note hidden="hidden"></p>
+            <h1 class="display">One command, and it runs</h1>
+            <p class="lede">Vyrn is early and the language still changes without a deprecation period. Installing it is one line: the script downloads the archive for your machine, checks it against the release's own checksums, and refuses to install bytes it cannot verify.</p>
+            <p class="notice">{{ versionLine() }} <a :href="releaseUrl()">Release notes</a></p>
+            <p class="notice" :data-release-note="releaseTag()" hidden="hidden"></p>
         </section>
 
         <section class="band" id="get">
-            <p class="eyebrow">01 — get it</p>
-            <h2>Build the compiler</h2>
+            <p class="eyebrow">01 — install it</p>
+            <h2>The one line</h2>
             <div class="plate" data-install>
                 <div class="plate-head">
-                    <span class="pill">Quickstart</span>
-                    <span class="eyebrow">from source</span>
+                    <span class="pill live">Quickstart</span>
+                    <span class="eyebrow">newest release</span>
                 </div>
                 <div class="tabs">
                     <button type="button" v-for="p in platforms()" :key="p.id" :data-plat="p.id">{{ p.name }}</button>
                 </div>
                 <div class="stage panes">
                     <div v-for="p in platforms()" :key="p.id" :data-plat-pane="p.id">
-                        <p class="eyebrow">You need</p>
-                        <p v-html="p.deps"></p>
                         <div class="cmd" data-copy>
-                            <code v-html="shellHtml(p.build)"></code>
-                            <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>
+                            <code v-html="shellHtml(p.install)"></code>
+                            <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
                         </div>
+                        <p class="eyebrow" style="margin-top:24px">It downloads</p>
+                        <p>{{ p.archive }}</p>
                         <p class="eyebrow" style="margin-top:24px">Then</p>
                         <div class="cmd" data-copy>
                             <code v-html="shellHtml(p.run)"></code>
                             <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>
                         </div>
+                        <p class="eyebrow" style="margin-top:24px">You need</p>
+                        <p v-html="p.deps"></p>
                     </div>
                 </div>
-                <p class="cap">The platform is picked from your browser and you can change it. Nothing here downloads a binary, because there is no binary to download yet.</p>
+                <p class="cap">The platform is picked from your browser and you can change it. The binary lands in <code>~/.vyrn/bin</code> (<code>%USERPROFILE%\.vyrn\bin</code> on Windows) with <code>std/</code> and <code>web/</code> beside it, and the script tells you what to add to your <code>PATH</code>.</p>
             </div>
+            <p class="notice">No version is written in that command, and none needs to be: the script resolves the newest release itself — pre-releases included, which is what every release so far has been. To pin one instead: <code>{{ pinnedInstall() }}</code>, or <code>$env:VYRN_VERSION</code> on Windows.</p>
+        </section>
+
+        <section class="band" id="verify">
+            <p class="eyebrow">02 — what it verifies</p>
+            <h2>It refuses what it cannot check</h2>
+            <p>A one-line installer is a request to run a stranger's shell script, so this is what that script does before it writes anything to your disk:</p>
+            <ul class="plain">
+                <li><strong>It downloads the release's own <code>SHA256SUMS</code></strong><span class="note">Published as an asset of the same release, generated by <code>sha256sum</code> over the archives in the workflow that built them.</span></li>
+                <li><strong>It hashes what it downloaded and compares</strong><span class="note">On a mismatch it deletes the download, prints both hashes, and installs nothing. On an archive that is not listed at all, it refuses for that reason instead.</span></li>
+                <li><strong>Both refusals are executed on every push</strong><span class="note"><code>install-test.sh</code> and <code>install-test.ps1</code> run the real installers against a fake release, on Linux, macOS and Windows, including the corrupted-archive case. A checksum check nobody executes is a paragraph, not a check.</span></li>
+            </ul>
+            <p>Prefer to do it by hand? Download the archive and <code>SHA256SUMS</code> from the release page and run:</p>
+            <div class="cmd" data-copy>
+                <code v-html="shellHtml(manualCheck())"></code>
+                <button type="button" data-copy-btn aria-label="Copy the checksum command">Copy</button>
+            </div>
+            <p class="notice">Read the script before you pipe it: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a> and <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a> are both about a hundred and thirty lines, and every line of them is on that page.</p>
+        </section>
+
+        <section class="band" id="source">
+            <p class="eyebrow">03 — from source</p>
+            <h2>Or build the compiler</h2>
+            <p>The newest commit rather than the newest release, a platform with no published archive, or plain preference. It is one clone and one <code>cargo build</code>, the same three lines on every platform, and it needs a recent Rust toolchain.</p>
+            <div class="cmd" data-copy>
+                <code v-html="shellHtml(sourceBuild())"></code>
+                <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>
+            </div>
+            <p>Then run an example from <code>vyrn/compiler</code>, where the examples are one directory up:</p>
+            <div class="cmd" data-copy>
+                <code v-html="shellHtml(sourceRun())"></code>
+                <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>
+            </div>
+            <p class="cap">On Windows that last one is <code>.\target\release\vyrn.exe run ..\examples\fib.vyrn</code>.</p>
             <p class="notice">A native binary needs <code>clang</code> on <code>PATH</code> (or <code>$CLANG</code>). A WebAssembly module needs nothing extra. The full parity harness also needs a <code>wasmtime</code>, through <code>$VYRN_WASMTIME</code>.</p>
         </section>
 
         <section class="band" id="check">
-            <p class="eyebrow">02 — check it</p>
+            <p class="eyebrow">04 — check it</p>
             <h2>Five commands worth knowing on day one</h2>
             <ul class="plain">
                 <li v-for="s in steps()" :key="s.title">
@@ -132,14 +211,14 @@ fn lspBuild() -> String {
         </section>
 
         <section class="band" id="first">
-            <p class="eyebrow">03 — first program</p>
+            <p class="eyebrow">05 — first program</p>
             <h2>Hello</h2>
             <p>Put this in <code>hello.vyrn</code> and run <code>vyrn run hello.vyrn</code>. The same file builds to a native binary and to a WebAssembly module, and all three print the same bytes.</p>
             <pre class="code" v-html="firstProgram()"></pre>
         </section>
 
         <section class="band" id="editor">
-            <p class="eyebrow">04 — editor</p>
+            <p class="eyebrow">06 — editor</p>
             <h2>The language server</h2>
             <p><code>vyrn-lsp</code> is a synchronous language server: diagnostics, hover, go-to-definition and completion, across linked files. The VS Code extension lives in <code>editor/vscode/</code>. It is excluded from the main workspace, so it is built on its own:</p>
             <div class="cmd" data-copy>
