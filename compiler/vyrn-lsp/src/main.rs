@@ -166,10 +166,7 @@ fn load_context(
 /// checking that its bytes still hash to the pin, and it accepted a `vyrn.lock`
 /// the build refuses. An editor that answers a different question from the
 /// build is worse than an editor that answers none.
-use vyrn_frontend::manifest::{
-    find as find_manifest, pinned_blob, std_root, Lock,
-};
-
+use vyrn_frontend::manifest::{find as find_manifest, pinned_blob, std_root, Lock};
 
 /// Read-only module resolver for the editor: local paths from disk; remote
 /// specifiers served from the project's `vyrn_vendor/` or the user cache — but

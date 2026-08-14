@@ -47,7 +47,9 @@ fn find_node() -> Option<PathBuf> {
 }
 
 fn repo(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
 }
 
 fn tmp(tag: &str) -> PathBuf {
@@ -83,7 +85,12 @@ fn build_wasm(dir: &Path, stem: &str, source: &str) -> PathBuf {
 /// then the same for the `vyrn.*` imports. Deliberately a SECOND reader written
 /// against the documented format rather than a call into the emitter, so that a
 /// change to either side has to be made in both.
-fn read_abi(wasm: &[u8]) -> (Vec<(String, String, Vec<String>)>, Vec<(String, String, Vec<String>)>) {
+fn read_abi(
+    wasm: &[u8],
+) -> (
+    Vec<(String, String, Vec<String>)>,
+    Vec<(String, String, Vec<String>)>,
+) {
     let mut i = 8; // magic + version
     let mut payload: Option<&[u8]> = None;
     while i < wasm.len() {
@@ -235,7 +242,12 @@ fn the_section_states_every_declared_signature_on_both_sides() {
 
     // Nothing on the boundary, nothing written down.
     let bare = tmp("bare");
-    let wasm = std::fs::read(build_wasm(&bare, "bare", "fn main() -> Int64 { return 0 }\n")).unwrap();
+    let wasm = std::fs::read(build_wasm(
+        &bare,
+        "bare",
+        "fn main() -> Int64 { return 0 }\n",
+    ))
+    .unwrap();
     assert!(
         !String::from_utf8_lossy(&wasm).contains("vyrn:exports"),
         "a module with no externs carries no section"
@@ -321,8 +333,7 @@ fn the_shim_reads_the_declaration_instead_of_the_instruction_shape() {
     // address 7 with length 900 — 900 bytes of whatever the heap held.
     let seen = lines.next().unwrap_or_default();
     assert_eq!(
-        seen,
-        r#"[["hostLog","string","from vyrn"],["hostPair","number",7,"bigint","900"]]"#,
+        seen, r#"[["hostLog","string","from vyrn"],["hostPair","number",7,"bigint","900"]]"#,
         "each import saw its declared arguments: {text}"
     );
 

@@ -485,7 +485,9 @@ mod tests {
         .unwrap();
 
         let canon = real_path(&d.to_string_lossy().replace('\\', "/")).unwrap();
-        let m = from_doc(doc, format!("{canon}/server/..")).audience.unwrap();
+        let m = from_doc(doc, format!("{canon}/server/.."))
+            .audience
+            .unwrap();
 
         assert_eq!(m.base, canon, "the base is what the filesystem calls it");
         assert_eq!(

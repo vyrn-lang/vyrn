@@ -535,9 +535,7 @@ impl vyrn_frontend::loader::ModuleResolver for FsResolver {
 /// binary crate is not linkable. The copy drifted: it served a cached module
 /// without verifying its hash, and it accepted a `vyrn.lock` this reader
 /// refuses. There is one reader now, and both programs are consumers.
-use vyrn_frontend::manifest::{
-    find as find_manifest, real_path, std_root, web_root, Manifest,
-};
+use vyrn_frontend::manifest::{find as find_manifest, real_path, std_root, web_root, Manifest};
 
 /// [`find_manifest`], with the CLI's answer to an unreadable one: say which file
 /// and why, and stop. Every command reads the manifest, and none of them can do

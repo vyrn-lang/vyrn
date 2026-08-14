@@ -61,15 +61,22 @@ const r = await runVyrn(bytes, {
 });
 ```
 
-The shim reads the module's own import section to recover each `vyrn.*`
-signature and wraps the host function: a `String` crosses as a `(ptr, len)`
-pair decoded from linear memory, `Int64` is a JS `BigInt`, floats and Bool map
-naturally. A missing extern is a clear instantiate error naming provided vs
-wanted. (Known ABI-shape caveat: an `i32` immediately followed by an `i64` in
-a signature is decoded as one String argument — no v1 extern signature hits
-that combination.) String *returns* from JS are not supported yet (needs an
-exported allocator — RFC-0012 stage 1.5). See [externdemo.html](externdemo.html)
-driving [examples/externdemo.vyrn](../examples/externdemo.vyrn).
+The shim reads each `vyrn.*` signature out of the module's own
+**`vyrn:exports` custom section** and wraps the host function: a `String`
+crosses as a `(ptr, len)` pair decoded from linear memory, `Int64`/`UInt64` are
+JS `BigInt`s, floats and Bool map naturally, and a `UInt32` arrives unsigned. A
+missing extern is a clear instantiate error naming provided vs wanted.
+
+Until RFC-0012 M3's section grew to cover both directions, the shim walked the
+module's type and import sections and guessed from the ABI shape: an `i32`
+immediately followed by an `i64` was taken to BE a String, because that is what
+a `String` lowers to — so `extern fn hostPair(a: Int32, b: Int64)` arrived at
+its JS hook as ONE argument, a string decoded from linear memory at address `a`
+with length `b`, and the second parameter as `undefined`. That caveat is gone
+with the guess. String *returns* from JS are still not supported (needs an
+exported allocator — RFC-0012 stage 1.5). See
+[externdemo.html](externdemo.html) driving
+[examples/externdemo.vyrn](../examples/externdemo.vyrn).
 
 On the interpreter and the native binary, *calling* an import extern traps with
 the canonical ``error: extern `name` is not available on this target``
@@ -93,19 +100,23 @@ exports.vyrnAdd(40, 2);   // => 42n  (Int64 is a BigInt)
 exports.greet("world");   // => "Hello, world!"
 ```
 
-The shim reads the module's function + export sections to recover each export's
-signature, then wraps it. **String ABI, and why it differs from an import:** an
-exported `String` *parameter* is a single `ptr` (not the import's `(ptr, len)`
-pair), because the JS caller *can* allocate inside the module — it takes the
-module's exported `__vyrn_malloc`, copies UTF-8 + a NUL terminator, and passes
-the pointer; `vyrn` force-exports `__vyrn_malloc` whenever an `export extern fn`
-has a String parameter. A returned `String` is a `ptr` the shim NUL-decodes from
-linear memory. Because a `String`, `Bool`, and `Int32` all lower to a wasm
-`i32`, the wrapper resolves *arguments* by the JS value's runtime type (a JS
-string is allocated + copied) and *results* by the module's own **`vyrn:exports`
-custom section** (`"string"` → NUL-decoded, `"bool"` → `true`/`false`, else a
-number; `i64` is a BigInt, floats are numbers). The wrapper skips `memory`,
-`_start`, `__vyrn_malloc`, and any `__`-prefixed export.
+The shim takes each export's signature from the same **`vyrn:exports` custom
+section**, and the list of callable names from `instance.exports`. **String ABI,
+and why it differs from an import:** an exported `String` *parameter* is a single
+`ptr` (not the import's `(ptr, len)` pair), because the JS caller *can* allocate
+inside the module — it takes the module's exported `__vyrn_malloc`, copies UTF-8
++ a NUL terminator, and passes the pointer; `vyrn` force-exports `__vyrn_malloc`
+whenever an `export extern fn` has a String parameter. A returned `String` is a
+`ptr` the shim NUL-decodes from linear memory.
+
+`String`, `Bool`, `Int32` and `UInt32` all lower to a wasm `i32`, so BOTH ends of
+a call are resolved from the declaration: a `string` parameter takes a JS string
+(and refuses a number, which the module would read as a pointer), a `bool`
+parameter takes anything truthy, a `u32` result comes back unsigned. Arguments
+used to be resolved by the JS value's runtime type instead, so `greet(42)` on
+`export extern fn greet(name: String)` returned `"Hello, !"` — 42 was handed over
+as a pointer — and a `UInt32` result over 2^31 came back negative. The wrapper
+skips `memory`, `_start`, `__vyrn_malloc`, and any `__`-prefixed export.
 
 **Who frees what.** Both directions are the caller's, and across this boundary
 the caller is the page. A String ARGUMENT is allocated here and released here,
@@ -122,8 +133,11 @@ ignores. `vyrn` exports `__vyrn_malloc` and `__vyrn_free` whenever an
 The release runs for every result the module DECLARES as a String, and the
 module declares them all. Until RFC-0012 M3 the page wrote the map by hand, so
 an export nobody named came back as a number and leaked. The compiler is the
-thing that knows, and it writes the section now. `hooks.exportReturns` remains
-as a fallback for a module built by another producer. See the M2 section of
+thing that knows, and it writes the section now — every signature on the
+boundary, in both directions, so nothing is left for a page or a runtime to
+infer. A module carrying no section is refused by name rather than guessed at;
+there is no hand-written fallback, because there is no producer of Vyrn wasm but
+`vyrn build --target wasm`. See the M2 section of
 [externdemo.html](externdemo.html) driving
 [examples/externdemo2.vyrn](../examples/externdemo2.vyrn).
 
