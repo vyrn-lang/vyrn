@@ -1566,22 +1566,28 @@ struct ProcessMemoryCounters {
     peak_pagefile: usize,
 }
 
+/// One program that parks TWICE: after `first` spawns, and again once `total`
+/// have run. Both handle counts are then read from ONE process, so everything
+/// the count holds that is not a task — the standard streams, the loader's, the
+/// machine's virus scanner reading a freshly built image — is the same number
+/// on both sides of the comparison and cancels out of it. Two processes cannot
+/// promise that: 30 launches of this very program, sampled 40 times each,
+/// answered a rock-steady 68 for a warm image and 74 for a cold one — six
+/// handles of difference that has nothing to do with a task.
+///
+/// Each park announces itself by WRITING A FILE rather than by printing: a
+/// piped stdout is block-buffered, so a line printed before the park does not
+/// arrive until the process ends, and waiting for it would deadlock against the
+/// process waiting for stdin. A line on stdin releases each park.
 #[cfg(windows)]
-fn spawn_loop_source(turns: usize, marker: &str) -> String {
+fn spawn_loop_source(first: usize, total: usize, park_a: &str, park_b: &str) -> String {
     format!(
         r#"fn work(n: Int64) -> Int64 {{
     return n + 1
 }}
 
-fn main() -> Int64 {{
-    let mut i = 0
-    let mut acc = 0
-    while i < {turns} {{
-        let t = spawn work(i)
-        acc = acc + t.join()
-        i = i + 1
-    }}
-    let parked = match writeFile("{marker}", "spawned \{{acc}}") {{
+fn park(path: String, acc: Int64) -> Int64 {{
+    let parked = match writeFile(path, "spawned \{{acc}}") {{
         Ok(b) => b,
         Err(e) => false,
     }}
@@ -1592,8 +1598,50 @@ fn main() -> Int64 {{
     }}
     return 0
 }}
+
+fn main() -> Int64 {{
+    let mut i = 0
+    let mut acc = 0
+    while i < {first} {{
+        let t = spawn work(i)
+        acc = acc + t.join()
+        i = i + 1
+    }}
+    acc = acc + park("{park_a}", acc)
+    while i < {total} {{
+        let t = spawn work(i)
+        acc = acc + t.join()
+        i = i + 1
+    }}
+    acc = acc + park("{park_b}", acc)
+    return 0
+}}
 "#
     )
+}
+
+/// The handles a parked process holds STEADILY.
+///
+/// A transient only ever ADDS a handle — the marker file the runtime has
+/// created and not yet closed, a worker thread the last `join` released that
+/// the operating system has not finished tearing down — so the smallest count
+/// over a short window is the steady state, and the poll that spots the marker
+/// cannot race the write that made it.
+#[cfg(windows)]
+fn steady_handle_count(child: &std::process::Child) -> u32 {
+    use std::os::windows::io::AsRawHandle;
+    (0..10)
+        .map(|k| {
+            if k > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let mut n: u32 = 0;
+            let ok = unsafe { GetProcessHandleCount(child.as_raw_handle(), &mut n) };
+            assert_ne!(ok, 0, "GetProcessHandleCount failed");
+            n
+        })
+        .min()
+        .expect("ten samples")
 }
 
 /// The measurement the table above cannot make (RFC-0095 M1).
@@ -1607,16 +1655,18 @@ fn main() -> Int64 {{
 /// stops.
 ///
 /// **A relation, not a number**, exactly as the table above asserts one: the
-/// handle count after 8,000 spawns equals the count after 2,000. Before M1 it
-/// was 20,076 handles at 20,000 spawns and 200,076 at 200,000 — one per spawn,
-/// on the nose.
+/// handle count does not scale with the spawn count. Before M1 it was 20,076
+/// handles at 20,000 spawns and 200,076 at 200,000 — one per spawn, on the
+/// nose.
 ///
-/// The program parks on `readLine()` after its loop, so the count is read at a
-/// synchronisation point rather than by polling a process that may already have
-/// exited. Closing its stdin lets it finish. It announces the park by WRITING A
-/// FILE rather than by printing: a piped stdout is block-buffered, so a line
-/// printed before the park does not arrive until the process ends, and waiting
-/// for it would deadlock against the process waiting for stdin.
+/// The two counts come from ONE process, at two parks 18,000 spawns apart. That
+/// is what makes the relation measurable rather than merely tolerable: the
+/// ambient half of the count — the standard streams, the loader's handles, a
+/// virus scanner's read of a freshly built image — is one number here, and it
+/// subtracts. The row used to run two processes and demand their counts be
+/// EQUAL, which is more precision than two launches can give: it flaked at a
+/// difference of one, four times in a week, and taught its readers to re-run a
+/// red gate. Against a signal of 18,000 that precision bought nothing.
 ///
 /// Skips, loudly, without clang — the same posture this file takes for node —
 /// and compiles only on Windows, because `GetProcessHandleCount` is what names
@@ -1625,7 +1675,7 @@ fn main() -> Int64 {{
 #[cfg(windows)]
 #[test]
 fn the_spawn_handles_go_back_natively() {
-    use std::os::windows::io::AsRawHandle;
+    use std::io::Write;
     use std::process::Stdio;
 
     if vyrn_codegen::toolchain::find_clang().is_none() {
@@ -1636,63 +1686,81 @@ fn the_spawn_handles_go_back_natively() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // 2,000 and 8,000. The leak was one handle per spawn, so one order of
-    // magnitude between the two runs is unmistakable and neither takes a second.
-    let mut counts = Vec::new();
-    for turns in [2000usize, 8000] {
-        let marker = dir.join(format!("ready{turns}.txt"));
-        let src = dir.join(format!("spawn{turns}.vyrn"));
-        std::fs::write(
-            &src,
-            spawn_loop_source(turns, &marker.display().to_string().replace('\\', "/")),
-        )
-        .unwrap();
-        let exe = dir.join(format!("spawn{turns}.exe"));
-        let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-            .arg("build")
-            .arg(&src)
-            .arg("-o")
-            .arg(&exe)
-            .output()
-            .expect("vyrn build");
-        assert!(
-            build.status.success(),
-            "native build failed:\n{}",
-            String::from_utf8_lossy(&build.stderr)
-        );
+    // 2,000 spawns, then 18,000 more. An order of magnitude between the two
+    // parks, and the whole program still runs in about two seconds.
+    let (first, total) = (2000usize, 20_000usize);
+    let parks = [dir.join("park1.txt"), dir.join("park2.txt")];
+    let at = |p: &std::path::Path| p.display().to_string().replace('\\', "/");
+    let src = dir.join("spawn.vyrn");
+    std::fs::write(
+        &src,
+        spawn_loop_source(first, total, &at(&parks[0]), &at(&parks[1])),
+    )
+    .unwrap();
+    let exe = dir.join("spawn.exe");
+    let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("vyrn build");
+    assert!(
+        build.status.success(),
+        "native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
-        let mut child = Command::new(&exe)
-            .stdin(Stdio::piped())
-            .spawn()
-            .expect("run the spawn loop");
+    let mut child = Command::new(&exe)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("run the spawn loop");
+    let mut counts = Vec::new();
+    for (k, marker) in parks.iter().enumerate() {
         // Wait for the park. Sixty seconds is a ceiling, not a timing
-        // assumption: 8,000 spawns take well under a second.
+        // assumption: 20,000 spawns take about two.
         let start = std::time::Instant::now();
         while !marker.exists() {
             assert!(
                 start.elapsed() < std::time::Duration::from_secs(60),
-                "the spawn loop never reached its park at {turns} turns"
+                "the spawn loop never reached park {}",
+                k + 1
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-
-        let mut n: u32 = 0;
-        let ok = unsafe { GetProcessHandleCount(child.as_raw_handle(), &mut n) };
-        assert_ne!(ok, 0, "GetProcessHandleCount failed");
-        counts.push(n);
-
-        drop(child.stdin.take());
-        let status = child.wait().expect("wait");
-        assert!(status.success(), "the spawn loop exited {status}");
+        counts.push(steady_handle_count(&child));
+        if k == 0 {
+            // Release the first park; the second is released by closing stdin.
+            let stdin = child.stdin.as_mut().expect("piped stdin");
+            stdin.write_all(b"go\n").expect("release the first park");
+            stdin.flush().expect("flush");
+        }
     }
+    drop(child.stdin.take());
+    let status = child.wait().expect("wait");
+    assert!(status.success(), "the spawn loop exited {status}");
 
-    assert_eq!(
-        counts[0], counts[1],
-        "the handle count grew with the spawn count: {} handles after 2,000 spawns, {} after \
-         8,000. A task owns an operating-system handle, and RFC-0095 M1 gives it back at the \
-         one join or at the `drop` — one per spawn is census §10, which measured 200,076 \
-         handles at 200,000 spawns.",
-        counts[0], counts[1]
+    // The tolerance, and the argument for the number. The defect is one handle
+    // per spawn — census §10 measured 200,076 at 200,000 — so between the two
+    // parks, 18,000 spawns apart, that leak shows a difference of 18,000. This
+    // gate fires at 16, which is a leak of one handle per 1,125 spawns: it
+    // still catches a defect a thousand times smaller than the one it was
+    // built for. And it is far above the noise it must ignore, because the
+    // ambient count is shared by the two samples and cancels — 40 runs across
+    // both profiles, under parallel load, moved this difference by 0 every
+    // time. A wider window would weaken the gate; the single process is what
+    // removed the jitter, not the 16.
+    let slack = 16;
+    assert!(
+        counts[1] <= counts[0] + slack,
+        "the handle count grew with the spawn count: {} handles at the {first}-spawn park and \
+         {} at {total}, {} more for {} further spawns. A task owns an operating-system handle, \
+         and RFC-0095 M1 gives it back at the one join or at the `drop` — one per spawn is \
+         census §10, which measured 200,076 handles at 200,000 spawns.",
+        counts[0],
+        counts[1],
+        counts[1] - counts[0],
+        total - first
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
