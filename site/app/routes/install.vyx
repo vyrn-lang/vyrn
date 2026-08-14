@@ -129,7 +129,7 @@ fn versionLine() -> String {
             <h1 class="display">One command, and it runs</h1>
             <p class="lede">Vyrn is early and the language still changes without a deprecation period. Installing it is one line: the script downloads the archive for your machine, checks it against the release's own checksums, and refuses to install bytes it cannot verify.</p>
             <p class="notice">{{ versionLine() }} <a :href="releaseUrl()">Release notes</a></p>
-            <p class="notice" :data-release-note="releaseTag()" hidden="hidden"></p>
+            <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
         </section>
 
         <section class="band" id="get">

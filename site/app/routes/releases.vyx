@@ -65,7 +65,7 @@ fn latestRfcs() -> Array<RfcRow> {
             <h1 class="display">{{ headline() }}</h1>
             <p class="lede">{{ standing() }} The language changes without a deprecation period, so read the design records before you depend on any of it. <a href="/install.html">Install it in one line</a>, or build from source.</p>
             <p class="notice"><a :href="releaseUrl()">Release notes and downloads</a> — every archive is listed in that release's <code>SHA256SUMS</code>, and both installers refuse anything that does not match it.</p>
-            <p class="notice" :data-release-note="releaseTag()" hidden="hidden"></p>
+            <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
         </section>
 
         <section class="band" id="record">
