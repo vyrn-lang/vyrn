@@ -12,7 +12,7 @@
 // If the module will not load, the same formula is evaluated here instead. That
 // is the brief's circuit breaker, not a second implementation to maintain: the
 // hero must always paint something, and a blank hero looks broken.
-import { runVyrn } from "/wasi-min.js";
+import { runVyrn } from "./wasi-min.js";
 
 const RAMP = ".:+=VYRN#$&"; // eleven glyphs, dark to light; VYRN in the mid-tones
 
@@ -219,7 +219,10 @@ export function mountHero(canvas, opts = {}) {
 /// or null if anything at all goes wrong.
 async function loadModule() {
   try {
-    const res = await fetch("/hero.wasm");
+    // Relative to THIS module, not to a root: the site is served from `/` on one
+    // host and `/vyrn/` on another, and the module sits beside this script on
+    // both.
+    const res = await fetch(new URL("hero.wasm", import.meta.url));
     if (!res.ok) return null;
     const bytes = new Uint8Array(await res.arrayBuffer());
     // `main` prints a sample frame and the field's bit patterns. That is the

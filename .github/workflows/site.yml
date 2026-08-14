@@ -159,6 +159,20 @@ jobs:
         # reference pages are read off `std/` by a generator while this runs.
         run: compiler/target/release/vyrn run site/export.vyrn out
 
+      - name: The site, served from somewhere that is not the root
+        # The export asserts that every internal link resolves, and used to
+        # assert it at a root — which is why the site shipped with `/style.css`
+        # on every page and 404ed under `https://vyrn-lang.github.io/vyrn/`.
+        # This serves `out/` behind a prefix and FETCHES: every page, every URL
+        # every page names, both wasm modules, and every fragment. Three mount
+        # points, one of them nested, plus `file://`, and the same artifact each
+        # time — nothing is rebuilt between them, which is the claim.
+        #
+        # It has to run here rather than beside the other node tests in `ci.yml`:
+        # what it checks is the exported tree, and this is the job that has one.
+        # A glob, so the next file lands in CI by being written.
+        run: node --test "site/test/*.test.mjs"
+
       - uses: actions/upload-pages-artifact@v3
         # Nothing to upload from a pull request — the build IS the check there.
         if: github.event_name != 'pull_request'

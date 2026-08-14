@@ -12,7 +12,7 @@
 // middle of the interpreter, unwinding no Rust and releasing no borrow. The next
 // call into that instance would panic on one. So each run gets its own, which
 // costs an instantiation of an already-compiled module.
-import { loadPlay } from "/play-wasm.js";
+import { loadPlay } from "./play-wasm.js";
 
 // Compiled once. `loadPlay` fetches and instantiates together, so the module is
 // re-fetched per run from the HTTP cache; that is 16 MB of linear memory and a
@@ -22,7 +22,7 @@ let ready = null;
 self.onmessage = async (e) => {
   const { src, stdin, now } = e.data;
   try {
-    ready = loadPlay("/play.wasm");
+    ready = loadPlay(new URL("play.wasm", import.meta.url));
     const play = await ready;
     self.postMessage({ ok: true, result: play.run(src, stdin, now) });
   } catch (err) {

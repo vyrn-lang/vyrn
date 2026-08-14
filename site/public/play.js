@@ -10,7 +10,7 @@
 // Nothing here decides anything about the language. Every colour, every
 // diagnostic and every byte of output comes back from `play.wasm`, which is the
 // compiler's own front end.
-import { loadPlay } from "/play-wasm.js";
+import { loadPlay } from "./play-wasm.js";
 
 /// How long a program may run before the page stops it.
 ///
@@ -293,7 +293,7 @@ export function mountPlay(root) {
     status.textContent = "Running…";
     say("…", "dim");
 
-    worker = new Worker("/play-worker.js", { type: "module" });
+    worker = new Worker(new URL("play-worker.js", import.meta.url), { type: "module" });
     worker.onmessage = (e) => {
       const m = e.data;
       stopWorker();
@@ -396,7 +396,7 @@ export function mountPlay(root) {
   }
   paint();
 
-  loadPlay("/play.wasm").then(
+  loadPlay(new URL("play.wasm", import.meta.url)).then(
     (api) => {
       play = api;
       runBtn.disabled = false;
