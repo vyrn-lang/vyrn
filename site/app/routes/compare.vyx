@@ -344,7 +344,7 @@ fn axes() -> Array<Axis> {
                         <button type="button" data-bars-replay>Replay</button>
                     </div>
                 </div>
-                <span class="bignum">{{ wasmRatio() }}<small>times the native time, in the browser's engine</small></span>
+                <span class="bignum">{{ wasmRatio() }}<small>times the native time, as WebAssembly under wasmtime</small></span>
                 <div class="stage">
                     <svg class="chart" :viewBox="moduleSizesBox()" role="img" aria-label="The same two compiled engines rescaled: 207 milliseconds as WebAssembly against 87 milliseconds native">
 <g class="axis">
@@ -360,7 +360,7 @@ fn axes() -> Array<Axis> {
                         </g>
                     </svg>
                 </div>
-                <p class="cap">The two bars a hair apart on the chart above, rescaled. The WebAssembly module came out of the compiler's own encoder — no LLVM, no <code>clang</code> — and ran under <code>wasmtime</code>.</p>
+                <p class="cap">The two bars a hair apart on the chart above, rescaled. The WebAssembly module came out of the compiler's own encoder — no LLVM, no <code>clang</code> — and ran under <code>wasmtime</code>, which is a standalone runtime and not a browser. A browser's engine is a different measurement, and this page does not make it.</p>
             </div>
 
             <p class="notice">Where these numbers come from: <code>{{ engineCommand() }}</code>, on {{ engineMachine() }}, best of three runs per engine. Each reading is the whole process minus the same process at one round, so process start-up and the shell that timed it are out of it; the harness prints both halves. The ratio is the claim — one machine, one afternoon — and the milliseconds are published so it can be checked. The command was run twice: the second pass came in 8% slower on the interpreter and 6% on the native binary, the spread of an ordinary desktop, and the ratios moved by under 3%. There is no cross-language chart here: that would need a second program written by us in someone else's language, and a reader would have to take on trust that we wrote it well.</p>

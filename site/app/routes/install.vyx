@@ -107,7 +107,7 @@ fn manualCheck() -> String {
 /// not by a layout.
 fn versionLine() -> String {
     if !hasRelease() {
-        return "Nothing is published yet, so the commands below build from source."
+        return "Nothing is published yet: the install script says so and points at the source build below."
     }
     let kind = if releasePre() { "pre-release" } else { "release" }
     return releaseTag() + ", published " + releaseDate() + " as a " + kind + "."
