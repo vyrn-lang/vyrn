@@ -134,8 +134,10 @@ jobs:
         #   README.md     what this is
         #   VERSION       the tag, which the step above proved is what
         #                 `vyrn --version` prints
-        # There is deliberately NO LICENSE file: the repository does not have
-        # one. See docs/releasing.md.
+        #   LICENSE-MIT   the two licences the user may choose between, and the
+        #   LICENSE-APACHE  third-party notice the emitted binaries carry. These
+        #   THIRD-PARTY-NOTICES.md  are terms, so they ship WITH the thing they
+        #                 govern rather than being a link somebody has to follow.
         run: |
           set -eu
           stage="vyrn-${{ matrix.name }}"
@@ -144,6 +146,7 @@ jobs:
           cp -r std "$stage/std"
           cp -r web "$stage/web"
           cp README.md "$stage/"
+          cp LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md "$stage/"
           printf '%s\n' "${GITHUB_REF_NAME}" > "$stage/VERSION"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$stage.zip" "$stage" > /dev/null

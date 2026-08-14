@@ -2,6 +2,7 @@
 name = "vyrn-frontend"
 version = "0.0.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Vyrn front end: lexer, parser, AST, type checker, and a tree-walking interpreter for the v0 subset."
 
 [dependencies]

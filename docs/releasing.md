@@ -68,6 +68,9 @@ vyrn-x86_64-linux/
 ├── std/          the standard library
 ├── web/          the browser-side runtimes `vyrn dev` serves
 ├── README.md
+├── LICENSE-MIT   the two licences, either of which the user may choose
+├── LICENSE-APACHE
+├── THIRD-PARTY-NOTICES.md  the one piece of third-party code the binary carries
 └── VERSION       the tag
 ```
 
@@ -79,10 +82,11 @@ installed layout (`~/.vyrn/bin/vyrn` beside `~/.vyrn/std`) resolve correctly.
 `SHA256SUMS` is `sha256sum -c` format, sorted by filename. The install scripts
 refuse to install any archive whose line is missing from it.
 
-**There is no LICENSE file, because the repository does not have one.** The
-archives therefore ship no licence. Adding one to the repository root is enough
-— the staging step copies what exists, and should be extended to copy `LICENSE`
-when it appears.
+The archive ships `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md`
+from the repository root. A user who has only the archive has the terms; they
+are not a link back to GitHub. The notice matters for the binary in particular:
+`vyrn build` emits Björn Höhrmann's UTF-8 DFA table into every artifact it
+produces, so the notice has to reach whoever ends up holding one.
 
 ## What a user needs on their machine
 

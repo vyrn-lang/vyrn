@@ -2,6 +2,7 @@
 name = "vyrn-codegen"
 version = "0.0.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Emits code for Vyrn: textual LLVM IR today, wasm directly (in progress)."
 
 [dependencies]

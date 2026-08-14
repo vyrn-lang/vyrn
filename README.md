@@ -309,3 +309,19 @@ carries.
 Higher-kinded types, dependent types, macros, class inheritance, metaclasses,
 and `async`/`await`. See
 [RFC-0001 §Non-goals](rfcs/RFC-0001-vision.md).
+
+## License
+
+Vyrn is licensed under either of [MIT](LICENSE-MIT) or
+[Apache License 2.0](LICENSE-APACHE), at your option. That is the pair Rust
+uses, and it is chosen for the same reason.
+
+The choice reaches your programs, not just the compiler's source. `vyrn build`
+compiles a small C runtime shim into every native binary, and every `std/`
+module a program imports is compiled in too. Both are under the licence above,
+so shipping a Vyrn program costs you attribution and nothing else. A copyleft
+licence here would have reached the same code and cost far more.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you shall be dual licensed as above, without any
+additional terms or conditions.
