@@ -11,6 +11,7 @@ description = "The vyrn driver: check, run (interpret), or emit LLVM IR for a .v
 
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
+vyrn-lower = { path = "../vyrn-lower" }
 vyrn-codegen = { path = "../vyrn-codegen" }
 # RFC-0076: the embedded wasm engine that runs generators. An EXCLUDED crate
 # (it pulls in `wasmtime`), depended on OPTIONALLY, so `cargo build` and
