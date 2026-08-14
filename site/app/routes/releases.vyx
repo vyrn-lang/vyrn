@@ -1,21 +1,41 @@
 <script>
-// GET /releases — a feed, newest first, pre-releases marked rather than hidden.
+// GET /releases — what is published, and the design record behind it.
 //
-// There are no releases. There are no git tags. Writing a release entry here
-// would be the one thing this site refuses to do, so the page says what is true
-// and shows what the project does have instead: the design record, one cell per
-// RFC, counted off the file names while this page was built.
+// The newest tag is BAKED: `site/release.txt` is refreshed from the GitHub
+// listing before every build of this site, and read here through `../repo`.
+// Nothing on this page is written by hand — not the tag, not the date, not
+// whether it is a pre-release, which is the tag's own suffix. `fresh.js` asks
+// the same listing once a visit and says so, in the notice under the heading, if
+// a newer release has appeared since this page was built.
 //
-// `release.yml` is in the repository and inert until someone pushes a `v*` tag.
-// `fresh.js` asks the GitHub feed once per visit, so the first release fills the
-// notice at the top of this page without a rebuild.
+// The RFC strip is the other half: one cell per design record, counted off the
+// file names in `rfcs/` while the page rendered. It is the closest thing to a
+// changelog the project has, and for a language this early it is the more useful
+// document.
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { rfcCells, rfcStripWidth, rfcStripHeight, rfcTag, rfcHref, Cell } from "../chart"
-import { rfcCount, rfcRows, RfcRow } from "../repo"
+import { rfcCount, rfcRows, RfcRow, hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
 
 export fn head() -> Head {
     return pageHead("Releases — Vyrn")
+}
+
+/// The heading, which is a different sentence in each of the two states.
+fn headline() -> String {
+    if !hasRelease() {
+        return "Nothing is released yet"
+    }
+    return releaseTag()
+}
+
+/// What that release is, in one line.
+fn standing() -> String {
+    if !hasRelease() {
+        return "There is no versioned release and no published binary."
+    }
+    let kind = if releasePre() { "a pre-release" } else { "a stable release" }
+    return "Published " + releaseDate() + " as " + kind + "."
 }
 
 /// The five most recent design records, newest first — the closest thing to a
@@ -42,13 +62,14 @@ fn latestRfcs() -> Array<RfcRow> {
     </aside>
         <section class="hero" id="status">
             <p class="eyebrow">Releases</p>
-            <h1 class="display">Nothing is released yet</h1>
-            <p class="lede">There is no versioned release and no published binary. The language changes without a deprecation period. <a href="/install.html">Build from source</a> — it is one clone and one command.</p>
-            <p class="notice" data-release-note hidden="hidden"></p>
+            <h1 class="display">{{ headline() }}</h1>
+            <p class="lede">{{ standing() }} The language changes without a deprecation period, so read the design records before you depend on any of it. <a href="/install.html">Install it in one line</a>, or build from source.</p>
+            <p class="notice"><a :href="releaseUrl()">Release notes and downloads</a> — every archive is listed in that release's <code>SHA256SUMS</code>, and both installers refuse anything that does not match it.</p>
+            <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
         </section>
 
         <section class="band" id="record">
-            <p class="eyebrow">02 — what there is instead</p>
+            <p class="eyebrow">02 — the record</p>
             <h2>{{ rfcCount() }} design records</h2>
             <p>Every decision in this language was argued in writing before it was built. That record is the closest thing to a changelog the project has, and it is more useful than one: each entry carries the argument, not only the outcome.</p>
             <div class="plate" data-widget="strip">
@@ -82,10 +103,10 @@ fn latestRfcs() -> Array<RfcRow> {
         </section>
 
         <section class="band" id="how">
-            <p class="eyebrow">04 — how a release will work</p>
-            <h2>One tag, three binaries</h2>
-            <p>Pushing a <code>v*</code> tag builds the <code>vyrn</code> binary for Linux, macOS and Windows and publishes a GitHub release. A tag with a suffix — <code>v0.2.0-rc.1</code> — publishes as a pre-release, and this page will list it and mark it rather than hide it.</p>
-            <p>Until a tag exists the workflow never runs: it has no schedule and no manual trigger. Nothing on this page is waiting on a decision except the decision to cut a version.</p>
+            <p class="eyebrow">04 — how a release works</p>
+            <h2>One tag, one archive per platform</h2>
+            <p>Pushing a <code>v*</code> tag builds the <code>vyrn</code> binary for Linux, macOS on Apple silicon and Windows, checks that the tag and the crate version agree, and publishes a GitHub release with one <code>SHA256SUMS</code> listing every archive beside them. A tag carrying a suffix — <code>v0.1.0-alpha.1</code>, <code>v0.2.0-rc.1</code> — publishes as a pre-release, and this page names it and marks it rather than hiding it.</p>
+            <p>That suffix rule is the whole of how this page decides: the installers take the newest release whatever kind it is, so the page shows the newest release, because showing anything else would name a version the command does not install. Pin a different one with <code>VYRN_VERSION</code>.</p>
             <p class="notice">What is stable today is the verification, not the surface. Every example runs under all three backends and must agree byte for byte, and CI enforces that on every push.</p>
         </section>
 </main>

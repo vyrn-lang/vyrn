@@ -5,7 +5,8 @@
 /// prefixes would generate two modules whose exports collide program-wide. One
 /// call, one set of names, and every page imports from here.
 import { repoFacts } from "./facts"
-import { exampleCount as genExamples, rfcCount as genRfcs, stdCount as genStd, stdModules as genModules, rfcNumbers as genNumbers, rfcTitles as genTitles } from repoFacts("../../examples", "../../rfcs", "../../std")
+import { exampleCount as genExamples, rfcCount as genRfcs, stdCount as genStd, stdModules as genModules, rfcNumbers as genNumbers, rfcTitles as genTitles, releaseTag as genTag, releaseDate as genDate } from repoFacts("../../examples", "../../rfcs", "../../std", "../release.txt")
+import { indexOf } from "std/strings"
 
 /// One design record: its number and its title.
 export type RfcRow = { number: Int64, title: String }
@@ -56,6 +57,54 @@ export fn backendCount() -> Int64 {
     return 3
 }
 
+// ---------------------------------------------------------------------------
+// The release, baked while the site built.
+//
+// `site/release.txt` holds the newest published tag and the day it was
+// published. The site workflow refreshes that file from the GitHub release
+// listing before every build and keeps the committed copy when the call is
+// unavailable, so a page is right without a network and the export makes no
+// request of its own. `site/public/fresh.js` is the drift check: it asks the
+// same listing once a visit and says so, on the page, when the newest tag is not
+// the one baked here.
+// ---------------------------------------------------------------------------
+
+/// Whether anything has been published at all. Every release-shaped sentence on
+/// the site is behind this, because "nothing yet" is a state the pages have to
+/// render correctly and used to be the only one they could.
+export fn hasRelease() -> Bool {
+    return releaseTag().byteLength > 0
+}
+
+/// The newest published tag — `v0.1.0-alpha.1` — or "" when there is none.
+export fn releaseTag() -> String {
+    return genTag()
+}
+
+/// The day GitHub published it, as `2026-08-11`.
+export fn releaseDate() -> String {
+    return genDate()
+}
+
+/// Whether the newest release is a pre-release. A tag carrying a suffix is one:
+/// the same rule `.github/workflows/release.yml` applies when it decides whether
+/// to pass `--prerelease` to `gh release create`.
+export fn releasePre() -> Bool {
+    return match indexOf(releaseTag(), "-") {
+        Some(at) => true,
+        None => false,
+    }
+}
+
+/// The release's page on GitHub — the whole feed when there is no release to
+/// name, so the link is never a URL with nothing on the end of it.
+export fn releaseUrl() -> String {
+    if !hasRelease() {
+        return "https://github.com/vyrn-lang/vyrn/releases"
+    }
+    return "https://github.com/vyrn-lang/vyrn/releases/tag/" + releaseTag()
+}
+
 test "the repository counts are all positive" {
     assert(exampleCount() > 0)
     assert(rfcCount() > 0)
@@ -74,4 +123,24 @@ test "every RFC has a number and a title" {
 
 test "the module list is as long as the module count" {
     assertEq(stdModules().length, stdCount())
+}
+
+test "the baked release is a tag, a date, and a rule about the suffix" {
+    // Not "the tag is v0.1.0-alpha.1": that is a fact about today, and this file
+    // is meant to keep being right after the next release. What is checked is
+    // the SHAPE, and that the derived answers follow from it.
+    if hasRelease() {
+        assertEq(releaseUrl(), "https://github.com/vyrn-lang/vyrn/releases/tag/" + releaseTag())
+        assert(releaseUrl().byteLength > "https://github.com/vyrn-lang/vyrn/releases/tag/".byteLength)
+        assert(releaseDate().byteLength == 10)
+        assertEq(releasePre(), match indexOf(releaseTag(), "-") {
+                Some(at) => true,
+                None => false,
+            })
+    } else {
+        // The other state, which the pages also render.
+        assertEq(releaseTag(), "")
+        assertEq(releasePre(), false)
+        assertEq(releaseUrl(), "https://github.com/vyrn-lang/vyrn/releases")
+    }
 }

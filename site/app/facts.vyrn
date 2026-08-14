@@ -8,7 +8,7 @@
 /// number by hand, and it starts drifting the same day.
 ///
 ///     import { repoFacts } from "./facts"
-///     import { exampleCount, rfcNumbers } from repoFacts("../examples", "../rfcs", "../std")
+///     import { exampleCount, rfcNumbers } from repoFacts("../examples", "../rfcs", "../std", "../release.txt")
 ///
 /// Import it through `site/app/repo.vyrn` rather than calling it twice. The
 /// generator cache is keyed on the argument STRINGS, so two call sites spelling
@@ -19,9 +19,10 @@
 /// and the sandbox scopes them to the CONSTANT PATH ARGUMENTS at the call site
 /// (RFC-0021 §sandbox). That is why the three directories are three separate
 /// parameters rather than one repository root: the call site states exactly
-/// what the generator may read, and a fourth directory would need a fourth
-/// argument. Read the emitted module with `vyrn emit-gen`.
-import { substring, split, joinWith } from "std/strings"
+/// what the generator may read, and the release file is a fourth argument for
+/// the same reason. Read the emitted module with `vyrn emit-gen`.
+import { substring, split, joinWith, lines, trim, fromBytesOr } from "std/strings"
+import { startsWith } from "std/strpred"
 
 /// One RFC, as its file name states it: the number, and the slug turned back
 /// into words. `RFC-0091-memory-model.md` is 91, "memory model".
@@ -121,8 +122,67 @@ fn quotedList(items: Array<String>) -> String {
     return out + "]"
 }
 
+/// The lines of `file` that say something: comments and blank lines dropped,
+/// each one trimmed. An unreadable file yields nothing, which is the "nothing is
+/// released yet" state and renders as such rather than as a broken page.
+fn contentLines(file: String) -> Array<String> {
+    let body = match readFile(file) {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+    let mut out: Array<String> = []
+    for line in lines(body) {
+        let t = trim(line)
+        if t.byteLength > 0 && !startsWith(t, "#") {
+            out.push(t)
+        }
+    }
+    return out
+}
+
+/// The release tag in `file`, or "" when it does not carry one.
+///
+/// A tag must start with `v`: it is the only shape `release.yml` publishes, and
+/// requiring it means a file that has lost its shape — a stray byte in front of
+/// a comment marker, a half-written refresh — reads as "nothing released" rather
+/// than as a release named after the accident.
+fn releaseTagOf(file: String) -> String {
+    let tag = releaseField(file, 0)
+    if !startsWith(tag, "v") {
+        return ""
+    }
+    return tag
+}
+
+/// Field `i` of the release file, or "" when the file does not carry it.
+///
+/// The bytes are filtered to what a version tag and a date are made of. Every
+/// other value this generator emits comes from a file NAME in this repository;
+/// this one comes from a file a workflow writes out of a GitHub API response, so
+/// it is the one string here that is not already trusted. A byte outside the set
+/// is dropped rather than escaped: a tag is not a place for a quote, and a
+/// generator that emitted one would be emitting Vyrn source with a hole in it.
+fn releaseField(file: String, i: Int64) -> String {
+    let rows = contentLines(file)
+    if i >= rows.length {
+        return ""
+    }
+    return safeTag(rows[i])
+}
+
+/// `s` with every byte a version tag or a date is not made of removed.
+fn safeTag(s: String) -> String {
+    let mut out = ""
+    for b in bytes(s) {
+        if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '.' || b == '-' || b == '_' || b == '+' {
+            out = out + fromBytesOr([b], "")
+        }
+    }
+    return out
+}
+
 /// Count the repository, and emit the answers as a module.
-export gen fn repoFacts(examplesDir: String, rfcsDir: String, stdDir: String) -> String {
+export gen fn repoFacts(examplesDir: String, rfcsDir: String, stdDir: String, releaseFile: String) -> String {
     let examples = countIn(examplesDir, ".vyrn")
     let mut numbers: Array<String> = []
     let mut titles: Array<String> = []
@@ -147,6 +207,11 @@ export gen fn repoFacts(examplesDir: String, rfcsDir: String, stdDir: String) ->
     out = out + "export fn rfcNumbers() -> Array<Int64> { return [" + joinWith(numbers, ", ") + "] }\n"
     out = out + "/// Every RFC title, in the same order as `rfcNumbers`.\n"
     out = out + "export fn rfcTitles() -> Array<String> { return " + quotedList(titles) + " }\n"
+    let tag = releaseTagOf(releaseFile)
+    out = out + "/// The newest published release's tag, or \"\" when there is none.\n"
+    out = out + "export fn releaseTag() -> String { return \"" + tag + "\" }\n"
+    out = out + "/// The day GitHub published it, or \"\".\n"
+    out = out + "export fn releaseDate() -> String { return \"" + if tag.byteLength == 0 { "" } else { releaseField(releaseFile, 1) } + "\" }\n"
     return out
 }
 
@@ -159,6 +224,20 @@ test "an RFC file name yields its number and its title" {
 test "a name that is not an RFC is dropped" {
     assertEq(rfcOf("README.md").number, 0)
     assertEq(rfcOf("RFC-0091-memory-model.txt").number, 0)
+}
+
+test "a release field keeps what a tag is made of and drops the rest" {
+    assertEq(safeTag("v0.1.0-alpha.1"), "v0.1.0-alpha.1")
+    assertEq(safeTag("2026-08-11"), "2026-08-11")
+    // The one string here that comes off the network. A quote or a backslash
+    // would end the string literal this generator writes it into.
+    assertEq(safeTag("v1\" }\nfn evil() -> Int64 { return 0"), "v1fnevil-Int64return0")
+    assertEq(safeTag(""), "")
+    // Read through a file that is not there: the missing-file path is the
+    // "nothing is released yet" state, and it must be empty rather than a trap.
+    assertEq(releaseField("no/such/release.txt", 0), "")
+    assertEq(releaseTagOf("no/such/release.txt"), "")
+    assertEq(contentLines("no/such/release.txt").length, 0)
 }
 
 test "the quoted list is a Vyrn array literal" {

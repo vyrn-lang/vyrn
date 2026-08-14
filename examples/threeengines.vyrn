@@ -1,0 +1,69 @@
+/// One program for all three engines: the interpreter, the native binary, and
+/// the WebAssembly module.
+///
+/// The site publishes a speed comparison, and the only comparison it can make
+/// honestly is Vyrn against itself — one machine, one instant, one source file,
+/// three engines. This is the program it measures. `bench/engines.sh` builds it
+/// twice, runs it three ways, checks that the three outputs are identical, and
+/// prints the times.
+///
+///     vyrn run examples/threeengines.vyrn 4000
+///     sh bench/engines.sh 4000
+///
+/// The work is a SHA-1 chain: hash a string, hash the hex of that, and repeat.
+/// Each round depends on the one before it, so nothing can be hoisted, unrolled
+/// or precomputed by any of the three, and the final digest is a checksum of
+/// every round that led to it — which is what makes "the three agree" a claim
+/// this file can prove rather than assert.
+///
+/// The rounds come from the command line so the parity harness (no arguments,
+/// 200 rounds) stays fast while a measurement can ask for as much work as it
+/// needs. An argument that is not a number is a usage error, not a default.
+import { sha1Hex } from "std/hash"
+import { parseInt64 } from "std/num"
+
+/// The chain, `rounds` deep, from a fixed seed.
+fn chain(rounds: Int64) -> String {
+    let mut digest = "vyrn"
+    let mut i = 0
+    while i < rounds {
+        digest = sha1Hex(digest)
+        i = i + 1
+    }
+    return digest
+}
+
+/// How many rounds to run: the first argument, or 200. `args()` excludes the
+/// program name (RFC-0014), so the count is argument zero.
+fn roundsOf(argv: Array<String>) -> Int64 {
+    if argv.length < 1 {
+        return 200
+    }
+    return match parseInt64(argv[0]) {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+fn main() -> Int64 {
+    let rounds = roundsOf(args())
+    if rounds < 1 {
+        print("usage: threeengines [rounds]")
+        return 1
+    }
+    print("\{rounds} rounds: \{chain(rounds)}")
+    return 0
+}
+
+test "the chain is deterministic and each round feeds the next" {
+    assertEq(chain(1), sha1Hex("vyrn"))
+    assertEq(chain(2), sha1Hex(sha1Hex("vyrn")))
+    assertEq(chain(3).byteLength, 40)
+}
+
+test "the rounds come from the command line, and 200 is the default" {
+    assertEq(roundsOf([]), 200)
+    assertEq(roundsOf(["4000"]), 4000)
+    // Not a number is zero, which `main` reports as a usage error.
+    assertEq(roundsOf(["lots"]), 0)
+}

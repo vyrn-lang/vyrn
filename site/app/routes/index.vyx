@@ -13,7 +13,7 @@
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
-import { exampleCount, rfcCount, stdCount, backendCount } from "../repo"
+import { exampleCount, rfcCount, stdCount, backendCount, hasRelease, releaseTag } from "../repo"
 import { shellHtml } from "../code"
 import { ownRows, lifetimes, lineCount, moduleRatio, targetsBox, targetsNodes, targetsEdges, OwnRow, Life, Node, Edge } from "../chart"
 import { parityReport } from "../../../examples/herofield"
@@ -24,11 +24,27 @@ export fn head() -> Head {
     return pageHead("Vyrn — a systems language with the expressiveness of TypeScript")
 }
 
-/// The install command a first-time reader should copy. It builds from source,
-/// because there is no published binary yet and saying otherwise would be a lie
-/// the reader finds out about in thirty seconds.
+/// The command a first-time reader should copy.
+///
+/// It used to be a `git clone` and a `cargo build`, because there was no
+/// published binary. There is one now, and the script that fetches it verifies
+/// the archive against the release's own SHA256SUMS before it unpacks anything.
+/// No version is written into it: the script resolves the newest release itself,
+/// so this line does not go stale between releases.
+///
+/// One command, not three: the hero has room for one, and the install page has
+/// the Windows line, the source build, and what the verification does.
 fn quickstart() -> String {
-    return "git clone https://github.com/vyrn-lang/vyrn.git && cd vyrn/compiler && cargo build --release -p vyrn-cli"
+    return "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh"
+}
+
+/// The line under it. Says which platforms that command is for, and names the
+/// release it installs today — baked, not written by hand.
+fn quickstartNote() -> String {
+    if !hasRelease() {
+        return "Linux and macOS. Nothing is published yet, so the install page builds from source."
+    }
+    return "Linux and macOS, checksum-verified, " + releaseTag() + " today. Windows and the source build are on the install page."
 }
 
 /// The parity digest, MEASURED while this page is built.
@@ -65,7 +81,7 @@ fn builtDigest() -> String {
                 <code id="quickstart" v-html="shellHtml(quickstart())"></code>
                 <button type="button" data-copy-btn aria-label="Copy the quickstart command">Copy</button>
             </div>
-            <p class="eyebrow" style="margin-top:16px">Build from source. There is no published binary yet.</p>
+            <p class="eyebrow" style="margin-top:16px">{{ quickstartNote() }} <a href="/install.html">Install page</a></p>
 
             <figure class="heroplate" style="margin:48px 0 0">
                 <canvas id="field" aria-hidden="true"></canvas>
