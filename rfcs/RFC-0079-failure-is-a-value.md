@@ -344,6 +344,24 @@ what it actually guarantees is pinned as such: `??` emits exactly the frees the
 `match` a user would write by hand emits. When arm binders become droppable, both
 spellings gain it together, which is the whole reason `??` is a `match`.
 
+> **The leak this paragraph records is closed, by a different route than the one
+> it predicts.** Arm binders are still not droppable — the mechanical claim
+> above is accurate — but the payload no longer leaks, because the SCRUTINEE
+> now owns it. PR #166 gave `Expr::Match` the ownership row `if let` and
+> `for in` already had, keyed on the match expression's own node:
+> *an arm that yields a place gives that place up, and where the place is a
+> payload binder the place given up is the scrutinee*
+> (`vyrn-frontend/src/movecheck.rs:2201-2223`). An arm that keeps nothing —
+> which is what discarding an error payload is — writes no row, and a row
+> nothing wrote on is a scrutinee the match releases. Measured native over
+> 3,000,000 turns of `match makeResult(i) { Ok(s) => s.byteLength, .. }`:
+> 141.7 MB before, 3.6 MB after. Pinned as `matchTemporary` in
+> `vyrn-cli/tests/memory.rs:858`.
+>
+> The prediction that "both spellings gain it together" held: they did, because
+> `??` is a `match`. Inside a `region` the row is not written, since the arena
+> owns what it allocated.
+
 ### M3 — `slice` becomes Vyrn — **shipped**
 
 1. `std/strpred` exports `SliceError` and a `slice` returning

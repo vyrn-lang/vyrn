@@ -1,6 +1,11 @@
 # RFC-0099 — A Generator May Report a Diagnostic
 
-- **Status:** **M1 landed.** The primitive, `std/diag`, and a non-web generator
+- **Status:** **M1 landed; M2 shipped as [RFC-0100](RFC-0100-a-rule-is-a-library.md);
+  M3 unspent.** M2 was written here as "the first consumer … not in this RFC",
+  and that is exactly how it landed — as a library with its own record. See the
+  banner in §M2. One of M1's own claims below has also been overtaken: the
+  anchor-containment table's last row, marked where it appears.
+  The primitive, `std/diag`, and a non-web generator
   that proves a third party can use it. One of M1's claims died to measurement:
   the mechanism was specified as new, and half of it already existed —
   RFC-0071 M2b's `//@warning` is this directive with its severity nailed shut, so
@@ -139,6 +144,15 @@ Three degradations, all of which keep the report:
 | a file the generator never read | wherever it points — v1 does not check |
 
 The last row is the honest one. See *Containment*.
+
+> **The last row no longer describes the code: v1 does check, three ways.**
+> `resolve_origin_path` (`vyrn-frontend/src/origin.rs:448-490`) refuses an
+> absolute path, a path that climbs out of the importing module, and a path
+> that lands outside the project directory — each as a malformed directive, so
+> the never-lose rule keeps the report at its generated location and says why.
+> The sentence it enforces is the one §Containment already wrote:
+> *an anchor resolves, it does not roam*. The Containment section below is
+> therefore stricter than it claims to be, not weaker.
 
 ## Severity
 
@@ -280,6 +294,19 @@ schema, its two rules are a schema author's rules, and the compiler contains no
 word of either.
 
 ### M2 — the first consumer: the vyx checking library
+
+> **M2 shipped, as [RFC-0100](RFC-0100-a-rule-is-a-library.md).** It kept the
+> shape this section states — a LIBRARY over the primitive, not an RFC-0099
+> milestone — so it got its own record: `std/hints` (policy, severity and
+> waivers), `std/vyx-hints` (eleven rules for `.vyx`), and one export on
+> `std/vyx` that makes its template parse a public seam. The suppression design
+> this section defers to M2 landed there as the waiver comment
+> (`std/hints.vyrn:52-63`), and it needed no compiler change and no code
+> registry, which is the refusal below holding. **M3 — codes — has still not
+> shipped**, and RFC-0100 §Waivers says why the consumer did not force it: the
+> code is read by the library that emitted it, inside the input file, before the
+> directive is ever written, so "the compiler still never sees a rule name.
+> RFC-0099 M3 remains unspent."
 
 `docs/research/vyx-hints.md` §8 ranks ten. They are a LIBRARY over this
 primitive — `std/vyx` reporting through `std/diag` — and they are not in this

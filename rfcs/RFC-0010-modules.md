@@ -63,6 +63,16 @@ A **loader/linker** stage sits between the parser and the checker:
      module only**; the loader rejects them in imported modules. An imported
      module's `test` blocks (RFC-0015) still type-check but do not run unless
      that module is itself the argument to `vyrn test`.
+
+     > **The module-state third of this rule was lifted by
+     > [RFC-0029](RFC-0029-module-state.md).** Top-level `let` / `let mut` is
+     > legal in ANY module — the loader says so where it used to refuse
+     > (`vyrn-frontend/src/loader.rs:1055-1059`): state stays module-private, one
+     > instance per process, initialized in linker order. `logging { .. }` and
+     > `main` are still root-only (`loader.rs:1044-1053`), and `export let` is
+     > still a parse error, which is the half of §Root-only above that RFC-0029
+     > kept. RFC-0013 and RFC-0021 both carry this note; this file was the one
+     > that did not.
 4. **Link** every module into ONE `ast::Program`: functions, types, protocols,
    and impls are concatenated (each decl tagged with its source `module` for
    diagnostics), imports discharged. Downstream — checker, interpreter, native

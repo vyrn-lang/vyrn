@@ -448,6 +448,15 @@ PR #100 gave: it is a rule about representation, and it would forbid this
   this rule does not reach it. §16's remainder stays open.
 - **`Ref<T>` and `cell`.** The one runtime island, by RFC-0089 rule 5. Unchanged
   and deliberately so.
+
+  > **This row was stale when it was written, and the record says so rather than
+  > deleting it.** RFC-0090 M4 (Phase 8e, `3c4569a`) deleted `Ref<T>`, `cell` and
+  > the compiler slab about a day and a half before this RFC was created; the row
+  > describes them as unchanged because it was copied forward from RFC-0089 rule
+  > 5 without being re-checked. `Type::Ref` and `DropKind::ReleaseRef` return zero
+  > matches across `compiler/` today. The island is `std/slots` — a
+  > generation-checked slot table in ordinary Vyrn — and it is still outside this
+  > RFC's reach, which is what the row was for. See the banner on RFC-0089 rule 5.
 - **§5/U6 inferred regions** and **§10 the native spawn frame.** Untouched. §10
   needs a declared release on `Task<T>`, which is RFC-0091's mechanism pointed at
   a new type.

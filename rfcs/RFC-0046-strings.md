@@ -1,6 +1,8 @@
 # RFC-0046 — `std/strings`: The String Library (+ a `slice` builtin)
 
-- **Status:** Implemented (as-landed notes at the end)
+- **Status:** Implemented as written, and its **one language hook has since been
+  removed**. `std/strings` is still what §2 describes. §1 is history: see the
+  banner below.
 - **Depends on:** RFC-0014 (bytes/String — `bytes()`/`stringFromBytes`,
   the UTF-8 invariant), RFC-0007 (string templates), RFC-0045 (bitwise —
   used inside some helpers), RFC-0027/0031 (the name-resolution machinery
@@ -18,6 +20,31 @@
 ---
 
 ## 1. The one language hook: a `slice` builtin
+
+> **Superseded. There is no `slice` builtin, and there is no slice trap.**
+> The argument below — that `slice` MUST be a builtin because "pure Vyrn has no
+> way to construct a String from bytes without `stringFromBytes`' full O(n)
+> revalidation" — was answered by measuring it, and the measurement said the
+> extra walk does not show up. Three RFCs took the hook apart in order:
+>
+> - **RFC-0078 M4b** moved the predicates and a `sliceV` returning
+>   `Option<String>` into `std/strpred`, written in Vyrn, and recorded the one
+>   thing it could not move: a trap with a message. It measured the price
+>   (`examples/twdemo` 67 → 68 ms) and found the whole-string copy, not the
+>   UTF-8 walk, was the regression.
+> - **RFC-0079 M3** made `slice` ordinary Vyrn:
+>   `slice(s, start, end) -> Result<String, SliceError>`
+>   (`std/strpred.vyrn:188`). It does not trap, so neither trap message below
+>   exists any more; the two conditions are `SliceError` variants
+>   (`OutOfRange(i)` / `SplitsCharacter(i)`) that name the offending index,
+>   which the two fixed strings could not.
+> - **RFC-0094 M2** stopped injecting `std/strpred`, so `slice` — and
+>   `contains` / `startsWith` / `endsWith` with it — needs an import.
+>   `checker.rs:281-293` (`MOVED_TO_STD`) is what a caller who does not import
+>   one is told.
+>
+> Read §1 for why the hook was thought necessary. The current string surface is
+> RFC-0078 §M4b, RFC-0079 §M3, and `std/strpred.vyrn`.
 
 `slice(s: String, start: Int64, end: Int64) -> String` — a **byte-range**
 substring, the primitive every other op builds on:
@@ -141,6 +168,12 @@ now — revisit only with a measured perf case).
   header so one `import { .. } from "std/strings"` plus those builtins
   covers the surface. `toHex(n: UInt64)` landed here (vlog's fingerprint),
   not in `std/hash`.
+
+  > **No longer true, in both halves.** They are not builtins — RFC-0078 M4b
+  > rewrote all three in Vyrn in `std/strpred` — and they are not available
+  > without importing: RFC-0094 M2 stopped injecting `std/strpred`, so
+  > `import { contains } from "std/strpred"` is required. UFCS still works on
+  > the imported function, so `s.contains(x)` still reads the same.
 - **Consumers (§4).** `vlog` dropped all six hand-rolled ops + the private
   `padTwo` (~110 lines) for `substring`/`indexOf`/`trim`/`toLower`/`toUpper`/
   `lines`/`padStart`/`toHex`; overview parity byte-identical, 11 tests pass.

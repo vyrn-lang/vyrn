@@ -5,7 +5,12 @@
   that asked for it, and this RFC is written from the census rather than from the
   brief; M1 then refuted two rows of the census, M2 refuted one of the census's
   counts, and M3 refuted its own brief about which side of the dispatch the seed
-  goes on. See the three "as landed" sections. RFC-0007 §v2 is closed by M3.
+  goes on. See the three "as landed" sections. **M1 also FAILED its own line
+  gate** — it demanded a net reduction and measured **+149** — and it was merged
+  anyway with the bar moved to M2, which met it at **−109**. That is written up
+  where it happened rather than only here: the failure at "The line gate failed,
+  and the RFC says what that means", the move at §M2's gate block, and M2's
+  measurement at "The line gate". M3 measured +131 and was not asked to pay. RFC-0007 §v2 is closed by M3.
   **The residue section closed a four-row list and left an eighteen-name class
   behind it**, which RFC-0096 M3 audited and closed — including one row of this
   RFC's own that had drifted from the checker's arm and segfaulted. See "The

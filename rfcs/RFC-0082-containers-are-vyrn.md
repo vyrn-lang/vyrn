@@ -249,6 +249,31 @@ M2 asked two questions before writing anything. Both answered *no*, independentl
 and the gate then failed on a proxy measurement. Nothing was ported and nothing
 was deleted. What follows is the measurement that replaced the assumption.
 
+> **The port M2 measured as impossible happened, and this RFC's thesis won by
+> being overruled.** RFC-0090 M1 shipped `std/slots` — `Slots<T>` and
+> `Handle<T>`, a generation-checked slot table written in ordinary Vyrn — and
+> RFC-0090 M4 (Phase 8e, `3c4569a`) then deleted `Ref<T>`, `cell`, the compiler
+> slab and `DropKind::ReleaseRef` outright: 1,714 lines, and the Vyrn version
+> measured 2.0× faster (18.29 µs → 9.06 µs, RFC-0094 §"the cell slab").
+> `Type::Ref` returns zero matches across `compiler/` now.
+>
+> Read §1 below for what it cost to be wrong, because the two obstacles were
+> real and were paid, not dissolved. The route out was to **change the contract
+> rather than reproduce it**: M2 argued that "the ambient slab is part of the
+> type's contract, not an implementation detail behind it", and treated
+> `examples/slottable.vyrn`'s explicit table as "not the same API". `std/slots`
+> takes exactly that not-the-same API — the container is a value the caller
+> holds and passes — which is why it needs no generic module state and no
+> type-directed route. Everything §1 lists as impossible is impossible for the
+> API M2 was trying to preserve.
+>
+> The three costs §1 records were each answered somewhere: auto-release became
+> the ordinary release of a Vyrn container, and the size cycle for
+> `Node = { next: Option<Ref<Node>> }` is
+> [RFC-0096](RFC-0096-a-self-referring-type-declares-its-release.md)'s job now.
+> The capability-boundary table near the end of this RFC still names `Type::Ref`
+> for that row; read it as RFC-0096.
+
 **1. `Ref<T>` cannot become a Vyrn record.** Not because a record is the wrong
 shape — `{ slot: Int64, gen: Int64 }` is byte-for-byte the `{ i64, i64 }` the two
 compiled backends already use — but because **the slab is type-erased and the

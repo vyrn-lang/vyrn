@@ -107,6 +107,32 @@ decided. Nothing else in the language has a runtime check. The model is
 and §5.3's measurement says the corpus already writes `cell` only where aliasing
 is real.
 
+> **`Ref<T>` and `cell` no longer exist. Rule 5's CONCLUSION survives; its
+> mechanism was deleted and replaced by a library.** `Type::Ref`,
+> `DropKind::ReleaseRef` and the `cell`/`get`/`set` builtins return zero matches
+> across `compiler/` — RFC-0090 M4 (Phase 8e, `3c4569a`) deleted Path B, 1,714
+> lines of it. What a program writes now is `std/slots`: `Slots<T>` and
+> `Handle<T>`, a generation-checked slot table written in **ordinary Vyrn**, 2.0×
+> faster than the compiler slab it replaced (`examples/genref.vyrn`,
+> `examples/slots.vyrn`).
+>
+> So the rule reads truer than it did, not weaker: the model is completely
+> compile-time, full stop, and the runtime check is not an island in the language
+> any more — it is a library a user could have written, which is the thing
+> RFC-0082 argued containers should be. The three later sentences that lean on
+> the deleted spelling — the census row "`§6/U5` … confined to explicit `Ref`",
+> and "`Ref<T>` remains the runtime island, by choice" below — should be read as
+> naming `std/slots`.
+>
+> The chain of records that repeat this rule is corrected with it:
+> [RFC-0092](RFC-0092-a-projection-is-a-borrow.md) §"What it does not close"
+> (which called `Ref<T>` "unchanged"), [RFC-0082](RFC-0082-containers-are-vyrn.md)
+> §M2 (which measured the port as impossible and it happened), and
+> [RFC-0093](RFC-0093-a-take-is-a-move-out-of-a-place.md) §"drop flags" (which
+> cites this rule as its premise). [RFC-0087](RFC-0087-memory-scenarios.md) §6 —
+> "~~Generational references — Path B~~ — DELETED" — was the first to say so, and
+> [RFC-0090](RFC-0090-one-model.md) is where the argument for the deletion lives.
+
 ---
 
 ## Why this is meaningfully better, not differently shaped

@@ -144,6 +144,17 @@ whole-container and reclaims no element.
 
 ## 4. Overwrite — the sharpest gap
 
+> **This section is a CENSUS of what was broken in August 2026, not a
+> description of the language.** Every present-tense sentence in §3 and §4 was
+> true when it was measured and is false now: RFC-0089 rule 4 releases what a
+> place held, and RFC-0091 Phase 8b gave a container the release its elements
+> need. The ranked table at the end of this file already carries both outcomes
+> ("§4 an overwrite never releases the old value — **CLOSED**, Phase 5"; U4
+> "**Half closed, Phase 8b**", then fully by RFC-0092 M2), and §6 and §16 carry
+> in-place banners. This is the same note for §3 and §4, since a reader who
+> lands here mid-file does not see the table. Read the whole document as dated
+> measurement — that is what it was written to be.
+
 An assignment stores a new pointer over an old one. **Nothing releases the old
 value.**
 

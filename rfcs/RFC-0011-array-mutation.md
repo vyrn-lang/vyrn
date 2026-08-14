@@ -56,6 +56,22 @@ builtins (RFC precedent: the 2026-07-16 surface migration).
   `pop`/`swapRemove` transfer ownership of the returned element to the caller.
   Movecheck treats `v` in `a[i] = v` as consumed, exactly like a `push`
   argument.
+
+  > **Reversed by RFC-0089 rule 4.** A store releases what the place held, and
+  > that includes an element: `a[i] = v` snapshots the old element and frees it
+  > after the new one is written (`vyrn-codegen/src/direct.rs:3426-3454`,
+  > "Rule 4 through an element"). The whole array releases its elements too, not
+  > only its buffer (RFC-0092 M2; pinned as the `elementLeak` row in
+  > `vyrn-cli/tests/memory.rs:523`). The rest of the paragraph still holds —
+  > `v` is still consumed, `pop`/`swapRemove` still hand ownership out.
+  >
+  > Two carve-outs survive and are recorded where they live: inside a `region`
+  > nothing is released, because the arena owns it (`direct.rs`'s `place_owns`),
+  > and a store whose value NAMES the place (`a = @push(a, i)`) releases nothing,
+  > because the old buffer is the new one.
+  >
+  > This paragraph was cited as support by RFC-0028 §Ownership and by RFC-0013
+  > §Ownership. All three are corrected; none of them supports the others.
 - **Validated elements.** `Array<Age>` + `xs[0] = 5` is a **compile-time**
   error (constant provably violates `Age`); `xs[0] = n` validates at runtime
   and traps with the existing validation wording on failure.
@@ -110,6 +126,9 @@ ps[0].x = 9        // sugar for:
 - **Ownership.** The element copy is a value; `at(a, i)` produces no owned heap
   handle, so the temporary never enters drop analysis (no double-free, no leak
   beyond the store's existing "overwritten element is not freed" stance).
+  (The stance it defers to was reversed — see the banner in §Ownership above.
+  The field store releases the old field the same way,
+  `direct.rs:3038`, pinned as `fieldOverwrite` in `vyrn-cli/tests/memory.rs:489`.)
 - **One level only (v1).** `ps[i].f.g = v` is a compile error (a single field
   write-through); deeper paths, and a non-variable array receiver
   (`f()[i].x = v`), are rejected in the parser.

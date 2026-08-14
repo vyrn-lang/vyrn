@@ -31,6 +31,11 @@ editor overlays precise colour on top of TextMate:
   `keyword` (contextual keywords TextMate misses, §3), `method` (protocol/
   builtin methods), plus `macro` for the compiler builtins
   (`toJson`/`slice`/`bytes`/…) so they read distinctly from user calls.
+  (`slice` is a stale example: RFC-0094 M2 took it, `chars` and the six codecs
+  off that list, because they are ordinary imported functions now and the editor
+  colours them like every other import — "a builtin coloured as a macro is a
+  builtin a reader cannot look up", `vyrn-frontend/src/symbols.rs:2939-2942`.
+  The mechanism is unchanged; the list it applies to shrank.)
 - **Modifiers:** `declaration` (the defining occurrence), `readonly`
   (non-`mut` binds, `Instant`-style validated types), `defaultLibrary`
   (std/builtins).
