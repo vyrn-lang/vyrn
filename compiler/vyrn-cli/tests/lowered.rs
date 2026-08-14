@@ -232,11 +232,6 @@ enum InstRule {
     /// time and is never called in a shipped binary, so neither backend emits a
     /// body for it. The lowering has one, because the program does.
     GenFn,
-    /// A function with a `fn`-typed parameter (RFC-0023) has no first-order
-    /// definition: it exists only as specializations, one per target. The
-    /// lowering builds the shell the program wrote; a backend builds the
-    /// specializations and skips the shell.
-    HigherOrderShell,
     /// A flattened protocol-impl method the SOURCE never calls: the `release` a
     /// scope exit reaches through `impl Owned for Slots<T>`, the `size` a
     /// `for x in s` reaches through `impl Iterate`. The lowering's worklist
@@ -536,11 +531,15 @@ fn gate() {
             }
             t.extra += 1;
             let f = k.split('<').next().unwrap_or(k);
+            // Deliberately no rule for the higher-order shell, and that is a
+            // measurement rather than an omission: a backend skips the
+            // first-order definition of a function with a `fn` parameter and
+            // emits specializations instead, but a specialization keys back to
+            // the SAME (callee, type arguments) the lowering built, so the two
+            // lists agree without one. A shell that ever shows up here is a real
+            // difference, and it fails.
             match by_name.get(f) {
                 Some(f) if f.is_gen => *inst_rules.entry(InstRule::GenFn).or_insert(0) += 1,
-                Some(f) if f.params.iter().any(|p| matches!(p.ty, Type::Fn(..))) => {
-                    *inst_rules.entry(InstRule::HigherOrderShell).or_insert(0) += 1
-                }
                 _ => {
                     extra.entry(k.clone()).or_insert(name.clone());
                 }

@@ -851,7 +851,7 @@ precedent.
 | PR | What | Changed lines | Files |
 |---|---|---|---|
 | M2a | the lowering's worklist gets module state; both backends' instance LISTS become readable and are gated against it; this text | 636 | 5 |
-| M2b | `vyrn check` stops running a whole backend to ask one question | (in flight) | |
+| M2b | `vyrn check` stops running a whole backend to ask one question; the shell rule that never fired goes | 103 | 7 |
 
 **What landed.**
 
@@ -865,13 +865,24 @@ precedent.
   named the way M1's five type rules are: `GenFn` (72 — a `gen fn` runs in the
   compiler at generation time and is never called in a shipped binary, so neither
   backend emits a body for it) and `ImplicitDispatch` (26 — finding 5 below).
+  A third rule was written and then deleted, because it never fired: a backend
+  skips the first-order definition of a function with a `fn`-typed parameter and
+  emits RFC-0023 specializations instead, and **a specialization keys back to the
+  same `(callee, type arguments)` the lowering built**. So the higher-order shell
+  is not a keying difference, and a rule that cannot fire is worse than none —
+  it invites a reader to believe in a difference that is not there.
 - **`vyrn check` no longer runs the native backend** (M2b).
   `check_instantiations` lowered the whole program to LLVM text, matched one
   needle and threw the module away; it reads the lowering's worklist now, and the
   refusal is worded by the same `check_inst_depth` both backends call, from the
   same two constants. That move needs the paragraph above under it: a bound the
   lowering enforces predicts a build only if the lowering reaches every
-  instantiation a backend reaches, which is what M2a's gate asserts.
+  instantiation a backend reaches, which is what M2a's gate asserts — with one
+  named exception, `ImplicitDispatch`. So the residual risk is exact and it is
+  small: a program whose instantiation chain grows without bound *only* through
+  an implicitly dispatched `release` or `for`-in step would be refused by a
+  backend and not by `check`. Nothing in the corpus is that program, and M4
+  closes the class rather than widening the gate.
 
 **What M2 measured, which is not what it went looking for.**
 
@@ -936,10 +947,21 @@ shell has to be owned by something, and today it is owned twice.
 
 **The gate, and the verdict.** M2's gate was "net negative. Two worklists and a
 whole-backend round trip go." The round trip went; the two worklists did not.
-**The pair is net positive and M2 does not meet its gate.** About half of M2a is
-the instance gate and its rules, which is the cost of the claim rather than an
-excuse for it. The deletion M2 promised is priced above and belongs to the
-milestone that moves the bodies.
+**The pair is 701 changed lines against `main` — 620 added and 81 removed, a net of +539 — so
+M2 does not meet its gate and this paragraph is where it says so** (§3's rule;
+RFC-0094 M1 is the precedent, and the bar there was moved rather than recorded).
+About half of M2a is the instance gate and its rules, which is the cost of the
+claim rather than an excuse for it. The deletion M2 promised is priced above and
+belongs to the milestone that moves the bodies. **M3's gate does not inherit
+this debt**: M3 deletes `peek` and its satellites and is measured on its own
+−1,200.
+
+One thing M2b bought that is not a line count. `vyrn check` built a complete LLVM
+module for every program it was asked about, and the crate boundary is why: the
+front end could not ask a question that only a backend knew the answer to. It
+asks the lowering now, and `vyrn-codegen` gained a dependency on `vyrn-lower`
+rather than the other way around — the direction §2.1's diagram draws, and the
+one M3 needs anyway.
 
 **Emitted output is byte-identical, by construction.** Every hook M2a adds is
 behind `observe::on()`, off outside the corpus gate, and nothing in either
