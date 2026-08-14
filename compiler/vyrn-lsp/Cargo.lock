@@ -1096,6 +1096,7 @@ name = "vyrn-codegen"
 version = "0.0.0"
 dependencies = [
  "vyrn-frontend",
+ "vyrn-lower",
  "wasm-encoder 0.221.3",
  "wasmprinter 0.221.3",
 ]
@@ -1111,6 +1112,13 @@ dependencies = [
  "vyrn-codegen",
  "vyrn-frontend",
  "wasmtime",
+]
+
+[[package]]
+name = "vyrn-lower"
+version = "0.0.0"
+dependencies = [
+ "vyrn-frontend",
 ]
 
 [[package]]
