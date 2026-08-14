@@ -11,6 +11,7 @@
 - [std/fallible](std/fallible.md) — `Fallible` — the protocol `?` resolves through for a type that is not
 - [std/graphql](std/graphql.md) — std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
 - [std/hash](std/hash.md) — std/hash — non-cryptographic byte hashing (RFC-0045).
+- [std/hints](std/hints.md) — std/hints — the shape of a checking library (RFC-0100).
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).
 - [std/http](std/http.md) — std/http — the REST projection (RFC-0074 M1), a library over the same
 - [std/i18n](std/i18n.md) — std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
@@ -35,3 +36,4 @@
 - [std/ui](std/ui.md) — std/ui — the pages generator (RFC-0026 M3), file-based routing as a library
 - [std/von](std/von.md) — std/von (RFC-0097 M1) — VON, Vyrn Object Notation: Vyrn's record-literal
 - [std/vyx](std/vyx.md) — std/vyx — the `.vyx` single-file component compiler (RFC-0026 M4, RFC-0039 v2),
+- [std/vyx-hints](std/vyx-hints.md) — std/vyx-hints — accessibility, security and performance rules for `.vyx`

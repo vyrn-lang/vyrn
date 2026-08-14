@@ -1,0 +1,318 @@
+/// std/hints — the shape of a checking library (RFC-0100).
+///
+/// `std/diag` (RFC-0099) is the whole compiler-side mechanism: a generator may
+/// report a diagnostic, at a severity it chooses. What it does not carry is the
+/// two things every checking library then needs, and would otherwise hand-roll:
+/// a way for the PROJECT to turn one rule off or move its severity, and a way
+/// for the AUTHOR to waive one report at the line that earns the waiver.
+///
+/// Both are policy, not compiler. So they live here, in an ordinary Vyrn
+/// library, and they know nothing about `.vyx`, about HTML, about the web, or
+/// about Vyrn. A rule is a `code` — a string this module never interprets — and
+/// an input file is text with lines in it.
+///
+/// A hint library is then three lines of plumbing and its own rules:
+///
+/// ```vyrn
+/// import { hint, noPolicy } from "std/hints"
+/// import { Severity } from "std/diag"
+///
+/// export gen fn myHints(path: String) -> String {
+///     let src = match readFile(path) { Ok(t) => t, Err(e) => "" }
+///     let mut out = ""
+///     // ... find something at line 4, column 9 ...
+///     out = out + hint(noPolicy(), "my/rule", Warning, src, path, 4, 9, "say what is wrong")
+///     return out
+/// }
+/// ```
+///
+/// Nothing above is privileged. `std/vyx-hints` is written against exactly this
+/// surface, and a third-party library for another framework — or for another
+/// file format entirely, since a generator reads text — is written against it
+/// the same way.
+///
+/// ## Configuration
+///
+/// A project moves or silences a rule with a JSON object mapping code to level:
+///
+/// ```json
+/// { "hints": { "a11y/img-alt": "error", "perf/img-size": "off" } }
+/// ```
+///
+/// The document is any JSON file the generator was GIVEN as a constant path
+/// argument — `vyrn.json` is the obvious home, since the manifest ignores keys
+/// it does not know — and the top-level `key` is the library's own, so two hint
+/// libraries in one project configure independently.
+///
+/// [`policyOf`] is strict, for the reason `find_manifest` is strict: a config
+/// that does not parse, or that names a level word nobody defined, is a fault to
+/// report — not a reason to quietly check nothing. A library that swallows it
+/// tells the project its rules are on while they are off.
+///
+/// ## Waivers
+///
+/// `vyrn-ignore <code>` in the reported line, or in the line above it, drops
+/// that one report. The marker is plain text, so it rides whatever comment the
+/// input file's own language spells:
+///
+/// ```text
+/// <!-- vyrn-ignore sec/raw-html: the summary is sanitized upstream -->
+/// <div v-html="summary"></div>
+/// ```
+///
+/// The count of waivers in a repository is the audit a rule like `sec/raw-html`
+/// is actually for.
+
+import { report, Severity } from "std/diag"
+import { Json, JsonField, copyJson, copyJsonFields, emit } from "std/json"
+import { parseJson } from "std/jsonread"
+import { contains } from "std/strpred"
+import { substring } from "std/strings"
+
+/// Per-code severity overrides, as parallel arrays (a code and its level word).
+/// Built by [`policyOf`]; [`noPolicy`] is the empty one, under which every rule
+/// runs at the severity its author chose.
+export type Policy = { codes: Array<String>, levels: Array<String> }
+
+/// The empty policy: no override, every rule at its default severity.
+export fn noPolicy() -> Policy {
+    return Policy { codes: [], levels: [] }
+}
+
+/// Read a policy out of `configText`, from its top-level `key`.
+///
+/// `Ok(noPolicy())` when the document has no such key — a project that says
+/// nothing gets the library's defaults. `Err` when the document does not parse,
+/// when the key is not an object of strings, or when a level word is not `off`,
+/// `warning` or `error`. Report the `Err`; do not fall back to checking nothing.
+export fn policyOf(configText: String, key: String) -> Result<Policy, String> {
+    let doc = parseJson(configText)?
+    let mut found = false
+    let mut section = JNull
+    let top = fieldsOf(doc)
+    for f in top {
+        if f.key == key {
+            found = true
+            section = copyJson(f.value)
+        }
+    }
+    if found == false {
+        return Ok(noPolicy())
+    }
+    if isObject(section) == false {
+        return Err("`\{key}` is not an object of rule levels")
+    }
+    let mut codes: Array<String> = []
+    let mut levels: Array<String> = []
+    let rules = fieldsOf(section)
+    for r in rules {
+        let word = stringOf(r.value)
+        if word == "off" || word == "warning" || word == "error" {
+            codes.push(r.key.copy())
+            levels.push(word.copy())
+        } else {
+            return Err(
+                "`\{key}.\{r.key}` is \{emit(r.value)} — a level is `off`, `warning` or `error`",
+            )
+        }
+    }
+    return Ok(Policy { codes: codes, levels: levels })
+}
+
+/// The level `code` runs at under `p`: its configured word, or the word for
+/// `dflt` when the project said nothing about it.
+export fn levelOf(p: Policy, code: String, dflt: Severity) -> String {
+    let mut i = 0
+    while i < p.codes.length {
+        if p.codes[i] == code {
+            return p.levels[i].copy()
+        }
+        i = i + 1
+    }
+    return match dflt {
+        Warning => "warning",
+        Error => "error",
+    }
+}
+
+/// One report: the `//@diag` line for it, or `""` when the project turned `code`
+/// off or the author waived it at that line.
+///
+/// `src` is the text of `file` — needed to read the waiver comment, and the
+/// reason this takes source a rule has already read rather than reading it
+/// again. The `code` rides the message, which is RFC-0099's convention until a
+/// consumer for a separate field exists.
+export fn hint(
+    p: Policy,
+    code: String,
+    dflt: Severity,
+    src: String,
+    file: String,
+    line: Int64,
+    col: Int64,
+    message: String,
+) -> String {
+    let level = levelOf(p, code, dflt)
+    if level == "off" {
+        return ""
+    }
+    if waived(src, line, code) {
+        return ""
+    }
+    let severity = if level == "error" { Error } else { Warning }
+    return report(severity, file, line, col, "\{code}: \{message}")
+}
+
+/// Whether `code` is waived at `line` of `src` — a `vyrn-ignore <code>` marker
+/// on that line or on the one above it.
+export fn waived(src: String, line: Int64, code: String) -> Bool {
+    let marker = "vyrn-ignore \{code}"
+    if contains(lineText(src, line), marker) {
+        return true
+    }
+    if line > 1 {
+        return contains(lineText(src, line - 1), marker)
+    }
+    return false
+}
+
+/// The text of 1-based `line` in `src`, or `""` past the end. The bounds come
+/// from a newline walk over the same string, so the slice can neither split a
+/// character nor run off the end.
+fn lineText(src: String, line: Int64) -> String {
+    if line < 1 {
+        return ""
+    }
+    let n = src.byteLength
+    let mut at = 1
+    let mut start = 0
+    let mut i = 0
+    while i < n {
+        if src[i] == '\n' {
+            if at == line {
+                return substring(src, start, i)
+            }
+            at = at + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if at == line {
+        return substring(src, start, n)
+    }
+    return ""
+}
+
+/// The fields of a JSON object, or `[]` for any other value. Copied, because a
+/// payload read out of a borrowed value is a read, not a move.
+fn fieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => copyJsonFields(fs),
+        JArr(xs) => [],
+        JStr(s) => [],
+        JNum(s) => [],
+        JBool(b) => [],
+        JNull => [],
+    }
+}
+
+fn isObject(j: Json) -> Bool {
+    return match j {
+        JObj(fs) => true,
+        JArr(xs) => false,
+        JStr(s) => false,
+        JNum(s) => false,
+        JBool(b) => false,
+        JNull => false,
+    }
+}
+
+/// The text of a JSON string, or `""` for any other value — which is not a level
+/// word, so a non-string level is refused by the same comparison.
+fn stringOf(j: Json) -> String {
+    return match j {
+        JStr(s) => s.copy(),
+        JObj(fs) => "",
+        JArr(xs) => "",
+        JNum(s) => "",
+        JBool(b) => "",
+        JNull => "",
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+/// The policy in `text` under `"hints"`, or the empty one (the `Err` arms are
+/// asserted on separately).
+fn policyOr(text: String) -> Policy {
+    return match policyOf(text, "hints") {
+        Ok(v) => v,
+        Err(e) => noPolicy(),
+    }
+}
+
+/// The refusal `text` earns, or `"PARSED"` if it earns none.
+fn refusal(text: String) -> String {
+    return match policyOf(text, "hints") {
+        Ok(v) => "PARSED",
+        Err(e) => e,
+    }
+}
+
+test "an absent key is the empty policy, not a fault" {
+    assertEq(refusal("{\"other\": {}}"), "PARSED")
+    assertEq(policyOr("{\"other\": {}}").codes.length, 0)
+    assertEq(policyOr("{}").codes.length, 0)
+}
+
+test "a configured level wins over the rule's default" {
+    let p = policyOr("{\"hints\": {\"a/b\": \"error\", \"c/d\": \"off\"}}")
+    assertEq(levelOf(p, "a/b", Warning), "error")
+    assertEq(levelOf(p, "c/d", Warning), "off")
+    assertEq(levelOf(p, "e/f", Warning), "warning")
+    assertEq(levelOf(p, "e/f", Error), "error")
+}
+
+test "a malformed config is refused, never a silent no-op" {
+    assert(contains(refusal("{\"hints\": {,}}"), "line 1"))
+    assert(contains(refusal("{\"hints\": {\"a/b\": \"loud\"}}"), "`hints.a/b` is \"loud\""))
+    assert(contains(refusal("{\"hints\": {\"a/b\": 1}}"), "a level is `off`"))
+    assert(contains(refusal("{\"hints\": [1]}"), "not an object of rule levels"))
+}
+
+test "an off rule emits nothing" {
+    let p = policyOr("{\"hints\": {\"a/b\": \"off\"}}")
+    assertEq(hint(p, "a/b", Warning, "x\n", "f.vyx", 1, 1, "nope"), "")
+    assert(hint(p, "a/z", Warning, "x\n", "f.vyx", 1, 1, "yes") != "")
+}
+
+test "a hint carries its code, its anchor and its severity" {
+    assertEq(
+        hint(noPolicy(), "a/b", Warning, "x\n", "f.vyx", 3, 7, "say why"),
+        "//@diag warning f.vyx:3:7 a/b: say why\n",
+    )
+    assertEq(
+        hint(policyOr("{\"hints\": {\"a/b\": \"error\"}}"), "a/b", Warning, "x\n", "f.vyx", 3, 7, "say why"),
+        "//@diag error f.vyx:3:7 a/b: say why\n",
+    )
+}
+
+test "a waiver on the line, or the line above, drops that one report" {
+    let src = "one\n<!-- vyrn-ignore a/b -->\n<img>\n<img>\n"
+    assert(waived(src, 3, "a/b"))
+    assert(waived(src, 2, "a/b"))
+    assert(waived(src, 4, "a/b") == false)
+    assert(waived(src, 3, "c/d") == false)
+    assertEq(hint(noPolicy(), "a/b", Warning, src, "f.vyx", 3, 1, "m"), "")
+    assert(hint(noPolicy(), "a/b", Warning, src, "f.vyx", 4, 1, "m") != "")
+}
+
+test "line text is 1-based and ends at the newline" {
+    assertEq(lineText("a\nbb\nccc", 2), "bb")
+    assertEq(lineText("a\nbb\nccc", 3), "ccc")
+    assertEq(lineText("a\r\nbb\r\n", 1), "a\r")
+    assertEq(lineText("a\nbb", 3), "")
+    assertEq(lineText("a\nbb", 0), "")
+}

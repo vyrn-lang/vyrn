@@ -57,6 +57,69 @@ Every generation failure is an identifier-carrying load diagnostic naming the
 `.vyx` file and line (the std/ui / std/rpc convention). Inspect the whole
 synthesized module with:  vyrn emit-gen <file>
 
+## VyxAttr
+
+```vyrn
+type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64, col: Int64 }
+```
+
+One attribute on a template element. `dyn` = a `:name="expr"` dynamic value;
+`evt` = an `@event` binding (its `name` has the `@` stripped). A `v-…`
+directive is carried as a plain attribute whose `name` retains the `v-` prefix
+(`dyn` false, since its value is written as a quoted string) and is consumed by
+the grouping pass. `line`/`col` are the 1-based position of the attribute value
+in the `.vyx` file (RFC-0033 origins).
+
+## VyxNode
+
+```vyrn
+type VyxNode = VNText(String) | VNInterp(String, Int64, Int64) | VNRaw(String, Int64, Int64) | VNChildren | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64) | VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool) | VNFor(String, String, String, Array<VyxNode>, Int64, Int64)
+```
+
+A node in a parsed template. The trailing `Int64` pair on position-bearing
+variants is the 1-based `(line, col)` of the pass-through in the `.vyx` file,
+so RFC-0033 origin directives point at the exact source column. `VNIf` carries
+PARALLEL per-condition `(line, col)` arrays so each `v-if`/`v-else-if` maps to
+its own condition column.
+
+## VyxBody
+
+```vyrn
+type VyxBody = { nodes: Array<VyxNode> }
+```
+
+A node-list wrapper, so an `Array<VyxNode>` can nest inside another node's
+payload (an if-chain's per-branch bodies) without an `Array<Array<…>>`.
+
+## VyxTemplate
+
+```vyrn
+type VyxTemplate = { nodes: Array<VyxNode>, err: String }
+```
+
+The parsed `<template>` of a `.vyx` source: its sibling nodes, or the `err`
+that stopped the parse.
+
+## vyxParseTemplate
+
+```vyrn
+fn vyxParseTemplate(source: String) -> VyxTemplate
+```
+
+Parse ONLY the `<template>` section of a `.vyx` source, into the same node
+tree the compiler walks — tags, attributes, and the 1-based line and column of
+every attribute value in the file.
+
+Exported for the checking libraries (RFC-0100). A rule wants what the
+compiler saw and nothing else: no props, no imports, no component resolution,
+no sibling `v-if` grouping (a `v-if` / `v-for` stays a plain attribute here,
+which is the form a rule reads it in anyway). `err` is non-empty when the
+template does not parse, and a checking library says nothing in that case —
+the compile is already failing, with a better message than a lint has.
+
+`std/vyx-hints` holds no privilege over this: it is the same import any
+third-party rule library writes.
+
 ## vyxCompileComponent
 
 ```vyrn

@@ -444,14 +444,14 @@ fn vyxScanFindMarkup(ba: Array<UInt8>, name: String, from: Int64) -> Int64 {
 /// (`dyn` false, since its value is written as a quoted string) and is consumed by
 /// the grouping pass. `line`/`col` are the 1-based position of the attribute value
 /// in the `.vyx` file (RFC-0033 origins).
-type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64, col: Int64 }
+export type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64, col: Int64 }
 
 /// A node in a parsed template. The trailing `Int64` pair on position-bearing
 /// variants is the 1-based `(line, col)` of the pass-through in the `.vyx` file,
 /// so RFC-0033 origin directives point at the exact source column. `VNIf` carries
 /// PARALLEL per-condition `(line, col)` arrays so each `v-if`/`v-else-if` maps to
 /// its own condition column.
-type VyxNode =
+export type VyxNode =
     | VNText(String)
     | VNInterp(String, Int64, Int64)
     | VNRaw(String, Int64, Int64)
@@ -462,7 +462,7 @@ type VyxNode =
 
 /// A node-list wrapper, so an `Array<VyxNode>` can nest inside another node's
 /// payload (an if-chain's per-branch bodies) without an `Array<Array<…>>`.
-type VyxBody = { nodes: Array<VyxNode> }
+export type VyxBody = { nodes: Array<VyxNode> }
 
 /// Give one payload back. One helper for every place the release below hands a
 /// value over, because a `match` arm is an expression and `drop` is a statement.
@@ -1526,6 +1526,37 @@ fn vyxIfUsesChildren(bodies: Array<VyxBody>, els: VyxBody, has: Bool) -> Bool {
         return vyxUsesChildren(els.nodes)
     }
     return false
+}
+
+/// The parsed `<template>` of a `.vyx` source: its sibling nodes, or the `err`
+/// that stopped the parse.
+export type VyxTemplate = { nodes: Array<VyxNode>, err: String }
+
+/// Parse ONLY the `<template>` section of a `.vyx` source, into the same node
+/// tree the compiler walks — tags, attributes, and the 1-based line and column of
+/// every attribute value in the file.
+///
+/// Exported for the checking libraries (RFC-0100). A rule wants what the
+/// compiler saw and nothing else: no props, no imports, no component resolution,
+/// no sibling `v-if` grouping (a `v-if` / `v-for` stays a plain attribute here,
+/// which is the form a rule reads it in anyway). `err` is non-empty when the
+/// template does not parse, and a checking library says nothing in that case —
+/// the compile is already failing, with a better message than a lint has.
+///
+/// `std/vyx-hints` holds no privilege over this: it is the same import any
+/// third-party rule library writes.
+export gen fn vyxParseTemplate(source: String) -> VyxTemplate {
+    let ba = bytes(source)
+    let scriptSec = vyxSection(ba, "script", true)
+    // The same avoid-range `vyxCompileComponent` uses, so a literal `<template>`
+    // inside a helper string never claims the section here either.
+    let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if templateSec.found == false {
+        return VyxTemplate { nodes: [], err: "no <template> section" }
+    }
+    let parsed = vyxParseNodes(ba, templateSec.start, templateSec.end, "")
+    let err = parsed.err.copy()
+    return VyxTemplate { nodes: consume parsed.nodes, err: err }
 }
 
 /// Compile one `.vyx` source into a `VyxComp` (parse only — component-call
