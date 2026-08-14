@@ -93,7 +93,7 @@ export function makeRpcTransport({ baseUrl = "", fetchImpl } = {}) {
 
 /**
  * Convenience: instantiate a client wasm module with the RPC transport already
- * wired. Extra `runVyrn` hooks (onStdout, exportReturns, more externs) pass
+ * wired. Extra `runVyrn` hooks (onStdout, more externs) pass
  * through; a caller-supplied `extern.vyrnRpcCall` is overridden by the transport.
  */
 export async function runVyrnRpc(wasmBytes, { baseUrl = "", fetchImpl, ...hooks } = {}) {

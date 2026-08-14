@@ -24,40 +24,56 @@
 //       jsNow: () => Date.now() / 1000,                //   Float64 return
 //       jsAdd: (a, b) => a + b,                        //   Int64 -> BigInt args
 //     },
-//     exportReturns: { greet: "string" },              // rarely needed — see below
 //   });
 //
 // After _start runs `main` once, `exports` holds a wrapper per `export extern
 // fn` (RFC-0012 M2): pass a JS string for a String param, get a decoded string
-// back for a String return. An `i32` result is ambiguous — String, Bool and
-// Int32 share the wasm type — so the module carries the answer in its
-// `vyrn:exports` custom section, which this file reads. A String is DECODED AND
-// FREED (RFC-0089 M3b): a return is owned, so the buffer is this side's to
-// release.
+// back for a String return. A String is DECODED AND FREED (RFC-0089 M3b): a
+// return is owned, so the buffer is this side's to release.
 //
-// `exportReturns` stays as a fallback for a module that carries no section
-// (one built before RFC-0012 M3, or one from another producer). The section
-// wins where both name the same export.
+// EVERY type on that boundary comes from the module's own `vyrn:exports` custom
+// section, which the compiler writes and this file reads. It has to: the wasm
+// ABI cannot tell a `String` from a `Bool` from an `Int32` (all `i32`), nor a
+// `String` argument from an `(Int32, Int64)` pair (both two slots). This file
+// used to infer them from instruction shapes and from the JS runtime type of
+// each argument at the call, which was wrong in both directions and documented
+// as a caveat. A module with no section is refused by name rather than guessed
+// at — `vyrn build --target wasm` writes one for every extern.
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
 const ERRNO_NOENT = 44; // no filesystem in a page: every path_open fails
 const ERRNO_SPIPE = 29; // stdout/stderr are not seekable
 
-// --- minimal wasm reader: recover the signatures of the module's `vyrn.*`
-// imports (so the extern-import glue can decode/encode arguments, RFC-0012 M1)
-// AND of its exported functions (so the export glue can wrap them, M2). The JS
-// WebAssembly API exposes names but not types, so we read the type, import,
-// function, and export sections ourselves (the same shape the codegen emits).
+// --- the module's declared boundary, read from its own `vyrn:exports` custom
+// section (RFC-0012 M3).
 //
-// Function index space: imported functions occupy the first indices (in import
-// order), then the module's own defined functions (in function-section order).
-// An export names a function by that combined index; we map it back through the
-// function section to a type index to recover the signature.
-function readModule(bytes) {
-  const b = new Uint8Array(bytes);
-  let i = 8; // skip magic + version
-  const VT = { 0x7f: "i32", 0x7e: "i64", 0x7d: "f32", 0x7c: "f64" };
+// The wasm type section is not enough and never was: `String`, `Bool`, `Int32`
+// and `UInt32` all cross as `i32`, and a `String` import occupies two slots that
+// look exactly like an `(Int32, Int64)` pair. This file used to walk the module's
+// bytes and infer signatures from that shape — an `i32` followed by an `i64` was
+// taken to BE a String — which is a guess, and `web/README.md` carried the
+// collision as a documented caveat. The compiler knows every one of these types
+// exactly, so it writes them down and this reads them.
+//
+// WHICH functions exist is a different question, and the platform already
+// answers it: `WebAssembly.Module.imports` for the import side,
+// `instance.exports` for the export side. So no section walking survives here —
+// `WebAssembly.Module.customSections` hands over the payload.
+//
+// Payload (version 2), all counts and lengths uleb128:
+//   u8 version, uleb exportCount, { name, ret, uleb paramCount, param… }…,
+//   uleb importCount, { name, ret, uleb paramCount, param… }…
+// A `kind` is one of: unit bool string i32 u32 i64 u64 f32 f64.
+const ABI_SECTION = "vyrn:exports";
+
+function readAbi(module) {
+  const secs = WebAssembly.Module.customSections(module, ABI_SECTION);
+  const abi = { exports: new Map(), imports: new Map() };
+  if (secs.length === 0) return abi;
+  const b = new Uint8Array(secs[0]);
+  const dec = new TextDecoder();
+  let i = 0;
   const uleb = () => {
     let r = 0, s = 0;
     for (;;) {
@@ -67,87 +83,48 @@ function readModule(bytes) {
       s += 7;
     }
   };
-  const name = () => {
+  const str = () => {
     const n = uleb();
-    const s = new TextDecoder().decode(b.subarray(i, i + n));
+    const s = dec.decode(b.subarray(i, i + n));
     i += n;
     return s;
   };
-  const types = [];
-  const imports = [];
-  const funcSec = []; // type index of each DEFINED function, in order
-  const rawExports = []; // { field, kind, index }
-  const returnTypes = {}; // export name -> "string" | "bool" (RFC-0012 M3)
-  let importedFuncs = 0;
-  while (i < b.length) {
-    const id = b[i++];
-    const len = uleb();
-    const end = i + len;
-    if (id === 0) {
-      // A custom section. `vyrn:exports` is the compiler's own record of what
-      // an ambiguous `i32` result really is, so nobody has to write it down by
-      // hand. Any other name is somebody else's and is skipped.
-      if (name() === "vyrn:exports") {
-        const c = uleb();
-        for (let e = 0; e < c; e++) {
-          const f = name();
-          returnTypes[f] = name();
-        }
-      }
-    } else if (id === 1) {
-      const c = uleb();
-      for (let t = 0; t < c; t++) {
-        i++; // 0x60 func form
-        const pc = uleb();
-        const params = [];
-        for (let p = 0; p < pc; p++) params.push(VT[b[i++]]);
-        const rc = uleb();
-        const results = [];
-        for (let r = 0; r < rc; r++) results.push(VT[b[i++]]);
-        types.push({ params, results });
-      }
-    } else if (id === 2) {
-      const c = uleb();
-      for (let m = 0; m < c; m++) {
-        const mod = name();
-        const fld = name();
-        const kind = b[i++];
-        if (kind === 0) {
-          const ti = uleb();
-          imports.push({ module: mod, field: fld, type: types[ti] });
-          importedFuncs++;
-        } else if (kind === 1) {
-          i++; const lim = b[i++]; uleb(); if (lim === 1) uleb();
-        } else if (kind === 2) {
-          const lim = b[i++]; uleb(); if (lim === 1) uleb();
-        } else if (kind === 3) {
-          i += 2;
-        }
-      }
-    } else if (id === 3) {
-      const c = uleb();
-      for (let f = 0; f < c; f++) funcSec.push(uleb());
-    } else if (id === 7) {
-      const c = uleb();
-      for (let e = 0; e < c; e++) {
-        const fld = name();
-        const kind = b[i++];
-        const index = uleb();
-        rawExports.push({ field: fld, kind, index });
-      }
-    }
-    i = end;
+  const version = b[i++];
+  if (version !== 2) {
+    throw new Error(
+      `this module declares its boundary in \`${ABI_SECTION}\` version ` +
+        `${version}, and this runtime reads version 2. Rebuild it with a ` +
+        `matching \`vyrn build --target wasm\`.`
+    );
   }
-  // Resolve each function export (kind 0) to its signature via the function
-  // section; non-function exports (memory, globals) carry no `type`.
-  const exports = rawExports.map((e) => {
-    if (e.kind === 0 && e.index >= importedFuncs) {
-      const ti = funcSec[e.index - importedFuncs];
-      return { ...e, type: types[ti] };
+  for (const into of [abi.exports, abi.imports]) {
+    const count = uleb();
+    for (let e = 0; e < count; e++) {
+      const name = str();
+      const ret = str();
+      const params = [];
+      const pc = uleb();
+      for (let p = 0; p < pc; p++) params.push(str());
+      into.set(name, { params, ret });
     }
-    return e;
-  });
-  return { imports, exports, returnTypes };
+  }
+  return abi;
+}
+
+/// The signature a module must have declared, or a refusal naming what is
+/// missing. A `vyrn build --target wasm` writes every one of these, so a miss is
+/// a module from somewhere else — and guessing on its behalf is what this file
+/// stopped doing.
+function declared(map, name, what) {
+  const sig = map.get(name);
+  if (!sig) {
+    throw new Error(
+      `\`${name}\` is ${what} of this module, but its \`${ABI_SECTION}\` section ` +
+        `does not declare a signature for it. Build it with ` +
+        `\`vyrn build --target wasm\`, which writes one for every extern.`
+    );
+  }
+  return sig;
 }
 
 /** Thrown by proc_exit to unwind out of _start; carries the exit code. */
@@ -300,59 +277,69 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   };
 
   // Build the `vyrn` import namespace (RFC-0012) from the host's extern hooks.
-  // For each `vyrn.*` the module imports, wrap the user function so it sees
-  // decoded values: a `String` param arrives as an (i32 ptr, i64 len) pair and
-  // is decoded to a JS string; an `i64` param arrives as a `BigInt`; `i32`/
-  // float params arrive as numbers. Return values are converted back to the
-  // wasm result type (BigInt for i64, 0/1 for a Bool i32, numbers for floats).
-  //
-  // String detection is by ABI shape: the only Vyrn type that lowers to two
-  // wasm words is `String` = (i32, i64), so an i32 immediately followed by an
-  // i64 is decoded as one string argument. (A hypothetical `(Int32, Int64)`
-  // adjacent pair would collide — none of the v1 externs use that; documented
-  // in web/README.md.)
+  // WHICH externs the module wants is `WebAssembly.Module.imports`; WHAT each one
+  // takes and returns is the module's own `vyrn:exports` section. Each hook is
+  // wrapped so it sees decoded values: a `String` param occupies two wasm slots
+  // (ptr, len) and arrives as a JS string, an `Int64`/`UInt64` as a `BigInt`,
+  // everything else as a number or a boolean.
+  const module = await WebAssembly.compile(wasmBytes);
+  const abi = readAbi(module);
   const externHooks = hooks.extern || {};
-  const mod = readModule(wasmBytes);
-  const wanted = mod.imports.filter((im) => im.module === "vyrn");
+  const wanted = WebAssembly.Module.imports(module)
+    .filter((im) => im.module === "vyrn")
+    .map((im) => im.name);
   const vyrn = {};
-  for (const im of wanted) {
-    const fn = externHooks[im.field];
+  for (const field of wanted) {
+    const fn = externHooks[field];
     if (typeof fn !== "function") {
       const provided = Object.keys(externHooks);
       throw new Error(
-        `module imports extern \`vyrn.${im.field}\`, but no such function was ` +
-          `provided. Pass it via runVyrn(bytes, { extern: { ${im.field}: … } }). ` +
-          `Provided: [${provided.join(", ")}]; wanted: [${wanted.map((w) => w.field).join(", ")}]`
+        `module imports extern \`vyrn.${field}\`, but no such function was ` +
+          `provided. Pass it via runVyrn(bytes, { extern: { ${field}: … } }). ` +
+          `Provided: [${provided.join(", ")}]; wanted: [${wanted.join(", ")}]`
       );
     }
-    const params = im.type.params;
-    const result = im.type.results[0]; // v1 externs return at most one value
-    vyrn[im.field] = (...raw) => {
+    const { params, ret } = declared(abi.imports, field, "an extern import");
+    vyrn[field] = (...raw) => {
       const dec = new TextDecoder();
       const args = [];
-      for (let k = 0; k < params.length; k++) {
-        if (params[k] === "i32" && params[k + 1] === "i64") {
-          // String: (ptr, len) -> decoded JS string; consume both words.
-          const ptr = raw[k] >>> 0;
-          const len = Number(raw[k + 1]);
+      let slot = 0;
+      for (const t of params) {
+        if (t === "string") {
+          // A String import crosses as (i32 ptr, i64 len) — two slots, one
+          // argument. This is the pair the old shape-guess collided with an
+          // `(Int32, Int64)` on; the declaration says which it is.
+          const ptr = raw[slot++] >>> 0;
+          const len = Number(raw[slot++]);
           args.push(dec.decode(new Uint8Array(memory.buffer, ptr, len)));
-          k++;
+        } else if (t === "bool") {
+          args.push(raw[slot++] !== 0);
+        } else if (t === "u32") {
+          args.push(raw[slot++] >>> 0);
+        } else if (t === "u64") {
+          args.push(BigInt.asUintN(64, raw[slot++]));
         } else {
-          // i64 arrives as BigInt (pass through); i32/f32/f64 as numbers.
-          args.push(raw[k]);
+          // i32/i64/f32/f64 arrive in their natural JS form already (i64 is a
+          // BigInt). `opaque` is a type this runtime has never seen; passing it
+          // through unchanged is the only honest thing left.
+          args.push(raw[slot++]);
         }
       }
       const r = fn(...args);
-      if (result === undefined) return undefined; // Unit
-      if (result === "i64") return typeof r === "bigint" ? r : BigInt(Math.trunc(r));
-      if (result === "i32") return typeof r === "boolean" ? (r ? 1 : 0) : Number(r) | 0;
-      // f32 / f64 (or a string-return `ptr`, unsupported without an allocator).
-      if (result === "f32" || result === "f64") return Number(r);
-      throw new Error(`extern \`${im.field}\` returns unsupported wasm type \`${result}\``);
+      if (ret === "unit") return undefined;
+      if (ret === "i64") return typeof r === "bigint" ? r : BigInt(Math.trunc(r));
+      if (ret === "u64")
+        return BigInt.asIntN(64, typeof r === "bigint" ? r : BigInt(Math.trunc(r)));
+      if (ret === "bool") return r ? 1 : 0;
+      if (ret === "i32" || ret === "u32") return Number(r) | 0;
+      if (ret === "f32" || ret === "f64") return Number(r);
+      // `string` needs an allocation inside the module, which an import cannot
+      // do (RFC-0012 stage 1.5); `opaque` has no wire form at all.
+      throw new Error(`extern \`${field}\` returns unsupported type \`${ret}\``);
     };
   }
 
-  const { instance } = await WebAssembly.instantiate(wasmBytes, {
+  const instance = await WebAssembly.instantiate(module, {
     wasi_snapshot_preview1: wasi,
     vyrn,
   });
@@ -403,27 +390,25 @@ export async function runVyrn(wasmBytes, hooks = {}) {
 
   // --- wrap exported-extern functions (RFC-0012 M2) --------------------------
   // For each `export extern fn`, expose a pre-wrapped callable on the returned
-  // `exports`. Argument encoding is by the ARG's JS type (the wasm export ABI is
-  // lossy: String / Bool / Int32 all lower to `i32`, so an i32 slot is decided
-  // at the call by the value passed — a JS string is allocated + copied, a
-  // boolean becomes 0/1, a number stays an i32; an i64 slot takes a BigInt).
-  // A result is likewise ambiguous for `i32`. The module's `vyrn:exports`
-  // custom section names it `"string"` (NUL-decoded) or `"bool"`, else an i32
-  // result is a number; `hooks.exportReturns` is the fallback for a module that
-  // carries no section. `i64` results are BigInt, floats are numbers. See
-  // web/README.md.
-  const returnHints = { ...(hooks.exportReturns || {}), ...mod.returnTypes };
+  // `exports`. Both halves come from the module's declaration now: an argument
+  // is encoded as the PARAMETER says (a `string` slot allocates and copies, a
+  // `bool` becomes 0/1), and a result is decoded as the RETURN says.
+  //
+  // Arguments used to be encoded by the JS runtime type of whatever the caller
+  // passed, because the wasm slot is lossy — `String`, `Bool`, `Int32` and
+  // `UInt32` are all `i32`. That made `greet(42)` hand a `String` parameter the
+  // number 42 as a pointer, and `wantsInt("7")` allocate a string and pass its
+  // address as a number, both without a word of complaint. A declared `string`
+  // parameter now takes a JS string or refuses.
   const RESERVED = new Set(["memory", "_start", "__vyrn_malloc", "__vyrn_free"]);
   const wrappedExports = {};
-  for (const ex of mod.exports) {
-    if (ex.kind !== 0 || !ex.type) continue; // functions only
-    if (RESERVED.has(ex.field) || ex.field.startsWith("__")) continue;
-    const params = ex.type.params;
-    const result = ex.type.results[0];
-    const hint = returnHints[ex.field];
-    const raw = instance.exports[ex.field];
+  for (const [field, { params, ret }] of abi.exports) {
+    if (RESERVED.has(field) || field.startsWith("__")) continue;
+    const raw = instance.exports[field];
+    // Declared but swept, or renamed: the section lists what the source says,
+    // and only what the instance actually exports is callable.
     if (typeof raw !== "function") continue;
-    wrappedExports[ex.field] = (...jsArgs) => {
+    wrappedExports[field] = (...jsArgs) => {
       const call = [];
       // Every buffer this call allocated inside the module. The CALLER owns a
       // String argument (RFC-0012), and across this boundary the caller is here —
@@ -436,17 +421,24 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       for (let k = 0; k < params.length; k++) {
         const t = params[k];
         const a = jsArgs[k];
-        if (t === "i64") {
+        if (t === "string") {
+          if (typeof a !== "string") {
+            throw new Error(
+              `\`${field}\` parameter ${k + 1} is declared \`String\`, but a ` +
+                `${typeof a} was passed. The module would read it as a pointer.`
+            );
+          }
+          const p = encodeString(a);
+          owned.add(p);
+          call.push(p);
+        } else if (t === "i64" || t === "u64") {
           call.push(typeof a === "bigint" ? a : BigInt(Math.trunc(Number(a))));
-        } else if (t === "i32") {
-          if (typeof a === "string") {
-            const p = encodeString(a);
-            owned.add(p);
-            call.push(p);
-          } else if (typeof a === "boolean") call.push(a ? 1 : 0);
-          else call.push(Number(a) | 0);
+        } else if (t === "bool") {
+          call.push(a ? 1 : 0);
+        } else if (t === "f32" || t === "f64") {
+          call.push(Number(a));
         } else {
-          call.push(Number(a)); // f32 / f64
+          call.push(Number(a) | 0); // i32 / u32
         }
       }
       let out;
@@ -454,21 +446,23 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         const r = raw(...call);
         // Decoded BEFORE the release, because an export may return the pointer it
         // was given and `free` writes its list link into the block.
-        if (result === undefined) out = undefined; // Unit
-        else if (result === "i64") out = r; // BigInt
-        else if (result === "i32") {
-          if (hint === "string") {
-            out = decodeCString(r);
-            // A returned String is the CALLER's (RFC-0089 rule 3), and across
-            // this boundary the caller is here. The module refuses to compile a
-            // lend out of an `export extern fn` — module state, a projection —
-            // so the pointer is either a heap block this release reclaims or a
-            // data-segment literal, which sits below `HEAP_BASE` and which
-            // `__vyrn_free` therefore ignores.
-            owned.add(Number(r) >>> 0);
-          } else if (hint === "bool") out = r !== 0;
-          else out = r;
-        } else out = r; // f32 / f64 — number
+        if (ret === "unit") out = undefined;
+        else if (ret === "string") {
+          out = decodeCString(r);
+          // A returned String is the CALLER's (RFC-0089 rule 3), and across
+          // this boundary the caller is here. The module refuses to compile a
+          // lend out of an `export extern fn` — module state, a projection —
+          // so the pointer is either a heap block this release reclaims or a
+          // data-segment literal, which sits below `HEAP_BASE` and which
+          // `__vyrn_free` therefore ignores.
+          owned.add(Number(r) >>> 0);
+        } else if (ret === "bool") out = r !== 0;
+        // An unsigned result is unsigned: a wasm `i32` reaches JS sign-extended,
+        // and a `UInt32` over 2^31 used to come back negative because nothing
+        // said it was unsigned.
+        else if (ret === "u32") out = r >>> 0;
+        else if (ret === "u64") out = BigInt.asUintN(64, r);
+        else out = r; // i32 / i64 / f32 / f64
       } finally {
         // A trap leaves the module unusable, but a `panic` the page catches does
         // not, so the release runs on both paths.
