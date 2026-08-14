@@ -188,7 +188,13 @@ impl std::fmt::Display for Why {
 pub struct Unresolved {
     pub caller: String,
     pub callee: String,
-    pub line: u32,
+    /// The line the CALLEE is declared on, which is what a refusal names — the
+    /// author has to change the generic, not the call.
+    pub line: usize,
+    /// The type arguments the call solved, where it solved them. Empty when the
+    /// checker left a parameter open. A refusal is worded from these, so
+    /// `vyrn check` can say what a backend would have said without running one.
+    pub args: Vec<Type>,
     pub why: Why,
 }
 
@@ -375,20 +381,21 @@ fn follow<'a>(
     unresolved: &mut Vec<Unresolved>,
 ) {
     for (callee, solved) in calls {
-        let mut stop = |why| {
+        let mut stop = |why, line, args: Vec<Type>| {
             unresolved.push(Unresolved {
                 caller: caller.to_string(),
                 callee: callee.to_string(),
-                line: 0,
+                line,
+                args,
                 why,
             })
         };
         let Some(target) = by_name.get(callee) else {
-            stop(Why::NotAFunction);
+            stop(Why::NotAFunction, 0, Vec::new());
             continue;
         };
         if target.type_params.iter().any(|p| !solved.contains_key(p)) {
-            stop(Why::UnsolvedParameter);
+            stop(Why::UnsolvedParameter, target.line, Vec::new());
             continue;
         }
         let next: Vec<Type> = target
@@ -404,7 +411,7 @@ fn follow<'a>(
         if next.iter().any(|t| {
             type_depth(t) > MONO_DEPTH_LIMIT || expanded_size(t, decls, MONO_SIZE_LIMIT).is_none()
         }) {
-            stop(Why::PastTheLimit);
+            stop(Why::PastTheLimit, target.line, next);
             continue;
         }
         let key = (

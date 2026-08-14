@@ -7,6 +7,11 @@ description = "Emits code for Vyrn: textual LLVM IR today, wasm directly (in pro
 
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
+# RFC-0101: the lowered form, which sits BELOW this crate. The edge is one way
+# and stays one way — `vyrn-lower` must not see a backend. `check_instantiations`
+# is the first reader (M2b): the monomorphization worklist is the lowering's, so
+# asking how deep it goes no longer means emitting a module and throwing it away.
+vyrn-lower = { path = "../vyrn-lower" }
 # The direct wasm backend, which replaces `--target wasm`'s trip through clang.
 # Section framing and LEB128 are not where the interesting bugs live, and this is
 # the Bytecode Alliance's own encoder — the same org as the `wasmtime` this repo

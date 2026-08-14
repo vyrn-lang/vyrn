@@ -1028,7 +1028,7 @@ pub const STATICS_LIMIT_NEEDLE: &str = "past the statics limit";
 /// The message names the TYPE rather than the chain of calls that built it. The
 /// type IS the chain, written down — `P<P<P<..>>>` is one `P` per instantiation —
 /// and it is also the thing the author has to change.
-pub(crate) fn check_inst_depth<'a>(
+pub fn check_inst_depth<'a>(
     name: &str,
     args: impl Iterator<Item = &'a Type>,
     line: usize,
@@ -1068,11 +1068,24 @@ pub(crate) fn check_inst_depth<'a>(
 /// `check` has never claimed to predict them, and promoting them all here would
 /// change its contract by more than the one defect this closes (audit A5.2:
 /// `check` said `ok` about a program no backend could finish).
+///
+/// **RFC-0101 M2b: this used to call [`emit`].** It ran the entire native
+/// lowering, built a complete LLVM module as a `String`, matched its error
+/// against one needle and threw the module away — because monomorphization only
+/// existed inside a backend and the front end had no other way to ask how deep
+/// it goes (§1.2). It does now: `vyrn-lower` runs the worklist, from the same
+/// two constants, and the refusal is worded by the same [`check_inst_depth`]
+/// both backends call. `vyrn-cli/tests/lowered.rs` is what makes that
+/// prediction sound — it asserts over the corpus that every instantiation either
+/// backend emits is one the lowering's worklist has.
 pub fn check_instantiations(program: &Program) -> Result<(), String> {
-    match emit(program) {
-        Err(e) if e.contains(MONO_LIMIT_NEEDLE) => Err(e),
-        _ => Ok(()),
+    let types = vyrn_frontend::types::decl_map(program);
+    for u in vyrn_lower::lower(program).unresolved {
+        if u.why == vyrn_lower::Why::PastTheLimit {
+            check_inst_depth(&u.callee, u.args.iter(), u.line, &types)?;
+        }
     }
+    Ok(())
 }
 
 pub fn emit(program: &Program) -> Result<String, String> {
