@@ -483,6 +483,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
 
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
+        crate::observe::note_inst(crate::observe::Site::Wasm, &f.name, &[]);
         lower_fn(&mut m, f, &sig, &cx, HashMap::new())?;
     }
 
@@ -512,6 +513,16 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             // backend's own worklist. Both drain until nothing is left, and
             // polymorphic recursion leaves something every turn.
             crate::check_inst_depth(&p.f.name, p.subst.values(), p.f.line, &cx.types)?;
+            // RFC-0101 M2's shadow. A `Key::Lambda` is not a function of the
+            // program and has no name to record; the other two kinds are one
+            // named callee at one list of type arguments, which is exactly the
+            // identity `vyrn-lower`'s worklist keys on.
+            match &p.key {
+                Key::Generic(n, args) | Key::Ho(n, args, _) => {
+                    crate::observe::note_inst(crate::observe::Site::Wasm, n, args)
+                }
+                Key::Lambda(..) => {}
+            }
             cx.subst = p.subst.clone();
             let body = lower_body(&mut m, &p.f, &p.sig, &cx, p.binds.clone())?;
             cx.subst = HashMap::new();
