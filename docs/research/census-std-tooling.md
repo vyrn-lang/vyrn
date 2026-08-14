@@ -25,13 +25,20 @@ map (bannered).
 
 ---
 
-## Top N by severity
-
-(Assembled last; see the numbered findings.)
+## Top 10 by severity
 
 | # | Severity | Finding | Ref |
 |---|---|---|---|
-| — | — | (in progress) | — |
+| 1 | **High** | **Contract errors still ride bare identifiers** (`RPC_CONTRACT_ERROR__…` read out of a parser complaint) in six modules, one RFC after RFC-0099 shipped real generator diagnostics — and the mechanism's own comments state the dead premise ("a generator has no message-carrying trap"). | 1.1 |
+| 2 | **High** | **The router's URL boundary converts alphabets in neither direction**: `hrefTags("a b")` emits a raw-space URL, the served route hands user code `a%20b`, and the no-op decoder's justifying comment cites a wall (`Int64→UInt8` narrowing) that RFC-0078 M4c removed — `urlDecode`/`urlEncode` are builtins. | 1.2 |
+| 3 | **High** | **The derived RPC client dedupes re-emitted types by name alone**: two api modules declaring `CreateReq` differently compile to a client whose `usersCreate` is silently typed by posts' record — every call 422s, and the fix (a name registry that errors, `gqlDefine`) already exists in `std/graphql` since #169. | 1.4 |
+| 4 | **High** | **Nine of twelve `vyrn-codegen` integration tests skip silently in every CI job** (early `return`, not `require_tools`; no job supplies wasmtime where they run) — including the layout-vs-clang ground truth that `ci.yml` cites as evidence in an argument about ARM coverage. | 3.1 |
+| 5 | **High** | **48 std test blocks run in no gate** (`std/i18n` 16, `std/args` 8, `std/jsondec` 7, …): std coverage is an opt-in list of hand-written wrappers, not a sweep, and `vyrn test` exits 0 on "no tests". | 3.4 |
+| 6 | **High** | **`web/wasi-min.js` parses the wasm binary and guesses ABI shapes** (`i32`+`i64` "is" a String, a documented-caveat collision) to recover signatures the compiler already half-writes into its `vyrn:exports` custom section — for results only. | 2.2 |
+| 7 | **High** | **The LSP re-implements the CLI's project-context reader** ("the CLI is a binary crate, not linkable") and the copy has drifted on path canonicalization — the exact divergence its own comment claims to avoid. | 2.3 |
+| 8 | **High** | **RFC-0046 documents a `slice` builtin, trap semantics, and always-available string predicates that no longer exist**, with no banner; plus the RFC-0011/0028/0013 "safe leak" triangle contradicting RFC-0089 rule 4 as shipped. | 4.1, 4.2 |
+| 9 | Medium | **Both CI wasm-toolchain fetches provision a dead code path**: the only readers of `WASI_SYSROOT`/`WASI_BUILTINS` are `shim_wasm()` (no production caller) and a test that never runs; the gen-engine job needs nothing from the cache it shares. | 3.2 |
+| 10 | Medium | **Five modules parse record fields back out of `TypeInfo.source`** with four independent parsers (lex-walk ×2, byte splitter, `gqlSplitDecl`) because reflection hands types over as text; `site/` re-scans source twice more because the reflected `Token` has no extent. | 1.5, 2.1 |
 
 ---
 
@@ -561,4 +568,175 @@ deletes every link; what is worth keeping — proof the generator runs — is
 `vyrn doc --std -o $(mktemp -d)` on one leg. (`cleanup-census.md:480`
 reviewed the directory and answered a different question: "cannot drift" is
 true and beside the point when nothing reads it.)
+
+---
+
+## Section 4 — the RFC corpus: records superseded in substance that still read as current
+
+Most of the corpus is well-kept: RFC-0004, 0012, 0025, 0034, 0088, 0090,
+0091 carry inline supersession notes, and RFC-0019 correctly marks the
+withdrawn `rpc fn` keyword. The stale ones cluster in two places: pre-memory-
+arc RFCs whose "safe leak" paragraphs RFC-0089/0092 silently invalidated, and
+RFC-0046, whose central mechanism was deleted without a note. Every claim
+below was verified against current code.
+
+### 4.1 MAJOR — RFC-0046's title mechanism does not exist
+
+`rfcs/RFC-0046-strings.md` is titled "+ a `slice` builtin" and argues at
+length (`:20-38`) why `slice` must be a builtin (pure Vyrn "has no way" to
+avoid revalidation) and that it TRAPS on bad input with recorded wording.
+Current code: `slice` is ordinary Vyrn in `std/strpred.vyrn:188` returning
+`Result<String, SliceError>` — no builtin (`checker.rs:281-293` lists it
+under `MOVED_TO_STD`), no trap, and it pays exactly the walk the RFC says is
+impossible. The as-landed note (`:138-141`) says `contains`/`startsWith`/
+`endsWith` "stayed compiler builtins … available without importing" —
+RFC-0094 M2 made all three imports. The changes are recorded in RFC-0078,
+0079 and 0094; RFC-0046 itself has no banner and still reads "Implemented".
+It is the file a reader opens for the string surface.
+
+### 4.2 MAJOR — three "safe leak" records contradict the shipped memory model
+
+- `RFC-0011-array-mutation.md:52-58,110-112`: "an overwritten heap element
+  is not freed by the store (a safe leak)". Rule 4 as implemented releases
+  it: `vyrn-codegen/src/direct.rs:3426-3454`, `movecheck.rs:3686-3691`,
+  pinned by `vyrn-cli/tests/memory.rs:492`.
+- `RFC-0028-map.md:147-152`: elements are "a safe leak … `keys()` copies the
+  key pointers". Both false: `direct.rs:2378-2389` (a map releases its
+  keys), `direct.rs:11411-11419` (`keys()` copies the strings BECAUSE a
+  pointer snapshot would double-free), `direct.rs:3400-3414` (`m[k] = v`
+  releases the displaced value).
+- `RFC-0013-module-state-event-loop.md:86-90`: "overwriting a heap-valued
+  `mut` global leaks the old value". `direct.rs:2988-3014,2624-2630`;
+  `memory.rs:480-487` pins the accumulator steady.
+
+Each cites the others ("consistent with array element stores") — a web of
+mutually-supporting stale claims. One banner paragraph per file, pointing at
+RFC-0089 rule 4, deletes the contradiction.
+
+### 4.3 MODERATE
+
+- **RFC-0079** `:337-346` records "a discarded error payload is a safe leak
+  … when arm binders become droppable, both spellings gain it together" as a
+  live limitation. PR #166 landed it by another route
+  (`movecheck.rs:2201-2223`; measured 141.7 MB → 3.6 MB in that commit).
+- **RFC-0099**'s status still reads "M1 landed" and its §M2 ("not in this
+  RFC") shipped as RFC-0100 with no cross-note; its anchor-containment table
+  (`:139`) says "v1 does not check" what `origin.rs:455-486` now refuses
+  three ways (#176/#179).
+- **RFC-0021** `:194-202` describes the gen cache as `v2`-tagged and
+  unauthenticated; it is `v3`, HMAC-authenticated under a per-user key
+  (`loader.rs:1776,1901-1917`, #175), and `:205-209`'s "generators run only
+  in the interpreter" was superseded by RFC-0076 (compiled to wasm).
+
+### 4.4 MINOR
+
+RFC-0007 (the `list([..])` desugar it documents was removed,
+`checker.rs:5604-5607`; the shipped `Template` record appears in no RFC but
+an aside in RFC-0054); RFC-0059 (reader now lives in `std/jsonread`, not
+`std/json`; the "`contains` is reserved" justification no longer holds;
+`emit` now validates `JNum` per #169); RFC-0008 (§"Retiring `print`" reads
+normative — "`print(x)` is removed" — while its own status banner says the
+opposite and `print` is everywhere); RFC-0012 (`encodeInto` rejected
+"because the path never frees" — it frees now, by the same RFC's as-landed
+section); RFC-0037 (justifies the lambda-capture leak by analogy to a boxed-
+enum leak that RFC-0092/0096 fixed).
+
+And the index: `rfcs/README.md:45` says "97 RFCs, numbered 0001 to 0098" —
+there are 99, through 0100, and RFC-0099/RFC-0100 are absent from the index
+table entirely.
+
+---
+
+## Section 5 — the three specific assessments
+
+### 5.1 How much of std/ui (116 KB) and std/vyx (205 KB) is a consequence of building code as text?
+
+Measured shape (`wc -l`, test blocks located by `grep -n '^test '`):
+
+| | total lines | code (before tests) | tests |
+|---|---|---|---|
+| `std/ui.vyrn` | 2,822 | ~2,735 | ~87 |
+| `std/vyx.vyrn` | 4,815 | ~4,390 | ~420 |
+
+Attribution, by reading every function (the fn inventory is in section 1's
+findings):
+
+**vyx** — the text-output tax is concentrated and identifiable:
+- position relocation: `vyxRegion`/`vyxShiftAttrs`/`vyxShiftNodes`/
+  `vyxShiftNode`/`vyxShiftIf`/`vyxCountNewlines`/`vyxNormHelper`/
+  `vyxRelocateComp` (`std/vyx.vyrn:1739-1935`, ~195 lines) exist ONLY
+  because the output is text: origins must be re-derived by counting
+  newlines in emitted strings so `//@origin` lines up.
+- textual import merging: `vyxParseImport`/`vyxMergeImports`/
+  `vyxImportLine` (`std/vyx.vyrn:2271-2460`, ~190 lines) parse Vyrn import
+  LINES with `vyxFind(" from ")` and re-emit them — structure → text →
+  parsed structure → text.
+- escaping into Vyrn literals: `vyxEscSecond`/`vyxStrLit`
+  (`std/vyx.vyrn:186-227`, ~40 lines).
+- emission plumbing: the `vyxEmit*` family + module assembly
+  (`std/vyx.vyrn:1936-2270,2461-2700`, ~570 lines), roughly half of which
+  is string bookkeeping (acc threading, paren/comma joining, newline
+  placement) rather than the semantic template→hyperscript mapping.
+- interface dummies: `vyxNoSchema`/`vyxNoOrigin`/`vyxEmittedInterface`
+  (`std/vyx.vyrn:2621-2667`, ~45 lines) — a synthesized module must fake
+  reflection metadata.
+
+Total: **~650-750 lines, 15-17% of the module's code**. The remaining ~83%
+is honest input work — the markup-alphabet scanner and parser (~1,450
+lines, the #168 lesson made structural), section/props handling, and
+`moduleInterface` interrogation — which a tree-emitting rewrite would keep
+unchanged.
+
+**ui** — same method: the three quoted runtime blocks (~150 lines,
+finding 1.7), the route/typed-URL emission plumbing's string half (share of
+~700 lines), the flat-namespace collision machinery (`uiCollisionKey`/
+`uiHelperCollisions`, ~55 lines), and the stringly-reflection field parsers
+(~100 lines, finding 1.5) put the tax at **~400-450 lines, ~15%**.
+
+So the honest answer is: **the text decision costs each module about a
+sixth of its bulk — but that sixth is where every shipped defect in this
+family lived** (#168's alphabet, #169's invalid documents, this census's
+1.2/1.4), and it costs a second thing the line count hides: **the test
+suites are pinned to the text**. 48 vyx tests assert with
+`out.contains("Raw(html)")`-style substring probes over emitted source
+(63 `contains(` in the file) — the std-side twin of the frontend's
+prose-grepping tests, and the reason any representation change now carries
+a re-pinning bill. The tree alternative is not hypothetical in this repo:
+`std/html` (the tree emitter) is the one that never shipped invalid output,
+and the fixed-runtime quote blocks (RFC-0054) already moved the most
+error-prone emissions from concatenation to compiler-checked quotes.
+
+### 5.2 RFCs superseded in substance but reading as current
+
+Section 4. The two worth a banner TODAY: **RFC-0046** (its title mechanism
+— the `slice` builtin, its trap semantics, and the builtin status of
+`contains`/`startsWith`/`endsWith` — is gone) and the **RFC-0011/0028/0013
+"safe leak" triangle** (three mutually-citing records of a stance RFC-0089
+rule 4 reversed, each now describing frees that DO happen as leaks). Plus
+the index file itself, which has not heard of RFC-0099/0100.
+
+### 5.3 The workflows: gated so it cannot fail, or claimed with no gate
+
+Section 3. The three structural answers: (a) yes — nine codegen integration
+tests early-return in every job (3.1), the bench gate cannot fire (3.5),
+site's highlighter tests are not in the loop (3.3), and 48 std test blocks
+run nowhere (3.4); (b) yes — the release gate proves the binary starts but
+not that CI passed, the wasm it ships is only stat'ed, and the install
+scripts (with their checksum promise) are executed by nothing (3.5); (c)
+the Taelin instances are the dead-toolchain fetches (3.2) and the
+committed-generated-docs chain (3.6).
+
+---
+
+## Counting
+
+| | CONFIRMED | PLAUSIBLE |
+|---|---|---|
+| Section 1 (std) | 4 (1.1-1.4) | 3 (1.5*, 1.6, 1.7) |
+| Section 2 (tooling) | 8 | 3 |
+| Section 3 (gates) | 13 | 1 |
+| Section 4 (RFCs) | 12 stale records verified against code | — |
+
+*1.5's mechanism count is verified by citation; its latent mis-split is the
+plausible half.
 
