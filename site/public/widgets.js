@@ -854,6 +854,27 @@ function navOwns(href, path) {
   return path === href || path.startsWith(href.replace(/\.html$/, "") + "/");
 }
 
+/// Freeze the shell's links to the URLs they resolve to on the document that
+/// shipped them.
+///
+/// A soft navigation replaces `<main>` and nothing else, so the masthead and
+/// the footer OUTLIVE the address bar they were written against. Every URL this
+/// site writes is relative to its own document, which is what makes one export
+/// work at any mount point — but a relative URL is read at the moment it is
+/// clicked. Navigate from `/docs.html` to `/docs/std/json.html` and the
+/// masthead's `docs.html` means `/docs/std/docs.html`, which is nowhere.
+///
+/// Resolving each one here, once, on the document it arrived with, makes the
+/// shell immune to the depth changing under it. The result is same-origin, so a
+/// click on it is still soft-navigated.
+///
+/// Fragment links are left alone: `#main` has to keep meaning THIS page.
+function anchorShell() {
+  for (const a of $$(".masthead a[href], .foot a[href]")) {
+    if (!a.getAttribute("href").startsWith("#")) a.setAttribute("href", a.href);
+  }
+}
+
 function markNav() {
   const path = location.pathname;
   for (const link of $$(".masthead .nav a")) {
@@ -890,6 +911,7 @@ function boot() {
   copyButtons();
   markCopyable();
   entrance();
+  anchorShell();
   markNav();
   railSpy();
   for (const el of $$('[data-widget="parity"]')) parityWidget(el);
