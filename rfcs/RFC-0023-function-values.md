@@ -16,6 +16,21 @@
 > compile time.** No function type is storable, returnable, or escapable —
 > so no closure exists at runtime, in any backend.
 
+> **The restriction was lifted by [RFC-0037](RFC-0037-stored-closures.md);
+> the refusal it was protecting was kept.** A `fn` type is storable,
+> returnable and escapable now — in a return, a `let` annotation, a record
+> field, an array element, an `Option` payload and module state, pinned as
+> `fn_types_are_storable` in `vyrn-frontend/src/checker.rs:12394-12408`.
+> `std/shelf`'s middleware is an `Array<Middleware>` in module state.
+>
+> What did NOT come back is the bill this paragraph refuses. RFC-0037 lifted
+> the restriction by **defunctionalization**: every function value is a closed
+> enum, every call is a direct call through `@dispatch`, and the wasm table is
+> identical to v1's. So "no closure exists at runtime, in any backend" still
+> holds — there are no function pointers, no boxing, no capture lifetimes and
+> no escape analysis. The sentence that stopped being true is the one before
+> it. Storing a function value is the feature; a heap closure is still refused.
+
 ---
 
 ## Surface
@@ -114,6 +129,16 @@ capture-by-move syntax, mutable capture.
   token); a bare `|` in expression position unambiguously opens a lambda (there
   is no bitwise-or operator). A lambda is legal only as a call argument in a
   `fn`-typed parameter position; a named function is accepted there too.
+
+  > **Two things in this bullet are no longer true.** The parameter-only
+  > restriction was lifted by RFC-0037 — see the banner in §Design above; a
+  > `fn` type is legal in a return, a `let` annotation, a record field, an
+  > array element, an `Option` payload and module state. And **there is a
+  > bitwise-or operator**: RFC-0045 added `|` as an infix `BitOr`
+  > (`vyrn-frontend/src/parser.rs:4079`). The lambda rule still works, for a
+  > narrower reason than the one given — `|` is infix-ONLY, so it can never
+  > START an expression, and a bare `|` in expression position is therefore
+  > still unambiguously a lambda.
 
 - **A `fn`-typed argument may be any expression of `fn` type** (added 2026-08-07,
   after RFC-0037). The check used to name a lambda literal and a bare name and

@@ -234,6 +234,11 @@ comes straight back.
 control flow, a drop that consults a per-field flag at run time. **Refused.**
 Vyrn has no drop flags and RFC-0089 rule 5 says `Ref<T>` is the one runtime
 mechanism and the only one. A drop flag would be a second.
+(The premise names a type RFC-0090 M4 deleted a day before this was written —
+`Ref<T>` and `cell` are gone, replaced by `std/slots` in ordinary Vyrn. The
+refusal is unaffected and is now stronger: the compiler has NO runtime ownership
+check at all, so a drop flag would be the first rather than the second. See the
+banner on RFC-0089 rule 5.)
 
 **(c) A hole the compiler knows statically, and a leak where it cannot.**
 Taken. The rule:

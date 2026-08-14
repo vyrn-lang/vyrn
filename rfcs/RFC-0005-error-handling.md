@@ -34,6 +34,28 @@
 > `Result` directly (today it aborts, but the fallible pattern composes cleanly —
 > see `parse_age` above), the concurrency model (§6), and typed error sets (Q2).
 
+> **This v0.1 status block is out of date in both directions.** The rules above
+> it — inference from context, exhaustive `match`, `?` — still hold. What has
+> moved:
+>
+> - **Bool payloads are not rejected.** Both compiling backends lower them
+>   (`vyrn-codegen/src/direct.rs:15235`, `vyrn-codegen/src/lib.rs:9388`), and the
+>   corpus depends on it: `writeFile` returns `Result<Bool, String>`
+>   (RFC-0014), and `examples/shelf` and `examples/fullstack` both use it.
+> - **The concurrency model (§6) shipped**, as
+>   [RFC-0025](RFC-0025-worker-threads.md) — parallel `spawn`, concurrent
+>   `serve` — and was extended by [RFC-0095](RFC-0095-a-task-is-owned.md).
+> - **"Native lowering" now means one of two backends.** The `insertvalue`/`phi`
+>   description is the text-IR-through-clang path; the direct wasm backend
+>   ([RFC-0077](RFC-0077-direct-wasm-backend.md)) emits its own layout, and
+>   [RFC-0024](RFC-0024-enums-on-the-wire.md) changed what a payload enum is on
+>   both. `examples/result.vyrn` no longer exists; `examples/option.vyrn` does.
+>
+> The rest of the "not yet implemented" list is still not implemented: a
+> validated construction still aborts rather than returning a `Result`, and
+> typed error sets (Q2) are still unbuilt — [RFC-0079](RFC-0079-failure-is-a-value.md)
+> is where the failure model was settled instead.
+
 ---
 
 ## Summary

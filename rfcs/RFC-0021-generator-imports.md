@@ -102,6 +102,21 @@ proc-macros run arbitrary native code with ambient authority; TS codegen
 writes artifacts that go stale. A generator is interpreted, scoped,
 deterministic, and pinned.
 
+> **"Interpreted" is one engine of two** — [RFC-0076](RFC-0076-generators-as-wasm.md)
+> compiles a generator to wasm and runs it there, with the interpreter as the
+> fallback and a cross-engine gate holding the two byte-identical
+> (`vyrn-frontend/src/loader.rs:1571`, "a generator is a runnable program, and
+> RFC-0076 compiles it to wasm"). "The loader runs the call in the compiler's
+> interpreter" earlier in this RFC reads the same way. Scoped, deterministic and
+> pinned are unaffected: the sandbox is the checker's, not the engine's.
+>
+> One aside in the purity list above has also aged: "(No clock or randomness
+> exists in Vyrn — good.)" — [RFC-0043](RFC-0043-time-random.md) shipped
+> `std/time` and `std/random`. The list is still complete, because both are
+> `extern`s and `extern` is already forbidden in a `gen fn`, so nothing had to
+> be added to `COMPTIME_FORBIDDEN`. The reason the aside gives is gone; the
+> guarantee it was supporting is not.
+
 ## Caching (what makes this fast)
 
 Deterministic + declared inputs ⇒ content-addressed output. The key is
