@@ -96,13 +96,14 @@
       "match": "\\\\(?:n|t|\\\\|\")"
     },
     "interpolation": {
-      "comment": "A \\{ ... } interpolation hole. The closing } is consumed by `end` and colored via endCaptures. Inner patterns deliberately OMIT } — an included } here would match before `end` and leave the hole unterminated. Nested braces (e.g. a block expr) are a known limitation: the hole closes at the first } not inside a nested string. NOTE: the delimiter scopes intentionally reuse the `punctuation.definition.template-expression.*` family rather than a generic `punctuation.definition.interpolation` — Dark+ (and most themes) theme the former but not the latter, so this is what makes \\{ and } actually render in a distinct color instead of falling back to the surrounding string color.",
+      "comment": "A \\{ ... } interpolation hole. The closing } is consumed by `end` and colored via endCaptures. Inner patterns deliberately OMIT a bare } — an included } here would match before `end` and leave the hole unterminated. A nested block (`if c { a } else { b }`, a record literal) is consumed WHOLE by #hole-block, which is why its closing brace never reaches `end` and the hole no longer stops at the first inner }. NOTE: the delimiter scopes intentionally reuse the `punctuation.definition.template-expression.*` family rather than a generic `punctuation.definition.interpolation` — Dark+ (and most themes) theme the former but not the latter, so this is what makes \\{ and } actually render in a distinct color instead of falling back to the surrounding string color.",
       "name": "meta.interpolation.vyrn",
       "begin": "\\\\\\{",
       "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.vyrn" } },
       "end": "\\}",
       "endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.vyrn" } },
       "patterns": [
+        { "include": "#hole-block" },
         { "include": "#strings" },
         { "include": "#byte-literal" },
         { "include": "#keywords" },
@@ -168,6 +169,25 @@
         { "name": "punctuation.section.brackets.vyrn", "match": "[\\[\\]]" },
         { "name": "punctuation.section.braces.vyrn", "match": "[{}]" },
         { "name": "punctuation.separator.vyrn", "match": "[,;:.]" }
+      ]
+    },
+    "hole-block": {
+      "comment": "A nested `{ ... }` inside an interpolation hole — an if/else arm, a block expression, a record literal. Matching the pair as a unit is what keeps its closing brace away from the hole's `end`; without this the hole terminates at the first inner } and the rest of the string is colored as code. Recursive, so blocks nest, and it includes #strings so a literal inside an arm (`else { \"n/a\" }`) is a string and its braces, if any, stay literal.",
+      "begin": "\\{",
+      "beginCaptures": { "0": { "name": "punctuation.section.braces.vyrn" } },
+      "end": "\\}",
+      "endCaptures": { "0": { "name": "punctuation.section.braces.vyrn" } },
+      "patterns": [
+        { "include": "#hole-block" },
+        { "include": "#strings" },
+        { "include": "#byte-literal" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#function-calls" },
+        { "include": "#numbers" },
+        { "include": "#operators" },
+        { "include": "#hole-punctuation" },
+        { "include": "#identifiers" }
       ]
     },
     "hole-punctuation": {
