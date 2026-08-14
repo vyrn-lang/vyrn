@@ -458,6 +458,26 @@ for coverage:
   decodes as a 422 naming that field. `parse` is integer-only and no dogfood has
   either.
 
+**A segment is wire text and a placeholder binds a value**, so `mount` converts
+between them: `urlDecode` where a segment becomes a binding (`httpMatch`) and
+`urlEncode` where a payload field becomes a `Location` (`httpFill`). The rule is
+RFC 3986 §2.3 through `std/codecs`, the same alphabet `std/ui`'s router and
+typed-URL helpers use — `/tags/a%20b` binds `a b`, and `createdAt("/tags/{name}")`
+over a name of `a/b` writes `/tags/a%2Fb`, where the separators are the
+template's and never a value's. Until this landed the binding was the raw
+segment, so a REST projection's `{id}` received wire bytes and its `Location`
+carried a value that was not a URL.
+
+**A malformed escape is 400, not 404.** A path that does not percent-decode is
+not a URL, which is a fault in the request rather than in the resource namespace:
+`mount` answers `400 the request path is not percent-encoded text` once, over the
+whole path, ahead of every route — so a path that matches nothing gets it too.
+`std/ui`'s router 404s the same input and the two do not disagree; each refuses in
+the vocabulary it has, and neither hands wire bytes to user code. A literal
+segment is still compared as written: percent-encoding *normalisation*
+(`/%6Eotes` for `/notes`) is a separate rule nothing here needs, and the query
+string keeps its own alphabet, since nothing in `std/http` decodes one.
+
 **A native codegen bug fell out of `surface`**, and half of it is fixed. A
 lambda whose body CALLS a captured `fn` value — `|req, ps| run(req)` — left the
 callee out of the lifted lambda's capture list, because the capture walk looked
