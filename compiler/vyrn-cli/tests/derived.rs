@@ -451,10 +451,10 @@ fn two_procedures_deriving_one_path_fail_the_build_naming_both() {
         .unwrap();
     assert!(!out.status.success(), "last-wins is never silent");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("two_procedures_derive_the_same_path"), "{err}");
-    assert!(err.contains("notes_recent"), "the first declaration: {err}");
+    assert!(err.contains("both answer `/_/recent`"), "{err}");
+    assert!(err.contains("notes/recent"), "the first declaration: {err}");
     assert!(
-        err.contains("pastes_recent"),
+        err.contains("pastes/recent"),
         "the second declaration: {err}"
     );
 }
@@ -476,9 +476,9 @@ fn a_pin_onto_an_occupied_path_is_the_same_error() {
         .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("two_procedures_derive_the_same_path"), "{err}");
-    assert!(err.contains("pastes_byId"), "{err}");
-    assert!(err.contains("notes_recent"), "{err}");
+    assert!(err.contains("both answer `/_/notes/recent`"), "{err}");
+    assert!(err.contains("pastes/byId"), "{err}");
+    assert!(err.contains("notes/recent"), "{err}");
 }
 
 /// A client root, calling the generated stubs by their qualified names.

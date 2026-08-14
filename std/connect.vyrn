@@ -41,6 +41,10 @@
 import { fromBytesOr } from "std/strings"
 import { endsWith, startsWith } from "std/strpred"
 
+// Generator diagnostics (RFC-0099): a contract violation fails the load in this
+// generator's own wording, at the generator's call site.
+import { reportHere, Severity } from "std/diag"
+
 /// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
 /// procedure `getBook` derives `onGetBook` / `connectDoneGetBook` this way.
 fn connectCapFirst(s: String) -> String {
@@ -126,25 +130,27 @@ fn connectServiceName(contract: String) -> String {
     return name
 }
 
-/// A one-line synthesized module that fails to load, spelling a contract
-/// violation in an identifier (the std convention: the offense rides a bare
-/// top-level identifier so parsing fails immediately, attributed to the
-/// generator call site). `detail` must be a valid identifier.
-fn connectContractError(detail: String) -> String {
-    return "CONNECT_CONTRACT_ERROR__" + detail + "\n"
-}
-
 /// Reject any contract Connect cannot model: an exported procedure with more
 /// than one parameter, or a single parameter that is not an exported named
 /// (codable) type. Returns "" when the contract is clean.
+///
+/// The objection is a `std/diag` report (RFC-0099), so it fails the load in this
+/// generator's own words. `reportHere` is the right anchor: reflection gives a
+/// procedure's shape, not the line it was declared on.
 fn connectValidateContract(iface: ModuleInterface) -> String {
     for f in iface.functions {
         if f.params.length > 1 {
-            return connectContractError(f.name + "_must_take_at_most_one_parameter")
+            return reportHere(
+                Error,
+                "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a Connect procedure takes at most one; gather them into one exported record type",
+            )
         }
         if f.params.length == 1 {
             if connectIsNamedType(f.params[0].spelling, iface) == false {
-                return connectContractError(f.name + "_parameter_must_be_an_exported_named_codable_type")
+                return reportHere(
+                    Error,
+                    "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which this contract does not export as a named type — a Connect parameter must be an exported named type so the generated module can decode it",
+                )
             }
         }
     }

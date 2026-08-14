@@ -40,6 +40,9 @@ import { parseJson } from "std/jsonread"
 import { joinWith, substring, fromBytesOr, trim } from "std/strings"
 import { includes } from "std/arrays"
 import { contains, endsWith } from "std/strpred"
+// Generator diagnostics (RFC-0099): a locale fault fails the load in this
+// generator's own wording, anchored in the locale file it came out of.
+import { report, reportHere, Severity } from "std/diag"
 
 // ===========================================================================
 // Byte helpers — all parsing runs over Array<UInt8> so element math stays UInt8.
@@ -848,25 +851,16 @@ gen fn emitChain(clauses: Array<String>, bodies: Array<String>, otherBody: Strin
 }
 
 // ===========================================================================
-// Drift errors — Vyrn has no message-carrying trap, so each drift issue rides a
-// bare top-level identifier: the synthesized module fails to parse and the
-// diagnostic (attributed to the generator call) names the offender. One line per
-// issue, so a broken pair fails with a readable list.
+// Drift errors — each issue is a `std/diag` report (RFC-0099) anchored in the
+// locale file it came out of, so the load fails in this generator's own wording.
+// One report per issue, so a broken pair fails with a readable list.
 // ===========================================================================
 
-/// A key with every non-identifier byte turned into `_`, so it is a legal
-/// identifier fragment inside a drift-error name.
-gen fn identKey(key: String) -> String {
-    let ba = bytes(key)
-    let mut out: Array<UInt8> = []
-    for b in ba {
-        if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
-            out.push(b)
-        } else {
-            out.push('_')
-        }
-    }
-    return fromBytesOr(out, "key")
+/// A report anchored in one locale FILE. Line 1, column 1: a flattened entry
+/// keeps no offset into the JSON it came out of, so the file is the finest
+/// anchor this generator can give correctly.
+gen fn localeErr(dir: String, tag: String, message: String) -> String {
+    return report(Error, dir + "/" + tag + ".json", 1, 1, message)
 }
 
 /// Whether a message has a malformed brace: a `{` with no matching `}`, or a stray
@@ -903,14 +897,14 @@ gen fn icuBadBrace(msg: String) -> Bool {
     return depth != 0
 }
 
-/// Key-collision errors for the base locale. TWO injectivity failures both surface
-/// today as a confusing "function `t…` defined twice"; each becomes a NAMED
-/// diagnostic listing the colliding keys instead of a silent rename:
+/// Key-collision errors for the base locale, anchored in its file. TWO injectivity
+/// failures both surface otherwise as a confusing "function `t…` defined twice";
+/// each becomes a report naming the colliding keys instead of a silent rename:
 ///   - a DOTTED key (`"a.b"`) and a NESTED object (`"a": {"b": …}`) flatten to the
-///     same `a.b` — `I18N_DUP_KEY__<key>`;
+///     same `a.b`;
 ///   - two distinct keys whose PascalCase concatenation collides (`home.title` and
-///     `homeTitle` both make `tHomeTitle`) — `I18N_KEY_COLLISION__<a>__<b>`.
-gen fn keyCollisionErrors(base: LocaleData) -> String {
+///     `homeTitle` both make `tHomeTitle`).
+gen fn keyCollisionErrors(base: LocaleData, dir: String, tag: String) -> String {
     let keys = localeKeys(base)
     let mut out = ""
     let mut i = 0
@@ -918,9 +912,19 @@ gen fn keyCollisionErrors(base: LocaleData) -> String {
         let mut j = i + 1
         while j < keys.length {
             if keys[i] == keys[j] {
-                out = out + "I18N_DUP_KEY__" + identKey(keys[i]) + "\n"
+                out = out
+                + localeErr(
+                    dir,
+                    tag,
+                    "key `\{keys[i]}` is defined twice — a dotted key and a nested object flatten to one key, so keep only one of them",
+                )
             } else if keyFnName(keys[i]) == keyFnName(keys[j]) {
-                out = out + "I18N_KEY_COLLISION__" + identKey(keys[i]) + "__" + identKey(keys[j]) + "\n"
+                out = out
+                + localeErr(
+                    dir,
+                    tag,
+                    "keys `\{keys[i]}` and `\{keys[j]}` both name the function `\{keyFnName(keys[i])}` — a key and a Vyrn identifier are different alphabets, and these two keys convert to one name; rename one key",
+                )
             }
             j = j + 1
         }
@@ -951,20 +955,27 @@ export gen fn i18n(dir: String) -> String {
             }
             let data = parseLocaleJson(src)
             if data.ok == false {
-                return "I18N_PARSE_ERROR__locale_" + tag + "__" + identKey(data.error) + "\n"
+                return localeErr(
+                    dir,
+                    tag,
+                    "locale `\{tag}` is not a usable locale file — \{data.error}",
+                )
             }
             tags.push(tag)
             datas.push(data)
         }
     }
     if tags.length == 0 {
-        return "I18N_ERROR__no_locale_json_files_found\n"
+        return reportHere(
+            Error,
+            "no locale files under `\{dir}` — i18n reads one `<locale>.json` per locale, so add at least one",
+        )
     }
 
     // ---- key-collision check: two keys flattening to one entry, or two keys
     // whose PascalCase concatenation collides, would otherwise emit a duplicate
     // function — a NAMED diagnostic listing the colliding keys instead.
-    let collisions = keyCollisionErrors(datas[0])
+    let collisions = keyCollisionErrors(datas[0], dir, tags[0])
     if collisions != "" {
         return collisions
     }
@@ -978,7 +989,12 @@ export gen fn i18n(dir: String) -> String {
         let mut bk = 0
         while bk < bd.entries.length {
             if icuBadBrace(bd.entries[bk].value) {
-                braceErr = braceErr + "I18N_BAD_BRACES__locale_" + tags[bi] + "__" + identKey(bd.entries[bk].key) + "\n"
+                braceErr = braceErr
+                + localeErr(
+                    dir,
+                    tags[bi],
+                    "key `\{bd.entries[bk].key}` has an unbalanced brace — every `{` needs a matching `}`, and a literal brace is written `'{'`",
+                )
             }
             bk = bk + 1
         }
@@ -1004,7 +1020,12 @@ export gen fn i18n(dir: String) -> String {
         let mut ki = 0
         while ki < base.entries.length {
             if includes(dKeys, base.entries[ki].key) == false {
-                drift = drift + "I18N_DRIFT__locale_" + tag + "__missing__" + identKey(base.entries[ki].key) + "\n"
+                drift = drift
+                + localeErr(
+                    dir,
+                    tag,
+                    "locale `\{tag}` is missing key `\{base.entries[ki].key}`, which `\{baseTag}` defines — every locale carries the same key set, so add it or drop it from `\{baseTag}`",
+                )
             }
             ki = ki + 1
         }
@@ -1012,7 +1033,12 @@ export gen fn i18n(dir: String) -> String {
         ki = 0
         while ki < d.entries.length {
             if includes(baseKeys, d.entries[ki].key) == false {
-                drift = drift + "I18N_DRIFT__locale_" + tag + "__extra__" + identKey(d.entries[ki].key) + "\n"
+                drift = drift
+                + localeErr(
+                    dir,
+                    tag,
+                    "locale `\{tag}` defines key `\{d.entries[ki].key}`, which `\{baseTag}` does not — every locale carries the same key set, so add it to `\{baseTag}` or drop it here",
+                )
             }
             ki = ki + 1
         }
@@ -1030,10 +1056,19 @@ export gen fn i18n(dir: String) -> String {
             if vi >= 0 {
                 let sc = scanArgs(d.entries[vi].value)
                 if sc.ok == false {
-                    return "I18N_UNSUPPORTED__locale_" + tags[lj] + "__" + identKey(key) + "\n"
+                    return localeErr(
+                        dir,
+                        tags[lj],
+                        "key `\{key}` uses ICU this generator does not support — \{sc.error}",
+                    )
                 }
                 if argSignature(sc) != baseSig {
-                    drift = drift + "I18N_DRIFT__key_" + identKey(key) + "__arg_mismatch__" + tags[lj] + "\n"
+                    drift = drift
+                    + localeErr(
+                        dir,
+                        tags[lj],
+                        "key `\{key}` takes `\{argSignature(sc)}` here and `\{baseSig}` in `\{baseTag}` — one key has one signature across every locale",
+                    )
                 }
             }
             lj = lj + 1
@@ -1049,7 +1084,11 @@ export gen fn i18n(dir: String) -> String {
     while ki < base.entries.length {
         let sc = scanArgs(base.entries[ki].value)
         if sc.ok == false {
-            return "I18N_UNSUPPORTED__locale_" + baseTag + "__" + identKey(base.entries[ki].key) + "\n"
+            return localeErr(
+                dir,
+                baseTag,
+                "key `\{base.entries[ki].key}` uses ICU this generator does not support — \{sc.error}",
+            )
         }
         // a plural arg requires a covered plural rule in EVERY locale
         let mut ai = 0
@@ -1058,7 +1097,11 @@ export gen fn i18n(dir: String) -> String {
                 let mut lj = 0
                 while lj < tags.length {
                     if pluralSupported(tags[lj]) == false {
-                        return "I18N_NO_PLURAL_RULE__locale_" + tags[lj] + "\n"
+                        return localeErr(
+                            dir,
+                            tags[lj],
+                            "key `\{base.entries[ki].key}` uses `plural`, and locale `\{tags[lj]}` has no plural rule in this generator's table — write the key without `plural`, or drop the locale",
+                        )
                     }
                     lj = lj + 1
                 }
@@ -1417,11 +1460,14 @@ test "icuBadBrace flags an unmatched or stray brace, quote-aware" {
 test "keyCollisionErrors names both collision classes" {
     // Dotted vs nested flatten to the same `a.b`.
     let dup = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "a.b", value: "x" }, LocaleEntry { key: "a.b", value: "y" }] }
-    assert(keyCollisionErrors(dup).contains("I18N_DUP_KEY__a_b"))
+    assert(keyCollisionErrors(dup, "./locales", "en").contains("key `a.b` is defined twice"))
     // home.title and homeTitle both make tHomeTitle.
     let clash = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "homeTitle", value: "B" }] }
-    assert(keyCollisionErrors(clash).contains("I18N_KEY_COLLISION__home_title__homeTitle"))
+    assert(
+        keyCollisionErrors(clash, "./locales", "en")
+        .contains("keys `home.title` and `homeTitle` both name the function `tHomeTitle`"),
+    )
     // A clean key set collides with nothing.
     let ok = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }
-    assertEq(keyCollisionErrors(ok), "")
+    assertEq(keyCollisionErrors(ok, "./locales", "en"), "")
 }

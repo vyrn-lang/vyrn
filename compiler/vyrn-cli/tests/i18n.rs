@@ -208,11 +208,11 @@ fn drift_between_locales_is_a_readable_load_error() {
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     // uk is missing `bye` (en has it) and carries an `extra` key en does not.
     assert!(
-        err.contains("I18N_DRIFT__locale_uk__missing__bye"),
+        err.contains("locale `uk` is missing key `bye`"),
         "missing-key drift:\n{err}"
     );
     assert!(
-        err.contains("I18N_DRIFT__locale_uk__extra__extra"),
+        err.contains("locale `uk` defines key `extra`"),
         "extra-key drift:\n{err}"
     );
 }
@@ -242,7 +242,7 @@ fn unsupported_value_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("I18N_PARSE_ERROR__locale_en"),
+        err.contains("locale `en` is not a usable locale file"),
         "parse-error diagnostic:\n{err}"
     );
 }
@@ -273,7 +273,7 @@ fn plural_in_a_locale_without_a_rule_fails() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("I18N_NO_PLURAL_RULE__locale_xx"),
+        err.contains("locale `xx` has no plural rule"),
         "no-plural-rule diagnostic:\n{err}"
     );
 }
@@ -368,7 +368,7 @@ fn an_unmatched_brace_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("I18N_BAD_BRACES__locale_en__msg"),
+        err.contains("key `msg` has an unbalanced brace"),
         "brace diagnostic naming the key:\n{err}"
     );
 }
@@ -401,11 +401,11 @@ fn a_dotted_vs_nested_key_collision_is_named() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("I18N_DUP_KEY__a_b"),
+        err.contains("key `a.b` is defined twice"),
         "dup-key diagnostic:\n{err}"
     );
     assert!(
-        !err.contains("defined twice"),
+        !err.contains("` defined twice"),
         "must not surface as the confusing duplicate-fn error:\n{err}"
     );
 }
@@ -436,11 +436,11 @@ fn a_fn_name_key_collision_is_named() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("I18N_KEY_COLLISION__home_title__homeTitle"),
+        err.contains("keys `home.title` and `homeTitle` both name the function `tHomeTitle`"),
         "collision diagnostic listing both keys:\n{err}"
     );
     assert!(
-        !err.contains("defined twice"),
+        !err.contains("` defined twice"),
         "must not surface as the confusing duplicate-fn error:\n{err}"
     );
 }
