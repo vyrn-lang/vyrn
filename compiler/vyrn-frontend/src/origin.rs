@@ -502,7 +502,15 @@ fn resolve_origin_path(ctx: &Context<'_>, path: &str) -> Result<String, String> 
 /// the result's shape — losing the drive on Windows, keeping the restored `/` on
 /// Unix — so the same directive was refused on one platform and followed on the
 /// other. The overshoot is an event during the walk, and is returned as one.
+///
+/// A backslash is a separator here, as it already is in the loader's
+/// `normalize`. It has to be: [`OriginMaps::norm_path_key`] folds backslashes
+/// before the project check compares prefixes, so a climb spelled
+/// `..\..\..\x.vyx` used to pass BOTH refusals — one opaque segment that pops
+/// nothing, then a folded string that still starts with the project base — and
+/// name on Windows exactly the file the check exists to keep out.
 fn normalize_slashes(p: &str) -> (String, bool) {
+    let p = &p.replace('\\', "/");
     let root_len = if p.starts_with('/') {
         1
     } else if crate::audience::is_absolute(p) {
@@ -866,5 +874,22 @@ fn x() {}
         assert!(resolved("/proj", "../../x.vyx").is_err());
         assert_eq!(resolved("n:/proj", "../x.vyx").unwrap(), "n:/x.vyx");
         assert!(resolved("n:/proj", "../../x.vyx").is_err());
+    }
+
+    /// A separator the refusal does not read is a separator the escape can use.
+    /// `norm_path_key` folds backslashes before the project check compares
+    /// prefixes, so a backslash climb used to survive both refusals: an opaque
+    /// segment pops nothing, and the folded key still starts with the project
+    /// base. On Windows that named the file outside the project.
+    #[test]
+    fn a_climb_spelled_with_backslashes_is_the_same_climb() {
+        assert!(resolved("n:/proj/app", r"..\..\..\..\outside.vyx").is_err());
+        let c = Context::new("", "n:/proj/app", "n:/proj");
+        assert!(resolve_origin_path(&c, r"..\..\outside.vyx").is_err());
+        // A backslash-spelled path that stays inside resolves, in slash form.
+        assert_eq!(
+            resolve_origin_path(&c, r"..\shared\x.vyx").unwrap(),
+            "n:/proj/shared/x.vyx"
+        );
     }
 }
