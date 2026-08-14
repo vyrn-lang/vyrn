@@ -42,6 +42,10 @@
 
 use std::collections::HashMap;
 
+// The `.vyx` script body, one definition for the whole server: `contracts`
+// delegates to `vyrn_frontend::vyx`, which applies `std/vyx`'s own section rule.
+use crate::contracts::vyx_script;
+
 use lsp_types::{Position, PrepareRenameResponse, Range, TextEdit, Url, WorkspaceEdit};
 use vyrn_frontend::ast::ImportSource;
 use vyrn_frontend::symbolmap::{same_file, MappedSymbol};
@@ -262,21 +266,6 @@ struct Candidate {
     uri: Url,
     body: String,
     line_offset: usize,
-}
-
-/// The `<script> … </script>` body of a `.vyx` and the number of file lines
-/// before it, so a position in the body maps back by addition. `None` for a
-/// `.vyx` with no script section.
-///
-/// Columns need no adjustment: the body starts immediately after the `<script>`
-/// tag's `>`, so its first line is that tag's (empty) remainder and every line
-/// after it is a whole line of the file.
-fn vyx_script(text: &str) -> Option<(String, usize)> {
-    let open = text.find("<script")?;
-    let start = text[open..].find('>')? + open + 1;
-    let close = text[start..].find("</script>")? + start;
-    let before = text[..start].matches('\n').count();
-    Some((text[start..close].to_string(), before))
 }
 
 /// Rewrite `wanted` throughout the project and return the edit.

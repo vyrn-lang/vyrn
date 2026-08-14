@@ -578,6 +578,15 @@ fn val_kind(v: &Val) -> &'static str {
     }
 }
 
+/// The trap for calling an `extern` (RFC-0012) on a target that provides no
+/// host for it. Parity compares these bytes byte-for-byte
+/// (`vyrn-cli/tests/parity.rs`), so there is one definition: the interpreter
+/// raises it, and the native trap stub `vyrn_codegen::toolchain` writes prints
+/// it. Neither backend spells it a second time.
+pub fn extern_unavailable(name: &str) -> String {
+    format!("extern `{name}` is not available on this target")
+}
+
 /// Escape a `String` value into a Vyrn source string literal, quotes included —
 /// the mechanism by which a spliced String is data, never code (RFC-0054). Uses
 /// the same escapes the lexer decodes (`\n \t \r \" \\` and `\{` so an emitted
@@ -2640,9 +2649,7 @@ impl<'a> Interp<'a> {
             if let Some(v) = self.host_boundary_value(name) {
                 return Ok((v, Vec::new()));
             }
-            return Err(Ctrl::Err(format!(
-                "extern `{name}` is not available on this target"
-            )));
+            return Err(Ctrl::Err(extern_unavailable(name)));
         }
         let mut scope: Vec<Frame> = vec![Frame::default()];
         for (p, v) in f.params.iter().zip(args) {

@@ -590,7 +590,7 @@ ok:
 /// cannot collide with a real C symbol on the native target: the generated C
 /// trap stub defines exactly this name, and the wasm import name is carried
 /// separately by the `wasm-import-name` attribute (the raw Vyrn name).
-fn extern_symbol(name: &str) -> String {
+pub(crate) fn extern_symbol(name: &str) -> String {
     format!("__vyrn_extern_{name}")
 }
 

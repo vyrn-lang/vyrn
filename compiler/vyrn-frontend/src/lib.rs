@@ -43,6 +43,7 @@ pub mod schema_reflect;
 pub mod symbolmap;
 pub mod symbols;
 pub mod types;
+pub mod vyx;
 
 // Re-export the symbol-query API at the crate root so the LSP can spell it as
 // `vyrn_frontend::analyze` / `::resolve` / `::completions` and use the types

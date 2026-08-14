@@ -51,7 +51,7 @@ use std::process::{Command, ExitCode};
 // and the excluded `vyrn-genwasm` can see (RFC-0076 M4). The wasi-sysroot and
 // builtins lookups are still there, but this driver no longer needs them: after
 // RFC-0077 M5 nothing here compiles C for wasm — the generator engine does.
-use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
+use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, RUNTIME_SHIM};
 
 /// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
 /// feature so the default build keeps its zero external dependencies.
@@ -1593,12 +1593,13 @@ fn contract_roots(app_dir: &Path, manifest: Option<&Manifest>) -> Vec<(String, S
         .collect()
 }
 
-/// The `<script> … </script>` body of a `.vyx`, which is ordinary Vyrn.
+/// The `<script> … </script>` body of a `.vyx`, which is ordinary Vyrn. The
+/// section's bounds are `vyrn_frontend::vyx`'s — the same rule `std/vyx` applies
+/// when it compiles the component, so `why` and `deps` describe the file the
+/// compiler sees rather than one truncated at a `</script>` inside a string.
 fn vyx_script_body(text: &str) -> Option<String> {
-    let open = text.find("<script")?;
-    let start = text[open..].find('>')? + open + 1;
-    let close = text[start..].find("</script>")? + start;
-    Some(text[start..close].to_string())
+    let (start, end) = vyrn_frontend::vyx::script_body(text)?;
+    Some(text[start..end].to_string())
 }
 
 /// `vyrn deps` — print the resolved module graph of the project's main.
@@ -2865,35 +2866,6 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
             format!("{{\n{}\n{close}}}", inner.join(",\n"))
         }
     }
-}
-
-/// C trap stubs for the program's `extern` imports (RFC-0012), one per `extern
-/// fn`, appended to the shim on the **native** target only. Each defines the
-/// import symbol (`__vyrn_extern_<name>`, matching codegen) as a function that
-/// prints the canonical trap and exits — so a native binary that reaches an
-/// `extern` call behaves exactly like the interpreter (`error: extern \`name\`
-/// is not available on this target`), rather than failing to link. The declared
-/// `(void)` signature is intentional: the stub never returns (it `exit`s), so
-/// the caller's argument/return registers are never observed.
-fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
-    let mut s = String::new();
-    for f in program
-        .functions
-        .iter()
-        // RFC-0043 host-boundary externs (time/random) have REAL implementations
-        // in RUNTIME_SHIM on every target, so they get no trap stub.
-        .filter(|f| f.is_extern && vyrn_codegen::host_boundary_extern(&f.name).is_none())
-    {
-        // `f.name` is a Vyrn identifier (alphanumeric + `_`), safe to inline
-        // into both a C symbol and a C string literal.
-        s.push_str(&format!(
-            "void __vyrn_extern_{name}(void) {{ \
-             fputs(\"error: extern `{name}` is not available on this target\\n\", stderr); \
-             exit(1); }}\n",
-            name = f.name
-        ));
-    }
-    s
 }
 
 /// `vyrn build <file.vyrn> [-o out] [--target wasm]` — a native executable via

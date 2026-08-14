@@ -679,6 +679,40 @@ int main(int argc, char** argv) {
 #endif
 "#;
 
+/// C trap stubs for a program's `extern` imports (RFC-0012), one per `extern
+/// fn`, appended to [`RUNTIME_SHIM`] on the **native** target only. Each defines
+/// the import symbol as a function that prints the canonical trap and exits — so
+/// a native binary that reaches an `extern` call behaves exactly like the
+/// interpreter, rather than failing to link.
+///
+/// Both halves belong to somebody, and neither is respelled here: the symbol is
+/// [`crate::extern_symbol`]'s (this crate emits the call that must resolve to
+/// it) and the wording is [`vyrn_frontend::interp::extern_unavailable`]'s (the
+/// interpreter raises it, and parity compares the two byte-for-byte). The driver
+/// used to write both by hand, third copies of each.
+///
+/// The declared `(void)` signature is intentional: the stub never returns (it
+/// `exit`s), so the caller's argument/return registers are never observed.
+pub fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
+    let mut s = String::new();
+    for f in program
+        .functions
+        .iter()
+        // RFC-0043 host-boundary externs (time/random) have REAL implementations
+        // in RUNTIME_SHIM on every target, so they get no trap stub.
+        .filter(|f| f.is_extern && crate::host_boundary_extern(&f.name).is_none())
+    {
+        // `f.name` is a Vyrn identifier (alphanumeric + `_`), safe to inline
+        // into both a C symbol and a C string literal.
+        s.push_str(&format!(
+            "void {sym}(void) {{ fputs(\"error: {msg}\\n\", stderr); exit(1); }}\n",
+            sym = crate::extern_symbol(&f.name),
+            msg = vyrn_frontend::interp::extern_unavailable(&f.name),
+        ));
+    }
+    s
+}
+
 /// The dev-tree wasi sysroot, if one exists: the first `tools/wasi-sysroot-*`
 /// directory found walking up from `start` (sorted, so the pick is
 /// deterministic when several versions are unpacked side by side).
@@ -930,5 +964,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(root.join("tools"));
         assert!(tools_wasi_sysroot_from(&bare).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The trap stub is assembled from the two facts' OWNERS — this crate's
+    /// symbol scheme and the interpreter's wording — so renaming either moves
+    /// the stub with it. The driver used to hand-write both, and parity was the
+    /// only thing holding the three spellings together.
+    #[test]
+    fn the_extern_stub_is_built_from_the_symbol_and_the_trap_it_quotes() {
+        let src = "extern fn jsBeep()\nextern fn hostNowMillis() -> Int64\nfn main() -> Int64 { return 0 }\n";
+        let toks = vyrn_frontend::lexer::lex(src).expect("lex");
+        let prog = vyrn_frontend::parser::parse(toks).expect("parse");
+        let stubs = extern_trap_stubs(&prog);
+
+        assert!(
+            stubs.contains(&format!("void {}(void)", crate::extern_symbol("jsBeep"))),
+            "the stub must define the symbol codegen calls: {stubs}"
+        );
+        assert!(
+            stubs.contains(&vyrn_frontend::interp::extern_unavailable("jsBeep")),
+            "the stub must print the interpreter's trap verbatim: {stubs}"
+        );
+        // RFC-0043 host-boundary externs are implemented by RUNTIME_SHIM on
+        // every target, so a stub for one would be a duplicate symbol.
+        assert!(
+            !stubs.contains("hostNowMillis"),
+            "no stub for a host-boundary extern: {stubs}"
+        );
     }
 }

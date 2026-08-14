@@ -695,10 +695,16 @@ pub fn synthesized_members(view: &ContractView, path: &str, file_text: &str) -> 
 /// `<script>` — a template tag inside a script string is not one. The section
 /// may sit on either side of the script, as `std/vyx`'s own `vyxSectionAvoid`
 /// allows.
+///
+/// The script's bounds come from [`crate::vyx::script_body`], which decides them
+/// by the same rule `std/vyx` does, so the sentence above is now true of the
+/// code: it was a naive `find("</script>")` claiming a property it did not have.
 fn has_template(text: &str) -> bool {
-    let (before, after) = match (text.find("<script"), text.find("</script>")) {
-        (Some(s), Some(e)) if e > s => (&text[..s], &text[e + "</script>".len()..]),
-        _ => ("", text),
+    let (before, after) = match crate::vyx::script_body(text) {
+        // `text[..start]` is the markup before the script plus the open tag
+        // itself, which holds no `<template`.
+        Some((start, end)) => (&text[..start], &text[end + "</script>".len()..]),
+        None => ("", text),
     };
     before.contains("<template") || after.contains("<template")
 }
