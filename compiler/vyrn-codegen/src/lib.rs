@@ -11489,6 +11489,16 @@ fn llvm_str(s: &str) -> (String, usize) {
 /// Shared with the direct wasm backend (RFC-0077 M2g), which puts the same bytes
 /// in a data segment and walks them with the same two loads. A second table would
 /// have been a second answer to "is this valid UTF-8", free to drift by a byte.
+///
+/// The table below is his, byte for byte, and it is the one piece of third-party
+/// code in this repository. His terms are MIT and they require the notice to
+/// travel with every copy, including the binaries this emits it into:
+///
+///     Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>
+///     See http://bjoern.hoehrmann.de/utf-8/decoder/dfa/ for details.
+///
+/// The full permission notice is in `THIRD-PARTY-NOTICES.md` at the repository
+/// root, which the release archive ships.
 pub(crate) fn utf8d_table() -> Vec<u8> {
     let mut t = vec![0u8; 256];
     for b in 0x80..=0x8F {
