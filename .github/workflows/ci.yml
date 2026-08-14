@@ -1,9 +1,23 @@
 name: CI
 
 on:
+  # `workflow_dispatch` is the escape hatch release.yml's gate needs: that gate
+  # refuses to publish a tag whose commit has no successful CI run, and a
+  # docs-only commit (see `paths-ignore`) has no run at all. Re-run CI here
+  # against the tagged commit and the release goes through.
+  workflow_dispatch:
   push:
     branches: [main]
     # Docs-only commits (RFCs, notes, README) don't need a build.
+    #
+    # What this makes one-directional, stated rather than left to be discovered:
+    # `docs/api/` is generated Markdown and the "Docs drift gate" step below is
+    # what keeps it honest — but a commit touching ONLY `docs/api/*.md` matches
+    # `**.md` and runs no workflow, so a hand-edit there is not caught until the
+    # next commit that does build. Caught late, not never. The alternative —
+    # dropping `**.md` — puts a full four-platform matrix plus parity behind
+    # every research note, which is a worse trade for a directory nothing reads
+    # (`vyrn doc --verify` regenerates it either way).
     paths-ignore:
       - 'rfcs/**'
       - '**.md'
@@ -128,6 +142,22 @@ jobs:
         # change. Cheap (no clang): --verify writes nothing and exits 1 on drift.
         working-directory: compiler
         run: cargo run --quiet -p vyrn-cli -- doc --std -o ../docs/api --verify
+      - name: The install script installs, and refuses what it cannot verify
+        if: runner.os != 'Windows'
+        # `install.sh` and `install.ps1` were executed by NOTHING — including the
+        # checksum refusal the README advertises and the release notes point at.
+        # The harness serves a fake release over a local python `http.server`
+        # (the `VYRN_REPO`/`VYRN_DOWNLOAD` hooks the script's own header says are
+        # "used by the test harness"), so it needs no network and no release.
+        run: sh install-test.sh
+      - name: The install script installs, and refuses what it cannot verify
+        if: runner.os == 'Windows'
+        # Windows PowerShell rather than the job's bash default: `install.ps1` is
+        # what the documented `irm | iex` line runs, so it is what gets executed.
+        shell: powershell
+        run: |
+          & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Bench --check (deterministic, RFC-0063)
         # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
         # body ONCE under the interpreter — deterministic, no clang, no timing —
@@ -136,8 +166,9 @@ jobs:
         # one), discovered here exactly as the RFC specifies.
         working-directory: compiler
         run: |
-          set -e
+          set -eu
           corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
+          [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
           echo "bench corpus:"; echo "$corpus"
           for f in $corpus; do
             echo "== vyrn bench --check $f =="
@@ -152,7 +183,10 @@ jobs:
     # What an `ubuntu-24.04-arm` copy of this job would NOT add: a second layout
     # ABI. `vyrn-codegen/tests/layout_vs_clang.rs` compiles for wasm32-wasip1 and
     # runs under wasmtime — the host architecture changes neither the target nor
-    # the answer. The layout engine exists for the direct wasm backend; on the
+    # the answer. (That citation was a claim when it was written: the test
+    # early-returned in every job for want of a toolchain. It executes in THIS
+    # job now — see the codegen step below — so the argument rests on something
+    # that has been watched go green.) The layout engine exists for the direct wasm backend; on the
     # native path LLVM computes layout, so there is nothing of ours to diverge.
     # The SIMD types are the same story: `<4 x float>` lowers to wasm SIMD in the
     # column this engine owns.
@@ -185,10 +219,16 @@ jobs:
           prefix-key: parity
       - name: wasm toolchain cache
         id: wasm-tools
-        # Deliberately the SAME key as the gen-engine job, which still needs the
-        # sysroot and the builtins archive for RFC-0076's C shim: one download,
-        # one cache. This job now uses only the wasmtime out of it — RFC-0077 M5
-        # made `--target wasm` need no clang, no sysroot and no builtins.
+        # The ONLY job that fetches this now. It was shared with gen-engine,
+        # which exported WASI_SYSROOT/WASI_BUILTINS that nothing in its build
+        # read — RFC-0076 M7 moved the shim to the direct backend and left the
+        # exports behind.
+        #
+        # All three pieces are live HERE, and each for a different step: the
+        # parity harness needs wasmtime (RFC-0077 M5 made `--target wasm` need
+        # no clang, no sysroot and no builtins), and the codegen integration
+        # tests below need the sysroot and the builtins archive to compile the
+        # C shim and the layout program.
         uses: actions/cache@v4
         with:
           path: ~/wasm-tools
@@ -211,6 +251,36 @@ jobs:
           export VYRN_WASMTIME=$(find ~/wasm-tools -type f -name wasmtime | head -1)
           echo "wasmtime: $VYRN_WASMTIME"
           cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
+      - name: The codegen integration tests that need a toolchain (RFC-0077)
+        working-directory: compiler
+        # THE JOB THAT MAKES `layout_vs_clang` A GATE. These eight tests —
+        # `layout_vs_clang` 1, `shim_link` 2, `wasm_runs` 5 — need wasmtime, and
+        # three of them need clang and the wasi sysroot as well. They used to be
+        # ordinary `#[test]`s that early-`return`ed when a tool was missing, and
+        # NO job supplied one, so all eight passed in every run having executed
+        # nothing — while the parity job's own comment above cited
+        # `layout_vs_clang` as the reason an ARM leg would add nothing.
+        #
+        # They are `#[ignore]`d now (so the four-platform test job reports them
+        # `ignored` with the reason instead of green) and run here, the one place
+        # with clang, the sysroot, the builtins archive and wasmtime together.
+        # `VYRN_REQUIRE_TOOLS=1` from `env:` above is what makes a missing tool a
+        # panic rather than a skip, so a broken cache fails this step.
+        #
+        # This is also the live consumer of WASI_SYSROOT/WASI_BUILTINS: the shim
+        # compile (`toolchain::shim_wasm`) and the C layout program are the only
+        # readers left in the repo, which is why the fetch stays in THIS job and
+        # left the gen-engine one.
+        run: |
+          export VYRN_WASMTIME=$(find ~/wasm-tools -type f -name wasmtime | head -1)
+          export WASI_SYSROOT=$(echo ~/wasm-tools/wasi-sysroot-*)
+          export WASI_BUILTINS=$(find ~/wasm-tools -name 'libclang_rt.builtins-wasm32.a' | head -1)
+          for v in VYRN_WASMTIME WASI_SYSROOT WASI_BUILTINS; do
+            eval "p=\$$v"
+            [ -e "$p" ] || { echo "$v is not a path that exists: '$p'" >&2; exit 1; }
+            echo "$v=$p"
+          done
+          cargo test --quiet -p vyrn-codegen -- --ignored --nocapture
       - name: Universal-pages integration (RFC-0069)
         # Ignored-tier like parity: spawning the bin server generates the whole
         # app cold (minutes in a debug build) — too slow for the test job.
@@ -233,24 +303,14 @@ jobs:
           # Distinct build graph (vyrn-genwasm and its wasmtime tree) — its own
           # slot, like parity's.
           prefix-key: genwasm
-      - name: wasm toolchain cache
-        id: wasm-tools
-        uses: actions/cache@v4
-        with:
-          path: ~/wasm-tools
-          # Deliberately the SAME key as the parity job: one download, one cache
-          # entry, two consumers. This job needs only the sysroot and builtins
-          # (wasmtime is embedded as a crate, not spawned), but sharing the entry
-          # beats maintaining a second recipe that drifts from the first.
-          key: wasm-tools-wasi25-wasmtime46
-      - name: Fetch wasi-sysroot + builtins + wasmtime
-        if: steps.wasm-tools.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/wasm-tools && cd ~/wasm-tools
-          curl -sSfL -o sysroot.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz
-          curl -sSfL -o builtins.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz
-          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-x86_64-linux.tar.xz
-          tar xf sysroot.tar.gz && tar xf builtins.tar.gz && tar xf wasmtime.tar.xz
+      # No wasm toolchain here, deliberately. This job used to restore the same
+      # ~/wasm-tools cache as parity and export WASI_SYSROOT/WASI_BUILTINS into
+      # the test — three tarballs (~150 MB unpacked) for two variables NOTHING
+      # in this build reads. RFC-0076 M7 moved the generation engine's shim to
+      # the direct backend (`vyrn-genwasm/src/lib.rs`), which needs no clang and
+      # no sysroot, and its wasmtime is a crate rather than a spawned binary. The
+      # only readers of those two variables left in the repo are the codegen
+      # integration tests, which run in the parity job where the fetch now lives.
       - name: Every generator agrees under both engines (RFC-0076)
         # The RFC's acceptance criteria, both halves in one run: the wasm column
         # must match the interpreter column byte for byte over every
@@ -262,8 +322,6 @@ jobs:
         # corpus with an empty artifact cache, 20 s release against 98 s debug.
         working-directory: compiler
         run: |
-          export WASI_SYSROOT=$(echo ~/wasm-tools/wasi-sysroot-*)
-          export WASI_BUILTINS=$(find ~/wasm-tools -name 'libclang_rt.builtins-wasm32.a' | head -1)
           cargo test --quiet -p vyrn-cli --release --features wasm-gen \
             --test genwasm -- --ignored --nocapture
 
@@ -275,14 +333,30 @@ jobs:
     # that caused it, against the one hardware line the baseline was taken from.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # `continue-on-error` is deliberately GONE. It was right while
-    # `bench/baseline.json` was a placeholder, because a placeholder can never
-    # report a regression and the job could only ever fail for an unrelated
-    # reason. Once a real baseline is seeded, a job that cannot fail is not a
-    # gate — so the failure is real, and `BENCH_THRESHOLD` (see `env:` above) is
-    # the one knob that decides when it fires. Until the baseline is seeded the
-    # comparator reports every bench `new` and exits 0, so this stays a no-op by
-    # its own arithmetic rather than by a flag.
+    defaults:
+      run:
+        # The test job sets this and this one did not, so its corpus discovery
+        # (`corpus=$(grep -rl ...)`) degraded to an empty loop where the test
+        # job's identical line fails — one shell contract, two answers. The
+        # explicit `set -eu` plus the non-empty check below is the belt; this is
+        # the braces.
+        shell: bash
+    # WHAT THIS GATE PROVES TODAY: that every bench in the corpus still builds,
+    # runs and produces a report. NOT that nothing regressed.
+    #
+    # `bench/baseline.json` is still a placeholder (`placeholder: true`, empty
+    # `benches`), so `--compare` reports every bench `new` and exits 0. And the
+    # loop compares ONE example's benches against the whole-corpus baseline, so
+    # once a baseline IS seeded every other example's entries come back
+    # `missing-from-run` on every iteration — a verdict `bench_verdicts`
+    # deliberately does not count as a regression (`vyrn-cli/src/main.rs`), which
+    # is right here and means a DELETED bench is invisible to this loop. Seeding
+    # the baseline turns the regression half on; catching a deleted bench needs
+    # the comparison to be whole-corpus rather than per-example, and is not
+    # something `continue-on-error` or a threshold can fix.
+    #
+    # `continue-on-error` is deliberately GONE all the same: a step that cannot
+    # fail for an unrelated reason either is not worth running.
     steps:
       - uses: actions/checkout@v4
       - name: Rust cache
@@ -299,8 +373,13 @@ jobs:
       - name: Run benches + compare to baseline
         working-directory: compiler
         run: |
+          set -eu
           vyrn=target/debug/vyrn
           corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
+          # A discovery pattern that stops matching must fail, not iterate zero
+          # times: an empty loop reports the same green as a clean corpus.
+          [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
+          echo "bench corpus:"; echo "$corpus"
           mkdir -p ../bench/out
           regressed=0
           for f in $corpus; do

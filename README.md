@@ -60,8 +60,13 @@ ahead of the implementation. Do not build anything on it that you are not
 willing to fix next month.
 
 What is stable is the verification. Every example in [`examples/`](examples/)
-runs under all three backends and must agree byte for byte, including trap
-messages and exit codes. CI enforces that on every push.
+that is meant to run runs under all three backends and must agree byte for byte,
+including trap messages and exit codes. CI enforces that on every push. The
+exceptions are listed, not implied: the examples that exist to be REFUSED are
+pinned with the diagnostic they must produce (`EXPECTED_CHECK_FAILURE` in
+`compiler/vyrn-cli/tests/common/mod.rs`), and one example is wasm-only
+(`WASM_ONLY`). Both lists are part of the same harness — an example cannot leave
+the comparison without appearing in one of them.
 
 ## Why Vyrn
 
@@ -243,7 +248,7 @@ crate map, and how to build the excluded crates (`vyrn-lsp`, `vyrn-genwasm`).
 
 ```
 lang/
-├── rfcs/         the design record: 95 RFCs, RFC-0001 through RFC-0096
+├── rfcs/         the design record, numbered from RFC-0001; rfcs/README.md indexes them
 ├── compiler/     the Rust workspace
 │   ├── vyrn-frontend/  lexer, parser, checker, move check, interpreter, diagnostics
 │   ├── vyrn-codegen/   textual LLVM IR emitter, and the direct wasm encoder
@@ -251,7 +256,7 @@ lang/
 │   ├── vyrn-lsp/       language server (excluded from the workspace)
 │   └── vyrn-genwasm/   runs `gen fn` generators as compiled wasm (excluded)
 ├── std/          the standard library, written in Vyrn
-├── examples/     141 single-file programs, plus multi-file apps in subdirectories
+├── examples/     single-file programs, plus multi-file apps in subdirectories
 ├── web/          browser demos and the JavaScript host runtimes
 ├── docs/api/     generated std API docs, checked for drift by CI
 ├── editor/       the VS Code extension
@@ -262,17 +267,32 @@ lang/
 
 ## What CI proves
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs four jobs on Linux:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs four jobs. The first
+is a matrix over the four platforms releases ship — Linux x86_64, Linux arm64,
+macOS arm64, Windows x86_64 — so every published binary is built by a machine
+whose tests ran. The other three are Linux, where the toolchain lives.
 
-1. **tests (workspace + LSP)** — `cargo fmt --check` over all three manifests,
-   the workspace test suite, the LSP suite, the `docs/api/` drift gate, and
+1. **tests (workspace + LSP)**, on all four platforms — `cargo fmt --check` over
+   all three manifests, the workspace test suite, the LSP suite, the browser
+   runtime tests, the `docs/api/` drift gate, the install scripts (they install,
+   and they refuse an archive whose checksum does not match), and
    `vyrn bench --check` over every benchmark.
 2. **three-way parity** — the interpreter, the clang-linked native binary and
    the wasm module must agree on every example. The known-divergent list is
-   empty and must stay empty.
+   empty and must stay empty. This job also runs the codegen integration tests
+   that need clang, a wasi sysroot and wasmtime, including the one that checks
+   the layout engine against clang's own answers on wasm32.
 3. **cross-engine generation** — every `gen fn` must produce identical source
    under the interpreter and under wasm.
-4. **benchmarks** — informational, on pushes to `main` only.
+4. **benchmarks**, on pushes to `main` only — every bench still builds and runs.
+   The regression half is not live: `bench/baseline.json` is a placeholder, so
+   `--compare` reports every bench as new. `ci.yml` says exactly what that gate
+   does and does not prove.
+
+[`.github/workflows/site.yml`](.github/workflows/site.yml) builds the website and
+runs its tests on pull requests too, and
+[`.github/workflows/release.yml`](.github/workflows/release.yml) refuses to
+publish a tag whose commit has no successful CI run.
 
 ## The design record
 
@@ -281,7 +301,7 @@ and an RFC disagree, one of them is a bug. Start with
 [RFC-0001 Vision](rfcs/RFC-0001-vision.md),
 [RFC-0003 Validated Types](rfcs/RFC-0003-validated-types.md) and
 [RFC-0004 Capabilities & Memory](rfcs/RFC-0004-capabilities-and-memory.md).
-[`rfcs/README.md`](rfcs/README.md) indexes all 95, with the status each one
+[`rfcs/README.md`](rfcs/README.md) indexes them, with the status each one
 carries.
 
 ## Not in v1

@@ -15,11 +15,15 @@
 //! writes bytes into it, and C reads them back — three parties, one address
 //! space, or the numbers do not come out.
 //!
-//! Needs clang, a wasi sysroot and a wasmtime binary. Skips loudly without them,
-//! same posture as M0's clang comparison — which is also why the STANDALONE
-//! ladder is the one that carries this RFC's no-toolchain acceptance criterion.
+//! Needs clang, a wasi sysroot and a wasmtime binary, so both tests are in the
+//! IGNORED tier — a plain `cargo test` reports them `ignored` with the reason,
+//! and CI's parity job runs `cargo test -p vyrn-codegen -- --ignored` with
+//! `VYRN_REQUIRE_TOOLS=1`, where a missing tool panics instead of skipping.
+//! (This is also why the STANDALONE ladder is the one that carries this RFC's
+//! no-toolchain acceptance criterion.)
 
 use std::path::{Path, PathBuf};
+use vyrn_codegen::toolchain::require_tools;
 use vyrn_codegen::wasm::{boundary, Instruction, MemArg, Module, ValType, SHIM_BASE};
 
 /// The `env` namespace both halves agree on: the name a `--preload`ed module is
@@ -28,8 +32,19 @@ const ENV: &str = "env";
 
 fn tools() -> Option<(PathBuf, PathBuf)> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let wasmtime = vyrn_codegen::toolchain::find_wasmtime_from(here)?;
-    let shim = vyrn_codegen::toolchain::shim_wasm()?;
+    let wasmtime = require_tools(
+        "wasmtime",
+        "VYRN_WASMTIME",
+        vyrn_codegen::toolchain::find_wasmtime_from(here),
+    )?;
+    // `shim_wasm` needs clang AND the sysroot AND the builtins archive, and
+    // answers `None` for any of the three — so the variable named here is the
+    // one a CI job is most likely to have got wrong.
+    let shim = require_tools(
+        "the compiled runtime shim (clang + wasi sysroot + builtins)",
+        "WASI_SYSROOT/WASI_BUILTINS",
+        vyrn_codegen::toolchain::shim_wasm(),
+    )?;
     Some((wasmtime, shim))
 }
 
@@ -220,6 +235,7 @@ fn run(wasmtime: &Path, shim: &Path, name: &str, wasm: &[u8]) -> (i32, Vec<u8>, 
 }
 
 #[test]
+#[ignore = "needs clang + a wasi sysroot + wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
     let Some((wasmtime, shim)) = tools() else {
         eprintln!(
@@ -287,8 +303,10 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
 /// unreachable for a module with no shim beside it — which is why the entire
 /// 68-signature boundary was unchecked-by-running until this milestone.
 #[test]
+#[ignore = "needs clang + a wasi sysroot + wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn a_boundary_signature_that_does_not_match_is_refused() {
     let Some((wasmtime, shim)) = tools() else {
+        eprintln!("SKIP: needs clang, a wasi sysroot and wasmtime");
         return;
     };
     let exports = exported_funcs(&std::fs::read(&shim).unwrap());

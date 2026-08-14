@@ -12,14 +12,24 @@
 //! it is, a stack pointer that starts where the map says, and a frame convention
 //! whose prologue and epilogue agree — all four at once, in one assertion.
 //!
-//! Skips, loudly, when wasmtime is absent. Same posture as the parity harness.
+//! Every test here needs wasmtime, so all five are in the IGNORED tier: a plain
+//! `cargo test` reports them `ignored` WITH the reason, and CI's parity job runs
+//! `cargo test -p vyrn-codegen -- --ignored` with `VYRN_REQUIRE_TOOLS=1`, which
+//! turns a missing wasmtime into a panic. They used to be ordinary `#[test]`s
+//! that early-`return`ed on a missing binary, so they passed in every CI job
+//! having encoded a module and run nothing.
 
 use std::path::{Path, PathBuf};
 use vyrn_codegen::layout::of_ll;
+use vyrn_codegen::toolchain::require_tools;
 use vyrn_codegen::wasm::{abi, Instruction, MemArg, Module, ValType};
 
 fn find_wasmtime() -> Option<PathBuf> {
-    vyrn_codegen::toolchain::find_wasmtime_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+    require_tools(
+        "wasmtime",
+        "VYRN_WASMTIME",
+        vyrn_codegen::toolchain::find_wasmtime_from(Path::new(env!("CARGO_MANIFEST_DIR"))),
+    )
 }
 
 /// Run `wasm` under wasmtime: exit code, stdout, stderr.
@@ -84,6 +94,7 @@ fn i64_load(off: u32) -> Instruction<'static> {
 /// The floor: sections, an import, an export, and a body that does one thing.
 /// If this does not exit 7 the encoder is not producing a module at all.
 #[test]
+#[ignore = "needs wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn a_module_that_only_returns_a_constant() {
     let mut m = Module::new();
     let exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
@@ -105,6 +116,7 @@ fn a_module_that_only_returns_a_constant() {
 /// other. Getting the address wrong prints garbage; getting the frame wrong
 /// writes over the string.
 #[test]
+#[ignore = "needs wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn a_frame_and_a_data_segment_and_an_imported_call() {
     let mut m = Module::new();
     let fd_write = import_fd_write(&mut m);
@@ -147,6 +159,7 @@ fn a_frame_and_a_data_segment_and_an_imported_call() {
 /// bytes instead of 20, and the only reason we know it exists is that clang said
 /// so.
 #[test]
+#[ignore = "needs wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn a_struct_round_trips_through_the_shadow_stack_at_the_computed_offsets() {
     let l = of_ll("{ ptr, i64, i64 }").unwrap();
     assert_eq!((l.size, &l.fields[..]), (24, &[0, 8, 16][..]));
@@ -228,6 +241,7 @@ fn a_struct_round_trips_through_the_shadow_stack_at_the_computed_offsets() {
 /// sit BETWEEN the two that are, so the surviving pair cannot keep its old
 /// indices.
 #[test]
+#[ignore = "needs wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn a_swept_module_still_calls_what_it_meant_to() {
     let mut m = Module::new();
     // Unreachable: nothing in the module calls it, so the sweep takes it and
@@ -280,6 +294,7 @@ fn a_swept_module_still_calls_what_it_meant_to() {
 /// stays, and this is what still tests it — a `Frame` built by hand, past the
 /// end on purpose.
 #[test]
+#[ignore = "needs wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn a_frame_past_the_bottom_of_memory_traps_rather_than_wrapping_into_data() {
     let mut m = Module::new();
     m.data(b"do not overwrite me", 1);

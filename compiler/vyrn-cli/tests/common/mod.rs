@@ -270,27 +270,10 @@ pub fn wasmtime() -> Option<PathBuf> {
 }
 
 /// Turn a missing tool from a SKIP into a failure when `VYRN_REQUIRE_TOOLS` is
-/// set, and return it unchanged otherwise.
+/// set — [`vyrn_codegen::toolchain::require_tools`], re-exported so this
+/// harness's callers keep reading `require_tools(..)`.
 ///
-/// Every column of this harness that needs an external binary degrades quietly
-/// when it is absent: no `wasmtime` and the wasm column disappears with a `NOTE`
-/// on stderr, and the run still passes with two engines compared instead of
-/// three. That is right on a developer's machine, where the tool is genuinely
-/// optional. It is wrong in CI, where the tool is fetched on purpose and a
-/// cache that restored an empty directory, a renamed release asset or a typo in
-/// an exported path all read as green — a gate measuring two thirds of what its
-/// name says.
-///
-/// So the decision is the CALLER's, made once per environment: CI exports
-/// `VYRN_REQUIRE_TOOLS=1` and a missing tool stops the build, saying which one
-/// and which variable points at it.
-pub fn require_tools(what: &str, var: &str, found: Option<PathBuf>) -> Option<PathBuf> {
-    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
-        panic!(
-            "VYRN_REQUIRE_TOOLS is set and `{what}` was not found — this run would have \
-             silently skipped the checks that need it. Point `{var}` at the binary, or \
-             unset VYRN_REQUIRE_TOOLS to allow the skip."
-        );
-    }
-    found
-}
+/// It moved into `vyrn-codegen` when RFC-0077's own integration tests needed the
+/// same rule: `vyrn-codegen/tests/` is a second harness, and a rule with two
+/// copies is a rule with two answers.
+pub use vyrn_codegen::toolchain::require_tools;

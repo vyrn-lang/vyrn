@@ -17,17 +17,27 @@
 //! sound; where the two languages genuinely differ — C has no `i1` — the note is
 //! on the mapping below.
 //!
-//! Skips, loudly, when clang or wasmtime is missing. Same posture as the parity
-//! harness: a machine without the toolchain still runs everything else.
+//! Needs clang, a wasi sysroot and wasmtime, so it is in the IGNORED tier: a
+//! plain `cargo test` reports it `ignored` with the reason, and CI's parity job
+//! — the one place with all three — runs `cargo test -p vyrn-codegen --
+//! --ignored` with `VYRN_REQUIRE_TOOLS=1`, which turns a missing tool into a
+//! panic. Before that this was an ordinary `#[test]` that early-`return`ed, so
+//! it passed in every job having checked nothing, while `ci.yml` cited it as
+//! evidence in its argument about ARM coverage.
 
 use std::path::{Path, PathBuf};
 use vyrn_codegen::layout::{of_ll, SHAPES};
+use vyrn_codegen::toolchain::require_tools;
 
 /// A wasmtime executable, from `$VYRN_WASMTIME` or the repo's `tools/` — the
 /// same lookup `vyrn-cli`'s parity harness does, moved into the crate when
 /// RFC-0077 M1's tests needed the second copy.
 fn find_wasmtime() -> Option<PathBuf> {
-    vyrn_codegen::toolchain::find_wasmtime_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+    require_tools(
+        "wasmtime",
+        "VYRN_WASMTIME",
+        vyrn_codegen::toolchain::find_wasmtime_from(Path::new(env!("CARGO_MANIFEST_DIR"))),
+    )
 }
 
 /// One LLVM type string as a C type expression around the declarator `decl`.
@@ -165,18 +175,23 @@ fn member_count(ll: &str) -> usize {
 }
 
 #[test]
+#[ignore = "needs clang + a wasi sysroot + wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn clang_agrees_with_the_layout_engine_on_wasm32() {
     let (Some(clang), Some(sysroot), Some(wasmtime)) = (
-        vyrn_codegen::toolchain::find_clang(),
-        std::env::var("WASI_SYSROOT")
-            .map(PathBuf::from)
-            .ok()
-            .filter(|p| p.exists())
-            .or_else(|| {
-                vyrn_codegen::toolchain::tools_wasi_sysroot_from(Path::new(env!(
-                    "CARGO_MANIFEST_DIR"
-                )))
-            }),
+        require_tools("clang", "CLANG", vyrn_codegen::toolchain::find_clang()),
+        require_tools(
+            "a wasi sysroot",
+            "WASI_SYSROOT",
+            std::env::var("WASI_SYSROOT")
+                .map(PathBuf::from)
+                .ok()
+                .filter(|p| p.exists())
+                .or_else(|| {
+                    vyrn_codegen::toolchain::tools_wasi_sysroot_from(Path::new(env!(
+                        "CARGO_MANIFEST_DIR"
+                    )))
+                }),
+        ),
         find_wasmtime(),
     ) else {
         eprintln!(
