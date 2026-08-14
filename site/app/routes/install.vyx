@@ -32,7 +32,7 @@ fn platforms() -> Array<Platform> {
             id: "linux",
             name: "Linux",
             install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-            archive: "vyrn-x86_64-linux.tar.gz, or the arm64 archive on an arm64 kernel",
+            archive: "vyrn-x86_64-linux.tar.gz — on a machine with no published archive the script says so and stops",
             deps: "Nothing. <code>clang</code>, and only for a native binary.",
             run: "vyrn run examples/fib.vyrn",
         },
@@ -88,9 +88,13 @@ fn sourceRun() -> String {
     return "./target/release/vyrn run ../examples/fib.vyrn"
 }
 
-/// Pinning a tag instead of taking the newest release.
+/// Pinning a tag instead of taking the newest release. The variable goes on the
+/// `sh` at the end of the pipe, which is where the script actually runs.
 fn pinnedInstall() -> String {
-    return "VYRN_VERSION=" + releaseTag() + " sh install.sh"
+    if !hasRelease() {
+        return "VYRN_VERSION=v0.1.0 sh"
+    }
+    return "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | VYRN_VERSION=" + releaseTag() + " sh"
 }
 
 /// Checking a manual download by hand, which is what the installer does for you.

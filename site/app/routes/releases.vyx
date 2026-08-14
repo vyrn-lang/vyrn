@@ -35,7 +35,7 @@ fn standing() -> String {
         return "There is no versioned release and no published binary."
     }
     let kind = if releasePre() { "a pre-release" } else { "a stable release" }
-    return "Published " + releaseDate() + " as " + kind + ", for Linux, macOS on Apple silicon, and Windows."
+    return "Published " + releaseDate() + " as " + kind + "."
 }
 
 /// The five most recent design records, newest first — the closest thing to a
@@ -104,8 +104,8 @@ fn latestRfcs() -> Array<RfcRow> {
 
         <section class="band" id="how">
             <p class="eyebrow">04 — how a release works</p>
-            <h2>One tag, four archives</h2>
-            <p>Pushing a <code>v*</code> tag builds the <code>vyrn</code> binary for Linux x86-64 and arm64, macOS on Apple silicon, and Windows, checks that the tag and the crate version agree, and publishes a GitHub release with one <code>SHA256SUMS</code> beside the archives. A tag carrying a suffix — <code>v0.1.0-alpha.1</code>, <code>v0.2.0-rc.1</code> — publishes as a pre-release, and this page names it and marks it rather than hiding it.</p>
+            <h2>One tag, one archive per platform</h2>
+            <p>Pushing a <code>v*</code> tag builds the <code>vyrn</code> binary for Linux, macOS on Apple silicon and Windows, checks that the tag and the crate version agree, and publishes a GitHub release with one <code>SHA256SUMS</code> listing every archive beside them. A tag carrying a suffix — <code>v0.1.0-alpha.1</code>, <code>v0.2.0-rc.1</code> — publishes as a pre-release, and this page names it and marks it rather than hiding it.</p>
             <p>That suffix rule is the whole of how this page decides: the installers take the newest release whatever kind it is, so the page shows the newest release, because showing anything else would name a version the command does not install. Pin a different one with <code>VYRN_VERSION</code>.</p>
             <p class="notice">What is stable today is the verification, not the surface. Every example runs under all three backends and must agree byte for byte, and CI enforces that on every push.</p>
         </section>
