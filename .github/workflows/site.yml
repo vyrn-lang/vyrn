@@ -24,6 +24,20 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+  # BEFORE MERGE, not after. `ci.yml` never touches `site/`, and this workflow
+  # used to run only on things that happen after a commit is already on main —
+  # so a pull request breaking any site module merged green and turned the Pages
+  # deploy red afterwards, with the tree already broken for everyone. The build
+  # job runs on the PR; `deploy` and the artifact upload do not (a fork's token
+  # cannot write Pages, and a PR has nothing to publish).
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'std/**'
+      - 'web/**'
+      - 'compiler/**'
+      - 'examples/**'
+      - '.github/workflows/site.yml'
   schedule:
     # One daily run, as a safety net for a missed trigger.
     - cron: '17 6 * * *'
@@ -33,9 +47,11 @@ permissions:
   pages: write
   id-token: write
 
-# One deployment at a time; a superseded build is not worth publishing.
+# One deployment at a time; a superseded build is not worth publishing. Keyed by
+# ref rather than a bare `pages`, so a pull-request build cannot cancel the
+# main-line deploy it has nothing to do with.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -59,11 +75,33 @@ jobs:
         # exists and that every route answers as a document AND as data. The
         # other modules check the highlighter, the chart geometry and the
         # repository counts.
+        #
+        # A GLOB, not a list. The list named thirteen files while `site/app/`
+        # held fourteen modules, so `hl.vyrn` (6 test blocks — the highlighter
+        # this step's own comment claimed was checked) and `facts.vyrn` (3) ran
+        # nowhere. The `fmt` step two steps down already globs; a list of what to
+        # check is a list somebody has to remember to add to.
+        #
+        # And `vyrn test` on a file with no test blocks prints "no tests" and
+        # exits 0, so a module that silently stopped being discovered would keep
+        # this loop green. The floor is therefore read off the SOURCE — the same
+        # rule `compiler/vyrn-cli/tests/std_suite.rs` applies to `std/` — so a
+        # block that stops running fails here with both numbers in the message.
         run: |
+          set -euo pipefail
           bin=compiler/target/release/vyrn
-          for f in site/export.vyrn site/app/code.vyrn site/app/chart.vyrn site/app/repo.vyrn site/app/nav.vyrn site/app/snippets.vyrn site/app/apidoc.vyrn site/app/docs.vyrn site/app/guidecode.vyrn site/app/guide.vyrn site/app/deps.vyrn site/app/explore.vyrn site/app/play.vyrn; do
-            "$bin" test "$f"
+          total=0
+          for f in site/export.vyrn site/app/*.vyrn; do
+            declared=$(grep -c '^test "' "$f" || true)
+            [ "$declared" -eq 0 ] && continue
+            echo "== $f ($declared declared)"
+            out=$("$bin" test "$f" 2>&1) || { echo "$out"; exit 1; }
+            ran=$(printf '%s' "$out" | sed -n 's/^\([0-9]*\) passed, 0 failed$/\1/p' | tail -1)
+            [ "${ran:-0}" -ge "$declared" ] ||
+              { echo "$f: $declared blocks declared, ${ran:-0} ran"; echo "$out"; exit 1; }
+            total=$((total + ran))
           done
+          echo "site: $total test blocks ran"
 
       - name: The guide's programs
         # Every code block in the guide is a file here, and the export imports
@@ -122,11 +160,15 @@ jobs:
         run: compiler/target/release/vyrn run site/export.vyrn out
 
       - uses: actions/upload-pages-artifact@v3
+        # Nothing to upload from a pull request — the build IS the check there.
+        if: github.event_name != 'pull_request'
         with:
           path: out
 
   deploy:
     needs: build
+    # A pull request builds the site and runs its tests; it does not publish it.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

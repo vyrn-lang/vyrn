@@ -9,9 +9,11 @@ on:
     tags:
       - 'v*'
 
-# The workflow writes releases and reads the tree. Nothing else.
+# The workflow writes releases, reads the tree, and reads the CI runs of the
+# commit it is about to publish. Nothing else.
 permissions:
   contents: write
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,8 +25,44 @@ env:
   RUSTFLAGS: -C strip=symbols
 
 jobs:
+  gate:
+    name: CI passed for this commit
+    runs-on: ubuntu-latest
+    # A TAG COULD PUBLISH A RED TREE. This workflow triggers on `v*` and nothing
+    # else, with no status requirement anywhere in it — so `git push origin
+    # v0.1.0` at a commit whose CI failed, or whose CI never ran, built four
+    # binaries and shipped them. Every gate in ci.yml was optional at the one
+    # moment it mattered most.
+    #
+    # What this checks is the weakest thing that is still true: the tagged commit
+    # has at least one COMPLETED, SUCCESSFUL run of the CI workflow. Not "the
+    # newest run", because a re-run after a flake is a legitimate green; not the
+    # combined status API, because that mixes in checks this repo does not own.
+    #
+    # The escape hatch for a docs-only commit (ci.yml's `paths-ignore` means such
+    # a commit has no run at all): re-run CI against it from the Actions tab —
+    # ci.yml carries `workflow_dispatch` for exactly this — then push the tag.
+    steps:
+      - name: The tagged commit must have a green CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          green=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow CI \
+                    --commit "$GITHUB_SHA" --limit 30 \
+                    --json status,conclusion \
+                    --jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length')
+          echo "$GITHUB_SHA: $green successful CI run(s)"
+          if [ "$green" -lt 1 ]; then
+            echo "refusing to publish ${GITHUB_REF_NAME}: no successful CI run for $GITHUB_SHA." >&2
+            echo "Run the CI workflow against this commit (Actions -> CI -> Run workflow)," >&2
+            echo "or move the tag to a commit that has one." >&2
+            exit 1
+          fi
+
   build:
     name: build ${{ matrix.name }}
+    needs: gate
     runs-on: ${{ matrix.os }}
     strategy:
       # A missing platform is a broken install command for everyone on it, so a
@@ -140,6 +178,14 @@ jobs:
         #                           reason to state one. `vyrn build` NATIVE is
         #                           the one thing not tested here, because it
         #                           needs clang on PATH and the notes say so.
+        #                           The module is RUN, not stat'ed: `test -s
+        #                           hello.wasm` passed for any nonempty file,
+        #                           while the notes promise a working wasm
+        #                           target. node's WASI is on every runner, so
+        #                           the same output the interpreter printed a
+        #                           line earlier has to come back out of the
+        #                           module — which is a second engine agreeing,
+        #                           for free, on the machine that will ship it.
         #
         # `fail-fast: true` above is what makes this a gate: a leg that cannot
         # run its own binary takes `publish` down with it.
@@ -162,10 +208,21 @@ jobs:
               return 0
           }
           EOF
-          "$vyrn" run hello.vyrn
+          want="HELLO FROM THE RELEASE ARCHIVE"
+          test "$("$vyrn" run hello.vyrn)" = "$want"
           "$vyrn" fmt --check hello.vyrn
           "$vyrn" build hello.vyrn --target wasm -o hello.wasm
           test -s hello.wasm
+          cat > wasi-run.mjs <<'EOF'
+          import { WASI } from 'node:wasi';
+          import { readFileSync } from 'node:fs';
+          const wasi = new WASI({ version: 'preview1', args: ['hello'] });
+          const mod = await WebAssembly.compile(readFileSync(process.argv[2]));
+          const inst = await WebAssembly.instantiate(mod, wasi.getImportObject());
+          process.exitCode = wasi.start(inst);
+          EOF
+          got=$(node --experimental-wasi-unstable-preview1 wasi-run.mjs hello.wasm 2>/dev/null)
+          test "$got" = "$want" || { echo "the shipped wasm printed '$got'" >&2; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

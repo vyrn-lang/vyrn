@@ -786,6 +786,34 @@ pub fn find_wasmtime_from(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Turn a missing tool from a SKIP into a failure when `VYRN_REQUIRE_TOOLS` is
+/// set, and return it unchanged otherwise.
+///
+/// Every check in this repo that needs an external binary degrades quietly when
+/// it is absent — no `wasmtime` and the wasm column disappears with a `NOTE`,
+/// and the run still passes with less checked than its name says. That is right
+/// on a developer's machine, where the tool is genuinely optional. It is wrong
+/// in CI, where the tool is fetched on purpose and a cache that restored an
+/// empty directory, a renamed release asset or a typo in an exported path all
+/// read as green.
+///
+/// So the decision is the CALLER's environment, made once: CI exports
+/// `VYRN_REQUIRE_TOOLS=1` and a missing tool stops the build, saying which one
+/// and which variable points at it. This lives here rather than in a test
+/// harness because two harnesses need it — `vyrn-cli/tests/common` and
+/// `vyrn-codegen/tests` — and a rule with two copies is a rule with two
+/// answers.
+pub fn require_tools(what: &str, var: &str, found: Option<PathBuf>) -> Option<PathBuf> {
+    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
+        panic!(
+            "VYRN_REQUIRE_TOOLS is set and `{what}` was not found — this run would have \
+             silently skipped the checks that need it. Point `{var}` at the binary, or \
+             unset VYRN_REQUIRE_TOOLS to allow the skip."
+        );
+    }
+    found
+}
+
 /// `libclang_rt.builtins-wasm32.a` from a `libclang_rt.builtins-wasm32-wasi-*`
 /// directory next to the sysroot (the wasi-sdk release-artifact layout),
 /// version-agnostic and deterministic (sorted).
@@ -937,6 +965,35 @@ fn shim_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule two test harnesses depend on, checked rather than assumed: with
+    /// `VYRN_REQUIRE_TOOLS` set a missing tool PANICS, and without it the same
+    /// call is a quiet `None` the caller may skip on. A `require_tools` that
+    /// silently returned `None` under the variable would give every gate that
+    /// uses it the failure mode it was written to remove.
+    ///
+    /// Serial by construction: it is one test, and it puts the variable back.
+    #[test]
+    fn require_tools_fails_loud_only_when_the_environment_asks() {
+        let saved = std::env::var_os("VYRN_REQUIRE_TOOLS");
+        std::env::remove_var("VYRN_REQUIRE_TOOLS");
+        assert!(require_tools("nothing", "NOTHING", None).is_none());
+
+        std::env::set_var("VYRN_REQUIRE_TOOLS", "1");
+        let missing = std::panic::catch_unwind(|| require_tools("nothing", "NOTHING", None));
+        assert!(missing.is_err(), "a missing tool must not skip quietly");
+        // A tool that IS there is handed back either way.
+        let here = PathBuf::from(".");
+        assert_eq!(
+            require_tools("here", "HERE", Some(here.clone())),
+            Some(here)
+        );
+
+        match saved {
+            Some(v) => std::env::set_var("VYRN_REQUIRE_TOOLS", v),
+            None => std::env::remove_var("VYRN_REQUIRE_TOOLS"),
+        }
+    }
 
     /// The dev-tree toolchain discovery: `tools/wasi-sysroot-*` found from any
     /// ancestor of the starting dir, builtins found version-agnostically next
