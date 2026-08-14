@@ -11494,8 +11494,10 @@ fn llvm_str(s: &str) -> (String, usize) {
 /// code in this repository. His terms are MIT and they require the notice to
 /// travel with every copy, including the binaries this emits it into:
 ///
-///     Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>
-///     See http://bjoern.hoehrmann.de/utf-8/decoder/dfa/ for details.
+/// ```text
+/// Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>
+/// See http://bjoern.hoehrmann.de/utf-8/decoder/dfa/ for details.
+/// ```
 ///
 /// The full permission notice is in `THIRD-PARTY-NOTICES.md` at the repository
 /// root, which the release archive ships.
