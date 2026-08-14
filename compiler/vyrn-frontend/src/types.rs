@@ -8,6 +8,65 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
+use crate::codec::Wire;
+
+/// The **structural identity** of a type — 64 bits of SHA-256 over its whole
+/// shape, as hex. One definition, because it was three.
+///
+/// # Why a synthesized name needs one
+///
+/// A generated function or symbol is BOTH a name and the key its worklist dedups
+/// on, so two distinct types that produce one string mean the second body is
+/// skipped and both sites point at the first. `vyrn-codegen`'s `mangle_ty` is a
+/// READABLE spelling and it is not injective — `Option<Int64>` and a user type
+/// named `OptInt64` both spell `OptInt64`, every structural record spells `Rec`,
+/// every `Omit`/`Pick`/`Merge`/`Partial` spells `Xf` — and RFC-0077 M2e is the
+/// bug that found it: native read one instantiation's value through another's
+/// body while `vyrn check` printed `ok`. The three synthesizers that name a
+/// function after a type (`mangle_name`/`stream_close_sym`/`mangle_dispatch_sym`
+/// in codegen, [`crate::jsonenc::enc_name`], [`crate::jsondec::top_name`]) each
+/// append this, so injectivity is one claim in one place.
+///
+/// # Why the derived `Debug` form is the structural serialization
+///
+/// [`Type`] is a plain tree of `String`/`Vec`/`Box`/integers with no map, no
+/// address and no interior mutability in it, so `{:?}` is a total, deterministic
+/// rendering of the whole shape, and it is injective because `Debug` for `String`
+/// quotes and escapes. Hand-writing an equivalent walk would be forty lines whose
+/// own injectivity then needed the argument this one gets from the derive —
+/// separators are exactly what `mangle_ty` got wrong.
+///
+/// What `Debug` is NOT is a stable format anyone promised: a field rename or a
+/// changed derive moves every key at once. That costs nothing as long as no
+/// artifact OUTSIDE the emitted module names one, which is the standing condition
+/// on this function — and it holds today in both directions:
+///
+/// - codegen's symbols: an `export extern fn` is exported under its own source
+///   name, and the exported symbols are never generic;
+/// - the JSON codec's function names: the reserved `json$e…`/`json$t…` spellings
+///   live entirely inside one linked program. The JSON **wire format** does not
+///   contain them — RFC-0018's bytes are field names and values — so no
+///   `.json` file, fixture, `vyrn.lock`, `docs/api` page or cached blob carries
+///   one, and nothing on disk pins one.
+///
+/// `struct_key_is_pinned` in this module's tests holds that condition to a
+/// COMMITTED table: the rendering cannot change silently, in this process or a
+/// later build, because a changed key is a red test naming the type it moved.
+/// If a future artifact ever does carry one of these names, that test is the
+/// place the compatibility break becomes visible.
+///
+/// # 64 bits
+///
+/// A birthday bound, not a proof: *n* distinct types collide with probability
+/// about *n*²/2⁶⁵, which is 2.7 × 10⁻⁸ at a million distinct types in one
+/// program — several orders past any real one, and `Debug` strings are not
+/// adversarial input. The remaining risk is not argued away, it is DETECTED:
+/// [`crate::jsonenc`] and [`crate::jsondec`] memoize on the key and keep the
+/// type beside it, so a collision is a build error naming both types instead of
+/// an encoder that writes the wrong shape.
+pub fn struct_key(x: &impl std::fmt::Debug) -> String {
+    crate::hash::sha256_hex(format!("{x:?}").as_bytes())[..16].to_string()
+}
 
 /// Guards against cyclic type aliases (e.g. `type A = Omit<A, x>`), which would
 /// otherwise recurse forever. A resolution deeper than this yields `Unit`, which
@@ -604,37 +663,19 @@ struct SchemaCx<'a> {
 }
 
 /// The JSON Schema object (`{ .. }`) for a structural type, without the top-level
-/// `$schema` dialect. Recurses through records, arrays, and options. A named
-/// type renders as `{"$ref":"#/$defs/N"}` (the root itself as `{"$ref":"#"}`)
-/// with its schema collected into [`SchemaCx::defs`] — except synthetic inline
-/// refinement helpers (`User.age`), which stay inlined so a field-level `where`
-/// round-trips as the inline constraints the user wrote.
+/// `$schema` dialect. A named type renders as `{"$ref":"#/$defs/N"}` (the root
+/// itself as `{"$ref":"#"}`) with its schema collected into [`SchemaCx::defs`] —
+/// except synthetic inline refinement helpers (`User.age`), which stay inlined so
+/// a field-level `where` round-trips as the inline constraints the user wrote.
+///
+/// Past the name, the SHAPE is not decided here: [`crate::codec::wire`] answers
+/// what a type is on the wire, and this function only spells that answer as JSON
+/// Schema. It used to answer for itself, over the raw type, with an open `_` arm
+/// — so `Omit<User, password>`, an applied generic, and every other type whose
+/// form comes from resolving one were described as `{}` ("anything") while the
+/// encoder wrote them out in full.
 fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
     match ty {
-        // The default Int64 is "just an integer"; a *sized* int is a deliberate
-        // wire-width choice, so its bounds are part of the contract.
-        Type::Int => "{\"type\":\"integer\"}".to_string(),
-        Type::IntN { bits, signed } => intn_schema(*bits, *signed, &[]),
-        Type::Float | Type::Float32 => "{\"type\":\"number\"}".to_string(),
-        Type::Bool => "{\"type\":\"boolean\"}".to_string(),
-        Type::Str => "{\"type\":\"string\"}".to_string(),
-        // An `Option<T>` field carries `T`'s schema; its optionality is expressed
-        // by omission from the enclosing object's `required` list.
-        Type::Option(inner) => type_schema(inner, cx),
-        Type::Array(inner) | Type::ArrayN(inner, _) => {
-            format!(
-                "{{\"type\":\"array\",\"items\":{}}}",
-                type_schema(inner, cx)
-            )
-        }
-        // A `Map<String, V>` (RFC-0028) is a free-form JSON object whose values
-        // all share `V`'s schema: `additionalProperties` carries it.
-        Type::Map(_, val) => {
-            format!(
-                "{{\"type\":\"object\",\"additionalProperties\":{}}}",
-                type_schema(val, cx)
-            )
-        }
         Type::Named(n) => {
             if n == cx.root {
                 return "{\"$ref\":\"#\"}".to_string();
@@ -661,37 +702,56 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
                 None => "{}".to_string(),
             }
         }
-        Type::Record(fields) => record_schema(fields, cx),
-        // A payload-less sum type is exactly a JSON Schema `enum` of its variant
-        // names (unchanged). A payload sum type emits the RFC-0024 externally-
-        // tagged `oneOf`, which the importer recognizes back into an enum decl.
-        Type::Enum(variants) => {
-            if variants.iter().all(|v| v.payload.is_empty()) {
-                let names: Vec<String> = variants
-                    .iter()
-                    .map(|v| format!("\"{}\"", json_escape(&v.name)))
-                    .collect();
-                format!("{{\"enum\":[{}]}}", names.join(","))
-            } else {
-                enum_oneof_schema(variants, cx)
+        // A schema DESCRIBES what is written, so it asks the encode direction:
+        // a `lazy T` field is a `T` in the JSON and nothing about the deferral is
+        // visible to a client.
+        _ => match crate::codec::wire(ty, cx.types, false) {
+            // The default Int64 is "just an integer"; a *sized* int is a
+            // deliberate wire-width choice, so its bounds are part of the
+            // contract.
+            Ok(Wire::Int) => "{\"type\":\"integer\"}".to_string(),
+            Ok(Wire::IntN { bits, signed }) => intn_schema(bits, signed, &[]),
+            Ok(Wire::Float | Wire::Float32) => "{\"type\":\"number\"}".to_string(),
+            Ok(Wire::Bool) => "{\"type\":\"boolean\"}".to_string(),
+            Ok(Wire::Str) => "{\"type\":\"string\"}".to_string(),
+            // An `Option<T>` field carries `T`'s schema; its optionality is
+            // expressed by omission from the enclosing object's `required` list.
+            Ok(Wire::Option(inner)) => type_schema(&inner, cx),
+            Ok(Wire::Array(inner) | Wire::FixedArray(inner, _)) => {
+                format!(
+                    "{{\"type\":\"array\",\"items\":{}}}",
+                    type_schema(&inner, cx)
+                )
             }
-        }
-        // `Result<T, E>` on the wire is a two-variant single-payload enum
-        // (`{"Ok":<T>}` / `{"Err":<E>}`) — emit the identical `oneOf` (RFC-0024).
-        Type::Result(t, e) => {
-            let variants = vec![
-                EnumVariant {
-                    name: "Ok".to_string(),
-                    payload: vec![(**t).clone()],
-                },
-                EnumVariant {
-                    name: "Err".to_string(),
-                    payload: vec![(**e).clone()],
-                },
-            ];
-            enum_oneof_schema(&variants, cx)
-        }
-        _ => "{}".to_string(),
+            // A `Map<String, V>` (RFC-0028) is a free-form JSON object whose
+            // values all share `V`'s schema: `additionalProperties` carries it.
+            Ok(Wire::Map(val)) => {
+                format!(
+                    "{{\"type\":\"object\",\"additionalProperties\":{}}}",
+                    type_schema(&val, cx)
+                )
+            }
+            Ok(Wire::Record(fields)) => record_schema(&fields, cx),
+            // A payload-less sum type is exactly a JSON Schema `enum` of its
+            // variant names. A payload sum type — and `Result<T, E>`, which IS
+            // one on the wire — emits the RFC-0024 externally-tagged `oneOf`,
+            // which the importer recognizes back into an enum decl.
+            Ok(Wire::Enum(variants)) => {
+                if variants.iter().all(|v| v.payload.is_empty()) {
+                    let names: Vec<String> = variants
+                        .iter()
+                        .map(|v| format!("\"{}\"", json_escape(&v.name)))
+                        .collect();
+                    format!("{{\"enum\":[{}]}}", names.join(","))
+                } else {
+                    enum_oneof_schema(&variants, cx)
+                }
+            }
+            // A type with no wire form has no schema to describe it either. `{}`
+            // is JSON Schema's "anything", which is the honest answer for a value
+            // that never becomes JSON.
+            Err(_) => "{}".to_string(),
+        },
     }
 }
 
@@ -1527,6 +1587,275 @@ pub fn predicate_binds(decl: &TypeDecl) -> Vec<(String, Type, Option<usize>)> {
             .map(|(i, f)| (f.name.clone(), f.ty.clone(), Some(i)))
             .collect(),
         base => vec![("value".to_string(), base.clone(), None)],
+    }
+}
+
+#[cfg(test)]
+mod struct_key_tests {
+    use super::*;
+
+    /// The structural identity of a fixed set of types, as bytes.
+    ///
+    /// This is the pin [`struct_key`]'s argument needs and did not have. The key
+    /// is `sha256(format!("{ty:?}"))[..16]`, and `Debug` is a debugging aid, not
+    /// a format anyone promised: a field rename, a changed derive or a different
+    /// rendering moves every key at once. Nothing in a single process can notice
+    /// that — a test that computes the key twice agrees with itself whatever the
+    /// key is — so the expected values are WRITTEN DOWN here, and a build that
+    /// renders `Type` differently from the build that wrote them fails naming the
+    /// type that moved.
+    ///
+    /// What to do when it fails: the change is safe as long as no artifact
+    /// outside an emitted module carries one of these names — the condition
+    /// stated on [`struct_key`] — in which case update the row. If that
+    /// condition has stopped holding, the row is the compatibility break, and
+    /// updating it is the wrong move.
+    ///
+    /// The rows are one per shape the identity has to tell apart: the two
+    /// integer families (`Int64` is a distinct variant from `Int8`), a name, a
+    /// record whose fields differ only by name and only by type, a payload enum,
+    /// and the two-argument constructors.
+    const PINNED: &[(&str, &str)] = &[
+        ("Int64", "0b5f608070c6ce3b"),
+        ("Int8", "2682e2651c00bb25"),
+        ("UInt8", "6b60ff17449c2bfe"),
+        ("String", "8084a51b3c649e88"),
+        ("Bool", "49f411f0a1a7f719"),
+        ("R", "6dc9d47663615470"),
+        ("Option<Int64>", "3cca7115ecddc468"),
+        ("Array<Int64>", "d9c366f005660b4f"),
+        ("Array<Int64, 4>", "789ccf35c7706c73"),
+        ("{ a: Int64 }", "9410e46ed45e2516"),
+        ("{ b: Int64 }", "b1e8f1e6073bf44e"),
+        ("{ a: String }", "71a7ba0548c213ff"),
+        ("enum { A }", "4312633fc2f748cb"),
+        ("Result<Int64, String>", "2a121af6953f575a"),
+        ("Map<String, Int64>", "4986ea0126622a62"),
+        ("Box<Int64>", "9969edc012fba3aa"),
+    ];
+
+    fn pinned_types() -> Vec<(&'static str, Type)> {
+        let b = |t: Type| Box::new(t);
+        vec![
+            ("Int64", Type::Int),
+            (
+                "Int8",
+                Type::IntN {
+                    bits: 8,
+                    signed: true,
+                },
+            ),
+            (
+                "UInt8",
+                Type::IntN {
+                    bits: 8,
+                    signed: false,
+                },
+            ),
+            ("String", Type::Str),
+            ("Bool", Type::Bool),
+            ("R", Type::Named("R".into())),
+            ("Option<Int64>", Type::Option(b(Type::Int))),
+            ("Array<Int64>", Type::Array(b(Type::Int))),
+            ("Array<Int64, 4>", Type::ArrayN(b(Type::Int), 4)),
+            (
+                "{ a: Int64 }",
+                Type::Record(vec![Field {
+                    name: "a".into(),
+                    ty: Type::Int,
+                }]),
+            ),
+            (
+                "{ b: Int64 }",
+                Type::Record(vec![Field {
+                    name: "b".into(),
+                    ty: Type::Int,
+                }]),
+            ),
+            (
+                "{ a: String }",
+                Type::Record(vec![Field {
+                    name: "a".into(),
+                    ty: Type::Str,
+                }]),
+            ),
+            (
+                "enum { A }",
+                Type::Enum(vec![EnumVariant {
+                    name: "A".into(),
+                    payload: vec![Type::Int],
+                }]),
+            ),
+            (
+                "Result<Int64, String>",
+                Type::Result(b(Type::Int), b(Type::Str)),
+            ),
+            ("Map<String, Int64>", Type::Map(b(Type::Str), b(Type::Int))),
+            ("Box<Int64>", Type::App("Box".into(), vec![Type::Int])),
+        ]
+    }
+
+    /// The same type produces the same identity in a LATER BUILD, not merely
+    /// twice in one run. See [`PINNED`].
+    #[test]
+    fn struct_key_is_pinned() {
+        let rows = pinned_types();
+        assert_eq!(rows.len(), PINNED.len(), "a pinned row lost its type");
+        for ((label, ty), (plabel, want)) in rows.iter().zip(PINNED) {
+            assert_eq!(label, plabel, "the two lists drifted apart");
+            assert_eq!(
+                &struct_key(ty),
+                want,
+                "the structural identity of `{label}` moved: `Debug` for Type \
+                 renders differently than it did when this row was written, so \
+                 every synthesized symbol keyed on a type has been renamed"
+            );
+        }
+    }
+
+    /// No two distinct types share one identity.
+    ///
+    /// The claim [`struct_key`] exists for, checked over generated trees rather
+    /// than the handful of pairs anyone thought to write down — including the
+    /// pairs the READABLE mangle collapses, which is the collision class this
+    /// mechanism replaced (RFC-0077 M2e). `vyrn-codegen` checks the same claim
+    /// through its symbols; this checks the function itself, so the JSON codec's
+    /// two names are covered by the same proof.
+    #[test]
+    fn struct_key_is_injective_over_generated_types() {
+        let f = |n: &str, t: Type| Field {
+            name: n.to_string(),
+            ty: t,
+        };
+        let mut seeds = vec![
+            Type::Int,
+            Type::IntN {
+                bits: 8,
+                signed: true,
+            },
+            Type::IntN {
+                bits: 8,
+                signed: false,
+            },
+            Type::IntN {
+                bits: 64,
+                signed: true,
+            },
+            Type::Float,
+            Type::Float32,
+            Type::Bool,
+            Type::Str,
+            Type::Unit,
+            // The pairs a readable mangle collapses: `Option<Int64>` and a user
+            // type spelled `OptInt64`, a record and the three characters `Rec`,
+            // every transformer and `Xf`.
+            Type::Named("OptInt64".into()),
+            Type::Named("Rec".into()),
+            Type::Named("Xf".into()),
+            Type::Named("R".into()),
+            Type::Param("R".into()),
+            Type::Record(vec![]),
+            Type::Record(vec![f("a", Type::Int)]),
+            Type::Record(vec![f("b", Type::Int)]),
+            Type::Record(vec![f("a", Type::Str)]),
+            Type::Record(vec![f("a", Type::Int), f("b", Type::Int)]),
+            Type::Enum(vec![]),
+            Type::Enum(vec![EnumVariant {
+                name: "A".into(),
+                payload: vec![],
+            }]),
+            Type::Enum(vec![EnumVariant {
+                name: "A".into(),
+                payload: vec![Type::Int],
+            }]),
+            Type::Omit(Box::new(Type::Named("R".into())), vec!["a".into()]),
+            Type::Omit(Box::new(Type::Named("R".into())), vec!["b".into()]),
+            Type::Pick(Box::new(Type::Named("R".into())), vec!["a".into()]),
+            Type::Partial(Box::new(Type::Named("R".into()))),
+            Type::Logger,
+            Type::Never,
+            Type::Err,
+        ];
+        // The hazard is real before it is ruled out: these two DO collide under
+        // the readable mangle, so a generator that missed them would prove
+        // nothing.
+        assert_eq!(
+            Type::Option(Box::new(Type::Int)).to_string(),
+            "Option<Int64>"
+        );
+
+        for round in 0..2 {
+            let base: Vec<Type> = if round == 0 {
+                seeds.clone()
+            } else {
+                seeds[..320].to_vec()
+            };
+            let pairs: Vec<Type> = base[..8.min(base.len())].to_vec();
+            for t in &base {
+                let b = || Box::new(t.clone());
+                seeds.extend([
+                    Type::Option(b()),
+                    Type::Array(b()),
+                    Type::ArrayN(b(), 4),
+                    Type::ArrayN(b(), 8),
+                    Type::SmallArray(b(), 4),
+                    Type::Stream(b()),
+                    Type::Task(b()),
+                    Type::Lazy(b()),
+                    Type::App("P".into(), vec![t.clone()]),
+                    Type::App("Q".into(), vec![t.clone()]),
+                    Type::Fn(vec![], b()),
+                    Type::Fn(vec![t.clone()], Box::new(Type::Unit)),
+                    Type::Record(vec![f("a", t.clone())]),
+                    Type::Enum(vec![EnumVariant {
+                        name: "V".into(),
+                        payload: vec![t.clone()],
+                    }]),
+                ]);
+            }
+            for a in &pairs {
+                for c in &pairs {
+                    seeds.extend([
+                        Type::Result(Box::new(a.clone()), Box::new(c.clone())),
+                        Type::Map(Box::new(a.clone()), Box::new(c.clone())),
+                        Type::App("P".into(), vec![a.clone(), c.clone()]),
+                        Type::Fn(vec![a.clone(), c.clone()], Box::new(Type::Unit)),
+                    ]);
+                }
+            }
+        }
+
+        let mut seen: HashMap<String, Type> = HashMap::new();
+        for ty in &seeds {
+            let k = struct_key(ty);
+            if let Some(prev) = seen.insert(k.clone(), ty.clone()) {
+                assert_eq!(
+                    &prev, ty,
+                    "two distinct types share the identity `{k}`: every symbol \
+                     keyed on it emits one body and routes both types through it"
+                );
+            }
+        }
+        assert!(
+            seeds.len() > 5_000,
+            "only {} types generated; the coverage shrank",
+            seeds.len()
+        );
+    }
+
+    /// The two synthesized JSON names carry the identity, so they are injective
+    /// wherever it is — and they are distinct from each other for one type, which
+    /// the shared key alone does not say.
+    #[test]
+    fn the_json_codec_names_are_the_shared_identity() {
+        let ty = Type::Record(vec![Field {
+            name: "a".into(),
+            ty: Type::Int,
+        }]);
+        let k = struct_key(&ty);
+        assert!(crate::jsonenc::enc_name(&ty).ends_with(&k));
+        assert!(crate::jsondec::top_name(&ty).ends_with(&k));
+        assert_ne!(crate::jsonenc::enc_name(&ty), crate::jsondec::top_name(&ty));
     }
 }
 

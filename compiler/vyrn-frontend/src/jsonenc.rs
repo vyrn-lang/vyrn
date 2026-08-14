@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Function, Type, TypeDecl};
+use crate::codec::Wire;
 
 /// The placeholder prefix the generated source uses for a name it cannot spell.
 /// Folded into [`crate::loader::RT_PREFIX`] after parsing.
@@ -44,22 +45,40 @@ const PH: &str = "VyrnRt_";
 
 /// The encoder function for `ty`, by its reserved (unspellable) name.
 ///
-/// Keyed by a hash of the type's structure rather than a readable mangle, because
+/// Keyed by the type's structural identity rather than a readable mangle, because
 /// this name has to be INJECTIVE: `mangle_ty` is not (RFC-0077 M2e found two
 /// instantiations colliding on one symbol and the driver silently skipping the
 /// second), and an encoder picked by a colliding name would encode the wrong
-/// shape rather than fail to build.
+/// shape rather than fail to build. The identity itself — why the derived `Debug`
+/// form serves as the structural serialization, and what pins it — is
+/// [`crate::types::struct_key`], which the codegen symbols read too.
 pub fn enc_name(ty: &Type) -> String {
-    format!("{}e{}", crate::loader::RT_PREFIX, type_key(ty))
-}
-
-fn type_key(ty: &Type) -> String {
-    crate::hash::sha256_hex(format!("{ty:?}").as_bytes())[..16].to_string()
+    format!(
+        "{}e{}",
+        crate::loader::RT_PREFIX,
+        crate::types::struct_key(ty)
+    )
 }
 
 /// The placeholder spelling of an encoder, for use inside generated source.
 fn enc_ph(ty: &Type) -> String {
-    format!("{PH}e{}", type_key(ty))
+    format!("{PH}e{}", crate::types::struct_key(ty))
+}
+
+/// Whether `ty`'s `Display` spelling contains a `lazy` the parser will refuse.
+///
+/// `lazy` is legal in exactly one position — a field of a NAMED record — so a
+/// bare one, or one inside an anonymous record, cannot be written as a parameter
+/// type. A `Type::Named` stops the walk: its spelling is the name, and whatever
+/// `lazy` its declaration holds is not printed.
+fn unspellable_lazy(ty: &Type) -> bool {
+    match ty {
+        Type::Lazy(_) => true,
+        Type::Record(fs) => fs.iter().any(|f| unspellable_lazy(&f.ty)),
+        Type::Option(t) | Type::Array(t) | Type::ArrayN(t, _) => unspellable_lazy(t),
+        Type::Result(a, b) | Type::Map(a, b) => unspellable_lazy(a) || unspellable_lazy(b),
+        _ => false,
+    }
 }
 
 /// A type as generated source. `Display` is the user-facing spelling — which is
@@ -116,7 +135,13 @@ struct Walk<'a> {
     types: &'a HashMap<String, TypeDecl>,
     /// Types already emitted (or in progress — inserted BEFORE the body is built,
     /// which is what makes a self-referential type terminate).
-    done: HashMap<String, ()>,
+    ///
+    /// The TYPE is kept beside its name, not a `()`, and that is the whole
+    /// answer to the 64 bits [`crate::types::struct_key`] truncates to: two
+    /// distinct types on one name would otherwise mean the second encoder is
+    /// silently skipped and both call sites encode through the first one's shape.
+    /// Holding the type makes that a build error naming both.
+    done: HashMap<String, Type>,
     source: String,
     /// Every placeholder name the source mentions, for the rename map.
     names: Vec<String>,
@@ -125,20 +150,35 @@ struct Walk<'a> {
 impl Walk<'_> {
     /// Ensure an encoder for `ty` exists and return its placeholder call name.
     fn encoder(&mut self, ty: &Type) -> Result<String, String> {
-        // An ANONYMOUS enum has no source spelling (`Display` renders
-        // `enum { A | B }`, which is not a type the parser accepts), so it cannot be
-        // a parameter and cannot have an encoder. Named enums — every enum a
-        // program declares — go through `Type::Named` and are fine.
+        // Every encoder takes its value as a PARAMETER, so `ty` has to have a
+        // source spelling the parser accepts. Two shapes do not, and both are
+        // rejected here rather than handed to the parser as text it will refuse
+        // with an internal error:
+        //
+        // - an ANONYMOUS enum (`Display` renders `enum { A | B }`). Named enums —
+        //   every enum a program declares — arrive as `Type::Named` and are fine;
+        // - a bare or anonymously-nested `lazy T`, which the parser accepts only
+        //   as a NAMED record's field. A named record's encoder never asks for
+        //   one (the record arm forces the field first), so this is the guard for
+        //   a type no source can write.
         if matches!(ty, Type::Enum(_)) {
             return Err("toJson: cannot encode an anonymous enum".to_string());
         }
+        if unspellable_lazy(ty) {
+            return Err("toJson: cannot encode a bare `lazy` type".to_string());
+        }
         let ph = enc_ph(ty);
-        if self.done.contains_key(&ph) {
+        if let Some(prev) = self.done.get(&ph) {
+            if prev != ty {
+                return Err(format!(
+                    "internal: {prev} and {ty} share the encoder name `{ph}`"
+                ));
+            }
             return Ok(ph);
         }
         // Reserved BEFORE the body: a recursive type reaches itself here and gets
         // the name rather than another expansion.
-        self.done.insert(ph.clone(), ());
+        self.done.insert(ph.clone(), ty.clone());
         self.names.push(ph.clone());
         let body = self.body(ty)?;
         // Through `rt`, not spelled inline: a placeholder that is not REGISTERED
@@ -164,22 +204,26 @@ impl Walk<'_> {
     }
 
     /// The body of `ty`'s encoder, as statements. Mirrors RFC-0018's canonical
-    /// encoding and RFC-0024's wire tagging exactly — this is the only place that
-    /// spells them now.
+    /// encoding exactly.
+    ///
+    /// WHAT a type is on the wire is [`crate::codec::wire`]'s answer, not this
+    /// module's — the same answer the checker's gate and the schema emitter read.
+    /// This function only spells it as source.
     fn body(&mut self, ty: &Type) -> Result<String, String> {
         // A named type routes through its own declaration, so recursion breaks at
-        // the name; a refinement (`type Port = Int64 where ..`) resolves to its base.
-        let r = crate::types::resolve(ty, self.types);
-        match r {
-            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 => {
+        // the name; a refinement (`type Port = Int64 where ..`) takes its base.
+        match crate::codec::wire(ty, self.types, false)
+            .map_err(|t| format!("toJson: cannot encode {t}"))?
+        {
+            Wire::Int | Wire::IntN { .. } | Wire::Float | Wire::Float32 => {
                 let n = self.rt("JNum");
                 Ok(format!("    return {n}(v.toString())\n"))
             }
-            Type::Bool => {
+            Wire::Bool => {
                 let n = self.rt("JBool");
                 Ok(format!("    return {n}(v)\n"))
             }
-            Type::Str => {
+            Wire::Str => {
                 let n = self.rt("JStr");
                 // `.copy()`, because `v` is a `read` parameter and the `Json`
                 // built here outlives the call. Handing the buffer over would
@@ -189,7 +233,7 @@ impl Walk<'_> {
                 // menu names, and the encoded value owns its own bytes.
                 Ok(format!("    return {n}(v.copy())\n"))
             }
-            Type::Record(fields) => {
+            Wire::Record(fields) => {
                 let (obj, fld) = (self.rt("JObj"), self.rt("JsonField"));
                 let mut out = format!("    let mut fs: Array<{fld}> = []\n");
                 for f in &fields {
@@ -206,7 +250,7 @@ impl Walk<'_> {
                     // because `push` RETURNS the array and `if let` is one of
                     // RFC-0077's own unlowered rows — the natural spelling would put
                     // every example with an `Option` field behind it.
-                    if let Type::Option(inner) = crate::types::resolve(&fty, self.types) {
+                    if let Ok(Wire::Option(inner)) = crate::codec::wire(&fty, self.types, false) {
                         let e = self.encoder(&inner)?;
                         out.push_str(&format!(
                             "    fs = match v.{0} {{ Some(x) => fs.push({fld} {{ key: \"{0}\", value: {e}(x) }}), None => fs }}\n",
@@ -224,14 +268,14 @@ impl Walk<'_> {
                 Ok(out)
             }
             // A bare `Option`: `Some` encodes the payload, `None` is `null`.
-            Type::Option(inner) => {
+            Wire::Option(inner) => {
                 let e = self.encoder(&inner)?;
                 let null = self.rt("JNull");
                 Ok(format!(
                     "    return match v {{ Some(x) => {e}(x), None => {null} }}\n"
                 ))
             }
-            Type::Array(inner) | Type::ArrayN(inner, _) => {
+            Wire::Array(inner) | Wire::FixedArray(inner, _) => {
                 let e = self.encoder(&inner)?;
                 let (arr, json) = (self.rt("JArr"), self.rt("Json"));
                 Ok(format!(
@@ -240,14 +284,16 @@ impl Walk<'_> {
             }
             // A `Map<String, V>` encodes as an object: keys in insertion order,
             // values through V's codec (RFC-0028).
-            Type::Map(_, v) => {
+            Wire::Map(v) => {
                 let e = self.encoder(&v)?;
                 let (obj, fld) = (self.rt("JObj"), self.rt("JsonField"));
                 Ok(format!(
                     "    let mut fs: Array<{fld}> = []\n    for k in v.keys() {{\n        fs = match v[k] {{ Some(x) => fs.push({fld} {{ key: k, value: {e}(x) }}), None => fs }}\n    }}\n    return {obj}(fs)\n"
                 ))
             }
-            Type::Enum(vs) => {
+            // `Result<T, E>` arrives here as the two-variant enum it is on the
+            // wire, so external tagging is written once.
+            Wire::Enum(vs) => {
                 let mut arms = String::new();
                 for var in &vs {
                     let binds: Vec<String> =
@@ -262,14 +308,6 @@ impl Walk<'_> {
                 }
                 Ok(format!("    return match v {{\n{arms}    }}\n"))
             }
-            Type::Result(t, e) => {
-                let ok = self.wire_variant("Ok", &[(*t).clone()], &["p0".to_string()])?;
-                let err = self.wire_variant("Err", &[(*e).clone()], &["p0".to_string()])?;
-                Ok(format!(
-                    "    return match v {{\n        Ok(p0) => {ok},\n        Err(p0) => {err},\n    }}\n"
-                ))
-            }
-            other => Err(format!("toJson: cannot encode {other}")),
         }
     }
 
