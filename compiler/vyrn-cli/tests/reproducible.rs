@@ -144,6 +144,38 @@ fn the_same_source_builds_to_the_same_wasm_bytes_in_every_process() {
     all_equal(&outs, "wasm");
 }
 
+/// The lowered form's text (RFC-0101 §2.7), which lands with this row rather
+/// than after it.
+///
+/// The dump is a printer over containers a lowering fills, and the lowering
+/// keeps two `HashMap`s of its own — the checker's per-node answers and the
+/// per-instance substitution. Neither may reach an ORDER, which is the exact
+/// mistake the module comment above records. Zig's `--verbose-air` is the
+/// cautionary precedent for the other half of the same discipline: a dump
+/// checked by nothing has broken three times in its issue tracker, and this
+/// repository already deleted a whole backend at `b1eef04` for going unbuilt and
+/// unnoticed for twelve days.
+#[test]
+fn the_same_source_lowers_to_the_same_text_in_every_process() {
+    let src = source("repolower");
+    let outs: Vec<Vec<u8>> = (0..RUNS)
+        .map(|_| {
+            let o = vyrn()
+                .args(["emit-lowered", &src.display().to_string()])
+                .output()
+                .expect("vyrn emit-lowered");
+            assert!(
+                o.status.success(),
+                "emit-lowered failed:\n{}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            assert!(!o.stdout.is_empty(), "emit-lowered printed nothing");
+            o.stdout
+        })
+        .collect();
+    all_equal(&outs, "lowered");
+}
+
 /// The textual backend, which was deterministic through the same defect — it
 /// reads the same set for MEMBERSHIP only, inside a walk over `program.globals`
 /// in declaration order, and names the flag symbolically. That asymmetry is why

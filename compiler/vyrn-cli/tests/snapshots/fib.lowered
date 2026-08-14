@@ -1,0 +1,29 @@
+; vyrn lowered v1 — examples/fib.vyrn
+
+fn fib(n: Int64) -> Int64                                                @4
+  if                                                                     @5
+    binary Lt : Bool                                                     @5
+      var n : Int64                                                      @5
+      int 2 : Int64                                                      @5
+    return                                                               @6
+      var n : Int64                                                      @6
+  return                                                                 @8
+    binary Add : Int64                                                   @8
+      call fib : Int64                                                   @8
+        binary Sub : Int64                                               @8
+          var n : Int64                                                  @8
+          int 1 : Int64                                                  @8
+      call fib : Int64                                                   @8
+        binary Sub : Int64                                               @8
+          var n : Int64                                                  @8
+          int 2 : Int64                                                  @8
+
+fn main() -> Int64                                                       @11
+  let result : Int64                                                     @12
+    call fib : Int64                                                     @12
+      int 10 : Int64                                                     @12
+  do                                                                     @13
+    call print : Unit                                                    @13
+      var result : Int64                                                 @13
+  return                                                                 @14
+    var result : Int64                                                   @14

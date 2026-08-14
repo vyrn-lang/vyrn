@@ -1,7 +1,15 @@
 # RFC-0101 — A Backend Is an Emitter
 
-- **Status:** **Proposed.** Nothing here is implemented. The measurements are
-  real and were taken at `dd3a9fe`; the design is not. **Amended from
+- **Status:** **M1 implemented**; M2–M6 proposed. M1 landed as four stacked pull
+  requests (§3 M1 records each one's changed-line count and every place the
+  design did not survive contact with the code). Its headline result is that
+  **M1's own assertion is false**: the two compiled backends do not agree about
+  the static type of an expression, and neither agrees with the checker. 22,283
+  of 570,960 typed expression answers differ from the checker's, 3,383 differ
+  between the two backends, and every one is coerced away immediately afterwards,
+  which is why the parity suite has never seen any of it. The five reasons are
+  named in §3 M1 and gated. The rest of the measurements below are real and were
+  taken at `dd3a9fe`; the design of M2–M6 is not implemented. **Amended from
   `docs/research/lowering-design.md`**, which checked this RFC against eight
   compilers and against the code. Four of its claims died to measurement and are
   recorded where they stood, not deleted: the precedent this RFC cited for a
@@ -24,6 +32,8 @@
   MLIR) and the cost of reading this design. Its §4 lists fifteen amendments.
   All fifteen are applied below, and each is marked **[A1]** to **[A15]** where
   it lands, so a reader can check the amendment against the text it changed.
+  **[A16] is not one of theirs**: it is the amendment M1 measured for itself,
+  and §2.1 item 2 is where it lands.
 - **Principle:** the checker decides. A backend encodes what was decided. Where a
   backend decides, it is deciding a second time.
 
@@ -388,17 +398,36 @@ checked — and a future reader who finds this form wrong knows where to look.
    leaves that decision in three engines, which is the sentence this RFC is
    built on.
 
-   **The fallback is rustc's, and it has a threshold.** If concrete bodies cost
-   too much, `Lowered` holds one generic body plus one instance list, and every
-   consumer substitutes through a single shared helper — one substitution site,
-   not three. The threshold is a number **M1 measures and writes into this file**:
-   peak resident memory and instance count for the largest corpus module, against
-   the same build today. It is not invented here, because a threshold invented
-   before the measurement is a number that decides nothing. M1 states it; M2 is
-   the first milestone that can cross it.
+   **The fallback is rustc's, and it has a threshold. M1 measured it, so the
+   threshold is now a number.** The largest corpus module is `graphql.vyrn` —
+   372 linked functions, **368 instances**, 15,867 rows. The borrowed form M1
+   ships holds **1.69 MiB** live (2.79 MiB peak, 52 ms). A concrete `Block` per
+   instantiation on top of that is **+1.20 MiB** live (3.6 ms) — **1.71×**, or
+   3.4 KiB per instance. Method: a counting global allocator, live bytes held
+   while the value is alive, in `vyrn-cli/tests/lowered_cost.rs`, which states
+   its own limits — heap held, not resident set, so it excludes the shared AST
+   and the allocator's slack. It is reproducible on every platform, which peak
+   RSS on Windows is not, and that is the trade this number makes.
+
+   **The threshold, written from that: switch to the generic-body fallback when
+   the lowered form of one module holds more than 256 MiB live** — about ninety
+   times the largest thing the corpus builds today. Nothing under that is worth
+   a second substitution mechanism. M2 is the first milestone that can cross it,
+   because M2 is where the instantiation count stops being M1's partial one.
 2. **A type on every expression node.** Not a side table — a field. `peek`,
    `static_ty`, both `expect` stacks, `declared::type_of` and `interp::type_of`
    read it instead of deriving it.
+
+   **[A16] M1 measured this item and it is under-specified: a node needs TWO
+   types, not one.** The checker's answer at a node is the type the value must
+   END UP as — `Expr::Int` under an `Int32` destination is `Int32`. A backend's
+   answer is the type the value HAS when the node's code has run, before the
+   `coerce` that follows — `Int64`, every time. Those are different questions and
+   neither engine is wrong. Over the corpus this single difference is 21,140 of
+   the 22,283 disagreements M1 found (§3 M1). So M3 cannot delete `peek` by
+   handing it the checker's contextual answer: the form must carry the node's own
+   type and the type its context requires, and the pair of them is what makes
+   `coerce`'s 505-line ladder (§1.5) a decision the lowering can own in M5.
 3. **Explicit release steps.** `own`'s rows stop being a `HashMap` a backend
    must place and become `Release(place, kind)` steps already in the body, in
    order, at every exit they belong at — every scope exit, every `break`,
@@ -570,6 +599,15 @@ an invariant every future change meets. It also gives the release steps of item 
 somewhere to be checked: a release of a place that is not live is a lint failure,
 not a leak found by `memory.rs` three PRs later.
 
+**Shipped in M1, and it paid immediately.** `vyrn_lower::lint` is one function,
+called by a `debug_assert` inside `lower` and by the corpus gate over every
+example. It found both of the recording's gaps — the unsolved parameter left on
+a generic call's argument, and the same gap in a generic record literal — before
+either reached a reviewer. What it does NOT do is re-derive a node's type from
+its children: that needs a second type derivation, and having one derivation is
+what this RFC is for. It checks that the answers are there, that an instance is
+concrete, and that the order is one a dump can be diffed in.
+
 ### 2.7 The form has a text rendering, and it is `vyrn emit-lowered`
 
 **[A11] Not an open question — an M1 deliverable.** Open question 5 asked
@@ -621,6 +659,13 @@ This repository has the matching lesson at `b1eef04`, where a second native
 backend was deleted after going from working to unbuildable in twelve days,
 unnoticed, because nothing checked it. An ungated dump decays, and a decayed dump
 is worse than none, because a reader trusts it.
+
+**Shipped in M1, minus one line of the sketch.** A trap site is not a token yet:
+there is no trap table until M5, so `!aoob` has nothing to name and the dump does
+not invent one. Everything else is there — a type on every binding and every call
+result, instantiations spelled (`fn id<Int64>` and `fn id<String>`, two entries
+for one function), positions in the last column, root module only. It ships with
+its row in `tests/reproducible.rs` and two blessed snapshots.
 
 One thing the dump also repairs. `vyrn emit-ir` gives the native backend a text
 tier that ten test files already use to prove properties no program output can
@@ -680,30 +725,111 @@ line number, that line from each engine, and two lines of context. **This is one
 function, it needs nothing from this RFC, and it is the failure output every
 milestone below will be read through. It lands in its own PR ahead of M1.**
 
-**M1 — the form exists, and it is checked against the copies it will replace.**
-`vyrn-lower` produces `Lowered` from a checked program: types on nodes, positions,
-nothing else. Nothing consumes it in anger. One new test walks the corpus and
-asserts, at every expression, that `peek`'s answer and the native backend's
-threaded answer both equal the recorded type. **This deletes nothing on purpose.**
-It converts "the two copies agree" from an assumption into a gate, before a line
-is removed — and if they disagree anywhere, that disagreement is a bug found by
-this milestone rather than a regression caused by M2. Line gate: additive; the
-number is the cost of the claim, and it is stated, not excused.
+**M1 — the form exists, and it is checked against the copies it will replace.
+IMPLEMENTED.**
 
-M1 also carries three things the first draft left out or left open.
+`vyrn-lower` produces `Lowered` from a checked program: types on nodes, lines,
+nothing else. Nothing consumes it in anger. **This deletes nothing on purpose.**
 
-- **`vyrn emit-lowered`, built and gated here** [A11]. §2.7 specifies it. It ships
-  with its row in `tests/reproducible.rs` in the same PR, not after. The dump is
-  what makes M1's own gate readable, and an ungated dump is the one part of Zig's
-  AIR this design refuses.
-- **The lint of §2.6, on the corpus** [A7]. The one-off check M1 was already
-  going to write becomes the permanent debug-build pass, in the same PR, because
-  the difference is where it is called from.
-- **The two measurements that decide the shape.** Peak resident memory and
-  instance count for the owned, concrete-body form on the largest corpus module —
-  the number the §2.1 item 1 fallback threshold is written from [A3] — and the
-  cost of the owned form against the borrowed one, which is open question 1 [A6].
-  Both are numbers M1 writes into this file.
+**Four pull requests, not one, and each one's changed-line count against §3.0's
+≤ 800 / ≤ 15 files:**
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M1a | the checker records; both backends say their answer out loud; the monomorphization bound moves below both | 329 | 4 |
+| M1b | the `vyrn-lower` crate: the form and its lint | 703 | 4 |
+| M1c | the corpus gate | 521 | 2 |
+| M1d | `vyrn emit-lowered`, its two gates, the measurements, this text | 795 | 10 |
+
+The budget held for all four. M1 is additive by design, so the number is the
+cost of the claim, stated rather than excused: **2,273 lines added and 75
+removed — 2,348 changed across 20 files.** Roughly a third of it is the two
+gates and their fixtures, and none of it is deleted yet; M3 is the first
+milestone with a negative gate.
+
+### What M1 found, which is not what it went looking for
+
+**M1's own assertion is false.** It said the corpus gate would assert, at every
+expression, that `peek`'s answer and the native backend's threaded answer both
+equal the recorded type. Measured over 138 linked corpus programs and **570,960
+backend answers**: **22,283 differ from the checker's answer, and 3,383 differ
+between the two BACKENDS.** No program notices, because every one of them is
+coerced immediately afterwards — which is exactly why the parity suite has never
+seen any of it. Parity compares output; it cannot see a type.
+
+That is a larger result than "they agree", and it is what a shadow PR is for.
+The differences are not noise: they are five structural facts, and the gate that
+shipped is that **every difference falls under a rule named in the test**, with
+an unexplained one failing the run. So a new class of disagreement is caught
+while these are recorded:
+
+| Rule | Count | What it is |
+|---|---|---|
+| `SameAfterResolve` | 376 | `MaybeAge` against `Option<Int64>`, `Age` against `Int64`, `User` against its record shape — each engine resolves a declared name at a different point. |
+| `DefaultedPosition` | 21,140 | The literal `1` under an `Int32` destination, the element type of `[]`, the unused side of a `Result`: one side wrote its default where nothing constrained the position. This is item 2's amendment [A16], and it is the class by two orders of magnitude. |
+| `ArrayShape` | 3,419 | `Array<E>` against `Array<E, N>` or `SmallArray<E, N>` — the literal's own type against the type it is stored as. |
+| `LessSpecific` | 677 | One side kept a type parameter, or dropped a generic's arguments (`Crate` for `Crate<Cargo>`). **The class M3 deletes rather than reconciles.** |
+| `Diverges` | 55 | A `match` whose every arm leaves the function: the backends type it `Never`, the checker types it as the destination. Both are right about a value that is never produced. |
+
+**Nothing here is a miscompile, and M1 found no bug in the emitted code.** What
+it found is that the three engines have never been asked the same question, and
+that M3's gate — "delete `peek`, read the recorded type" — needs item 2's second
+type before it can be met.
+
+### Where the design did not survive contact with the code
+
+Seven, each recorded rather than smoothed over.
+
+1. **`peek` does not run at every expression.** It runs at joins — 49 call sites,
+   which §1.2 measured correctly and the M1 text then forgot. The wasm backend's
+   per-expression choke point is `Fn_::expr` (`direct.rs:4156`), so the gate
+   observes three sites, not two: `Gen::gen_expr`, `Fn_::expr` and `Fn_::peek`.
+2. **The comparison is sound only over program nodes.** A backend types AST it
+   builds itself — a lifted lambda's body, a desugared method call — and those
+   live in temporaries whose addresses are reused, so two of them collide on one
+   `(node, instantiation)` key. A node of the program is alive for the whole
+   compile and cannot be aliased. Restricting the gate to recorded nodes removed
+   651 phantom classes and is what makes it a gate rather than a rumour.
+3. **The monomorphization bound had to move.** `examples/polyrecursion.vyrn`
+   reached **18 GiB** before `vyrn-lower`'s worklist took the same bound the
+   backends take. `MONO_DEPTH_LIMIT` and `MONO_SIZE_LIMIT` are now in
+   `vyrn_frontend::types` beside `type_depth` and `expanded_size`, re-exported
+   from `vyrn-codegen`. A bound on monomorphization is not a property of a
+   backend, and there are two worklists now.
+4. **The checker's answer is not final at the node it is written on.** A generic
+   call's arguments are checked against the callee's still-open parameter types,
+   so `[]` in `push(xs, [])` is recorded as `Array<T>`. The solution is recorded
+   on the call node and applied to the subtree it governs, as an ordered chain
+   rather than a merged map, so a caller's `T` and a callee's `T` stay apart. A
+   generic RECORD literal does the same thing and needed the same treatment —
+   `Deque { front: [], back: ["z"] }` had it, and the lint caught it.
+5. **§2.1 item 6 promises a line the AST does not always have.**
+   `ast::Expr::line` returns `0` for all five literal forms. A literal inherits
+   its statement's line, decided once in the lowering rather than five times in
+   whoever prints a position.
+6. **The lowering runs the checker again.** `check_and_synthesize` checks, THEN
+   synthesizes the JSON codecs, so those functions are never typed by the pass
+   that made them. `lower` records over the program it is given, which is the
+   only way the codecs get answers at all.
+7. **M1's monomorphization is partial, and the residue is counted, not hidden.**
+   The worklist follows ordinary generic calls. Higher-order and lambda
+   instantiation still lives in the backends, so 9,358 backend answers sit inside
+   instances M1 does not build and 1 call could not be followed. Both numbers are
+   printed by the gate. M2 is where they go to zero.
+
+### The three deliverables M1 also carried
+
+- **`vyrn emit-lowered`, built and gated here** [A11]. A subcommand beside
+  `emit-ir` and `emit-wat`, root module only. Its row in `tests/reproducible.rs`
+  landed in the same PR — seven separate processes, bytes compared — and two
+  blessed snapshots (`fib`, `option`) landed with it, because an ungated dump is
+  the one part of Zig's AIR this design refuses.
+- **The lint of §2.6** [A7]. A `debug_assert` inside `lower`, and the same
+  function called over every corpus example by the gate. The difference is where
+  it is called from, exactly as the amendment said. It found deviations 4 and 6
+  above before either reached a reviewer.
+- **The two measurements**, written into §2.1 item 1 with their method and the
+  threshold they imply.
 
 **M2 — monomorphization moves into the lowering.** One worklist, keyed on type
 arguments. `lib.rs`'s two mutually-feeding worklists, `direct.rs`'s FIFO index
@@ -860,7 +986,7 @@ Five were asked. Two are now answered — 6.1 by the migration and 6.5 by rustc 
 and both keep their question here rather than disappearing into the design, so a
 reader can see what was decided and against what.
 
-### 6.1 Does `Lowered` own or borrow? **Answered: borrow, during the migration.**
+### 6.1 Does `Lowered` own or borrow? **Answered: borrow, during the migration — and M1 measured what the other one costs.**
 
 A form that borrows the `Program` is cheap and pins the AST for the whole build;
 one that owns is a second copy of every body, per instantiation. This was left
@@ -868,10 +994,12 @@ open. **[A6] The migration decides it before performance gets a vote.** A
 borrowed node can carry the AST node it came from, and that is the only thing
 that lets an engine migrate one arm at a time and fall back to its old walk for
 the rest. Without it, every delete-half PR is all-or-nothing per engine, M4
-cannot split by exit kind and M6 has no legal intermediate state. M1 still
-measures the owned version on the largest corpus module — the number feeds the
-§2.1 item 1 fallback threshold — and the question is revisited after M6, when
-the fallback arms are gone and the only argument left is cost.
+cannot split by exit kind and M6 has no legal intermediate state. **M1 measured
+the owned version: +1.20 MiB against the borrowed form's 1.69 MiB on the largest
+corpus module, 1.71× (§2.1 item 1).** So cost was never going to decide this
+one — the migration did, and the number says the fallback is not needed at
+anything like the scale this project builds. The question is revisited after M6,
+when the fallback arms are gone and the only argument left is cost.
 ### 6.2 What happens to `movecheck` and `own`? **Open.**
 
 Both key on node address in the AST today. If the lowering carries releases
@@ -881,19 +1009,28 @@ start naming lowered nodes. Swift hints at the answer without giving it: it keep
 diagnosis *before* canonicalization, which is where Vyrn already runs both of
 these. A hint is not an answer, and this stays open.
 
-### 6.3 Where does the loader's generated code enter? **Open.**
+### 6.3 Where does the loader's generated code enter? **Answered by M1: nowhere special.**
 
 Generators produce Vyrn source that is parsed, checked and lowered like any other
-module (`loader.rs:1570`), so it should need no special case. M1 proves that
-rather than assumes it. Note the comptime sandbox is a fourth consumer of the
+module (`loader.rs:1570`), so it should need no special case. **M1's corpus gate
+lowers every generated module the corpus links — `graphql.vyrn` alone is 372
+functions, most of them generated — and needed no arm for any of them.** The one
+special case M1 did find is a synthesized one rather than a generated one: the
+JSON codecs `check_and_synthesize` adds AFTER it checks are never typed by that
+pass, which is why the lowering records over the program it is given (§3 M1,
+deviation 6). Note the comptime sandbox is a fourth consumer of the
 form, by both routes: a `gen fn` runs through `interp::generate` or, since
 RFC-0076, through compiled wasm, and both routes are Vyrn programs.
 
-### 6.4 Can `vyrn-lower` be a module of `vyrn-frontend` instead of a crate? **Open.**
+### 6.4 Can `vyrn-lower` be a module of `vyrn-frontend` instead of a crate? **Open, and M1 shipped the crate.**
 
 Lazier, and it puts the trap table where the interpreter can already reach it.
 The argument for a crate is only that `vyrn-frontend` is already 13,526 lines of
-checker; that is not much of an argument.
+checker; that is not much of an argument. M1 shipped the crate because a crate
+boundary is what stopped the lowering from reaching a backend by accident, and
+because moving a module later is a rename. **M5 is when this has to be settled**:
+the trap table is the first thing the interpreter must import, and `vyrn-frontend`
+cannot depend on `vyrn-lower` while `vyrn-lower` depends on the checker.
 
 ### 6.5 Does the form need a stable text rendering? **Answered: no. Print, do not parse. Unstable text, blessed snapshots.**
 

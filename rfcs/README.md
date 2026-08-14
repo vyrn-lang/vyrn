@@ -156,7 +156,7 @@ claim is true — is written down in the test's own header.
 | [0098](RFC-0098-cli.md) | `std/cli`: The Command Line Is a Record Type | M1 landed; M2–M7 stated |
 | [0099](RFC-0099-a-generator-may-report-a-diagnostic.md) | A Generator May Report a Diagnostic | M1 landed; M2 shipped as RFC-0100; M3 unspent |
 | [0100](RFC-0100-a-rule-is-a-library.md) | A Rule Is a Library | Implemented |
-| [0101](RFC-0101-a-backend-is-an-emitter.md) | A Backend Is an Emitter | Proposed |
+| [0101](RFC-0101-a-backend-is-an-emitter.md) | A Backend Is an Emitter | Implemented (M1) |
 | [0102](RFC-0102-a-toolchain-is-a-dependency.md) | A Toolchain Is a Dependency | Proposed |
 
 ## The other documents here
