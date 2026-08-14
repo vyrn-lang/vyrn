@@ -248,6 +248,41 @@ export's signature — one more branch, on section id 0. The section wins over
 `hooks.exportReturns`, which stays as the fallback for a module from another
 producer.
 
+### M3b — the section carries the WHOLE boundary (implemented)
+
+M3 wrote down half of what a host cannot see, and left the shim guessing the
+rest. `String`, `Bool`, `Int32` and `UInt32` all cross as `i32`, and a `String`
+ARGUMENT to an import occupies two slots, `(i32, i64)` — the same shape an
+`(Int32, Int64)` pair has. So `wasi-min.js` inferred imports from the ABI shape
+(an `i32` followed by an `i64` WAS a String, with the collision written down as
+a caveat in `web/README.md`) and export ARGUMENTS from the JS runtime type of
+whatever the caller passed: `greet(42)` on a `String` parameter handed the module
+42 as a pointer and returned `"Hello, !"`, and a `UInt32` result over 2^31 came
+back negative. The compiler knows every one of these types exactly; a consumer
+inferring them from instruction shapes is guessing at something nobody has to
+guess at.
+
+The payload is versioned now, and states the DECLARED signature of every
+`export extern fn` and every `vyrn.*` import:
+
+```text
+u8            version = 2
+uleb          export count
+  per entry:  name:str  ret:kind  uleb param count  param:kind …
+uleb          import count
+  per entry:  name:str  ret:kind  uleb param count  param:kind …
+```
+
+`str` is a uleb length then UTF-8 bytes; `kind` is one of `unit bool string i32
+u32 i64 u64 f32 f64`. A module with nothing on the boundary carries no section.
+
+WHICH functions exist is a question the platform already answers —
+`WebAssembly.Module.imports` and `instance.exports` — so the shim asks it there
+and asks the section only for the types. The hand-rolled reader of the type,
+import, function and export sections is deleted, and with it `hooks.exportReturns`:
+there is exactly one producer of Vyrn wasm, and a module with no section is
+refused by name rather than guessed at.
+
 **This changes the shipped ABI**, which is why it is written here rather than in
 the phase that did it. The change is additive in both directions: an engine that
 does not know the name skips a custom section, and a host that does not read the
@@ -276,4 +311,9 @@ It is now.
    writes every `export extern fn` whose result is a `String` or a `Bool` into a
    custom section, `wasi-min.js` reads it in its existing section walk, and the
    five hand-written `exportReturns` maps are deleted. See the section above.
+4. **M3b — the whole boundary (implemented):** the section carries the declared
+   signature of every export AND every `vyrn.*` import, versioned; `wasi-min.js`
+   reads it instead of walking the module's bytes, and both the import shape
+   heuristic and the argument-by-JS-type encoding are deleted. See the section
+   above.
 

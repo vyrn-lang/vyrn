@@ -5393,3 +5393,69 @@ fn vyx_inlay_hint_cost_on_the_heaviest_vyx() {
         let _ = client.child.kill();
     }
 }
+
+/// The editor reads a pinned module through the same reader the build does, and
+/// therefore refuses the same two things the build refuses.
+///
+/// Both were live: this server kept its own copy of the project-context reader,
+/// justified by "the CLI is a binary crate, not linkable", and the copy split
+/// `vyrn.lock` inline and read a cached blob without hashing it. So a `vyrn.lock`
+/// with one specifier pinned twice — the shape a merge that appended instead of
+/// replacing produces — analyzed clean against the FIRST pin while `vyrn check`
+/// refused to build at all; and a tampered blob in `vyrn_vendor/` was served to
+/// hover, completion and diagnostics as if it were the reviewed module.
+#[test]
+fn a_pin_the_build_refuses_is_refused_in_the_editor() {
+    let root = std::env::temp_dir().join(format!("vyrn-lsp-pin-{}", std::process::id()));
+    let spec = "https://x.invalid/dep.vyrn";
+    let good = "export fn dep() -> Int64 { return 1 }\n";
+    let sha = vyrn_frontend::hash::sha256_hex(good.as_bytes());
+    let app = format!("import {{ dep }} from \"{spec}\"\nfn main() -> Int64 {{ return dep() }}\n");
+
+    // Case 1: the blob is there under the pinned name, but its bytes are not the
+    // pinned content.
+    let dir = root.join("tampered");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("vyrn_vendor/sha256")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{}").unwrap();
+    std::fs::write(dir.join("vyrn.lock"), format!("{spec}\t{spec}\t{sha}\n")).unwrap();
+    std::fs::write(
+        dir.join("vyrn_vendor/sha256").join(&sha),
+        "export fn dep() -> Int64 { return 99 }\n",
+    )
+    .unwrap();
+    let app_path = dir.join("app.vyrn");
+    std::fs::write(&app_path, &app).unwrap();
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&app_path), "vyrn", &app);
+    let text = read_diags_for(&mut client, "app.vyrn").to_string();
+    assert!(
+        text.contains("does not match its recorded sha256"),
+        "a tampered vendored blob must be refused, not analyzed: {text}"
+    );
+    let _ = client.child.kill();
+
+    // Case 2: one specifier, two pins. `vyrn check` stops; so does the editor.
+    let dir = root.join("dupe");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("vyrn_vendor/sha256")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{}").unwrap();
+    std::fs::write(
+        dir.join("vyrn.lock"),
+        format!("{spec}\t{spec}\t{sha}\n{spec}\t{spec}\tdeadbeef\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("vyrn_vendor/sha256").join(&sha), good).unwrap();
+    let app_path = dir.join("app.vyrn");
+    std::fs::write(&app_path, &app).unwrap();
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&app_path), "vyrn", &app);
+    let text = read_diags_for(&mut client, "app.vyrn").to_string();
+    assert!(
+        text.contains("pinned twice"),
+        "a lock the build refuses must not analyze clean: {text}"
+    );
+    let _ = client.child.kill();
+}

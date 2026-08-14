@@ -620,30 +620,74 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // because nothing knows what a program reaches until its bodies are walked.
     // This is where that is known.
     m.sweep();
-    export_returns(&mut m, &user);
+    abi_section(&mut m, &user, program);
     m.finish()
 }
 
-/// The `vyrn:exports` custom section (RFC-0012): every `export extern fn` whose
-/// result an `i32` cannot describe, and what it really is.
+/// How a value crosses the JS boundary, as the DECLARATION says rather than as
+/// the wasm slot happens to look. The two are not the same fact: `String`,
+/// `Bool`, `Int32` and `UInt32` all lower to a wasm `i32`.
 ///
-/// The wasm export ABI is lossy — `String`, `Bool` and `Int32` all lower to
-/// `i32` — so a host reading only the type section cannot tell a pointer from a
-/// number. Until now the page said which, by hand, in a `hooks.exportReturns`
-/// map per page. A name nobody listed came back as a number, and since RFC-0089
-/// M3b the same hint also decides the `free`, so a missed name leaked as well.
+/// `"opaque"` is unreachable — [`extern_abi_type_ok`] in the checker closes the
+/// domain to exactly these — but it is written down rather than asserted, so a
+/// later type that widens the domain arrives at the shim as a loud refusal
+/// instead of a silent mis-encoding.
 ///
-/// The compiler knows every export's return type. This writes it down.
-///
-/// Payload: a vector of pairs, each a wasm name (a length then its UTF-8 bytes)
-/// — `count`, then `name`, `kind` per entry, `kind` being `string` or `bool`.
-/// Every other result is unambiguous already and is left out, so a module with
-/// no such export carries no section.
-fn export_returns(m: &mut wasm::Module, user: &[&Function]) {
-    fn name(out: &mut Vec<u8>, s: &str) {
-        leb(out, s.len() as u32);
-        out.extend_from_slice(s.as_bytes());
+/// [`extern_abi_type_ok`]: vyrn_frontend::checker
+fn abi_kind(ty: &Type) -> &'static str {
+    match ty {
+        Type::Str => "string",
+        Type::Bool => "bool",
+        Type::Unit => "unit",
+        Type::Float => "f64",
+        Type::Float32 => "f32",
+        Type::Int => "i64",
+        Type::IntN { bits, signed } => match (bits, signed) {
+            (64, true) => "i64",
+            (64, false) => "u64",
+            (_, true) => "i32",
+            (_, false) => "u32",
+        },
+        _ => "opaque",
     }
+}
+
+/// The `vyrn:exports` custom section (RFC-0012 M3): the declared signature of
+/// every function that crosses the JS boundary, in both directions.
+///
+/// **Why the module carries this.** The wasm ABI is lossy in the one direction a
+/// host needs: `String`, `Bool`, `Int32` and `UInt32` all arrive as `i32`, and a
+/// `String` import arrives as two slots that look exactly like an `(Int32,
+/// Int64)` pair. `web/wasi-min.js` used to recover the difference by reading the
+/// module's own type/import/function/export sections and guessing from the
+/// shape — an `i32` followed by an `i64` IS a String — with the collision written
+/// down as a caveat in `web/README.md`, and export ARGUMENTS decided by the JS
+/// runtime type of whatever the caller happened to pass. Passing `42` to
+/// `greet(name: String)` handed the module 42 as a pointer.
+///
+/// M3 wrote down half of it: the `String`/`Bool` RESULTS. This writes the rest.
+/// The compiler knows every one of these types exactly, and a consumer inferring
+/// them from instruction shapes is guessing at something nobody has to guess at.
+///
+/// **Payload** (version 2):
+///
+/// ```text
+/// u8            version = 2
+/// uleb          export count
+///   per entry:  name:str  ret:kind  uleb param count  param:kind …
+/// uleb          import count  (the `vyrn.*` namespace)
+///   per entry:  name:str  ret:kind  uleb param count  param:kind …
+/// ```
+///
+/// `str` is a uleb length then UTF-8 bytes; `kind` is a `str` from the closed
+/// set [`abi_kind`] returns. A module with nothing on the boundary carries no
+/// section at all.
+///
+/// The section lists every declaration, including one `Module::sweep` dropped.
+/// That is deliberate and costs nothing: the shim learns WHICH functions exist
+/// from `WebAssembly.Module.imports` and `instance.exports`, which is what the
+/// platform already answers, and reads this only for the types it cannot.
+fn abi_section(m: &mut wasm::Module, user: &[&Function], program: &Program) {
     fn leb(out: &mut Vec<u8>, mut n: u32) {
         loop {
             let b = (n & 0x7f) as u8;
@@ -655,23 +699,37 @@ fn export_returns(m: &mut wasm::Module, user: &[&Function]) {
             out.push(b | 0x80);
         }
     }
-    let rows: Vec<(&str, &str)> = user
+    fn name(out: &mut Vec<u8>, s: &str) {
+        leb(out, s.len() as u32);
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn sig(out: &mut Vec<u8>, f: &Function) {
+        name(out, &f.name);
+        name(out, abi_kind(&f.ret));
+        leb(out, f.params.len() as u32);
+        for p in &f.params {
+            name(out, abi_kind(&p.ty));
+        }
+    }
+    let exports: Vec<&&Function> = user.iter().filter(|f| f.is_export_extern).collect();
+    // RFC-0043's three host-boundary names are lowered in place on every target,
+    // so they are not `vyrn.*` imports and the page never supplies them.
+    let imports: Vec<&Function> = program
+        .functions
         .iter()
-        .filter(|f| f.is_export_extern)
-        .filter_map(|f| match f.ret {
-            Type::Str => Some((f.name.as_str(), "string")),
-            Type::Bool => Some((f.name.as_str(), "bool")),
-            _ => None,
-        })
+        .filter(|f| f.is_extern && crate::host_boundary_extern(&f.name).is_none())
         .collect();
-    if rows.is_empty() {
+    if exports.is_empty() && imports.is_empty() {
         return;
     }
-    let mut payload = Vec::new();
-    leb(&mut payload, rows.len() as u32);
-    for (n, kind) in rows {
-        name(&mut payload, n);
-        name(&mut payload, kind);
+    let mut payload = vec![2u8];
+    leb(&mut payload, exports.len() as u32);
+    for f in exports {
+        sig(&mut payload, f);
+    }
+    leb(&mut payload, imports.len() as u32);
+    for f in imports {
+        sig(&mut payload, f);
     }
     m.custom("vyrn:exports", payload);
 }
