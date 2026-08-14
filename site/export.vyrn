@@ -26,11 +26,11 @@
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
 import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, hrefDocsStd, hrefGuide } from pages("./app/routes")
-import { published, navRows, hrefOf } from "./app/nav"
+import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { apiModules, apiEntries, apiHref } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { exploreRows } from "./app/explore"
-import { substring, indexOf, split } from "std/strings"
+import { substring, indexOf, split, replace } from "std/strings"
 import { startsWith } from "std/strpred"
 
 /// Every path the site publishes, from the router's own typed URL helpers. A
@@ -147,6 +147,40 @@ fn withIcon(html: String) -> String {
     }
 }
 
+/// `text` with every site-root URL it writes made relative to the document
+/// published for `path`, so ONE export works at any mount point.
+///
+/// This is the last thing done to a page, and it is done in one place for one
+/// reason: a URL is written in more places than a link helper can reach. The
+/// navigation goes through `hrefOf`, but the stylesheet and the script come
+/// from the layout's `head { … }` block, the icon is stamped by `withIcon`
+/// above, and a hundred sentences in the book and the reference name a page in
+/// hand-written prose — `<a href="/docs/std/arrays.html">std/arrays</a>`. All
+/// of them land in the same document, and all of them are an `href` or a `src`
+/// by the time they get here. Threading a depth through every one of those
+/// authors is a change to every one of them, and the next sentence somebody
+/// writes is root-absolute again.
+///
+/// `href` and `src`, and nothing else. `data-key` is deliberately left alone:
+/// it is the route's identity, the same string on every page that names it, and
+/// a differ that keyed on a relative URL would key the masthead differently at
+/// each depth. No other attribute in this export carries a URL — checked below,
+/// not assumed.
+///
+/// The leading space in the needle keeps the match on a whole attribute name,
+/// the way `attrValues` does further down. The second pair covers the same two
+/// attributes inside a JSON string, where the quote arrives escaped: the guide's
+/// payloads carry prose HTML, and a payload is consumed on the very page it was
+/// exported for, so its depth is this one.
+///
+/// Text can never look like an attribute here — `std/html` escapes `"` in text
+/// as `&quot;`, so `href="/` in a code sample is not this pattern.
+fn relativize(text: String, path: String) -> String {
+    let up = upTo(path)
+    let plain = replace(replace(text, " href=\"/", " href=\"" + up), " src=\"/", " src=\"" + up)
+    return replace(replace(plain, " href=\\\"/", " href=\\\"" + up), " src=\\\"/", " src=\\\"" + up)
+}
+
 /// Write one file. Returns 1 if it failed, so failures add up.
 ///
 /// The reason is PRINTED rather than counted. A CI log that says
@@ -178,7 +212,8 @@ fn exportPath(outDir: String, path: String) -> Int64 {
     }
     let data = route(dataRequest(path))
     let json = payloadName(name)
-    let bad = emit("\{outDir}/\{name}", withIcon(withLang(markCurrent(doc.body, path)))) + emit("\{outDir}/\{json}", data.body)
+    let document = relativize(withIcon(withLang(markCurrent(doc.body, path))), path)
+    let bad = emit("\{outDir}/\{name}", document) + emit("\{outDir}/\{json}", relativize(data.body, path))
     print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
     return bad
 }
@@ -384,6 +419,57 @@ test "every name in a module's index points at an export that is on the page" {
             assert(has(html, "id=\"e-\{e.name}\""))
         }
     }
+}
+
+/// The document this export actually writes for `path` — every stamp, in the
+/// order `exportPath` applies them. The tests below read this rather than the
+/// router's raw body, because the raw body is not what ships.
+fn publishedDocument(path: String) -> String {
+    return relativize(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path))), path)
+}
+
+/// How many times `needle` occurs in `hay`.
+fn countOf(hay: String, needle: String) -> Int64 {
+    return split(hay, needle).length - 1
+}
+
+test "a URL is written relative to the document that carries it" {
+    // The home page is at the root, so the root prefix is nothing at all.
+    assertEq(relativize("<a href=\"/docs.html\">", "/"), "<a href=\"docs.html\">")
+    assertEq(relativize("<link href=\"/style.css\"><script src=\"/widgets.js\">", "/"), "<link href=\"style.css\"><script src=\"widgets.js\">")
+    // One directory down, and two.
+    assertEq(relativize("<a href=\"/docs.html\">", "/guide/values"), "<a href=\"../docs.html\">")
+    assertEq(relativize("<script src=\"/widgets.js\">", "/docs/std/json"), "<script src=\"../../widgets.js\">")
+    // A fragment, an external URL and the route identity are left as they are.
+    assertEq(relativize("<a href=\"#main\">", "/docs/std/json"), "<a href=\"#main\">")
+    assertEq(relativize("<a href=\"https://x/y\">", "/guide/values"), "<a href=\"https://x/y\">")
+    assertEq(relativize("<a data-key=\"/docs.html\">", "/guide/values"), "<a data-key=\"/docs.html\">")
+    // The same two attributes inside a JSON string, where the quote is escaped.
+    assertEq(relativize("{\"p\":\"<a href=\\\"/docs.html\\\">\"}", "/guide/values"), "{\"p\":\"<a href=\\\"../docs.html\\\">\"}")
+}
+
+test "no published document names a root that only one host has" {
+    // The defect this gate exists for: every link, the stylesheet, both scripts
+    // and the icon shipped as `/style.css`, which is right at a domain root and
+    // 404 under `https://vyrn-lang.github.io/vyrn/`. The assertion is TOTAL —
+    // every `="/` left in the document must be a `data-key`, which is a route
+    // identity and not a URL — so an attribute nobody thought of here still
+    // fails, and so does the next hand-written `<a href="/…">` in the book.
+    for path in sitePaths() {
+        let doc = publishedDocument(path)
+        assertEq(countOf(doc, "=\"/"), countOf(doc, "data-key=\"/"))
+        // An empty href resolves to the page itself: a link that silently does
+        // nothing, which is what a careless "strip the slash" would produce.
+        assertEq(countOf(doc, " href=\"\""), 0)
+        assertEq(countOf(doc, " src=\"\""), 0)
+        // And the payload beside it, which carries the book's prose.
+        assertEq(countOf(relativize(route(dataRequest(path)).body, path), "=\\\"/"), 0)
+    }
+    // The depth is the page's own, and the two ends of the site prove it.
+    assert(has(publishedDocument("/"), "<link rel=\"stylesheet\" href=\"style.css\">"))
+    assert(has(publishedDocument("/docs/std/json"), "<link rel=\"stylesheet\" href=\"../../style.css\">"))
+    assert(has(publishedDocument("/docs/std/json"), "<script type=\"module\" src=\"../../widgets.js\">"))
+    assert(has(publishedDocument("/guide/values"), "<link rel=\"icon\" href=\"../favicon.svg\" type=\"image/svg+xml\">"))
 }
 
 test "a payload sits beside its document" {

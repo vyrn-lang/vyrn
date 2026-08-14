@@ -3,11 +3,12 @@
 // list, a link built from what was typed still looks like a link, and a marker
 // on the wrong row still marks something — so they are the three worth a test.
 //
-// `site/public/widgets.js` is a browser module: it imports `/hero.js` and
-// `/fresh.js` by the paths the SITE serves them from, which node cannot resolve.
-// So the file is evaluated here as a plain script in a stubbed context and the
-// rules are read off it. Nothing is copied into this file: rename either rule,
-// or change what it answers, and these tests fail.
+// `site/public/widgets.js` is a browser module: it imports its siblings and
+// derives the site's base from `import.meta.url`, neither of which a plain
+// script can do. So the file is evaluated here as a script in a stubbed context,
+// with the imports dropped and `import.meta.url` — a syntax error outside a
+// module — standing in as a literal. Nothing is copied into this file: rename
+// either rule, or change what it answers, and these tests fail.
 //
 // Run: node --test web/test/
 import { test } from "node:test";
@@ -16,7 +17,10 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const src = await readFile(new URL("../../site/public/widgets.js", import.meta.url), "utf8");
-const script = src.replace(/^import .*$/gm, "").replace(/^import\(.*$/gm, "");
+const script = src
+  .replace(/^import .*$/gm, "")
+  .replace(/^import\(.*$/gm, "")
+  .replace(/import\.meta\.url/g, JSON.stringify("https://host.test/base/widgets.js"));
 
 const nothing = () => null;
 const element = () => ({
@@ -28,7 +32,8 @@ const element = () => ({
 });
 const ctx = {
   window: {},
-  location: { pathname: "/guide/values.html" },
+  URL,
+  location: { pathname: "/guide/values.html", href: "https://host.test/base/guide/values.html" },
   matchMedia: () => ({ matches: false }),
   addEventListener: nothing,
   document: {

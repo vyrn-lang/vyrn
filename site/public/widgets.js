@@ -7,10 +7,18 @@
 //
 // No framework, no bundler, no dependency. Three files: this one, hero.js, and
 // fresh.js.
-import { mountHero } from "/hero.js";
-import { refreshRelease } from "/fresh.js";
-import { mountPlay } from "/play.js";
-import { runVyrn } from "/wasi-min.js";
+import { mountHero } from "./hero.js";
+import { refreshRelease } from "./fresh.js";
+import { mountPlay } from "./play.js";
+import { runVyrn } from "./wasi-min.js";
+
+// Where the site is. Every file this page loads is a sibling of this script, and
+// this script knows its own URL, so that is the whole derivation — no flag baked
+// in at build time, no root assumed. It is correct at a domain root, under
+// `/vyrn/` on GitHub Pages, behind a preview URL, and on `file://`. The imports
+// above are relative for the same reason: a module specifier resolves against
+// the module that wrote it.
+const SITE = new URL(".", import.meta.url);
 
 // Soft navigation across a static host: the payload for /philosophy.html lives
 // beside it in /philosophy.data.json, because a file host cannot vary on
@@ -317,7 +325,7 @@ function digestBytesDiffer(a, b) {
 /// than showing a number it did not compute.
 async function wasmDigest() {
   try {
-    const res = await fetch("/hero.wasm");
+    const res = await fetch(new URL("hero.wasm", SITE));
     if (!res.ok) return null;
     const bytes = new Uint8Array(await res.arrayBuffer());
     const run = await runVyrn(bytes, { onStdout: () => {}, onStderr: () => {} });
@@ -390,7 +398,7 @@ function parityWidget(root) {
     runBtn.textContent = label;
     if (!measured) {
       verdict.classList.add("bad");
-      verdict.textContent = "/hero.wasm did not load — nothing ran, so there is nothing to compare";
+      verdict.textContent = "hero.wasm did not load — nothing ran, so there is nothing to compare";
       return;
     }
     settle();
@@ -684,7 +692,7 @@ function exportHits(row, names) {
   box.className = "hits";
   for (const name of names) {
     const a = document.createElement("a");
-    a.href = "/docs/std/" + row.dataset.m + ".html#e-" + name;
+    a.href = new URL("docs/std/" + row.dataset.m + ".html#e-" + name, SITE).href;
     a.textContent = name;
     box.appendChild(a);
   }
@@ -849,7 +857,11 @@ function navOwns(href, path) {
 function markNav() {
   const path = location.pathname;
   for (const link of $$(".masthead .nav a")) {
-    const href = link.getAttribute("href");
+    // RESOLVED, not the attribute. The export writes every URL relative to the
+    // document that carries it, so the attribute on a chapter page reads
+    // `../docs.html` and would never equal a pathname. The URL constructor
+    // answers what the browser itself would navigate to, at any mount point.
+    const href = new URL(link.getAttribute("href"), location.href).pathname;
     const here = navOwns(href, path);
     if (here) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -912,4 +924,4 @@ boot();
 // Soft navigation replaces the page body, so every widget on the new page needs
 // booting again. `vyrn-nav.js` announces that it has swapped the DOM.
 document.addEventListener("vyrn:nav-end", boot);
-import("/vyrn-nav.js").catch(() => {}); // a hard navigation is a fine fallback
+import("./vyrn-nav.js").catch(() => {}); // a hard navigation is a fine fallback

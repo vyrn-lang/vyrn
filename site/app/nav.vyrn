@@ -11,7 +11,7 @@
 /// `/explore` is the module explorer. Both arrived as a directory drop plus a
 /// row here, which is what reserving them was for. A row is still only written
 /// when the route behind it exists — there is no placeholder page anywhere.
-import { substring } from "std/strings"
+import { substring, split, repeat } from "std/strings"
 import { Head, noHead, withTitle, withMeta } from "std/ui"
 
 /// The head every page shares: its title, the viewport (without which a page
@@ -45,9 +45,31 @@ export fn published(path: String) -> String {
     return substring(path, 1, path.byteLength) + ".html"
 }
 
-/// The URL a link uses for a route path.
+/// The URL a link uses for a route path, as the site's own root names it.
+///
+/// This is the route's IDENTITY — the string the navigation marker matches on,
+/// the string a `data-key` carries, the string one route compares to another.
+/// It is not what the published document says. `site/export.vyrn` turns every
+/// `href` and `src` it writes into a document-relative URL as the last thing it
+/// does to a page, with `upTo` below. Nothing here has to know where the site
+/// is served from, because nothing here writes the URL a browser reads.
 export fn hrefOf(path: String) -> String {
     return "/" + published(path)
+}
+
+/// The step back up to the site's root from the page published for `path`:
+/// `""` for `index.html`, `"../"` for `guide/values.html`, `"../../"` for
+/// `docs/std/json.html`.
+///
+/// A page's own depth is the only input, and that is the whole point. A
+/// build-time `--base` flag bakes one host into the output, and the next host
+/// breaks: the site shipped every link as `/style.css`, which is correct at a
+/// domain root and 404 under GitHub Pages' `/vyrn/`. A URL written relative to
+/// the document that carries it is correct at a domain root, under `/vyrn/`, on
+/// a fork's Pages, behind a preview URL, and opened from disk as `file://` —
+/// one artifact, no configuration, nothing to get wrong twice.
+export fn upTo(path: String) -> String {
+    return repeat("../", split(published(path), "/").length - 1)
 }
 
 /// The navigation, in reading order.
@@ -77,6 +99,13 @@ test "a route becomes one file, and a nested route keeps its directory" {
     assertEq(hrefOf("/compare"), "/compare.html")
     assertEq(published("/docs/std/json"), "docs/std/json.html")
     assertEq(hrefOf("/docs/std/json"), "/docs/std/json.html")
+}
+
+test "a page's climb back to the root is its own depth and nothing else" {
+    assertEq(upTo("/"), "")
+    assertEq(upTo("/philosophy"), "")
+    assertEq(upTo("/guide/values"), "../")
+    assertEq(upTo("/docs/std/json"), "../../")
 }
 
 test "the navigation covers every route but the home page" {
