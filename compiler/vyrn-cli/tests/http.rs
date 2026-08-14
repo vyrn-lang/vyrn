@@ -610,6 +610,149 @@ fn the_derived_line_carries_the_policy() {
 // than ship a test that fails for a reason that is not about `std/http`, the
 // wire claims live in one place and the policy claims live here.
 
+// ---- the URL boundary ------------------------------------------------------
+
+/// A value crosses the URL boundary in BOTH directions and is still the value: a
+/// `{name}` placeholder hands user code what the client encoded, and `createdAt`
+/// writes a `Location` that reads back as the field it was filled from. Same rule
+/// as the page router's (RFC 3986 §2.3, `std/codecs`), one layer up.
+///
+/// The awkward ones are all here because each breaks a different way: a space and
+/// a `/` are not path-segment bytes at all, `?` and `#` end the path, `%` starts
+/// an escape, `+` is a space in nobody's rule that applies here, an astral
+/// character is four bytes, and an ALREADY percent-encoded value is where a
+/// careless encoder double-encodes or a careless decoder decodes twice.
+///
+/// The malformed escapes are a 400 rather than the router's 404, and `nowhere`
+/// pins why that is not a routing answer: a path that matches no route at all
+/// gets it too, because the fault is in the request.
+#[test]
+fn a_placeholder_and_a_location_both_convert_between_value_and_wire() {
+    let dir = scratch("urlboundary");
+    write(
+        &dir,
+        "wire.vyrn",
+        r#"/// A tag, whose name is free text.
+export type Tag = { name: String }
+/// A lookup or a creation by name.
+export type TagReq = { name: String }
+/// A fallible creation, so `createdAt` has an `Ok` payload to fill from.
+export type TagResult = Result<Tag, String>
+"#,
+    );
+    write(
+        &dir,
+        "tags.vyrn",
+        r#"import { Tag, TagReq, TagResult } from "./wire"
+
+/// Echo back the name the path bound, so the test can see what user code got.
+export fn show(req: TagReq) -> Tag {
+    return Tag { name: req.name.copy() }
+}
+
+/// Create a tag, returning it so `createdAt` has a payload field to fill from.
+export fn make(req: TagReq) -> TagResult {
+    return Ok(Tag { name: req.name.copy() })
+}
+"#,
+    );
+    write(
+        &dir,
+        "tags.http.vyrn",
+        r#"import { http, Policy, Route, GET, POST } from "std/http"
+import { show, make } from http("./tags")
+
+export fn routes() -> Array<Route> {
+    return [GET(show("/{name}")), POST(make("/")).createdAt("/tags/{name}")]
+}
+"#,
+    );
+    write(
+        &dir,
+        "root.vyrn",
+        r#"import { mount, Route } from "std/http"
+import * as api from "./tags.http"
+
+fn hdr(r: Response, k: String) -> String {
+    return match r.headers[k] {
+        Some(v) => v.copy(),
+        None => "",
+    }
+}
+
+fn hit(label: String, method: String, path: String, body: String) {
+    let groups: Array<Array<Route>> = [api.routes()]
+    let line = match mount(Request { method: method.copy(), path: path.copy(), headers: [:], body: body.copy() }, groups, [], []) {
+        Some(r) => "\{r.status}|\{r.body}|\{hdr(r, "Location")}",
+        None => "none",
+    }
+    print("\{label}|\{line}")
+}
+
+fn main() -> Int64 {
+    hit("space", "GET", "/tags/a%20b", "")
+    hit("slash", "GET", "/tags/a%2Fb", "")
+    hit("question", "GET", "/tags/a%3Fb", "")
+    hit("hash", "GET", "/tags/a%23b", "")
+    hit("percent", "GET", "/tags/a%25b", "")
+    hit("plus", "GET", "/tags/a%2Bb", "")
+    hit("astral", "GET", "/tags/a%F0%9D%84%9Eb", "")
+    hit("encoded", "GET", "/tags/a%2520b", "")
+    hit("plain", "GET", "/tags/ab", "")
+    hit("query", "GET", "/tags/a%20b?q=a%zzb", "")
+    hit("nul", "GET", "/tags/a%00b", "")
+    hit("badhex", "GET", "/tags/a%zzb", "")
+    hit("truncated", "GET", "/tags/a%4", "")
+    hit("nowhere", "GET", "/nowhere/a%zzb", "")
+    hit("locspace", "POST", "/tags", "{\"name\":\"a b\"}")
+    hit("locslash", "POST", "/tags", "{\"name\":\"a/b\"}")
+    hit("locencoded", "POST", "/tags", "{\"name\":\"a%20b\"}")
+    hit("locplain", "POST", "/tags", "{\"name\":\"ab\"}")
+    return 0
+}
+"#,
+    );
+    let (ok, out) = run(&dir, "root.vyrn");
+    assert!(ok, "the boundary app must run:\n{out}");
+    // label | status | body | Location.
+    for want in [
+        // The read side: the wire spelling is the value's encoding, and what the
+        // procedure echoes back is the value.
+        "space|200|{\"name\":\"a b\"}|",
+        "slash|200|{\"name\":\"a/b\"}|",
+        "question|200|{\"name\":\"a?b\"}|",
+        "hash|200|{\"name\":\"a#b\"}|",
+        "percent|200|{\"name\":\"a%b\"}|",
+        "plus|200|{\"name\":\"a+b\"}|",
+        "astral|200|{\"name\":\"a\u{1D11E}b\"}|",
+        // Decoded ONCE: an encoded-looking value comes back as itself.
+        "encoded|200|{\"name\":\"a%20b\"}|",
+        // An already-unreserved value is untouched, so no existing route moves.
+        "plain|200|{\"name\":\"ab\"}|",
+        // The query is not the path: it has its own alphabet, nothing here
+        // decodes one, and a `%zz` in it is not this rule's business.
+        "query|200|{\"name\":\"a b\"}|",
+        // Not a URL — a fault in the request, not a missing resource.
+        "nul|400|the request path is not percent-encoded text|",
+        "badhex|400|the request path is not percent-encoded text|",
+        "truncated|400|the request path is not percent-encoded text|",
+        // Same answer where no route could have matched anyway: the check is the
+        // request's, ahead of routing, not a placeholder's.
+        "nowhere|400|the request path is not percent-encoded text|",
+        // The write side: the template writes the separators, the field supplies
+        // a value, so a `/` in the value is `%2F` and stops being one.
+        "locspace|201|{\"Ok\":{\"name\":\"a b\"}}|/tags/a%20b",
+        "locslash|201|{\"Ok\":{\"name\":\"a/b\"}}|/tags/a%2Fb",
+        // The double-encoding row, the classic failure in the other direction: a
+        // value that looks encoded is a value, and `/tags/a%2520b` is the URL
+        // that reads back as it.
+        "locencoded|201|{\"Ok\":{\"name\":\"a%20b\"}}|/tags/a%2520b",
+        "locplain|201|{\"Ok\":{\"name\":\"ab\"}}|/tags/ab",
+    ] {
+        assert!(out.contains(want), "missing `{want}`:\n{out}");
+    }
+}
+
 // ---- M3a: `sse` is not a `Route`, and `mount` takes both --------------------
 //
 // The wire end of this — the header block, the frames, the 204, and the

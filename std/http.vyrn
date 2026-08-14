@@ -48,7 +48,14 @@ import { fnv1aStr, sha1 } from "std/hash"
 // GUID))`, both halves already in std and both pure. `sha1` is there as a nonce
 // transform rather than as a security primitive, which is the first thing its
 // doc comment says.
-import { base64EncodeBytes } from "std/codecs"
+// The URL boundary's two halves, one module over from the handshake's: a path
+// segment is WIRE text and a placeholder binds a VALUE, so `urlDecode` converts
+// on the way in (`httpMatch`) and `urlEncode` on the way out (`httpFill`). RFC
+// 3986 §2.3 — the unreserved set passes, every other byte is `%XX` — is the same
+// alphabet `std/ui`'s router and typed-URL helpers use, and one alphabet across
+// the repo is the point: a value that crosses this boundary in either library
+// comes back the value it was.
+import { base64EncodeBytes, urlDecode, urlEncode } from "std/codecs"
 import { civil, fromMillis, hour, minute, second } from "std/time"
 
 // The procedure rule, imported rather than restated: a projection publishes the
@@ -827,6 +834,36 @@ fn httpLastEventId(req: Request) -> Int64 {
 /// event stream. An app with neither writes `[], []` and pays a word.
 export fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> Option<Response> {
     httpCheckMount(groups, live, sockets)
+    // A path with a malformed escape is not a URL, and that is a fault in the
+    // REQUEST rather than in the resource namespace — 400, not 404.
+    //
+    // The two answers are both defensible and this one is what the surrounding
+    // code already says: `httpOpenSocket` answers 400 for an upgrade it cannot
+    // read, in the same shape, for the same reason — the client sent something
+    // the protocol does not admit. It is also what a real server does with a
+    // request line it cannot parse (nginx, Apache and Go's `http.Server` all
+    // refuse a bad escape with 400; Express 400s the same fault at the one place
+    // it decodes). And it is the answer a caller can act on: a 404 says "no such
+    // resource, try another path", which is advice about a name that names
+    // nothing anywhere, while a 400 says "fix the escape you sent".
+    //
+    // `std/ui`'s router 404s the same input, and the two do not disagree: neither
+    // hands wire bytes to user code, and each refuses in the vocabulary it has —
+    // a router that only matches routes has one answer, a server has two. A page
+    // tree mounted HERE gets this one, because `mount` is the front door.
+    //
+    // Checked once, over the whole path, ahead of every route: the fault belongs
+    // to the request, so a route that binds no placeholder and a path that
+    // matches nothing get the same answer as the one that does.
+    if httpIsUrl(req.path) == false {
+        return Some(Response {
+                status: 400,
+                contentType: "text/plain",
+                body: "the request path is not percent-encoded text",
+                vary: "",
+                headers: [:],
+            })
+    }
     for w in sockets {
         if let Some(ps) = httpSocketMatch(w, req) {
             return Some(httpOpenSocket(w, req, ps))
@@ -1110,10 +1147,24 @@ fn httpText(v: Json) -> String {
 /// `"/pastes/{id}"` with each `{name}` replaced by that payload field. An unknown
 /// name is left verbatim: a wrong `Location` should be visible in the URL, not
 /// silently shortened to one that resolves to something else.
+///
+/// The value is `urlEncode`d, because the TEMPLATE writes the URL and the field
+/// only supplies a value — the write side of the same boundary `httpMatch` reads.
+/// The separators are the template's, so a `/` inside a value becomes `%2F` and
+/// stops being one: `createdAt("/tags/{name}")` over a name of `a/b` writes
+/// `/tags/a%2Fb`, the one URL that reads back as that name.
+///
+/// A value that already LOOKS encoded is encoded again — `a%20b` writes
+/// `a%2520b` — because it is a value like any other and the alternative is a
+/// codec that guesses. Nothing in the repo passes a pre-encoded value: every
+/// `createdAt` template fills from an id (`examples/bin` hex, `examples/fullstack`
+/// an integer), all unreserved, so every existing `Location` is byte-identical.
+/// A caller wanting a URL through here verbatim is asking for a template rather
+/// than a field, and the template is the half that is not encoded.
 fn httpFill(template: String, body: String) -> String {
     let mut out = template.copy()
     for f in httpPayload(body) {
-        out = replace(out, "{" + f.key + "}", httpText(f.value))
+        out = replace(out, "{" + f.key + "}", urlEncode(httpText(f.value)))
     }
     return out
 }
@@ -1169,8 +1220,22 @@ fn httpMatch(r: Route, req: Request) -> Option<Map<String, String>> {
     let mut i = 0
     while i < pat.length {
         if httpIsPlaceholder(pat[i]) {
-            ps[httpPlaceholderName(pat[i])] = got[i].copy()
+            // The one place a segment becomes a value, so the one place the
+            // conversion belongs: `/tags/{name}` over `/tags/a%20b` binds `a b`,
+            // and `%2F` binds a `/` that was never a separator. `mount` already
+            // refused a path that does not decode, so the `else` is not the 404
+            // this fault gets — it is the guarantee that a caller reaching here
+            // some other way declines rather than binding wire bytes.
+            if let Some(v) = urlDecode(got[i]) {
+                ps[httpPlaceholderName(pat[i])] = v
+            } else {
+                return None
+            }
         } else {
+            // A literal segment IDENTIFIES itself rather than carrying a value,
+            // and is compared as written. Treating `/%6Eotes` as `/notes` is
+            // percent-encoding NORMALISATION, a separate rule from this one, and
+            // no pattern in the repo escapes a byte it never had to.
             if pat[i] != got[i] {
                 return None
             }
@@ -1178,6 +1243,17 @@ fn httpMatch(r: Route, req: Request) -> Option<Map<String, String>> {
         i = i + 1
     }
     return Some(ps)
+}
+
+/// Whether the path is percent-encoded text — whether it is a URL, in other
+/// words. Query included in the argument and excluded from the question: the
+/// query has its own alphabet (`+`, `&` and `=` mean something there) and nothing
+/// here decodes one.
+fn httpIsUrl(path: String) -> Bool {
+    return match urlDecode(httpPathOnly(path)) {
+        Some(decoded) => true,
+        None => false,
+    }
 }
 
 /// The request path without its query string. `path` carries the query as sent
