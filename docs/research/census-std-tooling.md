@@ -179,7 +179,7 @@ Reproduced with a contract whose procedure takes a bare scalar
 ```
 
 `#/components/schemas/Int64` resolves to nothing in the emitted document —
-a reference a resolver refuses, i.e. the #171 class ("a document a parser
+a reference a resolver refuses, i.e. the #169 class ("a document a parser
 refuses is not output") in the one emitter that already migrated to the
 `std/json` tree.
 
