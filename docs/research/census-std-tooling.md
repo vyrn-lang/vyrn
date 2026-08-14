@@ -185,3 +185,380 @@ documents whatever it is handed. A scalar parameter is legal under
 `$ref` for a named type, an inline schema (or `{}`) otherwise. Cost: a
 conditional; the document for every well-formed contract is byte-identical.
 
+### 1.4 CONFIRMED — High. The derived client dedupes re-emitted types by NAME alone, and a collision silently retypes another module's procedure
+
+`rpcClientTypes` (`std/rpc.vyrn:1238-1253`) re-emits every reachable type
+declaration into the client module — a recorded decision with its argument
+("re-emitted rather than imported: importing would put the api modules — and
+therefore their bodies — into the client build", `std/rpc.vyrn:1230-1232`).
+That part is design, not defect.
+
+The dedupe is the defect: `std/rpc.vyrn:1245` keeps the FIRST declaration per
+name (`rpcListContains(seen, t.name)`), comparing nothing else. Two api
+modules declaring the same type name with different shapes are legal — each
+module's own contract validates in isolation — and the collision is resolved
+by silently dropping one shape.
+
+Reproduced. `api/users.vyrn` declares `CreateReq = { name: String }`;
+`api/posts.vyrn` declares `CreateReq = { title: String, body: String }`.
+`vyrn emit-gen` on `import { … } from client("./api")`:
+
+```vyrn
+export type CreateReq = { title: String, body: String }   // posts' shape won
+…
+export fn usersCreate(req: CreateReq, cb: fn(RpcReply<UserRes>)) {
+    let id = vyrnRpcCall("usersCreate", "/_/users/create", toJson(req))
+```
+
+`usersCreate` is now typed by POSTS' record. The client compiles clean, the
+symbol map records `CreateReq`'s origin as `api/posts.vyrn` only, and every
+call to `usersCreate` serializes `{title, body}` at a server validating
+`{name}` — a 422 on every request, discovered at runtime, from a generator
+that had both declarations in hand.
+
+The base change already exists in a sibling: PR #169 gave `std/graphql` a
+name registry (`gqlDefine`) where "a repeat is an RFC-0099 `Error` naming both
+routes rather than a silent rename". The same registry in `rpcClientTypes` —
+same name, different `t.source`, `report(Error, …)` naming both files —
+deletes the silent pick. Cost: contracts that today collide benignly
+(identical source text in two modules) can stay deduped by comparing the
+source, so nothing working breaks.
+
+### 1.5 CONFIRMED — Medium. Five modules parse a record's fields back out of `TypeInfo.source`, each with its own parser
+
+`moduleInterface` reflection hands a type over as its SOURCE TEXT, so every
+generator that needs field structure re-derives it by parsing Vyrn:
+
+| module | parser | site |
+|---|---|---|
+| `std/http` | `lex()` walk at brace depth 1 | `std/http.vyrn:1415` |
+| `std/cli` | the same walk, restated | `std/cli.vyrn:246` (its own doc: "the `std/http:httpFields` walk", `std/cli.vyrn:11`) |
+| `std/ui` | a hand-rolled byte splitter (`uiRecordBody`/`uiSplitFields`/`uiParseFields`) | `std/ui.vyrn:825-908` |
+| `std/graphql` | `gqlSplitDecl` | `std/graphql.vyrn:259,659,688,834,1932` |
+| `std/connect`, `std/rpc` | no parsing, but verbatim `t.source` splicing | `std/connect.vyrn:343`, `std/rpc.vyrn:534,1247` |
+
+Four independent parsers for one grammar the compiler parsed once already —
+it BUILT the interface from the AST, rendered the declaration back to text,
+and each consumer un-renders it. `std/ui`'s copy is brace-aware but not
+comment-aware or string-aware; `uiSplitFields` splits on top-level commas by
+byte scanning (`std/ui.vyrn:847-868`), so a field type spelling containing a
+comma inside a string-refinement (`String where value =~ "a,b"`) would
+mis-split — the same class as #168's wrong-alphabet scan, latent because
+`Params` records are simple today.
+
+The base change: `TypeInfo` carries structured fields (name, type spelling,
+per-field doc) the way `FnInfo` already carries `params`. RFC-0098 M3 records
+the per-field-docs half of this as a planned compiler change
+(`std/cli.vyrn:31-34`); the field-structure half is what deletes the four
+parsers. Cost: a reflection-surface addition in the frontend and a gen-cache
+format bump; the four parsers and their tests (`std/ui.vyrn:2761-2812` pin
+the splitter's brace behaviour) all delete.
+
+### 1.6 PLAUSIBLE — Low. Three hand-rolled insertion sorts, because `std/arrays` has no sort
+
+`oaSorted` (`std/openapi.vyrn:106-124`), `sortedCopy`
+(`std/bench.vyrn:39-58`), and the ICU selector sort inside
+`joinSortedSelectors` (`std/i18n.vyrn:505-510`, "insertion sort (selector
+lists are tiny)") are the same algorithm three times. `std/arrays` (RFC-0023)
+ships generic `map`/`filter`/`fold`/`includes` and stops short of `sort`.
+String `<` ordering exists (RFC-0022), so `sort(Array<String>)` — or
+`sortBy` under a protocol bound — is ordinary Vyrn today. Cost: one function
+and three deletions; the only reason it does not exist is that nobody moved
+the third copy into the library.
+
+### 1.7 PLAUSIBLE — Medium. The generated router carries its own runtime as quoted text in every output, instead of importing it
+
+`uiFixedRuntime` (`std/ui.vyrn:1565-1637`), `uiHeadRuntime`
+(`std/ui.vyrn:1641-1659`) and `uiErrorRuntime` (`std/ui.vyrn:1664-1681`) are
+fixed, parameterless blocks of Vyrn — a segment splitter, an Option probe,
+the 404/error pages, head-merging — spliced verbatim into every generated
+router. The emitted functions live in the router's flat namespace, which is
+why they wear the `uiRoute…` prefix ("prefixed so it never clashes with page
+or app names", `std/ui.vyrn:1562-1564`) — a collision-avoidance convention
+that exists only because the code is spliced rather than imported.
+
+The same file already does it the other way: the generated module IMPORTS its
+runtime helpers from `std/ui` when they are `export fn`s
+(`std/ui.vyrn:2241-2244` emits `import { uiWantsData, uiPayload, … } from
+"std/ui"`), and `std/graphql` states the division as a principle — runtime
+code "lives in this file so the generated module is nothing but an import
+block and a resolver table — the same division `std/ui` draws"
+(`std/graphql.vyrn:883-889`).
+
+The one genuine blocker is that `uiRouteNotFound`/`uiRouteError` reference
+`Request`/`Response`/`Issue`/`document`/`el`/`text`, which resolve in the
+generated module's context — but `std/ui` itself imports `std/html`
+(`std/ui.vyrn:59`) and could own these outright. The base change: promote the
+three quoted blocks to `export fn`s of `std/ui` and emit three import lines.
+What deletes: the quotes, the prefix convention's reason, and ~150 lines of
+every generated router. Cost: the emitted module's byte shape changes (golden
+tests re-pin); `RoutePath`-adjacent code that assumed no `std/ui` runtime
+import gains one.
+
+---
+
+## Section 2 — tooling: the LSP, web/, site/, the play crate, genwasm
+
+### 2.1 CONFIRMED — High. The reflected `Token` drops the extent the lexer had, so two site modules re-scan the source to recover it
+
+`compiler/vyrn-frontend/src/interp.rs:623-659` builds the RFC-0054 `Token`
+as `{kind, text, line, col}` — decoded text, no end position, no trivia. So
+`site/app/hl.vyrn:201-287` carries `lineStarts`/`scanString`/`scanToEol`/
+`scanNumber`/`extentOf` plus a second `//`-trivia scanner
+(`site/app/hl.vyrn:316-333`) — roughly 110 lines re-deriving where each
+token ENDS, with an admitted ceiling (an interpolation ends the string scan
+early, `hl.vyrn:219-221`). `site/app/apidoc.vyrn:39-104` does it again at
+declaration granularity (`offsetOf`/`sigEnd`/`trimTail`; `sigEnd`'s own doc
+records that getting the rule order wrong "shipped ten unbalanced
+signatures").
+
+The counter-example is in-tree: `compiler/vyrn-play/src/lib.rs:162-201`
+colours the same language in ~25 lines with no scanner, because it sits on
+`lexer::lex_with_trivia`, which already yields verbatim text and trivia.
+
+Base change: widen the reflected record (`interp.rs:626-634,646-656`) with
+`endLine`/`endCol` (or the raw span) and route `lex()` through
+`lex_with_trivia`. Cost: two field lists, a prelude record, a gen-cache
+format bump; both site scanners shrink to lookups.
+
+### 2.2 CONFIRMED — High. `web/wasi-min.js` parses the wasm binary to re-learn signatures the compiler knows and already half-writes down
+
+`web/wasi-min.js:57-150` is a hand-rolled reader of the type/import/
+function/export sections ("the JS WebAssembly API exposes names but not
+types"), feeding a String-detection heuristic at `wasi-min.js:328-340`
+(an `i32` followed by an `i64` IS a String) whose collision case is a
+documented caveat (`web/README.md:68-70`), plus an argument encoder deciding
+slots by JS runtime type (`wasi-min.js:421-448`).
+
+Meanwhile `compiler/vyrn-codegen/src/direct.rs:642-677` already emits a
+`vyrn:exports` custom section — but only `name → "string"|"bool"` for
+RESULTS. `web/README.md:122-125` states the principle this census would
+apply: "The compiler is the thing that knows, and it writes the section
+now." It just stops at results.
+
+Base change: the custom section carries the full declared signature of every
+`export extern fn` and `vyrn.*` import. `readModule` collapses to a ~20-line
+custom-section read; the ABI heuristic and its caveat delete. Cost: a
+versioned signature table in `direct.rs` (sibling census's crate — flagged,
+not claimed) and a shim rewrite.
+
+### 2.3 CONFIRMED — High. The LSP re-implements the CLI's project-context reader because `vyrn-cli` is a binary crate — and the copy has drifted on the exact rule it cites
+
+`compiler/vyrn-lsp/src/main.rs:162-177` (`std_root`, "Mirrors `vyrn`'s
+discovery"), `:181-188` (`real_path`), `:198-235` (`find_manifest`, "A
+compact duplicate of `vyrn`'s reader (the CLI is a binary crate, not
+linkable)"), `:286-304` (an inline `vyrn.lock` TSV parser), `:350-358`
+(`gen_cache_dir`, "kept byte-identical to the CLI's") duplicate
+`compiler/vyrn-cli/src/main.rs:536-551,603-610,620-676` and
+`vyrn-cli/src/remote.rs:195-225`.
+
+The drift: the CLI canonicalizes the audience base
+(`vyrn-cli/src/main.rs:652-657`); the LSP passes the raw walked-up directory
+(`vyrn-lsp/src/main.rs:218-223`) — precisely the "second spelling of a path
+(case, a junction)" divergence the LSP's own comment at `:219-221` says it
+avoids. The parenthetical IS the base decision: nothing prevents a `[lib]`
+target on `vyrn-cli` (or a `project` module in the frontend) owning manifest
+discovery, canonicalization, lockfile reading and cache paths. Cost: one
+`[lib]` stanza and ~150 moved lines; both binaries become consumers.
+
+### 2.4 CONFIRMED — Medium. One LSP file answers "does this root call a generator?" twice — once structurally, once by substring
+
+`vyrn-lsp/src/main.rs:858-875` (`is_dev_entry`) lexes and parses imports and
+matches `ImportSource::Generator`. `main.rs:3154-3200` answers the same
+question with `src.contains("rpc(")` against two string tables
+(`RPC_GENERATORS`, `MAP_GENERATORS`) that also match a comment, a local
+`fn http(`, or `rpcClient(` under the `client(` entry — each false positive
+costing a full `analyze_doc` of an unrelated root. Base change: give
+`mounting_roots` the parse `is_dev_entry` already performs; the tables
+become name lists. Cost: ~10 lines.
+
+### 2.5 CONFIRMED — Medium. Hover text is rendered, then parsed back to recover the value that produced it
+
+`vyrn-lsp/src/main.rs:3762-3769` recovers a class name via
+`hover.ends_with("— safelisted (app-styled)")` + `strip_prefix("**\`")`,
+re-reading the string `vyrn-frontend/src/symbols.rs:1374` formatted from a
+token it held structurally; `main.rs:887-914` (`fence_signature`) re-decides
+"is this a signature" by testing rendered prose against nine keyword
+prefixes. This is the diagnostics-through-prose finding (#177's class) alive
+in hover. Base change: `class_token_hover`/`resolve` return a small struct
+beside the prose; the adapter renders. Cost: one struct, two call sites,
+re-pinned hover tests.
+
+### 2.6 CONFIRMED — Medium. The RPC dispatcher name is derived in three languages, in a file whose own comment forbids exactly that
+
+`web/vyrn-rpc.js:62-66` explains the derived PATH is passed as an argument
+because "inverting the path template in the host would be a second
+implementation of the derivation rule" — then `web/vyrn-rpc.js:34-36`
+implements `"vyrnRpcDone" + capFirst(proc)` anyway, byte-identically
+duplicated at `web/vyrn-query.js:35-38`, and predicted a third time in Rust
+(`vyrn-lsp/src/rename.rs:169-202`, where a failed prediction refuses the
+whole rename). Base change: pass the dispatcher name as one more argument on
+the `vyrnRpcCall` extern, exactly as the path already is, and record the
+generated prefix in `MappedSymbol.derived`
+(`vyrn-frontend/src/symbolmap.rs:47-58` — an open string-keyed slot). Cost:
+one extern argument in `std/rpc`, one map key; both JS copies and the Rust
+prediction delete.
+
+### 2.7 CONFIRMED — Medium. `site/export.vyrn` maintains an asset copy-table, an SVG-only favicon, and two CI copy steps because `writeFileBytes` does not exist
+
+`site/export.vyrn:192-206` is an 11-row source→name table whose doc states
+the reason ("`writeFile` takes a `String`, and a wasm module is not text"),
+`export.vyrn:140-143` records the favicon constraint, and
+`.github/workflows/site.yml:90-98,107-115` repeat it as two `cp` steps.
+`readFileBytes` exists (`vyrn-frontend/src/checker.rs:6157`); its write twin
+never shipped. Base change: `writeFileBytes(path, Array<UInt8>)`; `assets()`
+becomes a `listDir` walk and both workflow steps delete. Cost: one builtin
+across the engines (RFC-0014's pattern).
+
+### 2.8 CONFIRMED — Medium. Two web tests build a fake browser because the served JS lives in two directories
+
+`web/test/explore-search.test.mjs:18-45` and
+`web/test/inline-copy.test.mjs:18-45` share a byte-identical block that
+regex-strips `import` lines out of `site/public/widgets.js`, stubs
+`document`/`matchMedia`, and runs the result in a `node:vm` realm (forcing a
+cross-realm workaround at `explore-search.test.mjs:52-54`) — while
+`web/test/dom-svg.test.mjs:20-27` tests `web/vyrn-dom.js` with a plain
+`await import`. The difference: `web/*.js` imports relatively;
+`site/public/*.js` imports by served-root path because the export table
+flattens two directories into one root. Base change: one on-disk home for
+browser JS so specifiers are relative both places, plus a `document` guard
+on `widgets.js`'s boot. Cost: a file move; four tests lose the vm harness.
+
+### 2.9 Assorted smaller mechanisms (all traced)
+
+- **genwasm's `UNSERVED` scan** (`vyrn-genwasm/src/lib.rs:61,125-135`): a
+  per-generation AST walk declining modules that CONTAIN a write builtin,
+  which its own comment concedes the purity check already forbids calling
+  (`checker.rs:10369-10375`). PLAUSIBLE deletion — needs one check that the
+  lowering path fails cleanly for unreachable write calls.
+- **Closed sets restated across the boundary**: the contextual-keyword list
+  in `vyrn-play/src/lib.rs:121-123` = `site/app/hl.vyrn:159-161`; the HTML
+  void-element set in `web/vyrn-dom.js:39-42` = `std/html.vyrn:317-325`
+  (where the JS copy defends an invariant `el()` itself does not enforce,
+  `std/html.vyrn:164-166`); `site/app/code.vyrn:36-82` is a third HTML
+  escaper, disagreeing with `std/html`'s private pair on the apostrophe,
+  written only because `escapeText`/`escapeAttr` are not exported.
+- **`vyx_script` split four times**: `vyrn-lsp/src/contracts.rs:127-133`,
+  `vyrn-lsp/src/rename.rs:274-280` (with its own test), plus copies in
+  `vyrn-cli/src/main.rs:1596` and `vyrn-frontend/src/contracts.rs:699` —
+  the LSP-internal pair is a one-import fix today.
+- **`spells_type`** (`vyrn-lsp/src/main.rs:2278-2310`) re-derives "did the
+  author write the type" by scanning the declaration line for `:`, because
+  `LocalBinding` merged the checker's inferred type with the annotation and
+  erased which it was (`symbols.rs:2301-2306`). One `annotated: bool` at the
+  merge site deletes the scan.
+- **`site/app/apidoc.vyrn:39-205`** rebuilds `{name, kind, signature, doc}`
+  from raw `lex()` tokens although the frontend returns exactly that shape
+  as `ModuleDoc` (`symbols.rs:2808+`) to `vyrn doc` — the comptime surface
+  never got a `moduleDoc(path)` builtin. Lands fully only with 2.1.
+- **EXPECTED_CHECK_FAILURE prose twins**: eight examples carry a comment
+  saying they are listed in `vyrn-cli/tests/common/mod.rs:35-146`; the list
+  itself is the sibling census's territory, but the corpus-side mechanism —
+  an example's expectation living in another crate — would delete under a
+  `//! check-fails:` header directive.
+
+---
+
+## Section 3 — the gates: .github/workflows, release, and what no gate proves
+
+The workflow findings divide into gates that cannot fail, claims no gate
+proves, and provisioning for dead code. All were traced to the exact shell
+or Rust logic; the four most severe:
+
+### 3.1 CONFIRMED — High. Nine of the twelve `vyrn-codegen` integration tests skip silently in every CI job
+
+`vyrn-codegen/tests/layout_vs_clang.rs:168-186`, `wasm_runs.rs:95-290` (five
+tests), `shim_link.rs:225-231`: each is a plain `#[test]` whose body is
+`let Some(..) = <tool lookup> else { eprintln!("NOTE: …"); return; }` — an
+early return, not a panic, and none routes through `common::require_tools`,
+so `VYRN_REQUIRE_TOOLS=1` (`ci.yml:32`) does not bite. No job that runs them
+supplies `wasmtime`/`WASI_SYSROOT` (`ci.yml:115-117` runs the workspace
+suite with neither; the parity and gen-engine jobs filter to `vyrn-cli`
+tests only, `ci.yml:213,267-268`). The layout engine's ground-truth-vs-clang
+check has never executed in CI — and `ci.yml:151-156` cites that very test
+as the reason an ARM parity leg would add nothing.
+
+### 3.2 CONFIRMED — High. Both wasm-toolchain fetches download two tarballs for a dead code path
+
+`ci.yml:196-203` and its byte-identical copy at `ci.yml:246-253` fetch
+wasi-sysroot + builtins + wasmtime. The only readers of
+`WASI_SYSROOT`/`WASI_BUILTINS` are `vyrn-codegen/src/toolchain.rs:839,843`
+inside `shim_wasm()` — which has NO production caller (its one call site is
+the never-running test of 3.1) — and the exports at `ci.yml:265-266` are
+themselves built from constructs that cannot fail (`echo <glob>` and
+`find | head -1` both exit 0 on no match). The gen-engine job needs nothing
+from the cache at all (its wasmtime is an embedded crate, `ci.yml:242`;
+RFC-0076 M7 moved the shim to the direct backend,
+`vyrn-genwasm/src/lib.rs:1245`). Base change: delete `shim_wasm()` + its
+test, then the gen-engine job's whole fetch/cache/export block deletes and
+parity's collapses to one wasmtime curl.
+
+### 3.3 CONFIRMED — High. Nothing in `site/` is gated before merge, and the site test loop omits the highlighter it names
+
+`site.yml:19-29` triggers on release/workflow_run/dispatch/cron — no
+`pull_request`; `ci.yml` never touches `site/`. A PR breaking any site
+module merges green and turns the Pages deploy red afterwards. Inside the
+job, `site.yml:64` hardcodes 13 files while `site/app/` holds 14 modules:
+`hl.vyrn` (6 test blocks) and `facts.vyrn` (3) never run — and the step's
+own comment claims "the other modules check the highlighter", which is
+exactly what is not run. The fmt step two steps down already uses the glob.
+Compounding: `vyrn test` on a file with zero tests prints "no tests" and
+exits 0 (`vyrn-cli/src/main.rs:2933-2937`), so a module silently losing its
+tests keeps the loop green.
+
+### 3.4 CONFIRMED — High. 48 std test blocks run nowhere
+
+There is no sweep over `std/` anywhere in the Rust suite (the only
+`read_dir` sweeps cover `examples/`). Cross-referencing the 23 std modules
+carrying `test "` against every `vyrn test <path>` invocation: `std/i18n`
+(16 blocks), `std/args` (8), `std/jsondec` (7), `std/bench` (5), `std/diag`
+(4), `std/math` (3), `std/openapi` (3), `std/connect` (2) never run in any
+gate. Base change: one `read_dir("std")` test asserting
+`success && !contains("no tests")` — the `parity.rs` pattern — which also
+deletes the need for the 15 hand-written per-module wrappers.
+
+### 3.5 The rest, compressed
+
+- **Release requires nothing**: `release.yml:7-10` fires on any `v*` tag
+  with no needs/status check — a tag at a red commit ships (CONFIRMED).
+- **The wasm smoke never runs its module**: `release.yml:167-168` is
+  `test -s hello.wasm`; the release notes promise a working wasm target.
+  Node is on every runner; `WebAssembly.compile` is a one-line upgrade
+  (CONFIRMED).
+- **The install scripts are executed by nothing** — including the checksum
+  refusal README:196 advertises; `install.sh:13` documents a `VYRN_REPO`
+  hook "used by the test harness" and no harness exists (CONFIRMED).
+- **The bench gate is doubly vacuous**: the placeholder baseline makes every
+  bench `New` (self-documented), and a bench DELETED from the corpus is
+  `MissingFromRun`, which no path fails on (`vyrn-cli/src/main.rs:3557-3586`)
+  — plus the loop compares per-example against a whole-corpus baseline, so
+  the missing-signal is pre-flooded (CONFIRMED).
+- **Shell-contract asymmetry**: the test job sets `bash` defaults (pipefail
+  on, `ci.yml:78-85`); the bench job doesn't, so its corpus-discovery grep
+  (`ci.yml:303`) silently degrades to an empty loop where the test job's
+  identical pattern would fail (CONFIRMED).
+- **`paths-ignore: '**.md'`** makes the docs-drift gate one-directional: a
+  commit editing only `docs/api/*.md` runs no workflow at all (CONFIRMED).
+- **README vs workflows**: README:265 still says the test job runs "on
+  Linux" (it is a four-platform matrix since #174); README:271 calls
+  benchmarks "informational" while `ci.yml:278-285` argues the opposite;
+  README's hand counts (32 std modules / 141 examples / 95 RFCs) are 37 /
+  160 / 99 — the site generates and gates the same numbers, README states
+  them (CONFIRMED).
+- **"every one of them on all three backends"** (`site/app/repo.vyrn:13-14`,
+  README:44) overstates by the 17 skip-listed examples
+  (`EXPECTED_CHECK_FAILURE` 16 + `WASM_ONLY` 1) (CONFIRMED).
+
+### 3.6 CONFIRMED — Medium. `docs/api/` is 38 committed generated files with no reader, kept alive by a four-legged drift gate and a `.gitattributes` clause
+
+The chain: commit generated output → it can drift → add `--verify`
+(`ci.yml:125-130`, run once per matrix leg) → the gate compares bytes →
+Windows checkouts could change bytes → `.gitattributes:5-7`. Nothing
+consumes the directory: the website explicitly refuses to
+(`site/app/apidoc.vyrn:1-12` — rendering the Markdown back "loses on its own
+terms", so it reads `std/*.vyrn` directly). Deleting the committed copy
+deletes every link; what is worth keeping — proof the generator runs — is
+`vyrn doc --std -o $(mktemp -d)` on one leg. (`cleanup-census.md:480`
+reviewed the directory and answered a different question: "cannot drift" is
+true and beside the point when nothing reads it.)
+
