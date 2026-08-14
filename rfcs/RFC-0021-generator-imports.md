@@ -200,6 +200,20 @@ restraint is the feature).
   parse, which is a miss, and the re-run overwrites it. Backed by resolver hooks
   (`gen_cache_get`/`gen_cache_put`) so the frontend stays filesystem-free and
   the CLI + LSP share `~/.vyrn/cache/gen`. `VYRN_NO_GEN_CACHE` disables it.
+
+  > **The tag is `v3`, and it is no longer just a format tag: it authenticates
+  > the entry.** The gen cache holds compiler INPUT — a hit is linked into the
+  > program and never re-runs the generator — so a file dropped into that
+  > directory would be permanent. Every entry now opens with
+  > `v3 <tag> <N>`, where `<tag>` is `H(secret ‖ H(secret ‖ key ‖ body))` under
+  > a per-user key, and the lookup key is INSIDE the tag, so a valid generation
+  > of one module is not a valid generation of another
+  > (`vyrn-frontend/src/loader.rs:1776`, `:1783-1793`, `gen_cache_tag` at
+  > `:1901-1917`). `v1` and `v2` are listed as superseded and ignored without a
+  > word; an entry with a bad tag is a miss WITH a note, because something other
+  > than `vyrn` wrote it. The cranelift artifact `vyrn-genwasm` maps in beside
+  > the entries is authenticated by the same secret.
+
 - **Guardrails**: a 20 M-step budget and a 4 MB output cap; each becomes a load
   diagnostic at the import site, as does any generator trap.
 - **Deviation**: `listDir` and `moduleInterface` have no native/wasm *runtime*
@@ -207,3 +221,11 @@ restraint is the feature).
   parity example calls `listDir` at runtime (generators run only in the
   interpreter). Codegen emits a clear "interpreter/generation only" error rather
   than a link failure; `gen fn` bodies are not emitted into a shipped binary.
+
+  > **"Generators run only in the interpreter" was superseded by
+  > [RFC-0076](RFC-0076-generators-as-wasm.md).** A generator is compiled to
+  > wasm and run by `vyrn-genwasm`; the interpreter is the fallback, not the
+  > only engine, and the two are held byte-identical by a cross-engine gate.
+  > The parenthetical's CONCLUSION survives — `gen fn` bodies are still not
+  > emitted into a shipped binary, and `moduleInterface` is still
+  > compile-time-only — but the reason given for it is no longer the engine.

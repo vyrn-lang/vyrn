@@ -88,6 +88,21 @@ button.onclick = () => exports.reset();
   passing a global to a `consume` parameter is a movecheck error (nothing may
   take ownership of module state). Overwriting a heap-valued `mut` global
   leaks the old value (safe, consistent with array element stores).
+
+  > **The last sentence was reversed by RFC-0089 rule 4**; everything before it
+  > still holds. Module state still has module lifetime, `drop g` is still an
+  > error, and a global still may not be consumed — but a global OWNS what it
+  > holds, so a store into one releases the old value
+  > (`vyrn-codegen/src/direct.rs:2952-3030`, and `place_owns` at `:2626-2650`
+  > answers yes for a `Static` because reading a global is a borrow and rule 2
+  > refuses a borrow at a store). Pinned as `selfAppend` in
+  > `vyrn-cli/tests/memory.rs:481`; the memory census measured what the
+  > exclusion had cost — 4.92 s and 12.2 GB, against 0.095 s for the same eight
+  > lines written on a local.
+  >
+  > The array-element store this sentence calls itself consistent with was
+  > reversed too (RFC-0011 §Ownership), as was the map (RFC-0028 §Ownership).
+  > The three cited each other; all three are corrected.
 - **Spawn isolation**: any function that reads **or** writes any module-state
   binding is not spawn-safe, transitively (module state is shared by
   definition; when tasks land on real threads this rule is what keeps them

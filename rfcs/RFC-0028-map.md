@@ -150,6 +150,26 @@ codec, schema, enum-payload Map, validated-V trap).
   `FreeArr` exactly (the RFC's "recursively" reads as "follow Array's rules",
   which is what parity actually pins). `keys()` copies the key pointers into a
   fresh `Array<String>` snapshot.
+
+  > **Both sentences are now false, and the second one for the opposite reason.**
+  > RFC-0089 rule 4 and RFC-0092 M2 made a map release everything it took:
+  > the keys it holds (`direct.rs:2378-2389`), the value displaced by
+  > `m[k] = v` (`direct.rs:3400-3414`, "Rule 4 through an entry"), and both
+  > halves of an entry given up by `remove` — read out of their slots before
+  > the survivors shift over them. The three are pinned as `mapRepeatKey`,
+  > `mapReplaceValue` and `mapRemoveEntry` in `vyrn-cli/tests/memory.rs:592-630`,
+  > each with a measured before/after (a histogram loop over one key: 10.29 MB
+  > → 4.09 MB).
+  >
+  > `keys()` does not copy the key POINTERS. It copies the strings, and it does
+  > so *because* a pointer snapshot would now be a double free
+  > (`direct.rs:11411-11419`) — the mirror-`Array` sentence above is exactly
+  > what stopped being true. `sa.toArray()` and `xs.toArray()` were the same
+  > back door and copy for the same reason.
+  >
+  > The `Array` stance this paragraph mirrors is corrected in RFC-0011
+  > §Ownership; RFC-0013 §Ownership cited both. None of the three supports the
+  > others any more.
 - **Boundary validation.** A validated `V` re-validates on every `m[k] = v`
   (the `emit_map_set` / interp-coerce path runs the `where` clause and traps
   with the canonical `validation failed for \`T\`` wording, byte-identical

@@ -36,16 +36,24 @@ may read "Implemented", "Complete as scoped", "Accepted and complete", "Shipped"
 "Superseded by RFC-XXXX", or a per-milestone line such as "M1 and M2 shipped;
 M3 stopped at its own limit". Read the header, not a legend.
 
-Thirteen RFCs stopped short of their own design on purpose: 0047, 0074, 0075,
-0077, 0080, 0082, 0084, 0085, 0086, 0091, 0093, 0095 and 0097. Each header says
-which milestone landed and what did not.
+Several RFCs stopped short of their own design on purpose — 0047, 0074, 0075,
+0077, 0080, 0082, 0084, 0085, 0086, 0091, 0093, 0095, 0097, 0098 and 0099 among
+them. The count is not restated here, because a count restated is a count that
+drifts: each header says which milestone landed and what did not, and the
+`Status` column below copies it.
 
 ## The index
 
-97 RFCs, numbered 0001 to 0098, with one gap. **There is no RFC-0066** — the
-number was skipped and never used. Nothing in the repository references it.
-Closing the gap would mean renumbering thirty files and breaking every
-cross-reference, so the gap stays.
+99 RFCs, numbered 0001 to 0100, with one gap. **There is no RFC-0066** — the
+number was skipped and never used. The only mention of it in the repository is
+this sentence. Closing the gap would mean renumbering thirty files and breaking
+every cross-reference, so the gap stays.
+
+The count, the range, the gap, and the rows below are checked against this
+directory by `compiler/vyrn-cli/tests/rfc_index.rs`. That test is also what
+holds a banner honest: every `RFC-NNNN` this corpus names has to be an RFC that
+exists. What it does not check — status text, titles, and whether a banner's
+claim is true — is written down in the test's own header.
 
 | RFC | Title | Status |
 |-----|-------|--------|
@@ -94,7 +102,7 @@ cross-reference, so the gap stays.
 | [0043](RFC-0043-time-random.md) | Time and Randomness at the Host Boundary | Implemented |
 | [0044](RFC-0044-storage.md) | `std/storage`: Crash-Safe Persistence | Implemented |
 | [0045](RFC-0045-bitwise.md) | Bitwise Operators | Implemented |
-| [0046](RFC-0046-strings.md) | `std/strings`: The String Library (+ a `slice` builtin) | Implemented |
+| [0046](RFC-0046-strings.md) | `std/strings`: The String Library (+ a `slice` builtin) | Implemented; the `slice` builtin has since been removed (RFC-0078/0079/0094) |
 | [0047](RFC-0047-semantic-highlighting.md) | Semantic Highlighting, Import Hover, and Grammar Gaps | Implemented (§1–§3); §4 diagnosed, blocked |
 | [0048](RFC-0048-vyx-origins.md) | Complete `.vyx` Origins: Script Sections & Real-File Pages | Implemented (§1–§3) |
 | [0049](RFC-0049-vyx-owner-discovery.md) | `.vyx` Owner Discovery & Cached Forward-Mapping | Implemented |
@@ -146,11 +154,14 @@ cross-reference, so the gap stays.
 | [0096](RFC-0096-a-self-referring-type-declares-its-release.md) | A Self-Referring Type Declares Its Release | Complete (M1, M2, M3) |
 | [0097](RFC-0097-von.md) | VON, Vyrn Object Notation | M0 and M1 shipped; M2–M4 not started |
 | [0098](RFC-0098-cli.md) | `std/cli`: The Command Line Is a Record Type | M1 landed; M2–M7 stated |
+| [0099](RFC-0099-a-generator-may-report-a-diagnostic.md) | A Generator May Report a Diagnostic | M1 landed; M2 shipped as RFC-0100; M3 unspent |
+| [0100](RFC-0100-a-rule-is-a-library.md) | A Rule Is a Library | Implemented |
 
 ## The other documents here
 
-Seven files in this directory are not RFCs. They are records of measurement and
-of friction, and the RFCs above cite them.
+The rest of this directory is not RFCs. These are records of measurement and of
+friction, and the RFCs above cite them. The table is checked for membership by
+the same test as the index: a file here that nothing links to fails it.
 
 | File | What it is |
 |------|------------|
