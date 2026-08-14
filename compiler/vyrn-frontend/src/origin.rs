@@ -468,14 +468,9 @@ fn resolve_origin_path(ctx: &Context<'_>, path: &str) -> Result<String, String> 
     } else {
         format!("{}/{path}", ctx.importer_dir)
     };
-    let resolved = normalize_slashes(&joined);
-    // `..` popped past the importer directory's own root: an absolute base that
-    // came back relative lost its drive, and a relative one kept a `..`.
-    let climbed = if crate::audience::is_absolute(ctx.importer_dir) {
-        !crate::audience::is_absolute(&resolved)
-    } else {
-        resolved == ".." || resolved.starts_with("../")
-    };
+    // Normalization reports the climb itself: a `..` with nothing left to pop
+    // is the event, and it happens identically on every path shape.
+    let (resolved, climbed) = normalize_slashes(&joined);
     if climbed {
         return Err(format!("path `{path}` climbs out of the importing module"));
     }
@@ -495,34 +490,39 @@ fn resolve_origin_path(ctx: &Context<'_>, path: &str) -> Result<String, String> 
 }
 
 /// Collapse `.`/`..` segments in a slash path (a local copy of the loader's
-/// `normalize`, kept private so `origin` has no loader dependency).
+/// `normalize`, kept private so `origin` has no loader dependency), and report
+/// whether a `..` popped when there was nothing left to pop.
 ///
-/// MUST preserve a leading `/`: splitting drops the empty first segment of a
-/// Unix absolute path, and without restoring it every origin file key loses
-/// its root — no key ever matches an LSP URI path again and the entire `.vyx`
-/// editor surface goes dark on Linux/macOS (the first-Linux-CI-run hang).
-/// Windows never sees this because `n:` is a real first segment.
-fn normalize_slashes(p: &str) -> String {
+/// **The root is not a segment.** `/` and `n:/` are the floor, split off before
+/// anything is popped, so they survive resolution and cannot be consumed by a
+/// `..`. Both halves of that used to be wrong in a platform-shaped way: a Unix
+/// absolute path lost its leading `/` to the split and had it glued back on
+/// afterwards (the first-Linux-CI-run hang), and a Windows one let `..` eat `n:`
+/// as if it were a directory. The caller then had to GUESS the overshoot from
+/// the result's shape — losing the drive on Windows, keeping the restored `/` on
+/// Unix — so the same directive was refused on one platform and followed on the
+/// other. The overshoot is an event during the walk, and is returned as one.
+fn normalize_slashes(p: &str) -> (String, bool) {
+    let root_len = if p.starts_with('/') {
+        1
+    } else if crate::audience::is_absolute(p) {
+        p.find('/').map(|i| i + 1).unwrap_or(p.len())
+    } else {
+        0
+    };
+    let (root, rest) = p.split_at(root_len);
     let mut out: Vec<&str> = Vec::new();
-    for seg in p.split('/') {
+    let mut climbed = false;
+    for seg in rest.split('/') {
         match seg {
             "" | "." => {}
-            ".." => {
-                if matches!(out.last(), Some(&s) if s != "..") {
-                    out.pop();
-                } else {
-                    out.push("..");
-                }
-            }
+            // Nothing to pop is the climb, whether the floor is `/`, `n:/`, or
+            // the relative base's own first segment.
+            ".." => climbed |= out.pop().is_none(),
             s => out.push(s),
         }
     }
-    let joined = out.join("/");
-    if p.starts_with('/') && !joined.starts_with('/') {
-        format!("/{joined}")
-    } else {
-        joined
-    }
+    (format!("{root}{}", out.join("/")), climbed)
 }
 
 #[cfg(test)]
@@ -830,5 +830,41 @@ fn x() {}
         assert!(!maps.remap(&mut d));
         assert_eq!(d.file.as_deref(), Some("b"));
         assert!(d.note.as_deref().unwrap().contains("malformed"));
+    }
+
+    /// The same directive, against the two shapes an absolute base has, must get
+    /// the same verdict — the rule is about what the path CLAIMS, and a claim
+    /// does not change with the machine that reads it.
+    ///
+    /// It used to. `climbed` was inferred from the result no longer being
+    /// absolute, which is a Windows-only trace: popping past `n:` drops the
+    /// drive, while popping past `/` leaves a leading `/` restored on the way
+    /// out. So the refusal fired on Windows and not on Unix, and a generator
+    /// could name `/outside.vyx` on the platforms CI runs (the red main of
+    /// 2026-08-14). The overshoot is now recorded where it happens.
+    #[test]
+    fn the_climb_out_verdict_does_not_depend_on_the_platforms_path_shape() {
+        let escape = "../../../../../../../../outside.vyx";
+        for base in ["n:/proj/app", "/proj/app", "/tmp/probe/escape"] {
+            assert!(
+                resolved(base, escape).is_err(),
+                "climbing out of `{base}` must be refused"
+            );
+        }
+        // And a `..` that stays inside is still resolved, on both shapes.
+        assert_eq!(
+            resolved("n:/proj/client", "../app/x.vyx").unwrap(),
+            "n:/proj/app/x.vyx"
+        );
+        assert_eq!(
+            resolved("/proj/client", "../app/x.vyx").unwrap(),
+            "/proj/app/x.vyx"
+        );
+        // Exactly at the root is not out of it: the last `..` that has something
+        // to pop is legal, the next one is not.
+        assert_eq!(resolved("/proj", "../x.vyx").unwrap(), "/x.vyx");
+        assert!(resolved("/proj", "../../x.vyx").is_err());
+        assert_eq!(resolved("n:/proj", "../x.vyx").unwrap(), "n:/x.vyx");
+        assert!(resolved("n:/proj", "../../x.vyx").is_err());
     }
 }
