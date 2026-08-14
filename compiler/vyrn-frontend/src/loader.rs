@@ -2465,6 +2465,18 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             if imported.contains(&name) {
                 continue;
             }
+            // The ROOT's `main` is the program's entry point, and every engine
+            // reaches it by that spelling. It is not exported — nothing can
+            // import it — so the rule above treated it as a private name like
+            // any other and minted a fresh symbol for it the moment a SECOND
+            // module declared one. Every `examples/` file is a program, so
+            // importing one from a program left the whole build with no entry
+            // at all: `call to unknown function \`main\``, naming no file and no
+            // line. A non-root `main` is unreachable code and still renames,
+            // which is what clears the collision.
+            if m.key == root_key && name == "main" {
+                continue;
+            }
             if name_module_count.get(&name).copied().unwrap_or(0) >= 2 {
                 ensure_all_names(&mut all_names, &module_decls);
                 foreign_renames
@@ -5051,6 +5063,22 @@ mod tests {
                     import { bVal } from \"./b\" \
                     fn main() -> Int64 { return aVal() + bVal() }";
         assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_program_that_imports_a_program_keeps_its_entry_point() {
+        // Every file in `examples/` is a program, so importing one — the website
+        // imports `examples/herofield.vyrn` to hash what it prints — put a
+        // SECOND `main` in the link. `main` is not exported, so the name-privacy
+        // rename above minted a fresh symbol for both of them, and the program
+        // was left with no `main` at all: `call to unknown function \`main\``,
+        // naming no file and no line. The root's entry keeps its spelling; the
+        // imported one, which nothing can reach, is the one that renames.
+        let lib = "export fn libValue() -> Int64 { return 5 } \
+                   fn main() -> Int64 { return 99 }";
+        let root = "import { libValue } from \"./lib\" \
+                    fn main() -> Int64 { return libValue() }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 5);
     }
 
     #[test]

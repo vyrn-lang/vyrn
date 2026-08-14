@@ -1,0 +1,55 @@
+<script>
+// The site shell (RFC-0041 §1): every page body renders into the <slot/>.
+//
+// The navigation is built from the typed URL helpers the router generates, so a
+// link cannot name a route that does not exist — the compiler rejects it. The
+// two reserved sockets were filled that way: `/guide` and `/explore` arrived as
+// a directory of routes plus one row each in `navRows`, and nothing else here
+// changed.
+import { navRows, NavRow } from "../nav"
+import { exampleCount, backendCount } from "../repo"
+// The stylesheet and the one script module, for every page.
+//
+// The `head { … }` block takes `title`, `stylesheet`, `module` and `script`, and
+// has no entry for a `<meta>`. Each page therefore carries the viewport and
+// description meta in its own `head()` — one call to `pageHead`, which builds
+// them from a `Head` value where `withMeta` does exist.
+head {
+    stylesheet "/style.css"
+    module "/widgets.js"
+}
+</script>
+
+<template>
+<div id="root">
+    <!-- The first thing a keyboard reaches. A reference page puts a masthead
+         and a 23-link rail in front of the prose, and this jumps all of it. -->
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="masthead">
+        <a href="/index.html" class="wordmark">vyrn</a>
+        <nav class="nav">
+            <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
+        </nav>
+    </header>
+    <!-- Where the skip link lands, and why it is not the `<main>` itself: every
+         route's `<main class="page">` is `display: contents`, so its children
+         can be the grid items of this shell. An element with no box cannot take
+         focus — measured: `main.focus()` left the focus where it was, so the
+         next Tab went back to the masthead the reader had just skipped. This
+         anchor has a box, has no size, and sits out of the grid flow, so focus
+         lands here and the next Tab is the first link in the content. -->
+    <div id="main" class="skip-target" tabindex="-1"></div>
+    <slot/>
+    <footer class="foot">
+        <!-- The two counts are generated; `0 divergences` was not. It was a
+             string literal on every page, asserting the result of a harness this
+             build never ran — exactly the number-by-hand the site's own data
+             rule forbids. The parity claim is made where it can be shown: on the
+             landing page, by a check that runs. -->
+        <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
+        <a href="https://github.com/vyrn-lang/vyrn">Source on GitHub</a>
+        <a href="https://github.com/vyrn-lang/vyrn/tree/main/rfcs">The design record</a>
+        <span>Early. No versioned release yet.</span>
+    </footer>
+</div>
+</template>

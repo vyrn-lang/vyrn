@@ -1,0 +1,167 @@
+/// Repository facts, counted at compile time.
+///
+/// The design brief's data rule is absolute: no widget renders a number the
+/// project cannot produce on demand. So the site never writes a count by hand.
+/// This generator reads the repository's own directories with `listDir`
+/// (RFC-0021) while the site compiles, and emits the answers as Vyrn source.
+/// Add an example, and the landing page says so on the next build. Write the
+/// number by hand, and it starts drifting the same day.
+///
+///     import { repoFacts } from "./facts"
+///     import { exampleCount, rfcNumbers } from repoFacts("../examples", "../rfcs", "../std")
+///
+/// Import it through `site/app/repo.vyrn` rather than calling it twice. The
+/// generator cache is keyed on the argument STRINGS, so two call sites spelling
+/// the same directory with different `../` prefixes would generate two modules,
+/// and their exported names would collide program-wide.
+///
+/// `listDir` and `readFile` are the two file effects a generator is allowed,
+/// and the sandbox scopes them to the CONSTANT PATH ARGUMENTS at the call site
+/// (RFC-0021 §sandbox). That is why the three directories are three separate
+/// parameters rather than one repository root: the call site states exactly
+/// what the generator may read, and a fourth directory would need a fourth
+/// argument. Read the emitted module with `vyrn emit-gen`.
+import { substring, split, joinWith } from "std/strings"
+
+/// One RFC, as its file name states it: the number, and the slug turned back
+/// into words. `RFC-0091-memory-model.md` is 91, "memory model".
+///
+/// Private, and named apart from the `RfcRow` the generated module exports: a
+/// top-level name is program-wide, and the generator is linked beside its own
+/// output.
+type FactsRfc = { number: Int64, title: String }
+
+/// `true` when `name` ends with `suffix`.
+fn endsWithStr(name: String, suffix: String) -> Bool {
+    if name.byteLength < suffix.byteLength {
+        return false
+    }
+    return substring(name, name.byteLength - suffix.byteLength, name.byteLength) == suffix
+}
+
+/// The entries of `dir`, sorted (the generator sorts every listing, so what is
+/// emitted does not depend on the order a filesystem hands them back). An
+/// unreadable directory yields nothing, and the count that follows is zero,
+/// which is visible on the page rather than silently wrong.
+fn entriesOf(dir: String) -> Array<String> {
+    return match listDir(dir) {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+}
+
+/// How many entries of `dir` end in `suffix`. A directory entry cannot, so this
+/// counts files and nothing else.
+fn countIn(dir: String, suffix: String) -> Int64 {
+    let mut n = 0
+    for entry in entriesOf(dir) {
+        if endsWithStr(entry, suffix) {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+/// The digits of `s` as a number, stopping at the first byte that is not one.
+fn digits(s: String) -> Int64 {
+    let mut n = 0
+    for b in bytes(s) {
+        if b < '0' || b > '9' {
+            return n
+        }
+        n = n * 10 + Int64(b) - 48
+    }
+    return n
+}
+
+/// `RFC-0091-memory-model.md` -> `RfcRow { number: 91, title: "memory model" }`.
+/// A name that does not fit the pattern yields number 0, and the caller drops it.
+fn rfcOf(name: String) -> FactsRfc {
+    if !endsWithStr(name, ".md") || name.byteLength < 9 {
+        return FactsRfc { number: 0, title: "" }
+    }
+    if substring(name, 0, 4) != "RFC-" {
+        return FactsRfc { number: 0, title: "" }
+    }
+    let stem = substring(name, 9, name.byteLength - 3)
+    let mut title = ""
+    for word in split(stem, "-") {
+        if title.byteLength > 0 {
+            title = title + " "
+        }
+        title = title + word
+    }
+    return FactsRfc { number: digits(substring(name, 4, 8)), title: title }
+}
+
+/// The `std/` module names, without the extension, in sorted order.
+fn stdNames(stdDir: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for entry in entriesOf(stdDir) {
+        if endsWithStr(entry, ".vyrn") {
+            out.push(substring(entry, 0, entry.byteLength - 5))
+        }
+    }
+    return out
+}
+
+/// A Vyrn array literal of quoted strings. The names come from file names in
+/// this repository, which hold no quote or backslash, so a plain quote is safe
+/// here in a way it would never be for untrusted text.
+fn quotedList(items: Array<String>) -> String {
+    let mut out = "["
+    let mut first = true
+    for it in items {
+        if !first {
+            out = out + ", "
+        }
+        first = false
+        out = out + "\"" + it + "\""
+    }
+    return out + "]"
+}
+
+/// Count the repository, and emit the answers as a module.
+export gen fn repoFacts(examplesDir: String, rfcsDir: String, stdDir: String) -> String {
+    let examples = countIn(examplesDir, ".vyrn")
+    let mut numbers: Array<String> = []
+    let mut titles: Array<String> = []
+    for entry in entriesOf(rfcsDir) {
+        let row = rfcOf(entry)
+        if row.number > 0 {
+            numbers.push(row.number.toString())
+            titles.push(row.title.copy())
+        }
+    }
+    let mods = stdNames(stdDir)
+    let mut out = "/// Counted from the repository while the site compiled. Do not edit.\n"
+    out = out + "/// Single-file programs in `examples/`. Every one runs on all three backends.\n"
+    out = out + "export fn exampleCount() -> Int64 { return " + examples.toString() + " }\n"
+    out = out + "/// Numbered design records in `rfcs/`.\n"
+    out = out + "export fn rfcCount() -> Int64 { return " + numbers.length.toString() + " }\n"
+    out = out + "/// Modules in `std/`, all written in Vyrn.\n"
+    out = out + "export fn stdCount() -> Int64 { return " + mods.length.toString() + " }\n"
+    out = out + "/// The `std/` module names.\n"
+    out = out + "export fn stdModules() -> Array<String> { return " + quotedList(mods) + " }\n"
+    out = out + "/// Every RFC number, ascending.\n"
+    out = out + "export fn rfcNumbers() -> Array<Int64> { return [" + joinWith(numbers, ", ") + "] }\n"
+    out = out + "/// Every RFC title, in the same order as `rfcNumbers`.\n"
+    out = out + "export fn rfcTitles() -> Array<String> { return " + quotedList(titles) + " }\n"
+    return out
+}
+
+test "an RFC file name yields its number and its title" {
+    let r = rfcOf("RFC-0091-memory-model.md")
+    assertEq(r.number, 91)
+    assertEq(r.title, "memory model")
+}
+
+test "a name that is not an RFC is dropped" {
+    assertEq(rfcOf("README.md").number, 0)
+    assertEq(rfcOf("RFC-0091-memory-model.txt").number, 0)
+}
+
+test "the quoted list is a Vyrn array literal" {
+    assertEq(quotedList([]), "[]")
+    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
+}

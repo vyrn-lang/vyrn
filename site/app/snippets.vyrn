@@ -1,0 +1,312 @@
+/// The code the site shows, and the text the tools print.
+///
+/// Vyrn snippets live in `hl.vyrn` and are coloured by the compiler's own lexer
+/// while the site compiles. This module is the ONE call site of that generator —
+/// a second one would generate a second module and collide with the first — and
+/// it adds the two things the lexer has no business with: the same task written
+/// in Rust, TypeScript and Go, and the output the tools actually print.
+///
+/// Every Vyrn snippet is copied from a file in this repository. Every quoted
+/// tool output was produced by running the tool, and is reproduced to the byte,
+/// em dashes included.
+import { highlightWith, terminalHtml, rustWords, tsWords, goWords } from "./code"
+import { joinWith } from "std/strings"
+import { vyrnCode } from "./hl"
+import { hlLines } from vyrnCode()
+
+/// A snippet in one language, ready for `v-html`.
+export type Snippet = { id: String, lang: String, label: String, html: String }
+
+/// One rendered source line: the number to print in the gutter, the markup, and
+/// the markup this line becomes when a control changes it (empty when nothing
+/// does).
+export type CodeLine = { n: Int64, html: String, alt: String }
+
+// ---------------------------------------------------------------------------
+// Vyrn, through the compiler's lexer
+// ---------------------------------------------------------------------------
+
+/// A Vyrn snippet's coloured lines.
+export fn vyrnLines(id: String) -> Array<String> {
+    return hlLines(id)
+}
+
+/// A Vyrn snippet as one coloured block.
+export fn vyrnHtml(id: String) -> String {
+    return joinWith(hlLines(id), "\n")
+}
+
+/// A Vyrn snippet as numbered rows, starting at line `from`.
+export fn vyrnRows(id: String, from: Int64) -> Array<CodeLine> {
+    let lines = hlLines(id)
+    let mut out: Array<CodeLine> = []
+    let mut i = 0
+    while i < lines.length {
+        out.push(CodeLine { n: from + i, html: lines[i].copy(), alt: "" })
+        i = i + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// The validated-types specimen, and the compiler's answer to it
+// ---------------------------------------------------------------------------
+
+/// Which row of the specimen the `Age(5)` line is. Found rather than written
+/// down, so editing the snippet cannot silently point the control at the wrong
+/// line.
+export fn badRow() -> Int64 {
+    let a = hlLines("hero")
+    let b = hlLines("heroBad")
+    let mut i = 0
+    while i < a.length && i < b.length {
+        if a[i] != b[i] {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// The specimen, with the commented line carrying the markup it becomes when
+/// the control uncomments it.
+export fn heroRows() -> Array<CodeLine> {
+    let alt = hlLines("heroBad")
+    let mut out = vyrnRows("hero", 1)
+    let mut i = 0
+    while i < out.length {
+        if i == badRow() {
+            out[i].alt = alt[i].copy()
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// What `vyrn check` prints for that line, word for word. Reproduced from a run
+/// against a file holding exactly it.
+export fn heroDiagnostic() -> String {
+    return terminalHtml("bad.vyrn:3:0: 5 does not satisfy `Age` (predicate `where value >= 18` is false)")
+}
+
+// ---------------------------------------------------------------------------
+// The ownership specimen, and what `vyrn why --memory` says about it
+// ---------------------------------------------------------------------------
+
+/// The first source line of `fullName` in `examples/ownership.vyrn`.
+export fn ownershipFirstLine() -> Int64 {
+    return 17
+}
+
+/// `fn fullName`, at the line numbers the file gives it.
+export fn ownershipRows() -> Array<CodeLine> {
+    return vyrnRows("ownership", ownershipFirstLine())
+}
+
+/// One line of the tool's report, and the range of source lines it is about — a
+/// binding's row stays lit for as long as that binding is alive, so the playhead
+/// always has a report row to point at.
+export type ReportRow = { tag: String, from: Int64, to: Int64, html: String }
+
+/// `vyrn why --memory examples/ownership.vyrn`, the `fullName` section, quoted
+/// from the tool's own output.
+export fn ownershipReport() -> Array<ReportRow> {
+    return [
+        ReportRow { tag: "signature", from: 17, to: 17, html: terminalHtml("fn fullName(first: String, last: String) -> String") },
+        ReportRow { tag: "transfers", from: 17, to: 17, html: terminalHtml("  transfers: yes — the caller owns the result, and releases it by freeing the String buffer") },
+        ReportRow { tag: "firstSpace", from: 18, to: 21, html: terminalHtml("  line 18    firstSpace       reclaimed at block exit — freeing the String buffer") },
+        ReportRow { tag: "whole", from: 19, to: 20, html: terminalHtml("  line 19    whole            moved at line 20 into the return") },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The same task, four ways, on three axes
+//
+// The Vyrn snippet is the language's own. The other three are written the way
+// each language's documentation writes them, and are illustrative rather than
+// measured — the comparison page says so under every plate.
+// ---------------------------------------------------------------------------
+
+fn snippet(id: String, label: String, html: String) -> Snippet {
+    return Snippet { id: id.copy(), lang: id.copy(), label: label.copy(), html: html.copy() }
+}
+
+/// A rule about a value, and a total way to check an untrusted one.
+export fn typeSpecs() -> Array<Snippet> {
+    return [
+        snippet("vyrn", "Vyrn", vyrnHtml("cmpTypes")),
+        snippet("rust", "Rust", highlightWith("pub struct Age(i64);
+
+// The rule lives in a constructor beside the type, so a caller can still build
+// the newtype the long way, and no constant is checked while it compiles.
+impl TryFrom<i64> for Age {
+    type Error = ();
+    fn try_from(v: i64) -> Result<Self, ()> {
+        if v >= 18 { Ok(Age(v)) } else { Err(()) }
+    }
+}
+", rustWords())),
+        snippet("ts", "TypeScript", highlightWith("import { z } from \"zod\";
+
+// The rule lives in a schema object beside the type. The type is erased before
+// the program runs, so the check is a library call and never free.
+const Age = z.number().int().min(18);
+type Age = z.infer<typeof Age>;
+const maybe = Age.safeParse(input);
+", tsWords())),
+        snippet("go", "Go", highlightWith("type Age int64
+
+// The rule lives in a function the caller must remember to call. Nothing in the
+// type system says an Age was ever validated.
+func NewAge(v int64) (Age, error) {
+    if v < 18 {
+        return 0, errors.New(\"below 18\")
+    }
+    return Age(v), nil
+}
+", goWords())),
+    ]
+}
+
+/// What a function intends to do with its argument.
+export fn memorySpecs() -> Array<Snippet> {
+    return [
+        snippet("vyrn", "Vyrn", vyrnHtml("cmpMemory")),
+        snippet("rust", "Rust", highlightWith("fn seat_count(t: &Ticket) -> i64 { t.seats }
+fn add_seat(t: &mut Ticket) { t.seats += 1 }
+fn redeem(t: Ticket) -> i64 { t.id }
+
+// The same three intents, spelled as reference kinds. A lifetime appears the
+// moment a reference is stored or returned.
+", rustWords())),
+        snippet("ts", "TypeScript", highlightWith("function seatCount(t: Readonly<Ticket>): number { return t.seats; }
+function addSeat(t: Ticket): void { t.seats += 1; }
+function redeem(t: Ticket): number { return t.id; }
+
+// Readonly is erased before the program runs, so nothing enforces it then. The
+// collector decides when the object goes.
+", tsWords())),
+        snippet("go", "Go", highlightWith("func seatCount(t Ticket) int64 { return t.seats }
+func addSeat(t *Ticket) { t.seats++ }
+func redeem(t Ticket) int64 { return t.id }
+
+// A pointer says \"may change it\" and \"may escape to the heap\" with one symbol.
+// The collector decides the rest.
+", goWords())),
+    ]
+}
+
+/// What happens when the value is not there.
+export fn failureSpecs() -> Array<Snippet> {
+    return [
+        snippet("vyrn", "Vyrn", vyrnHtml("cmpFailure")),
+        snippet("rust", "Rust", highlightWith("match seat(&t) {
+    Some(n) => n,
+    None => 0,
+}
+
+// Exhaustive too, and the closest of the three. `unwrap()` is one call away,
+// and it panics.
+", rustWords())),
+        snippet("ts", "TypeScript", highlightWith("const n = seat(t);
+if (n === undefined) { return 0; }
+return n;
+
+// null and undefined are two different absences, and whether the compiler
+// checks either is a flag in a config file.
+", tsWords())),
+        snippet("go", "Go", highlightWith("n, err := seat(t)
+if err != nil {
+    return 0
+}
+return n
+
+// Nothing in the type forces the check. Skip it and read n anyway, and the
+// zero value is a plausible answer.
+", goWords())),
+    ]
+}
+
+test "a Vyrn snippet comes back coloured by the compiler's own lexer" {
+    let lines = vyrnLines("hero")
+    assert(lines.length > 5)
+    assertEq(lines[0], "<span class=\"k\">type</span> <span class=\"t\">Age</span> = <span class=\"t\">Int64</span> <span class=\"k\">where</span> value &gt;= <span class=\"n\">18</span>")
+}
+
+test "the capability words are tinted, because they are the argument" {
+    let lines = vyrnLines("cmpMemory")
+    assertEq(lines[0], "<span class=\"k\">fn</span> seatCount(t: <span class=\"k\">read</span> <span class=\"t\">Ticket</span>) -&gt; <span class=\"t\">Int64</span> { <span class=\"k\">return</span> t.seats }")
+}
+
+test "the control's row is the one row the two specimens disagree about" {
+    let a = vyrnLines("hero")
+    let b = vyrnLines("heroBad")
+    assertEq(a.length, b.length)
+    let row = badRow()
+    assert(a[row] != b[row])
+    let rows = heroRows()
+    assertEq(rows[row].alt, b[row])
+    // Every other row offers the control nothing to change.
+    let mut others = 0
+    for r in rows {
+        if r.alt.byteLength > 0 {
+            others = others + 1
+        }
+    }
+    assertEq(others, 1)
+}
+
+test "the specimen's rows are numbered from one" {
+    let rows = vyrnRows("hello", 1)
+    assertEq(rows[0].n, 1)
+    assertEq(rows.length, 4)
+}
+
+test "the ownership rows carry the file's own line numbers" {
+    let rows = ownershipRows()
+    assertEq(rows.length, 5)
+    assertEq(rows[0].n, 17)
+    assertEq(rows[4].n, 21)
+}
+
+test "every report row covers lines the specimen shows, and every line is covered" {
+    let rows = ownershipRows()
+    let first = rows[0].n
+    let last = rows[rows.length - 1].n
+    for r in ownershipReport() {
+        assert(r.from >= first && r.to <= last && r.from <= r.to)
+        assert(r.tag.byteLength > 0)
+        assert(r.html.byteLength > 0)
+    }
+    // No position of the playhead leaves the report with nothing to say.
+    let mut line = first
+    while line <= last {
+        let mut lit = 0
+        for r in ownershipReport() {
+            if r.from <= line && line <= r.to {
+                lit = lit + 1
+            }
+        }
+        assert(lit > 0)
+        line = line + 1
+    }
+}
+
+test "every specimen set covers the same four languages" {
+    for set in [typeSpecs(), memorySpecs(), failureSpecs()] {
+        assertEq(set.length, 4)
+        assertEq(set[0].id, "vyrn")
+        for s in set {
+            assert(s.label.byteLength > 0)
+            assert(s.html.byteLength > 60)
+        }
+    }
+}
+
+test "tool output is marked as output and never coloured as code" {
+    assert(heroDiagnostic().byteLength > 0)
+    // No code class anywhere in it: a diagnostic is not a snippet.
+    for row in ownershipReport() {
+        assert(row.html.byteLength > 0)
+    }
+}

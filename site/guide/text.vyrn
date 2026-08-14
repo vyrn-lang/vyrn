@@ -1,0 +1,18 @@
+// A String is UTF-8 bytes. `byteLength` counts bytes, `charCount()` counts
+// characters, and the two differ the moment the text leaves ASCII.
+import { joinWith, toUpper, split } from "std/strings"
+
+export fn demo() -> String {
+    let name = "Ada"
+    let mixed = "naïve"
+    let parts = split("a,b,c", ",")
+    let rejoined = joinWith(parts, " + ")
+
+    return joinWith([
+            "upper     \{toUpper(name)}",
+            "bytes     \{mixed.byteLength}",
+            "chars     \{mixed.charCount()}",
+            "parts     \{parts.length}",
+            "rejoined  \{rejoined}",
+        ], "\n")
+}

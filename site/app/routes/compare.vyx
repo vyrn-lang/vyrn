@@ -1,0 +1,310 @@
+<script>
+// GET /compare — the densest page on the site, and the one that has to earn it.
+//
+// It was a set of one-row tables whose Vyrn cell repeated the section heading.
+// That is filler, not comparison. It is now three things a reader can act on:
+// ONE matrix of six axes across four languages, THREE code plates showing the
+// same small task in each language, and THREE charts — every one of them
+// plotting a number this repository can produce on demand.
+//
+// THE DATA RULE, which shapes this page more than anything else: no widget here
+// renders a number the project cannot produce on demand. The module ladder was
+// measured with the release binary, one `vyrn build --target wasm` per row. The
+// leak-shape figures are the ones `rfcs/census-call-arguments.md` recorded, and
+// the caption names that file. `bench/baseline.json` is still a placeholder, so
+// there is no run-time benchmark chart and the page says why.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { typeSpecs, memorySpecs, failureSpecs, Snippet } from "../snippets"
+import { moduleSizes, moduleSizesBox, moduleSizesGrid, moduleLadder, moduleLadderBox, moduleLadderGrid, moduleLadderPlot, twoRowPlot, moduleRatio, largestModule, leakBars, leakBox, leakGrid, leakPeak, barLeft, barRight, barText, barRow, Bar, Grid } from "../chart"
+
+/// One comparison axis: what is being compared, and where each answer stands.
+type Axis = { id: String, name: String, vyrn: String, rust: String, ts: String, go: String }
+
+export fn head() -> Head {
+    return pageHead("Compare — Vyrn")
+}
+
+/// Text that holds an angle bracket lives here rather than in the template: a
+/// template escapes what it renders, so an entity written by hand is escaped a
+/// second time and the reader sees `&lt;`.
+fn buildCommand() -> String {
+    return "vyrn build examples/<name>.vyrn --target wasm"
+}
+
+/// The signature the leak chart is measuring, with and without the keyword.
+fn leakWord(declared: Bool) -> String {
+    if declared {
+        return "fn wrap(s: consume String) -> Option<String>"
+    }
+    return "fn wrap(s: String) -> Option<String>"
+}
+
+fn axes() -> Array<Axis> {
+    return [
+        Axis {
+            id: "01",
+            name: "Memory",
+            vyrn: "Declared: read, modify, consume, share",
+            rust: "Inferred lifetimes and borrows",
+            ts: "The host's collector",
+            go: "A collector, with a pause",
+        },
+        Axis {
+            id: "02",
+            name: "Validation",
+            vyrn: "A where clause in the type",
+            rust: "A constructor beside the type",
+            ts: "A schema library beside the type",
+            go: "A function you must remember",
+        },
+        Axis {
+            id: "03",
+            name: "Concurrency",
+            vyrn: "spawn and join, no function colour",
+            rust: "async/await, plus a runtime",
+            ts: "async/await, one thread",
+            go: "Goroutines and channels",
+        },
+        Axis {
+            id: "04",
+            name: "Metaprogramming",
+            vyrn: "Generators: compile-time Vyrn, readable output",
+            rust: "Macros, in a second language",
+            ts: "Decorators and codegen tools",
+            go: "go:generate, outside the language",
+        },
+        Axis {
+            id: "05",
+            name: "Targets",
+            vyrn: "Interpreter, native, wasm — byte-identical",
+            rust: "Native and wasm, via LLVM",
+            ts: "One runtime, interpreted or JIT",
+            go: "Native and wasm",
+        },
+        Axis {
+            id: "06",
+            name: "Failure",
+            vyrn: "Option, Result, exhaustive match, no null",
+            rust: "Option, Result, and panics",
+            ts: "null, undefined, and exceptions",
+            go: "Explicit error returns, and nil",
+        },
+    ]
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#axes"><span class="n">01</span>the axes</a>
+        <a href="#rule"><span class="n">02</span>a rule</a>
+        <a href="#memory"><span class="n">03</span>an argument</a>
+        <a href="#failure"><span class="n">04</span>an absence</a>
+        <a href="#numbers"><span class="n">05</span>size</a>
+        <a href="#leak"><span class="n">06</span>a leak</a>
+        <a href="#missing"><span class="n">07</span>not measured</a>
+    </aside>
+        <section class="hero">
+            <p class="eyebrow">Compare</p>
+            <h1 class="display">Where Vyrn differs, and where it has nothing to show yet</h1>
+            <p class="lede">Every row names a real difference. Every number traces to something this repository can produce on demand. Where no honest measurement exists, this page says so instead of printing one.</p>
+        </section>
+
+        <section class="band" id="axes">
+            <p class="eyebrow">01 — six axes</p>
+            <h2>The whole comparison, on one screen</h2>
+            <div class="scroller">
+            <table class="matrix">
+                <thead>
+                    <tr><th>Axis</th><th class="yes">Vyrn</th><th>Rust</th><th>TypeScript</th><th>Go</th></tr>
+                </thead>
+                <tbody>
+                    <tr v-for="a in axes()" :key="a.id">
+                        <th scope="row">{{ a.name }}</th>
+                        <td class="yes">{{ a.vyrn }}</td>
+                        <td class="no">{{ a.rust }}</td>
+                        <td class="no">{{ a.ts }}</td>
+                        <td class="no">{{ a.go }}</td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+            <p class="cap">Each of the next three sections takes one row of this table and writes the same small task in all four languages.</p>
+        </section>
+
+        <section class="band" id="rule">
+            <p class="eyebrow">02 — a rule about a value</p>
+            <h2>A number that is only valid at 18 or above</h2>
+            <p>In Vyrn the rule is part of the type. Everywhere else it lives beside the type — in a constructor, a schema object, or a function the caller has to remember.</p>
+            <div class="plate" data-tabs>
+                <div class="plate-head">
+                    <span class="pill">Specimen</span>
+                    <span class="eyebrow">the same rule, four ways</span>
+                </div>
+                <div class="tabs">
+                    <button type="button" v-for="s in typeSpecs()" :key="s.id" :data-tab="s.id">{{ s.label }}</button>
+                </div>
+                <div class="stage panes">
+                    <div v-for="s in typeSpecs()" :key="s.id" :data-pane="s.id">
+                        <pre class="code" v-html="s.html"></pre>
+                    </div>
+                </div>
+                <p class="cap">The Vyrn pane is coloured by the compiler's own lexer. The other three are keyword-set colouring over snippets written the way each language's documentation writes them — illustrative, not measured.</p>
+            </div>
+        </section>
+
+        <section class="band" id="memory">
+            <p class="eyebrow">03 — what a function does with its argument</p>
+            <h2>Read it, change it, or take it</h2>
+            <p>Three intents, one word each. Rust spells them as reference kinds and adds a lifetime the moment one is stored; the other two hand the question to a collector.</p>
+            <div class="plate" data-tabs>
+                <div class="plate-head">
+                    <span class="pill">Specimen</span>
+                    <span class="eyebrow">the same three functions, four ways</span>
+                </div>
+                <div class="tabs">
+                    <button type="button" v-for="s in memorySpecs()" :key="s.id" :data-tab="s.id">{{ s.label }}</button>
+                </div>
+                <div class="stage panes">
+                    <div v-for="s in memorySpecs()" :key="s.id" :data-pane="s.id">
+                        <pre class="code" v-html="s.html"></pre>
+                    </div>
+                </div>
+                <p class="cap">Vyrn's three declarations are enforced by the compiler and cost nothing at run time. The section below measures what one of those words is worth.</p>
+            </div>
+        </section>
+
+        <section class="band" id="failure">
+            <p class="eyebrow">04 — when the value is not there</p>
+            <h2>There is no null to forget</h2>
+            <p>Vyrn and Rust both make absence a value you have to open. TypeScript has two absences and a compiler flag; Go has a convention.</p>
+            <div class="plate" data-tabs>
+                <div class="plate-head">
+                    <span class="pill">Specimen</span>
+                    <span class="eyebrow">the same missing seat, four ways</span>
+                </div>
+                <div class="tabs">
+                    <button type="button" v-for="s in failureSpecs()" :key="s.id" :data-tab="s.id">{{ s.label }}</button>
+                </div>
+                <div class="stage panes">
+                    <div v-for="s in failureSpecs()" :key="s.id" :data-pane="s.id">
+                        <pre class="code" v-html="s.html"></pre>
+                    </div>
+                </div>
+                <p class="cap">Vyrn has no unwrap and no panic-on-absence: <code>?</code> propagates, and <code>match</code> must cover every arm.</p>
+            </div>
+        </section>
+
+        <section class="band" id="numbers">
+            <p class="eyebrow">05 — measured</p>
+            <h2>What a WebAssembly module weighs</h2>
+            <p>Every bar was built with the release binary in this repository, one command per row, and read off the file. A module carries only the runtime its own code reaches.</p>
+            <div class="plate" data-widget="bars">
+                <div class="plate-head">
+                    <span class="pill live">Measured</span>
+                    <span class="eyebrow">{{ buildCommand() }}</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-bars-replay>Replay</button>
+                    </div>
+                </div>
+                <div class="stage">
+                    <svg class="chart" :viewBox="moduleLadderBox()" role="img" aria-label="Eight example programs, and the size of the WebAssembly module each one builds to">
+<g class="axis">
+                            <line v-for="g in moduleLadderGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="moduleLadderPlot()"/>
+                            <text v-for="g in moduleLadderGrid()" :key="g.id" :x="g.x" :y="moduleLadderPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
+                        <g class="row" v-for="b in moduleLadder()" :key="b.id">
+                            <title>{{ b.title }}</title>
+                            <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
+                            <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">Eight examples, smallest first, on one linear scale against {{ largestModule() }}. Hover a row for the exact byte count, or open the example on GitHub. Rebuild any row in one command; nothing here is estimated.</p>
+            </div>
+
+            <div class="plate" data-widget="bars">
+                <div class="plate-head">
+                    <span class="pill">Two routes</span>
+                    <span class="eyebrow">examples/fib.vyrn</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-bars-replay>Replay</button>
+                    </div>
+                </div>
+                <span class="bignum">{{ moduleRatio() }}<small>times smaller</small></span>
+                <div class="stage">
+                    <svg class="chart" :viewBox="moduleSizesBox()" role="img" aria-label="fib.wasm is 1.5 KB through the direct encoder and 277 KB through clang">
+<g class="axis">
+                            <line v-for="g in moduleSizesGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
+                            <text v-for="g in moduleSizesGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
+                        <g class="row" v-for="b in moduleSizes()" :key="b.id">
+                            <title>{{ b.title }}</title>
+                            <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
+                            <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">The direct figure is the ladder's first row, measured. 277 KB is the figure <code>README.md</code> and <code>ROADMAP.md</code> both state for the old route through textual LLVM IR and <code>clang</code>. One linear scale, so the small bar is a sliver — which is what the difference looks like.</p>
+            </div>
+        </section>
+
+        <section class="band" id="leak">
+            <p class="eyebrow">06 — measured</p>
+            <h2>What one keyword is worth</h2>
+            <p>The same loop, a million turns, native. One word changes on the callee's parameter, and a shape that grows becomes a shape that does not.</p>
+            <div class="plate" data-widget="leak">
+                <div class="plate-head">
+                    <span class="pill live">Measured</span>
+                    <span class="eyebrow">rfcs/census-call-arguments.md</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-leak-toggle aria-pressed="false">Declare consume</button>
+                    </div>
+                </div>
+                <span class="bignum" data-leak-peak :data-alt="leakPeak(true)">{{ leakPeak(false) }}<small>peak, at 1,000,000 turns</small></span>
+                <div class="stage">
+                    <svg class="chart" data-leak-svg :viewBox="leakBox()" role="img" aria-label="Peak resident memory of the same loop, with and without the consume declaration">
+<g class="axis">
+                            <line v-for="g in leakGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
+                            <text v-for="g in leakGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
+                        </g>
+                        <g data-series="no">
+                            <g class="row" v-for="b in leakBars(false)" :key="b.id">
+                                <title>{{ b.title }}</title>
+                                <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
+                                <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                                <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                                <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
+                            </g>
+                        </g>
+                        <g data-series="yes">
+                            <g class="row" v-for="b in leakBars(true)" :key="b.id">
+                                <title>{{ b.title }}</title>
+                                <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
+                                <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
+                                <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                                <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
+                            </g>
+                        </g>
+                    </svg>
+                    <p class="verdict" data-leak-word :data-alt="leakWord(true)">{{ leakWord(false) }}</p>
+                </div>
+                <p class="cap">Peak resident memory, native, as recorded in rfcs/census-call-arguments.md (Finding 2). Both series are on one scale. The leak is not a missing release; it is a missing declaration, which is why one keyword closes it and no rule could.</p>
+            </div>
+        </section>
+
+        <section class="band" id="missing">
+            <p class="eyebrow">07 — not measured</p>
+            <h2>The chart that is not here</h2>
+            <p class="notice">There is no run-time benchmark on this page, deliberately. <code>vyrn bench</code> exists and CI runs it, but <code>bench/baseline.json</code> is still a placeholder — the file documents how to seed it from a CI run. Until it is seeded, a speed figure here would be a number from a developer's laptop dressed up as a measurement. The chart lands the day the baseline does.</p>
+        </section>
+</main>
+</template>

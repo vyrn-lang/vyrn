@@ -1,0 +1,450 @@
+/// Vyrn syntax highlighting, done by the compiler's own lexer (design brief G3).
+///
+/// `lex()` is the compiler's real lexer, reachable from Vyrn since RFC-0054, and
+/// it is generation-only. So this module is a GENERATOR: it holds every Vyrn
+/// snippet the site shows, lexes each one while the site compiles, and emits the
+/// coloured markup as ordinary Vyrn source. A visitor downloads coloured HTML
+/// and no highlighter, and there is no JavaScript on this path at all.
+///
+///     import { vyrnCode } from "./hl"
+///     import { hlLines } from vyrnCode()
+///
+/// WHAT THE LEXER DECIDES AND WHAT THIS FILE DECIDES. Every token's kind comes
+/// from `lex()` — there is no keyword list to drift from the language. Two things
+/// the token list cannot answer are answered here:
+///
+///  1. **Extent.** A token carries `line` and `col` but its `text` is DECODED:
+///     a string token's text has no quotes, a byte literal's text is its number.
+///     So the source extent of a string, a doc comment and a number is measured
+///     by scanning from the token's own start. Every other kind — keyword, ident,
+///     punctuation — spells itself, and its text length is exact.
+///  2. **Trivia.** Comments are trivia and never reach the token list, so the gap
+///     between two tokens is scanned for `//` and coloured as a comment.
+///
+/// The one list left is `contextual()`: ten words the grammar treats as keywords
+/// in position but the lexer hands back as identifiers. Four of them are the
+/// capability words this whole site is about, so they are tinted deliberately.
+import { substring, split, joinWith } from "std/strings"
+import { escapeHtml } from "./code"
+
+/// One snippet, under the id the pages ask for.
+type Piece = { id: String, src: String }
+
+// ---------------------------------------------------------------------------
+// The Vyrn code the site shows, and the one place it is written.
+//
+// Every snippet is copied from a file in this repository — `README.md`,
+// `examples/ownership.vyrn` — so a reader who follows the link finds the same
+// lines. Snippets are literals rather than files read at generation time
+// because a page must render identically wherever it is built.
+// ---------------------------------------------------------------------------
+
+fn pieces() -> Array<Piece> {
+    return [
+        Piece {
+            id: "hero",
+            src: "type Age = Int64 where value >= 18
+
+fn admit(n: Int64) -> Int64 {
+    // `Age?(n)` is None when the rule fails, so untrusted input never traps.
+    return match Age?(n) {
+        Some(a) => a,
+        None => 0 - 1,
+    }
+}
+
+let a = Age(30)     // proven valid while it compiles - no runtime check
+// let bad = Age(5) // the compiler refuses this
+",
+        },
+        Piece {
+            id: "heroBad",
+            src: "type Age = Int64 where value >= 18
+
+fn admit(n: Int64) -> Int64 {
+    // `Age?(n)` is None when the rule fails, so untrusted input never traps.
+    return match Age?(n) {
+        Some(a) => a,
+        None => 0 - 1,
+    }
+}
+
+let a = Age(30)     // proven valid while it compiles - no runtime check
+let bad = Age(5)    // the compiler refuses this
+",
+        },
+        Piece {
+            id: "ownership",
+            src: "fn fullName(first: String, last: String) -> String {
+    let firstSpace = first + \" \" // inner temp - freed inside fullName
+    let whole = firstSpace + last // built by reading firstSpace
+    return whole                  // moved out to the caller
+}
+",
+        },
+        Piece {
+            id: "hello",
+            src: "fn main() -> Int64 {
+    print(\"hello\")
+    return 0
+}
+",
+        },
+        Piece {
+            id: "cmpTypes",
+            src: "type Age = Int64 where value >= 18
+
+let ok = Age(30)        // no runtime check is emitted
+let maybe = Age?(input) // Option<Age>, total over any input
+",
+        },
+        Piece {
+            id: "cmpMemory",
+            src: "fn seatCount(t: read Ticket) -> Int64 { return t.seats }
+fn addSeat(t: modify Ticket) { t.seats = t.seats + 1 }
+fn redeem(t: consume Ticket) -> Int64 { return t.id }
+
+// No lifetime, no borrow annotation, no collector. The word is the contract.
+",
+        },
+        Piece {
+            id: "cmpFailure",
+            src: "fn seat(t: read Ticket) -> Option<Int64>
+
+match seat(t) {
+    Some(n) => n,
+    None => 0,  // there is no null to forget, and no arm to leave out
+}
+",
+        },
+        Piece {
+            id: "capRead",
+            src: "fn seatCount(t: read Ticket) -> Int64 {
+    return t.seats  // the caller still owns t afterwards
+}
+",
+        },
+        Piece {
+            id: "capModify",
+            src: "fn addSeat(t: modify Ticket) {
+    t.seats = t.seats + 1  // changed in place, still the caller's
+}
+",
+        },
+        Piece {
+            id: "capConsume",
+            src: "fn redeem(t: consume Ticket) -> Int64 {
+    return t.id  // the caller may not name t again
+}
+",
+        },
+        Piece {
+            id: "capShare",
+            src: "fn watch(t: share Ticket) -> Int64 {
+    return t.id  // shared, and the compiler enforces what that permits
+}
+",
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The highlighter
+// ---------------------------------------------------------------------------
+
+/// The words the grammar reads as keywords in position and the lexer hands back
+/// as identifiers. `read`, `modify`, `consume` and `share` are the reason this
+/// list exists: they are the language's whole ownership surface, and a site that
+/// argues for them cannot render them as ordinary names.
+fn contextual() -> Array<String> {
+    return ["read", "modify", "consume", "share", "gen", "test", "bench", "panic", "from", "as"]
+}
+
+fn isContextual(word: String) -> Bool {
+    for w in contextual() {
+        if w == word {
+            return true
+        }
+    }
+    return false
+}
+
+/// `text` under class `cls`, escaped, and never spanning a newline: a run that
+/// crosses one is closed and reopened, so the caller can split the finished
+/// markup into lines and every line is balanced HTML.
+fn emit(cls: String, text: String) -> String {
+    if cls == "" {
+        return escapeHtml(text)
+    }
+    let mut out = ""
+    let mut first = true
+    for part in split(text, "\n") {
+        if !first {
+            out = out + "\n"
+        }
+        first = false
+        if part.byteLength > 0 {
+            out = out + "<span class=\"" + cls + "\">" + escapeHtml(part) + "</span>"
+        }
+    }
+    return out
+}
+
+fn digitByte(b: UInt8) -> Bool {
+    return b >= '0' && b <= '9'
+}
+
+fn letterByte(b: UInt8) -> Bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+/// The byte offset each line starts at, so a token's `(line, col)` becomes an
+/// offset into the source.
+export fn lineStarts(src: String) -> Array<Int64> {
+    let mut out: Array<Int64> = [0]
+    let raw = bytes(src)
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == 10 {
+            out.push(i + 1)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// Past the closing quote of the string that starts at `start`. A backslash
+/// covers the next byte.
+///
+/// ponytail: a `\{...}` interpolation holding its own string literal would end
+/// the scan early. No snippet on this site has one; the upgrade is the lexer's
+/// own brace depth, not a second scanner.
+fn scanString(raw: Array<UInt8>, start: Int64) -> Int64 {
+    let mut i = start + 1
+    while i < raw.length && raw[i] != '"' {
+        if raw[i] == 92 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    if i < raw.length {
+        i = i + 1
+    }
+    return i
+}
+
+/// The end of the line `start` is on.
+fn scanToEol(raw: Array<UInt8>, start: Int64) -> Int64 {
+    let mut i = start
+    while i < raw.length && raw[i] != 10 {
+        i = i + 1
+    }
+    return i
+}
+
+/// Past the numeric literal at `start`: a byte literal, or digits with at most
+/// one fractional part. A `.` is only part of the number when a digit follows,
+/// so `1.0.toString()` ends the number at `1.0`.
+fn scanNumber(raw: Array<UInt8>, start: Int64) -> Int64 {
+    if raw[start] == 39 {
+        let mut i = start + 1
+        while i < raw.length && raw[i] != 39 {
+            if raw[i] == 92 {
+                i = i + 1
+            }
+            i = i + 1
+        }
+        if i < raw.length {
+            i = i + 1
+        }
+        return i
+    }
+    let mut i = start
+    while i < raw.length && (digitByte(raw[i]) || letterByte(raw[i])) {
+        i = i + 1
+    }
+    if i + 1 < raw.length && raw[i] == '.' && digitByte(raw[i + 1]) {
+        i = i + 1
+        while i < raw.length && (digitByte(raw[i]) || letterByte(raw[i])) {
+            i = i + 1
+        }
+    }
+    return i
+}
+
+/// Where the token at `start` ends in the source.
+fn extentOf(raw: Array<UInt8>, start: Int64, kind: String, text: String) -> Int64 {
+    if kind == "string" || kind == "template" {
+        return scanString(raw, start)
+    }
+    if kind == "doc" || kind == "error" {
+        return scanToEol(raw, start)
+    }
+    if kind == "int" || kind == "float" {
+        return scanNumber(raw, start)
+    }
+    return start + text.byteLength
+}
+
+/// The CSS class for a token, or "" for text that carries no colour.
+fn classOf(kind: String, text: String) -> String {
+    if kind == "keyword" {
+        return "k"
+    }
+    if kind == "string" || kind == "template" {
+        return "s"
+    }
+    if kind == "int" || kind == "float" {
+        return "n"
+    }
+    if kind == "doc" {
+        return "c"
+    }
+    if kind == "ident" {
+        if isContextual(text) {
+            return "k"
+        }
+        let b = bytes(text)
+        if b.length > 0 && b[0] >= 'A' && b[0] <= 'Z' {
+            return "t"
+        }
+    }
+    return ""
+}
+
+/// The gap between two tokens: whitespace, and the comments the token list drops.
+fn trivia(src: String, raw: Array<UInt8>, from: Int64, to: Int64) -> String {
+    let mut out = ""
+    let mut plain = from
+    let mut i = from
+    while i < to {
+        if raw[i] == '/' && i + 1 < to && raw[i + 1] == '/' {
+            out = out + emit("", substring(src, plain, i))
+            let stop = scanToEol(raw, i)
+            let end = if stop < to { stop } else { to }
+            out = out + emit("c", substring(src, i, end))
+            plain = end
+            i = end
+        } else {
+            i = i + 1
+        }
+    }
+    return out + emit("", substring(src, plain, to))
+}
+
+/// `src` as coloured markup, one left-to-right pass over the compiler's tokens.
+///
+/// The tokens arrive as an argument rather than being lexed here, because `lex()`
+/// is only callable from a generator's own body — so the one `lex(p.src)` call
+/// site is `vyrnCode` below, and everything else is an ordinary function.
+export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
+    let raw = bytes(src)
+    let starts = lineStarts(src)
+    let mut out = ""
+    let mut cursor = 0
+    for t in toks {
+        let start = starts[t.line - 1] + t.col - 1
+        if start >= cursor {
+            out = out + trivia(src, raw, cursor, start)
+            let stop = extentOf(raw, start, t.kind, t.text)
+            out = out + emit(classOf(t.kind, t.text), substring(src, start, stop))
+            cursor = stop
+        }
+    }
+    return out + trivia(src, raw, cursor, raw.length)
+}
+
+/// `s` as a Vyrn string literal.
+fn quoted(s: String) -> String {
+    let raw = bytes(s)
+    let mut out = "\""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == 92 || raw[i] == '"' {
+            out = out + substring(s, plain, i) + "\\"
+            plain = i
+        }
+        i = i + 1
+    }
+    return out + substring(s, plain, raw.length) + "\""
+}
+
+/// A Vyrn array literal of the coloured lines of `src`. The trailing newline
+/// every snippet ends with would otherwise become an empty final row.
+gen fn linesLit(src: String, toks: Array<Token>) -> String {
+    let all = split(highlightSrc(src, toks), "\n")
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < all.length {
+        if i + 1 < all.length || all[i].byteLength > 0 {
+            out.push(quoted(all[i]))
+        }
+        i = i + 1
+    }
+    return "[" + joinWith(out, ", ") + "]"
+}
+
+/// Colour every snippet, and emit the answers as a module.
+export gen fn vyrnCode() -> String {
+    let mut out = "/// Coloured by the compiler's own lexer while the site compiled. Do not edit.\n"
+    out = out + "/// The lines of one snippet, already coloured, one string per source line.\n"
+    out = out + "export fn hlLines(id: String) -> Array<String> {\n"
+    for p in pieces() {
+        out = out + "    if id == " + quoted(p.id) + " { return " + linesLit(p.src, lex(p.src)) + " }\n"
+    }
+    out = out + "    return []\n}\n"
+    return out
+}
+
+// The pipeline's own tests are in `snippets.vyrn`, against the module this
+// generator emits: `lex()` is generation-only, so a `test` block cannot call it,
+// and the emitted markup is the thing worth asserting on anyway.
+
+test "a coloured run never crosses a newline, so every line is balanced markup" {
+    assertEq(emit("s", "a\nb"), "<span class=\"s\">a</span>\n<span class=\"s\">b</span>")
+    assertEq(emit("", "a<b"), "a&lt;b")
+}
+
+test "a number ends where the language ends it" {
+    assertEq(scanNumber(bytes("1.0.toString()"), 0), 3)
+    assertEq(scanNumber(bytes("'A' x"), 0), 3)
+    assertEq(scanNumber(bytes("0x1F,"), 0), 4)
+}
+
+test "a string's extent is its quotes, not its decoded text" {
+    assertEq(scanString(bytes("\"a//b\" x"), 0), 6)
+    assertEq(scanString(bytes("\"a\\\"b\""), 0), 6)
+}
+
+test "a capability word is a keyword here and an ordinary name is not" {
+    assert(isContextual("consume"))
+    assert(!isContextual("consumer"))
+    assertEq(classOf("ident", "read"), "k")
+    assertEq(classOf("ident", "Ticket"), "t")
+    assertEq(classOf("ident", "seats"), "")
+    assertEq(classOf("keyword", "where"), "k")
+}
+
+test "a snippet's lines survive the round trip through a literal" {
+    assertEq(quoted("a\"b"), "\"a\\\"b\"")
+}
+
+test "the two halves of the types specimen differ on exactly one line" {
+    let a = pieces()[0]
+    let b = pieces()[1]
+    assertEq(a.id, "hero")
+    assertEq(b.id, "heroBad")
+    assertEq(split(a.src, "\n").length, split(b.src, "\n").length)
+    let mut differ = 0
+    let left = split(a.src, "\n")
+    let right = split(b.src, "\n")
+    let mut i = 0
+    while i < left.length {
+        if left[i] != right[i] {
+            differ = differ + 1
+        }
+        i = i + 1
+    }
+    assertEq(differ, 1)
+}

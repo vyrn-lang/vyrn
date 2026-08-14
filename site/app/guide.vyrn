@@ -1,0 +1,730 @@
+/// The guide book: the chapters, their prose, and the programs they show.
+///
+/// THE RULE THIS FILE EXISTS TO KEEP. Every code block in the book is a file in
+/// `site/guide/`, and every block on a page was RUN while the page was built.
+/// This module imports each program as a namespace and calls its `demo()`, so
+/// the output printed under a block is the output the program produced. A
+/// program that does not compile fails the site build. A program that traps
+/// fails the export. There is no pseudo-code in the book, because nothing here
+/// can render a block that did not run.
+///
+/// The other half — the source, coloured, and what each block imports — comes
+/// from `guidecode.vyrn`, which reads the same files with the compiler's own
+/// lexer. Both halves read one file, so the block a reader sees and the program
+/// that ran cannot drift.
+///
+/// ONE NAMESPACE PER PROGRAM. A top-level name is program-wide, and the 24
+/// programs are linked into one program here, so a plain `import { demo }` would
+/// collide 24 times over. `import * as g<Block>` keeps every one of them out of
+/// the flat namespace. It has a second consequence worth knowing before you add
+/// a chapter: a PRIVATE name in a guide program is program-wide too, so two
+/// blocks cannot both declare `fn describe`. The compiler says so by name.
+import { guideCode } from "./guidecode"
+import { guideBlocks, guideSrc, guideLines, guideUses, guideImports, guidePlayable } from guideCode("../guide")
+import * as gArrays from "../guide/arrays"
+import * as gBenches from "../guide/benches"
+import * as gCapabilities from "../guide/capabilities"
+import * as gCliargs from "../guide/cliargs"
+import * as gClosures from "../guide/closures"
+import * as gEnums from "../guide/enums"
+import * as gFallible from "../guide/fallible"
+import * as gFirstfn from "../guide/firstfn"
+import * as gGenuse from "../guide/genuse"
+import * as gHello from "../guide/hello"
+import * as gHtml from "../guide/html"
+import * as gImports from "../guide/imports"
+import * as gLambdas from "../guide/lambdas"
+import * as gMaps from "../guide/maps"
+import * as gMatching from "../guide/matching"
+import * as gNumbers from "../guide/numbers"
+import * as gOptions from "../guide/options"
+import * as gProtocols from "../guide/protocols"
+import * as gRecords from "../guide/records"
+import * as gRegions from "../guide/regions"
+import * as gSchema from "../guide/schema"
+import * as gTests from "../guide/tests"
+import * as gText from "../guide/text"
+import * as gValidated from "../guide/validated"
+import { base64Encode } from "std/codecs"
+import { replace, joinWith, substring, trimEnd, toLower } from "std/strings"
+import { startsWith } from "std/strpred"
+import { escapeHtml, terminalHtml } from "./code"
+import { blob } from "./repo"
+
+/// One program on a page: its id, its coloured lines, what it printed, and the
+/// playground link — empty for a block the playground cannot run on its own.
+export type Block = { id: String, lines: Array<String>, output: String, play: String, source: String }
+
+/// One section of a chapter: an anchor, a heading, paragraphs of HTML, and the
+/// ids of the programs that follow them.
+export type Section = { anchor: String, heading: String, prose: Array<String>, blocks: Array<String> }
+
+/// One chapter: its URL slug, its title, its opening paragraph, and its sections.
+export type Chapter = { slug: String, title: String, lede: String, sections: Array<Section> }
+
+// ---------------------------------------------------------------------------
+// Running the programs
+// ---------------------------------------------------------------------------
+
+/// What one block printed, produced by calling it.
+///
+/// The branch list is written out rather than looked up, because a function
+/// value cannot be reached by name at run time and should not be: the compiler
+/// checks every one of these calls, so a renamed or deleted program is a build
+/// failure and never a page with a hole in it.
+export fn blockOutput(id: String) -> String {
+    if id == "arrays" { return gArrays.demo() }
+    if id == "benches" { return gBenches.demo() }
+    if id == "capabilities" { return gCapabilities.demo() }
+    if id == "cliargs" { return gCliargs.demo() }
+    if id == "closures" { return gClosures.demo() }
+    if id == "enums" { return gEnums.demo() }
+    if id == "fallible" { return gFallible.demo() }
+    if id == "firstfn" { return gFirstfn.demo() }
+    if id == "genuse" { return gGenuse.demo() }
+    if id == "hello" { return gHello.demo() }
+    if id == "html" { return gHtml.demo() }
+    if id == "imports" { return gImports.demo() }
+    if id == "lambdas" { return gLambdas.demo() }
+    if id == "maps" { return gMaps.demo() }
+    if id == "matching" { return gMatching.demo() }
+    if id == "numbers" { return gNumbers.demo() }
+    if id == "options" { return gOptions.demo() }
+    if id == "protocols" { return gProtocols.demo() }
+    if id == "records" { return gRecords.demo() }
+    if id == "regions" { return gRegions.demo() }
+    if id == "schema" { return gSchema.demo() }
+    if id == "tests" { return gTests.demo() }
+    if id == "text" { return gText.demo() }
+    if id == "validated" { return gValidated.demo() }
+    // `gentiny` is a generator, not a program: it has no `demo` to call, and the
+    // chapter says so under the block.
+    return ""
+}
+
+/// The playground URL for `src`: base64url of its UTF-8 bytes, in the fragment.
+///
+/// base64url rather than base64 (RFC 4648 §5): `+` and `/` are not safe in a URL
+/// fragment, and the padding is dropped because a fragment carries no length
+/// prefix that needs it. The fragment never reaches a server, so a whole program
+/// travels in a link and nothing is stored anywhere.
+export fn playHref(src: String) -> String {
+    let raw = base64Encode(src)
+    return "/play.html#c=" + replace(replace(replace(raw, "+", "-"), "/", "_"), "=", "")
+}
+
+/// One block, ready to render.
+export fn blockOf(id: String) -> Block {
+    let src = guideSrc(id)
+    return Block {
+        id: id.copy(),
+        lines: guideLines(id),
+        output: blockOutput(id),
+        play: if guidePlayable(id) { playHref(src) } else { "" },
+        source: blob("site/guide/" + id + ".vyrn"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One block, as it appears on the page
+// ---------------------------------------------------------------------------
+
+/// One program, its output and its links, as HTML.
+///
+/// The pill says BUILT and not "live". The program ran once, while this page was
+/// built, and the output below it is what it wrote then. A control that claimed
+/// to run it now would be a picture of a run, and this site does not ship those.
+fn blockHtml(b: Block) -> String {
+    let mut out = "<div class=\"plate block\">"
+    out = out + "<div class=\"plate-head\"><span class=\"pill\">Built</span>"
+    out = out + "<span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span><span class=\"spacer\"></span>"
+    if b.play.byteLength > 0 {
+        out = out + "<a class=\"btn\" href=\"" + b.play + "\">Run it in the playground</a>"
+    }
+    out = out + "</div>"
+    out = out + "<pre class=\"code\">" + joinWith(b.lines, "\n") + "</pre>"
+    if b.output.byteLength > 0 {
+        out = out + "<div class=\"out\">" + terminalHtml(b.output) + "</div>"
+    }
+    out = out + "<p class=\"cap\">"
+    if b.output.byteLength > 0 {
+        out = out + "Compiled and run while this page was built. "
+    } else {
+        out = out + "Compiled while this page was built, and imported by the block above. "
+    }
+    return out + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
+}
+
+/// The eyebrow above a section: its number in the chapter, and what the chapter
+/// is about.
+export fn sectionEyebrow(c: Chapter, s: Section) -> String {
+    let mut n = 1
+    for other in c.sections {
+        if other.anchor == s.anchor {
+            return chapterTag(n) + " — " + toLower(c.title)
+        }
+        n = n + 1
+    }
+    return toLower(c.title)
+}
+
+/// The links out of a chapter: the one before it and the one after it. Built
+/// here rather than in the template, because a chapter at either end of the book
+/// has one link and not two.
+export fn chapterNavHtml(slug: String) -> String {
+    let mut out = ""
+    let back = prevSlug(slug)
+    if back.byteLength > 0 {
+        out = out + "<a class=\"prev\" href=\"" + chapterHref(back) + "\"><span class=\"eyebrow\">Previous</span>" + escapeHtml(chapterOf(back).title) + "</a>"
+    }
+    let ahead = nextSlug(slug)
+    if ahead.byteLength > 0 {
+        out = out + "<a class=\"next\" href=\"" + chapterHref(ahead) + "\"><span class=\"eyebrow\">Next</span>" + escapeHtml(chapterOf(ahead).title) + "</a>"
+    }
+    return out
+}
+
+/// The prose and the programs of one section, as HTML.
+export fn sectionBody(s: Section) -> String {
+    let mut out = ""
+    for p in s.prose {
+        out = out + "<p>" + p + "</p>"
+    }
+    for id in s.blocks {
+        out = out + blockHtml(blockOf(id))
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// The book
+// ---------------------------------------------------------------------------
+
+fn section(anchor: String, heading: String, prose: Array<String>, blocks: Array<String>) -> Section {
+    return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: blocks.copy() }
+}
+
+/// Every chapter, in reading order.
+export fn chapters() -> Array<Chapter> {
+    return [
+        Chapter {
+            slug: "getting-started",
+            title: "Getting started",
+            lede: "Install the compiler, write one file, run it. Vyrn needs no project file and no build step for a single program.",
+            sections: [
+                section("install", "Install and check", [
+                        "Install the compiler with the script for your platform. The <a href=\"/install.html\">install page</a> has both, and both verify the archive against the release checksums before they unpack anything.",
+                        "Then run a file. <code>vyrn run</code> uses the interpreter, which needs nothing else on your machine. <code>vyrn build</code> writes a native binary and needs <code>clang</code>. <code>vyrn build --target wasm</code> writes a WebAssembly module and needs nothing.",
+                        "The three backends are the same language. The parity harness runs every example on all three and compares the bytes, so a program that runs under the interpreter runs the same way as a binary.",
+                    ], []),
+                section("first", "Your first program", [
+                        "A program is a file. <code>main</code> returns the exit code, and <code>print</code> writes one line to standard output.",
+                        "Every program in this book has the same shape: a <code>demo</code> function that answers with the text, and the <code>main</code> that prints it. That is not a language rule. It is how this site proves the book: it imports each program and calls <code>demo</code> while the page is built, so the output under each block is the output that program produced. Follow the run link to open the same source in the playground.",
+                    ], ["hello"]),
+                section("shape", "Functions, parameters, results", [
+                        "A function states the type of each parameter and the type it returns. Nothing is inferred across a function boundary, so a signature is the whole contract.",
+                        "<code>\\{ }</code> inside a string puts a value into it. The value is converted where it is written, not by a format string somewhere else.",
+                    ], ["firstfn"]),
+            ],
+        },
+        Chapter {
+            slug: "values",
+            title: "Values and types",
+            lede: "Numbers state their width. Text is UTF-8 bytes. A type can carry the rule that makes a value valid, and the compiler checks the rule where it can.",
+            sections: [
+                section("numbers", "Numbers", [
+                        "Every number type states its width: <code>Int8</code>, <code>Int16</code>, <code>Int32</code>, <code>Int64</code>, the unsigned pairs, <code>Float32</code> and <code>Float64</code>. There is no unsized <code>Int</code>, because its width would then depend on the machine.",
+                        "A conversion is written. <code>Int64(x)</code> widens, and nothing widens on its own.",
+                    ], ["numbers"]),
+                section("text", "Text", [
+                        "A <code>String</code> is UTF-8 bytes. <code>byteLength</code> is a field and counts bytes; <code>charCount()</code> walks the string and counts characters. The two agree on ASCII and disagree everywhere else, and the names say which one you asked for.",
+                        "<a href=\"/docs/std/strings.html\">std/strings</a> has the rest: split, join, trim, case, search, pad.",
+                    ], ["text"]),
+                section("validated", "Types that carry rules", [
+                        "A <code>where</code> clause is part of the type. <code>Age(30)</code> is proven while the file compiles, so no check is emitted. <code>Age(5)</code> is refused by the compiler, in the same way a type error is refused.",
+                        "Input from outside the program is not a constant, so it gets the total form. <code>Age?(n)</code> answers <code>Option&lt;Age&gt;</code>: <code>Some</code> when the rule holds, <code>None</code> when it does not. Nothing traps, and you cannot forget a check you never wrote.",
+                        "The rule is readable by the compiler as well as by you. <a href=\"/guide/generators.html#reflection\">Chapter 9</a> turns the same declaration into a JSON Schema document.",
+                    ], ["validated"]),
+            ],
+        },
+        Chapter {
+            slug: "records",
+            title: "Records, enums, match",
+            lede: "A record is a shape. An enum is a choice. `match` covers every case, and the compiler counts them.",
+            sections: [
+                section("records", "Records are shapes", [
+                        "A record type lists fields. Compatibility is by shape: a value with more fields fits where fewer are wanted, with no cast and no base class. This is width subtyping, and it is the whole inheritance story.",
+                        "Fields of a <code>mut</code> binding are assigned in place. A record that owns heap data — a <code>String</code> field, for example — is moved by an assignment, so <code>copy()</code> is how both sides keep a value.",
+                    ], ["records"]),
+                section("enums", "Enums are choices", [
+                        "An enum value is exactly one variant, and a variant can carry a payload. There is no tag field to keep in step with a union, because the tag is the type.",
+                        "<code>match</code> must cover every variant. Leave one out and the file does not compile, which is what makes an enum safe to extend: add a variant, and the compiler lists every place that has to answer for it.",
+                    ], ["enums"]),
+                section("match", "match is an expression", [
+                        "<code>match</code> answers with a value, so a binding takes it directly and there is no mutable slot to fill in each arm.",
+                        "<code>if let</code> reads one variant when the others need no arm. <code>while let</code> does the same in a loop, and stops when the pattern stops matching.",
+                    ], ["matching"]),
+            ],
+        },
+        Chapter {
+            slug: "ownership",
+            title: "Ownership, consume, regions",
+            lede: "You write what a function does with a value. The compiler enforces it and frees the memory. There is no collector, no lifetime syntax, and no borrow annotation.",
+            sections: [
+                section("capabilities", "The four words", [
+                        "A parameter carries a capability. <code>read</code> observes the value and the caller keeps it. <code>modify</code> changes it in place. <code>consume</code> takes ownership, and the caller may not name the value again. <code>share</code> is the fourth, for a value more than one holder reads.",
+                        "The words are erased before the program runs. They cost nothing, and they are the only ownership syntax there is.",
+                        "Use a consumed value again and the compiler names the line that took it: <code>`t` is used here but was already consumed by `redeem(..)` on line 7</code>.",
+                    ], ["capabilities"]),
+                section("regions", "Regions", [
+                        "A <code>region</code> block frees a group of allocations at its closing brace. It suits a loop that builds temporary values: one release for the whole block instead of one per value.",
+                        "A value that must outlive the block is returned from it, and the caller owns what comes out. Storing an arena value into a binding that outlives the region is a compile error.",
+                        "<code>vyrn why --memory &lt;file&gt;</code> reports, for every binding, whether it is reclaimed, how, and why not when it is not.",
+                    ], ["regions"]),
+            ],
+        },
+        Chapter {
+            slug: "collections",
+            title: "Collections and Map",
+            lede: "Arrays and maps are subject-first: the value comes before the verb. A lookup answers `Option`, so a missing entry is a case you handle.",
+            sections: [
+                section("arrays", "Arrays", [
+                        "An array grows with <code>push</code>, is read with <code>xs[i]</code>, and reports <code>xs.length</code>. An element store writes in place, and the index is checked.",
+                        "<code>pop()</code> answers <code>Option&lt;T&gt;</code>, because an empty array has nothing to give. <a href=\"/docs/std/arrays.html\">std/arrays</a> adds <code>map</code>, <code>filter</code>, <code>fold</code>, <code>any</code>, <code>all</code> and <code>sortBy</code>.",
+                    ], ["arrays"]),
+                section("maps", "Map", [
+                        "<code>Map&lt;String, V&gt;</code> keeps insertion order. <code>m[k]</code> answers <code>Option&lt;V&gt;</code>, <code>m[k] = v</code> inserts or updates, and an update keeps the key where it was.",
+                        "On the wire a map is a JSON object, and its schema is <code>additionalProperties</code>. A validated value type re-runs its rule on every insert.",
+                    ], ["maps"]),
+            ],
+        },
+        Chapter {
+            slug: "protocols",
+            title: "Protocols and generics",
+            lede: "A protocol names methods a type can implement. A generic bounded by it is compiled once per concrete type, so dispatch costs nothing at run time.",
+            sections: [
+                section("protocols", "A protocol and a bound", [
+                        "<code>protocol</code> declares the methods. <code>impl P for T</code> supplies them for one type, including a built-in type such as <code>Int64</code>.",
+                        "A generic function takes a bound: <code>fn label&lt;T: Show&gt;(x: T)</code>. The compiler generates one <code>label</code> per concrete type and calls the implementation directly. There is no table and no dynamic lookup, and the interpreter agrees with the binary because both resolve the same way.",
+                        "A protocol can also declare an associated type. <a href=\"/guide/errors.html#fallible\">Chapter 11</a> uses one: <code>Fallible</code> owes an <code>Output</code>, which is what <code>?</code> hands back.",
+                    ], ["protocols"]),
+            ],
+        },
+        Chapter {
+            slug: "functions",
+            title: "Function values and closures",
+            lede: "A function is a value. Lambdas capture by reading, and every call site is resolved while the program compiles.",
+            sections: [
+                section("lambdas", "Lambdas and higher-order functions", [
+                        "A <code>fn</code>-typed parameter takes a lambda, written <code>|x| expr</code>, or a named function. <code>map</code>, <code>filter</code> and <code>fold</code> in <a href=\"/docs/std/arrays.html\">std/arrays</a> are ordinary generic functions with such a parameter.",
+                        "Every use is monomorphized, so no function value survives to run time in any backend.",
+                    ], ["lambdas"]),
+                section("closures", "Stored functions", [
+                        "A <code>fn</code> type is storable: a binding, a record field, an array, module state. A lambda that reads an outer local carries a copy of that local, taken where the lambda is written.",
+                        "The implementation is defunctionalization: one closed enum per signature, one variant per lambda, and every call a direct call. There are no function pointers in the output.",
+                    ], ["closures"]),
+            ],
+        },
+        Chapter {
+            slug: "modules",
+            title: "Modules and imports",
+            lede: "A file is a module. `export` decides what leaves it, and an import names what it takes.",
+            sections: [
+                section("imports", "Importing", [
+                        "<code>import { a, b } from \"std/strings\"</code> takes two names. <code>import * as math from \"std/math\"</code> takes the module under one name and reaches its exports as <code>math.min</code>.",
+                        "A top-level name is program-wide, so two linked modules cannot both export <code>parse</code>. The namespace form is the answer, and the compiler suggests it by name when the collision happens.",
+                        "A remote import — <code>github:</code>, <code>gist:</code> or <code>https:</code> — is pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch. <code>vyrn add</code>, <code>vyrn update</code> and <code>vyrn vendor</code> manage them.",
+                    ], ["imports"]),
+            ],
+        },
+        Chapter {
+            slug: "generators",
+            title: "gen fns and generators",
+            lede: "A `gen fn` is ordinary Vyrn that runs while the program compiles and returns Vyrn source. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way. None of them is a compiler feature.",
+            sections: [
+                section("genfn", "A generator writes a module", [
+                        "A generator is a function marked <code>gen</code>. It returns a <code>String</code> of Vyrn source. It may read files through <code>readFile</code> and <code>listDir</code>, scoped to the paths its caller passed in, and it may not write, spawn, or reach an <code>extern</code>.",
+                        "This one writes a lookup table. It takes no input, so its answer is the same on every machine — which is the property a build has to have.",
+                        "There is no run link on this block. A generator is not a program: it needs the file that imports it, and the playground takes one source. The site imported it while building this page, which is the same proof by another route.",
+                    ], ["gentiny"]),
+                section("genimport", "An import can be a call", [
+                        "The target of an import can be a call to a generator. The compiler runs the call at load time, caches it, and links the source it returned as an ordinary module. Everything after that is normal Vyrn.",
+                        "<code>vyrn emit-gen &lt;file&gt;</code> prints the source a generator produced. A generator is not magic, and that command is the proof.",
+                        "This page is built the same way. The reference pages you see under <a href=\"/docs.html\">Docs</a> are read off <code>std/</code> by a generator, and the code blocks in this book are read off <code>site/guide/</code> by another.",
+                    ], ["genuse"]),
+                section("reflection", "Reading a type at compile time", [
+                        "<code>schemaOf(T)</code> reads a validated type's own declaration and answers with its name, its base type, its documentation line and every bound its <code>where</code> clause implies. <code>jsonSchema(T)</code> writes the JSON Schema document from the same facts.",
+                        "This is not runtime reflection. Vyrn erases types before the program runs; the compiler computes the answer from the declaration, so the interpreter and the binary agree.",
+                    ], ["schema"]),
+            ],
+        },
+        Chapter {
+            slug: "testing",
+            title: "Testing and bench",
+            lede: "Tests and benchmarks live in the file they are about. `vyrn run` and `vyrn build` strip them.",
+            sections: [
+                section("tests", "test blocks", [
+                        "A <code>test</code> block sits beside the code it tests. <code>vyrn test &lt;file&gt;</code> runs the blocks and reports each one; <code>--name</code> selects a subset. <code>assert</code> and <code>assertEq</code> exist inside a test block and nowhere else.",
+                        "A file can hold tests and a <code>main</code> at once. The tests are checked, then stripped, so the program is unchanged by having them.",
+                    ], ["tests"]),
+                section("bench", "bench blocks", [
+                        "A <code>bench</code> block is a body the timer runs. <code>vyrn bench</code> reports the minimum, median and mean over many samples, and it uses the native build, because timing the interpreter would report the wrong thing.",
+                        "<code>blackBox</code> hides a value from the optimizer. Around the input it stops the compiler from precomputing the answer; around the result it keeps the work live. <code>vyrn bench --check</code> runs each body once under the interpreter, which is what CI does.",
+                    ], ["benches"]),
+            ],
+        },
+        Chapter {
+            slug: "errors",
+            title: "Errors: panic, Fallible, ?",
+            lede: "There is no null and no exception. An absent value is `Option`, a failure is `Result`, and `?` sends a failure to the caller unchanged.",
+            sections: [
+                section("option", "Option, Result, and ?", [
+                        "<code>Option&lt;T&gt;</code> is <code>Some</code> or <code>None</code>. <code>Result&lt;T, E&gt;</code> is <code>Ok</code> or <code>Err</code>. Both are ordinary enums, so <code>match</code> covers them and the compiler counts the arms.",
+                        "<code>?</code> after an expression unwraps the success and returns the failure to the caller. It changes no types on the way out: the whole value is copied into a function that returns the same type, so there is no residual type to convert.",
+                    ], ["options"]),
+                section("fallible", "Your own type, and ?", [
+                        "<code>?</code> also works on a type you declare. Implement <a href=\"/docs/std/fallible.html\">Fallible</a>: say whether a value is a success, and how to read the success payload. The operator resolves through the protocol.",
+                        "The failing value reaches the caller with its payload intact, because nothing looked inside it.",
+                        "<code>panic(msg)</code> ends the program with a message. It is for a case that cannot happen — an arm the operator never calls — and not for a failure a caller could handle. There is no unwinding anywhere in the language, so a panic does not become a catch somewhere up the stack.",
+                    ], ["fallible"]),
+            ],
+        },
+        Chapter {
+            slug: "web",
+            title: "Web apps",
+            lede: "A view is a function that returns a tree. The server renders it to markup; the browser gets the same tree and a differ applies it.",
+            sections: [
+                section("html", "The view tree", [
+                        "<a href=\"/docs/std/html.html\">std/html</a> builds the tree. <code>toHtmlString</code> renders it for the server. Text is escaped; a tag or attribute NAME is checked rather than escaped, because it lands outside the quotes, so a bad one is refused instead of emitted.",
+                        "The same tree crosses to the browser as JSON, and <code>web/vyrn-dom.js</code> applies the difference between the old tree and the new one. Keys carry list identity.",
+                    ], ["html"]),
+                section("stack", "vyx, ui and rpc", [
+                        "A <code>.vyx</code> file is a single-file component: a <code>&lt;script&gt;</code> block of ordinary Vyrn and a <code>&lt;template&gt;</code> block of markup. <a href=\"/docs/std/vyx.html\">std/vyx</a> compiles it to Vyrn with a generator, so it is not a compiler feature either.",
+                        "<a href=\"/docs/std/ui.html\">std/ui</a> turns a routes directory into one <code>route(req) -&gt; Response</code>, with typed URL helpers per route. This site is built with it: <code>site/export.vyrn</code> calls that function once per path and writes what comes back.",
+                        "<a href=\"/docs/std/rpc.html\">std/rpc</a> is the client and server halves of a typed call, generated from one declaration. <code>vyrn dev</code> builds the client to wasm and serves everything in one process, and <code>vyrn routes</code> prints the resolved table.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            slug: "cli",
+            title: "CLI apps",
+            lede: "`args()` is the argument list. `std/args` reads flags and options from it, and `std/cli` builds the whole command from a record type.",
+            sections: [
+                section("args", "Reading arguments", [
+                        "<a href=\"/docs/std/args.html\">std/args</a> takes a token list. <code>cli()</code> takes the real arguments; <code>cliOf(list)</code> takes a list you supply, which is how a test — and this page — checks the parsing without a process.",
+                        "<code>flag</code> asks whether a token is present. <code>opt</code> reads <code>--name=value</code> and <code>--name value</code>, and answers <code>Option&lt;String&gt;</code>. <code>positionals</code> returns what is left, and <code>rest</code> returns what follows <code>--</code>.",
+                    ], ["cliargs"]),
+                section("cli", "The command line as a type", [
+                        "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, give each field a validated type with its own documentation line, and <code>cli(\"./module\")</code> reflects it into a parser and a help text. No flag name is written twice.",
+                        "A parse answers <code>Valid</code> or <code>Invalid</code> with the issues attached to their fields, so a program reports every problem at once instead of the first one.",
+                    ], []),
+            ],
+        },
+    ]
+}
+
+/// Every chapter slug, in order.
+export fn chapterSlugs() -> Array<String> {
+    let mut out: Array<String> = []
+    for c in chapters() {
+        out.push(c.slug.copy())
+    }
+    return out
+}
+
+/// The chapter with this slug, or an empty chapter when there is none.
+export fn chapterOf(slug: String) -> Chapter {
+    for c in chapters() {
+        if c.slug == slug {
+            return c
+        }
+    }
+    return Chapter { slug: "", title: "", lede: "", sections: [] }
+}
+
+/// Whether `slug` names a chapter.
+export fn chapterKnown(slug: String) -> Bool {
+    return chapterOf(slug).slug.byteLength > 0
+}
+
+/// The 1-based number of a chapter, or 0.
+export fn chapterNumber(slug: String) -> Int64 {
+    let mut n = 1
+    for c in chapters() {
+        if c.slug == slug {
+            return n
+        }
+        n = n + 1
+    }
+    return 0
+}
+
+/// `01`, `02`, ... — the rail prints a chapter's number in two digits.
+export fn chapterTag(n: Int64) -> String {
+    return if n < 10 { "0" + n.toString() } else { n.toString() }
+}
+
+/// The page a chapter is published at.
+export fn chapterHref(slug: String) -> String {
+    return "/guide/" + slug + ".html"
+}
+
+/// The chapter before this one, or "" at the start of the book.
+export fn prevSlug(slug: String) -> String {
+    let n = chapterNumber(slug)
+    return if n > 1 { chapters()[n - 2].slug.copy() } else { "" }
+}
+
+/// The chapter after this one, or "" at the end of the book.
+export fn nextSlug(slug: String) -> String {
+    let n = chapterNumber(slug)
+    let all = chapters()
+    return if n > 0 && n < all.length { all[n].slug.copy() } else { "" }
+}
+
+/// The chapter that shows block `id`, or "" — the reference pages link back into
+/// the book with this.
+export fn chapterOfBlock(id: String) -> String {
+    for c in chapters() {
+        for s in c.sections {
+            for b in s.blocks {
+                if b == id {
+                    return c.slug.copy()
+                }
+            }
+        }
+    }
+    return ""
+}
+
+/// The anchor of the section that shows block `id`, or "".
+export fn sectionOfBlock(id: String) -> String {
+    for c in chapters() {
+        for s in c.sections {
+            for b in s.blocks {
+                if b == id {
+                    return s.anchor.copy()
+                }
+            }
+        }
+    }
+    return ""
+}
+
+/// The blocks that import `std/<module>`, in book order.
+export fn blocksUsing(module: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for c in chapters() {
+        for s in c.sections {
+            for b in s.blocks {
+                for u in guideUses(b) {
+                    if u == module {
+                        out.push(b.copy())
+                    }
+                }
+            }
+        }
+    }
+    return out
+}
+
+/// How many programs the book runs.
+export fn blockCount() -> Int64 {
+    return guideBlocks().length
+}
+
+/// One reference page's link into the book: the chapter, the section and the
+/// program that uses an export.
+export type Demo = { block: String, chapter: String, section: String, title: String, play: String }
+
+/// Nothing, for an export no program in the book imports.
+fn noDemo() -> Demo {
+    return Demo { block: "", chapter: "", section: "", title: "", play: "" }
+}
+
+/// The program in the book that imports `name` from `std/<module>`, or nothing.
+///
+/// This is what a reference page's "open in playground" link is derived FROM,
+/// and it is why there is no link on most exports. A snippet invented for an
+/// export nobody wrote a program for would be a snippet nobody ran, and the
+/// playground would be the first thing to find that out. Where a block imports
+/// the export by name, the link carries that block — a program this site
+/// compiled and ran while the page was built.
+export fn demoFor(module: String, name: String) -> Demo {
+    let wanted = module + ":" + name
+    for id in guideBlocks() {
+        for pair in guideImports(id) {
+            if pair == wanted && guidePlayable(id) {
+                let slug = chapterOfBlock(id)
+                if slug.byteLength > 0 {
+                    return Demo {
+                        block: id.copy(),
+                        chapter: slug.copy(),
+                        section: sectionOfBlock(id),
+                        title: chapterOf(slug).title,
+                        play: playHref(guideSrc(id)),
+                    }
+                }
+            }
+        }
+    }
+    return noDemo()
+}
+
+// ---------------------------------------------------------------------------
+// The gates
+// ---------------------------------------------------------------------------
+
+/// `markup` with every tag removed — what a reader actually reads.
+fn stripTags(markup: String) -> String {
+    let raw = bytes(markup)
+    let mut out = ""
+    let mut plain = 0
+    let mut i = 0
+    let mut inTag = false
+    while i < raw.length {
+        if !inTag && raw[i] == '<' {
+            out = out + substring(markup, plain, i)
+            inTag = true
+        }
+        if inTag && raw[i] == '>' {
+            inTag = false
+            plain = i + 1
+        }
+        i = i + 1
+    }
+    return out + substring(markup, plain, raw.length)
+}
+
+test "every chapter names a slug, a title and at least one section" {
+    let all = chapters()
+    assertEq(all.length, 13)
+    for c in all {
+        assert(c.slug.byteLength > 0)
+        assert(c.title.byteLength > 0)
+        assert(c.lede.byteLength > 0)
+        assert(c.sections.length > 0)
+        for s in c.sections {
+            assert(s.anchor.byteLength > 0)
+            assert(s.heading.byteLength > 0)
+            assert(s.prose.length > 0)
+        }
+    }
+}
+
+test "a slug appears once, and the chain of prev and next covers the book" {
+    let all = chapters()
+    for c in all {
+        assertEq(chapterNumber(c.slug), chapterNumber(c.slug))
+        assert(chapterKnown(c.slug))
+    }
+    assertEq(prevSlug(all[0].slug), "")
+    assertEq(nextSlug(all[all.length - 1].slug), "")
+    let mut walked = 1
+    let mut here = all[0].slug.copy()
+    while nextSlug(here).byteLength > 0 {
+        let ahead = nextSlug(here)
+        assertEq(prevSlug(ahead), here)
+        here = ahead
+        walked = walked + 1
+    }
+    assertEq(walked, all.length)
+    assert(!chapterKnown("nope"))
+}
+
+test "every block the book names is a file the generator read" {
+    let known = guideBlocks()
+    let mut shown = 0
+    for c in chapters() {
+        for s in c.sections {
+            for b in s.blocks {
+                let mut found = false
+                for k in known {
+                    if k == b {
+                        found = true
+                    }
+                }
+                assert(found)
+                assert(guideSrc(b).byteLength > 0)
+                assert(guideLines(b).length > 0)
+                shown = shown + 1
+            }
+        }
+    }
+    // Every program in the directory is shown somewhere: a file nobody reads is
+    // a program nobody checks.
+    assertEq(shown, known.length)
+}
+
+test "every program the book runs answered with something" {
+    for id in guideBlocks() {
+        let b = blockOf(id)
+        if guidePlayable(id) {
+            assert(b.output.byteLength > 0)
+        }
+        assert(b.source.byteLength > 0)
+    }
+}
+
+test "a playground link is base64url of the source, with no padding" {
+    for id in guideBlocks() {
+        let href = blockOf(id).play
+        if href.byteLength > 0 {
+            assert(startsWith(href, "/play.html#c="))
+            let code = substring(href, 13, href.byteLength)
+            assert(code.byteLength > 0)
+            for b in bytes(code) {
+                let ok = (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-' || b == '_'
+                assert(ok)
+            }
+        }
+    }
+    // The three substitutions, on a source that needs all of them.
+    assertEq(playHref("~~~?"), "/play.html#c=fn5-Pw")
+}
+
+test "a block that needs a second file carries no run link" {
+    // The generator chapter's two blocks: one is a `gen fn` with no `demo`, and
+    // one imports it. Neither is a whole program on its own, and a run link that
+    // opened a source the playground cannot compile would be a broken promise.
+    assertEq(blockOf("gentiny").play, "")
+    assertEq(blockOf("genuse").play, "")
+    assert(blockOf("hello").play.byteLength > 0)
+}
+
+test "the block on the page is the program that ran" {
+    // The colouring pass and the source it coloured must agree character for
+    // character. A `\{ }` interpolation holding a string literal used to end the
+    // highlighter's scan early and mangle the rest of the line; this is the gate
+    // that catches that, on every block, rather than by eye.
+    for id in guideBlocks() {
+        assertEq(stripTags(joinWith(guideLines(id), "\n")), escapeHtml(trimEnd(guideSrc(id))))
+    }
+}
+
+test "every block a chapter shows sits under a section of that chapter" {
+    assertEq(chapterOfBlock("hello"), "getting-started")
+    assertEq(sectionOfBlock("hello"), "first")
+    assertEq(chapterOfBlock("nope"), "")
+    assertEq(chapterTag(1), "01")
+    assertEq(chapterTag(13), "13")
+    assertEq(chapterHref("values"), "/guide/values.html")
+}
+
+test "an export a program in the book imports carries that program" {
+    let d = demoFor("strings", "joinWith")
+    assert(d.block.byteLength > 0)
+    assert(d.chapter.byteLength > 0)
+    assert(d.section.byteLength > 0)
+    assert(startsWith(d.play, "/play.html#c="))
+    // A name nobody imports, and a module nobody imports, carry nothing — no
+    // invented snippet, and no link to one.
+    assertEq(demoFor("strings", "editDistance").block, "")
+    assertEq(demoFor("graphql", "graphqlSdl").block, "")
+}
+
+test "a std module the book uses lists the block that uses it" {
+    let users = blocksUsing("arrays")
+    assert(users.length > 0)
+    assertEq(blocksUsing("nope").length, 0)
+}

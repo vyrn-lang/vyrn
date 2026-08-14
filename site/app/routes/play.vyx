@@ -1,0 +1,93 @@
+<script>
+// GET /play — the compiler, in the reader's browser.
+//
+// The front end is compiled to WebAssembly (`compiler/vyrn-play`) and answers
+// three questions on this page: where the tokens are, what the diagnostics are,
+// and what the program prints. All three come from the same Rust the `vyrn`
+// binary is built from, so the page cannot disagree with the compiler.
+//
+// The pill says RUNNING and not BUILT, and it is the opposite of the guide's for
+// the same reason the guide's is honest: a guide block ran once while the page
+// was built, and this one runs when the reader presses the button. The caption
+// says which engine — the tree-walking interpreter, which is the reference every
+// other backend is checked against.
+//
+// EVERYTHING ON THIS PAGE IS MARKUP THE EXPORT WROTE. The examples are Vyrn data
+// rendered into hidden `<pre>` blocks, escaped by the template, and `play.js`
+// reads them back with `textContent`. Nothing here is a JavaScript string
+// holding a program.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { playExamples, Example } from "../play"
+
+export fn head() -> Head {
+    return pageHead("Playground — Vyrn")
+}
+
+fn examples() -> Array<Example> {
+    return playExamples()
+}
+</script>
+
+<template>
+<main class="page play" data-widget="play">
+    <section class="hero">
+        <p class="eyebrow">Playground</p>
+        <h1 class="display">Type Vyrn. Run it here.</h1>
+        <p class="lede">The compiler's front end is compiled to WebAssembly and runs in this tab. Nothing is uploaded, nothing is stored, and there is no server behind this page.</p>
+    </section>
+
+    <section class="band">
+        <div class="plate" data-play-plate>
+            <div class="plate-head">
+                <span class="pill">Running</span>
+                <span class="eyebrow" data-play-status>Loading the compiler…</span>
+                <span class="spacer"></span>
+                <label class="pickbox">
+                    <span class="sr-only">Example</span>
+                    <select data-play-pick>
+                        <option v-for="e in examples()" :key="e.id" :value="e.id">{{ e.title }}</option>
+                    </select>
+                </label>
+                <button type="button" class="btn" data-play-share>Copy link</button>
+                <button type="button" class="btn primary" data-play-run disabled="disabled">Run</button>
+            </div>
+
+            <div class="editor" data-play-editor>
+                <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
+                <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>
+            </div>
+
+            <p class="cap">Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run. <kbd>Tab</kbd> inserts two spaces. Colour comes from the compiler's own lexer, not from a second one written in JavaScript.</p>
+
+            <details class="stdinbox" data-play-stdin-box>
+                <summary>Standard input</summary>
+                <textarea data-play-stdin spellcheck="false" aria-label="Standard input"></textarea>
+                <p class="cap">These lines reach <code>readLine()</code>, one per call. At the end of them it answers <code>None</code>, exactly as a pipe does.</p>
+            </details>
+
+            <div class="diags" data-play-diags hidden="hidden"></div>
+
+            <div class="out" data-play-out><span class="dim">Nothing has run yet.</span></div>
+        </div>
+
+        <p class="notice" data-play-note>This is the <strong>tree-walking interpreter</strong> — the reference semantics, the same engine <code>vyrn run</code> uses, compiled to WebAssembly and running in this tab. The native and WebAssembly backends are checked against it byte for byte by the parity harness.</p>
+
+        <dl class="nongoals">
+            <dt>What runs</dt>
+            <dd>One file, plus <code>std/</code>, which is embedded in the module. A relative import has nowhere to resolve to and says so.</dd>
+            <dt>What refuses</dt>
+            <dd><code>readFile</code>, <code>writeFile</code> and <code>listDir</code> answer with the same <code>Err</code> the compiler defines everywhere else — <code>cannot read `x`</code>, <code>cannot write `x`</code> — because a tab has no filesystem. <code>args()</code> is empty. The clock is read once, when the run starts.</dd>
+            <dt>How deep it recurses</dt>
+            <dd>The interpreter's limit is 1,000 nested calls, and it is the same number in every backend. A browser gives out before that: 466 to 468 here, measured by binary search against this page's own worker, because the engine puts every WebAssembly call on a native stack a worker gets half of. Past that the page says so, and says whose ceiling it was — <code>vyrn run</code> takes the same program to 1,000.</dd>
+            <dt>How long it may run</dt>
+            <dd>Five seconds. The program runs in a Web Worker, and terminating one is the only way to stop running WebAssembly — so a program that loops forever is stopped rather than asked to stop.</dd>
+        </dl>
+    </section>
+
+    <div hidden="hidden" data-play-examples>
+        <pre v-for="e in examples()" :key="e.id" :data-play-example="e.id">{{ e.src }}</pre>
+        <pre v-for="e in examples()" :key="e.id" :data-play-example-stdin="e.id">{{ e.stdin }}</pre>
+    </div>
+</main>
+</template>

@@ -1,0 +1,84 @@
+/// The site navigation, and the one place that maps a route to its published
+/// file.
+///
+/// It sits OUTSIDE `routes/` on purpose. `pages("./app/routes")` scans that
+/// directory, so a page importing the module the scan generates would be a cycle.
+/// The binding is kept honest from the other side instead: `export.vyrn` asserts
+/// every row here against the generated typed-URL helper, so a route that is
+/// renamed or deleted fails the export.
+///
+/// The two sockets the brief reserved are filled: `/guide` is the book, and
+/// `/explore` is the module explorer. Both arrived as a directory drop plus a
+/// row here, which is what reserving them was for. A row is still only written
+/// when the route behind it exists — there is no placeholder page anywhere.
+import { substring } from "std/strings"
+import { Head, noHead, withTitle, withMeta } from "std/ui"
+
+/// The head every page shares: its title, the viewport (without which a page
+/// renders at desktop width on a phone), and one description.
+///
+/// It lives here rather than in the layout because the layout's `head { … }`
+/// block has entries for a stylesheet and a script and none for a `<meta>`,
+/// while a page's `head()` returns a `Head` value, which does.
+export fn pageHead(title: String) -> Head {
+    let titled = withTitle(noHead(), title)
+    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
+    return withMeta(sized, "description", "Vyrn is a systems language with the expressiveness of TypeScript. Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, and one program for three backends.")
+}
+
+/// One navigation entry: where it goes, and what it is called.
+export type NavRow = { href: String, label: String }
+
+/// The published file for a route path: `/philosophy` is `philosophy.html`, and
+/// `/docs/std/json` is `docs/std/json.html`.
+///
+/// A route keeps its own shape, and the URL keeps the `.html`. RFC-0014 has
+/// `readFile`, `writeFile` and `listDir` but no way to CREATE a directory, so a
+/// nested route needs its directory made before the export runs — `site.yml`
+/// makes `out/docs/std` — and `philosophy/index.html` would need one per page.
+/// When a `makeDir` builtin lands, this one function changes and the extension
+/// can go.
+export fn published(path: String) -> String {
+    if path == "/" {
+        return "index.html"
+    }
+    return substring(path, 1, path.byteLength) + ".html"
+}
+
+/// The URL a link uses for a route path.
+export fn hrefOf(path: String) -> String {
+    return "/" + published(path)
+}
+
+/// The navigation, in reading order.
+///
+/// Guide sits before Docs: the book teaches in order, the reference answers one
+/// question at a time, and a reader who wants the second usually knows it.
+export fn navRows() -> Array<NavRow> {
+    return [
+        NavRow { href: hrefOf("/philosophy"), label: "Philosophy" },
+        NavRow { href: hrefOf("/compare"), label: "Compare" },
+        NavRow { href: hrefOf("/install"), label: "Install" },
+        NavRow { href: hrefOf("/releases"), label: "Releases" },
+        NavRow { href: hrefOf("/guide"), label: "Guide" },
+        NavRow { href: hrefOf("/docs"), label: "Docs" },
+        NavRow { href: hrefOf("/explore"), label: "Explore" },
+        NavRow { href: hrefOf("/play"), label: "Play" },
+    ]
+}
+
+test "the home page keeps the bare index name" {
+    assertEq(published("/"), "index.html")
+    assertEq(hrefOf("/"), "/index.html")
+}
+
+test "a route becomes one file, and a nested route keeps its directory" {
+    assertEq(published("/philosophy"), "philosophy.html")
+    assertEq(hrefOf("/compare"), "/compare.html")
+    assertEq(published("/docs/std/json"), "docs/std/json.html")
+    assertEq(hrefOf("/docs/std/json"), "/docs/std/json.html")
+}
+
+test "the navigation covers every route but the home page" {
+    assertEq(navRows().length, 8)
+}

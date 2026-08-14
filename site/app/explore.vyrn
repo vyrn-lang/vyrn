@@ -1,0 +1,353 @@
+/// The explorer: what the standard library holds, and what depends on what.
+///
+/// Two views over one set of facts, both read off the source while the site
+/// compiles:
+///
+///  - **A searchable index.** Every module, its first line, and the name of
+///    every export. The rows ARE the index: each one carries its own searchable
+///    text in a `data-q` attribute and its export names in `data-e`, so the page
+///    needs no fetch, works with no script (the modules are links), and the
+///    filter is a class on a row.
+///  - **The import graph.** One node per module, one wire per `import`, laid out
+///    in columns by depth. Every coordinate is computed HERE, at build time, and
+///    the script only lights up the wires of the module under the pointer.
+///
+/// The graph's data comes from `deps.vyrn`, which reads the `import` lines with
+/// the compiler's own lexer. Nothing about the graph is written by hand, so a
+/// module added to `std/` is in it on the next build.
+import { moduleDeps } from "./deps"
+import { depUses, depUsedBy, depDepth, depExamples } from moduleDeps("../../std", "../../examples")
+import { ApiModule, ApiEntry, apiModules, apiEntries, apiHref } from "./docs"
+import { joinWith, toLower, substring } from "std/strings"
+import { escapeHtml } from "./code"
+
+/// One row of the index: a module, what it is, and every name it exports.
+export type ExploreRow = { name: String, href: String, summary: String, count: Int64, exports: Array<String>, q: String, e: String }
+
+/// One node of the graph: where it sits, what it is called, and the two lists
+/// the highlight needs.
+export type GraphNode = { name: String, href: String, x: String, y: String, tx: String, ty: String, hx: String, hy: String, w: String, uses: String, usedBy: String }
+
+/// One wire: the path, and the two modules it joins.
+export type GraphEdge = { id: String, d: String, from: String, to: String }
+
+// ---------------------------------------------------------------------------
+// The index
+// ---------------------------------------------------------------------------
+
+/// `markup` as the text a reader sees, so a search over a summary matches the
+/// words and not the tags around them.
+fn plainText(markup: String) -> String {
+    let raw = bytes(markup)
+    let mut out = ""
+    let mut plain = 0
+    let mut i = 0
+    let mut inTag = false
+    while i < raw.length {
+        if !inTag && raw[i] == '<' {
+            out = out + substring(markup, plain, i)
+            inTag = true
+        }
+        if inTag && raw[i] == '>' {
+            inTag = false
+            plain = i + 1
+        }
+        i = i + 1
+    }
+    return out + substring(markup, plain, raw.length)
+}
+
+/// Every module, with everything a search over it can match.
+export fn exploreRows() -> Array<ExploreRow> {
+    let mut out: Array<ExploreRow> = []
+    for m in apiModules() {
+        let mut names: Array<String> = []
+        for e in apiEntries(m.name) {
+            names.push(e.name.copy())
+        }
+        let joined = joinWith(names, " ")
+        out.push(ExploreRow {
+                name: m.name.copy(),
+                href: apiHref(m.name),
+                summary: m.summary.copy(),
+                count: m.count,
+                exports: names.copy(),
+                // One lowercased haystack per row: the module name, every export
+                // name, and the words of the summary.
+                q: toLower(m.name + " " + joined + " " + plainText(m.summary)),
+                e: joined,
+            })
+    }
+    return out
+}
+
+/// How many exports the whole index covers.
+export fn exportTotal() -> Int64 {
+    let mut n = 0
+    for m in apiModules() {
+        n = n + m.count
+    }
+    return n
+}
+
+// ---------------------------------------------------------------------------
+// The graph
+// ---------------------------------------------------------------------------
+
+/// The deepest layer any module sits in.
+fn deepest() -> Int64 {
+    let mut d = 0
+    for m in apiModules() {
+        if depDepth(m.name) > d {
+            d = depDepth(m.name)
+        }
+    }
+    return d
+}
+
+/// The modules of one layer, in the order the reference lists them.
+fn layer(d: Int64) -> Array<String> {
+    let mut out: Array<String> = []
+    for m in apiModules() {
+        if depDepth(m.name) == d {
+            out.push(m.name.copy())
+        }
+    }
+    return out
+}
+
+/// The tallest layer, which sets the height of the drawing.
+fn tallest() -> Int64 {
+    let mut n = 0
+    let mut d = 0
+    while d <= deepest() {
+        if layer(d).length > n {
+            n = layer(d).length
+        }
+        d = d + 1
+    }
+    return n
+}
+
+/// The horizontal step between two layers. A layer's labels are at most ten
+/// characters of 11px mono, so the step clears the widest of them.
+fn columnStep() -> Int64 {
+    return 150
+}
+
+/// The vertical step between two modules of one layer.
+fn rowStep() -> Int64 {
+    return 24
+}
+
+/// Where layer `d` starts.
+fn columnX(d: Int64) -> Int64 {
+    return 16 + d * columnStep()
+}
+
+/// Where row `i` of a layer sits.
+fn rowY(i: Int64) -> Int64 {
+    return 40 + i * rowStep()
+}
+
+/// How wide a label is, in px. 11px mono is 6.6px per character; the estimate is
+/// rounded up, because a wire that starts a pixel clear of a name is right and
+/// one that starts a pixel inside it is not.
+fn labelWidth(name: String) -> Int64 {
+    return 7 * name.byteLength
+}
+
+/// The layer a module sits in, and its row inside that layer.
+fn rowOf(name: String) -> Int64 {
+    let mut i = 0
+    for m in layer(depDepth(name)) {
+        if m == name {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// The x of a module's dot: the left edge of its label.
+fn nodeX(name: String) -> Int64 {
+    return columnX(depDepth(name))
+}
+
+/// The y of a module's dot.
+fn nodeY(name: String) -> Int64 {
+    return rowY(rowOf(name))
+}
+
+/// The whole drawing's width and height, which the viewBox takes.
+export fn graphWidth() -> Int64 {
+    return columnX(deepest()) + 110
+}
+
+export fn graphHeight() -> Int64 {
+    return rowY(tallest()) + 8
+}
+
+/// The viewBox, as one attribute.
+export fn graphViewBox() -> String {
+    return "0 0 " + graphWidth().toString() + " " + graphHeight().toString()
+}
+
+/// Every node, in layer order.
+export fn graphNodes() -> Array<GraphNode> {
+    let mut out: Array<GraphNode> = []
+    for m in apiModules() {
+        out.push(GraphNode {
+                name: m.name.copy(),
+                href: apiHref(m.name),
+                x: nodeX(m.name).toString(),
+                y: nodeY(m.name).toString(),
+                // The label sits to the right of the dot, and the hit area
+                // covers both, so a name is as clickable as it looks.
+                tx: (nodeX(m.name) + 10).toString(),
+                ty: (nodeY(m.name) + 4).toString(),
+                hx: (nodeX(m.name) - 6).toString(),
+                hy: (nodeY(m.name) - 9).toString(),
+                w: (labelWidth(m.name) + 20).toString(),
+                uses: joinWith(depUses(m.name), " "),
+                usedBy: joinWith(depUsedBy(m.name), " "),
+            })
+    }
+    return out
+}
+
+/// The wire from `from` to the module it imports.
+///
+/// It leaves the dependent on its left and arrives at the dependency past the
+/// right end of that module's name, so no wire crosses the word it points at.
+fn wire(from: String, to: String) -> String {
+    let x1 = nodeX(from) - 6
+    let y1 = nodeY(from)
+    let x2 = nodeX(to) + labelWidth(to) + 12
+    let y2 = nodeY(to)
+    let c1 = x1 - 40
+    let c2 = x2 + 40
+    return "M \{x1} \{y1} C \{c1} \{y1}, \{c2} \{y2}, \{x2} \{y2}"
+}
+
+/// Every wire, one per import.
+export fn graphEdges() -> Array<GraphEdge> {
+    let mut out: Array<GraphEdge> = []
+    for m in apiModules() {
+        for u in depUses(m.name) {
+            out.push(GraphEdge { id: m.name + "-" + u, d: wire(m.name, u), from: m.name.copy(), to: u.copy() })
+        }
+    }
+    return out
+}
+
+/// How many imports the graph draws.
+export fn edgeCount() -> Int64 {
+    return graphEdges().length
+}
+
+/// How many modules import nothing else in `std/`.
+export fn leafCount() -> Int64 {
+    return layer(0).length
+}
+
+// ---------------------------------------------------------------------------
+// What a module page adds
+// ---------------------------------------------------------------------------
+
+/// The example programs that import `m`, by path under the repository.
+export fn examplesUsing(m: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for e in depExamples(m) {
+        out.push("examples/" + e)
+    }
+    return out
+}
+
+/// The `std/` modules `m` imports.
+export fn usesOfModule(m: String) -> Array<String> {
+    return depUses(m)
+}
+
+/// The `std/` modules that import `m`.
+export fn usedByModule(m: String) -> Array<String> {
+    return depUsedBy(m)
+}
+
+test "every module is a row, and every row carries its own search text" {
+    let rows = exploreRows()
+    assertEq(rows.length, apiModules().length)
+    for r in rows {
+        assert(r.name.byteLength > 0)
+        assert(r.count > 0)
+        assertEq(r.exports.length, r.count)
+        // The row's haystack is lowercase, and holds the module's own name.
+        assertEq(r.q, toLower(r.q))
+        assert(r.q.byteLength > r.name.byteLength)
+    }
+    assert(exportTotal() > 300)
+}
+
+test "a summary's tags are not part of what a search matches" {
+    assertEq(plainText("the <code>value</code> tree"), "the value tree")
+    assertEq(plainText("plain"), "plain")
+}
+
+test "every node sits in a column, and no two share a place" {
+    let nodes = graphNodes()
+    assertEq(nodes.length, apiModules().length)
+    for a in nodes {
+        let mut same = 0
+        for b in nodes {
+            if a.x == b.x && a.y == b.y {
+                same = same + 1
+            }
+        }
+        assertEq(same, 1)
+    }
+    assert(graphWidth() > 300)
+    assert(graphHeight() > 200)
+}
+
+test "every wire joins two modules the graph draws" {
+    let edges = graphEdges()
+    assert(edges.length > 40)
+    for e in edges {
+        let mut fromFound = false
+        let mut toFound = false
+        for n in graphNodes() {
+            if n.name == e.from {
+                fromFound = true
+            }
+            if n.name == e.to {
+                toFound = true
+            }
+        }
+        assert(fromFound)
+        assert(toFound)
+        // A module never imports itself, and a wire is a real path.
+        assert(e.from != e.to)
+        assert(e.d.byteLength > 10)
+    }
+}
+
+test "a module sits deeper than everything it imports" {
+    // The layer is what the drawing is FOR: dependencies to the left, and the
+    // modules that need them to the right. A wire that ran backwards would say
+    // the opposite of what the graph claims.
+    for m in apiModules() {
+        for u in depUses(m.name) {
+            assert(depDepth(u) < depDepth(m.name))
+        }
+    }
+}
+
+test "the graph and the reference agree about what imports what" {
+    // `std/json` is imported by several modules and imports none of them, so it
+    // is a leaf with dependents — the shape the highlight is built to show.
+    assertEq(depUses("json").length, 0)
+    assert(depUsedBy("json").length > 3)
+    assert(depUses("jsonread").length > 0)
+    assert(examplesUsing("json").length > 0)
+    assertEq(examplesUsing("nope").length, 0)
+}

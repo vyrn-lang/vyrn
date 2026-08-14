@@ -1,0 +1,92 @@
+<script>
+// GET /releases — a feed, newest first, pre-releases marked rather than hidden.
+//
+// There are no releases. There are no git tags. Writing a release entry here
+// would be the one thing this site refuses to do, so the page says what is true
+// and shows what the project does have instead: the design record, one cell per
+// RFC, counted off the file names while this page was built.
+//
+// `release.yml` is in the repository and inert until someone pushes a `v*` tag.
+// `fresh.js` asks the GitHub feed once per visit, so the first release fills the
+// notice at the top of this page without a rebuild.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { rfcCells, rfcStripWidth, rfcStripHeight, rfcTag, rfcHref, Cell } from "../chart"
+import { rfcCount, rfcRows, RfcRow } from "../repo"
+
+export fn head() -> Head {
+    return pageHead("Releases — Vyrn")
+}
+
+/// The five most recent design records, newest first — the closest thing to a
+/// changelog the project has today.
+fn latestRfcs() -> Array<RfcRow> {
+    let rows = rfcRows()
+    let mut out: Array<RfcRow> = []
+    let mut i = rows.length - 1
+    while i >= 0 && out.length < 8 {
+        out.push(RfcRow { number: rows[i].number, title: rows[i].title.copy() })
+        i = i - 1
+    }
+    return out
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#status"><span class="n">01</span>status</a>
+        <a href="#record"><span class="n">02</span>the record</a>
+        <a href="#latest"><span class="n">03</span>latest</a>
+        <a href="#how"><span class="n">04</span>how it works</a>
+    </aside>
+        <section class="hero" id="status">
+            <p class="eyebrow">Releases</p>
+            <h1 class="display">Nothing is released yet</h1>
+            <p class="lede">There is no versioned release and no published binary. The language changes without a deprecation period. <a href="/install.html">Build from source</a> — it is one clone and one command.</p>
+            <p class="notice" data-release-note hidden="hidden"></p>
+        </section>
+
+        <section class="band" id="record">
+            <p class="eyebrow">02 — what there is instead</p>
+            <h2>{{ rfcCount() }} design records</h2>
+            <p>Every decision in this language was argued in writing before it was built. That record is the closest thing to a changelog the project has, and it is more useful than one: each entry carries the argument, not only the outcome.</p>
+            <div class="plate" data-widget="strip">
+                <div class="plate-head">
+                    <span class="pill">Record</span>
+                    <span class="eyebrow">rfcs/</span>
+                </div>
+                <span class="bignum"><span data-strip-count>{{ rfcCount() }}</span><small>RFCs, RFC-0001 onward</small></span>
+                <div class="stage">
+                    <svg class="chart" :viewBox='"0 0 " + rfcStripWidth() + " " + rfcStripHeight()' role="img" aria-label="One cell per design record, in order">
+                        <a v-for="c in rfcCells()" :key="c.id" :href="c.href">
+                            <title>{{ c.title }}</title>
+                            <rect class="cell" :x="c.x" :y="c.y" width="18" height="18" :data-tone="c.tone" fill="currentColor" :fill-opacity="c.tone"/>
+                        </a>
+                    </svg>
+                </div>
+                <p class="cap">One cell per file in rfcs/, counted while this page was built. Hover a cell for its number and title, or open the record itself. The tone steps every ten records so the sequence is countable.</p>
+            </div>
+        </section>
+
+        <section class="band" id="latest">
+            <p class="eyebrow">03 — latest</p>
+            <h2>The eight most recent</h2>
+            <ul class="feed">
+                <li v-for="r in latestRfcs()" :key="r.number">
+                    <a class="tag" :href="rfcHref(r)">{{ rfcTag(r.number) }}</a>
+                    <span>{{ r.title }}</span>
+                </li>
+            </ul>
+            <p class="notice">The whole index, with the status each record carries, is <a href="https://github.com/vyrn-lang/vyrn/blob/main/rfcs/README.md">in the repository</a>.</p>
+        </section>
+
+        <section class="band" id="how">
+            <p class="eyebrow">04 — how a release will work</p>
+            <h2>One tag, three binaries</h2>
+            <p>Pushing a <code>v*</code> tag builds the <code>vyrn</code> binary for Linux, macOS and Windows and publishes a GitHub release. A tag with a suffix — <code>v0.2.0-rc.1</code> — publishes as a pre-release, and this page will list it and mark it rather than hide it.</p>
+            <p>Until a tag exists the workflow never runs: it has no schedule and no manual trigger. Nothing on this page is waiting on a decision except the decision to cut a version.</p>
+            <p class="notice">What is stable today is the verification, not the surface. Every example runs under all three backends and must agree byte for byte, and CI enforces that on every push.</p>
+        </section>
+</main>
+</template>

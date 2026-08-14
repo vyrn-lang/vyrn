@@ -1,0 +1,282 @@
+/// The guide's programs, read off `site/guide/` while the site compiles.
+///
+/// Every code block in the book is a FILE in that directory. This generator
+/// reads each one, colours it with the compiler's own lexer, and emits the
+/// answers as Vyrn source:
+///
+///     import { guideCode } from "./guidecode"
+///     import { guideBlocks, guideSrc, guideLines } from guideCode("../guide")
+///
+/// Nothing here runs the programs. `site/app/guide.vyrn` does that, by importing
+/// each one as a namespace and CALLING its `demo()` while the page renders — so a
+/// program that does not compile fails the site build, and one that traps fails
+/// the export. The two halves read the same file, so the block on the page and
+/// the program that ran cannot drift apart.
+///
+/// WHAT IS EMITTED PER BLOCK.
+///
+///  - `guideSrc` — the program as shown: the file, plus the four-line `main` that
+///    prints `demo()`. A module has no entry point of its own, so the `main` is
+///    added here rather than written 24 times; it is also exactly what the
+///    playground link carries, so what a reader runs is what a reader read.
+///  - `guideLines` — the same text, coloured, one string per line.
+///  - `guideUses` — the `std/` modules the block imports. The reference pages
+///    read this to link a module to the block that demonstrates it.
+///  - `guidePlayable` — whether the block is a WHOLE program. A block that
+///    imports a sibling file (the generator chapter has two that do) needs more
+///    than one source, and the playground takes one, so it gets no run link
+///    rather than a broken one.
+import { substring, split, joinWith } from "std/strings"
+import { endsWith, startsWith } from "std/strpred"
+import { highlightSrc } from "./hl"
+
+/// One block: its id (the file stem), the program as shown, what it imports, and
+/// whether it stands alone.
+type Block = { id: String, src: String, uses: Array<String>, names: Array<String>, playable: Bool }
+
+/// What one file's import lines say: the `std/` modules it takes, and whether
+/// every one of them resolves without a second file.
+///
+/// Exported because `deps.vyrn` asks the same question of `std/` and of
+/// `examples/`, and one scan that both generators call is one scan to be right.
+export type Imports = { uses: Array<String>, names: Array<String>, standalone: Bool }
+
+/// The `main` every block is shown and run with. `demo()` returns the output, so
+/// `main` is the same four lines for every program in the book.
+fn mainTail() -> String {
+    return "\nfn main() -> Int64 {\n    print(demo())\n    return 0\n}\n"
+}
+
+/// The entries of `dir`, or nothing when it cannot be read.
+fn entriesOf(dir: String) -> Array<String> {
+    return match listDir(dir) {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+}
+
+/// Whether the module exports a `demo` function — the one name the site calls.
+gen fn hasDemo(toks: Array<Token>) -> Bool {
+    let mut i = 0
+    while i + 2 < toks.length {
+        if toks[i].text == "export" && toks[i + 1].text == "fn" && toks[i + 2].text == "demo" {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// The index of the `from` that belongs to the import starting at `i`, or -1.
+///
+/// The scan stops at the next top-level keyword, so a file with no `from` on an
+/// import line cannot run away to the end of the token list.
+gen fn fromAfter(toks: Array<Token>, i: Int64) -> Int64 {
+    let mut j = i + 1
+    while j < toks.length {
+        if toks[j].text == "from" {
+            return j
+        }
+        if toks[j].col == 1 && toks[j].text != "import" {
+            return 0 - 1
+        }
+        j = j + 1
+    }
+    return 0 - 1
+}
+
+/// The names an import list takes, between the `{` at `open` and its `}`.
+///
+/// `a, b as c` yields `a` and `b`: the name the module EXPORTS is what a
+/// reference page can be linked by, and the local alias is the caller's business.
+gen fn namesBetween(toks: Array<Token>, open: Int64) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = open + 1
+    let mut wanted = true
+    while i < toks.length && toks[i].text != "}" {
+        if toks[i].text == "," {
+            wanted = true
+        } else if toks[i].text == "as" {
+            wanted = false
+        } else if wanted && toks[i].kind == "ident" {
+            out.push(toks[i].text.copy())
+            wanted = false
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// What one module source imports: every `std/` module by name, every name it
+/// takes as `<module>:<name>`, and whether any import needs a second FILE — a
+/// relative path, or a generator call.
+///
+/// The token list is the compiler's own, so an `import` line written inside a
+/// string or a code quote is a string token here and is never read as an import.
+export gen fn importsOf(toks: Array<Token>) -> Imports {
+    let mut uses: Array<String> = []
+    let mut names: Array<String> = []
+    let mut standalone = true
+    let mut i = 0
+    while i < toks.length {
+        if toks[i].kind == "keyword" && toks[i].text == "import" && toks[i].col == 1 {
+            let at = fromAfter(toks, i)
+            if at >= 0 && at + 1 < toks.length {
+                let target = toks[at + 1]
+                if target.kind == "string" {
+                    if startsWith(target.text, "std/") {
+                        let module = substring(target.text, 4, target.text.byteLength)
+                        uses.push(module.copy())
+                        // `import * as ns` has no list, and `namesBetween` stops
+                        // at the first `}` — which is the list's own, because the
+                        // scan starts at the `{` of THIS import.
+                        if toks[i + 1].text == "{" {
+                            for name in namesBetween(toks, i + 1) {
+                                names.push(module + ":" + name)
+                            }
+                        }
+                    } else {
+                        // A sibling file: one source is not the whole program.
+                        standalone = false
+                    }
+                } else {
+                    // `from someGenerator(..)` — the generator lives elsewhere.
+                    standalone = false
+                }
+            }
+        }
+        i = i + 1
+    }
+    return Imports { uses: uses, names: names, standalone: standalone }
+}
+
+/// `s` as a Vyrn string literal. Only a quote and a backslash can end one, and a
+/// newline has to be written rather than embedded.
+fn quoted(s: String) -> String {
+    let raw = bytes(s)
+    let mut out = "\""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        let b = raw[i]
+        if b == 92 || b == '"' || b == 10 || b == 9 {
+            out = out + substring(s, plain, i)
+            if b == 10 {
+                out = out + "\\n"
+            } else if b == 9 {
+                out = out + "\\t"
+            } else if b == 92 {
+                out = out + "\\\\"
+            } else {
+                out = out + "\\\""
+            }
+            plain = i + 1
+        }
+        i = i + 1
+    }
+    return out + substring(s, plain, raw.length) + "\""
+}
+
+/// The coloured lines of `markup`, without the empty row the closing newline of
+/// every program would otherwise add.
+fn rowsOf(markup: String) -> Array<String> {
+    let all = split(markup, "\n")
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < all.length {
+        if i + 1 < all.length || all[i].byteLength > 0 {
+            out.push(all[i].copy())
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// A Vyrn array literal of quoted strings.
+fn quotedList(items: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for it in items {
+        parts.push(quoted(it))
+    }
+    return "[" + joinWith(parts, ", ") + "]"
+}
+
+/// One `if` branch of a lookup.
+fn branch(id: String, value: String) -> String {
+    return "    if id == " + quoted(id) + " { return " + value + " }\n"
+}
+
+/// A lookup over the blocks, with an empty answer for an id that is not one.
+fn lookup(name: String, ret: String, branches: Array<String>, fallback: String) -> String {
+    let mut out = "export fn " + name + "(id: String) -> " + ret + " {\n"
+    for b in branches {
+        out = out + b
+    }
+    return out + "    return " + fallback + "\n}\n"
+}
+
+/// Read `dir`, and emit every block as one module.
+export gen fn guideCode(dir: String) -> String {
+    let mut blocks: Array<Block> = []
+    for entry in entriesOf(dir) {
+        if endsWith(entry, ".vyrn") {
+            let file = match readFile(dir + "/" + entry) {
+                Ok(text) => text,
+                Err(why) => "",
+            }
+            let toks = lex(file)
+            let found = importsOf(toks)
+            // A block with no `demo` is a module the book SHOWS rather than runs
+            // — the generator chapter's `gen fn`. It keeps the file as it is.
+            let shown = if hasDemo(toks) { file + mainTail() } else { file.copy() }
+            blocks.push(Block {
+                    id: substring(entry, 0, entry.byteLength - 5),
+                    src: shown,
+                    uses: found.uses.copy(),
+                    names: found.names.copy(),
+                    playable: found.standalone && hasDemo(toks),
+                })
+        }
+    }
+
+    let mut ids: Array<String> = []
+    let mut srcs: Array<String> = []
+    let mut lines: Array<String> = []
+    let mut uses: Array<String> = []
+    let mut names: Array<String> = []
+    let mut playable: Array<String> = []
+    for b in blocks {
+        ids.push(b.id.copy())
+        srcs.push(branch(b.id, quoted(b.src)))
+        lines.push(branch(b.id, quotedList(rowsOf(highlightSrc(b.src, lex(b.src))))))
+        uses.push(branch(b.id, quotedList(b.uses)))
+        names.push(branch(b.id, quotedList(b.names)))
+        playable.push(branch(b.id, if b.playable { "true" } else { "false" }))
+    }
+
+    let mut out = "/// The guide's programs, read off `site/guide/` by `site/app/guidecode.vyrn`\n/// while the site compiled. Do not edit.\n"
+    out = out + "/// Every block id, sorted.\n"
+    out = out + "export fn guideBlocks() -> Array<String> { return " + quotedList(ids) + " }\n"
+    out = out + "/// A block's program, as it is shown and as the playground link carries it.\n"
+    out = out + lookup("guideSrc", "String", srcs, "\"\"")
+    out = out + "/// A block's program, coloured, one string per line.\n"
+    out = out + lookup("guideLines", "Array<String>", lines, "[]")
+    out = out + "/// The `std/` modules a block imports.\n"
+    out = out + lookup("guideUses", "Array<String>", uses, "[]")
+    out = out + "/// The names a block imports, each as `<module>:<name>`.\n"
+    out = out + lookup("guideImports", "Array<String>", names, "[]")
+    out = out + "/// Whether a block is a whole program, so the playground can run it.\n"
+    out = out + lookup("guidePlayable", "Bool", playable, "false")
+    return out
+}
+
+test "the main every block is shown with prints what demo answered" {
+    assertEq(mainTail(), "\nfn main() -> Int64 {\n    print(demo())\n    return 0\n}\n")
+}
+
+test "a source with a quote, a backslash and a newline survives the literal" {
+    assertEq(quoted("a\"b"), "\"a\\\"b\"")
+    assertEq(quoted("a\\b"), "\"a\\\\b\"")
+    assertEq(quoted("a\nb"), "\"a\\nb\"")
+    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
+}

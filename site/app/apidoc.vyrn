@@ -1,0 +1,572 @@
+/// The standard library reference, read off the source while the site compiles.
+///
+/// `vyrn doc` (RFC-0065) writes the same reference as Markdown, from the same
+/// two facts: a declaration's `///` block, and the declaration itself. Rendering
+/// that Markdown back into pages would need a Markdown reader, and the round
+/// trip loses on its own terms — `std/html`'s doc prose contains a line reading
+/// `## Emission-order convention`, which a Markdown reader cannot tell from a
+/// heading `vyrn doc` wrote. So this generator skips the round trip and reads
+/// what `vyrn doc` reads.
+///
+///     import { apiDocs } from "./apidoc"
+///     import { docModules, docSigs } from apiDocs("../../std")
+///
+/// The token stream comes from `lex()`, the compiler's own lexer (RFC-0054), so
+/// an `export fn` written INSIDE a code quote — `std/tw` and `std/graphql` both
+/// emit one — is a string token here and is never mistaken for a declaration. A
+/// line scan gets that wrong, and `vyrn doc` does not.
+///
+/// What is read, per module: the header `///` block, and for every `export`ed
+/// function, type and protocol its name, its signature exactly as written, its
+/// `///` prose, and the line it sits on. The signature is coloured by the same
+/// `lex()`-based highlighter every other snippet on the site uses.
+import { substring, split, joinWith, trim, trimEnd } from "std/strings"
+import { startsWith, endsWith } from "std/strpred"
+import { escapeHtml } from "./code"
+import { highlightSrc, lineStarts } from "./hl"
+
+/// One exported declaration.
+type Entry = { name: String, kind: String, sig: String, doc: String, line: Int64 }
+
+/// One documented module: its name, its header prose, its exports, and the
+/// names of the `test` blocks it keeps beside them.
+type Mod = { name: String, doc: String, entries: Array<Entry>, tests: Array<String> }
+
+// ---------------------------------------------------------------------------
+// Reading the source.
+// ---------------------------------------------------------------------------
+
+/// The byte offset of a token, from its line and column.
+gen fn offsetOf(starts: Array<Int64>, t: Token) -> Int64 {
+    return starts[t.line - 1] + t.col - 1
+}
+
+/// The index of the first token that is NOT part of the declaration's signature.
+///
+/// A function's signature ends where its body opens: the first `{` no bracket is
+/// holding open. A protocol's signature IS its body, and so is a RECORD type's,
+/// so both end one token past the `}` that closes them. A type with no braces —
+/// `type Age = Int64 where value >= 18`, a sum of variants over several lines —
+/// ends at the next token that starts a line in column 1, which the formatter
+/// guarantees is the next top-level declaration, because every continuation line
+/// is indented.
+///
+/// The brace-closes-it rule has to be read BEFORE the column-1 rule and not
+/// after: a record's closing `}` is itself in column 1, so the column rule alone
+/// stopped one token short and shipped ten unbalanced signatures.
+gen fn sigEnd(toks: Array<Token>, from: Int64, head: String) -> Int64 {
+    let mut depth = 0
+    let mut i = from
+    while i < toks.length {
+        let t = toks[i]
+        if t.kind == "punct" && t.text == "{" {
+            if depth == 0 && head == "fn" {
+                return i
+            }
+            depth = depth + 1
+        }
+        if t.kind == "punct" && t.text == "}" {
+            depth = depth - 1
+            if depth == 0 && (head == "protocol" || head == "type") {
+                return i + 1
+            }
+        }
+        if head == "type" && depth == 0 && i > from && t.col == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return toks.length
+}
+
+/// The signature text, without the trailing blank and comment lines the extent
+/// picks up between one declaration and the next.
+fn trimTail(s: String) -> String {
+    let all = split(s, "\n")
+    let mut keep = all.length
+    let mut done = false
+    while keep > 0 && !done {
+        let last = trim(all[keep - 1])
+        if last.byteLength > 0 && !startsWith(last, "//") {
+            done = true
+        } else {
+            keep = keep - 1
+        }
+    }
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < keep {
+        out.push(trimEnd(all[i]))
+        i = i + 1
+    }
+    return joinWith(out, "\n")
+}
+
+/// The declaration that starts at token `i` (an `export` in column 1), carrying
+/// the `///` block that sits directly above it. A kind this reference does not
+/// cover — module state, an import — comes back with an empty kind and is dropped.
+gen fn declAt(src: String, toks: Array<Token>, starts: Array<Int64>, i: Int64, doc: String) -> Entry {
+    let none = Entry { name: "", kind: "", sig: "", doc: "", line: 0 }
+    if i + 2 >= toks.length {
+        return none
+    }
+    let first = i + 1
+    let mut j = first
+    if toks[j].text == "gen" {
+        j = j + 1
+    }
+    let head = toks[j].text.copy()
+    if head != "fn" && head != "type" && head != "protocol" {
+        return none
+    }
+    if j + 1 >= toks.length {
+        return none
+    }
+    let stop = sigEnd(toks, j, head)
+    let from = offsetOf(starts, toks[first])
+    let to = if stop < toks.length { offsetOf(starts, toks[stop]) } else { bytes(src).length }
+    return Entry {
+        name: toks[j + 1].text.copy(),
+        kind: if head == "fn" { "fn" } else { head.copy() },
+        sig: trimTail(substring(src, from, to)),
+        doc: doc.copy(),
+        line: toks[first].line,
+    }
+}
+
+/// Every exported declaration of one module source, in declaration order.
+///
+/// A `///` block belongs to the declaration on the line directly below it. A
+/// block with a gap under it documents nothing and is dropped, which is the rule
+/// the parser itself follows.
+gen fn exportsOf(src: String, toks: Array<Token>) -> Array<Entry> {
+    let starts = lineStarts(src)
+    let mut out: Array<Entry> = []
+    let mut docBuf: Array<String> = []
+    let mut docEnd = 0 - 2
+    let mut i = 0
+    while i < toks.length {
+        let t = toks[i]
+        if t.kind == "doc" {
+            if t.line != docEnd + 1 {
+                docBuf = []
+            }
+            docBuf.push(t.text.copy())
+            docEnd = t.line
+        } else {
+            if t.kind == "keyword" && t.text == "export" && t.col == 1 {
+                let doc = if docEnd + 1 == t.line { joinWith(docBuf, "\n") } else { "" }
+                let e = declAt(src, toks, starts, i, doc)
+                if e.kind.byteLength > 0 {
+                    out.push(e)
+                }
+            }
+            docBuf = []
+            docEnd = 0 - 2
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The name of every `test` block in the module, in source order.
+///
+/// A test's name is a sentence about the code — "base64 pads at all three
+/// residues, and refuses misplaced padding" — so the list of them is the list of
+/// promises the module keeps, written by whoever had to keep them. The reference
+/// page prints them under the exports.
+///
+/// `test` is a contextual keyword, so it arrives as an identifier in column 1
+/// with a string after it. A `test` written inside a code quote is a string
+/// token and is never counted.
+gen fn testNames(toks: Array<Token>) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i + 1 < toks.length {
+        if toks[i].text == "test" && toks[i].col == 1 && toks[i + 1].kind == "string" {
+            out.push(toks[i + 1].text.copy())
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The module's own header block: the `///` lines that open the file, above the
+/// first declaration or import.
+gen fn headerDoc(toks: Array<Token>) -> String {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < toks.length && toks[i].kind == "doc" {
+        out.push(toks[i].text.copy())
+        i = i + 1
+    }
+    return joinWith(out, "\n")
+}
+
+// ---------------------------------------------------------------------------
+// Prose. `///` text is Markdown, but only four shapes of it are ever written in
+// this repository: paragraphs, `- ` lists, indented or fenced code, and `code`
+// spans. Everything else is rendered as the text it is.
+// ---------------------------------------------------------------------------
+
+/// `s` with each `**pair**` emphasised. An unpaired marker stays the text it is.
+fn boldHtml(s: String) -> String {
+    let parts = split(s, "**")
+    let mut out = ""
+    let mut i = 0
+    while i < parts.length {
+        if i % 2 == 1 && i + 1 < parts.length {
+            out = out + "<strong>" + parts[i] + "</strong>"
+        } else if i % 2 == 1 {
+            out = out + "**" + parts[i]
+        } else {
+            out = out + parts[i]
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// `escaped` with every `` `span` `` turned into a `<code>` and every `**pair**`
+/// emphasised. A marker inside a code span is text, because a code span is read
+/// first.
+fn tickHtml(escaped: String) -> String {
+    let parts = split(escaped, "`")
+    let mut out = ""
+    let mut i = 0
+    while i < parts.length {
+        if i % 2 == 1 && i + 1 < parts.length {
+            out = out + "<code>" + parts[i] + "</code>"
+        } else if i % 2 == 1 {
+            out = out + "`" + boldHtml(parts[i])
+        } else {
+            out = out + boldHtml(parts[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// `s` as inline HTML, markup escaped.
+///
+/// A doubled delimiter is read first, because that is how a code span holds a
+/// backtick of its own: ``` ``missing field `name` `` ``` is one span, and its
+/// content is literal.
+fn inlineHtml(s: String) -> String {
+    let parts = split(escapeHtml(s), "``")
+    let mut out = ""
+    let mut i = 0
+    while i < parts.length {
+        if i % 2 == 1 && i + 1 < parts.length {
+            out = out + "<code>" + trim(parts[i]) + "</code>"
+        } else if i % 2 == 1 {
+            out = out + "``" + tickHtml(parts[i])
+        } else {
+            out = out + tickHtml(parts[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// A paragraph, a list or a code block, closed.
+///
+/// A fenced or indented block inside a `///` comment is Vyrn — an import line, a
+/// call, a small program — so it is coloured by the same `lex()` highlighter the
+/// signatures and the site's snippets use, rather than shipped as grey text.
+///
+/// ponytail: a block that is NOT Vyrn (a JSON body, a shell line) is lexed all
+/// the same. The lexer answers `error` for what it cannot read, `classOf` gives
+/// that no colour, and the text comes out as it went in. A per-block language
+/// tag is the upgrade, and no block in `std/` needs one yet.
+gen fn blockHtml(kind: String, rows: Array<String>) -> String {
+    if rows.length == 0 {
+        return ""
+    }
+    if kind == "code" {
+        let mut body = ""
+        for row in rows {
+            body = body + row + "\n"
+        }
+        let src = trimEnd(body) + "\n"
+        return "<pre class=\"doccode\">" + highlightSrc(src, lex(src)) + "</pre>"
+    }
+    if kind == "list" {
+        let mut out = "<ul class=\"docprose\">"
+        for row in rows {
+            out = out + "<li>" + inlineHtml(row) + "</li>"
+        }
+        return out + "</ul>"
+    }
+    return "<p>" + inlineHtml(joinWith(rows, " ")) + "</p>"
+}
+
+/// How many spaces `line` opens with.
+fn indentOf(line: String) -> Int64 {
+    let raw = bytes(line)
+    let mut i = 0
+    while i < raw.length && raw[i] == ' ' {
+        i = i + 1
+    }
+    return i
+}
+
+/// `doc` as HTML.
+///
+/// An indented run is a code block, and the repository indents code by two
+/// spaces as often as by four. A line indented under a PARAGRAPH is that
+/// paragraph wrapping, not code, so a block only opens at a paragraph boundary
+/// — or under a line that ends in a colon, which is how five blocks in `std/`
+/// introduce themselves.
+/// The block's own indent is the margin: what is indented further inside it —
+/// nested JSON, a continued argument list — keeps its shape.
+gen fn proseHtml(doc: String) -> String {
+    if doc.byteLength == 0 {
+        return ""
+    }
+    let mut out = ""
+    let mut kind = ""
+    let mut rows: Array<String> = []
+    let mut fenced = false
+    let mut margin = 0
+    for line in split(doc, "\n") {
+        let flat = trim(line)
+        if startsWith(flat, "```") {
+            if fenced {
+                out = out + blockHtml("code", rows)
+                rows = []
+                kind = ""
+            } else {
+                out = out + blockHtml(kind, rows)
+                rows = []
+                kind = "code"
+            }
+            fenced = !fenced
+        } else if fenced {
+            rows.push(line.copy())
+        } else if flat.byteLength == 0 {
+            out = out + blockHtml(kind, rows)
+            rows = []
+            kind = ""
+        } else if startsWith(flat, "- ") {
+            if kind != "list" {
+                out = out + blockHtml(kind, rows)
+                rows = []
+                kind = "list"
+            }
+            rows.push(substring(flat, 2, flat.byteLength))
+        } else if kind == "list" {
+            rows[rows.length - 1] = rows[rows.length - 1] + " " + flat
+        } else if indentOf(line) >= 2 && (kind != "para" || endsWith(rows[rows.length - 1], ":")) {
+            if kind != "code" {
+                out = out + blockHtml(kind, rows)
+                rows = []
+                kind = "code"
+                margin = indentOf(line)
+            }
+            let cut = if indentOf(line) < margin { indentOf(line) } else { margin }
+            rows.push(substring(line, cut, line.byteLength))
+        } else {
+            if kind == "code" {
+                out = out + blockHtml(kind, rows)
+                rows = []
+            }
+            kind = "para"
+            rows.push(flat.copy())
+        }
+    }
+    return out + blockHtml(kind, rows)
+}
+
+/// The one-line summary for the module list: the first sentence of the header
+/// block, with its code spans intact.
+fn summaryOf(doc: String) -> String {
+    let mut flat = ""
+    for line in split(doc, "\n") {
+        let t = trim(line)
+        if t.byteLength == 0 {
+            if flat.byteLength > 0 {
+                break
+            }
+        } else {
+            flat = if flat.byteLength == 0 { t.copy() } else { flat + " " + t }
+        }
+    }
+    let mut cut = flat.byteLength
+    let raw = bytes(flat)
+    let mut i = 0
+    while i + 1 < raw.length {
+        if raw[i] == '.' && raw[i + 1] == ' ' {
+            cut = i + 1
+            break
+        }
+        i = i + 1
+    }
+    return inlineHtml(substring(flat, 0, cut))
+}
+
+// ---------------------------------------------------------------------------
+// Emission.
+// ---------------------------------------------------------------------------
+
+/// `s` as a Vyrn string literal. Only a quote and a backslash can end one.
+fn quoted(s: String) -> String {
+    let raw = bytes(s)
+    let mut out = "\""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == 92 || raw[i] == '"' {
+            out = out + substring(s, plain, i) + "\\"
+            plain = i
+        }
+        i = i + 1
+    }
+    return out + substring(s, plain, raw.length) + "\""
+}
+
+/// A Vyrn array literal of quoted strings.
+fn quotedList(items: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for it in items {
+        parts.push(quoted(it))
+    }
+    return "[" + joinWith(parts, ", ") + "]"
+}
+
+/// A lookup function over the modules: one branch per module name, and an empty
+/// answer for a name that is not one.
+fn lookup(name: String, ret: String, branches: Array<String>, fallback: String) -> String {
+    let mut out = "export fn " + name + "(m: String) -> " + ret + " {\n"
+    for b in branches {
+        out = out + b
+    }
+    return out + "    return " + fallback + "\n}\n"
+}
+
+/// One `if` branch of a lookup.
+fn branch(module: String, value: String) -> String {
+    return "    if m == " + quoted(module) + " { return " + value + " }\n"
+}
+
+/// Read `stdDir`, and emit the whole reference as one module.
+export gen fn apiDocs(stdDir: String) -> String {
+    let entries = match listDir(stdDir) {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+    let mut mods: Array<Mod> = []
+    for entry in entries {
+        if endsWith(entry, ".vyrn") {
+            let src = match readFile(stdDir + "/" + entry) {
+                Ok(text) => text,
+                Err(why) => "",
+            }
+            let toks = lex(src)
+            mods.push(Mod {
+                    name: substring(entry, 0, entry.byteLength - 5),
+                    doc: headerDoc(toks),
+                    entries: exportsOf(src, toks),
+                    tests: testNames(toks),
+                })
+        }
+    }
+
+    let mut names: Array<String> = []
+    let mut summaries: Array<String> = []
+    let mut intros: Array<String> = []
+    let mut nameLists: Array<String> = []
+    let mut kindLists: Array<String> = []
+    let mut sigLists: Array<String> = []
+    let mut proseLists: Array<String> = []
+    let mut lineLists: Array<String> = []
+    let mut testLists: Array<String> = []
+    let mut counts: Array<String> = []
+    for m in mods {
+        names.push(m.name.copy())
+        summaries.push(branch(m.name, quoted(summaryOf(m.doc))))
+        intros.push(branch(m.name, quoted(proseHtml(m.doc))))
+        let mut en: Array<String> = []
+        let mut ek: Array<String> = []
+        let mut es: Array<String> = []
+        let mut ep: Array<String> = []
+        let mut el: Array<String> = []
+        for e in m.entries {
+            en.push(e.name.copy())
+            ek.push(e.kind.copy())
+            es.push(highlightSrc(e.sig, lex(e.sig)))
+            ep.push(proseHtml(e.doc))
+            el.push(e.line.toString())
+        }
+        nameLists.push(branch(m.name, quotedList(en)))
+        kindLists.push(branch(m.name, quotedList(ek)))
+        sigLists.push(branch(m.name, quotedList(es)))
+        proseLists.push(branch(m.name, quotedList(ep)))
+        lineLists.push(branch(m.name, "[" + joinWith(el, ", ") + "]"))
+        testLists.push(branch(m.name, quotedList(m.tests)))
+        counts.push(branch(m.name, m.entries.length.toString()))
+    }
+
+    let mut out = "/// The standard library reference, read off `std/` by `site/app/apidoc.vyrn`\n/// while the site compiled. Do not edit.\n"
+    out = out + "/// Every documented module, sorted.\n"
+    out = out + "export fn docModules() -> Array<String> { return " + quotedList(names) + " }\n"
+    out = out + "/// The first sentence of a module's header block.\n"
+    out = out + lookup("docSummary", "String", summaries, "\"\"")
+    out = out + "/// A module's header block, as HTML.\n"
+    out = out + lookup("docIntro", "String", intros, "\"\"")
+    out = out + "/// The names of a module's exports, in declaration order.\n"
+    out = out + lookup("docNames", "Array<String>", nameLists, "[]")
+    out = out + "/// What each export is: `fn`, `type` or `protocol`.\n"
+    out = out + lookup("docKinds", "Array<String>", kindLists, "[]")
+    out = out + "/// Each export's signature, coloured by the compiler's own lexer.\n"
+    out = out + lookup("docSigs", "Array<String>", sigLists, "[]")
+    out = out + "/// Each export's `///` prose, as HTML.\n"
+    out = out + lookup("docProse", "Array<String>", proseLists, "[]")
+    out = out + "/// The source line each export is declared on.\n"
+    out = out + lookup("docLines", "Array<Int64>", lineLists, "[]")
+    out = out + "/// The name of every `test` block the module keeps, in source order.\n"
+    out = out + lookup("docTests", "Array<String>", testLists, "[]")
+    out = out + "/// How many exports a module has.\n"
+    out = out + lookup("docCount", "Int64", counts, "0")
+    return out
+}
+
+test "a code span becomes a code element and a stray tick stays text" {
+    assertEq(inlineHtml("call `min(a, b)` first"), "call <code>min(a, b)</code> first")
+    assertEq(inlineHtml("``field `name` `` is the key"), "<code>field `name`</code> is the key")
+    assertEq(inlineHtml("a ` b"), "a ` b")
+    assertEq(inlineHtml("2 < 3"), "2 &lt; 3")
+}
+
+test "the four prose shapes render" {
+    assertEq(proseHtml("one line"), "<p>one line</p>")
+    assertEq(proseHtml("one\ntwo"), "<p>one two</p>")
+    assertEq(proseHtml("- a\n- b"), "<ul class=\"docprose\"><li>a</li><li>b</li></ul>")
+    assertEq(proseHtml("    let a = 1"), "<pre class=\"doccode\"><span class=\"k\">let</span> a = <span class=\"n\">1</span>\n</pre>")
+    assertEq(proseHtml("one\n\ntwo"), "<p>one</p><p>two</p>")
+}
+
+test "a list item wraps onto the next line, however far it is indented" {
+    assertEq(proseHtml("- a\n  more"), "<ul class=\"docprose\"><li>a more</li></ul>")
+    assertEq(proseHtml(" - a\n     more"), "<ul class=\"docprose\"><li>a more</li></ul>")
+}
+
+test "an emphasised pair is emphasis and a lone marker is text" {
+    assertEq(inlineHtml("**loud** and `**quiet**`"), "<strong>loud</strong> and <code>**quiet**</code>")
+    assertEq(inlineHtml("2 ** 3"), "2 ** 3")
+}
+
+test "the summary is the first sentence of the first paragraph" {
+    assertEq(summaryOf("std/math — helpers. And more.\n\nlater"), "std/math — helpers.")
+    assertEq(summaryOf("no full stop here"), "no full stop here")
+}
+
+test "the trailing comment between two declarations is not part of a signature" {
+    assertEq(trimTail("type A = Int64\n\n// a note\n"), "type A = Int64")
+    assertEq(trimTail("fn f() -> Int64 "), "fn f() -> Int64")
+}
+
+test "a string literal is a literal, so the emitted module parses" {
+    assertEq(quoted("a\"b"), "\"a\\\"b\"")
+    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
+}

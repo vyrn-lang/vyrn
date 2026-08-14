@@ -20,3 +20,79 @@ export fn abs(x: Int64) -> Int64 {
 export fn clamp(x: Int64, lo: Int64, hi: Int64) -> Int64 {
     return max(lo, min(x, hi))
 }
+
+/// Pi, to the last bit a `Float64` holds.
+export fn pi() -> Float64 {
+    return 3.141592653589793
+}
+
+/// The greatest whole number at or below `x`, as a `Float64`.
+/// `Int64(x)` truncates towards zero, so a negative non-integer needs one step
+/// down. Values past the `Int64` range are already whole and pass through.
+export fn floorF(x: Float64) -> Float64 {
+    // 2^53: past it every `Float64` is already whole.
+    if x > 9007199254740992.0 || x < 0.0 - 9007199254740992.0 {
+        return x
+    }
+    let t = Float64(Int64(x))
+    if t > x {
+        return t - 1.0
+    }
+    return t
+}
+
+/// Sine of `x` radians.
+///
+/// Two steps, both plain `Float64` arithmetic. First reduce `x` to `r` in
+/// [-pi/2, pi/2] using `sin(x) = sin(pi - x)` and a period of 2pi. Then evaluate
+/// the odd Taylor polynomial through `x^13` in Horner form. On the reduced range
+/// its error stays under 1e-13 — far below the 8-bit luminance the hero field
+/// quantises to.
+///
+/// Every step is a single rounded operation, and RFC-0083 compiles with
+/// `-ffp-contract=off`, so the interpreter, the native binary and wasm return the
+/// same bits (`examples/herofield.vyrn` prints them and the parity harness
+/// compares all three).
+export fn sin(x: Float64) -> Float64 {
+    let twoPi = 6.283185307179586
+    let halfPi = 1.5707963267948966
+    let mut r = x - twoPi * floorF(x / twoPi + 0.5)
+    if r > halfPi {
+        r = pi() - r
+    }
+    if r < 0.0 - halfPi {
+        r = 0.0 - pi() - r
+    }
+    let s = r * r
+    let p = 0.00000000016059043836821613 * s - 0.000000025052108385441718
+    let q = p * s + 0.0000027557319223985893
+    let u = q * s - 0.0001984126984126984
+    let v = u * s + 0.008333333333333333
+    let w = v * s - 0.16666666666666666
+    return r + r * s * w
+}
+
+/// Cosine of `x` radians, as the sine a quarter turn ahead.
+export fn cos(x: Float64) -> Float64 {
+    return sin(x + 1.5707963267948966)
+}
+
+test "sine hits the values the unit circle fixes" {
+    assertEq(sin(0.0), 0.0)
+    assert(sin(pi() / 6.0) > 0.4999999 && sin(pi() / 6.0) < 0.5000001)
+    assert(sin(pi() / 2.0) > 0.9999999)
+    assert(cos(0.0) > 0.9999999)
+}
+
+test "sine stays in range far from the origin" {
+    // 100 turns out: the reduction must still land inside [-1, 1].
+    let far = sin(628.3185307179587 + 0.5)
+    assert(far > 0.4794 && far < 0.4795)
+    assert(sin(0.0 - 1.0) > 0.0 - 0.8415 && sin(0.0 - 1.0) < 0.0 - 0.8414)
+}
+
+test "floorF steps down on the negative side" {
+    assertEq(floorF(2.7), 2.0)
+    assertEq(floorF(0.0 - 2.7), 0.0 - 3.0)
+    assertEq(floorF(0.0 - 3.0), 0.0 - 3.0)
+}

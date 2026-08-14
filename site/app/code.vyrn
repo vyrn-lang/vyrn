@@ -1,0 +1,297 @@
+/// Colour for the code that is NOT Vyrn, and shape for the text that is not code.
+///
+/// Vyrn snippets are coloured by the compiler's own lexer, in `hl.vyrn`. This
+/// module covers the two things that lexer cannot answer for:
+///
+///  - **Rust, TypeScript and Go.** A word-list colourer over a byte scan, which
+///    the design brief permits explicitly (G3): "do not write three more lexers".
+///    It is approximate, and the comparison page says so.
+///  - **Tool output.** A compiler diagnostic or a `vyrn why` report is not code
+///    and must not be dressed as code. `terminalHtml` marks each line so the
+///    stylesheet can give output its own, dimmer treatment. Nothing on this site
+///    ships as bare unstyled text.
+///
+/// ponytail: word-list colouring for the other three languages, no parser. If a
+/// snippet ever highlights wrongly, shorten the snippet.
+import { substring, split, fromBytesOr } from "std/strings"
+
+/// The Rust words the comparison snippets use.
+export fn rustWords() -> Array<String> {
+    return ["fn", "let", "mut", "if", "else", "while", "for", "in", "impl", "self", "return", "true", "false", "struct", "enum", "match", "pub", "use", "mod", "trait", "where", "const", "static", "unsafe", "move", "ref", "dyn", "async", "await", "crate"]
+}
+
+/// The TypeScript words the comparison snippets use.
+export fn tsWords() -> Array<String> {
+    return ["function", "let", "const", "var", "if", "else", "while", "for", "of", "in", "return", "true", "false", "class", "interface", "type", "enum", "import", "export", "from", "as", "new", "async", "await", "throw", "try", "catch", "extends", "implements", "readonly"]
+}
+
+/// The Go words the comparison snippets use.
+export fn goWords() -> Array<String> {
+    return ["func", "var", "const", "if", "else", "for", "range", "return", "true", "false", "type", "struct", "interface", "package", "import", "go", "defer", "chan", "select", "switch", "case", "map", "nil", "make", "new"]
+}
+
+/// One HTML-safe byte. A byte that is not valid UTF-8 on its own is a
+/// continuation byte of a character the caller split, which cannot happen here —
+/// every caller passes whole runs — so the fallback is unreachable.
+fn escapeByte(b: UInt8) -> String {
+    if b == '&' {
+        return "&amp;"
+    }
+    if b == '<' {
+        return "&lt;"
+    }
+    if b == '>' {
+        return "&gt;"
+    }
+    if b == '"' {
+        return "&quot;"
+    }
+    if b == '\'' {
+        return "&#39;"
+    }
+    return fromBytesOr([b], "")
+}
+
+/// `s` with every markup-significant byte replaced. Multi-byte characters pass
+/// through whole: only ASCII bytes are replaced, and no byte of a longer
+/// character can equal one of them.
+///
+/// THE QUOTES ARE ESCAPED TOO, and they used to not be. The argument for leaving
+/// them was that a quote inside a `<pre>` is text — true, and it made the
+/// function safe only because of where its callers happened to put the result.
+/// A name like `escapeHtml` is a promise about the OUTPUT, not about the six
+/// call sites it has today: the day a signature or a title is routed into an
+/// attribute, an unescaped `"` closes the attribute and the rest of the
+/// signature becomes markup. The safety is now a property of this function.
+/// In element content the two forms render identically, so nothing on the page
+/// changes.
+export fn escapeHtml(s: String) -> String {
+    let raw = bytes(s)
+    let mut out = ""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        let b = raw[i]
+        if b == '&' || b == '<' || b == '>' || b == '"' || b == '\'' {
+            out = out + substring(s, plain, i) + escapeByte(b)
+            plain = i + 1
+        }
+        i = i + 1
+    }
+    return out + substring(s, plain, raw.length)
+}
+
+fn isLetter(b: UInt8) -> Bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+fn isDigit(b: UInt8) -> Bool {
+    return b >= '0' && b <= '9'
+}
+
+fn isWordByte(b: UInt8) -> Bool {
+    return isLetter(b) || isDigit(b)
+}
+
+fn isWord(word: String, words: Array<String>) -> Bool {
+    for w in words {
+        if w == word {
+            return true
+        }
+    }
+    return false
+}
+
+/// `text` inside a span of class `cls`, escaped.
+fn span(cls: String, text: String) -> String {
+    return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>"
+}
+
+/// Highlight `src` against `words`, returning the inner HTML of a `<pre>`.
+///
+/// One left-to-right pass. A comment runs to the newline, a string runs to the
+/// closing quote (a backslash covers the next byte), a word run is one span or
+/// none, and everything else is escaped through.
+export fn highlightWith(src: String, words: Array<String>) -> String {
+    let raw = bytes(src)
+    let mut out = ""
+    let mut i = 0
+    while i < raw.length {
+        let b = raw[i]
+        if b == '/' && i + 1 < raw.length && raw[i + 1] == '/' {
+            let start = i
+            while i < raw.length && raw[i] != 10 {
+                i = i + 1
+            }
+            out = out + span("c", substring(src, start, i))
+        } else if b == '"' {
+            let start = i
+            i = i + 1
+            while i < raw.length && raw[i] != '"' {
+                if raw[i] == 92 {
+                    i = i + 1
+                }
+                i = i + 1
+            }
+            if i < raw.length {
+                i = i + 1
+            }
+            out = out + span("s", substring(src, start, i))
+        } else if isLetter(b) {
+            let start = i
+            while i < raw.length && isWordByte(raw[i]) {
+                i = i + 1
+            }
+            let word = substring(src, start, i)
+            if isWord(word, words) {
+                out = out + span("k", word)
+            } else if b >= 'A' && b <= 'Z' {
+                out = out + span("t", word)
+            } else {
+                out = out + escapeHtml(word)
+            }
+        } else if isDigit(b) {
+            let start = i
+            while i < raw.length && (isWordByte(raw[i]) || raw[i] == '.') {
+                i = i + 1
+            }
+            out = out + span("n", substring(src, start, i))
+        } else {
+            out = out + escapeByte(b)
+            i = i + 1
+        }
+    }
+    return out
+}
+
+/// A shell block, coloured by token class.
+///
+/// Four classes, and they are the four things a reader picks out of a command:
+/// the program being run, its flags, a comment, and everything else. The program
+/// is the first word of a line, a flag is a word opening with `-`, a comment runs
+/// from `#` to the newline, and an argument is left as text — which is right,
+/// because the argument is usually the only part the reader has to change.
+///
+/// ponytail: this is a token class treatment, NOT a shell parser. It does not
+/// know a pipe from a subshell, so `cat x | wc -l` colours `cat` and leaves `wc`
+/// as an argument, and a `#` inside a quoted string would read as a comment. No
+/// command on this site has either. The upgrade is a real tokenizer, and nothing
+/// here has asked for one.
+export fn shellHtml(src: String) -> String {
+    let mut out = ""
+    let mut first = true
+    for line in split(src, "\n") {
+        if !first {
+            out = out + "\n"
+        }
+        first = false
+        out = out + shellLine(line)
+    }
+    return out
+}
+
+/// One command line. `head` is true until the first word is spent.
+fn shellLine(line: String) -> String {
+    let raw = bytes(line)
+    let mut out = ""
+    let mut head = true
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == '#' {
+            return out + span("c", substring(line, i, raw.length))
+        }
+        if raw[i] == ' ' || raw[i] == 9 {
+            out = out + escapeByte(raw[i])
+            i = i + 1
+        } else {
+            let start = i
+            while i < raw.length && raw[i] != ' ' && raw[i] != 9 {
+                i = i + 1
+            }
+            let word = substring(line, start, i)
+            if word == "&&" || word == "||" || word == "|" || word == ";" {
+                // What follows a connector is another program, not an argument.
+                out = out + escapeHtml(word)
+                head = true
+            } else if head {
+                out = out + span("k", word)
+                head = false
+            } else if raw[start] == '-' {
+                out = out + span("n", word)
+            } else {
+                out = out + escapeHtml(word)
+            }
+        }
+    }
+    return out
+}
+
+/// One line of tool output, marked so the stylesheet can prefix and dim it.
+///
+/// The text is escaped and otherwise untouched: a compiler diagnostic means what
+/// it says, and colouring parts of it would be this site editing the compiler.
+export fn terminalHtml(text: String) -> String {
+    let mut out = ""
+    let mut first = true
+    for line in split(text, "\n") {
+        if !first {
+            out = out + "\n"
+        }
+        first = false
+        out = out + "<span class=\"ol\">" + escapeHtml(line) + "</span>"
+    }
+    return out
+}
+
+test "another language uses its own word list" {
+    assertEq(highlightWith("func x", goWords()), "<span class=\"k\">func</span> x")
+    assertEq(highlightWith("pub struct Age", rustWords()), "<span class=\"k\">pub</span> <span class=\"k\">struct</span> <span class=\"t\">Age</span>")
+}
+
+test "a comment runs to the end of its line and no further" {
+    assertEq(highlightWith("// note\nfn", rustWords()), "<span class=\"c\">// note</span>\n<span class=\"k\">fn</span>")
+}
+
+test "markup in a snippet cannot escape the pre" {
+    assertEq(escapeHtml("<script>&"), "&lt;script&gt;&amp;")
+    assertEq(highlightWith("a < b", goWords()), "a &lt; b")
+}
+
+test "an escaped quote does not end the string" {
+    // The quotes reach the page as `&quot;`, which is what makes a highlighted
+    // signature safe in an attribute as well as in a `<pre>`. A browser renders
+    // the two identically.
+    assertEq(highlightWith("\"a\\\"b\" c", goWords()), "<span class=\"s\">&quot;a\\&quot;b&quot;</span> c")
+}
+
+test "a signature cannot break out of an attribute" {
+    // The invariant `escapeHtml` used to keep only by circumstance: it was safe
+    // because every call site landed in element content. Now it is safe because
+    // of what it returns.
+    assertEq(escapeHtml("\" onerror=\"alert(1)"), "&quot; onerror=&quot;alert(1)")
+    assertEq(escapeHtml("it's"), "it&#39;s")
+}
+
+test "a shell block marks the program, its flags and its comments" {
+    assertEq(shellHtml("cargo build --release -p vyrn-cli"), "<span class=\"k\">cargo</span> build <span class=\"n\">--release</span> <span class=\"n\">-p</span> vyrn-cli")
+    assertEq(shellHtml("cd vyrn/compiler"), "<span class=\"k\">cd</span> vyrn/compiler")
+    assertEq(shellHtml("mkdir out # first"), "<span class=\"k\">mkdir</span> out <span class=\"c\"># first</span>")
+}
+
+test "every line of a shell block gets its own program word" {
+    assertEq(shellHtml("a\nb"), "<span class=\"k\">a</span>\n<span class=\"k\">b</span>")
+    assertEq(shellHtml("  a b"), "  <span class=\"k\">a</span> b")
+}
+
+test "a connector starts another command, not another argument" {
+    assertEq(shellHtml("a x && b"), "<span class=\"k\">a</span> x &amp;&amp; <span class=\"k\">b</span>")
+}
+
+test "a shell argument cannot carry markup out of the block" {
+    assertEq(shellHtml("run <x> &"), "<span class=\"k\">run</span> &lt;x&gt; &amp;")
+}
+
+test "tool output is marked line by line and never coloured as code" {
+    assertEq(terminalHtml("a\nb"), "<span class=\"ol\">a</span>\n<span class=\"ol\">b</span>")
+    assertEq(terminalHtml("<x>"), "<span class=\"ol\">&lt;x&gt;</span>")
+}

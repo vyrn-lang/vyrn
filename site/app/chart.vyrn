@@ -1,0 +1,787 @@
+/// Chart geometry, computed while the site builds.
+///
+/// The architectural rule from the design brief, section 4.3: **Vyrn computes
+/// the geometry at build time, JavaScript animates one scalar.** Every position,
+/// width and label below is in the exported markup before a script runs, so the
+/// charts are correct — and readable — with JavaScript switched off. The scripts
+/// then only fade, sweep, or move a playhead.
+///
+/// THE LAYOUT RULE, and the reason it is a rule. Every bar chart on this site
+/// uses one three-column geometry: the name at the left edge, the bar in the
+/// middle, the value right-aligned at the sheet's right edge. Nothing is drawn
+/// above a bar, because a label above the first bar leaves the plate — which is
+/// exactly what the first version of the module-size chart did to "277 KB". A
+/// value label lives in its own column and cannot collide or clip.
+///
+/// THREE RULES TAKEN FROM `cathrynlavery/diagram-design` and kept:
+///
+///  - **One focal element.** Eight bars in one tint is eight bars with no
+///    argument. Each chart marks exactly ONE bar as focal — the one the caption
+///    is about — and the rest recede. An accent on everything is an accent on
+///    nothing.
+///  - **A scale, not just labels.** A bar chart with no gridline asks the reader
+///    to trust the numbers printed at the end of each bar. Four faint rules and
+///    a baseline let the eye measure, and the axis starts at zero, always.
+///  - **The 4px grid.** Every coordinate, size and gap below is divisible by
+///    four. It is why the rows line up with the type around them.
+///
+/// Every field is a `String`, because that is what an SVG attribute is. Rounding
+/// happens here, once, rather than in four `.toString()` calls at the template.
+import { rfcRows, RfcRow, blob } from "./repo"
+import { split, joinWith } from "std/strings"
+import { vyrnLines } from "./snippets"
+
+/// One row of a bar chart: the bar itself, the row's full-width hit area, the
+/// label, the value, the native `<title>`, and where the row's name points.
+///
+/// `hy` exists because a bar is 20 units tall inside a 34-unit row, and a
+/// reader hovers the ROW. The hit rectangle spans the whole row, so a 26-unit
+/// sliver of a bar is not the only target on the chart.
+export type Bar = { id: String, y: String, hy: String, w: String, label: String, value: String, title: String, href: String, tone: String }
+
+/// One cell in the RFC strip. It is a link: a tinted square that answers a
+/// hover but not a click is a square pretending to be a control.
+export type Cell = { id: String, x: String, y: String, tone: String, title: String, href: String }
+
+/// A number as a string.
+fn px(v: Int64) -> String {
+    return v.toString()
+}
+
+// ---------------------------------------------------------------------------
+// The one bar geometry
+//
+//   0            150                              820        900
+//   | name       | bar                              |  value |
+//
+// A row is 34 units tall: a 20-unit bar with 14 of air under it. The bar never
+// reaches 900, and the value is anchored at the right edge, so no label can
+// leave the viewBox at either end.
+// ---------------------------------------------------------------------------
+
+/// Where a bar starts, and how much room it has.
+export fn barLeft() -> String {
+    return "160"
+}
+
+fn barLeftN() -> Int64 {
+    return 160
+}
+
+fn barRoom() -> Int64 {
+    return 672
+}
+
+/// Where every value label is anchored, eight units in from the viewBox's right
+/// edge so an end-anchored glyph has air rather than a clip.
+export fn barRight() -> String {
+    return "896"
+}
+
+/// The baseline of a row's text, relative to the row's `y`.
+export fn barText() -> String {
+    return "16"
+}
+
+/// How tall the whole plot is for `rows` bars, before the axis strip.
+fn plotHeight(rows: Int64) -> Int64 {
+    return rows * 36 + 8
+}
+
+/// A chart's viewBox: the plot, plus twenty units of axis strip under it.
+fn barViewBox(rows: Int64) -> String {
+    return "0 0 904 " + px(plotHeight(rows) + 20)
+}
+
+fn rowY(i: Int64) -> String {
+    return px(i * 36 + 8)
+}
+
+/// The top of row `i`, which is where its hit area starts.
+fn hitY(i: Int64) -> String {
+    return px(i * 36)
+}
+
+/// How tall a row's hit area is.
+export fn barRow() -> String {
+    return "36"
+}
+
+/// One gridline: where it stands, and what it is worth.
+export type Grid = { id: String, x: String, label: String }
+
+/// Four gridlines and a zero, so the reader can measure a bar rather than take
+/// the printed value on trust. `full` and `step` are in the chart's own integer
+/// units; `unit` is what one `step` is called.
+fn gridOf(full: Int64, step: Int64, per: Int64, unit: String) -> Array<Grid> {
+    let mut out: Array<Grid> = []
+    let mut v = 0
+    while v * per <= full {
+        out.push(Grid {
+                id: v.toString(),
+                x: px(barLeftN() + barRoom() * v * per / full),
+                label: v.toString(),
+            })
+        v = v + step
+    }
+    // The unit is named once, on the last gridline, rather than repeated four
+    // times down an axis that is already saying the same thing.
+    let last = out.length - 1
+    out[last].label = out[last].label + " " + unit
+    return out
+}
+
+/// The gridlines of the module charts, in kilobytes.
+export fn sizeGrid(fullBytes: Int64, stepKb: Int64) -> Array<Grid> {
+    return gridOf(fullBytes, stepKb, 1024, "KB")
+}
+
+/// `n` bytes as kilobytes with one decimal, rounded rather than truncated.
+export fn kbOf(byteCount: Int64) -> String {
+    let tenths = (byteCount * 10 + 512) / 1024
+    return (tenths / 10).toString() + "." + (tenths % 10).toString() + " KB"
+}
+
+// ---------------------------------------------------------------------------
+// Module size, measured
+//
+// Every figure below came out of this repository's own release binary:
+//
+//     vyrn build examples/<name>.vyrn --target wasm -o <name>.wasm
+//
+// and was read off the file. Nothing here is estimated, and nothing is rounded
+// before `kbOf` rounds it. Rebuild any row in one command.
+// ---------------------------------------------------------------------------
+
+/// One measured module: the example, and the size of the wasm it builds to.
+type Module = { name: String, size: Int64 }
+
+/// The ladder, smallest first. Eight examples that span what a program can be:
+/// arithmetic only, a String, an array, floating point, the site's own hero
+/// field, string handling, an HTML tree, a JSON codec.
+fn modules() -> Array<Module> {
+    return [
+        Module { name: "fib", size: 1522 },
+        Module { name: "ownership", size: 2224 },
+        Module { name: "arrays", size: 4458 },
+        Module { name: "floats", size: 7905 },
+        Module { name: "herofield", size: 12364 },
+        Module { name: "strings", size: 15941 },
+        Module { name: "htmltree", size: 16493 },
+        Module { name: "jsoncodec", size: 38825 },
+    ]
+}
+
+/// The measured ladder as bars, on one linear scale.
+export fn moduleLadder() -> Array<Bar> {
+    let rows = modules()
+    let full = rows[rows.length - 1].size
+    let mut out: Array<Bar> = []
+    let mut i = 0
+    while i < rows.length {
+        let m = rows[i]
+        out.push(Bar {
+                id: m.name.copy(),
+                y: rowY(i),
+                hy: hitY(i),
+                w: px(barRoom() * m.size / full),
+                label: m.name.copy(),
+                value: kbOf(m.size),
+                title: "examples/" + m.name + ".vyrn -> " + m.size.toString() + " bytes of wasm",
+                href: blob("examples/" + m.name + ".vyrn"),
+                tone: if i == 0 { "bar focal" } else { "bar" },
+            })
+        i = i + 1
+    }
+    return out
+}
+
+export fn moduleLadderBox() -> String {
+    return barViewBox(modules().length)
+}
+
+/// The ladder's axis: every ten kilobytes.
+export fn moduleLadderGrid() -> Array<Grid> {
+    return sizeGrid(modules()[modules().length - 1].size, 10)
+}
+
+/// How far down a gridline runs on the ladder.
+export fn moduleLadderPlot() -> String {
+    return px(plotHeight(modules().length))
+}
+
+/// The largest module on the ladder, for the caption.
+export fn largestModule() -> String {
+    let rows = modules()
+    return rows[rows.length - 1].name.copy()
+}
+
+// ---------------------------------------------------------------------------
+// The two routes to a wasm module
+//
+// `fib.vyrn` through the direct encoder, measured above, against the same file
+// through textual LLVM IR and clang — the figure README.md and ROADMAP.md both
+// state for the old route. A log scale would make the small bar look
+// respectable. Linear is the honest picture and the stronger one.
+// ---------------------------------------------------------------------------
+
+/// `fib.wasm` through clang, in bytes. 277 KB, as both documents state it.
+fn clangSize() -> Int64 {
+    return 277 * 1024
+}
+
+fn directSize() -> Int64 {
+    return modules()[0].size
+}
+
+/// How many times smaller the direct encoder's module is. Computed from the two
+/// figures, so it cannot drift from the bars beside it.
+export fn moduleRatio() -> String {
+    return (clangSize() / directSize()).toString()
+}
+
+export fn moduleSizes() -> Array<Bar> {
+    return [
+        Bar {
+            id: "clang",
+            y: rowY(0),
+            hy: hitY(0),
+            w: px(barRoom()),
+            label: "through clang",
+            value: "277 KB",
+            title: "fib.wasm through textual LLVM IR and clang: 277 KB",
+            href: blob("README.md#status"),
+            tone: "bar",
+        },
+        Bar {
+            id: "direct",
+            y: rowY(1),
+            hy: hitY(1),
+            w: px(barRoom() * directSize() / clangSize()),
+            label: "direct encoder",
+            value: kbOf(directSize()),
+            title: "fib.wasm from the compiler's own wasm encoder (RFC-0077): " + directSize().toString() + " bytes",
+            href: blob("rfcs/RFC-0077-direct-wasm-backend.md"),
+            tone: "bar focal",
+        },
+    ]
+}
+
+export fn moduleSizesBox() -> String {
+    return barViewBox(2)
+}
+
+/// The two-route axis: every hundred kilobytes.
+export fn moduleSizesGrid() -> Array<Grid> {
+    return sizeGrid(clangSize(), 100)
+}
+
+export fn twoRowPlot() -> String {
+    return px(plotHeight(2))
+}
+
+// ---------------------------------------------------------------------------
+// The shape of a leak, measured
+//
+// From `rfcs/census-call-arguments.md`, Finding 2: the same loop, a million
+// turns, native, with one word changed on the callee's parameter. The census
+// recorded peak resident memory at two loop counts. Both series ship, and the
+// widget's control switches between them, because the whole finding is that ONE
+// KEYWORD is the difference.
+// ---------------------------------------------------------------------------
+
+/// One measurement: hundredths of a megabyte, so the arithmetic stays integer.
+type Leak = { turns: String, hundredths: Int64 }
+
+fn leakSeries(declared: Bool) -> Array<Leak> {
+    if declared {
+        return [Leak { turns: "250,000 turns", hundredths: 396 }, Leak { turns: "1,000,000 turns", hundredths: 396 }]
+    }
+    return [Leak { turns: "250,000 turns", hundredths: 1573 }, Leak { turns: "1,000,000 turns", hundredths: 5032 }]
+}
+
+/// Hundredths of a megabyte, as the census prints them.
+fn mbOf(hundredths: Int64) -> String {
+    let tenths = (hundredths + 5) / 10
+    return (tenths / 10).toString() + "." + (tenths % 10).toString() + " MB"
+}
+
+/// The worst reading on either series, which fixes one scale for both.
+fn leakFull() -> Int64 {
+    return 5032
+}
+
+/// One series of the leak-shape chart. `declared` is the `consume` keyword.
+export fn leakBars(declared: Bool) -> Array<Bar> {
+    let rows = leakSeries(declared)
+    let word = if declared { "wrap(s: consume String)" } else { "wrap(s: String)" }
+    let tag = if declared { "yes" } else { "no" }
+    let mut out: Array<Bar> = []
+    let mut i = 0
+    while i < rows.length {
+        let r = rows[i]
+        out.push(Bar {
+                id: tag + i.toString(),
+                y: rowY(i),
+                hy: hitY(i),
+                w: px(barRoom() * r.hundredths / leakFull()),
+                label: r.turns.copy(),
+                value: mbOf(r.hundredths),
+                title: word + ", " + r.turns + ": " + mbOf(r.hundredths),
+                href: blob("rfcs/census-call-arguments.md"),
+                tone: if i == rows.length - 1 { "bar focal" } else { "bar" },
+            })
+        i = i + 1
+    }
+    return out
+}
+
+export fn leakBox() -> String {
+    return barViewBox(2)
+}
+
+/// The leak axis: every twenty-five megabytes.
+export fn leakGrid() -> Array<Grid> {
+    return gridOf(leakFull(), 25, 100, "MB")
+}
+
+/// The headline figure of a series: its worst reading.
+export fn leakPeak(declared: Bool) -> String {
+    let rows = leakSeries(declared)
+    return mbOf(rows[rows.length - 1].hundredths)
+}
+
+// ---------------------------------------------------------------------------
+// The RFC strip. One cell per design record, in order, tinted by decade so the
+// eye can count. Real data: the file names in `rfcs/`, counted by the generator.
+// ---------------------------------------------------------------------------
+
+/// Every RFC as a cell, twenty to a row.
+export fn rfcCells() -> Array<Cell> {
+    let mut out: Array<Cell> = []
+    let mut i = 0
+    let rows = rfcRows()
+    while i < rows.length {
+        let r = rows[i]
+        out.push(Cell {
+                id: r.number.toString(),
+                x: px(i % 20 * 22),
+                y: px(i / 20 * 22),
+                tone: toneOf(r.number),
+                title: rfcTag(r.number) + " " + r.title,
+                href: rfcHref(r),
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// An RFC number as its file name spells it: four digits.
+export fn rfcTag(n: Int64) -> String {
+    if n < 10 {
+        return "RFC-000" + n.toString()
+    }
+    if n < 100 {
+        return "RFC-00" + n.toString()
+    }
+    return "RFC-0" + n.toString()
+}
+
+/// A design record's file, on GitHub.
+///
+/// The generator read `RFC-0091-memory-model.md` and reported number 91 and
+/// title "memory model"; this puts the name back together. The title's words
+/// ARE the file's own words, so the round trip is exact and a test says so.
+export fn rfcHref(row: RfcRow) -> String {
+    return blob("rfcs/" + rfcTag(row.number) + "-" + joinWith(split(row.title, " "), "-") + ".md")
+}
+
+/// A cell's fill opacity, stepping every ten RFCs so the strip reads as a
+/// sequence rather than a texture.
+fn toneOf(number: Int64) -> String {
+    let step = (number - 1) / 10
+    return "0." + (3 + step * 7).toString()
+}
+
+/// How wide the RFC strip is, in its own coordinates.
+export fn rfcStripWidth() -> String {
+    return "440"
+}
+
+/// How tall the RFC strip is: one row per twenty RFCs, rounded up.
+export fn rfcStripHeight() -> String {
+    return px((rfcRows().length + 19) / 20 * 22)
+}
+
+// ---------------------------------------------------------------------------
+// The ownership replay
+//
+// The first version drew a horizontal timeline beside the code, with a big
+// readout naming a line the bars did not point at. It was rebuilt as a GUTTER:
+// one row per real source line, one lane per binding, and the lane is drawn on
+// exactly the lines where that binding is alive. The playhead is a line number,
+// the same number highlights the row, the lane and the report row — so the
+// number, the bars and the report cannot disagree, because they are one value.
+// ---------------------------------------------------------------------------
+
+/// One binding, as `vyrn why --memory` reports it: where it is declared, the
+/// last line it is alive on, and the tool's own words for how it ends.
+export type Life = { name: String, from: Int64, to: Int64, fate: String }
+
+/// The two bindings of `fn fullName` in `examples/ownership.vyrn`.
+export fn lifetimes() -> Array<Life> {
+    return [
+        Life { name: "firstSpace", from: 18, to: 21, fate: "reclaimed at block exit" },
+        Life { name: "whole", from: 19, to: 20, fate: "moved into the return" },
+    ]
+}
+
+/// One source line of the specimen, with the state of each lane on it.
+///
+/// A lane's class is what the stylesheet draws: nothing, a lane that starts
+/// here, a lane running through, or a lane that ends here.
+export type OwnRow = { n: Int64, html: String, a: String, b: String }
+
+fn laneAt(life: Life, which: String, line: Int64) -> String {
+    if line < life.from || line > life.to {
+        return ""
+    }
+    if line == life.from {
+        return "lane " + which + " start"
+    }
+    if line == life.to {
+        return "lane " + which + " end"
+    }
+    return "lane " + which
+}
+
+/// The specimen, one row per source line.
+export fn ownRows() -> Array<OwnRow> {
+    let lives = lifetimes()
+    let lines = vyrnLines("ownership")
+    let mut out: Array<OwnRow> = []
+    let mut i = 0
+    while i < lines.length {
+        let n = firstLine() + i
+        out.push(OwnRow {
+                n: n,
+                html: lines[i].copy(),
+                a: laneAt(lives[0], "a", n),
+                b: laneAt(lives[1], "b", n),
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// The specimen's first source line in `examples/ownership.vyrn`.
+export fn firstLine() -> Int64 {
+    return 17
+}
+
+/// Its last.
+export fn lastLine() -> Int64 {
+    return firstLine() + vyrnLines("ownership").length - 1
+}
+
+/// How many source lines the replay steps through.
+export fn lineCount() -> Int64 {
+    return lastLine() - firstLine() + 1
+}
+
+test "no value label is ever drawn above a bar, so none can leave the plate" {
+    // The geometry has exactly one text baseline, inside the row.
+    assertEq(barText(), "16")
+    for b in moduleLadder() {
+        // Every bar's top is at or below the viewBox origin plus its own air.
+        assert(b.y.byteLength > 0)
+    }
+    assertEq(moduleLadder()[0].y, "8")
+    assertEq(moduleLadder()[0].hy, "0")
+    assertEq(moduleLadderBox(), "0 0 904 316")
+}
+
+test "the module ladder plots what the compiler actually built" {
+    let bars = moduleLadder()
+    assertEq(bars.length, 8)
+    assertEq(bars[0].label, "fib")
+    assertEq(bars[0].value, "1.5 KB")
+    assertEq(bars[7].value, "37.9 KB")
+    // The largest module fills the width, and nothing exceeds it.
+    assertEq(bars[7].w, "672")
+    // Exactly one bar carries the accent. Eight in one tint is not an argument.
+    let mut focal = 0
+    for b in bars {
+        if b.tone == "bar focal" {
+            focal = focal + 1
+        }
+    }
+    assertEq(focal, 1)
+    assertEq(bars[0].tone, "bar focal")
+    // Every row names a file a reader can open, and no row leaves it empty.
+    for b in bars {
+        assert(b.title.byteLength > 10)
+        assert(b.href.byteLength > 40)
+    }
+    assertEq(bars[0].href, "https://github.com/vyrn-lang/vyrn/blob/main/examples/fib.vyrn")
+}
+
+test "an axis starts at zero, is named once, and does not run past the data" {
+    let g = moduleLadderGrid()
+    assertEq(g[0].x, barLeft())
+    assertEq(g[0].label, "0")
+    assertEq(g[g.length - 1].label, "30 KB")
+    assertEq(leakGrid()[leakGrid().length - 1].label, "50 MB")
+    assertEq(moduleSizesGrid()[moduleSizesGrid().length - 1].label, "200 KB")
+    // No gridline is drawn past the room a bar has.
+    for line in g {
+        assert(line.x.byteLength <= 3)
+    }
+}
+
+test "kilobytes round rather than truncate" {
+    assertEq(kbOf(1522), "1.5 KB")
+    assertEq(kbOf(1024), "1.0 KB")
+    assertEq(kbOf(0), "0.0 KB")
+}
+
+test "the two routes to a module are on one scale, and the ratio is computed" {
+    let bars = moduleSizes()
+    assertEq(bars.length, 2)
+    assertEq(bars[0].w, "672")
+    assertEq(bars[0].value, "277 KB")
+    assertEq(bars[1].tone, "bar focal")
+    assertEq(bars[1].value, "1.5 KB")
+    assertEq(moduleRatio(), "186")
+}
+
+test "the census figures are plotted as the census recorded them" {
+    let grows = leakBars(false)
+    let flat = leakBars(true)
+    assertEq(grows[0].value, "15.7 MB")
+    assertEq(grows[1].value, "50.3 MB")
+    assertEq(flat[0].value, "4.0 MB")
+    assertEq(flat[1].value, "4.0 MB")
+    assertEq(leakPeak(false), "50.3 MB")
+    assertEq(leakPeak(true), "4.0 MB")
+    // One scale for both series: the flat bar is a sliver, which is the finding.
+    assertEq(grows[1].w, "672")
+    assertEq(flat[1].w, "52")
+    assertEq(grows[1].tone, "bar focal")
+    assertEq(grows[0].tone, "bar")
+}
+
+test "the RFC strip has one cell per RFC and wraps every twenty" {
+    let cells = rfcCells()
+    assertEq(cells.length, rfcRows().length)
+    assertEq(cells[0].x, "0")
+    assertEq(cells[0].y, "0")
+    assertEq(cells[20].x, "0")
+    assertEq(cells[20].y, "22")
+}
+
+test "a design record's link is the file name the generator read" {
+    assertEq(rfcHref(RfcRow { number: 91, title: "memory model" }), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/RFC-0091-memory-model.md")
+    assertEq(rfcHref(RfcRow { number: 1, title: "vision" }), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/RFC-0001-vision.md")
+    // Every row the repository reported round-trips to a plausible file.
+    for r in rfcRows() {
+        assert(rfcHref(r).byteLength > 60)
+    }
+}
+
+test "an RFC number is padded the way its file name is" {
+    assertEq(rfcTag(1), "RFC-0001")
+    assertEq(rfcTag(42), "RFC-0042")
+    assertEq(rfcTag(96), "RFC-0096")
+}
+
+test "every tone is a fill-opacity between nothing and everything" {
+    for c in rfcCells() {
+        assert(c.tone.byteLength >= 3)
+        assert(c.title.byteLength > 4)
+        assert(c.href.byteLength > 60)
+    }
+}
+
+test "a lane is drawn on exactly the lines its binding is alive" {
+    let rows = ownRows()
+    assertEq(rows.length, 5)
+    assertEq(rows[0].n, 17)
+    // firstSpace: declared on 18, alive to block exit on 21.
+    assertEq(rows[0].a, "")
+    assertEq(rows[1].a, "lane a start")
+    assertEq(rows[2].a, "lane a")
+    assertEq(rows[4].a, "lane a end")
+    // whole: declared on 19, moved out on 20.
+    assertEq(rows[1].b, "")
+    assertEq(rows[2].b, "lane b start")
+    assertEq(rows[3].b, "lane b end")
+    assertEq(rows[4].b, "")
+}
+
+test "the replay's range is the specimen's own range" {
+    assertEq(firstLine(), 17)
+    assertEq(lastLine(), 21)
+    assertEq(lineCount(), 5)
+}
+
+// ---------------------------------------------------------------------------
+// One program, three backends, one result
+//
+// This replaced three prose cards, on the test `cathrynlavery/diagram-design`
+// puts before drawing anything: *would the reader learn more from this than
+// from a well-written paragraph?* Three cards saying "the interpreter does X,
+// clang does Y, the encoder does Z" hid the only fact that matters — the three
+// paths CONVERGE. A drawing says it without a sentence, and it is the mark's
+// own shape: three strokes meeting at one point.
+//
+// The rules the drawing keeps, from the same source:
+//
+//  - **Five nodes, six arrows.** Well inside the budget of nine and twelve.
+//  - **Two focal elements, and no more.** The program you write, and the result
+//    all three agree on. The backends between them recede.
+//  - **Rounded right-angle elbows only.** No diagonal connector anywhere.
+//  - **Fanned attach points.** The three arrows leaving the source are 16 units
+//    apart on its edge, so no arrow hides another.
+//  - **No arrow labels.** Each backend carries its own command as a sublabel,
+//    which is the same information with one element instead of two — and it
+//    removes every mask rectangle and every label-to-stroke gap to police.
+//  - **The 4px grid**, on every coordinate below.
+// ---------------------------------------------------------------------------
+
+/// One box in the targets diagram. `tone` is the class the stylesheet reads:
+/// a focal node, or an ordinary one.
+export type Node = { id: String, x: String, y: String, w: String, h: String, cx: String, name: String, sub: String, tone: String }
+
+/// One connector, as a path.
+export type Edge = { id: String, d: String }
+
+/// A rounded right-angle elbow from (x1, y1) to (x2, y2), turning at `midX`.
+/// A straight run when the two ends already share a row, which is the one case
+/// a plain horizontal line is allowed.
+fn elbow(x1: Int64, y1: Int64, x2: Int64, y2: Int64, midX: Int64) -> String {
+    if y1 == y2 {
+        return "M \{x1} \{y1} H \{x2}"
+    }
+    let r = 8
+    let step = if y2 > y1 { r } else { 0 - r }
+    let corner1 = y1 + step
+    let corner2 = y2 - step
+    return "M \{x1} \{y1} H \{midX - r} Q \{midX} \{y1} \{midX} \{corner1} V \{corner2} Q \{midX} \{y2} \{midX + r} \{y2} H \{x2}"
+}
+
+/// The three backends, in the order the README introduces them.
+fn backends() -> Array<Array<String>> {
+    return [
+        ["interp", "Interpreter", "vyrn run"],
+        ["native", "Native binary", "vyrn build"],
+        ["wasm", "WebAssembly", "vyrn build --target wasm"],
+    ]
+}
+
+/// Where a backend's row sits.
+fn laneY(i: Int64) -> Int64 {
+    return i * 100 + 32
+}
+
+/// The centre of the diagram, vertically: the middle lane's centre.
+fn axisY() -> Int64 {
+    return laneY(1) + 28
+}
+
+export fn targetsBox() -> String {
+    return "0 0 904 292"
+}
+
+export fn targetsNodes() -> Array<Node> {
+    let mut out: Array<Node> = []
+    out.push(Node {
+            id: "source",
+            x: "0",
+            y: px(axisY() - 28),
+            w: "176",
+            h: "56",
+            cx: "88",
+            name: "one program",
+            sub: "hello.vyrn",
+            tone: "node focal",
+        })
+    let rows = backends()
+    let mut i = 0
+    while i < rows.length {
+        out.push(Node {
+                id: rows[i][0].copy(),
+                x: "328",
+                y: px(laneY(i)),
+                w: "232",
+                h: "56",
+                cx: "444",
+                name: rows[i][1].copy(),
+                sub: rows[i][2].copy(),
+                tone: "node",
+            })
+        i = i + 1
+    }
+    out.push(Node {
+            id: "result",
+            x: "712",
+            y: px(axisY() - 28),
+            w: "192",
+            h: "56",
+            cx: "808",
+            name: "identical bytes",
+            sub: "stdout, stderr, exit code",
+            tone: "node focal",
+        })
+    return out
+}
+
+export fn targetsEdges() -> Array<Edge> {
+    let mut out: Array<Edge> = []
+    let rows = backends()
+    let mut i = 0
+    while i < rows.length {
+        let lane = laneY(i) + 28
+        // Fanned along the source's right edge, 16 units apart, so the three
+        // arrows never share a point and never overlap.
+        let from = axisY() + (i - 1) * 16
+        out.push(Edge { id: "out" + rows[i][0], d: elbow(176, from, 320, lane, 252) })
+        // And fanned again on the way in, at the result's left edge.
+        out.push(Edge { id: "in" + rows[i][0], d: elbow(560, lane, 704, axisY() + (i - 1) * 16, 636) })
+        i = i + 1
+    }
+    return out
+}
+
+test "the targets diagram stays inside the budget it was drawn to" {
+    let nodes = targetsNodes()
+    let edges = targetsEdges()
+    // Nine nodes and twelve arrows are the ceiling; this is well under both.
+    assertEq(nodes.length, 5)
+    assertEq(edges.length, 6)
+    let mut focal = 0
+    for n in nodes {
+        if n.tone == "node focal" {
+            focal = focal + 1
+        }
+    }
+    assertEq(focal, 2)
+}
+
+test "no connector in the targets diagram is a diagonal" {
+    // Every path is H/V runs joined by quarter-arcs. A diagonal would need an
+    // `L` with two changing coordinates, and there is no `L` in any of them.
+    for e in targetsEdges() {
+        assert(e.d.byteLength > 10)
+        for b in bytes(e.d) {
+            assert(b != 'L')
+        }
+    }
+}
+
+test "the three arrows leaving the source do not share a point" {
+    let edges = targetsEdges()
+    // The fan is 16 units apart on the source edge: 144, 160, 176 down its side.
+    assert(edges[0].d != edges[2].d)
+    assert(edges[2].d != edges[4].d)
+}

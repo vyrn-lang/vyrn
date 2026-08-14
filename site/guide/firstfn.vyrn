@@ -1,0 +1,11 @@
+// A function takes typed parameters and returns a typed result. `\{...}` puts a
+// value into a string.
+fn area(width: Int64, height: Int64) -> Int64 {
+    return width * height
+}
+
+export fn demo() -> String {
+    let w = 3
+    let h = 4
+    return "\{w} by \{h} is \{area(w, h)}"
+}

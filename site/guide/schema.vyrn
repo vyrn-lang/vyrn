@@ -1,0 +1,24 @@
+// `schemaOf` and `jsonSchema` read a type's own declaration at compile time. The
+// rule is written once, in the type, and the document follows from it.
+import { joinWith } from "std/strings"
+
+/// The port to listen on.
+type Port = Int64 where value >= 1 && value <= 65535
+
+fn bound(o: Option<Int64>) -> String {
+    return match o {
+        Some(n) => n.toString(),
+        None => "none",
+    }
+}
+
+export fn demo() -> String {
+    let s = schemaOf(Port)
+    return joinWith([
+            "name    \{s.name}",
+            "base    \{s.base}",
+            "minimum \{bound(s.min)}",
+            "maximum \{bound(s.max)}",
+            "schema  \{jsonSchema(Port)}",
+        ], "\n")
+}

@@ -1,0 +1,22 @@
+// `std/args` reads a token list. `cli()` takes the real arguments; `cliOf` takes
+// a list you hand it, which is what a test — and this page — does.
+import { cliOf, flag, opt, positionals } from "std/args"
+import { joinWith } from "std/strings"
+
+export fn demo() -> String {
+    let a = cliOf(["--verbose", "--port=8080", "site", "docs"])
+    let port = match opt(a, "--port") {
+        Some(v) => v,
+        None => "none",
+    }
+    let short = flag(a, "-v")
+    let long = flag(a, "--verbose")
+    let rest = joinWith(positionals(a), ", ")
+
+    return joinWith([
+            "-v          \{short}",
+            "--verbose   \{long}",
+            "port        \{port}",
+            "positionals \{rest}",
+        ], "\n")
+}

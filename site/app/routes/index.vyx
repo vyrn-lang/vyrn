@@ -1,0 +1,242 @@
+<script>
+// GET / — the landing page.
+//
+// It leads with what the language IS for the person reading it: the
+// expressiveness of TypeScript, native speed, no collector, rules that live in
+// the type, ownership written as one word. Every sentence is drawn from
+// `README.md`, which is verified copy.
+//
+// DENSITY. One band, one claim, one visual, and the visual carries it. The
+// headline states the claim; a single line of prose says the one thing the
+// widget cannot show; the widget does the rest. Anything a reader could learn by
+// pressing the control is not written out above the control.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
+import { exampleCount, rfcCount, stdCount, backendCount } from "../repo"
+import { shellHtml } from "../code"
+import { ownRows, lifetimes, lineCount, moduleRatio, targetsBox, targetsNodes, targetsEdges, OwnRow, Life, Node, Edge } from "../chart"
+import { parityReport } from "../../../examples/herofield"
+import { fnv1aStr } from "std/hash"
+import { toHex } from "std/strings"
+
+export fn head() -> Head {
+    return pageHead("Vyrn — a systems language with the expressiveness of TypeScript")
+}
+
+/// The install command a first-time reader should copy. It builds from source,
+/// because there is no published binary yet and saying otherwise would be a lie
+/// the reader finds out about in thirty seconds.
+fn quickstart() -> String {
+    return "git clone https://github.com/vyrn-lang/vyrn.git && cd vyrn/compiler && cargo build --release -p vyrn-cli"
+}
+
+/// The parity digest, MEASURED while this page is built.
+///
+/// The interpreter is running this file, so it can run the program the parity
+/// claim is about: `parityReport()` is exactly what `examples/herofield.vyrn`
+/// prints — a frame, then the raw bits behind it — and this hashes it. The page
+/// then runs the same file as wasm in the reader's browser and hashes what the
+/// module printed. Two engines, two digests, one comparison the reader watches
+/// happen.
+///
+/// `main` is `print(parityReport())`, and `print` ends the line, so the bytes
+/// the wasm module writes to stdout are these bytes plus one newline. That
+/// newline is the only difference between the two sides, and it is here.
+fn builtDigest() -> String {
+    return toHex(fnv1aStr(parityReport() + "\n"))
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#types"><span class="n">01</span>types</a>
+        <a href="#memory"><span class="n">02</span>memory</a>
+        <a href="#targets"><span class="n">03</span>targets</a>
+        <a href="#parity"><span class="n">04</span>parity</a>
+        <a href="/install.html"><span class="n">05</span>install</a>
+    </aside>
+        <section class="hero">
+            <p class="eyebrow">A systems language</p>
+            <h1 class="display">The expressiveness of TypeScript.<br/>Native speed. No collector.</h1>
+            <p class="lede">Types carry the rules that make a value valid, not only its shape. Ownership is one word on a parameter. One program compiles to an interpreter, a native binary and a WebAssembly module.</p>
+            <div class="cmd" data-copy>
+                <code id="quickstart" v-html="shellHtml(quickstart())"></code>
+                <button type="button" data-copy-btn aria-label="Copy the quickstart command">Copy</button>
+            </div>
+            <p class="eyebrow" style="margin-top:16px">Build from source. There is no published binary yet.</p>
+
+            <figure class="heroplate" style="margin:48px 0 0">
+                <canvas id="field" aria-hidden="true"></canvas>
+                <figcaption class="cap">field(u, v, t) — raw noise enters on the left, a gate crosses the field, ordered values leave on the right. The field function is Vyrn (<code>examples/herofield.vyrn</code>), and the parity harness proves all three backends agree on its bits. The host only paints.</figcaption>
+            </figure>
+
+            <dl class="specs">
+                <div>
+                    <dt>Examples</dt>
+                    <dd>{{ exampleCount() }}<small>counted in examples/ at build time</small></dd>
+                </div>
+                <div>
+                    <dt>Std modules</dt>
+                    <dd>{{ stdCount() }}<small>written in Vyrn, not in Rust</small></dd>
+                </div>
+                <div>
+                    <dt>Design records</dt>
+                    <dd>{{ rfcCount() }}<small>every decision, with its argument</small></dd>
+                </div>
+                <div>
+                    <dt>Backends</dt>
+                    <dd>{{ backendCount() }}<small>interpreter, native, wasm</small></dd>
+                </div>
+            </dl>
+        </section>
+
+        <section class="band" id="types">
+            <p class="eyebrow">01 — validated types</p>
+            <h2>Types carry the rules, not only the shape</h2>
+            <p>The rule is part of the type, so you cannot forget a check you never wrote. Uncomment the last line.</p>
+            <div class="plate" data-widget="types">
+                <div class="plate-head">
+                    <span class="pill">Specimen</span>
+                    <span class="eyebrow">README.md</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-types-btn aria-pressed="false">Uncomment the bad line</button>
+                    </div>
+                </div>
+                <div class="stage">
+                    <div class="lines" data-types-code>
+                        <div class="cl" v-for="r in heroRows()" :key="r.n" :data-l="r.n.toString()" :data-alt="r.alt">
+                            <span class="ln">{{ r.n }}</span>
+                            <code v-html="r.html"></code>
+                        </div>
+                    </div>
+                    <pre class="out" data-types-error v-html="heroDiagnostic()"></pre>
+                </div>
+                <p class="cap">The snippet is <code>README.md</code>'s. Line {{ badRow() + 1 }} is the one the control changes, and the message under it is what <code>vyrn check</code> prints for that line, word for word.</p>
+            </div>
+        </section>
+
+        <section class="band" id="memory">
+            <p class="eyebrow">02 — ownership</p>
+            <h2>Ownership is a word you write</h2>
+            <p>One word on a parameter — <code>read</code>, <code>modify</code>, <code>consume</code>, <code>share</code> — and the compiler enforces the rest. No lifetime syntax, no collector.</p>
+            <div class="plate" data-widget="ownership">
+                <div class="plate-head">
+                    <!-- The pill names the PLATE and the button names the ACTION.
+                         Both said "Replay", and on a narrow column the head wraps,
+                         so the two stacked and read as two Replay buttons — one of
+                         which does nothing. A pill is never a control's label. -->
+                    <span class="pill">Ownership</span>
+                    <span class="eyebrow">vyrn why --memory examples/ownership.vyrn</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-own-play>Replay</button>
+                    </div>
+                </div>
+                <span class="bignum">line <span data-own-n>{{ ownRows()[0].n }}</span></span>
+                <div class="stage">
+                    <ul class="legend">
+                        <li v-for="l in lifetimes()" :key="l.name">
+                            <i :class='"key " + l.name'></i><code>{{ l.name }}</code>
+                            <span>lines {{ l.from }} to {{ l.to }} — {{ l.fate }}</span>
+                        </li>
+                    </ul>
+                    <div class="lines gutter">
+                        <div class="cl head"><span class="ln">line</span><span class="lanes"></span><code>source</code></div>
+                    </div>
+                    <div class="lines gutter" data-own-rows>
+                        <div class="cl" v-for="r in ownRows()" :key="r.n" :data-l="r.n.toString()">
+                            <span class="ln">{{ r.n }}</span>
+                            <span class="lanes"><i :class="r.a"></i><i :class="r.b"></i></span>
+                            <code v-html="r.html"></code>
+                        </div>
+                    </div>
+                    <div class="out" data-own-report>
+                        <div v-for="row in ownershipReport()" :key="row.tag" :data-from="row.from.toString()" :data-to="row.to.toString()" v-html="row.html"></div>
+                    </div>
+                </div>
+                <p class="cap">Each lane runs from the line that declares a binding to the line the tool names as its end. The playhead highlights one source line, one lane and one report row at a time — all three are the number above. {{ lineCount() }} lines, 2 bindings, 0 collectors.</p>
+            </div>
+        </section>
+
+        <section class="band" id="targets">
+            <p class="eyebrow">03 — targets</p>
+            <h2>One program, three targets</h2>
+            <p>The interpreter is the reference semantics. <code>--target wasm</code> emits the module directly: no LLVM, no <code>clang</code>, no sysroot.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Schematic</span>
+                    <span class="eyebrow">one source, three paths, one result</span>
+                </div>
+                <div class="stage">
+                    <svg class="chart schematic" :viewBox="targetsBox()" role="img" aria-label="One program compiles through the interpreter, a native binary and a WebAssembly module, and all three produce identical bytes">
+                        <defs>
+                            <marker id="tip" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6"/></marker>
+                        </defs>
+                        <path class="wire" v-for="e in targetsEdges()" :key="e.id" :d="e.d" marker-end="url(#tip)"/>
+                        <g v-for="n in targetsNodes()" :key="n.id" :class="n.tone">
+                            <rect :x="n.x" :y="n.y" :width="n.w" :height="n.h"/>
+                            <text :x="n.cx" :y="n.y" dy="26" text-anchor="middle" class="name">{{ n.name }}</text>
+                            <text :x="n.cx" :y="n.y" dy="42" text-anchor="middle" class="sub">{{ n.sub }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">The three paths converge, and that is the whole claim: CI fails unless they do. The command under each backend is the one you type.</p>
+            </div>
+            <p class="notice">That is why a module is small: <code>fib.vyrn</code> builds to 1.5 KB, against 277 KB through <code>clang</code> — {{ moduleRatio() }} times. <a href="/compare.html#numbers">The comparison page measures eight of them.</a></p>
+        </section>
+
+        <section class="band" id="parity">
+            <p class="eyebrow">04 — how we know it works</p>
+            <h2>Three backends, checked byte for byte</h2>
+            <p>Not a reason to use Vyrn — the reason to believe the rest. CI fails unless all three backends agree on stdout, stderr and exit code, trap messages included.</p>
+            <div class="plate" data-widget="parity">
+                <div class="plate-head">
+                    <span class="pill live">Runs in your browser</span>
+                    <span class="eyebrow">examples/herofield.vyrn</span>
+                    <span class="spacer"></span>
+                    <div class="controls">
+                        <button type="button" data-parity-run>Run it here</button>
+                        <button type="button" class="danger" data-parity-break aria-pressed="false">Break one byte</button>
+                    </div>
+                </div>
+                <span class="bignum" data-parity-num>— <small>bytes differ</small></span>
+                <div class="stage">
+                    <div class="columns" data-parity-cols>
+                        <div>
+                            <h4>interp</h4>
+                            <pre class="digest" data-col="interp">{{ builtDigest() }}</pre>
+                            <p class="eyebrow">computed while this page was built</p>
+                        </div>
+                        <div>
+                            <h4>native</h4>
+                            <pre class="digest muted" data-col="native">not here</pre>
+                            <p class="eyebrow">a page cannot run a binary — CI compares it</p>
+                        </div>
+                        <div>
+                            <h4>wasm</h4>
+                            <pre class="digest" data-col="wasm">—</pre>
+                            <p class="eyebrow">computed by this browser, when you press Run</p>
+                        </div>
+                    </div>
+                    <p class="verdict" data-parity-verdict>The wasm column runs in the browser. With no JavaScript, this page shows only the digest the build measured.</p>
+                </div>
+                <p class="cap">The digest is <code>FNV-1a-64</code> of everything <code>examples/herofield.vyrn</code> prints — a frame, and the raw IEEE-754 bits behind it. The interpreter hashed it while this page was built; press Run and your browser fetches <code>hero.wasm</code>, runs it, and hashes what the module printed. Two engines, one number. <strong>Break one byte</strong> corrupts the digest the build recorded, so the comparison fails against a run that is still real.</p>
+            </div>
+            <p class="notice">Run it yourself: <code>cargo test -p vyrn-cli --test parity -- --ignored</code>.</p>
+        </section>
+
+        <section class="band">
+            <p class="eyebrow">05 — next</p>
+            <h2>Read it, or build it</h2>
+            <ul class="plain">
+                <li><a href="/philosophy.html">Philosophy</a><span class="note">Intent over mechanism, and the six things Vyrn refuses to have.</span></li>
+                <li><a href="/compare.html">Compare</a><span class="note">The same task in four languages, and every number we can produce on demand.</span></li>
+                <li><a href="/install.html">Install</a><span class="note">Three commands, per platform, and how to check it runs.</span></li>
+                <li><a href="/docs.html">Docs</a><span class="note">The standard library reference, the examples and the design record.</span></li>
+            </ul>
+        </section>
+</main>
+</template>

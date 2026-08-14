@@ -38,3 +38,9 @@ Thumbs.db
 tools/
 .claude/worktrees/
 .claude/settings.local.json
+
+# Site build output (`vyrn run site/export.vyrn out`) and the hero module the
+# same build produces. Both are rebuilt by .github/workflows/site.yml.
+out/
+site/public/*.wasm
+gate-*.txt

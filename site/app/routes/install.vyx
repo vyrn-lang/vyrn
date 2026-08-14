@@ -1,0 +1,152 @@
+<script>
+// GET /install — the quickstart, and the most important page on the site after
+// the landing page.
+//
+// No version string is written by hand, and none is invented. There is no
+// published binary and no git tag yet, so every command here builds from source.
+// `fresh.js` asks the GitHub release feed once per visit; the moment a release
+// exists, the notice at the top of this page fills itself in. Until then the
+// page says plainly that there is nothing to download.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { vyrnHtml } from "../snippets"
+import { shellHtml } from "../code"
+
+/// One platform's setup, in the order a reader does it.
+type Platform = { id: String, name: String, deps: String, build: String, run: String }
+
+export fn head() -> Head {
+    return pageHead("Install — Vyrn")
+}
+
+fn platforms() -> Array<Platform> {
+    return [
+        Platform {
+            id: "linux",
+            name: "Linux",
+            deps: "A recent Rust toolchain. <code>clang</code>, for a native binary.",
+            build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
+            run: "./target/release/vyrn run ../examples/fib.vyrn",
+        },
+        Platform {
+            id: "macos",
+            name: "macOS",
+            deps: "A recent Rust toolchain. Xcode command line tools supply <code>clang</code>.",
+            build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
+            run: "./target/release/vyrn run ../examples/fib.vyrn",
+        },
+        Platform {
+            id: "windows",
+            name: "Windows",
+            deps: "A recent Rust toolchain. <code>clang</code>, for a native binary.",
+            build: "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli",
+            run: ".\\target\\release\\vyrn.exe run ..\\examples\\fib.vyrn",
+        },
+    ]
+}
+
+/// What to build next, and what each command proves.
+type Step = { title: String, command: String, what: String }
+
+fn steps() -> Array<Step> {
+    return [
+        Step { title: "Run a program", command: "vyrn run examples/fib.vyrn", what: "The tree-walking interpreter. Needs nothing but the compiler." },
+        Step { title: "Build a WebAssembly module", command: "vyrn build examples/fib.vyrn --target wasm -o fib.wasm", what: "The compiler emits the module directly. No LLVM, no <code>clang</code>, no sysroot." },
+        Step { title: "Build a native binary", command: "vyrn build examples/fib.vyrn -o fib", what: "Textual LLVM IR, linked with <code>clang</code>. Needs <code>clang</code> on <code>PATH</code>, or <code>$CLANG</code>." },
+        Step { title: "Run the tests in a file", command: "vyrn test examples/testing.vyrn", what: "<code>test</code> blocks live in the source file, beside the code they check." },
+        Step { title: "Ask about the memory", command: "vyrn why --memory examples/ownership.vyrn", what: "Per binding: whether it is reclaimed, how, and the reason when it is not." },
+    ]
+}
+
+fn firstProgram() -> String {
+    return vyrnHtml("hello")
+}
+
+/// The one command that builds the language server. It is written here rather
+/// than in the template because the template shows it coloured, and a coloured
+/// command is built from its text.
+fn lspBuild() -> String {
+    return "cargo build --release --manifest-path vyrn-lsp/Cargo.toml"
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#get"><span class="n">01</span>get it</a>
+        <a href="#check"><span class="n">02</span>check it</a>
+        <a href="#first"><span class="n">03</span>first program</a>
+        <a href="#editor"><span class="n">04</span>editor</a>
+    </aside>
+        <section class="hero">
+            <p class="eyebrow">Install</p>
+            <h1 class="display">Three commands, and it runs</h1>
+            <p class="lede">Vyrn is early. There is no versioned release and no published binary, so you build the compiler from source. It takes one clone and one <code>cargo build</code>.</p>
+            <p class="notice" data-release-note hidden="hidden"></p>
+        </section>
+
+        <section class="band" id="get">
+            <p class="eyebrow">01 — get it</p>
+            <h2>Build the compiler</h2>
+            <div class="plate" data-install>
+                <div class="plate-head">
+                    <span class="pill">Quickstart</span>
+                    <span class="eyebrow">from source</span>
+                </div>
+                <div class="tabs">
+                    <button type="button" v-for="p in platforms()" :key="p.id" :data-plat="p.id">{{ p.name }}</button>
+                </div>
+                <div class="stage panes">
+                    <div v-for="p in platforms()" :key="p.id" :data-plat-pane="p.id">
+                        <p class="eyebrow">You need</p>
+                        <p v-html="p.deps"></p>
+                        <div class="cmd" data-copy>
+                            <code v-html="shellHtml(p.build)"></code>
+                            <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>
+                        </div>
+                        <p class="eyebrow" style="margin-top:24px">Then</p>
+                        <div class="cmd" data-copy>
+                            <code v-html="shellHtml(p.run)"></code>
+                            <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>
+                        </div>
+                    </div>
+                </div>
+                <p class="cap">The platform is picked from your browser and you can change it. Nothing here downloads a binary, because there is no binary to download yet.</p>
+            </div>
+            <p class="notice">A native binary needs <code>clang</code> on <code>PATH</code> (or <code>$CLANG</code>). A WebAssembly module needs nothing extra. The full parity harness also needs a <code>wasmtime</code>, through <code>$VYRN_WASMTIME</code>.</p>
+        </section>
+
+        <section class="band" id="check">
+            <p class="eyebrow">02 — check it</p>
+            <h2>Five commands worth knowing on day one</h2>
+            <ul class="plain">
+                <li v-for="s in steps()" :key="s.title">
+                    <strong>{{ s.title }}</strong>
+                    <div class="cmd" data-copy>
+                        <code v-html="shellHtml(s.command)"></code>
+                        <button type="button" data-copy-btn aria-label="Copy this command">Copy</button>
+                    </div>
+                    <span class="note" v-html="s.what"></span>
+                </li>
+            </ul>
+        </section>
+
+        <section class="band" id="first">
+            <p class="eyebrow">03 — first program</p>
+            <h2>Hello</h2>
+            <p>Put this in <code>hello.vyrn</code> and run <code>vyrn run hello.vyrn</code>. The same file builds to a native binary and to a WebAssembly module, and all three print the same bytes.</p>
+            <pre class="code" v-html="firstProgram()"></pre>
+        </section>
+
+        <section class="band" id="editor">
+            <p class="eyebrow">04 — editor</p>
+            <h2>The language server</h2>
+            <p><code>vyrn-lsp</code> is a synchronous language server: diagnostics, hover, go-to-definition and completion, across linked files. The VS Code extension lives in <code>editor/vscode/</code>. It is excluded from the main workspace, so it is built on its own:</p>
+            <div class="cmd" data-copy>
+                <code v-html="shellHtml(lspBuild())"></code>
+                <button type="button" data-copy-btn aria-label="Copy the language server build command">Copy</button>
+            </div>
+            <p class="notice">Modules resolve from <code>vyrn.json</code>. Remote imports (<code>github:</code>, <code>gist:</code>, <code>https:</code>) are pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch.</p>
+        </section>
+</main>
+</template>

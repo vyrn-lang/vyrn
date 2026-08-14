@@ -1,0 +1,27 @@
+// A `test` block lives beside the code it tests. `vyrn run` and `vyrn build`
+// strip them; `vyrn test` runs them.
+import { joinWith } from "std/strings"
+
+fn clamp(x: Int64, lo: Int64, hi: Int64) -> Int64 {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+test "clamp holds the bounds" {
+    assertEq(clamp(5, 0, 10), 5)
+    assertEq(clamp(0 - 3, 0, 10), 0)
+    assertEq(clamp(99, 0, 10), 10)
+}
+
+test "clamp leaves a value inside them alone" {
+    assert(clamp(7, 0, 10) == 7)
+}
+
+export fn demo() -> String {
+    return joinWith(["clamp(5) is \{clamp(5, 0, 10)}", "clamp(99) is \{clamp(99, 0, 10)}"], "\n")
+}

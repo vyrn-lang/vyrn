@@ -1,0 +1,20 @@
+// Every number type states its width. There is no unsized `Int`.
+import { joinWith } from "std/strings"
+
+export fn demo() -> String {
+    let small: Int8 = 100
+    let count: Int64 = 9007199254740993
+    let ratio: Float64 = 0.1 + 0.2
+    let flag = 7 > 3
+
+    // A conversion is written, never implied.
+    let widened = Int64(small) + 1
+
+    return joinWith([
+            "small  \{small}",
+            "widened \{widened}",
+            "count  \{count}",
+            "ratio  \{ratio}",
+            "flag   \{flag}",
+        ], "\n")
+}

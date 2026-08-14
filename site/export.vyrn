@@ -1,0 +1,543 @@
+/// The static export (design brief G1).
+///
+/// `pages()` synthesizes `route(req) -> Response` for a server. GitHub Pages
+/// serves files, not a process. `Request` is an ordinary record, so the whole
+/// gap closes here: walk the route table, call `route` once per path, and write
+/// what comes back.
+///
+/// Each route is exported TWICE, because a page has two representations at one
+/// URL and the client navigator asks for them by `Accept` (RFC-0072 M4):
+///
+///   - the document, as `<name>.html`
+///   - the soft-navigation payload, as `<name>.data.json`
+///
+/// A static host cannot vary on `Accept`, so `vyrn-nav.js` takes
+/// `__vyrnNavConfig.staticData`, which points the payload fetch at the second
+/// file. Soft navigation then works with no server behind it.
+///
+///     vyrn run site/export.vyrn out
+///
+/// The output directory must exist, and so must `<out>/docs/std`, which holds
+/// one page per standard library module. RFC-0014 has `readFile`, `writeFile`
+/// and `listDir` and no way to CREATE a directory, so the caller makes them:
+///
+///     mkdir -p out/docs/std
+///
+/// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
+import { pages } from "std/ui"
+import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, hrefDocsStd, hrefGuide } from pages("./app/routes")
+import { published, navRows, hrefOf } from "./app/nav"
+import { apiModules, apiEntries, apiHref } from "./app/docs"
+import { chapterSlugs, chapterHref } from "./app/guide"
+import { exploreRows } from "./app/explore"
+import { substring, indexOf, split } from "std/strings"
+import { startsWith } from "std/strpred"
+
+/// Every path the site publishes, from the router's own typed URL helpers. A
+/// route that is renamed or deleted breaks this list at compile time, which is
+/// the point of listing it this way rather than writing the strings out.
+///
+/// The reference pages come from the same generated module the pages render, so
+/// a module added to `std/` is exported here on the next build with nothing
+/// written by hand.
+fn sitePaths() -> Array<String> {
+    let mut out: Array<String> = [rootPath(), philosophyPath(), comparePath(), installPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
+    for m in apiModules() {
+        out.push(hrefDocsStd(m.name))
+    }
+    // The book's chapters come from the book itself, in reading order.
+    for slug in chapterSlugs() {
+        out.push(hrefGuide(slug))
+    }
+    return out
+}
+
+/// The request for a path's document representation.
+fn documentRequest(path: String) -> Request {
+    return Request { method: "GET", path: path.copy(), headers: ["accept": "text/html"], body: "" }
+}
+
+/// The request for a path's soft-navigation payload. Same URL, different
+/// `Accept` — the negotiation the router already answers.
+fn dataRequest(path: String) -> Request {
+    return Request { method: "GET", path: path.copy(), headers: ["accept": "application/json"], body: "" }
+}
+
+/// The payload file beside a document: `philosophy.html` → `philosophy.data.json`.
+fn payloadName(name: String) -> String {
+    return substring(name, 0, name.byteLength - 5) + ".data.json"
+}
+
+/// The navigation row a path belongs under, or "" for a path under none.
+///
+/// A reference page — `/docs/std/json` — belongs under Docs, and a chapter —
+/// `/guide/values` — under Guide. Those are the two rows that own a subtree.
+fn currentNav(path: String) -> String {
+    let here = hrefOf(path)
+    for row in navRows() {
+        if row.href == here {
+            return row.href.copy()
+        }
+    }
+    if startsWith(path, "/docs/") {
+        return hrefOf("/docs")
+    }
+    if startsWith(path, "/guide/") {
+        return hrefOf("/guide")
+    }
+    return ""
+}
+
+/// `html` with the navigation link for `path` marked as the page the reader is
+/// on.
+///
+/// The marker is stamped HERE rather than by the layout, because the layout is
+/// shared by every page and is not told which route it is rendering — the export
+/// is, once per path. One replacement, on the FIRST match: the masthead is the
+/// document's first element, so the first `data-key` anchor for a route is the
+/// navigation's, and a link to the same route inside the page body is left
+/// alone.
+///
+/// A soft navigation swaps `<main>` and never touches the masthead, so
+/// `widgets.js` moves the marker after every one. This is the full-load half.
+fn markCurrent(html: String, path: String) -> String {
+    let href = currentNav(path)
+    if href.byteLength == 0 {
+        return html.copy()
+    }
+    let anchor = "<a href=\"\{href}\" data-key=\"\{href}\">"
+    return match indexOf(html, anchor) {
+        Some(at) => substring(html, 0, at) + "<a href=\"\{href}\" data-key=\"\{href}\" aria-current=\"page\">" + substring(html, at + anchor.byteLength, html.byteLength),
+        None => html.copy(),
+    }
+}
+
+/// `html` with the document's language declared.
+///
+/// A page with no `lang` leaves a screen reader to guess the voice it reads in
+/// (WCAG 3.1.1), and no page here declared one. The skeleton comes from
+/// `std/html`'s `document`, which writes a bare `<html>` and takes no language;
+/// changing that is a standard library change with golden output behind it, so
+/// the site stamps its own — exactly as it stamps the navigation marker below,
+/// and in the same one pass over the document.
+fn withLang(html: String) -> String {
+    return match indexOf(html, "<html>") {
+        Some(at) => substring(html, 0, at) + "<html lang=\"en\">" + substring(html, at + 6, html.byteLength),
+        None => html.copy(),
+    }
+}
+
+/// `html` with the site's own mark declared as its icon.
+///
+/// Without a `<link rel="icon">` a browser asks for `/favicon.ico`, which this
+/// site does not publish, so every page fetched a 404 and showed the blank
+/// sheet. The mark exists — `editor/vscode/icons/vyrn.svg` is where the
+/// stylesheet's palette was sampled from — and `assets()` copies it to
+/// `favicon.svg`. Stamped here, beside the language, for the reason `withLang`
+/// is: the document skeleton comes from `std/ui`, whose `Head` has entries for a
+/// stylesheet, a script and a meta, and none for a link of another `rel`.
+///
+/// SVG only. `writeFile` takes a `String`, so this export cannot write the
+/// binary `.ico` a very old browser would want; a browser that cannot read the
+/// SVG shows the blank sheet it showed before, and asks for nothing.
+fn withIcon(html: String) -> String {
+    return match indexOf(html, "<head>") {
+        Some(at) => substring(html, 0, at) + "<head><link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">" + substring(html, at + 6, html.byteLength),
+        None => html.copy(),
+    }
+}
+
+/// Write one file. Returns 1 if it failed, so failures add up.
+///
+/// The reason is PRINTED rather than counted. A CI log that says
+/// `export failed: 3 file(s)` tells the operator how many and not one thing
+/// about why; `no such file or directory` names the missing `out/docs/std` in
+/// the line where it happened.
+fn emit(file: String, body: String) -> Int64 {
+    return match writeFile(file, body) {
+        Ok(done) => 0,
+        Err(why) => failed(file, why),
+    }
+}
+
+/// Say what went wrong with `what`, and count one failure. A match arm is an
+/// expression, so the message and the count live here rather than in a block.
+fn failed(what: String, why: String) -> Int64 {
+    print("FAIL \{what}: \{why}")
+    return 1
+}
+
+/// Export one route: its document and its navigation payload. Returns the number
+/// of failures, so the caller exits non-zero instead of publishing a hole.
+fn exportPath(outDir: String, path: String) -> Int64 {
+    let name = published(path)
+    let doc = route(documentRequest(path))
+    if doc.status != 200 {
+        print("FAIL \{path} -> \{doc.status}")
+        return 1
+    }
+    let data = route(dataRequest(path))
+    let json = payloadName(name)
+    let bad = emit("\{outDir}/\{name}", withIcon(withLang(markCurrent(doc.body, path)))) + emit("\{outDir}/\{json}", data.body)
+    print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
+    return bad
+}
+
+/// Every text file the site serves beside its pages: `source` in the repository,
+/// `name` in the output. Flat, for the same reason the pages are flat.
+///
+/// The wasm hero module is NOT here. `writeFile` takes a `String`, and a wasm
+/// module is not text, so `site/public/hero.wasm` is copied by the deploy step
+/// (`.github/workflows/site.yml`) along with anything else binary the site grows.
+fn assets() -> Array<Array<String>> {
+    return [
+        ["site/public/style.css", "style.css"],
+        ["site/public/widgets.js", "widgets.js"],
+        ["site/public/hero.js", "hero.js"],
+        ["site/public/fresh.js", "fresh.js"],
+        ["site/public/play.js", "play.js"],
+        ["site/public/play-wasm.js", "play-wasm.js"],
+        ["site/public/play-worker.js", "play-worker.js"],
+        ["web/wasi-min.js", "wasi-min.js"],
+        ["web/vyrn-nav.js", "vyrn-nav.js"],
+        ["web/vyrn-dom.js", "vyrn-dom.js"],
+        ["editor/vscode/icons/vyrn.svg", "favicon.svg"],
+    ]
+}
+
+/// Copy one asset. A missing source is a failure, not a warning: a page that
+/// links a stylesheet the export did not write is a broken page.
+///
+/// A missing file and an empty one are two different failures, and they used to
+/// share one message — `unreadable or empty`, which named neither. Each says
+/// what happened now, in the OS's own words where the OS is the one that knows.
+fn copyAsset(outDir: String, source: String, name: String) -> Int64 {
+    return match readFile(source) {
+        Ok(body) => written(outDir, source, name, body),
+        Err(why) => failed(source, why),
+    }
+}
+
+/// The write half of `copyAsset`, once the read has succeeded. A file that read
+/// as nothing is its own failure and says so in its own words.
+fn written(outDir: String, source: String, name: String, body: String) -> Int64 {
+    if body.byteLength == 0 {
+        print("FAIL \{source}: read, but empty — the site links it, so it cannot be nothing")
+        return 1
+    }
+    return emit("\{outDir}/\{name}", body)
+}
+
+fn main() -> Int64 {
+    let argv = args()
+    let outDir = if argv.length > 1 { argv[1].copy() } else { "out" }
+    let mut failures = 0
+    for path in sitePaths() {
+        failures = failures + exportPath(outDir, path)
+    }
+    for asset in assets() {
+        failures = failures + copyAsset(outDir, asset[0], asset[1])
+    }
+    if failures > 0 {
+        print("export failed: \{failures} file(s)")
+        return 1
+    }
+    print("exported \{sitePaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
+    return 0
+}
+
+/// Whether `needle` occurs in `haystack`. Only the tests below use it.
+fn has(haystack: String, needle: String) -> Bool {
+    return match indexOf(haystack, needle) {
+        Some(at) => true,
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The link gate.
+//
+// The site's central claim about itself is that every link it writes resolves.
+// The generated ones were already checked here; the HAND-WRITTEN ones — a
+// sentence in a chapter pointing at `/compare.html#numbers`, a rail link
+// pointing at `#graph` — resolved by author discipline. This reads every
+// rendered document, collects every `id` and every `href`, and checks each
+// fragment against the ids of the page it names. One scan, no exceptions.
+// ---------------------------------------------------------------------------
+
+/// Every value of the attribute `name` in `html`, in document order.
+///
+/// `split` and `indexOf` do the scanning, because both are builtins and this
+/// walks 56 documents: the same loop written byte by byte in Vyrn runs in the
+/// interpreter and takes minutes, which is how a gate becomes something people
+/// switch off.
+///
+/// The needle carries the leading space — ` id="`, not `id="` — so `data-id="`
+/// and `aria-labelledby="` are not read as the attribute they end with. An id
+/// this scan invented would be an id that hides a broken anchor.
+fn attrValues(html: String, name: String) -> Array<String> {
+    let parts = split(html, " " + name + "=\"")
+    let mut out: Array<String> = []
+    let mut i = 1
+    while i < parts.length {
+        out.push(match indexOf(parts[i], "\"") {
+                Some(at) => substring(parts[i], 0, at),
+                None => "",
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// `href` split at its `#`: the document it names (empty for this one) and the
+/// fragment (empty when it has none).
+fn fragmentOf(href: String) -> Array<String> {
+    return match indexOf(href, "#") {
+        Some(at) => [substring(href, 0, at), substring(href, at + 1, href.byteLength)],
+        None => [href.copy(), ""],
+    }
+}
+
+/// Whether `name` is one of `all`.
+fn oneOf(name: String, all: Array<String>) -> Bool {
+    for x in all {
+        if x == name {
+            return true
+        }
+    }
+    return false
+}
+
+test "every reference link points at the route the router generated" {
+    for m in apiModules() {
+        assertEq(apiHref(m.name), "/" + published(hrefDocsStd(m.name)))
+    }
+}
+
+test "a module the reference does not cover answers 404, not an empty page" {
+    assertEq(route(documentRequest("/docs/std/nope")).status, 404)
+}
+
+test "every navigation row points at a route that exists" {
+    for row in navRows() {
+        let mut found = false
+        for path in sitePaths() {
+            if row.href == "/" + published(path) {
+                found = true
+            }
+        }
+        assert(found)
+    }
+}
+
+test "every route answers 200 as a document and as data" {
+    for path in sitePaths() {
+        assertEq(route(documentRequest(path)).status, 200)
+        assertEq(route(dataRequest(path)).status, 200)
+    }
+}
+
+test "the two representations of one URL differ" {
+    let doc = route(documentRequest(rootPath()))
+    let data = route(dataRequest(rootPath()))
+    assertEq(doc.contentType, "text/html")
+    assertEq(data.contentType, "application/json")
+}
+
+test "every published document marks exactly one navigation row" {
+    for path in sitePaths() {
+        let html = markCurrent(route(documentRequest(path)).body, path)
+        let mut marked = 0
+        for row in navRows() {
+            marked = marked + match indexOf(html, "data-key=\"\{row.href}\" aria-current=\"page\"") {
+                Some(at) => 1,
+                None => 0,
+            }
+        }
+        // The home page is not a navigation row, and marks none.
+        assertEq(marked, if path == "/" { 0 } else { 1 })
+    }
+}
+
+test "a reference page belongs under Docs, and the home page under nothing" {
+    assertEq(currentNav("/install"), "/install.html")
+    assertEq(currentNav("/docs"), "/docs.html")
+    assertEq(currentNav("/docs/std/json"), "/docs.html")
+    assertEq(currentNav("/"), "")
+}
+
+test "the marker lands on the navigation, not on the first link in the body" {
+    let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Docs</a>"
+    let body = "<p>" + nav + "</p>"
+    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Docs</a>" + body)
+}
+
+test "every name in a module's index points at an export that is on the page" {
+    // The index moved from a band into the rail this round. A rail entry that
+    // names an anchor no element carries is a link that silently does nothing —
+    // the reader clicks and the page sits still — so both halves are checked
+    // here, on every one of the 34 module pages rather than on a sample.
+    for m in apiModules() {
+        let html = route(documentRequest(hrefDocsStd(m.name))).body
+        for e in apiEntries(m.name) {
+            assert(has(html, "href=\"#e-\{e.name}\""))
+            assert(has(html, "id=\"e-\{e.name}\""))
+        }
+    }
+}
+
+test "a payload sits beside its document" {
+    assertEq(payloadName("index.html"), "index.data.json")
+    assertEq(payloadName("philosophy.html"), "philosophy.data.json")
+}
+
+test "every published document declares its language" {
+    assertEq(withLang("<!doctype html>\n<html>\n<head>"), "<!doctype html>\n<html lang=\"en\">\n<head>")
+    // Stamped once, on the document element, and on every page.
+    for path in sitePaths() {
+        let html = withLang(route(documentRequest(path)).body)
+        assert(has(html, "<html lang=\"en\">"))
+        assert(!has(html, "<html>"))
+    }
+}
+
+test "every published document points at an icon this export writes" {
+    // A `<link rel="icon">` on every page, and the file it names in `assets()`.
+    // Without both, a browser asks for `/favicon.ico` and gets a 404 on every
+    // page of the site.
+    let mut copied = false
+    for asset in assets() {
+        if asset[1] == "favicon.svg" {
+            copied = true
+        }
+    }
+    assert(copied)
+    for path in sitePaths() {
+        let html = withIcon(route(documentRequest(path)).body)
+        assert(has(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">"))
+    }
+}
+
+test "an attribute scan reads the values and stops at the quote" {
+    let hrefs = attrValues("<a href=\"/a.html\"><b id=\"x\">", "href")
+    assertEq(hrefs.length, 1)
+    assertEq(hrefs[0], "/a.html")
+    let ids = attrValues("<b id=\"x\"><i id=\"y\">", "id")
+    assertEq(ids.length, 2)
+    assertEq(ids[0], "x")
+    assertEq(ids[1], "y")
+    assertEq(attrValues("<b>", "id").length, 0)
+    // An attribute that ENDS in the name is not the attribute.
+    assertEq(attrValues("<li data-id=\"x\" id=\"y\">", "id").length, 1)
+    let cross = fragmentOf("/compare.html#numbers")
+    assertEq(cross[0], "/compare.html")
+    assertEq(cross[1], "numbers")
+    let here = fragmentOf("#graph")
+    assertEq(here[0], "")
+    assertEq(here[1], "graph")
+    assertEq(fragmentOf("/docs.html")[1], "")
+}
+
+test "every fragment the site writes lands on an element that is there" {
+    // The gate the audit asked for: the generated `#e-<name>` anchors were
+    // checked, and every hand-written cross-page fragment — a sentence in a
+    // chapter pointing at `/guide/errors.html#fallible`, a rail pointing at
+    // `#graph` — resolved because whoever wrote it was careful. Now they are
+    // checked, on every rendered document, against the ids of the page they
+    // name.
+    let mut files: Array<String> = []
+    let mut links: Array<Array<String>> = []
+    let mut ids: Array<Array<String>> = []
+    for path in sitePaths() {
+        let html = route(documentRequest(path)).body
+        files.push("/" + published(path))
+        links.push(attrValues(html, "href"))
+        // Scanned once per page rather than once per link: a page carries up to
+        // 143 links, and re-reading 40 KB for each of them is how a gate becomes
+        // something people turn off.
+        ids.push(attrValues(html, "id"))
+    }
+    let mut checked = 0
+    let mut i = 0
+    while i < links.length {
+        for href in links[i] {
+            let parts = fragmentOf(href)
+            if parts[1].byteLength > 0 && !startsWith(parts[0], "http") {
+                // The page the fragment is on: this one, or the one it names.
+                let mut target = i
+                if parts[0].byteLength > 0 {
+                    target = 0 - 1
+                    let mut k = 0
+                    while k < files.length {
+                        if files[k] == parts[0] {
+                            target = k
+                        }
+                        k = k + 1
+                    }
+                    // A link to a page this export does not write is a broken
+                    // link, fragment or not. `/play.html` is the one exception,
+                    // and it is checked by its own test below.
+                    if parts[0] != "/play.html" {
+                        assert(target >= 0)
+                    }
+                }
+                if target >= 0 && parts[0] != "/play.html" {
+                    assert(oneOf(parts[1], ids[target]))
+                    checked = checked + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    // The rails alone are more than a hundred; a gate that checked nothing would
+    // pass every one of these assertions in silence.
+    assert(checked > 200)
+}
+
+test "every playground link carries base64url and nothing else" {
+    // The contract with the playground is one line long: `play.html#c=` and
+    // base64url of the program's UTF-8 bytes, with `+` as `-`, `/` as `_`, and
+    // no padding. A link that carried a `+` would arrive as a space.
+    let mut links = 0
+    for path in sitePaths() {
+        for href in attrValues(route(documentRequest(path)).body, "href") {
+            if startsWith(href, "/play.html#c=") {
+                let code = substring(href, 13, href.byteLength)
+                assert(code.byteLength > 0)
+                for b in bytes(code) {
+                    assert((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-' || b == '_')
+                }
+                links = links + 1
+            }
+        }
+    }
+    // Every runnable block in the book, and every export a block demonstrates.
+    assert(links > 20)
+}
+
+test "every export the explorer offers has an anchor on the page it points at" {
+    // The explorer's rows carry their export names, and the script builds a link
+    // to `/docs/std/<m>.html#e-<name>` from them. That link is assembled in the
+    // browser, so this is where it is checked: every name in every row is an
+    // anchor the reference page actually carries.
+    let mut names = 0
+    for row in exploreRows() {
+        let html = route(documentRequest(hrefDocsStd(row.name))).body
+        for name in row.exports {
+            assert(has(html, "id=\"e-\{name}\""))
+            names = names + 1
+        }
+    }
+    assert(names > 300)
+}
+
+test "the book publishes one page per chapter, and an unknown chapter is a 404" {
+    for slug in chapterSlugs() {
+        let path = hrefGuide(slug)
+        assertEq(route(documentRequest(path)).status, 200)
+        assertEq("/" + published(path), chapterHref(slug))
+    }
+    assertEq(route(documentRequest("/guide/nope")).status, 404)
+    assertEq(currentNav("/guide/values"), "/guide.html")
+    assertEq(currentNav("/guide"), "/guide.html")
+}

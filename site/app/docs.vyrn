@@ -1,0 +1,192 @@
+/// The standard library reference, as the pages read it.
+///
+/// This is the ONLY place `apiDocs` is called, for the reason `repo.vyrn` gives:
+/// the generator cache is keyed on the argument strings, so a second call site
+/// spelling `std/` differently would generate a second module whose exported
+/// names collide program-wide. One call, one set of names.
+///
+/// The generated module answers in parallel arrays — a generated module cannot
+/// name a record type this module declares — so the zip into records happens
+/// here, exactly as `repo.vyrn` zips RFC numbers and titles.
+import { apiDocs } from "./apidoc"
+import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docTests, docCount } from apiDocs("../../std")
+import { startsWith } from "std/strpred"
+import { substring, trimStart } from "std/strings"
+import { hrefOf } from "./nav"
+import { blob } from "./repo"
+
+/// One exported declaration: what it is called, what it is, its signature as
+/// written (already coloured), its `///` prose as HTML, and where it is declared.
+export type ApiEntry = { name: String, kind: String, sig: String, prose: String, line: Int64 }
+
+/// One module in the list: its name, its first sentence, and how many exports it
+/// has. The summary is HTML, because the prose it came from is.
+export type ApiModule = { name: String, summary: String, count: Int64 }
+
+/// A module's summary without the module's own name in front of it. The list
+/// prints the name in its first column, and a row that says `std/json` twice
+/// reads as a machine repeating itself.
+fn shorten(name: String, summary: String) -> String {
+    let full = "std/" + name
+    if !startsWith(summary, full) {
+        return summary.copy()
+    }
+    let rest = trimStart(substring(summary, full.byteLength, summary.byteLength))
+    if startsWith(rest, "— ") {
+        return trimStart(substring(rest, 4, rest.byteLength))
+    }
+    return rest
+}
+
+/// Every documented module, sorted.
+export fn apiModules() -> Array<ApiModule> {
+    let mut out: Array<ApiModule> = []
+    for m in docModules() {
+        out.push(ApiModule { name: m.copy(), summary: shorten(m, docSummary(m)), count: docCount(m) })
+    }
+    return out
+}
+
+/// Whether `m` names a module the reference covers.
+export fn apiKnown(m: String) -> Bool {
+    for name in docModules() {
+        if name == m {
+            return true
+        }
+    }
+    return false
+}
+
+/// The exports of `m`, in declaration order.
+export fn apiEntries(m: String) -> Array<ApiEntry> {
+    let names = docNames(m)
+    let kinds = docKinds(m)
+    let sigs = docSigs(m)
+    let prose = docProse(m)
+    let lines = docLines(m)
+    let mut out: Array<ApiEntry> = []
+    let mut i = 0
+    while i < names.length {
+        out.push(ApiEntry { name: names[i].copy(), kind: kinds[i].copy(), sig: sigs[i].copy(), prose: prose[i].copy(), line: lines[i] })
+        i = i + 1
+    }
+    return out
+}
+
+/// The module's header block, as HTML.
+export fn apiIntro(m: String) -> String {
+    return docIntro(m)
+}
+
+/// What the module's own tests promise, one sentence each.
+///
+/// These are the names of its `test` blocks, read off the source with the
+/// exports. A test name in this repository is a claim about the code, so the
+/// list is a summary of what the module guarantees — and CI runs every one of
+/// them, so the list cannot outlive the guarantee.
+export fn apiTests(m: String) -> Array<String> {
+    return docTests(m)
+}
+
+/// The page that documents `m`.
+///
+/// Built from the path rather than from the router's typed helper, for the
+/// reason `nav.vyrn` gives: this module is imported BY the pages the router
+/// scans, so importing the router here would be a cycle. `export.vyrn` checks
+/// every one of these against the generated helper instead.
+export fn apiHref(m: String) -> String {
+    return hrefOf("/docs/std/" + m)
+}
+
+/// The module's source file, in the repository. The site does not host the
+/// source, so this link leaves — and it is the only reason to leave.
+export fn apiSource(m: String) -> String {
+    return blob("std/" + m + ".vyrn")
+}
+
+/// The declaration itself, at its line.
+export fn apiSourceLine(m: String, line: Int64) -> String {
+    return apiSource(m) + "#L" + line.toString()
+}
+
+/// How many times the byte `b` occurs in `s`. Only the balance gate below uses
+/// it, and it lives here because this is where the real signatures are.
+fn countByte(s: String, b: UInt8) -> Int64 {
+    let raw = bytes(s)
+    let mut n = 0
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == b {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+test "every signature the reference renders is a whole declaration" {
+    // The gate this test exists for: a record type's closing `}` sits in column
+    // 1, which is also where the NEXT declaration starts. Reading the column
+    // rule before the brace rule cut ten signatures one line short — `type
+    // CliRead = {` with three fields and no closing brace. A truncated signature
+    // is silent: it renders, it reads, and only a count catches it.
+    //
+    // The check runs here rather than in `apidoc.vyrn` because a generator's
+    // `listDir` resolves against the importing file, so this module's own
+    // `apiDocs("../../std")` import is the one place the real reference exists.
+    //
+    // ponytail: brackets are counted, not parsed. A signature with an unbalanced
+    // bracket inside a string literal or a trailing comment would be a false
+    // alarm; none in `std/` has one, and the day one does, this test says so.
+    let mut total = 0
+    for m in apiModules() {
+        for e in apiEntries(m.name) {
+            assert(e.sig.byteLength > 0)
+            assertEq(countByte(e.sig, '{'), countByte(e.sig, '}'))
+            assertEq(countByte(e.sig, '('), countByte(e.sig, ')'))
+            assertEq(countByte(e.sig, '['), countByte(e.sig, ']'))
+            total = total + 1
+        }
+    }
+    assert(total > 300)
+}
+
+test "every module has a name, a summary and at least one export" {
+    let mods = apiModules()
+    assert(mods.length > 20)
+    for m in mods {
+        assert(m.name.byteLength > 0)
+        assert(m.summary.byteLength > 0)
+        assert(m.count > 0)
+    }
+}
+
+test "a module's exports arrive zipped, in declaration order" {
+    let math = apiEntries("math")
+    assertEq(math[0].name, "min")
+    assertEq(math[0].kind, "fn")
+    assert(math[0].line > 0)
+    assert(math[0].sig.byteLength > 0)
+    for e in math {
+        assert(e.name.byteLength > 0)
+        assert(e.kind == "fn" || e.kind == "type" || e.kind == "protocol")
+    }
+}
+
+test "the reference covers the modules it lists and nothing else" {
+    assert(apiKnown("math"))
+    assert(!apiKnown("nope"))
+    assertEq(apiEntries("nope").length, 0)
+    assertEq(apiIntro("nope"), "")
+}
+
+test "a summary does not repeat the module's own name" {
+    assertEq(shorten("json", "std/json — the value tree."), "the value tree.")
+    assertEq(shorten("json", "std/json (RFC-0059) — the value tree."), "(RFC-0059) — the value tree.")
+    assertEq(shorten("fallible", "`Fallible` — the protocol."), "`Fallible` — the protocol.")
+}
+
+test "a module page and its source are one link each" {
+    assertEq(apiHref("json"), "/docs/std/json.html")
+    assertEq(apiSourceLine("json", 12), "https://github.com/vyrn-lang/vyrn/blob/main/std/json.vyrn#L12")
+}

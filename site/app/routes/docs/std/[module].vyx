@@ -1,0 +1,201 @@
+<script>
+// GET /docs/std/[module] — one standard library module, generated from its source.
+//
+// Nothing on this page is written by hand. `site/app/apidoc.vyrn` lexes every
+// `std/*.vyrn` while the site compiles and emits the reference as Vyrn source:
+// each export's signature exactly as it is written, its `///` prose, the line it
+// sits on, and the name of every `test` block the module keeps. The signature is
+// coloured by the compiler's own lexer, which is the same highlighter every
+// other snippet on the site uses.
+//
+// Three more things arrive from two other generators, and all three are read off
+// the source rather than written here: the modules this one imports and the ones
+// that import it (`site/app/deps.vyrn`), the example programs that import it
+// (the same generator, over `examples/`), and the program in the guide that
+// imports a particular export (`site/app/guide.vyrn`). That last one is why an
+// "open in playground" link appears on some exports and not on others: the link
+// carries a program this site compiled and RAN while the page was built, and
+// there is no such program for most exports.
+//
+// A String segment binds the module name, and the query returns
+// `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
+// themed error page at 404 instead of an empty page.
+import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref } from "../../../docs"
+import { Demo, demoFor } from "../../../guide"
+import { examplesUsing, usesOfModule, usedByModule } from "../../../explore"
+import { blob } from "../../../repo"
+import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
+import { pageHead } from "../../../nav"
+params { module: String }
+
+/// One module's whole page: its name, its header prose, and its exports.
+type ModuleDoc = { name: String, intro: String, entries: Array<ApiEntry> }
+
+/// The document title names the module, because a reader with twelve tabs open
+/// is reading the title, not the page.
+export fn head(d: ModuleDoc) -> Head {
+    return pageHead("std/" + d.name + " — Vyrn")
+}
+
+export fn data() -> ParamQuery<Params, Result<ModuleDoc, PageError>> {
+    return paramQuery(fetchModule)
+}
+
+fn fetchModule(p: Params) -> Result<ModuleDoc, PageError> {
+    if !apiKnown(p.module) {
+        return Err(notFound("std/" + p.module + " is not a module"))
+    }
+    return Ok(ModuleDoc { name: p.module.copy(), intro: apiIntro(p.module), entries: apiEntries(p.module) })
+}
+
+/// `1 export`, `44 exports`. A count and its noun disagreeing is the sort of
+/// thing a reader takes as a sign that nothing here was read.
+fn exportCount(n: Int64) -> String {
+    return if n == 1 { "1 export" } else { n.toString() + " exports" }
+}
+
+/// The same rule for the other three counts on this page.
+fn plural(n: Int64, one: String, many: String) -> String {
+    return if n == 1 { "1 " + one } else { n.toString() + " " + many }
+}
+
+/// The anchor an export is linked by. Two exports of one module never share a
+/// name, so the name is the identifier.
+fn anchorOf(name: String) -> String {
+    return "e-" + name
+}
+
+/// The link to an export, within this page.
+fn hrefFor(name: String) -> String {
+    return "#" + anchorOf(name)
+}
+
+/// One neighbour in the module graph: a module this one imports, or one that
+/// imports it.
+type Neighbour = { name: String, href: String }
+
+fn neighbours(names: Array<String>) -> Array<Neighbour> {
+    let mut out: Array<Neighbour> = []
+    for n in names {
+        out.push(Neighbour { name: n.copy(), href: apiHref(n) })
+    }
+    return out
+}
+
+fn importsOfThis(m: String) -> Array<Neighbour> {
+    return neighbours(usesOfModule(m))
+}
+
+fn importersOfThis(m: String) -> Array<Neighbour> {
+    return neighbours(usedByModule(m))
+}
+
+/// One example program that imports this module. The site does not host the
+/// examples, so the link leaves.
+type Sample = { path: String, href: String }
+
+fn samples(m: String) -> Array<Sample> {
+    let mut out: Array<Sample> = []
+    for path in examplesUsing(m) {
+        out.push(Sample { path: path.copy(), href: blob(path) })
+    }
+    return out
+}
+
+/// The guide program that imports `e` from this module, if the book has one.
+fn demoOf(m: String, e: ApiEntry) -> Demo {
+    return demoFor(m, e.name)
+}
+
+/// Whether that program exists. A `v-if` here is the whole "skip where it is not
+/// derivable" rule: no program, no link, and nothing invented to fill the gap.
+fn hasDemo(m: String, e: ApiEntry) -> Bool {
+    return demoFor(m, e.name).block.byteLength > 0
+}
+
+fn demoChapterHref(m: String, e: ApiEntry) -> String {
+    let d = demoFor(m, e.name)
+    return "/guide/" + d.chapter + ".html#" + d.section
+}
+</script>
+
+<template>
+<main class="page docpage">
+    <!-- The export index IS the rail. It was a full-width band of its own, two
+         horizontal rules and a screen of whitespace around thirteen short names,
+         and it sat far above the entries it indexes while the page's own left
+         margin stood empty. The rail is the furniture this site already has for
+         "where am I in this page": it is sticky, it fills the margin, and
+         `widgets.js` already marks the section a reader is looking at. Here that
+         marker follows the export you are reading. -->
+    <aside class="rail toc">
+        <p class="eyebrow">On this page</p>
+        <a v-for="e in data.entries" :key="e.name" :href="hrefFor(e.name)">{{ e.name }}</a>
+    </aside>
+    <section class="hero">
+        <p class="eyebrow"><a href="/docs.html">Docs</a> — the standard library</p>
+        <h1 class="display">std/{{ data.name }}</h1>
+        <p class="lede">{{ exportCount(data.entries.length) }}, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
+        <p class="notice"><a :href="apiSource(data.name)">Read the source</a> — the one thing this site does not host.</p>
+    </section>
+
+    <section class="band" id="about">
+        <div class="prose" v-html="data.intro"></div>
+    </section>
+
+    <section class="band" id="graph">
+        <p class="eyebrow">In the graph</p>
+        <h2>What it needs, and who needs it</h2>
+        <p>Read from the module's own <code>import</code> lines while this page was built. <a href="/explore.html#graph">The whole graph</a> is on one page.</p>
+        <dl class="specs">
+            <div>
+                <dt>Imports</dt>
+                <dd class="links">
+                    <a v-for="n in importsOfThis(data.name)" :key="n.name" :href="n.href">{{ n.name }}</a>
+                    <span class="none" v-if="importsOfThis(data.name).length == 0">nothing else in std/</span>
+                </dd>
+            </div>
+            <div>
+                <dt>Imported by</dt>
+                <dd class="links">
+                    <a v-for="n in importersOfThis(data.name)" :key="n.name" :href="n.href">{{ n.name }}</a>
+                    <span class="none" v-if="importersOfThis(data.name).length == 0">no other std module</span>
+                </dd>
+            </div>
+        </dl>
+    </section>
+
+    <section class="band" id="api">
+        <article class="entry" v-for="e in data.entries" :key="e.name" :id="anchorOf(e.name)">
+            <h2><a :href="hrefFor(e.name)">{{ e.name }}</a> <span class="kindpill">{{ e.kind }}</span></h2>
+            <pre class="code" v-html="e.sig"></pre>
+            <div class="prose" v-html="e.prose"></div>
+            <p class="cap"><a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a></p>
+            <p class="cap demo" v-if="hasDemo(data.name, e)">Used by a program in the guide: <a :href="demoChapterHref(data.name, e)">{{ demoOf(data.name, e).title }}</a> — <a :href="demoOf(data.name, e).play">open it in the playground</a>.</p>
+        </article>
+    </section>
+
+    <section class="band" id="tests">
+        <p class="eyebrow">What the tests promise</p>
+        <h2>{{ plural(apiTests(data.name).length, "test block", "test blocks") }}</h2>
+        <p>Every one of these is a <code>test</code> block in <code>std/{{ data.name }}.vyrn</code>, named by the person who wrote it. CI runs all of them, so a promise here is a promise the build keeps.</p>
+        <details class="promises">
+            <summary>Read the promises</summary>
+            <ul class="plain">
+                <li v-for="t in apiTests(data.name)" :key="t">{{ t }}</li>
+            </ul>
+        </details>
+        <p class="cap" v-if="apiTests(data.name).length == 0">This module carries no test block of its own.</p>
+    </section>
+
+    <section class="band" id="examples">
+        <p class="eyebrow">In use</p>
+        <h2>{{ plural(samples(data.name).length, "example program", "example programs") }}</h2>
+        <p>Whole programs in <code>examples/</code> that import this module. The parity harness runs every one of them on all three backends, so each is a working use of what is documented above.</p>
+        <ul class="plain paths">
+            <li v-for="s in samples(data.name)" :key="s.path"><a :href="s.href">{{ s.path }}</a></li>
+        </ul>
+        <p class="cap" v-if="samples(data.name).length == 0">No example program imports this module yet.</p>
+    </section>
+</main>
+</template>

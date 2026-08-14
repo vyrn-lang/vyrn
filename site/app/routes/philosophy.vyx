@@ -1,0 +1,154 @@
+<script>
+// GET /philosophy — the one page allowed to be quiet, and the page that carries
+// the non-goals.
+//
+// It was a run of static prose. The two claims a reader can actually test are
+// now plates with a control: the capability words, one tab each with the code
+// that word produces, and the design record with its own count. The prose around
+// them says the one thing a plate cannot.
+//
+// The non-goals are the list in README.md's "Not in v1" and RFC-0001's Non-goals
+// section, with the reason each one is refused.
+import { Head } from "std/ui"
+import { pageHead } from "../nav"
+import { vyrnHtml } from "../snippets"
+import { rfcCount } from "../repo"
+
+/// Something the language refuses, and why.
+type NonGoal = { what: String, why: String }
+
+/// One capability word: what it means, the code it produces, and what the
+/// compiler stops you doing once you have written it.
+type Capability = { id: String, word: String, means: String, refuses: String, html: String }
+
+export fn head() -> Head {
+    return pageHead("Philosophy — Vyrn")
+}
+
+/// An angle bracket written in a template is escaped twice, so the command that
+/// contains one is built here instead.
+fn whyCommand() -> String {
+    return "vyrn why --memory <file>"
+}
+
+fn nonGoals() -> Array<NonGoal> {
+    return [
+        NonGoal { what: "No garbage collector", why: "Collection time is a cost you cannot see in the source. Ownership is declared instead, and memory is reclaimed at a site the compiler can name." },
+        NonGoal { what: "No async, no await", why: "Two colours of function split a library in half. The host owns the loop; Vyrn owns the state and the logic." },
+        NonGoal { what: "No macros", why: "A generator is ordinary Vyrn that runs at compile time and returns Vyrn source, and <code>vyrn emit-gen</code> prints what it produced. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way." },
+        NonGoal { what: "No higher-kinded types", why: "The cost lands on every error message, paid by every reader, to serve a few abstractions." },
+        NonGoal { what: "No inheritance, no metaclasses", why: "A protocol states what a type does. A record states what it holds. Nothing needs a third relationship." },
+        NonGoal { what: "No null", why: "Option<T>, Result<T, E>, exhaustive match, and ? propagation. A failure is a value you have to look at." },
+    ]
+}
+
+fn capabilities() -> Array<Capability> {
+    return [
+        Capability {
+            id: "read",
+            word: "read",
+            means: "The function looks at the value and does not change it.",
+            refuses: "Assigning through the parameter is a compile error, and the caller still owns the value afterwards.",
+            html: vyrnHtml("capRead"),
+        },
+        Capability {
+            id: "modify",
+            word: "modify",
+            means: "The function changes the value in place.",
+            refuses: "The caller keeps the value, changed. No second alias to it may exist while the call runs.",
+            html: vyrnHtml("capModify"),
+        },
+        Capability {
+            id: "consume",
+            word: "consume",
+            means: "The function takes ownership.",
+            refuses: "Naming the value again after the call is a compile error — that is the whole meaning of the word.",
+            html: vyrnHtml("capConsume"),
+        },
+        Capability {
+            id: "share",
+            word: "share",
+            means: "The value is shared.",
+            refuses: "The compiler enforces what sharing permits, rather than trusting a comment that says it is safe.",
+            html: vyrnHtml("capShare"),
+        },
+    ]
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#intent"><span class="n">01</span>intent</a>
+        <a href="#rules"><span class="n">02</span>rules</a>
+        <a href="#ownership"><span class="n">03</span>ownership</a>
+        <a href="#refuses"><span class="n">04</span>refusals</a>
+        <a href="#record"><span class="n">05</span>the record</a>
+    </aside>
+        <section class="hero" id="intent">
+            <p class="eyebrow">Philosophy</p>
+            <h1 class="display">Intent over mechanism</h1>
+            <p class="lede">State what must be true of a value, and let the compiler decide how to keep it true. State what a function does with its argument, and let the compiler decide when the memory goes back.</p>
+        </section>
+
+        <section class="band" id="rules">
+            <p class="eyebrow">01 — a rule is part of a type</p>
+            <h2>The check you cannot forget</h2>
+            <p>A validated type carries its <code>where</code> clause everywhere it goes. The compiler rejects what it can prove invalid, erases the check where it can prove validity, and emits it where it can prove neither — which is every boundary a value arrives at.</p>
+            <p class="notice"><a href="/index.html#types">The front page runs this one</a> — uncomment the bad line and the compiler answers.</p>
+        </section>
+
+        <section class="band" id="ownership">
+            <p class="eyebrow">02 — ownership is declared</p>
+            <h2>Four words, and no lifetime syntax</h2>
+            <p>A parameter says what the function intends. Nothing is inferred, so there is nothing to fight.</p>
+            <div class="plate" data-tabs>
+                <div class="plate-head">
+                    <span class="pill">The four words</span>
+                    <span class="eyebrow">RFC-0089</span>
+                </div>
+                <div class="tabs">
+                    <button type="button" v-for="c in capabilities()" :key="c.id" :data-tab="c.id">{{ c.word }}</button>
+                </div>
+                <div class="stage panes">
+                    <div v-for="c in capabilities()" :key="c.id" :data-pane="c.id">
+                        <p class="lede" style="font-size:1.05rem">{{ c.means }}</p>
+                        <pre class="code" v-html="c.html"></pre>
+                        <p class="cap" style="border:0;padding:16px 0 0">{{ c.refuses }}</p>
+                    </div>
+                </div>
+                <p class="cap">Every pane is coloured by the compiler's own lexer, and the capability word is tinted as the keyword it is in that position.</p>
+            </div>
+            <p class="notice"><code>{{ whyCommand() }}</code> names the site each binding is reclaimed at, and the reason when it is not. <a href="/index.html#memory">The front page replays one report.</a></p>
+        </section>
+
+        <section class="band" id="refuses">
+            <p class="eyebrow">03 — non-goals</p>
+            <h2>What Vyrn refuses</h2>
+            <p>What a language refuses is the sharpest statement of what it believes.</p>
+            <dl class="nongoals">
+                <div v-for="g in nonGoals()" :key="g.what">
+                    <dt>{{ g.what }}</dt>
+                    <dd v-html="g.why"></dd>
+                </div>
+            </dl>
+        </section>
+
+        <section class="band" id="record">
+            <p class="eyebrow">04 — predictability</p>
+            <h2>The same program means the same thing</h2>
+            <p>The native binary and the WebAssembly module must agree with the interpreter byte for byte, floating point included. A language whose backends disagree has no meaning, only implementations.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Record</span>
+                    <span class="eyebrow">rfcs/</span>
+                </div>
+                <span class="bignum">{{ rfcCount() }} <small>design records</small></span>
+                <div class="stage">
+                    <p>Every decision was argued in writing before it was built. When the implementation and an RFC disagree, one of them is a bug.</p>
+                </div>
+                <p class="cap">Counted from the file names in rfcs/ while this page was built. <a href="/releases.html">The release page charts them</a>, and <a href="https://github.com/vyrn-lang/vyrn/tree/main/rfcs">the record itself is in the repository.</a></p>
+            </div>
+        </section>
+</main>
+</template>

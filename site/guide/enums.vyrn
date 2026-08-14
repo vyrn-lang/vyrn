@@ -1,0 +1,25 @@
+// A value is exactly one variant. A variant may carry a payload, and `match`
+// must cover every one — leave an arm out and the file does not compile.
+import { joinWith } from "std/strings"
+
+type Shape =
+    | Circle(Int64)
+    | Rect(Int64, Int64)
+    | Point
+
+fn describeShape(s: Shape) -> String {
+    return match s {
+        Circle(r) => "circle of radius \{r}",
+        Rect(w, h) => "rect \{w} by \{h}",
+        Point => "a point",
+    }
+}
+
+export fn demo() -> String {
+    let shapes: Array<Shape> = [Circle(2), Rect(3, 4), Point]
+    let mut out: Array<String> = []
+    for s in shapes {
+        out.push(describeShape(s))
+    }
+    return joinWith(out, "\n")
+}

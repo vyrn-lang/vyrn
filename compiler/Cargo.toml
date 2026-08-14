@@ -21,6 +21,12 @@
 # `vyrn-lsp` depend on `vyrn-genwasm` OPTIONALLY, behind a feature spelled
 # `wasm-gen` in each, so it enters the resolve only when asked for.
 #   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
+#
+# `vyrn-play` is EXCLUDED for a different reason: it only makes sense for one
+# target (`wasm32-unknown-unknown`, the website's playground) and nothing depends
+# on it. It also has to be built from its OWN directory, so the linker stack size
+# in `vyrn-play/.cargo/config.toml` applies:
+#   cd compiler/vyrn-play && cargo build --release --target wasm32-unknown-unknown
 
 [workspace]
 resolver = "2"
@@ -32,6 +38,7 @@ members = [
 exclude = [
     "vyrn-lsp",
     "vyrn-genwasm",
+    "vyrn-play",
 ]
 
 [profile.dev]
