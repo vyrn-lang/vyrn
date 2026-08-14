@@ -159,6 +159,17 @@ base+state rules under the breakpoint prefix). CSS selectors escape `:` as
 convention): `TW_UNKNOWN_KEY__<key>`, `TW_PARSE_ERROR__<reason>` (non-string
 leaf), `TW_UNSAFE_NAME__<class>`.
 
+> **Replaced by RFC-0099.** None of those three identifiers exists. A generator
+> reports through `std/diag` now, and `std/tw` does: `reportHere(Error, …)` at
+> every fault, in the generator's own wording (`std/tw.vyrn:65-67` states why it
+> is `reportHere` throughout — `twParseTheme` flattens the document, so no fault
+> has a line in `theme.json` to point at). The identifier convention was the
+> workaround for a language with no way for a generator to say anything except by
+> emitting source the parser would refuse; the mechanism it worked around is gone,
+> and with it the folding helper each generator had written for itself. What the
+> RFC records here — that these three faults fail generation, and what each one
+> is about — still holds; only the channel changed.
+
 **Consumers / proof.** `examples/shelf` adopts it: `theme.json`, a
 `/theme.css` route in `handle` returning `css()` with `text/css`, and its
 hand-written header/nav CSS replaced by theme utilities on the

@@ -373,6 +373,88 @@ fn string_segment_and_respond_route_end_to_end() {
     );
 }
 
+/// A value survives the whole URL boundary: the typed-URL helper encodes it into
+/// a path segment, and the router decodes that segment back before user code sees
+/// it. `href -> route -> Params` is the identity for every value, not only for the
+/// values that happen to be their own encoding.
+///
+/// The awkward ones are all here, because each breaks a different way: a space and
+/// a `/` are not path-segment bytes at all, `?` and `#` end the path, `%` starts an
+/// escape, `+` is a space in nobody's rule that applies here, an astral character
+/// is four bytes, and an ALREADY percent-encoded value is where a careless encoder
+/// double-encodes (or a careless decoder decodes twice).
+#[test]
+fn a_string_segment_round_trips_through_the_url_boundary() {
+    let dir = scratch("urlboundary");
+    write(
+        &dir.join("pages/t/[v].vyrn"),
+        "export type Params = { v: String }\n\
+         export fn respond(p: Params) -> Response {\n\
+         return Response { status: 200, contentType: \"text/plain\", body: \"[\" + p.v + \"]\", vary: \"\", headers: [:] }\n\
+         }\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route, hrefT } from pages(\"./pages\")\n\
+         fn hitAt(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
+         fn trip(label: String, v: String) {\n\
+         let h = hrefT(v)\n\
+         let r = hitAt(h.copy())\n\
+         print(\"\\{label}|\\{h}|\\{r.status}|\\{r.body}\")\n\
+         }\n\
+         fn wire(label: String, path: String) { print(\"\\{label}|\\{hitAt(path).status}\") }\n\
+         fn main() -> Int64 {\n\
+         trip(\"space\", \"a b\")\n\
+         trip(\"slash\", \"a/b\")\n\
+         trip(\"question\", \"a?b\")\n\
+         trip(\"hash\", \"a#b\")\n\
+         trip(\"percent\", \"a%b\")\n\
+         trip(\"plus\", \"a+b\")\n\
+         trip(\"astral\", \"a\\u{1D11E}b\")\n\
+         trip(\"encoded\", \"a%20b\")\n\
+         trip(\"plain\", \"ab\")\n\
+         wire(\"nul\", \"/t/a%00b\")\n\
+         wire(\"badhex\", \"/t/a%zzb\")\n\
+         wire(\"truncated\", \"/t/a%4\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "round-trip app must run:\n{combined}");
+
+    // label | the href built from the value | status | what user code saw.
+    // The href is a URL in every row (unreserved bytes and `%XX`, nothing else),
+    // and the value comes back byte-identical.
+    for want in [
+        "space|/t/a%20b|200|[a b]",
+        "slash|/t/a%2Fb|200|[a/b]",
+        "question|/t/a%3Fb|200|[a?b]",
+        "hash|/t/a%23b|200|[a#b]",
+        "percent|/t/a%25b|200|[a%b]",
+        "plus|/t/a%2Bb|200|[a+b]",
+        "astral|/t/a%F0%9D%84%9Eb|200|[a\u{1D11E}b]",
+        // The double-encoding row: the `%` of the value is itself escaped, so the
+        // decoder gives back the value and not what the value looks like.
+        "encoded|/t/a%2520b|200|[a%20b]",
+        // An already-legal value is untouched, so no existing href moves.
+        "plain|/t/ab|200|[ab]",
+        // A segment that is not percent-encoded text is the 404 the router already
+        // has — user code never sees wire bytes, and nothing aborts.
+        "nul|404",
+        "badhex|404",
+        "truncated|404",
+    ] {
+        assert!(combined.contains(want), "missing `{want}`:\n{combined}");
+    }
+}
+
 /// A `.vyx` page (RFC-0039 §4) routes through `pagesThemed`: its `params {}`
 /// block binds the bracket segment, its `data` query runs, its template classes are
 /// theme-checked, and a non-integer `Int64` segment 404s before user code.
