@@ -16,6 +16,15 @@ vyrn-frontend = { path = "../vyrn-frontend" }
 # matters — `cargo build` and `cargo test` with no LLVM, no clang, no wasi
 # sysroot — is untouched by it; see ../Cargo.toml.
 wasm-encoder = "0.221"
+# The same module, printed as text (`vyrn emit-wat`). The encoder's own family,
+# pinned to the encoder's version so the two never read the format differently.
+# `default-features = false` drops the component-model printer: this backend
+# emits core modules only.
+#
+# It is what gives the direct backend the thing the textual one has had all
+# along — a form a test can READ, so a property proved by grepping `emit-ir`
+# can be proved on both compiled backends instead of one.
+wasmprinter = { version = "0.221", default-features = false }
 
 [lib]
 name = "vyrn_codegen"

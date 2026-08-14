@@ -157,7 +157,7 @@ libraries.
 ```
 vyrn run | check | fix | build | test | bench | serve | dev | fmt | doc
 vyrn why <file> | why --contract <file> | why --memory <file>
-vyrn routes | emit-ir | emit-gen
+vyrn routes | emit-ir | emit-wat | emit-gen
 vyrn new <name> | add <specifier> | update | vendor | deps
 ```
 

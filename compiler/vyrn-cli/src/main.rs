@@ -4,6 +4,7 @@
 //!   vyrn run     [file.vyrn]            Type-check and interpret; process exits with main's value.
 //!   vyrn check   [file.vyrn]            Type-check only; print "ok" or every diagnostic.
 //!   vyrn emit-ir [file.vyrn]            Print textual LLVM IR to stdout.
+//!   vyrn emit-wat [file.vyrn]           Print the direct wasm backend's module as WAT to stdout.
 //!   vyrn emit-gen [file.vyrn] [--maps]  Print every synthesized generator module (RFC-0021),
 //!                                       or its RFC-0073 symbol map as JSON.
 //!   vyrn build   [file.vyrn] [-o out] [--target wasm]
@@ -57,7 +58,7 @@ use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, RUNTIME_SHIM};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps\n       vyrn --version   (also -V)";
 
@@ -443,9 +444,28 @@ fn real_main() -> ExitCode {
                 }
             }
         }
+        // The other compiled backend's text form (RFC-0077). `emit-ir` prints
+        // what `build` hands clang; this prints what `build --target wasm`
+        // writes, so a property no program output can show is readable on both.
+        "emit-wat" => {
+            let program = match load_program(path, &source) {
+                Ok(p) => p,
+                Err(code) => return code,
+            };
+            match vyrn_codegen::direct::wat(&program) {
+                Ok(wat) => {
+                    print!("{wat}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "emit-gen" => emit_gen(path, &source, want_maps),
         other => {
-            eprintln!("unknown command `{other}` (expected run, check, fix, emit-ir, emit-gen, build, test, bench, or serve)");
+            eprintln!("unknown command `{other}` (expected run, check, fix, emit-ir, emit-wat, emit-gen, build, test, bench, or serve)");
             ExitCode::from(2)
         }
     }

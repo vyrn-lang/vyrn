@@ -33,15 +33,14 @@
 
 mod common;
 use common::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn examples_interp_native_parity() {
     let dir = examples_dir();
-    let out_dir = std::env::temp_dir().join("vyrn-parity");
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = scratch("parity-corpus");
     // A `wasmtime` binary and nothing else: since RFC-0077 M5 the wasm column is
     // emitted directly, so no clang, no wasi sysroot and no builtins archive stand
     // between this harness and a module.
@@ -118,9 +117,9 @@ fn examples_interp_native_parity() {
 
         if i_out != n_out || i_err != n_err || i_code != n_code {
             failures.push(format!(
-                "{name}: DIVERGED\n  exit: interp {i_code:?} vs native {n_code:?}\n  \
-                 stdout interp: {i_out:?}\n  stdout native: {n_out:?}\n  \
-                 stderr interp: {i_err:?}\n  stderr native: {n_err:?}"
+                "{name}: DIVERGED\n  exit: interp {i_code:?} vs native {n_code:?}\n{}{}",
+                first_diff("stdout", "interp", &i_out, "native", &n_out).unwrap_or_default(),
+                first_diff("stderr", "interp", &i_err, "native", &n_err).unwrap_or_default(),
             ));
             continue;
         }
@@ -168,9 +167,9 @@ fn examples_interp_native_parity() {
             let w_code = w.status.code();
             if i_out != w_out || i_err != w_err || i_code != w_code {
                 failures.push(format!(
-                    "{name}: WASM DIVERGED\n  exit: interp {i_code:?} vs wasm {w_code:?}\n  \
-                     stdout interp: {i_out:?}\n  stdout wasm: {w_out:?}\n  \
-                     stderr interp: {i_err:?}\n  stderr wasm: {w_err:?}"
+                    "{name}: WASM DIVERGED\n  exit: interp {i_code:?} vs wasm {w_code:?}\n{}{}",
+                    first_diff("stdout", "interp", &i_out, "wasm", &w_out).unwrap_or_default(),
+                    first_diff("stderr", "interp", &i_err, "wasm", &w_err).unwrap_or_default(),
                 ));
                 continue;
             }
@@ -187,6 +186,43 @@ fn examples_interp_native_parity() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
 
+/// What a red run says, which is the one part of this file a green run never
+/// prints — so it is asserted here rather than discovered on the day it matters.
+///
+/// Not `#[ignore]`d: it compiles nothing and runs no engine.
+#[test]
+fn a_divergence_names_the_first_differing_line() {
+    let interp = "start\nsame\nsame\n42\ntail\n";
+    let native = "start\nsame\nsame\n43\ntail\n";
+    let msg = first_diff("stdout", "interp", interp, "native", native).expect("they differ");
+    assert!(
+        msg.contains("stdout: first differs at line 4 (interp 5 lines, native 5 lines)"),
+        "{msg}"
+    );
+    assert!(msg.contains("same     3 | same"), "shared context:\n{msg}");
+    assert!(msg.contains("interp     4 | 42"), "{msg}");
+    assert!(msg.contains("native     4 | 43"), "{msg}");
+    assert!(
+        !msg.contains("start"),
+        "a whole transcript is what this replaced:\n{msg}"
+    );
+
+    // Identical bytes is the only thing that passes, and a difference the line
+    // view cannot see — here a missing trailing newline — is not laundered into
+    // one: `lines()` reports the same two lines for both.
+    assert!(first_diff("stdout", "interp", interp, "native", interp).is_none());
+    let msg = first_diff("stdout", "interp", "a\nb\n", "wasm", "a\nb").expect("bytes differ");
+    assert!(
+        msg.contains("the 2 lines are equal, the bytes are not — first differs at byte 3"),
+        "{msg}"
+    );
+
+    // A line the other engine does not have at all.
+    let msg = first_diff("stderr", "interp", "a\nb\n", "wasm", "a\n").expect("they differ");
+    assert!(msg.contains("first differs at line 2"), "{msg}");
+    assert!(msg.contains("wasm     2 | <no such line>"), "{msg}");
+}
+
 /// The intentional-compile-error examples must actually fail `vyrn check` (and
 /// name a validation diagnostic) — a guard so a silently-fixed example doesn't
 /// keep claiming to demonstrate a rejection. Runs without clang, so it is not
@@ -199,8 +235,7 @@ fn examples_interp_native_parity() {
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn wasm_only_examples_trap_identically() {
     let dir = examples_dir();
-    let out_dir = std::env::temp_dir().join("vyrn-parity");
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = scratch("parity-wasmonly");
     for (name, _why) in WASM_ONLY {
         let path = dir.join(name);
 
@@ -257,8 +292,7 @@ fn wasm_only_examples_trap_identically() {
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn threaded_spawn_matches_sequential_and_interp() {
     let dir = examples_dir();
-    let out_dir = std::env::temp_dir().join("vyrn-parity");
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = scratch("parity-spawn");
     let path = dir.join("parallel.vyrn");
 
     let interp = vyrn().arg("run").arg(&path).output().expect("run interp");
@@ -307,8 +341,7 @@ fn threaded_spawn_matches_sequential_and_interp() {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn task_trap_prints_once_and_exits_1_threaded() {
-    let out_dir = std::env::temp_dir().join("vyrn-parity");
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = scratch("parity-tasktrap");
     // A long task in flight while a second task traps: the trapping task
     // performs the standard trap protocol itself (stderr + exit(1)) from its
     // own thread — the locked RFC-0025 semantics.
@@ -375,8 +408,7 @@ fn task_trap_prints_once_and_exits_1_threaded() {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
-    let out_dir = std::env::temp_dir().join("vyrn-parity");
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = scratch("parity-taskdrop");
     let src = "fn boom(n: Int64) -> Int64 {\n    let z = n - n\n    return n / z\n}\n\n\
                fn main() -> Int64 {\n    print(\"before\")\n    \
                let t = spawn boom(3)\n    drop t\n    return 0\n}\n";
@@ -437,8 +469,7 @@ fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn stored_fn_param_compiles_for_any_payload() {
-    let out_dir = std::env::temp_dir().join("vyrn-parity");
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = scratch("parity-fnparam");
 
     // (payload type, sample value, callback body reading the payload). Each stores
     // `cb` (a fn-param) into module-state Map<String, fn(Payload)>, then retrieves
@@ -530,8 +561,7 @@ fn stored_fn_param_compiles_for_any_payload() {
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn subdir_server_examples_native_build() {
     let dir = examples_dir();
-    let out_dir = std::env::temp_dir().join("vyrn-parity");
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = scratch("parity-subdir");
 
     // Every `examples/<subdir>/server.vyrn` entrypoint, discovered so a future
     // server app is covered automatically.
@@ -616,8 +646,7 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-framedepth");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("framedepth");
     let src = |n: u32| {
         format!(
             "type K8 = {{ a: Int64, b: Int64, c: Int64, d: Int64, e: Int64, f: Int64, \
@@ -732,8 +761,7 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-oob");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-oob");
     for (what, src) in [
         ("array", "fn main() -> Int64 {\n let xs: Array<Int64> = [1, 2, 3]\n print(xs[7])\n return 0\n}\n"),
         ("string", "fn main() -> Int64 {\n let s = \"hi\"\n let b = s[9]\n return 0\n}\n"),
@@ -787,8 +815,7 @@ fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-mono");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-mono");
     let src = "\
 type Pair<A, B> = { first: A, second: B }
 
@@ -882,8 +909,7 @@ fn the_dfa_walk_agrees_with_the_interpreter_on_what_no_example_reaches() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-regex");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-regex");
     let src = "\
 fn main() -> Int64 {
     print(\"\" =~ \"a*\")
@@ -966,8 +992,7 @@ fn a_modify_parameter_copies_back_whatever_the_caller_kept_it_in() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-modify");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-modify");
     let src = "\
 type Counter = { value: Int64, hits: Int64 }
 
@@ -1073,8 +1098,7 @@ fn a_boxed_enum_payload_survives_the_word_it_travels_in() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-value");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-value");
     let src = "\
 fn show(v: Value) -> String {
     return match v {
@@ -1175,8 +1199,7 @@ fn a_retained_argument_is_not_freed_at_the_call() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-retained-arg");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("retained-arg");
     let src = "\
 type Twig =
     | Tip(String)
@@ -1341,8 +1364,7 @@ fn the_string_builtins_agree_with_the_interpreter_about_their_failures() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-strbytes");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-strbytes");
 
     let show = "\
 import { SliceError, slice } from \"std/strpred\"
@@ -1480,8 +1502,7 @@ fn every_integer_width_wraps_where_the_interpreter_wraps() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-ints");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-ints");
 
     let widths = "\
 type Widths = { a: Int8, b: Int16, c: Int32, d: UInt8, e: UInt32, f: UInt64 }
@@ -1711,8 +1732,7 @@ fn six_decimals_of_a_float_are_the_exact_ones() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-floats");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-floats");
     let src = "\
 fn opaque(x: Float64) -> Float64 {
     return x
@@ -1942,8 +1962,7 @@ fn the_wasi_io_builtins_agree_with_the_interpreter_about_their_edges() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-wasiio");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-wasiio");
     // Two files a `String` cannot hold, and one it can. Written as bytes, because
     // that is the whole point of them.
     std::fs::write(dir.join("plain.txt"), b"hi\n").unwrap();
@@ -2189,8 +2208,7 @@ fn a_propagating_early_exit_releases_its_frame_and_copies_modify_back() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-try");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-try");
     let src = "\
 type Sink = { n: Int64 }
 
@@ -2275,8 +2293,7 @@ fn the_json_reader_parses_the_same_on_the_direct_backend() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-jsonread");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-jsonread");
     let src = "\
 import { parseJson } from \"std/jsonread\"
 import { Json, emit } from \"std/json\"
@@ -2383,8 +2400,7 @@ fn a_fn_typed_parameter_specializes_to_whatever_the_call_site_resolved() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-ho");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-ho");
     let src = "\
 type Pt = { x: Int64, y: Int64 }
 
@@ -2529,8 +2545,7 @@ fn a_stored_function_value_dispatches_by_signature_not_by_spelling() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-fnval");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-fnval");
     let src = "\
 type Pt = { x: Int64, y: Int64 }
 
@@ -2630,8 +2645,7 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-spawn");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-spawn");
     for (what, src) in [
         // Four tasks spawned in a loop and all joined afterwards, so four boxes
         // have to coexist.
@@ -2741,8 +2755,7 @@ fn every_exit_out_of_a_region_balances_and_the_65th_traps() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-region");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-region");
     for (what, src) in [
         (
             "balance",
@@ -2911,8 +2924,7 @@ fn line_and_column_agree_with_the_interpreter_off_both_ends_of_the_buffer() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-linecol");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-linecol");
     let src = "\
 fn lc(b: Array<UInt8>, off: Int64) -> String {
     return lineAt(b, off).toString() + \":\" + colAt(b, off).toString()
@@ -3003,8 +3015,7 @@ fn a_generic_payload_is_typed_by_whichever_arm_knows_it() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-payload");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-payload");
     let src = r#"
 type Cargo = { weight: Int64, label: String }
 type Crate<T> = | Empty | Held(T)
@@ -3106,8 +3117,7 @@ fn a_log_sink_is_whichever_descriptor_the_config_named() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-logsink");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-logsink");
     for (what, src, want_out, want_err, want_file) in [
         (
             "stdout",
@@ -3255,8 +3265,7 @@ fn a_log_sink_is_whichever_descriptor_the_config_named() {
 /// deleted the whole statement would pass a test that only looked for the prefix.
 #[test]
 fn a_suppressed_log_call_is_not_in_the_module() {
-    let dir = std::env::temp_dir().join("vyrn-directwasm-logfold");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-logfold");
     // `warn`, so two levels below it and two at-or-above are in one program.
     let src = "logging { level: warn, sink: stderr }\n\
                \n\
@@ -3343,8 +3352,7 @@ fn a_suppressed_log_call_is_not_in_the_module() {
 #[test]
 fn the_rfc_0012_host_boundary_is_named_in_the_module() {
     let dir = examples_dir();
-    let out = std::env::temp_dir().join("vyrn-directwasm-extern");
-    std::fs::create_dir_all(&out).unwrap();
+    let out = scratch("directwasm-extern");
     let build = |name: &str| -> Vec<u8> {
         let module = out.join(format!("{name}.wasm"));
         let b = vyrn()
@@ -3403,8 +3411,19 @@ fn three_engines(
     what: &str,
     src: &str,
 ) -> Vec<(&'static str, String, String, Option<i32>)> {
-    let dir = std::env::temp_dir().join(format!("vyrn-parity-{tag}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    three_engines_in(&scratch(&format!("parity-{tag}")), what, src)
+}
+
+/// [`three_engines`] over a directory the caller already has — for the one pin
+/// whose program IMPORTS a second file, which has to be written beside it. Each
+/// scratch directory is now this process's alone, so "the same tag twice" is no
+/// longer a way to share one.
+#[allow(clippy::type_complexity)]
+fn three_engines_in(
+    dir: &Path,
+    what: &str,
+    src: &str,
+) -> Vec<(&'static str, String, String, Option<i32>)> {
     let path = dir.join(format!("{what}.vyrn"));
     std::fs::write(&path, src).unwrap();
     let no_stdin = dir.join("no.stdin");
@@ -4095,8 +4114,7 @@ fn main() -> Int64 {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn a_panic_in_a_library_names_the_library() {
-    let dir = std::env::temp_dir().join("vyrn-parity-panicsite");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("parity-panicsite");
     std::fs::write(
         dir.join("bank.vyrn"),
         r#"export type Cage = { xs: Array<Int64> }
@@ -4116,8 +4134,8 @@ impl Index for Cage {
 "#,
     )
     .unwrap();
-    let rows = three_engines(
-        "panicsite",
+    let rows = three_engines_in(
+        &dir,
         "site",
         r#"import { Cage, newCage } from "./bank"
 
@@ -4410,8 +4428,7 @@ fn a_malloc_that_cannot_grow_memory_traps_instead_of_growing_forever() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-oom");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-oom");
     // Doubling, so the cap is reached in ~25 allocations rather than by a loop
     // whose trip count would have to be tuned to the cap.
     let src = "\
@@ -4517,8 +4534,7 @@ fn a_malloc_whose_bump_pointer_would_wrap_traps_instead_of_lying() {
         eprintln!("SKIP: no wasmtime");
         return;
     };
-    let dir = std::env::temp_dir().join("vyrn-directwasm-wrap");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("directwasm-wrap");
     // A `String` parameter on an `export extern fn` is the condition under which
     // `__vyrn_malloc` is exported at all (asserted separately by
     // `the_wasm_module_exports_what_the_llvm_path_exports`).
