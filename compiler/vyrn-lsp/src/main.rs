@@ -138,7 +138,7 @@ fn load_context(
     let mut manifest_error = None;
     let manifest_dir = match found {
         Ok(m) => m.map(|m| {
-            opts.aliases = m.deps.into_iter().collect();
+            opts.aliases = m.dependencies.into_iter().collect();
             opts.alias_base = m.dir.clone();
             opts.audience = m.audience;
             m.dir
@@ -155,103 +155,21 @@ fn load_context(
     Some((opts, resolver, path, manifest_error))
 }
 
-/// The std-library root: `$VYRN_STD`, or `std/` found by walking up from the
-/// executable (the bundled server lives at `<repo>/editor/vscode/server/`,
-/// dev builds under `<repo>/compiler/vyrn-lsp/target/<profile>/` — both are
-/// within five levels of the repo's `std/`). Mirrors `vyrn`'s discovery.
-fn std_root() -> Option<String> {
-    if let Ok(p) = std::env::var("VYRN_STD") {
-        if std::path::Path::new(&p).exists() {
-            return Some(p.replace('\\', "/"));
-        }
-    }
-    let mut dir = std::env::current_exe().ok()?;
-    for _ in 0..5 {
-        dir = dir.parent()?.to_path_buf();
-        let cand = dir.join("std");
-        if cand.is_dir() {
-            return Some(cand.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    None
-}
-
-/// What the filesystem calls `path` — the CLI's `real_path`, for the same
-/// reason: audience is a property of a file, not of the spelling that reached it.
-fn real_path(path: &str) -> Option<String> {
-    let p = std::path::Path::new(path).canonicalize().ok()?;
-    Some(
-        p.to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/"),
-    )
-}
-
-/// Find `vyrn.json` by walking up from `start`; returns the manifest's
-/// directory (slash-separated) and its `dependencies` import map. A compact
-/// duplicate of `vyrn`'s reader (the CLI is a binary crate, not linkable).
+/// The project context — `vyrn.json`, `vyrn.lock`, the content-addressed caches
+/// and the `std/` root — is read by [`vyrn_frontend::manifest`], the same
+/// reader `vyrn` uses.
 ///
-/// Like the CLI's, it keeps "no manifest" and "a manifest I cannot read" apart:
-/// the audience vocabulary and the import map both live in this file, and an
-/// editor that quietly drops them answers a different question from the one the
-/// build answers.
-fn find_manifest(start: &std::path::Path) -> Result<Option<Manifest>, String> {
-    use vyrn_frontend::schema::Json;
-    let mut dir = start.to_path_buf();
-    loop {
-        let candidate = dir.join("vyrn.json");
-        if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate)
-                .map_err(|e| format!("cannot read {}: {e}", candidate.display()))?;
-            let doc = vyrn_frontend::schema::parse_json(&text)
-                .map_err(|e| format!("{} is not valid JSON: {e}", candidate.display()))?;
-            let deps = match doc.get("dependencies") {
-                Some(Json::Obj(entries)) => entries
-                    .iter()
-                    .filter_map(|(k, v)| match v {
-                        Json::Str(s) => Some((k.clone(), s.clone())),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            let slash = dir.to_string_lossy().replace('\\', "/");
-            // The same file identity the CLI decides by: the editor must reject
-            // exactly the imports the build rejects, including the second
-            // spelling of a path (case, a junction) that the string would miss.
-            let audience = vyrn_frontend::audience::from_manifest(&doc, &slash)
-                .map(|m| m.with_realpath(real_path));
-            return Ok(Some(Manifest {
-                dir: slash,
-                deps,
-                audience,
-            }));
-        }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => return Ok(None),
-        }
-    }
-}
+/// It used to be a compact duplicate here, justified by "the CLI is a binary
+/// crate, not linkable". That is true and it was never a reason to have two
+/// readers, only a reason the reader could not stay in the CLI. The duplicate
+/// drifted exactly where a duplicate does: it served a cached module without
+/// checking that its bytes still hash to the pin, and it accepted a `vyrn.lock`
+/// the build refuses. An editor that answers a different question from the
+/// build is worse than an editor that answers none.
+use vyrn_frontend::manifest::{
+    find as find_manifest, pinned_blob, std_root, Lock,
+};
 
-/// The parsed `vyrn.json` governing `dir`, for the readers that want one key out
-/// of it. `None` covers both "no manifest" and "unreadable"; the reader that
-/// REPORTS the unreadable one is [`find_manifest`], on the analysis path every
-/// buffer takes.
-pub fn manifest_doc(dir: &std::path::Path) -> Option<vyrn_frontend::schema::Json> {
-    let text = std::fs::read_to_string(dir.join("vyrn.json")).ok()?;
-    vyrn_frontend::schema::parse_json(&text).ok()
-}
-
-/// The manifest facts a load needs: dependency aliases and, since RFC-0072, the
-/// declared audience vocabulary. Carried so the editor rejects an import that
-/// widens audience exactly where the compiler does — a rule you only discover at
-/// the shell is half a rule.
-struct Manifest {
-    dir: String,
-    deps: Vec<(String, String)>,
-    audience: Option<vyrn_frontend::audience::AudienceMap>,
-}
 
 /// Read-only module resolver for the editor: local paths from disk; remote
 /// specifiers served from the project's `vyrn_vendor/` or the user cache — but
@@ -283,39 +201,28 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             .manifest_dir
             .as_deref()
             .ok_or_else(|| "remote import outside a vyrn.json project".to_string())?;
-        let lock =
-            std::fs::read_to_string(std::path::Path::new(dir).join("vyrn.lock")).map_err(|_| {
-                format!("`{resolved}` is not pinned yet — run `vyrn check` once to fetch it")
-            })?;
-        // vyrn.lock is TSV: `specifier ⇥ resolved-url ⇥ sha256`, keyed by the
-        // exact specifier string the loader hands us.
-        let sha = lock
-            .lines()
-            .filter_map(|l| {
-                let mut parts = l.split('\t');
-                Some((parts.next()?, parts.nth(1)?))
-            })
-            .find(|(spec, _)| *spec == resolved)
-            .map(|(_, sha)| sha.to_string())
+        // The lock through the reader that refuses a damaged one. A lock the
+        // build will not accept must not analyze as if it were fine: this file
+        // used to split the TSV inline, which took the FIRST of two pins for one
+        // specifier and read a spaces-for-tabs line as "never pinned".
+        let (_, sha) = Lock::in_project(dir)?
+            .entries
+            .get(resolved)
+            .cloned()
             .ok_or_else(|| {
                 format!(
                     "`{resolved}` is not pinned in vyrn.lock — run `vyrn check` once to fetch it"
                 )
             })?;
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| ".".to_string());
-        for blob_dir in [
-            std::path::Path::new(dir).join("vyrn_vendor/sha256"),
-            std::path::Path::new(&home).join(".vyrn/cache/sha256"),
-        ] {
-            if let Ok(text) = std::fs::read_to_string(blob_dir.join(&sha)) {
-                return Ok(text);
-            }
-        }
-        Err(format!(
-            "`{resolved}` is pinned but not cached — run `vyrn check` once to fetch it"
-        ))
+        // Vendor, then the user cache, hash-verified — the same read the build
+        // does. A cached blob whose bytes no longer hash to the pin is the one
+        // case content-addressing exists to catch, and the editor used to serve
+        // it without looking.
+        pinned_blob(Some(dir), &sha).unwrap_or_else(|| {
+            Err(format!(
+                "`{resolved}` is pinned but not cached — run `vyrn check` once to fetch it"
+            ))
+        })
     }
 
     /// Generation-time `listDir` (RFC-0021): read the local directory. The
@@ -335,26 +242,11 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
     /// re-analysis reuses a build's generation instead of re-running it. Same
     /// `~/.vyrn/cache/gen` the CLI writes (honors `VYRN_GEN_CACHE_DIR`).
     fn gen_cache_get(&self, key: &str) -> Option<String> {
-        std::fs::read_to_string(gen_cache_dir().join(key)).ok()
+        vyrn_frontend::manifest::gen_cache_get(key)
     }
     fn gen_cache_put(&self, key: &str, value: &str) {
-        let dir = gen_cache_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join(key), value);
+        vyrn_frontend::manifest::gen_cache_put(key, value)
     }
-}
-
-/// The shared generator cache directory (`~/.vyrn/cache/gen`, overridable with
-/// `VYRN_GEN_CACHE_DIR`) — kept byte-identical to the CLI's so a build and the
-/// editor reuse each other's generation.
-fn gen_cache_dir() -> std::path::PathBuf {
-    if let Ok(d) = std::env::var("VYRN_GEN_CACHE_DIR") {
-        return std::path::PathBuf::from(d);
-    }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&home).join(".vyrn/cache/gen")
 }
 
 /// Diagnostic trace: append a line to `$VYRN_LSP_LOG`, else

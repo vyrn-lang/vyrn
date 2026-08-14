@@ -1,7 +1,7 @@
 //! SHA-256 (FIPS 180-4), std-only — the frontend's content-addressing needs a
-//! hash without pulling a crate (the workspace's zero-dependency invariant). The
-//! CLI has its own copy for remote imports (RFC-0010 M4); this one keys the
-//! generator cache (RFC-0021). Both are tested against the NIST vectors.
+//! hash without pulling a crate (the workspace's zero-dependency invariant).
+//! It keys the generator cache (RFC-0021) and verifies every content-addressed
+//! module blob (RFC-0010 M4). Tested against the NIST vectors.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -88,6 +88,15 @@ mod tests {
         assert_eq!(
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // A length crossing the 55-byte padding boundary.
+        assert_eq!(
+            sha256_hex(&[b'a'; 64]),
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
         );
     }
 }

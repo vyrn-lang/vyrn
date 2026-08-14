@@ -26,6 +26,7 @@ pub mod jsondec;
 pub mod jsonenc;
 pub mod lexer;
 pub mod loader;
+pub mod manifest;
 pub mod movecheck;
 pub mod origin;
 pub mod own;

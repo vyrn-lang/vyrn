@@ -60,7 +60,7 @@ pub fn file_sig(path: &std::path::Path) -> u64 {
 /// fallback affordable.
 pub fn role_roots(app_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(doc) = crate::manifest_doc(app_dir) {
+    if let Some(doc) = vyrn_frontend::manifest::doc_in(app_dir) {
         for key in ["main", "server", "client"] {
             if let Some(vyrn_frontend::schema::Json::Str(p)) = doc.get(key) {
                 paths.push(app_dir.join(p));
@@ -107,7 +107,7 @@ pub fn roles_of(
     opts: &LoadOptions,
     resolver: &dyn vyrn_frontend::loader::ModuleResolver,
 ) -> Vec<Role> {
-    if let Some(doc) = crate::manifest_doc(app_dir) {
+    if let Some(doc) = vyrn_frontend::manifest::doc_in(app_dir) {
         let declared = vyrn_frontend::contracts::roles_from_manifest(&doc);
         if !declared.is_empty() {
             return declared;

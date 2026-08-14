@@ -15,214 +15,26 @@
 //!   * **Offline-capable**: `--offline` / `VYRN_OFFLINE=1` forbids network;
 //!     a lock+cache hit needs none.
 //!
-//! Zero new crates: SHA-256 is implemented below (FIPS 180-4, tested against
+//! Zero new crates: SHA-256 is `vyrn_frontend::hash` (FIPS 180-4, tested against
 //! NIST vectors), fetching shells out to `curl -sL --fail`, and git refs
 //! resolve via `git ls-remote` — both tools are ubiquitous.
+//!
+//! What is HERE is the network: resolving a floating ref, fetching, pinning.
+//! What is not is reading the pin and the cache — that is
+//! [`vyrn_frontend::manifest`], because the editor reads them too and must reach
+//! the same verdict without ever reaching the network.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// ---------------------------------------------------------------------------
-// SHA-256 (FIPS 180-4)
-// ---------------------------------------------------------------------------
-
-const K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
-/// The SHA-256 digest of `data`, lowercase hex.
-pub fn sha256_hex(data: &[u8]) -> String {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    // Pad: 0x80, zeros, then the bit length as big-endian u64.
-    let mut msg = data.to_vec();
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-    h.iter().map(|x| format!("{x:08x}")).collect()
-}
-
-// ---------------------------------------------------------------------------
-// lockfile
-// ---------------------------------------------------------------------------
-
-/// `vyrn.lock`: `specifier ⇥ resolved-url ⇥ sha256` per line, sorted by
-/// specifier. Line-based and diff-friendly by design.
-#[derive(Debug)]
-pub struct Lock {
-    pub path: PathBuf,
-    pub entries: BTreeMap<String, (String, String)>,
-    pub dirty: bool,
-}
-
-impl Lock {
-    /// Read the lock, or say which line stopped it.
-    ///
-    /// A lock file that exists and does not parse is not an unpinned project.
-    /// Every way of damaging one — tabs turned to spaces by an editor or a CI
-    /// checkout, a truncated write, a merge that appended instead of replacing —
-    /// used to read as "this specifier was never pinned", and an unpinned
-    /// specifier is fetched from the network and re-pinned to whatever arrives.
-    /// The one artifact whose whole job is that it cannot drift failed toward
-    /// the network in every direction. A missing file is still `Ok`: never
-    /// pinned and never claimed otherwise.
-    pub fn load(path: PathBuf) -> Result<Lock, String> {
-        let mut entries: BTreeMap<String, (String, String)> = BTreeMap::new();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-        };
-        for (i, line) in text.lines().enumerate() {
-            let no = i + 1;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let fields: Vec<&str> = line.split('\t').collect();
-            let [spec, url, sha] = fields[..] else {
-                return Err(format!(
-                    "{}:{no}: expected `specifier<TAB>url<TAB>sha256`, found {} \
-                     tab-separated field(s)",
-                    path.display(),
-                    fields.len()
-                ));
-            };
-            // Two pins for one specifier: the second used to replace the first
-            // in silence, so appending a line changed what was built while
-            // leaving the reviewed line in place, and the next `save` erased the
-            // evidence. A specifier has exactly one pin.
-            if entries.contains_key(spec) {
-                return Err(format!(
-                    "{}:{no}: `{spec}` is pinned twice; a specifier has exactly one pin",
-                    path.display()
-                ));
-            }
-            entries.insert(spec.to_string(), (url.to_string(), sha.to_string()));
-        }
-        Ok(Lock {
-            path,
-            entries,
-            dirty: false,
-        })
-    }
-
-    pub fn save(&self) -> Result<(), String> {
-        let mut out = String::new();
-        for (spec, (url, sha)) in &self.entries {
-            // The format is one line of three tab-separated fields, so a field
-            // carrying a tab or a newline is a line the reader would split
-            // differently from the writer. Specifiers come from source strings
-            // the compiler does not constrain, so this is refused where it is
-            // written rather than discovered where it is read.
-            for field in [spec, url, sha] {
-                if field.contains('\t') || field.contains('\n') || field.contains('\r') {
-                    return Err(format!(
-                        "`{field}` contains a tab or a line break and cannot be written to \
-                         {}",
-                        self.path.display()
-                    ));
-                }
-            }
-            out.push_str(&format!("{spec}\t{url}\t{sha}\n"));
-        }
-        std::fs::write(&self.path, out).map_err(|e| e.to_string())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// cache / vendor
-// ---------------------------------------------------------------------------
-
-pub fn cache_dir() -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    Path::new(&home).join(".vyrn/cache/sha256")
-}
-
-/// The generator cache directory (RFC-0021): `~/.vyrn/cache/gen`, overridable
-/// with `VYRN_GEN_CACHE_DIR` (used by tests + air-gapped setups). Shared by the
-/// CLI and the LSP so a build's generation is reused per keystroke.
-pub fn gen_cache_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("VYRN_GEN_CACHE_DIR") {
-        return PathBuf::from(d);
-    }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    Path::new(&home).join(".vyrn/cache/gen")
-}
-
-/// Read a cached generator output by content-address key (a hex sha256).
-pub fn gen_cache_get(key: &str) -> Option<String> {
-    std::fs::read_to_string(gen_cache_dir().join(key)).ok()
-}
-
-/// Store a generator output; failures are swallowed (the cache is optional).
-pub fn gen_cache_put(key: &str, value: &str) {
-    let dir = gen_cache_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join(key), value);
-}
+// The lock, the caches and the content-addressed blob read live in
+// `vyrn_frontend::manifest`, because the LSP reads them too and a second reader
+// of a pin is a second answer about what is pinned. Re-exported here so this
+// module still reads as the one place remote imports are handled.
+pub use vyrn_frontend::hash::sha256_hex;
+pub use vyrn_frontend::manifest::{
+    cache_dir, gen_cache_get, gen_cache_put, pinned_blob, vendor_dir, write_blob, Lock,
+};
 
 /// List the entry names directly under `dir` (generation-time `listDir`,
 /// RFC-0021), sorted for determinism.
@@ -234,29 +46,6 @@ pub fn list_dir(dir: &str) -> Result<Vec<String>, String> {
         .collect();
     names.sort();
     Ok(names)
-}
-
-pub fn vendor_dir(project_dir: &str) -> PathBuf {
-    Path::new(project_dir).join("vyrn_vendor/sha256")
-}
-
-/// Read a content-addressed blob, verifying its hash (tamper-evident).
-fn read_blob(dir: &Path, sha: &str) -> Option<Result<String, String>> {
-    let path = dir.join(sha);
-    let bytes = std::fs::read(&path).ok()?;
-    if sha256_hex(&bytes) != sha {
-        return Some(Err(format!(
-            "cached copy at `{}` does not match its recorded sha256 — delete it and \
-             re-fetch (or restore a good copy: any file hashing {sha} works)",
-            path.display()
-        )));
-    }
-    Some(String::from_utf8(bytes).map_err(|_| "cached module is not UTF-8".to_string()))
-}
-
-fn write_blob(dir: &Path, sha: &str, bytes: &[u8]) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(sha), bytes).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -347,12 +136,7 @@ impl RemoteResolver {
         // 1. Locked: content by hash, wherever it lives.
         let locked = self.lock.borrow().entries.get(spec).cloned();
         if let Some((url, sha)) = locked {
-            if let Some(dir) = &self.project_dir {
-                if let Some(r) = read_blob(&vendor_dir(dir), &sha) {
-                    return r;
-                }
-            }
-            if let Some(r) = read_blob(&cache_dir(), &sha) {
+            if let Some(r) = pinned_blob(self.project_dir.as_deref(), &sha) {
                 return r;
             }
             if self.offline {
@@ -421,108 +205,6 @@ impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sha256_matches_nist_vectors() {
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
-        // A length crossing the 55-byte padding boundary.
-        assert_eq!(
-            sha256_hex(&[b'a'; 64]),
-            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
-        );
-    }
-
-    /// A directory of this file's own, so two lock tests never share a path.
-    fn lock_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("vyrn-lock-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn lock_round_trips() {
-        let path = lock_dir("roundtrip").join("vyrn.lock");
-        let mut lock = Lock::load(path.clone()).unwrap();
-        lock.entries.insert(
-            "github:a/b@v1/x.vyrn".into(),
-            (
-                "https://raw.githubusercontent.com/a/b/deadbeef/x.vyrn".into(),
-                "abc123".into(),
-            ),
-        );
-        lock.save().unwrap();
-        let reloaded = Lock::load(path).unwrap();
-        assert_eq!(lock.entries, reloaded.entries);
-    }
-
-    /// A lock file that exists and does not parse is not an unpinned project.
-    /// Every one of these used to read as "this specifier was never pinned",
-    /// which fetches from the network and re-pins to whatever arrives.
-    #[test]
-    fn a_lock_file_that_does_not_parse_stops_the_build() {
-        let dir = lock_dir("damaged");
-        let good = "github:a/b@v1/x.vyrn\thttps://x.dev/x.vyrn\tabc123\n";
-
-        // Absent is still `Ok`: never pinned, and never claimed otherwise.
-        let absent = Lock::load(dir.join("absent.lock")).unwrap();
-        assert!(absent.entries.is_empty());
-
-        // A duplicate specifier: the second line used to replace the first in
-        // silence, so appending a line changed what was built while leaving the
-        // reviewed line in place.
-        let path = dir.join("dupe.lock");
-        std::fs::write(
-            &path,
-            format!("{good}github:a/b@v1/x.vyrn\thttps://evil.dev/x.vyrn\tdef456\n"),
-        )
-        .unwrap();
-        let e = Lock::load(path).unwrap_err();
-        assert!(e.contains("dupe.lock:2"), "names the line: {e}");
-        assert!(e.contains("github:a/b@v1/x.vyrn"), "names the pin: {e}");
-
-        // Tabs turned to spaces by an editor, a merge tool or a CI checkout.
-        let path = dir.join("spaces.lock");
-        std::fs::write(&path, good.replace('\t', " ")).unwrap();
-        let e = Lock::load(path).unwrap_err();
-        assert!(e.contains("spaces.lock:1"), "{e}");
-
-        // A truncated write.
-        let path = dir.join("cut.lock");
-        std::fs::write(&path, "github:a/b@v1/x.vyrn\thttps://x.dev\n").unwrap();
-        assert!(Lock::load(path).is_err());
-
-        // A blank line is not damage.
-        let path = dir.join("blank.lock");
-        std::fs::write(&path, format!("{good}\n")).unwrap();
-        assert_eq!(Lock::load(path).unwrap().entries.len(), 1);
-    }
-
-    /// The write side of the same invariant: a field carrying the separator is a
-    /// line the reader would split differently from the writer, and specifiers
-    /// come from source strings the compiler does not constrain.
-    #[test]
-    fn a_specifier_carrying_a_separator_is_never_written() {
-        let path = lock_dir("separator").join("vyrn.lock");
-        let mut lock = Lock::load(path.clone()).unwrap();
-        lock.entries.insert(
-            "https://x.dev/a.vyrn\tb\tc".into(),
-            ("https://x.dev/a.vyrn".into(), "abc123".into()),
-        );
-        assert!(lock.save().is_err(), "a tab in a specifier is not writable");
-        assert!(!path.is_file(), "and nothing was written");
-    }
 
     #[test]
     fn resolve_to_url_shapes() {
