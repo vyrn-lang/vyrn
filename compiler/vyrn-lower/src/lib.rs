@@ -20,6 +20,9 @@
 //! instantiation the body is being lowered for. A lowering that re-derived types
 //! would be a sixth copy of the derivation RFC-0101 §1.2 counts five of.
 
+mod render;
+pub use render::render;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use vyrn_frontend::ast::{Block, Expr, Function, LambdaBody, Program, Stmt, Type};

@@ -1,0 +1,91 @@
+; vyrn lowered v1 — examples/option.vyrn
+
+fn agePlus(n: Int64, extra: Int64) -> Result<Int64, Int64>               @32
+  let a : Age                                                            @33
+    try : Age                                                            @33
+      call parseAge : Result<Age, Int64>                                 @33
+        var n : Int64                                                    @33
+  return                                                                 @34
+    call Ok : Result<Int64, Int64>                                       @34
+      binary Add : Int64                                                 @34
+        var a : Age                                                      @34
+        var extra : Int64                                                @34
+
+fn main() -> Int64                                                       @37
+  do                                                                     @39
+    call print : Unit                                                    @39
+      call unwrapOr : Int64                                              @39
+        call safeDiv : Option<Int64>                                     @39
+          int 10 : Int64                                                 @39
+          int 2 : Int64                                                  @39
+        binary Sub : Int64                                               @39
+          int 0 : Int64                                                  @39
+          int 1 : Int64                                                  @39
+  do                                                                     @40
+    call print : Unit                                                    @40
+      call unwrapOr : Int64                                              @40
+        call safeDiv : Option<Int64>                                     @40
+          int 10 : Int64                                                 @40
+          int 0 : Int64                                                  @40
+        binary Sub : Int64                                               @40
+          int 0 : Int64                                                  @40
+          int 1 : Int64                                                  @40
+  let ok : Int64                                                         @43
+    match : Int64                                                        @43
+      call agePlus : Result<Int64, Int64>                                @43
+        int 30 : Int64                                                   @43
+        int 5 : Int64                                                    @43
+      var v : Int64                                                      @43
+      binary Sub : Int64                                                 @43
+        int 0 : Int64                                                    @43
+        var e : Int64                                                    @43
+  let bad : Int64                                                        @44
+    match : Int64                                                        @44
+      call agePlus : Result<Int64, Int64>                                @44
+        int 10 : Int64                                                   @44
+        int 5 : Int64                                                    @44
+      var v : Int64                                                      @44
+      binary Sub : Int64                                                 @44
+        int 0 : Int64                                                    @44
+        var e : Int64                                                    @44
+  do                                                                     @45
+    call print : Unit                                                    @45
+      var ok : Int64                                                     @45
+  do                                                                     @46
+    call print : Unit                                                    @46
+      var bad : Int64                                                    @46
+  return                                                                 @47
+    int 0 : Int64                                                        @47
+
+fn parseAge(n: Int64) -> Result<Age, Int64>                              @24
+  if                                                                     @25
+    binary GtEq : Bool                                                   @25
+      var n : Int64                                                      @25
+      int 18 : Int64                                                     @25
+    return                                                               @26
+      call Ok : Result<Age, Int64>                                       @26
+        call Age : Age                                                   @26
+          var n : Int64                                                  @26
+  return                                                                 @28
+    call Err : Result<Age, Int64>                                        @28
+      var n : Int64                                                      @28
+
+fn safeDiv(a: Int64, b: Int64) -> Option<Int64>                          @8
+  if                                                                     @9
+    binary Eq : Bool                                                     @9
+      var b : Int64                                                      @9
+      int 0 : Int64                                                      @9
+    return                                                               @10
+      var None : Option<Int64>                                           @10
+  return                                                                 @12
+    call Some : Option<Int64>                                            @12
+      binary Div : Int64                                                 @12
+        var a : Int64                                                    @12
+        var b : Int64                                                    @12
+
+fn unwrapOr(o: Option<Int64>, fallback: Int64) -> Int64                  @16
+  return                                                                 @17
+    match : Int64                                                        @17
+      var o : Option<Int64>                                              @17
+      var x : Int64                                                      @18
+      var fallback : Int64                                               @19
