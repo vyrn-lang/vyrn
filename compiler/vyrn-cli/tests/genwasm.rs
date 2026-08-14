@@ -216,8 +216,16 @@ fn the_reflected_type_closure_is_recorded_identically_by_both_engines() {
 
     // With the on-disk cache ON, the entry file IS the recorded read list. Both
     // engines must write the same one, and editing `wire.vyrn` must change it.
+    //
+    // The cache is this test's OWN directory, not `~/.vyrn/cache/gen`. Reading
+    // every entry in the shared one made this row depend on state it does not
+    // own: any sibling test that generates writes an entry there, so the
+    // comparison read somebody else's work and the row failed under parallel
+    // load while passing alone.
+    let cache = dir.join("gen-cache");
     let cached = |wasm: bool| -> String {
         let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+        c.env("VYRN_GEN_CACHE_DIR", &cache);
         if !wasm {
             c.env("VYRN_NO_WASM_GEN", "1");
         }
@@ -228,8 +236,7 @@ fn the_reflected_type_closure_is_recorded_identically_by_both_engines() {
             .unwrap()
             .status
             .success());
-        let dir = dirs_gen_cache();
-        let mut entries: Vec<String> = std::fs::read_dir(&dir)
+        let mut entries: Vec<String> = std::fs::read_dir(&cache)
             .unwrap()
             .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
             .collect();
@@ -263,15 +270,6 @@ fn the_reflected_type_closure_is_recorded_identically_by_both_engines() {
         "the engines diverged after the closure edit"
     );
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The on-disk generator cache, so the test above can read the recorded inputs
-/// back. Mirrors the loader's own location.
-fn dirs_gen_cache() -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap();
-    PathBuf::from(home).join(".vyrn").join("cache").join("gen")
 }
 
 /// The structured builtins are lowered ONLY on the generation path. In the
