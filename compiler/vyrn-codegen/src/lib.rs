@@ -12710,16 +12710,14 @@ pub(crate) fn ty_is_concrete_app(t: &Type, resolve: &dyn Fn(&Type) -> Type) -> b
 /// prefix byte-for-byte what it was, which is what `emit-ir` output, crash
 /// dumps and linker errors are read for.
 ///
-/// The derived `Debug` form is the structural serialization: [`Type`] is a
-/// plain tree of `String`/`Vec`/`Box`/integers with no map and no address in
-/// it, so `{:?}` is deterministic within a build and across platforms, and it
-/// is injective because `Debug` for `String` quotes and escapes. It is not a
-/// stable ABI — a `Debug` change moves every symbol — which costs nothing here
-/// because no artifact outside the emitted module names one: an
-/// `export extern fn` is exported under its own source name, and the exported
-/// symbols are never generic.
+/// The derived `Debug` form is the structural serialization, it is not a stable
+/// ABI, and 64 bits is a birthday bound — the whole argument, and the pin that
+/// holds it, live on [`vyrn_frontend::types::struct_key`], which is now the ONE
+/// definition. The JSON codec's synthesized encoder and decoder names took this
+/// same decision in a second crate, byte-identically and twice more; they read
+/// that function too.
 fn struct_key(x: &impl std::fmt::Debug) -> String {
-    vyrn_frontend::hash::sha256_hex(format!("{x:?}").as_bytes())[..16].to_string()
+    vyrn_frontend::types::struct_key(x)
 }
 
 /// The mangled LLVM symbol for a generic instantiation, e.g.
@@ -13130,47 +13128,6 @@ mod tests {
         }
     }
 
-    /// Every variant of the type enum, as a value — the other half of the lock
-    /// [`variant_name`] is. The test asserts the seeds cover this list, so a
-    /// variant that gains a `variant_name` arm but no seed still fails.
-    const VARIANTS: &[&str] = &[
-        "Int",
-        "IntN",
-        "Float",
-        "Float32",
-        "F32x4",
-        "I32x4",
-        "F64x2",
-        "Mask32x4",
-        "Mask64x2",
-        "Bool",
-        "Str",
-        "Unit",
-        "Named",
-        "Option",
-        "Result",
-        "Record",
-        "Omit",
-        "Pick",
-        "Merge",
-        "Partial",
-        "Enum",
-        "Param",
-        "App",
-        "Array",
-        "ArrayN",
-        "SmallArray",
-        "ConstInt",
-        "Map",
-        "Stream",
-        "Task",
-        "Logger",
-        "Fn",
-        "Lazy",
-        "Never",
-        "Err",
-    ];
-
     /// One `Type` per variant of the type enum, held complete by a match the
     /// compiler will not let go stale.
     ///
@@ -13178,48 +13135,9 @@ mod tests {
     /// variant is added, which is what makes the list below a list rather than a
     /// guess — the hand-written `cases` above is exactly what happens without
     /// one, and it had been missing `Stream` and every vector for as long as
-    /// they had existed.
-    fn variant_name(t: &Type) -> &'static str {
-        match t {
-            Type::Int => "Int",
-            Type::IntN { .. } => "IntN",
-            Type::Float => "Float",
-            Type::Float32 => "Float32",
-            Type::F32x4 => "F32x4",
-            Type::I32x4 => "I32x4",
-            Type::F64x2 => "F64x2",
-            Type::Mask32x4 => "Mask32x4",
-            Type::Mask64x2 => "Mask64x2",
-            Type::Bool => "Bool",
-            Type::Str => "Str",
-            Type::Unit => "Unit",
-            Type::Named(_) => "Named",
-            Type::Option(_) => "Option",
-            Type::Result(..) => "Result",
-            Type::Record(_) => "Record",
-            Type::Omit(..) => "Omit",
-            Type::Pick(..) => "Pick",
-            Type::Merge(..) => "Merge",
-            Type::Partial(_) => "Partial",
-            Type::Enum(_) => "Enum",
-            Type::Param(_) => "Param",
-            Type::App(..) => "App",
-            Type::Array(_) => "Array",
-            Type::ArrayN(..) => "ArrayN",
-            Type::SmallArray(..) => "SmallArray",
-            Type::ConstInt(_) => "ConstInt",
-            Type::Map(..) => "Map",
-            Type::Stream(_) => "Stream",
-            Type::Task(_) => "Task",
-            Type::Logger => "Logger",
-            Type::Fn(..) => "Fn",
-            Type::Lazy(_) => "Lazy",
-            Type::Never => "Never",
-            Type::Err => "Err",
-        }
-    }
-
-    /// One inhabitant of every variant [`variant_name`] knows.
+    /// they had existed. Both halves live on the type itself
+    /// ([`Type::VARIANTS`] / [`Type::variant_name`]), because `vyrn-frontend`'s
+    /// wire-form coverage test asks the same question of the same list.
     fn layout_seeds() -> Vec<Type> {
         let b = |t: Type| Box::new(t);
         vec![
@@ -13335,7 +13253,7 @@ mod tests {
     ///
     /// So derive the cases, on PR #165's generator itself. [`layout_seeds`] is
     /// one `Type` per variant of the type enum, held complete by
-    /// [`variant_name`] — an exhaustive match, so a new variant is a COMPILE
+    /// [`Type::variant_name`] — an exhaustive match, so a new variant is a COMPILE
     /// error here before it is a missing layout in front of a user. [`grow`],
     /// which the mangle-injectivity test already owns, composes those through
     /// every container constructor twice, and [`in_records`] adds the two
@@ -13365,13 +13283,14 @@ mod tests {
         // new variant of the type enum stops this file compiling; `VARIANTS` is
         // the same list as a value, so a variant that is named but never seeded
         // stops the test passing. Neither half alone is a guard.
-        let seeded: std::collections::BTreeSet<&str> = seeds.iter().map(variant_name).collect();
-        for v in VARIANTS {
+        let seeded: std::collections::BTreeSet<&str> =
+            seeds.iter().map(|t| t.variant_name()).collect();
+        for v in Type::VARIANTS {
             assert!(seeded.contains(v), "no seed for Type::{v}");
         }
         assert!(
-            seeded.iter().all(|s| VARIANTS.contains(s)),
-            "a seed names a variant VARIANTS does not list"
+            seeded.iter().all(|s| Type::VARIANTS.contains(s)),
+            "a seed names a variant Type::VARIANTS does not list"
         );
         let d1 = grow(&seeds, &seeds[..8]);
         let d2 = grow(&d1[..200], &d1[..20]);

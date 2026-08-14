@@ -42,6 +42,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Block, Capability, Function, Param, Stmt, Type, TypeDecl};
+use crate::codec::Wire;
 
 /// The placeholder prefix for a name in the injected `std/json` (the tree).
 const PH: &str = "VyrnRt_";
@@ -55,12 +56,13 @@ fn rd_prefix() -> &'static str {
     "jsondec$"
 }
 
-/// A hash of the type's structure. Injective by construction, unlike a readable
-/// mangle: RFC-0077 M2e found two instantiations colliding on one symbol, and a
-/// decoder picked by a colliding name would decode the wrong shape rather than
-/// fail to build.
+/// The type's structural identity, unlike a readable mangle: RFC-0077 M2e found
+/// two instantiations colliding on one symbol, and a decoder picked by a
+/// colliding name would decode the wrong shape rather than fail to build. The
+/// identity is [`crate::types::struct_key`] — one definition, read here, by
+/// [`crate::jsonenc`] and by the codegen symbols.
 fn type_key(ty: &Type) -> String {
-    crate::hash::sha256_hex(format!("{ty:?}").as_bytes())[..16].to_string()
+    crate::types::struct_key(ty)
 }
 
 /// The top-level `String -> Validation<T>` entry point for a decode target, by
@@ -133,7 +135,13 @@ struct Walk<'a> {
     types: &'a HashMap<String, TypeDecl>,
     /// Names already emitted (or in progress — inserted BEFORE the body is built,
     /// which is what makes a self-referential type terminate).
-    done: HashMap<String, ()>,
+    ///
+    /// The TYPE is kept beside its name, not a `()`, and that is the whole answer
+    /// to the 64 bits [`crate::types::struct_key`] truncates to: two distinct
+    /// types on one name would otherwise mean the second decoder is silently
+    /// skipped and both call sites decode through the first one's shape. Holding
+    /// the type makes that a build error naming both.
+    done: HashMap<String, Type>,
     source: String,
     /// Every placeholder name the source mentions, for the rename map.
     names: Vec<String>,
@@ -150,14 +158,30 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
+    /// Claim `ph` for `ty`, or say it is already taken. `Err` is the collision
+    /// [`crate::types::struct_key`]'s truncation leaves possible: two distinct
+    /// types on one name, which without this check emits one body and decodes
+    /// both call sites through it.
+    fn reserve(&mut self, ph: &str, ty: &Type) -> Result<bool, String> {
+        if let Some(prev) = self.done.get(ph) {
+            if prev != ty {
+                return Err(format!(
+                    "internal: {prev} and {ty} share the decoder name `{ph}`"
+                ));
+            }
+            return Ok(false);
+        }
+        self.done.insert(ph.to_string(), ty.clone());
+        self.names.push(ph.to_string());
+        Ok(true)
+    }
+
     /// Ensure the top-level entry point for a decode target exists.
     fn top(&mut self, ty: &Type) -> Result<String, String> {
         let ph = top_ph(ty);
-        if self.done.contains_key(&ph) {
+        if !self.reserve(&ph, ty)? {
             return Ok(ph);
         }
-        self.done.insert(ph.clone(), ());
-        self.names.push(ph.clone());
         let d = self.decoder(ty)?;
         let (rd, t) = (self.rd("readDoc"), spell(ty));
         self.source.push_str(&format!(
@@ -189,11 +213,9 @@ impl Walk<'_> {
             return Err("fromJson: cannot decode an anonymous enum".to_string());
         }
         let ph = dec_ph(ty);
-        if self.done.contains_key(&ph) {
+        if !self.reserve(&ph, ty)? {
             return Ok(ph);
         }
-        self.done.insert(ph.clone(), ());
-        self.names.push(ph.clone());
         let body = self.body(ty)?;
         let (json, t) = (self.rt("Json"), spell(ty));
         self.source.push_str(&format!(
@@ -221,6 +243,10 @@ impl Walk<'_> {
     }
 
     /// The body of `ty`'s decoder, as statements.
+    ///
+    /// WHAT a type is on the wire is [`crate::codec::wire`]'s answer, not this
+    /// module's — the same answer the checker's gate, the schema emitter and
+    /// [`crate::jsonenc`] read. This function only spells it as source, backwards.
     fn body(&mut self, ty: &Type) -> Result<String, String> {
         // A NAMED type is not resolved away first: its `where` clause is the whole
         // reason decode has an accumulating shape, so a refinement decodes its
@@ -236,14 +262,15 @@ impl Walk<'_> {
             }
         }
         let t = spell(ty);
-        let r = crate::types::resolve(ty, self.types);
-        match r {
-            Type::Int => Ok(self.scalar("dInt64", "")),
-            Type::IntN { bits, signed } if signed => {
+        match crate::codec::wire(ty, self.types, true)
+            .map_err(|o| format!("fromJson: cannot decode {o}"))?
+        {
+            Wire::Int => Ok(self.scalar("dInt64", "")),
+            Wire::IntN { bits, signed } if signed => {
                 let (lo, hi) = signed_bounds(bits);
                 Ok(self.narrow(&t, "dIntRange", &format!(", {lo}, {hi}")))
             }
-            Type::IntN { bits, .. } => {
+            Wire::IntN { bits, .. } => {
                 let hi = unsigned_max(bits);
                 if bits == 64 {
                     Ok(self.scalar("dUIntMax", &format!(", {hi}")))
@@ -251,11 +278,11 @@ impl Walk<'_> {
                     Ok(self.narrow(&t, "dUIntMax", &format!(", {hi}")))
                 }
             }
-            Type::Float => Ok(self.scalar("dFloat64", "")),
-            Type::Float32 => Ok(self.scalar("dFloat32", "")),
-            Type::Bool => Ok(self.scalar("dBool", "")),
-            Type::Str => Ok(self.scalar("dStr", "")),
-            Type::Record(fields) => {
+            Wire::Float => Ok(self.scalar("dFloat64", "")),
+            Wire::Float32 => Ok(self.scalar("dFloat32", "")),
+            Wire::Bool => Ok(self.scalar("dBool", "")),
+            Wire::Str => Ok(self.scalar("dStr", "")),
+            Wire::Record(fields) => {
                 // The literal needs a NAME. A named target has one; an anonymous
                 // record gets a synthesized alias, because `{ c: 1 }` is not an
                 // expression in Vyrn.
@@ -265,28 +292,21 @@ impl Walk<'_> {
                 };
                 self.record_body(&t, &lit, &fields)
             }
-            Type::Array(inner) => self.array_body(&t, &inner),
-            Type::Map(_, val) => self.map_body(&t, &val),
-            Type::Option(inner) => self.option_body(&t, &inner),
-            Type::Enum(vs) => {
+            Wire::Array(inner) => self.array_body(&t, &inner),
+            Wire::Map(val) => self.map_body(&t, &val),
+            Wire::Option(inner) => self.option_body(&t, &inner),
+            // `Result<T, E>` arrives as the two-variant enum it is on the wire,
+            // so external tagging is read back in one place — and its
+            // ``one of `Ok`, `Err``` falls out of listing those two variants
+            // rather than being a second spelling of the same sentence.
+            Wire::Enum(vs) => {
                 let expected = crate::codec::enum_expected(&vs);
                 self.variants_body(&t, &vs, &expected)
             }
-            Type::Result(ok, err) => {
-                let vs = vec![
-                    crate::ast::EnumVariant {
-                        name: "Ok".to_string(),
-                        payload: vec![(*ok).clone()],
-                    },
-                    crate::ast::EnumVariant {
-                        name: "Err".to_string(),
-                        payload: vec![(*err).clone()],
-                    },
-                ];
-                let expected = crate::codec::result_expected();
-                self.variants_body(&t, &vs, &expected)
-            }
-            other => Err(format!("fromJson: cannot decode {other}")),
+            // Unreachable: `wire` in the decode direction has no fixed array —
+            // its length is not known until the data arrives, so it left as an
+            // `Err` above.
+            Wire::FixedArray(..) => Err(format!("fromJson: cannot decode {ty}")),
         }
     }
 
@@ -348,12 +368,17 @@ impl Walk<'_> {
     /// spelling, and its parameters are [`crate::types::predicate_binds`] — the
     /// same structure the trap path binds, which is what keeps the two from
     /// drifting.
+    ///
+    /// No collision check, unlike [`Walk::reserve`]'s two callers, and it needs
+    /// none: a predicate's name is keyed on the same type its decoder is, so two
+    /// distinct types colliding here have already collided on `dec_ph` and the
+    /// build stopped there.
     fn predicate(&mut self, ty: &Type, decl: &TypeDecl) -> String {
         let ph = pred_ph(ty);
         if self.done.contains_key(&ph) {
             return ph;
         }
-        self.done.insert(ph.clone(), ());
+        self.done.insert(ph.clone(), ty.clone());
         self.names.push(ph.clone());
         self.preds.push(Function {
             name: ph.clone(),

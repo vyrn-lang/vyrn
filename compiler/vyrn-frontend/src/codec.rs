@@ -372,19 +372,21 @@ pub fn escape_into(s: &str, out: &mut String) {
 // Issue vocabulary (locked wording — shared by both backends)
 // ---------------------------------------------------------------------------
 
-/// The `expected <what>` phrase for a decode target's resolved structural type.
+/// The `expected <what>` phrase for a decode target — the JSON kind its [`Wire`]
+/// form arrives as. Asked in the encode direction because it names what the
+/// *data* looks like, which both directions agree about.
 pub fn expected_name(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
-    match crate::types::resolve(ty, types) {
-        Type::Record(_) => "object".to_string(),
-        Type::Map(..) => "object".to_string(),
-        Type::Array(_) | Type::ArrayN(..) => "array".to_string(),
-        Type::Str => "string".to_string(),
-        Type::Int | Type::IntN { .. } => "integer".to_string(),
-        Type::Float | Type::Float32 => "number".to_string(),
-        Type::Bool => "boolean".to_string(),
-        Type::Enum(vs) => enum_expected(&vs),
-        Type::Result(..) => result_expected(),
-        _ => "value".to_string(),
+    match wire(ty, types, false) {
+        Ok(Wire::Record(_) | Wire::Map(_)) => "object".to_string(),
+        Ok(Wire::Array(_) | Wire::FixedArray(..)) => "array".to_string(),
+        Ok(Wire::Str) => "string".to_string(),
+        Ok(Wire::Int | Wire::IntN { .. }) => "integer".to_string(),
+        Ok(Wire::Float | Wire::Float32) => "number".to_string(),
+        Ok(Wire::Bool) => "boolean".to_string(),
+        // A `Result<T, E>` is a two-variant enum on the wire, so this is where
+        // its `one of \`Ok\`, \`Err\`` comes from — one wording, not two.
+        Ok(Wire::Enum(vs)) => enum_expected(&vs),
+        Ok(Wire::Option(_)) | Err(_) => "value".to_string(),
     }
 }
 
@@ -393,11 +395,6 @@ pub fn expected_name(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
 pub fn enum_expected(vs: &[EnumVariant]) -> String {
     let names: Vec<String> = vs.iter().map(|v| format!("`{}`", v.name)).collect();
     format!("one of {}", names.join(", "))
-}
-
-/// `one of \`Ok\`, \`Err\`` for a `Result<T, E>` decode target.
-pub fn result_expected() -> String {
-    "one of `Ok`, `Err`".to_string()
 }
 
 /// `json.type` message: `expected <what>, found <kind>`.
@@ -440,6 +437,164 @@ pub fn index_path(parent: &str, i: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// the wire form
+// ---------------------------------------------------------------------------
+
+/// What a type **is on the JSON wire**, once names, generic applications and
+/// record transformers are resolved away.
+///
+/// One answer, because there used to be four. "Which types cross the wire, and
+/// as what" was decided independently by [`codable`] (the checker's gate),
+/// `types::type_schema` (the schema emitter), `jsonenc::Walk::body` (the encoder
+/// synthesizer) and `jsondec::Walk::body` (the decoder synthesizer) — four
+/// `match`es over [`Type`], three of them with an open `_` arm. They had already
+/// drifted, and the disagreement ran the same way every time: the two
+/// SYNTHESIZERS call [`crate::types::resolve`] first, and the two others matched
+/// the raw spelling, so `Omit<User, password>`, `Pick`, `Merge`, `Partial` and
+/// every applied generic (`Box<Int64>`) were rejected by the gate, described as
+/// `{}` ("anything") by the schema, and encoded/decoded perfectly by the two
+/// passes that never got asked.
+///
+/// Resolving is the correct answer of the three. A record transformer IS the
+/// record it computes — that is what RFC-0002 §7 defines it as, and what every
+/// backend lowers it to — so refusing to encode one refuses the exact use the
+/// feature exists for (`toJson(Omit<User, password>)`), and describing it as
+/// "anything" is a schema that says nothing about a shape that is fully known.
+///
+/// # What this cannot answer, and why each site keeps a step of its own
+///
+/// A [`Type::Named`] is handled by its caller BEFORE it gets here, because the
+/// three callers that care break the same cycle three different ways and none of
+/// them is the others': [`codable`] carries a `seen` list to make a
+/// self-referential type terminate, `type_schema` emits `{"$ref":"#/$defs/N"}`
+/// and collects the body once, and `jsondec` takes the refinement path so a
+/// `where` clause is decoded-then-guarded. Those are three answers to a
+/// different question — how a name is *presented* — and folding them together
+/// would be forcing the shared answer to express something it is not about.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Wire {
+    /// `Int64` — a JSON number in integer syntax.
+    Int,
+    /// A sized integer. Its width is part of the wire contract.
+    IntN {
+        bits: u8,
+        signed: bool,
+    },
+    Float,
+    Float32,
+    Bool,
+    Str,
+    /// `Option<T>` — the payload, or absent/`null`. Carries `T`.
+    Option(Type),
+    /// A growable `Array<T>`.
+    Array(Type),
+    /// `Array<T, N>` — an ordinary JSON array on the way OUT, and encode-only:
+    /// its length is not known until the data arrives, so it is not a decode
+    /// target.
+    FixedArray(Type, usize),
+    /// `Map<String, V>` — a JSON object. Carries `V`; the key is always `String`.
+    Map(Type),
+    Record(Vec<Field>),
+    /// A sum type in RFC-0024 external tagging. `Result<T, E>` arrives here too,
+    /// as the two-variant enum it is on the wire.
+    Enum(Vec<EnumVariant>),
+}
+
+/// The wire form of `ty`, or `Err` with the resolved type that has none.
+///
+/// `decode` picks the direction: the decode domain is the narrower one (a fixed
+/// array and a `lazy` field are encode-only), which is the only thing the two
+/// directions disagree about.
+pub fn wire(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> Result<Wire, Type> {
+    // `Validation<T>` stays off the wire in v1 (its `Invalid` carries an
+    // `Array<Issue>` and its `Valid` a generic payload) — rejected by NAME,
+    // before resolution, so the diagnostic says `Validation` rather than naming
+    // the enum it resolves to (RFC-0024 out-of-scope).
+    if is_validation(ty) {
+        return Err(ty.clone());
+    }
+    // A `lazy T` field ENCODES as a `T`: `toJson` reads the field, the read
+    // forces the thunk, and the JSON carries the value. JSON that silently
+    // dropped a declared field would be worse than one that paid to compute it —
+    // and it is precisely why RFC-0085 M4b needs a selection-aware encoder.
+    //
+    // It does NOT decode. A decoded value arrives as data with no thunk behind
+    // it, so there is nothing to defer; a decoder that manufactured a constant
+    // thunk would be laziness that had already done the work.
+    if let Type::Lazy(inner) = ty {
+        return if decode {
+            Err(ty.clone())
+        } else {
+            wire(inner, types, decode)
+        };
+    }
+    // A nested `Option` is a decode hazard (a double `null` has two readings), so
+    // it has no wire form in either direction. An `Option<Result<..>>` /
+    // `Option<Enum>` DOES (RFC-0024): a payload enum never encodes as `null`, so
+    // the wire form stays unambiguous.
+    if let Type::Option(inner) = ty {
+        if matches!(crate::types::resolve(inner, types), Type::Option(_)) {
+            return Err(ty.clone());
+        }
+    }
+    let r = crate::types::resolve(ty, types);
+    match r {
+        Type::Int => Ok(Wire::Int),
+        Type::IntN { bits, signed } => Ok(Wire::IntN { bits, signed }),
+        Type::Float => Ok(Wire::Float),
+        Type::Float32 => Ok(Wire::Float32),
+        Type::Bool => Ok(Wire::Bool),
+        Type::Str => Ok(Wire::Str),
+        Type::Option(inner) => Ok(Wire::Option(*inner)),
+        Type::Array(inner) => Ok(Wire::Array(*inner)),
+        Type::ArrayN(inner, n) => {
+            if decode {
+                Err(Type::ArrayN(inner, n))
+            } else {
+                Ok(Wire::FixedArray(*inner, n))
+            }
+        }
+        // The key is always `String` (the checker enforces it), so only the value
+        // type is carried.
+        Type::Map(_, val) => Ok(Wire::Map(*val)),
+        Type::Record(fields) => Ok(Wire::Record(fields)),
+        Type::Enum(vs) => Ok(Wire::Enum(vs)),
+        // `Result<T, E>` flows through as the two-variant single-payload enum
+        // `{"Ok":<T>}` / `{"Err":<E>}` (RFC-0024) — so it IS that enum here, and
+        // every consumer gets the tagging rule once instead of four times.
+        Type::Result(t, e) => Ok(Wire::Enum(vec![
+            EnumVariant {
+                name: "Ok".to_string(),
+                payload: vec![*t],
+            },
+            EnumVariant {
+                name: "Err".to_string(),
+                payload: vec![*e],
+            },
+        ])),
+        // Everything else is off the wire in v1: the vectors, `Ref`, `Task`,
+        // `Stream`, `SmallArray`, `Template`, `Logger`, `Fn`, `Param`, `Unit`,
+        // `ConstInt`, `Never`, `Err` — and any name that did not resolve.
+        other => Err(other),
+    }
+}
+
+/// Whether the resolved wire form of `ty` came from resolving a NAME — the six
+/// heads that can be cyclic, and so the ones a walk over [`Wire`] has to guard
+/// before it re-enters them.
+fn resolving_head(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Named(_)
+            | Type::App(..)
+            | Type::Omit(..)
+            | Type::Pick(..)
+            | Type::Merge(..)
+            | Type::Partial(_)
+    )
+}
+
+// ---------------------------------------------------------------------------
 // codability
 // ---------------------------------------------------------------------------
 
@@ -457,6 +612,13 @@ pub fn decodable(ty: &Type, types: &HashMap<String, TypeDecl>) -> Result<(), Str
     codable(ty, types, true, &mut Vec::new())
 }
 
+/// The gate, as a walk over [`Wire`]: this decides nothing about what a type
+/// becomes on the wire, it only asks whether every leaf reached that way has one.
+///
+/// What stays here rather than moving into [`wire`] is the DIAGNOSTIC: a
+/// rejection is described by the spelling the user wrote, so a named type
+/// re-badges its structural rejection with its own name and an enum payload
+/// names its variant.
 fn codable(
     ty: &Type,
     types: &HashMap<String, TypeDecl>,
@@ -466,41 +628,71 @@ fn codable(
     // A named type is described by the *spelling the user wrote* in error
     // messages, but we recurse through its structural form.
     let display = type_display(ty);
-    // `Validation<T>` stays off the wire in v1 (its `Invalid` carries an
-    // `Array<Issue>` and its `Valid` a generic payload) — an explicit reject so
-    // the diagnostic names `Validation` rather than a generic-parameter leaf
-    // (RFC-0024 out-of-scope; a one-line follow-up if ever wanted).
     if is_validation(ty) {
         return Err("Validation".to_string());
     }
-    match ty {
-        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str => {
-            Ok(())
+    // A type whose wire form comes from resolving a NAME can be self-referential
+    // (`type Node = { kids: Array<Node> }`), so the walk guards on the spelling
+    // it will re-enter. `Named` additionally re-badges, which is why it is the
+    // one head spelled out.
+    if let Type::Named(n) = ty {
+        if seen.iter().any(|s| s == n) {
+            return Ok(()); // already being checked — break the cycle
         }
-        Type::Option(inner) => {
-            // A nested Option is a decode hazard (double `null`), so name it here.
-            // An `Option<Result<..>>` / `Option<Enum>` IS codable (RFC-0024): a
-            // payload enum/Result never encodes as `null`, so the wire form stays
-            // unambiguous.
-            if matches!(**inner, Type::Option(_)) {
-                return Err(display);
-            }
-            codable(inner, types, decode, seen)
-        }
-        Type::Array(inner) => codable(inner, types, decode, seen),
-        // A `Map<String, V>` (RFC-0028) is a JSON object; codable when `V` is.
-        // The key is always `String` (the checker enforces it), so only the
-        // value type is checked.
-        Type::Map(_, val) => codable(val, types, decode, seen),
-        Type::ArrayN(inner, _) => {
-            if decode {
-                Err(display)
+        let Some(d) = types.get(n) else {
+            return Err(n.clone());
+        };
+        seen.push(n.clone());
+        let r = codable_wire(ty, &display, types, decode, seen);
+        seen.pop();
+        // Preserve a payload-enum's precise variant/payload offender; re-badge
+        // any other structural rejection with the user's name.
+        return r.map_err(|e| {
+            if matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()))
+                || matches!(d.base, Type::Result(..))
+            {
+                e
             } else {
-                codable(inner, types, decode, seen)
+                n.clone()
             }
+        });
+    }
+    if resolving_head(ty) {
+        let key = ty.to_string();
+        if seen.iter().any(|s| s == &key) {
+            return Ok(());
         }
-        Type::Record(fields) => {
-            for f in fields {
+        seen.push(key);
+        let r = codable_wire(ty, &display, types, decode, seen);
+        seen.pop();
+        return r.map_err(|_| display);
+    }
+    codable_wire(ty, &display, types, decode, seen)
+}
+
+/// `codable` once the cycle guard and the naming are out of the way: ask [`wire`]
+/// what the type is, and recurse on what it carries. `display` is the user's
+/// spelling of `ty`, which this level cannot re-derive after resolution.
+fn codable_wire(
+    ty: &Type,
+    display: &str,
+    types: &HashMap<String, TypeDecl>,
+    decode: bool,
+    seen: &mut Vec<String>,
+) -> Result<(), String> {
+    match wire(ty, types, decode) {
+        Err(_) => Err(display.to_string()),
+        Ok(
+            Wire::Int | Wire::IntN { .. } | Wire::Float | Wire::Float32 | Wire::Bool | Wire::Str,
+        ) => Ok(()),
+        Ok(
+            Wire::Option(inner)
+            | Wire::Array(inner)
+            | Wire::FixedArray(inner, _)
+            | Wire::Map(inner),
+        ) => codable(&inner, types, decode, seen),
+        Ok(Wire::Record(fields)) => {
+            for f in &fields {
                 codable(&f.ty, types, decode, seen)?;
             }
             Ok(())
@@ -508,57 +700,7 @@ fn codable(
         // A payload enum is codable when every variant's payloads are (RFC-0024).
         // A rejection names the offending variant + payload type so the diagnostic
         // is precise (`Task<Int64> (payload of variant \`Boxed\`)`).
-        Type::Enum(vs) => enum_codable(vs, types, decode, seen),
-        // `Result<T, E>` flows through as a two-variant payload enum
-        // (`{"Ok":<T>}` / `{"Err":<E>}`): codable when both payloads are.
-        Type::Result(t, e) => {
-            codable(t, types, decode, seen).map_err(|_| enum_payload_offender(t, "Ok"))?;
-            codable(e, types, decode, seen).map_err(|_| enum_payload_offender(e, "Err"))?;
-            Ok(())
-        }
-        Type::Named(n) => {
-            if seen.iter().any(|s| s == n) {
-                return Ok(()); // already being checked — break the cycle
-            }
-            match types.get(n) {
-                None => Err(n.clone()),
-                Some(d) => {
-                    seen.push(n.clone());
-                    let r = codable(&d.base, types, decode, seen);
-                    seen.pop();
-                    // Preserve a payload-enum's precise variant/payload offender;
-                    // re-badge any other structural rejection with the user's name.
-                    r.map_err(|e| {
-                        if matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()))
-                            || matches!(d.base, Type::Result(..))
-                        {
-                            e
-                        } else {
-                            n.clone()
-                        }
-                    })
-                }
-            }
-        }
-        // A `lazy T` field (RFC-0085 M4a) ENCODES as a `T`: `toJson` reads the
-        // field, the read forces the thunk, and the JSON carries the value. That
-        // is the right answer here — JSON that silently dropped a declared field
-        // would be worse than one that paid to compute it — and it is precisely
-        // why RFC-0085 M4b needs a selection-aware encoder rather than this one.
-        //
-        // It does NOT decode. A decoded value arrives as data with no thunk
-        // behind it, so there is nothing to defer; a decoder that manufactured a
-        // constant thunk would be laziness that had already done the work.
-        Type::Lazy(inner) => {
-            if decode {
-                Err(display)
-            } else {
-                codable(inner, types, decode, seen)
-            }
-        }
-        // Everything else is off the wire in v1: Ref, Task, Template, Logger,
-        // type transformers, Param, Unit, Err.
-        _ => Err(display),
+        Ok(Wire::Enum(vs)) => enum_codable(&vs, types, decode, seen),
     }
 }
 
@@ -597,6 +739,286 @@ fn enum_payload_offender(p: &Type, variant: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One inhabitant of every variant of the type enum, held complete by
+    /// [`Type::VARIANTS`] and [`Type::variant_name`] — the same lock PR #173
+    /// put on `layout::SHAPES`, asked here about the wire form.
+    fn seed_per_variant() -> Vec<Type> {
+        let b = |t: Type| Box::new(t);
+        vec![
+            Type::Int,
+            Type::IntN {
+                bits: 8,
+                signed: false,
+            },
+            Type::Float,
+            Type::Float32,
+            Type::F32x4,
+            Type::I32x4,
+            Type::F64x2,
+            Type::Mask32x4,
+            Type::Mask64x2,
+            Type::Bool,
+            Type::Str,
+            Type::Unit,
+            Type::Named("R".into()),
+            Type::Option(b(Type::Int)),
+            Type::Result(b(Type::Int), b(Type::Str)),
+            Type::Record(vec![Field {
+                name: "a".into(),
+                ty: Type::Int,
+            }]),
+            Type::Omit(b(Type::Named("R".into())), vec!["b".into()]),
+            Type::Pick(b(Type::Named("R".into())), vec!["a".into()]),
+            Type::Merge(b(Type::Named("R".into())), b(Type::Named("R".into()))),
+            Type::Partial(b(Type::Named("R".into()))),
+            Type::Enum(vec![EnumVariant {
+                name: "A".into(),
+                payload: vec![Type::Int],
+            }]),
+            Type::Param("T".into()),
+            Type::App("Box".into(), vec![Type::Int]),
+            Type::Array(b(Type::Int)),
+            Type::ArrayN(b(Type::Int), 4),
+            Type::SmallArray(b(Type::Int), 4),
+            Type::ConstInt(8),
+            Type::Map(b(Type::Str), b(Type::Int)),
+            Type::Stream(b(Type::Int)),
+            Type::Task(b(Type::Int)),
+            Type::Logger,
+            Type::Fn(vec![Type::Int], b(Type::Unit)),
+            Type::Lazy(b(Type::Int)),
+            Type::Never,
+            Type::Err,
+        ]
+    }
+
+    fn seed_types() -> HashMap<String, TypeDecl> {
+        let d = |name: &str, base: Type, params: Vec<String>| TypeDecl {
+            name: name.to_string(),
+            exported: false,
+            module: None,
+            doc: None,
+            type_params: params,
+            base,
+            predicate: None,
+            line: 0,
+        };
+        let mut m = HashMap::new();
+        m.insert(
+            "R".to_string(),
+            d(
+                "R",
+                Type::Record(vec![
+                    Field {
+                        name: "a".into(),
+                        ty: Type::Int,
+                    },
+                    Field {
+                        name: "b".into(),
+                        ty: Type::Str,
+                    },
+                ]),
+                vec![],
+            ),
+        );
+        m.insert(
+            "Box".to_string(),
+            d(
+                "Box",
+                Type::Record(vec![Field {
+                    name: "value".into(),
+                    ty: Type::Param("T".into()),
+                }]),
+                vec!["T".into()],
+            ),
+        );
+        m
+    }
+
+    /// The guard the four `match`es could not be for each other.
+    ///
+    /// "Which types cross the JSON wire, and as what" used to be answered
+    /// independently by [`codable`], `types::type_schema`, `jsonenc::Walk::body`
+    /// and `jsondec::Walk::body` — three of them with an open `_` arm, so a new
+    /// variant could be admitted by one and unknown to the others with no
+    /// compile-time complaint. It had already happened: the two synthesizers
+    /// resolved first and the two others did not, so every record transformer and
+    /// every applied generic got three answers.
+    ///
+    /// [`wire`] is the one answer now, and this holds it complete the way PR
+    /// #173 holds `layout::SHAPES`: the cases are DERIVED from the type enum
+    /// rather than typed out. [`Type::variant_name`]'s match is exhaustive, so a
+    /// new variant stops this file compiling; [`Type::VARIANTS`] is the same set
+    /// as data, so a variant that gained an arm but no seed still fails.
+    ///
+    /// What it asserts is not that each verdict is a particular one — that is
+    /// what the rows below are for — but that there IS a verdict, reached
+    /// without panicking, for every variant and for a few thousand trees built
+    /// out of them, in both directions.
+    #[test]
+    fn every_type_variant_has_one_wire_verdict() {
+        let types = seed_types();
+        let seeds = seed_per_variant();
+        let seeded: std::collections::BTreeSet<&str> =
+            seeds.iter().map(|t| t.variant_name()).collect();
+        for v in Type::VARIANTS {
+            assert!(seeded.contains(v), "no wire seed for Type::{v}");
+        }
+        assert!(
+            seeded.iter().all(|s| Type::VARIANTS.contains(s)),
+            "a seed names a variant Type::VARIANTS does not list"
+        );
+
+        // Every container over every seed, twice, plus every ordered pair
+        // through the two-argument constructors.
+        let mut all = seeds.clone();
+        for t in &seeds {
+            let b = || Box::new(t.clone());
+            all.extend([
+                Type::Option(b()),
+                Type::Array(b()),
+                Type::ArrayN(b(), 3),
+                Type::Lazy(b()),
+                Type::Map(Box::new(Type::Str), b()),
+                Type::Record(vec![Field {
+                    name: "f".into(),
+                    ty: t.clone(),
+                }]),
+                Type::Enum(vec![EnumVariant {
+                    name: "V".into(),
+                    payload: vec![t.clone()],
+                }]),
+            ]);
+        }
+        let pairs: Vec<Type> = all[..12].to_vec();
+        for a in &pairs {
+            for c in &pairs {
+                all.push(Type::Result(Box::new(a.clone()), Box::new(c.clone())));
+                all.push(Type::Option(Box::new(Type::Result(
+                    Box::new(a.clone()),
+                    Box::new(c.clone()),
+                ))));
+            }
+        }
+        assert!(all.len() > 500, "coverage shrank to {}", all.len());
+
+        for ty in &all {
+            for decode in [false, true] {
+                // A verdict, either way — the point is that no variant falls
+                // through anything.
+                let _ = wire(ty, &types, decode);
+                // And the gate agrees about REACHABILITY: it rejects exactly
+                // when the shared answer has no wire form for the leaf it walks
+                // to, so the checker can never refuse what the synthesizers
+                // would have written (which is the drift this replaced).
+                let gate = codable(ty, &types, decode, &mut Vec::new());
+                if gate.is_ok() {
+                    assert!(
+                        wire(ty, &types, decode).is_ok(),
+                        "the gate admits {ty} ({}) but it has no wire form",
+                        if decode { "decode" } else { "encode" }
+                    );
+                }
+            }
+        }
+    }
+
+    /// The rows the four sites used to disagree about, pinned.
+    ///
+    /// A record transformer IS the record it computes (RFC-0002 §7) and an
+    /// applied generic IS its substituted base, so both cross the wire. Before
+    /// [`wire`] the checker's gate refused them, the schema emitter described
+    /// them as `{}` ("anything"), and the encoder and decoder wrote them out in
+    /// full — three answers, and the gate's was the one users met.
+    #[test]
+    fn a_resolved_shape_crosses_the_wire() {
+        let types = seed_types();
+        for ty in [
+            Type::App("Box".into(), vec![Type::Int]),
+            Type::Omit(Box::new(Type::Named("R".into())), vec!["b".into()]),
+            Type::Pick(Box::new(Type::Named("R".into())), vec!["a".into()]),
+            Type::Merge(
+                Box::new(Type::Named("R".into())),
+                Box::new(Type::Named("R".into())),
+            ),
+            Type::Partial(Box::new(Type::Named("R".into()))),
+        ] {
+            assert!(encodable(&ty, &types).is_ok(), "{ty} does not encode");
+            assert!(decodable(&ty, &types).is_ok(), "{ty} does not decode");
+            assert!(
+                matches!(wire(&ty, &types, false), Ok(Wire::Record(_))),
+                "{ty} is not a record on the wire"
+            );
+        }
+    }
+
+    /// A nested `Option` has no wire form however it is SPELLED.
+    ///
+    /// The rejection used to be `matches!(**inner, Type::Option(_))` on the RAW
+    /// inner, so one type alias walked straight past it: on `main`,
+    /// `type MaybeInt = Option<Int64>` made `toJson(x: Option<MaybeInt>)`
+    /// compile, and `Some(None)` and `None` both wrote `null` — a value nothing
+    /// can read back. The same defect as the transformers, with the sign
+    /// reversed: a decision about a wire SHAPE was taken on a SPELLING.
+    #[test]
+    fn a_nested_option_is_refused_through_an_alias() {
+        let mut types = seed_types();
+        types.insert(
+            "MaybeInt".to_string(),
+            TypeDecl {
+                name: "MaybeInt".to_string(),
+                exported: false,
+                module: None,
+                doc: None,
+                type_params: Vec::new(),
+                base: Type::Option(Box::new(Type::Int)),
+                predicate: None,
+                line: 0,
+            },
+        );
+        let aliased = Type::Option(Box::new(Type::Named("MaybeInt".into())));
+        let bare = Type::Option(Box::new(Type::Option(Box::new(Type::Int))));
+        for ty in [&aliased, &bare] {
+            assert!(encodable(ty, &types).is_err(), "{ty} encodes");
+            assert!(decodable(ty, &types).is_err(), "{ty} decodes");
+            assert!(wire(ty, &types, false).is_err(), "{ty} has a wire form");
+        }
+        // A single `Option` through the same alias is untouched.
+        assert!(encodable(&Type::Named("MaybeInt".into()), &types).is_ok());
+    }
+
+    /// A self-referential type terminates through every head that resolves, not
+    /// just through a name. `wire` resolves, so the gate's cycle guard has to
+    /// cover the transformer heads too — without it, `type L = { next: L }`
+    /// reached through `Partial<L>` walks forever.
+    #[test]
+    fn a_cyclic_type_terminates_through_every_resolving_head() {
+        let mut types = seed_types();
+        types.insert(
+            "L".to_string(),
+            TypeDecl {
+                name: "L".to_string(),
+                exported: false,
+                module: None,
+                doc: None,
+                type_params: Vec::new(),
+                base: Type::Record(vec![Field {
+                    name: "next".into(),
+                    ty: Type::Array(Box::new(Type::Named("L".into()))),
+                }]),
+                predicate: None,
+                line: 0,
+            },
+        );
+        for ty in [
+            Type::Named("L".into()),
+            Type::Partial(Box::new(Type::Named("L".into()))),
+            Type::Pick(Box::new(Type::Named("L".into())), vec!["next".into()]),
+        ] {
+            assert!(encodable(&ty, &types).is_ok(), "{ty} does not encode");
+        }
+    }
 
     /// A `Map<String, V>` is codable exactly when `V` is (RFC-0028): the key is
     /// always `String`, so only the value type gates codability.

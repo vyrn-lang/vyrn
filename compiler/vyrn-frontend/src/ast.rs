@@ -891,6 +891,102 @@ pub enum Type {
     Err,
 }
 
+impl Type {
+    /// Every variant of this enum, as a value.
+    ///
+    /// The lock a coverage test needs, and it has two halves that only work
+    /// together: [`Type::variant_name`] is an exhaustive `match`, so a new
+    /// variant stops the compile; this list is the same set as data, so a
+    /// variant that gained a `match` arm but no test case still fails. Neither
+    /// half alone is a guard, and PR #173 is what happens without both —
+    /// `layout::SHAPES` claimed to be the whole type universe while `Stream` and
+    /// four vector spellings had never once been checked.
+    ///
+    /// It lives on the type rather than in a test module because two crates ask
+    /// the same question of it: `vyrn-codegen` asserts every variant has a
+    /// layout, and [`crate::codec`] asserts every variant has one wire verdict.
+    /// A second copy of this list is a second thing to keep complete.
+    pub const VARIANTS: &'static [&'static str] = &[
+        "Int",
+        "IntN",
+        "Float",
+        "Float32",
+        "F32x4",
+        "I32x4",
+        "F64x2",
+        "Mask32x4",
+        "Mask64x2",
+        "Bool",
+        "Str",
+        "Unit",
+        "Named",
+        "Option",
+        "Result",
+        "Record",
+        "Omit",
+        "Pick",
+        "Merge",
+        "Partial",
+        "Enum",
+        "Param",
+        "App",
+        "Array",
+        "ArrayN",
+        "SmallArray",
+        "ConstInt",
+        "Map",
+        "Stream",
+        "Task",
+        "Logger",
+        "Fn",
+        "Lazy",
+        "Never",
+        "Err",
+    ];
+
+    /// The name of this value's variant. The match computes nothing; its only job
+    /// is to fail to compile when a variant is added (see [`Type::VARIANTS`]).
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Type::Int => "Int",
+            Type::IntN { .. } => "IntN",
+            Type::Float => "Float",
+            Type::Float32 => "Float32",
+            Type::F32x4 => "F32x4",
+            Type::I32x4 => "I32x4",
+            Type::F64x2 => "F64x2",
+            Type::Mask32x4 => "Mask32x4",
+            Type::Mask64x2 => "Mask64x2",
+            Type::Bool => "Bool",
+            Type::Str => "Str",
+            Type::Unit => "Unit",
+            Type::Named(_) => "Named",
+            Type::Option(_) => "Option",
+            Type::Result(..) => "Result",
+            Type::Record(_) => "Record",
+            Type::Omit(..) => "Omit",
+            Type::Pick(..) => "Pick",
+            Type::Merge(..) => "Merge",
+            Type::Partial(_) => "Partial",
+            Type::Enum(_) => "Enum",
+            Type::Param(_) => "Param",
+            Type::App(..) => "App",
+            Type::Array(_) => "Array",
+            Type::ArrayN(..) => "ArrayN",
+            Type::SmallArray(..) => "SmallArray",
+            Type::ConstInt(_) => "ConstInt",
+            Type::Map(..) => "Map",
+            Type::Stream(_) => "Stream",
+            Type::Task(_) => "Task",
+            Type::Logger => "Logger",
+            Type::Fn(..) => "Fn",
+            Type::Lazy(_) => "Lazy",
+            Type::Never => "Never",
+            Type::Err => "Err",
+        }
+    }
+}
+
 impl std::fmt::Display for Type {
     /// The user-facing spelling of a type, exactly as it is written in Vyrn
     /// source: `Int64`, `UInt8`, `Float64`, `String`, `Option<T>`, a named
