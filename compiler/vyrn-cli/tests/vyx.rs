@@ -961,3 +961,78 @@ fn a_comparison_inside_a_single_event_argument_compiles() {
     let (ok, err) = run_app(&dir);
     assert!(ok, "one comparison is one argument:\n{err}");
 }
+
+// ---- the section boundary: one rule, two implementations -------------------
+
+/// Hostile `<script>` bodies whose FIRST `</script>` is not the section's: it
+/// sits inside a string or a comment. Each is followed by an import and a
+/// `props` block, so anything that reaches those saw past the decoy.
+const DECOY_SCRIPTS: &[(&str, &str)] = &[
+    ("string", "fn tag() -> String { return \"</script>\" }"),
+    ("line_comment", "// </script>"),
+    (
+        "escaped_quote",
+        "fn tag() -> String { return \"a\\\"</script>b\" }",
+    ),
+];
+
+/// The `.vyx` section boundary is decided by two implementations that cannot
+/// share code — `std/vyx`'s scanner, which compiles the component, and
+/// `vyrn_frontend::vyx`, which the tools read a `.vyx` with — so this asserts
+/// they answer the same on every hostile body: the generator compiles the props
+/// that follow the decoy, and `vyrn why` reports the import that follows it.
+///
+/// It fails if EITHER drifts. The tool half was a naive `find("</script>")`
+/// before `vyrn_frontend::vyx` existed, and `why` denied an import the program
+/// makes.
+#[test]
+fn audit_hostile_sections_agree_with_the_generator() {
+    for (tag, decoy) in DECOY_SCRIPTS {
+        let dir = scratch(&format!("decoy_{tag}"));
+        write(&dir.join("vyrn.json"), "{ \"main\": \"app.vyrn\" }\n");
+        write(
+            &dir.join("util.vyrn"),
+            "export fn helper() -> String {\n    return \"h\"\n}\n",
+        );
+        write(
+            &dir.join("comp/Widget.vyx"),
+            &format!(
+                "<script>\n{decoy}\nimport {{ helper }} from \"../util\"\nprops {{ n: Int64 }}\n\
+                 </script>\n<template><li>{{{{ n }}}}{{{{ helper() }}}}</li></template>\n"
+            ),
+        );
+        write(&dir.join("app.vyrn"), APP);
+
+        // `std/vyx`'s answer: the props AFTER the decoy became parameters, so
+        // its scanner ran past the decoy to the real close tag.
+        let gen = vyrn()
+            .arg("emit-gen")
+            .arg(dir.join("app.vyrn"))
+            .output()
+            .expect("emit-gen");
+        assert!(
+            gen.status.success(),
+            "{tag}: the generator must compile the component:\n{}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
+        let src = String::from_utf8_lossy(&gen.stdout);
+        assert!(
+            src.contains("export fn widget(n: Int64) -> Html"),
+            "{tag}: the generator truncated the section:\n{src}"
+        );
+
+        // The tools' answer, over the same file: the import AFTER the decoy is
+        // an edge of the project graph.
+        let why = vyrn()
+            .current_dir(&dir)
+            .arg("why")
+            .arg("util.vyrn")
+            .output()
+            .expect("why");
+        let out = String::from_utf8_lossy(&why.stdout).replace('\\', "/");
+        assert!(
+            out.contains("comp/Widget.vyx -> util.vyrn"),
+            "{tag}: `why` disagrees with the generator about the section:\n{out}"
+        );
+    }
+}

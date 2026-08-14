@@ -124,10 +124,11 @@ pub fn roles_of(
 /// `<script>` tag's `>`, mid-line, so the offset is the number of NEWLINES
 /// before it — not the number of lines, which would be one too many and put
 /// every query one line off.
+///
+/// The bounds are `vyrn_frontend::vyx`'s, which decides them by `std/vyx`'s
+/// rule — a `</script>` inside a helper string or comment closes nothing.
 pub fn vyx_script(text: &str) -> Option<(String, usize)> {
-    let open_tag = text.find("<script")?;
-    let body_start = text[open_tag..].find('>')? + open_tag + 1;
-    let close = text[body_start..].find("</script>")? + body_start;
+    let (body_start, close) = vyrn_frontend::vyx::script_body(text)?;
     let line_offset = text[..body_start].matches('\n').count();
     Some((text[body_start..close].to_string(), line_offset))
 }

@@ -950,17 +950,15 @@ fn unmapped_comment(pred: &Expr) -> String {
 }
 
 /// Escape a string for embedding as a JSON string value.
+///
+/// One table, [`crate::codec::escape_into`] — the one both backends encode
+/// with, and the one this crate's strict reader decodes. A second table here
+/// escaped four characters of six and emitted a raw `\r` (and every other
+/// control byte) into a schema, which RFC 8259 forbids and [`crate::codec`]'s
+/// own reader rejects: `jsonSchema` wrote a document this repo cannot read.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
+    crate::codec::escape_into(s, &mut out);
     out
 }
 
@@ -1688,6 +1686,33 @@ mod json_schema_tests {
             s.contains("\"pattern\":\"^[a-z]+$\""),
             "anchored pattern: {s}"
         );
+    }
+
+    /// A schema is a JSON document, so this crate's own strict reader must read
+    /// back everything `jsonSchema` emits — including a `where` pattern carrying
+    /// control bytes, which RFC 8259 forbids raw inside a string. A second,
+    /// incomplete escaper on this path wrote a raw `\r` and the reader refused
+    /// the document it had just produced.
+    #[test]
+    fn a_hostile_pattern_round_trips_through_the_strict_reader() {
+        for (src, name) in [
+            ("type T = String where value =~ \"a\\rb\"", "T"),
+            ("type T = String where value =~ \"a\\tb\\nc\"", "T"),
+            // `$comment` carries the whole predicate when the keywords cannot.
+            (
+                "type T = String where value =~ \"a\\rb\" || value.byteLength > 2",
+                "T",
+            ),
+        ] {
+            let s = schema_of(src, name);
+            assert!(
+                !s.bytes().any(|b| b < 0x20),
+                "raw control byte in a JSON string ({src}): {s:?}"
+            );
+            crate::codec::parse(&s).unwrap_or_else(|e| {
+                panic!("strict reader refused its own output ({src}): {e:?}\n{s}")
+            });
+        }
     }
 
     #[test]

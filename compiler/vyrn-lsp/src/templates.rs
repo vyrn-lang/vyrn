@@ -254,17 +254,17 @@ fn col_of(chars: &[char], idx: usize) -> usize {
     col
 }
 
-/// Whether `offset` is inside a `<script> … </script>` region.
+/// Whether the char `offset` is inside the `<script> … </script>` body — the
+/// section as `vyrn_frontend::vyx` (and so `std/vyx`) bounds it, so a cursor
+/// after a helper string containing `</script>` is still in the script.
 fn in_script(text: &str, offset: usize) -> bool {
     // Compare byte offsets: rebuild a byte offset from the char offset.
     let byte_off: usize = text.chars().take(offset).map(|c| c.len_utf8()).sum();
-    let before = &text[..byte_off.min(text.len())];
-    let open = before.rfind("<script");
-    let close = before.rfind("</script>");
-    match (open, close) {
-        (Some(o), Some(c)) => o > c,
-        (Some(_), None) => true,
-        _ => false,
+    match vyrn_frontend::vyx::script_body(text) {
+        Some((start, end)) => byte_off >= start && byte_off <= end,
+        // No closed section: a `<script>` the file never closes still owns
+        // everything after it, as the old scan did.
+        None => text.find("<script>").is_some_and(|o| byte_off > o),
     }
 }
 
