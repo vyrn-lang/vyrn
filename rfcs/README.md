@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-99 RFCs, numbered 0001 to 0100, with one gap. **There is no RFC-0066** — the
+100 RFCs, numbered 0001 to 0101, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -156,6 +156,7 @@ claim is true — is written down in the test's own header.
 | [0098](RFC-0098-cli.md) | `std/cli`: The Command Line Is a Record Type | M1 landed; M2–M7 stated |
 | [0099](RFC-0099-a-generator-may-report-a-diagnostic.md) | A Generator May Report a Diagnostic | M1 landed; M2 shipped as RFC-0100; M3 unspent |
 | [0100](RFC-0100-a-rule-is-a-library.md) | A Rule Is a Library | Implemented |
+| [0101](RFC-0101-a-backend-is-an-emitter.md) | A Backend Is an Emitter | Proposed |
 
 ## The other documents here
 
