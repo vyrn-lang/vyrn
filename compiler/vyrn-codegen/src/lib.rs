@@ -781,14 +781,36 @@ pub mod observe {
         pub ty: Type,
     }
 
+    /// One body this backend decided to emit: a function and the type arguments
+    /// it was emitted at.
+    ///
+    /// RFC-0101 M2's shadow: the two backends each run their own worklist, and
+    /// nothing outside a backend has ever been able to see either list, so
+    /// "`vyrn-lower` builds the instances the backends build" has been a claim
+    /// with no gate under it. This makes both lists readable and adds no
+    /// decision — every hook records a body the driver was about to lower anyway.
+    ///
+    /// A lifted lambda is deliberately NOT here. It is not a function of the
+    /// program: it has no name, its body is a clone the backend synthesized, and
+    /// its identity is a node address the lowering cannot key against. What that
+    /// costs is written into RFC-0101 §3 M2.
+    #[derive(Debug, Clone)]
+    pub struct Inst {
+        pub site: Site,
+        pub name: String,
+        pub args: Vec<Type>,
+    }
+
     thread_local! {
         static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static ROWS: std::cell::RefCell<Vec<Row>> = const { std::cell::RefCell::new(Vec::new()) };
+        static INSTS: std::cell::RefCell<Vec<Inst>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
     /// Start recording on this thread, discarding anything already collected.
     pub fn start() {
         ROWS.with(|r| r.borrow_mut().clear());
+        INSTS.with(|r| r.borrow_mut().clear());
         ON.with(|o| o.set(true));
     }
 
@@ -796,6 +818,25 @@ pub mod observe {
     pub fn take() -> Vec<Row> {
         ON.with(|o| o.set(false));
         ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// The instantiations recorded since [`start`]. Read after [`take`], which is
+    /// what stops the recording.
+    pub fn take_insts() -> Vec<Inst> {
+        INSTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    pub(crate) fn note_inst(site: Site, name: &str, args: &[Type]) {
+        if !on() {
+            return;
+        }
+        INSTS.with(|r| {
+            r.borrow_mut().push(Inst {
+                site,
+                name: name.to_string(),
+                args: args.to_vec(),
+            })
+        });
     }
 
     pub(crate) fn on() -> bool {
@@ -1765,6 +1806,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         } else {
             format!("vyrn_{}", f.name)
         };
+        observe::note_inst(observe::Site::Native, &f.name, &[]);
         let mut gen = Gen::new(
             &ret_types,
             &param_types,
@@ -1810,6 +1852,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             }
             let f = funcs[&name];
             check_inst_depth(&name, type_args.iter(), f.line, &types)?;
+            observe::note_inst(observe::Site::Native, &name, &type_args);
             let subst: HashMap<String, Type> = f
                 .type_params
                 .iter()
@@ -1860,6 +1903,24 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 funcs.get(inst.name.as_str()).map_or(0, |f| f.line),
                 &types,
             )?;
+            // An RFC-0023 specialization IS an instantiation of a named function
+            // — its extra identity is which target each `fn` parameter got, and
+            // the type arguments underneath are the same list a generic call
+            // hands the other worklist. Read them back in the callee's own
+            // parameter order so both backends and the lowering spell one thing
+            // one way.
+            if observe::on() {
+                let args: Vec<Type> = funcs
+                    .get(inst.name.as_str())
+                    .map(|f| {
+                        f.type_params
+                            .iter()
+                            .map(|p| inst.subst.get(p).cloned().unwrap_or(Type::Unit))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                observe::note_inst(observe::Site::Native, &inst.name, &args);
+            }
             let mut gen = Gen::new(
                 &ret_types,
                 &param_types,

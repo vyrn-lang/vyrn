@@ -155,13 +155,41 @@ impl Instance<'_> {
     }
 }
 
+/// Why a generic call did not become an instantiation.
+///
+/// M1 kept one counter for three facts and M2 measured what that cost: the only
+/// entry the corpus produces is `PastTheLimit`, on `examples/polyrecursion.vyrn`,
+/// which is the bound WORKING. A counter that cannot reach zero without deleting
+/// a limit is not a residue counter, so the reason is now a value the gate reads
+/// rather than a sentence it prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// The name is not a function of this linked program.
+    NotAFunction,
+    /// The checker left a type parameter unsolved at the call.
+    UnsolvedParameter,
+    /// [`MONO_DEPTH_LIMIT`] or [`MONO_SIZE_LIMIT`] refused the instantiation —
+    /// the same refusal both backends make, from the same two constants.
+    PastTheLimit,
+}
+
+impl std::fmt::Display for Why {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Why::NotAFunction => "the callee is not a function of this program",
+            Why::UnsolvedParameter => "the checker left a type parameter for a backend to solve",
+            Why::PastTheLimit => "the instantiation passes the monomorphization limit",
+        })
+    }
+}
+
 /// A generic call the lowering could not turn into an instantiation.
 #[derive(Debug, Clone)]
 pub struct Unresolved {
     pub caller: String,
     pub callee: String,
     pub line: u32,
-    pub why: &'static str,
+    pub why: Why,
 }
 
 /// The checked program with the answers written on it and the sugar gone.
@@ -170,9 +198,16 @@ pub struct Lowered<'a> {
     /// Sorted by module, then name, then rendered type arguments — never
     /// printed from a `HashMap` (RFC-0101 §2.7).
     pub instances: Vec<Instance<'a>>,
-    /// Where the worklist stopped. M1 follows ordinary generic calls only; the
-    /// higher-order and lambda instantiation both backends run is M2's, and a
-    /// call it could not follow is recorded here rather than assumed away.
+    /// The module-state initializers (RFC-0013), in declaration order.
+    ///
+    /// They are not a function, and both backends emit them into a synthesized
+    /// one; M1's worklist rooted at `program.functions` and so never walked them,
+    /// which is why `std/stream`'s `let mut cells: Slots<CursorCell>` reached the
+    /// native backend as an instantiation the lowering did not have.
+    pub globals: Vec<Row<'a>>,
+    /// Where the worklist stopped, and why. Every corpus entry is
+    /// [`Why::PastTheLimit`] — the bound refusing an instantiation, which is the
+    /// bound working rather than a hole.
     pub unresolved: Vec<Unresolved>,
 }
 
@@ -185,7 +220,7 @@ impl<'a> Lowered<'a> {
     }
 
     pub fn rows(&self) -> usize {
-        self.instances.iter().map(|i| i.rows.len()).sum()
+        self.instances.iter().map(|i| i.rows.len()).sum::<usize>() + self.globals.len()
     }
 }
 
@@ -257,6 +292,30 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
     let mut instances: Vec<Instance<'a>> = Vec::new();
     let mut unresolved: Vec<Unresolved> = Vec::new();
 
+    // The worklist's second root: module state. A `let` at module scope is an
+    // ordinary expression the backends run inside a synthesized initializer, and
+    // it instantiates generics like any other body — `std/stream`'s
+    // `let mut cells: Slots<CursorCell> = newSlots()` is the corpus's proof.
+    let mut gw = Walk {
+        recorded,
+        rows: Vec::new(),
+        calls: Vec::new(),
+    };
+    for g in &program.globals {
+        let mut chain: Chain = vec![HashMap::new()];
+        expr(&g.init, 0, &mut chain, &mut gw);
+    }
+    let globals = gw.rows;
+    follow(
+        "<module state>",
+        std::mem::take(&mut gw.calls),
+        &by_name,
+        &decls,
+        &mut seen,
+        &mut queue,
+        &mut unresolved,
+    );
+
     while let Some((func, type_args)) = queue.pop_front() {
         let subst: BTreeMap<String, Type> = func
             .type_params
@@ -274,60 +333,15 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
         let mut chain: Chain = vec![flat];
         block(&func.body, 0, &mut chain, &mut w);
 
-        for (callee, solved) in std::mem::take(&mut w.calls) {
-            let Some(target) = by_name.get(callee) else {
-                unresolved.push(Unresolved {
-                    caller: func.name.clone(),
-                    callee: callee.to_string(),
-                    line: 0,
-                    why: "the callee is not a function of this program",
-                });
-                continue;
-            };
-            if target.type_params.iter().any(|p| !solved.contains_key(p)) {
-                unresolved.push(Unresolved {
-                    caller: func.name.clone(),
-                    callee: callee.to_string(),
-                    line: 0,
-                    why: "the checker left a type parameter for a backend to solve",
-                });
-                continue;
-            }
-            let next: Vec<Type> = target
-                .type_params
-                .iter()
-                .map(|p| solved[p].clone())
-                .collect();
-            // The same bound both backends apply, from the same constant.
-            // Polymorphic recursion — `f<T>` calling `f<P<T>>` — has no fixed
-            // point, so a worklist without this runs until the machine stops;
-            // `examples/polyrecursion.vyrn` is the corpus entry that proves it,
-            // and it reached 18 GiB here before the bound was wired in.
-            if next.iter().any(|t| {
-                type_depth(t) > MONO_DEPTH_LIMIT
-                    || expanded_size(t, &decls, MONO_SIZE_LIMIT).is_none()
-            }) {
-                unresolved.push(Unresolved {
-                    caller: func.name.clone(),
-                    callee: callee.to_string(),
-                    line: 0,
-                    why: "the instantiation passes the monomorphization limit",
-                });
-                continue;
-            }
-            let key = (
-                target.name.clone(),
-                next.iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            if seen.contains(&key) {
-                continue;
-            }
-            seen.push(key);
-            queue.push_back((target, next));
-        }
+        follow(
+            &func.name,
+            std::mem::take(&mut w.calls),
+            &by_name,
+            &decls,
+            &mut seen,
+            &mut queue,
+            &mut unresolved,
+        );
 
         instances.push(Instance {
             func,
@@ -339,7 +353,72 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
 
     Lowered {
         instances,
+        globals,
         unresolved,
+    }
+}
+
+/// Turn the generic calls one body made into instantiations on the worklist.
+///
+/// One function rather than one per root, because a module-state initializer
+/// discovers instantiations exactly the way a function body does and a second
+/// copy of this is a second set of rules for the same decision — which is the
+/// defect shape RFC-0101 is about.
+#[allow(clippy::too_many_arguments)]
+fn follow<'a>(
+    caller: &str,
+    calls: Vec<(&str, HashMap<String, Type>)>,
+    by_name: &HashMap<&str, &'a Function>,
+    decls: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
+    seen: &mut Vec<(String, String)>,
+    queue: &mut VecDeque<(&'a Function, Vec<Type>)>,
+    unresolved: &mut Vec<Unresolved>,
+) {
+    for (callee, solved) in calls {
+        let mut stop = |why| {
+            unresolved.push(Unresolved {
+                caller: caller.to_string(),
+                callee: callee.to_string(),
+                line: 0,
+                why,
+            })
+        };
+        let Some(target) = by_name.get(callee) else {
+            stop(Why::NotAFunction);
+            continue;
+        };
+        if target.type_params.iter().any(|p| !solved.contains_key(p)) {
+            stop(Why::UnsolvedParameter);
+            continue;
+        }
+        let next: Vec<Type> = target
+            .type_params
+            .iter()
+            .map(|p| solved[p].clone())
+            .collect();
+        // The same bound both backends apply, from the same constant.
+        // Polymorphic recursion — `f<T>` calling `f<P<T>>` — has no fixed
+        // point, so a worklist without this runs until the machine stops;
+        // `examples/polyrecursion.vyrn` is the corpus entry that proves it,
+        // and it reached 18 GiB here before the bound was wired in.
+        if next.iter().any(|t| {
+            type_depth(t) > MONO_DEPTH_LIMIT || expanded_size(t, decls, MONO_SIZE_LIMIT).is_none()
+        }) {
+            stop(Why::PastTheLimit);
+            continue;
+        }
+        let key = (
+            target.name.clone(),
+            next.iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        queue.push_back((target, next));
     }
 }
 

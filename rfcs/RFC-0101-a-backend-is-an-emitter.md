@@ -1,6 +1,13 @@
 # RFC-0101 — A Backend Is an Emitter
 
-- **Status:** **M1 implemented**; M2–M6 proposed. M1 landed as four stacked pull
+- **Status:** **M1 implemented; M2 partially implemented and failing its own line
+  gate**; M3–M6 proposed. §3 M2 records what landed, what did not, and the
+  measurement that says why: M1's residue was attributed to a missing worklist
+  and is 9,355-to-7 a missing *body* — a backend clones the AST before it lowers
+  a specialization, so no list a lowering hands over can close it. M2 landed the
+  gate that proves the lists match and the deletion of `vyrn check`'s
+  whole-backend round trip; the two backend worklists stay.
+  M1 landed as four stacked pull
   requests (§3 M1 records each one's changed-line count and every place the
   design did not survive contact with the code). Its headline result is that
   **M1's own assertion is false**: the two compiled backends do not agree about
@@ -831,13 +838,113 @@ Seven, each recorded rather than smoothed over.
 - **The two measurements**, written into §2.1 item 1 with their method and the
   threshold they imply.
 
-**M2 — monomorphization moves into the lowering.** One worklist, keyed on type
-arguments. `lib.rs`'s two mutually-feeding worklists, `direct.rs`'s FIFO index
-queue and its lambda dedup set become consumers of a list the lowering hands them.
-`check_instantiations` stops running `emit()`. Symbols keep the readable mangle
-plus the structural hash #165 gave them, because `emit-ir` output and linker
-errors are read for that prefix. Gate: net negative. Two worklists and a
-whole-backend round trip go.
+**M2 — monomorphization moves into the lowering. PARTIALLY IMPLEMENTED, AND IT
+FAILS ITS OWN LINE GATE.**
+
+M2 asked for one worklist keyed on type arguments; for `lib.rs`'s two
+mutually-feeding worklists and `direct.rs`'s FIFO index queue to become consumers
+of it; for `check_instantiations` to stop running `emit()`; and for a net
+negative. **Two of those landed, one is a different job from the one written
+here, and the line gate is missed and says so** — §3's rule, and RFC-0094's
+precedent.
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M2a | the lowering's worklist gets module state; both backends' instance LISTS become readable and are gated against it; this text | 636 | 5 |
+| M2b | `vyrn check` stops running a whole backend to ask one question | (in flight) | |
+
+**What landed.**
+
+- **The lowering's worklist is complete for the calls a program writes, and
+  there is a gate that says so.** Both backends now record every body they decide
+  to emit (`vyrn_codegen::observe::Inst`, off by default like the type sink M1
+  added), and the corpus gate asserts set equality against the lowering's list on
+  `(callee, type arguments)`, resolved through every declared alias so one
+  instance has one spelling. **Zero instantiations are emitted by a backend and
+  missing from the lowering.** Seventy-two go the other way, and both classes are
+  named the way M1's five type rules are: `GenFn` (72 — a `gen fn` runs in the
+  compiler at generation time and is never called in a shipped binary, so neither
+  backend emits a body for it) and `ImplicitDispatch` (26 — finding 5 below).
+- **`vyrn check` no longer runs the native backend** (M2b).
+  `check_instantiations` lowered the whole program to LLVM text, matched one
+  needle and threw the module away; it reads the lowering's worklist now, and the
+  refusal is worded by the same `check_inst_depth` both backends call, from the
+  same two constants. That move needs the paragraph above under it: a bound the
+  lowering enforces predicts a build only if the lowering reaches every
+  instantiation a backend reaches, which is what M2a's gate asserts.
+
+**What M2 measured, which is not what it went looking for.**
+
+1. **M1's residue was 9,358 answers "inside higher-order/lambda instances M1 did
+   not build", and that attribution is wrong. The split is 9,355 to 7.** Only
+   seven were about a node the lowering had walked, at an instantiation it had
+   not built. Every other one is about **AST that is not in the program**: a
+   backend `clone()`s a `Function` before lowering a specialization or lifting a
+   lambda, so those bodies' node addresses are the clone's and no worklist can
+   make them match. **The residue does not go to zero when the LIST moves. It
+   goes to zero when the BODY does.** The gate counts the two separately now and
+   asserts the first is zero.
+2. **The seven were module state, not higher-order anything.** `std/stream`'s
+   `let mut cells: Slots<CursorCell> = newSlots()` is an instantiation both
+   backends emit from inside their synthesized initializer, and M1's worklist
+   rooted at `program.functions` and never walked a `program.globals`
+   initializer. One more root, and the counter is zero.
+3. **"1 call the worklist could not follow" cannot go to zero, and asking it to
+   was asking for a limit to be deleted.** The single entry is
+   `examples/polyrecursion.vyrn`'s `f -> f`, refused by `MONO_DEPTH_LIMIT` —
+   the bound working, and the same refusal both backends make. M1 kept one
+   counter for three different facts; the reason is a typed value now (`Why`),
+   and the gate asserts every entry is the bound instead of counting them.
+4. **M1's residue number is not reproducible, and that is a property of the gate
+   rather than of the compiler.** The same binary printed 9,569, 9,362 and 9,486
+   on three consecutive runs. It counts distinct `(node address, instantiation)`
+   keys, and a synthesized node's address is a freed temporary the allocator
+   hands out again, so two of them collide — or do not — per run. The halves that
+   matter (`compared`, `differed`, and both instance lists) are stable run to run;
+   the synthesized count is reported and not asserted.
+5. **One class of instantiation a backend has and the lowering does not is
+   deliberately still open: `ImplicitDispatch`.** Twenty-six, every one a
+   flattened protocol-impl method the source never calls — the `release` a scope
+   exit reaches through `impl Owned for Slots<T>`, the `size` a `for x in s`
+   reaches through `impl Iterate`. These are calls the *language* writes, placed
+   by the release walk and by the loop lowering. Guessing them ahead of the pass
+   that PLACES a release would be a second source of truth about where a release
+   happens, which is the failure mode `direct.rs:848`'s own worklist comment
+   warns about. **M4 puts the release steps in the form; the instantiation then
+   comes from the step, and this rule goes with it.** The gate names the class so
+   it cannot hide an ordinary miss.
+
+**What did not land, and the measurement that says why.**
+
+The headline sentence — "both worklists become consumers of a list the lowering
+hands them" — assumes a worklist entry is an *identity*. It is not. `direct.rs`'s
+`Pending` carries an `Rc<Function>`: a substituted clone of the callee with
+capture parameters prepended, a lambda's expression body already turned into a
+block, a per-target `Sig`, and a wasm function **index reserved at discovery** —
+`direct.rs:857` says the order IS the numbering. `lib.rs`'s `HoInst` carries a
+resolved `target_sym` per `fn`-typed parameter, and a `target_sym` exists only
+after a lambda has been lifted. A backend cannot consume a list of names and type
+arguments; it needs the **bodies**. Producing those in the lowering means moving
+RFC-0023's specialization and RFC-0037's lambda lifting — capture analysis
+included — below both backends, and having each build its own signature from one
+shared shell.
+
+That is the same change finding 1 names as the only way the 9,355 go to zero, and
+it is a milestone rather than the second half of a PR pair. It is not written as
+M2's remainder here because it also decides open question 6.1: a synthesized
+shell has to be owned by something, and today it is owned twice.
+
+**The gate, and the verdict.** M2's gate was "net negative. Two worklists and a
+whole-backend round trip go." The round trip went; the two worklists did not.
+**The pair is net positive and M2 does not meet its gate.** About half of M2a is
+the instance gate and its rules, which is the cost of the claim rather than an
+excuse for it. The deletion M2 promised is priced above and belongs to the
+milestone that moves the bodies.
+
+**Emitted output is byte-identical, by construction.** Every hook M2a adds is
+behind `observe::on()`, off outside the corpus gate, and nothing in either
+emitter's decision path changed. Symbols keep the readable mangle and #165's
+structural hash, untouched. Full parity is green at both PRs.
 
 **M3 — the backends read types.** `peek` (510), its four satellites, `static_ty`,
 both `expect` stacks, both copies of `expected_fn_sig` / `fn_arg_param_types` /
