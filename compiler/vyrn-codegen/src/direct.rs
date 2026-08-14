@@ -247,6 +247,21 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
     compile_inner(program)
 }
 
+/// The same module [`compile`] emits, as WAT (`vyrn emit-wat`).
+///
+/// It is exactly `emit`'s textual IR for the other compiled backend: a form a
+/// test can read. Until this existed, a property that no program output can show
+/// — one bounds check for four lanes, a header moved and not copied — could be
+/// pinned on the native backend by grepping `emit-ir` and could not be pinned
+/// here at all, so half the compiled surface was gated on behaviour only.
+///
+/// Printing is not part of `compile`: `vyrn build` writes bytes, and a text form
+/// nothing but a reader asks for should not be on the path that produces them.
+pub fn wat(program: &Program) -> Result<String, String> {
+    let bytes = compile(program)?;
+    wasmprinter::print_bytes(&bytes).map_err(|e| e.to_string())
+}
+
 /// Compile `program` to run as a GENERATOR under RFC-0076's engine: the same
 /// traversal, plus the `vyrn_gen` host imports and the two lowerings that only
 /// make sense with them (`listDir`, and `Code` as an opaque `i64` handle).

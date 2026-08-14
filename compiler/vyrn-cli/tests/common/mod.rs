@@ -176,6 +176,111 @@ pub fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
 
+/// A scratch directory named for this PROCESS, removed again when the test that
+/// asked for it passes.
+///
+/// It was `%TEMP%/vyrn-<tag>` for every run of every checkout, so two parity runs
+/// at once wrote each other's `fib.vyrn.exe` and the loser reported a divergence
+/// it had not produced. The process id makes concurrent runs disjoint; keeping the
+/// tree on failure keeps the artifact the failure is about.
+pub fn scratch(tag: &str) -> Scratch {
+    // The counter is for calls WITHIN a run: two tests reaching one helper with
+    // the same tag would otherwise share a path again, and this one deletes.
+    static NTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("vyrn-{tag}-{}-{nth}", std::process::id()));
+    // A previous run of THIS pid (they are reused) left a tree that is not this
+    // run's; a stale `.exe` here is a result attributed to the wrong build.
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("create scratch dir");
+    Scratch(path)
+}
+
+/// The directory [`scratch`] hands out. Derefs to a `Path`, so a call site reads
+/// as it did when it held a `PathBuf`.
+pub struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // A failing test panics, and its build artifacts are the evidence — so
+        // the cleanup is on the passing path only.
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+/// Where two engines' output for one stream first differs — a line number, the
+/// two lines, and the lines around them. `None` when the two are byte-identical,
+/// which is the only thing that passes.
+///
+/// The comparison stays on the bytes: this only ever composes the MESSAGE. A
+/// difference the line view cannot show (a trailing newline, a stray CR that
+/// `lines()` eats) is still a failure, and says so with the byte offset instead
+/// — the shape `reproducible.rs` reports a differing artifact with.
+///
+/// What it replaces: two whole program outputs `{:?}`-escaped onto one line
+/// each. The corpus's largest example is 944 lines, so finding the divergence
+/// meant reading two walls of `\n`-spelled text and comparing them by eye.
+pub fn first_diff(stream: &str, a_name: &str, a: &str, b_name: &str, b: &str) -> Option<String> {
+    if a == b {
+        return None;
+    }
+    let (al, bl): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
+    let counts = format!("({a_name} {} lines, {b_name} {} lines)", al.len(), bl.len());
+    let n = (0..al.len().max(bl.len())).find(|&i| al.get(i) != bl.get(i));
+    let Some(n) = n else {
+        // Every line is equal and the bytes are not: a trailing newline, or a CR
+        // `lines()` stripped. Byte-identical INCLUDING those is the invariant.
+        let at = a.bytes().zip(b.bytes()).position(|(x, y)| x != y);
+        let at = at.unwrap_or(a.len().min(b.len()));
+        // The byte itself, not a slice from `at`: an offset inside a multi-byte
+        // character is not a `str` boundary, and this has to print either way.
+        let byte = |s: &str| match s.as_bytes().get(at) {
+            Some(x) => format!("{x:#04x}"),
+            None => "<end of output>".to_string(),
+        };
+        return Some(format!(
+            "  {stream}: the {} lines are equal, the bytes are not — first differs at byte {at} {counts}\n    \
+             {a_name}: {}\n    {b_name}: {}\n",
+            al.len(),
+            byte(a),
+            byte(b),
+        ));
+    };
+    let missing = "<no such line>";
+    let mut out = format!("  {stream}: first differs at line {} {counts}\n", n + 1);
+    // Everything before line `n` is equal in both, so it is printed once.
+    for i in n.saturating_sub(2)..n {
+        out.push_str(&format!("     same {:>5} | {}\n", i + 1, al[i]));
+    }
+    // From here the two are their own; each engine's next two lines follow its
+    // own, because a shared "context" after a divergence is a fiction.
+    for (who, lines) in [(a_name, &al), (b_name, &bl)] {
+        for i in n..(n + 3).min(lines.len().max(n + 1)) {
+            out.push_str(&format!(
+                "  {who:>7} {:>5} | {}\n",
+                i + 1,
+                lines.get(i).unwrap_or(&missing)
+            ));
+        }
+    }
+    Some(out)
+}
+
 pub fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }

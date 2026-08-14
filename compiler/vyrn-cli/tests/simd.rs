@@ -8,11 +8,12 @@
 //! are that half, in the shape of `places.rs`: a structural count, not a
 //! duration, so a loaded machine cannot make them flaky.
 //!
-//! The wasm column has no equivalent pin here — there is no wasm parser in this
-//! workspace to count instructions with. What it has instead is
-//! `bounds_check_span`'s single `If`, and `examples/simdoob.vyrn` /
-//! `examples/simdoobstore.vyrn`, which prove the two branches of the check trap
-//! identically on all three engines.
+//! The wasm column used to have no equivalent pin — there was no text form of a
+//! module in this workspace to count instructions in. `vyrn emit-wat` is that
+//! form, and [`a_vector_load_is_bounds_checked_once_on_wasm_too`] is the same
+//! count on the other compiled backend. `examples/simdoob.vyrn` /
+//! `examples/simdoobstore.vyrn` still prove the two branches of the check trap
+//! identically on all three engines; what they cannot say is how many checks ran.
 
 mod common;
 use common::*;
@@ -50,6 +51,49 @@ fn body_of(src: &str, name: &str) -> String {
 /// per check, which is the branch's only unambiguous fingerprint.
 fn checks(body: &str) -> usize {
     body.matches("@.trap.aoob").count()
+}
+
+/// The one function in `src`'s WASM module whose body contains `marker`, printed
+/// as WAT (`vyrn emit-wat`).
+///
+/// It is `body_of` for the other compiled backend, and it finds its function by
+/// content rather than by name because the module carries no name section — a
+/// function is an index there, and an index moves whenever the runtime does.
+/// `wasmprinter` indents every function's opening `(func` by two spaces and
+/// closes it with a `)` at the same column, which is what makes the slice exact.
+fn wat_func_containing(src: &str, marker: &str) -> String {
+    let dir = scratch("simd-wat");
+    let file = dir.join("vec.vyrn");
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-wat");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    assert!(
+        wat.contains("error: array index "),
+        "the module interns the interpreter's bounds wording, or the count below \
+         is counting a check that cannot report:\n{wat}"
+    );
+    let bodies: Vec<&str> = wat
+        .split("\n  (func ")
+        .skip(1)
+        .map(|f| &f[..f.find("\n  )").expect("unterminated function")])
+        .filter(|f| f.contains(marker))
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "expected exactly one function containing `{marker}`, found {}",
+        bodies.len()
+    );
+    bodies[0].to_string()
 }
 
 const PROLOGUE: &str = "fn main() -> Int64 {\n\
@@ -95,6 +139,57 @@ fn a_vector_load_is_bounds_checked_once_and_not_per_lane() {
     // The four `lane` reads add no check of their own — the index is constant
     // and in range by the checker's rule, which is M1's claim still holding.
     assert_eq!(body.matches("extractelement <4 x float>").count(), 4);
+}
+
+/// The same property on the OTHER compiled backend (RFC-0077), read out of
+/// `vyrn emit-wat`.
+///
+/// Both backends emit the check from their own code, so the claim "one check for
+/// four lanes" was pinned on one of them and asserted about the other. What the
+/// wasm module actually contains is `bounds_check_span`'s single branch — the
+/// signed pair `i < 0 || i > len - 4` joined by `i32.or`, and NOT four copies of
+/// `bounds_check`'s scalar `i64.ge_u` — and one `v128.load` where four lane loads
+/// would otherwise be.
+#[test]
+fn a_vector_load_is_bounds_checked_once_on_wasm_too() {
+    let body = wat_func_containing(
+        &format!(
+            "fn read(xs: Array<Float32>, i: Int64) -> Float32 {{\n\
+             let v = F32x4.load(xs, i)\n\
+             return v.lane(0) + v.lane(1) + v.lane(2) + v.lane(3)\n\
+             }}\n{PROLOGUE}"
+        ),
+        "v128.load",
+    );
+    assert_eq!(
+        body.matches("i64.gt_s").count(),
+        1,
+        "one span check for four lanes:\n{body}"
+    );
+    assert_eq!(
+        body.matches("i64.ge_u").count(),
+        0,
+        "a scalar per-lane check would spell itself `i64.ge_u`:\n{body}"
+    );
+    assert_eq!(
+        body.matches("v128.load").count(),
+        1,
+        "one 16-byte load, not four 4-byte ones:\n{body}"
+    );
+    assert_eq!(
+        body.matches("f32x4.extract_lane").count(),
+        4,
+        "four lanes out of the one load:\n{body}"
+    );
+    // And the one check BRANCHES to the trap: a check that computes a condition
+    // and drops it reads exactly like this one from the counts alone.
+    let arm = &body[body.find("i32.or").expect("no span check at all")..];
+    let arm = &arm[..arm.find("\n      end").expect("unterminated check")];
+    assert!(
+        arm.contains("if ") && arm.contains("select") && arm.contains("call "),
+        "the check's branch must reach the trap, naming the first lane out of \
+         range:\n{arm}"
+    );
 }
 
 /// The comparison the milestone rests on: the same four elements read one at a
