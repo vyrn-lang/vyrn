@@ -1,6 +1,7 @@
 # Vyrn compiler workspace.
 #
 #   - vyrn-frontend : lexer + parser + AST + type checker + tree-walking interpreter
+#   - vyrn-lower    : the lowered form (RFC-0101) — the checker's answers, written down
 #   - vyrn-codegen  : emits code (textual LLVM IR today; wasm directly, in progress)
 #   - vyrn-cli      : the `vyrn` driver
 #
@@ -32,6 +33,7 @@
 resolver = "2"
 members = [
     "vyrn-frontend",
+    "vyrn-lower",
     "vyrn-codegen",
     "vyrn-cli",
 ]

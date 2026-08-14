@@ -1,0 +1,16 @@
+[package]
+name = "vyrn-lower"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The lowered form (RFC-0101): the checker's answers, written on a monomorphized program."
+
+[dependencies]
+# The only dependency, and it is the crate below every consumer. `vyrn-lower`
+# sits between the checker and the engines (RFC-0101 §2.1), so it must not see a
+# backend: a form that knows what a backend wants is a form that decided for it.
+vyrn-frontend = { path = "../vyrn-frontend" }
+
+[lib]
+name = "vyrn_lower"
+path = "src/lib.rs"
