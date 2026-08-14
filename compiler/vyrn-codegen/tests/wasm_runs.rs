@@ -13,7 +13,8 @@
 //! whose prologue and epilogue agree — all four at once, in one assertion.
 //!
 //! Every test here needs wasmtime, so all five are in the IGNORED tier: a plain
-//! `cargo test` reports them `ignored` WITH the reason, and CI's parity job runs
+//! `cargo test` counts them `ignored` (and prints the reason, without
+//! `--quiet`) rather than green, and CI's parity job runs
 //! `cargo test -p vyrn-codegen -- --ignored` with `VYRN_REQUIRE_TOOLS=1`, which
 //! turns a missing wasmtime into a panic. They used to be ordinary `#[test]`s
 //! that early-`return`ed on a missing binary, so they passed in every CI job

@@ -16,7 +16,8 @@
 //! space, or the numbers do not come out.
 //!
 //! Needs clang, a wasi sysroot and a wasmtime binary, so both tests are in the
-//! IGNORED tier — a plain `cargo test` reports them `ignored` with the reason,
+//! IGNORED tier — a plain `cargo test` counts them `ignored` (and prints the
+//! reason, without `--quiet`) rather than green,
 //! and CI's parity job runs `cargo test -p vyrn-codegen -- --ignored` with
 //! `VYRN_REQUIRE_TOOLS=1`, where a missing tool panics instead of skipping.
 //! (This is also why the STANDALONE ladder is the one that carries this RFC's

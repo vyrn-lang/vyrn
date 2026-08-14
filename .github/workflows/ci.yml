@@ -261,8 +261,10 @@ jobs:
         # nothing — while the parity job's own comment above cited
         # `layout_vs_clang` as the reason an ARM leg would add nothing.
         #
-        # They are `#[ignore]`d now (so the four-platform test job reports them
-        # `ignored` with the reason instead of green) and run here, the one place
+        # They are `#[ignore]`d now — the four-platform test job counts them
+        # `1 ignored` / `2 ignored` / `5 ignored` instead of green (the `--quiet`
+        # formatter prints the count, not the reason string; drop `--quiet` to
+        # read it) — and they run here, the one place
         # with clang, the sysroot, the builtins archive and wasmtime together.
         # `VYRN_REQUIRE_TOOLS=1` from `env:` above is what makes a missing tool a
         # panic rather than a skip, so a broken cache fails this step.

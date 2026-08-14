@@ -18,7 +18,8 @@
 //! on the mapping below.
 //!
 //! Needs clang, a wasi sysroot and wasmtime, so it is in the IGNORED tier: a
-//! plain `cargo test` reports it `ignored` with the reason, and CI's parity job
+//! plain `cargo test` counts it `ignored` (and prints the reason, without
+//! `--quiet`) rather than green, and CI's parity job
 //! — the one place with all three — runs `cargo test -p vyrn-codegen --
 //! --ignored` with `VYRN_REQUIRE_TOOLS=1`, which turns a missing tool into a
 //! panic. Before that this was an ordinary `#[test]` that early-`return`ed, so
