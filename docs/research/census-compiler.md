@@ -43,9 +43,10 @@ entry says "design critique", not "defect".
 | 9 | Medium | N copies | **"Which types cross the JSON wire, and as what" is answered by four independent `match`es over `Type`** (`codec::codable`, `types::type_schema`, `jsonenc::body`, `jsondec::body`); `Lazy` already collects three different answers. | 2.3 |
 | 10 | Medium | second copy | **The CLI's extern trap stub spells codegen's symbol scheme and the interpreter's trap wording as a third copy of each** (`main.rs:2890`) — parity-load-bearing bytes with three sources, where one of the two owners is already exported. | 2.4 |
 
-Counts: **14 CONFIRMED** (1.1–1.5, 2.1, 2.2, 2.4, 2.5, 2.6, 3.1, 4.1, 4.2,
-4.3), **8 PLAUSIBLE / design critique** (1.2 design critique, 1.6, 2.3, 2.7,
-3.2, 3.3, 4.4, 5.x observations). Each entry carries its own label.
+Counts: **14 CONFIRMED** (1.1, 1.3, 1.4, 1.5, 2.1, 2.2, 2.4, 2.5, 2.6, 3.1,
+3.3, 4.1, 4.2, 4.3 — two of them reproduced by running programs), **5
+PLAUSIBLE** (1.6, 2.3, 2.7, 3.2, 4.4), **4 design critiques** (1.2 and the
+three in 4.5). Each entry carries its own label.
 
 ---
 
