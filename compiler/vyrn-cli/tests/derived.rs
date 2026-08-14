@@ -481,6 +481,111 @@ fn a_pin_onto_an_occupied_path_is_the_same_error() {
     assert!(err.contains("notes/recent"), "{err}");
 }
 
+/// Two api modules declaring one type name with DIFFERENT shapes is a build
+/// failure naming both files — not a silent pick.
+///
+/// Every flavor builds one flat module out of the directory, so the name is the
+/// only handle it has: `client` re-emits declarations and would keep the first,
+/// typing `pastesCreate` by `notes`' record (a 422 on every call, at runtime);
+/// `rpc` imports instead and emits two conflicting import lines.
+#[test]
+fn one_type_name_with_two_shapes_fails_the_build_naming_both_files() {
+    for (tag, driver) in [
+        ("typeclash", DRIVER),
+        ("typeclash_client", "import { client } from \"std/rpc\"\nimport { pastesCreate } from client(\"./server/api\")\nfn main() -> Int64 { return 0 }\n"),
+    ] {
+        let dir = scratch(tag);
+        project(&dir);
+        write(
+            &dir,
+            "server/api/pastes.vyrn",
+            "import { Id } from \"../../shared/wire\"\n\
+             export type CreateReq = { body: String }\n\
+             export fn create(req: CreateReq) -> Id {\n    return 1\n}\n",
+        );
+        write(
+            &dir,
+            "server/api/notes.vyrn",
+            "import { Id } from \"../../shared/wire\"\n\
+             export type CreateReq = { title: String, body: String }\n\
+             export fn create(req: CreateReq) -> Id {\n    return 2\n}\n",
+        );
+        write(&dir, "server.vyrn", driver);
+        let out = vyrn()
+            .arg("check")
+            .arg(dir.join("server.vyrn"))
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{tag}: last-wins is never silent");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("`CreateReq`"), "{tag}: names the type: {err}");
+        assert!(
+            err.contains("one name may carry only one shape"),
+            "{tag}: {err}"
+        );
+        // Both origins, and both shapes — which of the two to keep is the
+        // author's decision, so the message hands over what it had.
+        assert!(err.contains("pastes.vyrn"), "{tag}: the first file: {err}");
+        assert!(err.contains("notes.vyrn"), "{tag}: the second file: {err}");
+        assert!(err.contains("{ body: String }"), "{tag}: {err}");
+        assert!(
+            err.contains("{ title: String, body: String }"),
+            "{tag}: {err}"
+        );
+    }
+}
+
+/// The same name declared IDENTICALLY in two modules is ordinary sharing, and
+/// still dedupes into one re-emitted declaration.
+///
+/// `TypeInfo.source` is the compiler's canonical rendering of the declaration, so
+/// "identical" is structural: the two modules below differ in spacing and in a doc
+/// comment, and the shared `Id` comes through an import rather than a
+/// declaration.
+#[test]
+fn a_name_declared_identically_in_two_modules_is_not_a_collision() {
+    let dir = scratch("typeshare");
+    project(&dir);
+    write(
+        &dir,
+        "server/api/pastes.vyrn",
+        "import { Id } from \"../../shared/wire\"\n\
+         export type CreateReq = { body: String }\n\
+         export fn create(req: CreateReq) -> Id {\n    return 1\n}\n",
+    );
+    write(
+        &dir,
+        "server/api/notes.vyrn",
+        "import { Id } from \"../../shared/wire\"\n\
+         /// The same shape, written out again.\n\
+         export type CreateReq = {  body:  String  }\n\
+         export fn create(req: CreateReq) -> Id {\n    return 2\n}\n",
+    );
+    write(
+        &dir,
+        "server.vyrn",
+        "import { client } from \"std/rpc\"\nimport { pastesCreate, notesCreate } from client(\"./server/api\")\nfn main() -> Int64 { return 0 }\n",
+    );
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("server.vyrn"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "shared name must compile: {err}");
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        src.matches("export type CreateReq =").count(),
+        1,
+        "one declaration for one name:\n{src}"
+    );
+    assert_eq!(
+        src.matches("export type Id =").count(),
+        1,
+        "the imported declaration is re-emitted once:\n{src}"
+    );
+}
+
 /// A client root, calling the generated stubs by their qualified names.
 const BOOT: &str = "\
 import { client } from \"std/rpc\"

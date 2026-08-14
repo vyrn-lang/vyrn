@@ -34,8 +34,10 @@ import { fromBytesOr } from "std/strings"
 import { checkContract } from "std/contract"
 
 // Generator diagnostics (RFC-0099): a contract violation fails the load in this
-// generator's own wording, at the generator's call site.
-import { reportHere, Severity } from "std/diag"
+// generator's own wording, at the generator's call site. `report` where the fault
+// has a declaration to point at (`rpcTypeCollision`), `reportHere` where it is a
+// property of the directory as a whole.
+import { report, reportHere, Severity } from "std/diag"
 
 // The symbol map (RFC-0073 M1): `rpc` and `client` bake a `symbolMap()` into the
 // module they emit, mapping every symbol back to the declaration it stands for.
@@ -850,13 +852,72 @@ fn rpcCollision(routes: Array<RpcRoute>) -> String {
     return ""
 }
 
-/// Validate every module under the directory against `Api` + serializability,
-/// returning the first objection or "".
+/// Validate every module under the directory against `Api` + serializability, and
+/// the directory as a whole against the one-name-one-shape rule, returning the
+/// first objection or "".
 gen fn rpcValidateAll(mods: Array<RpcModule>) -> String {
     for m in mods {
         let err = validateContract(moduleInterface(m.modPath))
         if err != "" {
             return err
+        }
+    }
+    return rpcTypeCollision(mods)
+}
+
+/// One type name the directory defines: the canonical declaration that defines
+/// it, and the file that declared it — a file is what a collision message has to
+/// name, because which of the two an author meant is exactly what the generator
+/// does not know.
+type RpcDef = { name: String, source: String, from: String }
+
+/// The declaration already registered under `name`, or one with an empty `name` —
+/// the linear scan an api directory's handful of type names deserves.
+gen fn rpcDefinedAs(defs: Array<RpcDef>, name: String) -> RpcDef {
+    for d in defs {
+        if d.name == name {
+            return RpcDef { name: d.name.copy(), source: d.source.copy(), from: d.from.copy() }
+        }
+    }
+    return RpcDef { name: "", source: "", from: "" }
+}
+
+/// Refuse two DIFFERENT declarations of one type name across the directory
+/// (RFC-0099), rather than let a generator pick one.
+///
+/// Every flavor builds ONE flat module out of the whole directory, so a name is
+/// the only handle any of them has on a type. `client` re-emits declarations and
+/// would keep the first, silently typing another module's procedure by this
+/// module's record — a 422 on every call, at runtime, from a generator that had
+/// both declarations in hand. `rpc` and `clientInProcess` import instead, so the
+/// same collision emits two `import { CreateReq } from …` lines and the module
+/// they build does not load. One rule, checked once, ahead of all three.
+///
+/// IDENTICAL declarations are not a collision. `TypeInfo.source` is the
+/// compiler's canonical rendering of the declaration, not the author's text, so
+/// equal source means equal shape — same fields, same order, same types, same
+/// refinement — with formatting and doc comments already normalised away. That is
+/// what a name legitimately shared across modules looks like: one declaration in a
+/// `shared/` module that two api modules both import (reflection reports it in
+/// each interface, identically), or the same small alias written out twice. Both
+/// dedupe exactly as before.
+gen fn rpcTypeCollision(mods: Array<RpcModule>) -> String {
+    let mut defs: Array<RpcDef> = []
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for t in iface.types {
+            let prior = rpcDefinedAs(defs, t.name)
+            if prior.name == "" {
+                defs.push(RpcDef { name: t.name.copy(), source: t.source.copy(), from: t.origin.file.copy() })
+            } else if prior.source != t.source {
+                return report(
+                    Error,
+                    t.origin.file,
+                    t.origin.line,
+                    t.origin.col,
+                    "`\{t.name}` is declared here as `\{t.source}`, and in `\{prior.from}` as `\{prior.source}` — one api directory derives one module, so one name may carry only one shape; rename one of them, or declare it once in a module both import",
+                )
+            }
         }
     }
     return ""
@@ -1213,6 +1274,11 @@ type RpcClientTypes = { source: String, symbols: Array<Symbol> }
 /// for a declaration in `shared/`, and nothing else in the emitted source says
 /// so. Source and symbols come out of the SAME loop because two loops over one
 /// dedupe is a map free to claim a symbol the module does not declare.
+///
+/// The dedupe is BY NAME, and that is safe only because `rpcValidateAll` has
+/// already refused two different shapes under one name (`rpcTypeCollision`) — every
+/// caller runs it first. Without that gate this loop keeps the first declaration
+/// and silently retypes the loser's procedures.
 gen fn rpcClientTypes(mods: Array<RpcModule>) -> RpcClientTypes {
     let mut seen: Array<String> = []
     let mut out = ""
