@@ -1,7 +1,14 @@
 # RFC-0101 — A Backend Is an Emitter
 
 - **Status:** **Proposed.** Nothing here is implemented. The measurements are
-  real and were taken at `dd3a9fe`; the design is not.
+  real and were taken at `dd3a9fe`; the design is not. **Amended from
+  `docs/research/lowering-design.md`**, which checked this RFC against eight
+  compilers and against the code. Four of its claims died to measurement and are
+  recorded where they stood, not deleted: the precedent this RFC cited for a
+  monomorphized shared form does the opposite (§2.1 item 1), the parity claim
+  was larger than the evidence (§2.4), the `(String, Type)` convention is 16
+  functions and not ~300 (§1.2 and §3 M3), and §2.1 item 6 promised a column
+  the AST does not carry. The design holds. None of the corrections reverses it.
 - **Depends on:** RFC-0077 (the direct wasm backend — the second compiled engine,
   and the reason the duplication is now three-way), RFC-0086 (the compiler asks
   the type — "no second list"), RFC-0091 / RFC-0092 / RFC-0093 (the ownership
@@ -12,6 +19,11 @@
   uses was re-measured here at `dd3a9fe`, and two of its claims are corrected
   below: the identity it asks for already exists, and the validation ladder it
   names as duplicated is not.
+  Second pass: `docs/research/lowering-design.md`, measured at `1eff3d3` — the
+  prior art (rustc MIR, Swift SIL, GHC Core, QBE, Zig AIR, Go SSA, Cranelift,
+  MLIR) and the cost of reading this design. Its §4 lists fifteen amendments.
+  All fifteen are applied below, and each is marked **[A1]** to **[A15]** where
+  it lands, so a reader can check the amendment against the text it changed.
 - **Principle:** the checker decides. A backend encodes what was decided. Where a
   backend decides, it is deciding a second time.
 
@@ -84,9 +96,18 @@ Four engines then re-derive the same answers:
 |---|---|---|
 | `direct.rs:4740` `peek` | a second expression typer for the wasm backend | **510 lines**, 49 call sites |
 | `direct.rs:4550` `peek_arm`, `:7613` `peek_ho`, `:5641` `gen_peek`, `:4525`/`:4567` `match_ty`/`join` | its satellites — including the checker's match-arm type join, re-run at lowering time | — |
-| `lib.rs` | the `(String, Type)` return convention on every `gen_*` emitter, plus `static_ty` (`lib.rs:3973`, 34 lines) | a convention over ~300 functions |
+| `lib.rs` | the `(String, Type)` return convention on the `gen_*` emitters, plus `static_ty` (`lib.rs:3973`, 34 lines) | **16 functions, 40 occurrences** |
 | `declared.rs:236` `Declared::type_of` | a fourth partial copy, for `own` and `movecheck` | 4-arm |
 | `interp.rs:6539` `type_of` | a fifth partial copy | 77 lines |
+
+**[A10] That row said "a convention over ~300 functions" and it was wrong.**
+Measured in `docs/research/lowering-design.md` §2.3: **16 functions return
+`Result<(String, Type), String>`**, the spelling appears **40 times**, and
+`lib.rs` holds 400 `fn`s. The first draft counted the file, not the convention.
+M3's gate is written from the measured number below, because a gate written from
+a wrong number is a gate nobody can meet or miss on purpose. The convention is
+smaller than claimed here and larger than claimed on the other axis: `peek`'s
+49 call sites are verified exactly.
 
 `solve_param` (`lib.rs:12328`) is documented as "Mirrors the checker's `unify`,
 minus error checks (the checker already validated the call)" — it is at least
@@ -330,6 +351,17 @@ Not a control-flow graph, not three-address code, not an SSA form. A new crate,
 becomes a runnable one, and already the only point with both halves of what the
 JSON synthesis needs. It is the seam.
 
+**[A1] This shape is not novel, and naming what it copies is worth more than
+arguing it.** It is Zig's AIR: fully typed, one instance per instantiated
+function, produced after comptime and generics are resolved, structured control
+flow as instructions, and six backends over it including a C backend that emits
+text (`src/Air.zig`, `src/codegen.zig`; see `docs/research/lowering-design.md`
+§1.5). Every structural choice in §2.1 and §2.2 was reached here independently
+and is shipped there. Zig is also the only surveyed system with no runtime
+generics and no garbage collector, which is Vyrn's position exactly. An RFC that
+proposes a novel shape is argued. An RFC that proposes a shipped shape is
+checked — and a future reader who finds this form wrong knows where to look.
+
 `Lowered` holds:
 
 1. **Concrete function bodies, one per instantiation.** Monomorphization moves
@@ -338,6 +370,32 @@ JSON synthesis needs. It is the seam.
    `check_instantiations`'s whole-backend round trip all collapse into one
    worklist with one identity — and the identity is the type arguments, not a
    mangled string (#165).
+
+   **[A3] This RFC cited rustc for this item, and rustc does the opposite.**
+   `TyCtxt::instance_mir` is keyed on `DefId`, not on generic arguments: the
+   shared MIR body is generic, and each consumer substitutes at the use site —
+   codegen with `instantiate_mir_and_normalize_erasing_regions`, the interpreter
+   with `instantiate_from_current_frame_and_normalize_erasing_regions`. One body,
+   two instantiation strategies. Zig does it the other way: `InternPool` gives
+   each generic instantiation its own function entity, and no backend ever sees a
+   generic. **This is the one place the two strongest precedents disagree, so
+   this RFC chooses rather than cites.**
+
+   **Choose Zig's.** rustc keeps a generic body because it must — trait objects,
+   separate compilation, an interpreter that instantiates lazily. Vyrn has none
+   of those, monomorphizes everything already, and has no function pointers
+   (RFC-0037; `direct.rs:864`). A substitution is a decision, and a generic body
+   leaves that decision in three engines, which is the sentence this RFC is
+   built on.
+
+   **The fallback is rustc's, and it has a threshold.** If concrete bodies cost
+   too much, `Lowered` holds one generic body plus one instance list, and every
+   consumer substitutes through a single shared helper — one substitution site,
+   not three. The threshold is a number **M1 measures and writes into this file**:
+   peak resident memory and instance count for the largest corpus module, against
+   the same build today. It is not invented here, because a threshold invented
+   before the measurement is a number that decides nothing. M1 states it; M2 is
+   the first milestone that can cross it.
 2. **A type on every expression node.** Not a side table — a field. `peek`,
    `static_ty`, both `expect` stacks, `declared::type_of` and `interp::type_of`
    read it instead of deriving it.
@@ -347,6 +405,21 @@ JSON synthesis needs. It is the seam.
    `continue`, `return` and `?`, every match-arm handover. "Innermost frame
    first, newest binding first" becomes the order the steps are in, instead of an
    invariant three files assert.
+
+   **The releases are elaborated before any backend sees the body, and two
+   compilers reached that independently.** rustc's `MirPhase` says what the
+   difference is: in analysis MIR a `Drop` terminator is a *conditional* drop; in
+   runtime MIR "the drops are unconditional", and `ElaborateDrops` is the pass
+   between them, classifying each drop as static, dead, conditional or open from
+   a maybe-initialized dataflow pair. **An unelaborated drop is a question. An
+   elaborated drop is an instruction.** Vyrn's `droppable` map is the question,
+   asked once in the interpreter and five times in each backend, and each asker
+   answers it again. Swift makes the same move from the other side: `destroy_value`
+   is an instruction in the IR, the `SILVerifier` checks it at every point until
+   ownership is lowered, and the pass that erases it has been moved *later* over
+   time as more passes learned to keep it. So the direction of travel in both
+   systems is to keep releases explicit longer, not shorter. This item is the
+   elaborated form, in the shared body, before the split.
 4. **Resolved trap sites.** A trap carries its wording, already formatted, as a
    string in the form. `IO_MESSAGES`, the bounds messages, the shift and divide
    guards, the depth limits: one table, in `vyrn-lower`, which every engine can
@@ -354,8 +427,17 @@ JSON synthesis needs. It is the seam.
 5. **Resolved dispatch.** Which `impl` a protocol call reaches, which
    defunctionalized variant a stored `fn` is, which field offset a projection
    names — decided once.
-6. **Positions.** Every node keeps the line and column it came from, because a
-   trap message and a runtime diagnostic name them.
+6. **Positions.** Every node keeps the **line** it came from, because a trap
+   message and a runtime diagnostic name it.
+
+   **[A4] This item said "line and column", and the AST has no column to carry.**
+   `compiler/vyrn-frontend/src/ast.rs` spells `line: usize` 40 times and
+   `col: usize` twice. `Diagnostic` carries `col` and `end_col`
+   (`diagnostics.rs:52-56`), but the tree the lowering reads does not. Promising
+   columns on every node means threading a column through the parser and through
+   every AST synthesizer — the pervasive change §2.5 says this design avoids. No
+   trap message prints a column. So the form carries the line, and a consumer
+   that later needs columns writes its own RFC and pays the parser cost there.
 
 ### 2.2 Control flow stays structured, deliberately
 
@@ -368,8 +450,21 @@ make the shared layer pay a relooper so that the one backend that cannot use a
 CFG can get its structure back.
 
 So the form keeps `if` / `loop` / `block` / `break n` / `continue n` / `return`,
-and Cranelift — which wants a CFG — flattens on the way in. That is the cheap
-direction.
+and a Cranelift backend — which wants a CFG — flattens on the way in. That is the
+cheap direction, and Zig's AIR is the same choice made for the same reason: it
+is the only surveyed system with structured control flow in its shared form, and
+the only one with a first-class wasm backend of its own.
+
+**[A15] An earlier draft said Cranelift "flattens on the way in" as if Cranelift
+did the flattening. It does not.** `cranelift-frontend`'s `FunctionBuilder`
+builds SSA for the producer — `declare_var` / `def_var` / `use_var` over Braun et
+al. — but Cranelift IR is a flat CFG with no structured `if` or `loop` in the
+builder API, and **the producer writes the flattener**. Wasmtime's own wasm
+frontend carries a `ControlStackFrame` stack to do it. So a Cranelift emitter
+starts with a control-flow flattener before it emits one instruction. The
+direction is still the cheap one — a relooper in the shared layer would be worse,
+and every backend would pay it — but the flattening is work, and §4 must not
+price a new backend as if it were free.
 
 Expressions stay a tree, for the same reason: all three consumers already walk one.
 An interpreter wants a tree; both emitters emit into a buffer as they walk. Nobody
@@ -392,6 +487,20 @@ Everything below the decision:
 
 A new backend writes those. It does not write the language.
 
+**[A5] And the rule that was here by omission is now a rule: the form is the
+contract, and there is no shared emitter interface.** No `BuilderMethods`, no
+`emit_add` trait, no abstract instruction builder that three backends implement.
+rustc built exactly that — `rustc_codegen_ssa`'s `BuilderMethods` — and its
+newest backend declined it: a code search for `BuilderMethods` under
+`compiler/rustc_codegen_cranelift` returns **zero hits**, while
+`rustc_codegen_llvm` and `rustc_codegen_gcc` both implement it across
+`builder.rs`, `abi.rs` and `intrinsic.rs`. cg_clif reuses the driver and the
+linking layer, then walks MIR itself with its own place, discriminant, vtable,
+ABI and intrinsic code. **Two of three backends share the instruction
+abstraction. Three of three share the IR.** An omission is not a rule, and the
+next person to propose a shared emitter trait should have to argue against this
+paragraph.
+
 ### 2.4 The interpreter runs it
 
 Yes — and this is the part that changes what parity *means*.
@@ -399,10 +508,29 @@ Yes — and this is the part that changes what parity *means*.
 Today the interpreter is the oracle: three engines are compared against each
 other, and when they agree, the suite is green. If the interpreter walks the same
 lowered form the backends encode, then every decision recorded in the form is
-made **once for all three engines**, and parity stops testing whether three copies
-agree about it. It tests only what is left: encoding. That is the difference
-between an invariant proved empirically over 161 examples and an invariant that
-holds by construction over every program.
+made **once**, and no engine can hold a different answer to it by accident.
+
+**[A2] The first draft claimed more than that, and the claim does not survive its
+own §1.4.** It said parity "stops testing whether three copies agree" and that
+the invariant would "hold by construction over every program". Two facts refuse
+it. Miri runs the same MIR the backends compile — `Machine::load_mir` and
+`codegen_mir` both go through `TyCtxt::instance_mir` — **and** disables five
+passes over it, because it wants its own diagnostics
+(`MIRI_DEFAULT_ARGS`: `-CheckAlignment,-CheckNull,-CheckEnums`,
+`-ReferencePropagation`, `-GVN`). A shared form did not make those two consumers
+identical. And Vyrn's interpreter already does the same thing: it runs no
+releases on the `?` path (`interp.rs:2760`) because the host reclaims, which
+§1.4 records as intentional. The form does not delete that difference. It moves
+it.
+
+**The smaller true claim: a shared form does not make three engines identical. It
+makes their differences declared instead of accidental.** Today a difference
+between the engines is a comment, or nothing, and parity finds it as a symptom
+over 161 examples. After this, a difference is a place where an engine
+deliberately does not run what the form says, and there are few enough of them to
+list. Parity keeps its job on everything else — encoding — and it keeps its job
+on the declared differences too. That is a smaller promise, it is true, and it
+still justifies six milestones.
 
 It is also the phase with the largest cost, which is why it is last (§3, M6).
 `interp::expr` is 1,847 lines and `interp::stmt` is 775; they walk `Expr` and
@@ -425,11 +553,88 @@ consumed by both backends under an explicit comment
 (`lib.rs:4546`: "Node-address identity — must match `vyrn_frontend::own`"). The
 migration in §3 reuses that key and never generalizes it.
 
+### 2.6 The form checks itself, in debug builds, forever
+
+**[A7]** A form with a type on every node admits an independent type-check over
+itself: walk `Lowered`, re-derive each node's type from its children, and assert
+it equals the recorded one. That is GHC's `-dcore-lint`, described by GHC's own
+authors as "a 100% independent check on the type inference engine", and it is
+what Swift's `SILVerifier` does for ownership until ownership is lowered. **Both
+systems that verify their IR verify it continuously.** An untyped IR cannot buy
+this at any price.
+
+M1's corpus gate is a one-off version of the same check, aimed at the copies it
+will replace. Making it permanent — `debug_assert`-gated, one pass, off in
+release — turns "the lowering is right" from a claim a migration made once into
+an invariant every future change meets. It also gives the release steps of item 3
+somewhere to be checked: a release of a place that is not live is a lint failure,
+not a leak found by `memory.rs` three PRs later.
+
+### 2.7 The form has a text rendering, and it is `vyrn emit-lowered`
+
+**[A11] Not an open question — an M1 deliverable.** Open question 5 asked
+whether the form needs a text rendering. It does, it is cheap, and the thing that
+makes it safe is a gate rather than a promise.
+
+**The name is a subcommand.** This repository spells emitters as subcommands —
+`vyrn emit-ir`, `vyrn emit-gen` (`vyrn-cli/src/main.rs:6-7`) — not as build
+flags. So `vyrn emit-lowered <file>`, beside them, and not `build
+--emit-lowered`.
+
+**Scope: the root module's functions, by default.** `vyrn why --memory` already
+decided this and wrote down why: "Only the file asked about. A linked program
+carries every import's functions, and they are another file's answer"
+(`main.rs:1139-1141`). The median example is 67 lines. Its linked program is not.
+
+**Shape: one decision per line, indentation is structure, the position is the
+last column.** A type on every binding and every call result, so `grep ': Array<'`
+answers a class of question in one command. A trap site is one token — `!aoob` —
+so `grep '!'` lists every trap a program can reach. A release is a line, not an
+inference: `release xs : FreeArr @8 exit=fn`, which is `own`'s answer *placed*.
+Instantiations are spelled as `fn map<Int64,Str>`; the mangled symbol stays in
+the emitters, because #165 was a mangled string used as an identity and a dump
+that shows the mangle invites the same confusion into every bug report.
+
+**The rule the dump exists to serve: a decision lives in one file, and the dump
+names that decision at every site it applies.** `docs/research/lowering-design.md`
+§2.2 measured what that is worth on one question — *where does an array bound get
+checked?* Today, answering it across the three engines means reading **23 sites
+in three files, over 700 lines**, none of which references any other except
+through a comment. After the form, it is `vyrn emit-lowered f.vyrn | grep '!aoob'`
+plus one arm of the lowering. Where a decision has to be re-stated per target it
+is not a decision, and §2.3 already lists what is allowed to be re-stated.
+
+**Determinism is a gate, not an intention, and the gate lands with the dump.**
+This repository has already paid for the other choice: one `HashSet`, iterated by
+the direct backend, built "SIX different modules from this one file — same
+length, first difference at byte 1016" (`tests/reproducible.rs:8-17`), and that
+test crosses a process boundary on purpose because a `HashSet` iterates
+identically twice inside one process. `emit-lowered` gets a row in that file on
+the day it lands, beside `the_same_source_emits_the_same_ir_in_every_process`.
+Sort by module, then name, then rendered type arguments. Never print from a
+`HashMap`.
+
+**And the gate is the whole point, because the precedent this design copies got
+this part wrong.** Zig's `--verbose-air` is debug-only, checked by nothing, and
+has been incomplete or crashing repeatedly (ziglang/zig #7670, #10031, #12599).
+This repository has the matching lesson at `b1eef04`, where a second native
+backend was deleted after going from working to unbuildable in twelve days,
+unnoticed, because nothing checked it. An ungated dump decays, and a decayed dump
+is worse than none, because a reader trusts it.
+
+One thing the dump also repairs. `vyrn emit-ir` gives the native backend a text
+tier that ten test files already use to prove properties no program output can
+show — `tests/places.rs` counts allocating calls in the emitted IR to prove a
+container mutation moves a header instead of copying it. **The direct wasm
+backend has no text form at all.** `emit-lowered` sits above both and covers the
+half of the compiled surface that is currently untestable that way.
+
 ---
 
 ## 3. Migration
 
-Six milestones. **The full parity gate is green at the end of every one** —
+Six milestones, **twelve pull requests**. **The full parity gate is green at the
+end of every one** —
 `cargo test -p vyrn-cli --release --test parity -- --ignored --test-threads=1`,
 plus the CI debug profile, plus `memory.rs`, `limits.rs` and `genwasm.rs`. No
 milestone lands with a backend half-converted.
@@ -437,7 +642,43 @@ milestone lands with a backend half-converted.
 Each milestone states a line gate. RFC-0094 M1 demanded a net reduction, measured
 +149, and was merged with the bar moved to M2. That is written into RFC-0094 where
 it happened, and the same rule applies here: **a milestone that fails its gate says
-so in this file.** A gate moved quietly is a gate that was never a gate.
+so in this file.** A gate moved quietly is a gate that was never a gate. A
+twelve-PR arc needs that discipline more than a six-PR one, not less.
+
+### 3.0 Two PRs per milestone, and the budget each has to fit
+
+**[A8] The first draft's six milestones did not fit what one agent can land.**
+M3 deletes 510 lines and rewires 49 call sites; M4 rewrites three encoders
+together and is the milestone the bug ledger pays for; M6 points 2,622 lines of
+interpreter walk at a new form. Measured over the last 30 commits on `main`, the
+median commit is **611 insertions across 10 files**. That is the proven budget,
+so it is the budget: **≤ 800 changed lines and ≤ 15 files per PR.**
+
+M1 already invented the pattern that fixes this — "this deletes nothing on
+purpose" — and applied it once. It is now the rule for every milestone. Each
+lands as two PRs:
+
+- **A — shadow.** The lowering computes the answer. A corpus gate asserts it
+  equals what each engine derives today. Nothing is deleted, nothing changes
+  behaviour, parity is trivially green, and a disagreement is a bug this PR
+  *found* rather than a regression the next PR *caused*. Additive, small, and its
+  line count is stated rather than excused.
+- **B — delete.** The engines read the recorded answer and their derivation goes.
+  Nearly all deletion. A deleted line is the cheapest line an agent can review.
+
+The risky half of each pair is the small additive one. The line gates below are
+the gates for the pair; PR A is expected to be positive and PR B pays for it.
+
+**M0 — the failure output, before any of this.** [A14] When a parity run goes
+red, `tests/parity.rs:118-123` and `:167-172` push two whole program outputs,
+`{:?}`-escaped onto one line each, with every newline spelled `\n` — for a corpus
+whose largest example is 944 lines. The reader must find the first difference by
+eye. The same repository already knows better: `reproducible.rs` reports the
+offset of the first differing byte, and `limits.rs` reads the number it asserts
+out of the code that enforces it. Replace the two dumps with the first differing
+line number, that line from each engine, and two lines of context. **This is one
+function, it needs nothing from this RFC, and it is the failure output every
+milestone below will be read through. It lands in its own PR ahead of M1.**
 
 **M1 — the form exists, and it is checked against the copies it will replace.**
 `vyrn-lower` produces `Lowered` from a checked program: types on nodes, positions,
@@ -448,6 +689,21 @@ It converts "the two copies agree" from an assumption into a gate, before a line
 is removed — and if they disagree anywhere, that disagreement is a bug found by
 this milestone rather than a regression caused by M2. Line gate: additive; the
 number is the cost of the claim, and it is stated, not excused.
+
+M1 also carries three things the first draft left out or left open.
+
+- **`vyrn emit-lowered`, built and gated here** [A11]. §2.7 specifies it. It ships
+  with its row in `tests/reproducible.rs` in the same PR, not after. The dump is
+  what makes M1's own gate readable, and an ungated dump is the one part of Zig's
+  AIR this design refuses.
+- **The lint of §2.6, on the corpus** [A7]. The one-off check M1 was already
+  going to write becomes the permanent debug-build pass, in the same PR, because
+  the difference is where it is called from.
+- **The two measurements that decide the shape.** Peak resident memory and
+  instance count for the owned, concrete-body form on the largest corpus module —
+  the number the §2.1 item 1 fallback threshold is written from [A3] — and the
+  cost of the owned form against the borrowed one, which is open question 1 [A6].
+  Both are numbers M1 writes into this file.
 
 **M2 — monomorphization moves into the lowering.** One worklist, keyed on type
 arguments. `lib.rs`'s two mutually-feeding worklists, `direct.rs`'s FIFO index
@@ -463,6 +719,14 @@ both `expect` stacks, both copies of `expected_fn_sig` / `fn_arg_param_types` /
 deleted. The `(String, Type)` convention in `lib.rs` becomes `String`. Gate: at
 least −1,200 lines across the two backends.
 
+**[A10] And the size of that convention change is 16 functions, not ~300.**
+`Result<(String, Type), String>` is returned by **16 functions** and the spelling
+appears **40 times**, in a file with 400 `fn`s; §1.2 records where the wrong
+number came from. So M3 is smaller than advertised on the signature axis and
+larger on the other one: `peek`'s **49 call sites**, verified exactly, are the
+work. The split follows §3.0 — PR A records the type and gates it against `peek`
+and the threaded answer; PR B deletes `peek`, its satellites and the convention.
+
 **M4 — release placement.** The lowering emits ordered `Release` steps at the
 exits `own` computes, and the backends encode them. The three scope-frame stacks,
 the three break/continue boundary indices, `emit_drop` (180), `rel_at` (239),
@@ -474,6 +738,15 @@ eleven "the other engine does it this way" comments are the acceptance
 criterion: each one either becomes unnecessary or names a real target difference.
 Gate: at least −900 lines across the three engines. #163, #166 and #172 are the
 regression tests; they already exist, in `memory.rs`.
+
+**[A9] M4 does not fit one PR pair, so it splits by exit kind.** It is the
+largest phase, it holds all three placement defects, and §3.0's budget applies to
+it like everything else. The order is the order the bug ledger ranks: **block
+exit first, then `break` / `continue` / `return`, then `?` and match-arm
+handover.** Each exit kind already has its regression tests in `memory.rs`, so
+each split has a gate under it before it starts. This works only if a construct
+can be half-migrated — the engines keep their old walk for the exits not yet
+moved — which is what open question 1's answer buys (§6.1).
 
 M4 also has a prediction to check first. The interpreter runs no releases on the
 `?` path (`interp.rs:2760`) while both backends walk one, and a declared `release`
@@ -489,9 +762,15 @@ stops re-spelling `IO_MESSAGES`. Gate: the count of trap literals outside the ta
 is **zero**, and a test asserts it — the same shape as the reserved-name gate
 RFC-0094 M2 landed.
 
-**M6 — the interpreter runs the lowered form.** Parity becomes structural for
-everything M1–M5 moved. Until this lands, the interpreter is still a third copy of
-what the form decides, and parity is still doing the work it does today.
+**M6 — the interpreter runs the lowered form.** For everything M1–M5 moved, the
+three engines stop holding three answers, and every place the interpreter still
+does something else becomes a **declared** difference with a name — the `?` path
+of §1.4 is the first one on that list. Not "parity becomes structural": §2.4 says
+why that claim was too large. Until this lands, the interpreter is still a third
+copy of what the form decides, and parity is still doing the work it does today.
+M6 splits by construct like M4, for the same reason: 2,622 lines of walk
+(`interp::expr` 1,847, `interp::stmt` 775) is not one PR, and the fallback to the
+old walk for unmigrated arms is what makes an intermediate state legal.
 
 **Order, and why.** Types are first because nothing else can move without them: a
 release needs a type to know deep from shallow, and a monomorphization is a type
@@ -506,11 +785,26 @@ pulled forward if M3 turns out to be bigger than measured.
 
 Stated briefly, because none of it is a reason to do M1.
 
-- **A new backend is an emitter.** Cranelift for fast debug builds — the thing
-  RFC-0077's own evidence table points at, where clang costs 1,974 ms and
-  cranelift 250 ms — becomes representation, locals, encoding and a runtime,
-  against a lowered form that already decided the language. An ARM native target
-  is the same shape. An alternate wasm engine is smaller still.
+- **A new backend is an emitter.** A Cranelift backend becomes representation,
+  locals, encoding, a control-flow flattener (§2.2) and a runtime, against a
+  lowered form that already decided the language. An ARM native target is the
+  same shape. An alternate wasm engine is smaller still.
+
+  **[A15] The 250 ms figure that used to be in this line is gone.** It cited
+  RFC-0077's clang-against-cranelift table as if a fourth backend would buy that
+  ratio. The published Rust measurement has Cranelift *slower* on incremental
+  builds — 7.98 s against 5.48 s — and faster on a full debug build, 49.93 s
+  against 54.64 s. Neither number transfers to Vyrn. §5 refuses to make a
+  compile-speed claim, and §4 was making one.
+- **A semantic change becomes a reviewable diff of the form.** [A13] After M6 the
+  lowered form is the single artifact, so changing what the language *means*
+  shows up as a diff of a checked-in dump inside the pull request, before anyone
+  runs anything. This is rustc's `mir-opt` model, and its workflow guide tells
+  authors to bless and commit the dump *before* implementing an optimization, "so
+  that you (and your reviewers) can see a before/after diff of what the
+  optimization changed". Snapshot **ten** examples with a `--bless` flag, not 161:
+  ten small snapshots are read, and 161 large ones are skipped. This is the payoff
+  that pays on every pull request, and the first draft of §4 omitted it.
 - **The differential harnesses cover three engines for one run.** `numbers.rs`
   generates 800 float cases into a Vyrn program and runs it under `vyrn run` —
   one engine, because running the other two costs a toolchain per case. When the
@@ -544,34 +838,78 @@ Stated briefly, because none of it is a reason to do M1.
   justified by speed.
 - **It does not make a fourth backend free.** The target-specific residue is a
   third of each existing backend — an allocator, a float formatter, a layout
-  engine, an encoder — and that is genuinely new work per target.
+  engine, an encoder — and that is genuinely new work per target. QBE is the
+  price list: about 8 kloc buys a whole optimizing backend for three
+  architectures, register allocation and the C ABI included. That says the ~5,400
+  lines §1.7 estimates for Vyrn's residue is the right order of magnitude, which
+  is a confirmation of the cost, not a discount on it.
 - **It does not touch the bugs already in the shared half.** `own.rs`'s fates,
   `layout.rs`, `predicate_binds` and the synthesized codecs are shared today and
   can still be wrong.
-- **Six milestones is a long arc against a live corpus.** The memory-model arc
-  ran ten phases and eighteen PRs, and every phase corrected its own brief. This
-  one should be expected to do the same, and the corrections belong in this file.
+- **Six milestones and twelve pull requests is a long arc against a live corpus.**
+  The memory-model arc ran ten phases and eighteen PRs, and every phase corrected
+  its own brief. This one should be expected to do the same, and the corrections
+  belong in this file. Fifteen of them arrived before M1 started, from
+  `docs/research/lowering-design.md`, and they are marked [A1] to [A15] above.
 
 ---
 
 ## 6. Open questions
 
-1. **Does `Lowered` own or borrow?** A form that borrows the `Program` is cheap
-   and pins the AST for the whole build; one that owns is a second copy of every
-   body, per instantiation. M1 should measure the owned version on the largest
-   corpus module before the shape is fixed.
-2. **What happens to `movecheck` and `own`?** Both key on node address in the AST
-   today. If the lowering carries releases explicitly, `own`'s placement output
-   has no consumer left in the backends — but `movecheck`'s diagnostics are about
-   source the user wrote, and they must not start naming lowered nodes.
-3. **Where does the loader's generated code enter?** Generators produce Vyrn
-   source that is parsed, checked and lowered like any other module (`loader.rs:1570`),
-   so it should need no special case. M1 should prove that rather than assume it.
-4. **Can `vyrn-lower` be a module of `vyrn-frontend` instead of a crate?** Lazier,
-   and it puts the trap table where the interpreter can already reach it. The
-   argument for a crate is only that `vyrn-frontend` is already 13,526 lines of
-   checker; that is not much of an argument.
-5. **Does the form need a stable text rendering?** `emit-ir` exists for the native
-   backend and is read in bug reports. An `emit-lowered` would be the same tool one
-   layer up, and it is the cheapest possible debugging aid for M1 — but a rendering
-   people read becomes a rendering people depend on.
+Five were asked. Two are now answered — 6.1 by the migration and 6.5 by rustc —
+and both keep their question here rather than disappearing into the design, so a
+reader can see what was decided and against what.
+
+### 6.1 Does `Lowered` own or borrow? **Answered: borrow, during the migration.**
+
+A form that borrows the `Program` is cheap and pins the AST for the whole build;
+one that owns is a second copy of every body, per instantiation. This was left
+open. **[A6] The migration decides it before performance gets a vote.** A
+borrowed node can carry the AST node it came from, and that is the only thing
+that lets an engine migrate one arm at a time and fall back to its old walk for
+the rest. Without it, every delete-half PR is all-or-nothing per engine, M4
+cannot split by exit kind and M6 has no legal intermediate state. M1 still
+measures the owned version on the largest corpus module — the number feeds the
+§2.1 item 1 fallback threshold — and the question is revisited after M6, when
+the fallback arms are gone and the only argument left is cost.
+### 6.2 What happens to `movecheck` and `own`? **Open.**
+
+Both key on node address in the AST today. If the lowering carries releases
+explicitly, `own`'s placement output has no consumer left in the backends — but
+`movecheck`'s diagnostics are about source the user wrote, and they must not
+start naming lowered nodes. Swift hints at the answer without giving it: it keeps
+diagnosis *before* canonicalization, which is where Vyrn already runs both of
+these. A hint is not an answer, and this stays open.
+
+### 6.3 Where does the loader's generated code enter? **Open.**
+
+Generators produce Vyrn source that is parsed, checked and lowered like any other
+module (`loader.rs:1570`), so it should need no special case. M1 proves that
+rather than assumes it. Note the comptime sandbox is a fourth consumer of the
+form, by both routes: a `gen fn` runs through `interp::generate` or, since
+RFC-0076, through compiled wasm, and both routes are Vyrn programs.
+
+### 6.4 Can `vyrn-lower` be a module of `vyrn-frontend` instead of a crate? **Open.**
+
+Lazier, and it puts the trap table where the interpreter can already reach it.
+The argument for a crate is only that `vyrn-frontend` is already 13,526 lines of
+checker; that is not much of an argument.
+
+### 6.5 Does the form need a stable text rendering? **Answered: no. Print, do not parse. Unstable text, blessed snapshots.**
+
+**[A12]** The worry was real — "a rendering people read becomes a rendering
+people depend on" — and rustc has already answered it in a comment. Every MIR
+dump carries "subject to change without notice. Knock yourself out.", and
+`tests/mir-opt` blesses `.mir` files with `--bless` anyway. **Stability is
+enforced by a blessed snapshot suite, not promised by a contract.** A format
+change becomes one wide, reviewable diff instead of a compatibility argument.
+`emit-lowered` prints a version line (`; vyrn lowered v1`), promises nothing, and
+its snapshots are blessed.
+
+**And there is no parser.** MLIR's textual round-trip is the tempting version of
+this, and it serves a pass pipeline that reads back what it wrote. Vyrn has one
+pass. A parser for the lowered form would be a second front end, written to test
+a printer, and it would be the largest single piece of new code this RFC could
+accidentally acquire. Print deterministically, check the print in, diff it. That
+catches everything the round-trip catches except "the printer and the parser
+disagree", and there is no parser to disagree with.
