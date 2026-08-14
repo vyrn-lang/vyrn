@@ -953,6 +953,41 @@ mod tests {
         }
     }
 
+    /// A nested `Option` has no wire form however it is SPELLED.
+    ///
+    /// The rejection used to be `matches!(**inner, Type::Option(_))` on the RAW
+    /// inner, so one type alias walked straight past it: on `main`,
+    /// `type MaybeInt = Option<Int64>` made `toJson(x: Option<MaybeInt>)`
+    /// compile, and `Some(None)` and `None` both wrote `null` — a value nothing
+    /// can read back. The same defect as the transformers, with the sign
+    /// reversed: a decision about a wire SHAPE was taken on a SPELLING.
+    #[test]
+    fn a_nested_option_is_refused_through_an_alias() {
+        let mut types = seed_types();
+        types.insert(
+            "MaybeInt".to_string(),
+            TypeDecl {
+                name: "MaybeInt".to_string(),
+                exported: false,
+                module: None,
+                doc: None,
+                type_params: Vec::new(),
+                base: Type::Option(Box::new(Type::Int)),
+                predicate: None,
+                line: 0,
+            },
+        );
+        let aliased = Type::Option(Box::new(Type::Named("MaybeInt".into())));
+        let bare = Type::Option(Box::new(Type::Option(Box::new(Type::Int))));
+        for ty in [&aliased, &bare] {
+            assert!(encodable(ty, &types).is_err(), "{ty} encodes");
+            assert!(decodable(ty, &types).is_err(), "{ty} decodes");
+            assert!(wire(ty, &types, false).is_err(), "{ty} has a wire form");
+        }
+        // A single `Option` through the same alias is untouched.
+        assert!(encodable(&Type::Named("MaybeInt".into()), &types).is_ok());
+    }
+
     /// A self-referential type terminates through every head that resolves, not
     /// just through a name. `wire` resolves, so the gate's cycle guard has to
     /// cover the transformer heads too — without it, `type L = { next: L }`
