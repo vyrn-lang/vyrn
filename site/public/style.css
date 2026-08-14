@@ -1098,6 +1098,25 @@ svg.graph .node.on circle { fill-opacity: 1; }
   color: var(--ink);
   max-width: 46vw;
 }
+/* The list a `select` drops down is a SEPARATE surface, and it is not covered by
+ * the two colours above. Blink paints that surface from the control's own
+ * `background-color`; `transparent` gives it nothing to derive, so it falls back
+ * to white and stops following `color-scheme` — while `color` above cascades
+ * into the options unchanged. In the dark theme that is near-white ink on white,
+ * and only the row the OS highlights is readable, because the highlight
+ * overrides both colours.
+ *
+ * The control itself stays transparent, because it is styled to sit flush with
+ * the buttons beside it in both themes; giving it an opaque background to feed
+ * the popup would change the closed control everywhere to fix a list that is
+ * open for a moment. The list gets its own pair instead, off the same tokens:
+ * `--paper` is the opaque ground the page already paints, and it is the higher-
+ * contrast of the two surfaces against `--ink` in BOTH themes (17.0:1 dark,
+ * 17.9:1 light, against 13.3 and 14.9 for `--plate`). */
+.play .pickbox select option {
+  background: var(--paper);
+  color: var(--ink);
+}
 .play .btn.primary { border-color: color-mix(in oklab, var(--accent) 55%, transparent); color: var(--accent); }
 .play .btn[disabled] { opacity: 0.45; cursor: default; }
 
