@@ -2211,8 +2211,13 @@ struct Gen<'a> {
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `funcs` cannot answer for it.
     impls: &'a [vyrn_frontend::ast::ImplBlock],
-    /// Per-block stack of (slot register, kind) to reclaim when the block exits.
-    drop_stack: Vec<Vec<(String, DropKind)>>,
+    /// Per-block stack of (slot register, kind, binding node) to reclaim when
+    /// the block exits. The third field is the `Stmt::Let`'s node address —
+    /// `own`'s own key for the binding, and what RFC-0101 M4's shadow trace
+    /// reports so that one gate can assert this engine's order against the
+    /// other two. It is `0` for a frame entry with no `let` behind it: a match
+    /// scrutinee temporary, a `for`-in iterable, a stream cursor.
+    drop_stack: Vec<Vec<(String, DropKind, usize)>>,
     /// The argument expressions whose value this frame releases after the call
     /// they belong to — `own`'s answer, keyed by node address the way
     /// `droppable` is keyed by the `Stmt::Let`'s.
@@ -4294,8 +4299,22 @@ impl<'a> Gen<'a> {
         // If the block already returned, these are skipped (that path leaks —
         // safe, never a double-free), matching the `region` early-exit rule.
         let drops = self.drop_stack.pop().unwrap();
+        // RFC-0101 M4's shadow: this engine's block-exit sequence, made readable
+        // so one gate can assert it against the other two. Outside the
+        // `terminated` test on purpose — a block that already returned emits
+        // NOTHING here, and recording that as an empty exit is what lets the
+        // gate see the difference instead of missing the block entirely.
+        vyrn_frontend::own::trace::note(
+            vyrn_frontend::own::trace::Site::Native,
+            block as *const Block as usize,
+            if self.terminated {
+                Vec::new()
+            } else {
+                drops.iter().rev().map(|(_, _, b)| *b).collect()
+            },
+        );
         if !self.terminated {
-            for (slot, kind) in drops.iter().rev() {
+            for (slot, kind, _) in drops.iter().rev() {
                 self.emit_drop(slot, kind);
             }
         }
@@ -4313,9 +4332,10 @@ impl<'a> Gen<'a> {
     /// it leaves a block. `__vyrn_region_pop` and not `__vyrn_region_exit`: see
     /// [`REGION_RUNTIME`] for why the returned value forbids the free.
     fn emit_all_drops(&mut self) {
-        let frames: Vec<Vec<(String, DropKind)>> = self.drop_stack.iter().rev().cloned().collect();
+        let frames: Vec<Vec<(String, DropKind, usize)>> =
+            self.drop_stack.iter().rev().cloned().collect();
         for frame in frames {
-            for (slot, kind) in frame.iter().rev() {
+            for (slot, kind, _) in frame.iter().rev() {
                 self.emit_drop(slot, kind);
             }
         }
@@ -4330,10 +4350,10 @@ impl<'a> Gen<'a> {
     /// `terminated` and skip their own fall-through frees (no double free), just
     /// like `emit_all_drops` does for `return`.
     fn emit_drops_above(&mut self, boundary: usize) {
-        let frames: Vec<Vec<(String, DropKind)>> =
+        let frames: Vec<Vec<(String, DropKind, usize)>> =
             self.drop_stack[boundary..].iter().rev().cloned().collect();
         for frame in frames {
-            for (slot, kind) in frame.iter().rev() {
+            for (slot, kind, _) in frame.iter().rev() {
                 self.emit_drop(slot, kind);
             }
         }
@@ -4559,7 +4579,7 @@ impl<'a> Gen<'a> {
     /// released: the arena owns what was allocated there.
     fn slot_owns(&self, slot: &str) -> bool {
         self.region_depth == 0
-            && (slot.starts_with('@') || self.drop_stack.iter().flatten().any(|(s, _)| s == slot))
+            && (slot.starts_with('@') || self.drop_stack.iter().flatten().any(|(s, ..)| s == slot))
     }
 
     /// The heap buffers the value in `slot` holds right now, loaded so a store may
@@ -4726,7 +4746,7 @@ impl<'a> Gen<'a> {
                     if let Some(h) = self.holes_map.get(&key) {
                         self.hole_slots.insert(slot.clone(), h.clone());
                     }
-                    self.drop_stack.last_mut().unwrap().push((slot, kind));
+                    self.drop_stack.last_mut().unwrap().push((slot, kind, key));
                 }
                 Ok(())
             }
@@ -5048,7 +5068,7 @@ impl<'a> Gen<'a> {
                 if let Some(kind) = scrut_drop {
                     let slot = self.fresh_alloca(&self.llt(&sr).clone());
                     self.emit(format!("store {} {sv}, ptr {slot}", self.llt(&sr)));
-                    self.drop_stack.last_mut().unwrap().push((slot, kind));
+                    self.drop_stack.last_mut().unwrap().push((slot, kind, 0));
                 }
                 let then_l = self.fresh_label("il.then");
                 let end_l = self.fresh_label("il.end");
@@ -5085,7 +5105,7 @@ impl<'a> Gen<'a> {
                 // is freed twice — the same rule `gen_block` follows.
                 let drops = self.drop_stack.pop().unwrap();
                 if !self.terminated {
-                    for (slot, kind) in drops.iter().rev() {
+                    for (slot, kind, _) in drops.iter().rev() {
                         self.emit_drop(slot, kind);
                     }
                 }
@@ -5191,7 +5211,7 @@ impl<'a> Gen<'a> {
                     let ty = self.llt(&resolved).clone();
                     let slot = self.fresh_alloca(&ty);
                     self.emit(format!("store {ty} {av}, ptr {slot}"));
-                    self.drop_stack.last_mut().unwrap().push((slot, kind));
+                    self.drop_stack.last_mut().unwrap().push((slot, kind, 0));
                 }
                 // Iterating a String yields each byte as an Int (loaded as i8 and
                 // zero-extended); arrays load their element type directly.
@@ -5311,7 +5331,7 @@ impl<'a> Gen<'a> {
                 // reached from the condition, so the normal exit runs it once.
                 let drops = self.drop_stack.pop().unwrap();
                 if !self.terminated {
-                    for (slot, kind) in drops.iter().rev() {
+                    for (slot, kind, _) in drops.iter().rev() {
                         self.emit_drop(slot, kind);
                     }
                 }
@@ -6015,12 +6035,12 @@ impl<'a> Gen<'a> {
             let ll = self.llt(&self.resolve(&sty)).clone();
             let slot = self.fresh_alloca(&ll);
             self.emit(format!("store {ll} {sv}, ptr {slot}"));
-            self.drop_stack.last_mut().unwrap().push((slot, kind));
+            self.drop_stack.last_mut().unwrap().push((slot, kind, 0));
         }
         let r = self.gen_match_body(&sv, &sty, arms);
         let drops = self.drop_stack.pop().unwrap();
         if !self.terminated {
-            for (slot, kind) in drops.iter().rev() {
+            for (slot, kind, _) in drops.iter().rev() {
                 self.emit_drop(slot, kind);
             }
         }
@@ -6437,7 +6457,7 @@ impl<'a> Gen<'a> {
         self.drop_stack
             .last_mut()
             .unwrap()
-            .push((sslot.clone(), DropKind::CloseStream));
+            .push((sslot.clone(), DropKind::CloseStream, 0));
         let vslot = self.declare(var, elem);
         self.emit(format!("store {ell} {staged}, ptr {vslot}"));
         self.loop_ctx.push(LoopCtx {

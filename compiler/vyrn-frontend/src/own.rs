@@ -45,6 +45,100 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::movecheck::{Gone, LetOwnership};
 
+/// What each engine actually releases at a scope exit, made readable — RFC-0101
+/// M4's shadow.
+///
+/// "Innermost frame first, newest binding first" is asserted independently in
+/// three files today: `Gen::drop_stack`, `Fn_::releases` and the interpreter's
+/// per-block `Vec`. Nothing checks that the three assertions describe one order,
+/// because nothing outside an engine can see the sequence any of them walks.
+/// This makes all three readable, so `vyrn-cli/tests/lowered.rs` can assert
+/// them against the placement `vyrn_lower` computes — one assertion where there
+/// were three.
+///
+/// It lives here, in the file that DECIDES what is droppable, because it is the
+/// only place all three engines can already reach: the interpreter is in this
+/// crate and cannot import `vyrn_codegen::observe`, which is where the type sink
+/// of M1 lives.
+///
+/// Off by default, thread-local, and every hook records a step the engine was
+/// about to take anyway. Nothing here decides anything.
+pub mod trace {
+    /// Which engine walked the step.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum Site {
+        Interp,
+        Native,
+        Wasm,
+    }
+
+    /// One block's fall-through exit, as one engine ran or emitted it.
+    ///
+    /// The whole exit rather than one record per release, because the thing being
+    /// gated is the SEQUENCE: an exit that releases nothing is a fact too, and a
+    /// per-release trace cannot tell it apart from a block the engine never
+    /// reached.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Exit {
+        pub site: Site,
+        /// The `Block`'s node address.
+        pub block: usize,
+        /// The `Stmt::Let`s released, in the order the engine releases them. A
+        /// `0` is a frame entry with no `let` behind it — a match scrutinee
+        /// temporary, a `for`-in iterable, a stream cursor — recorded rather
+        /// than filtered, so the gate sees that it is there.
+        pub bindings: Vec<usize>,
+    }
+
+    thread_local! {
+        static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static EXITS: std::cell::RefCell<Vec<Exit>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+
+    /// Start recording on this thread, discarding anything already collected.
+    pub fn start() {
+        EXITS.with(|s| s.borrow_mut().clear());
+        ON.with(|o| o.set(true));
+    }
+
+    /// Stop recording and take what was collected.
+    pub fn take() -> Vec<Exit> {
+        ON.with(|o| o.set(false));
+        EXITS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+
+    pub fn on() -> bool {
+        ON.with(|o| o.get())
+    }
+
+    /// Take back what a thread of the engine's own collected.
+    ///
+    /// The interpreter runs its program on a dedicated stack
+    /// (`interp::on_deep_stack`), so a thread-local sink would be left behind on
+    /// that thread. The recording is per thread on purpose — two tests in one
+    /// binary run in parallel and a global would interleave them — so the thread
+    /// that made the stack hands the rows back to the one that asked.
+    pub fn adopt(rows: Vec<Exit>) {
+        EXITS.with(|s| s.borrow_mut().extend(rows));
+    }
+
+    /// Note one block's fall-through exit.
+    pub fn note(site: Site, block: usize, bindings: Vec<usize>) {
+        if !on() {
+            return;
+        }
+        EXITS.with(|s| {
+            s.borrow_mut().push(Exit {
+                site,
+                block,
+                bindings,
+            })
+        });
+    }
+}
+
 /// How a droppable binding is reclaimed at block exit.
 ///
 /// Not `Copy`: [`DropKind::Release`] carries the name of the method the type

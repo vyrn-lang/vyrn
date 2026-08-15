@@ -57,8 +57,42 @@ pub fn render(lowered: &Lowered, source: &str) -> String {
             line.push_str(&row_text(row.node, row.ty.as_ref(), row.has.as_ref()));
             pos(&mut out, line, row.line);
         }
+        // The releases, in the order they run — RFC-0101 §2.7 sketched these and
+        // M4 is where they exist. They follow the rows rather than sitting
+        // inside them because a block exit is not a node: it is a point between
+        // two of them, and giving it a row would put a decision on a line the
+        // source has nothing at.
+        for rel in &inst.releases {
+            let exit = match rel.exit {
+                crate::Exit::Block => "block",
+            };
+            pos(
+                &mut out,
+                format!(
+                    "  release {} : {} exit={exit}",
+                    rel.name,
+                    kind_text(&rel.kind)
+                ),
+                rel.line,
+            );
+        }
     }
     out
+}
+
+/// A release kind in one token, so `grep 'release .* Release'` lists every place
+/// a user's own `release` runs.
+fn kind_text(k: &vyrn_frontend::own::DropKind) -> String {
+    use vyrn_frontend::own::DropKind as K;
+    match k {
+        K::FreeStr => "FreeStr".into(),
+        K::FreeArr => "FreeArr".into(),
+        K::FreeSmallArr => "FreeSmallArr".into(),
+        K::FreeMap => "FreeMap".into(),
+        K::CloseStream => "CloseStream".into(),
+        K::Deep(t) => format!("Deep<{t}>"),
+        K::Release(f) => format!("Release {f}"),
+    }
 }
 
 fn signature(inst: &Instance) -> String {

@@ -1,7 +1,20 @@
 # RFC-0101 — A Backend Is an Emitter
 
-- **Status:** **M1 implemented; M2, M2c, M2d and M3 each half implemented and
-  each failing its own line gate**; M4–M6 proposed. M3's shadow half landed — the form
+- **Status:** **M1 implemented; M2, M2c, M2d, M3 and M4's first phase each half
+  implemented and each failing its own line gate**; M5–M6 proposed. **M4's step 0
+  is this arc's first real defect find, and it is in the invariant the RFC calls
+  the best thing the project has built**: the milestone predicted that a declared
+  `release` carried across a `?` would print in the two backends and not in the
+  interpreter, the program was written, and the three engines printed different
+  output. The corpus had never reached it. The fix is nine lines — a propagating
+  `?` is a function exit and pays what one pays — and `examples/releaseacrosstry.vyrn`
+  is the pin. M4's first phase then placed the block-exit releases in the form and
+  gated all three engines' sequences against them: **52,676 sequences equal, every
+  other one named.** Its delete half did not land, and §3 M4 records why in one
+  sentence: the per-block frames exist for the EARLY exits, so deleting the
+  fall-through walk deletes three lines per engine and leaves everything that
+  holds it up — the −900 is an all-exit-kinds deletion, not a per-exit-kind one.
+  M3's shadow half landed — the form
   carries the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the
   two engines answering different questions. Its delete half did not, and §3 M3
   records why in one sentence: a backend clones the AST before it lowers a
@@ -1485,7 +1498,10 @@ is no third mechanism left to invent below it, and no further preparation this
 milestone can do. **The −1,200 is re-parented onto M4**, and M4 should be read as
 carrying both its own −900 and this one.
 
-**M4 — release placement.** The lowering emits ordered `Release` steps at the
+**M4 — release placement. THE FIRST PHASE IS IMPLEMENTED: its step-0 prediction
+found a live parity defect, the block-exit placement and its three-engine gate
+landed, and the delete half turned out not to be a per-exit-kind deletion. The
+records are below.** The lowering emits ordered `Release` steps at the
 exits `own` computes, and the backends encode them. The three scope-frame stacks,
 the three break/continue boundary indices, `emit_drop` (180), `rel_at` (239),
 `deep_release` (149) and `rel_for`'s re-derivation of a kind the shared analysis
@@ -1558,6 +1574,133 @@ Three things this find is worth stating plainly.
 `examples/releaseacrosstry.vyrn` is in the corpus, so the three engines are
 pinned on it now — stdout, stderr and exit code, byte for byte, in the gate that
 missed it. Full parity is green with it: 40 tests, 161 examples, no divergence.
+
+### M4 first phase — the block exit. THE PLACEMENT AND ITS GATE LANDED; THE DELETE HALF IS NOT AVAILABLE AT THIS EXIT KIND, AND THE MEASUREMENT SAYS WHY
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| step 0 | the `?`-path divergence, the interpreter's fix, the corpus pin, this text | 65 | 3 |
+| M4a | the form places the block-exit releases; all three engines' sequences become readable and are gated against it; a third blessed dump | 693 + this text | 8 + a snapshot + this file |
+
+M4a is **693 changed lines across 8 compiler files** — 653 added and 40 removed
+— plus **149 lines of this text** and a 105-line blessed snapshot, which is 947
+against §3.0's ≤ 800 and is said here rather than rounded down. The snapshot is
+generated output and this section is prose; the code and its gate are the 693,
+and 257 of those are the gate and its fixtures.
+
+**What landed.** `Instance::releases` is a `Vec<Release>` — a block, a binding, a
+kind and an exit, in the order they run. It is derived from `own`'s own map and
+from source order, in one place, and it is the elaborated form §2.1 item 3 asks
+for: `own` answers WHETHER and HOW, and the form answers WHERE and IN WHAT ORDER.
+All three engines now report the sequence they walk
+(`vyrn_frontend::own::trace`, off by default, in the crate the interpreter can
+also reach — `vyrn_codegen::observe` cannot serve three engines), and the corpus
+gate asserts it. `vyrn emit-lowered` prints a `release` line per step, and
+`ownedcontainer.vyrn` is a third blessed snapshot, because neither `fib` nor
+`option` owns a byte of heap and the placement would otherwise have shipped
+ungated.
+
+**Measured over the corpus: 52,676 block-exit sequences equal the placement
+exactly, and every remaining one is named.**
+
+| rule | count | what it is |
+|---|---|---|
+| *equal, order included* | 52,676 | — |
+| `Terminated` | 1,039 | the block already returned, so no fall-through walk is emitted at all |
+| `HostReclaims` | (fixtures) | the interpreter runs 2 of `own`'s 7 kinds; a `String` or an array buffer is the host's |
+
+The interpreter's half is three fixtures rather than the corpus, and the reason
+is a shape difference rather than a shortcut: its walk happens when a block
+RUNS, so reading it means executing programs, and executing 161 examples
+in-process is a different test. Each fixture asks one question — the same
+bindings, the same order, and everything skipped a kind the host reclaims — and
+the order assertion was checked by breaking it: with `block_exit`'s reverse
+removed, the corpus gate reports 40 classes and the fixture prints
+`the interpreter released [b, a] where the lowering placed [a, b]`.
+
+**Six places this phase's brief did not survive contact with the code.**
+
+1. **`return` at the end of a body is an EARLY exit in all three engines, so the
+   exit kind [A9] ranks first covers the least of a program.** Every function
+   body ends in `return`, and every engine treats that as the early path:
+   the interpreter's `Flow::Return`, the native backend's `terminated`, the
+   direct backend's unreachable tail. `main`'s own block never runs a
+   fall-through release walk. That is the whole of the 1,039 `Terminated`, and
+   it is why this phase's fixtures put their bindings inside an `if`. The order
+   [A9] chose is still the right one — the block exit is the simplest sequence
+   and the one the other kinds are defined against — but "block exit first" is
+   the smallest of the three, not the largest.
+2. **The block-exit portion of the three walks CANNOT be deleted while the other
+   exit kinds stay, and that is structural rather than a matter of effort.** The
+   per-block frames (`Gen::drop_stack`, `Fn_::releases`, the interpreter's
+   per-block `Vec`) exist *for* the early exits: `emit_all_drops`,
+   `emit_drops_above`, `emit_loop_exit_cleanup` and `emit_releases_above` all
+   walk the same frames from a boundary index. Deleting the fall-through loop
+   deletes three lines per engine and leaves the frames, the pushes and the
+   boundary indices standing — and replacing it with a lookup into the form
+   ADDS a reader beside a derivation that has to stay. **So the −900 M4 is
+   priced on is an all-exit-kinds deletion, not a per-exit-kind one**, and the
+   split by exit kind buys a gate rather than a ledger entry per phase. The
+   deletion this phase banks toward the −2,100 is **zero**, and this paragraph
+   is where it says so (§3's rule; RFC-0094 M1 is the precedent).
+3. **§1.4's `Rel` sentence is a third right.** It says the direct backend "keeps
+   `DropKind` only for two of its seven variants and re-switches on `Type` to
+   build a parallel five-variant `Rel` enum", and the re-switch is real —
+   `direct.rs`'s `let` site asks `drops.contains_key`, a boolean, and derives the
+   kind again. But `Rel` is not parallel to `DropKind`: `Rel::Buffers(Vec<u32>)`
+   carries LAYOUT OFFSETS, which §2.3 puts in the backend on purpose, and
+   `Rel::Stream`/`Rel::Call` carry the element and receiver types the emit site
+   needs. And `rel_for` has two consumers outside the release frames —
+   `store_bufs` and `rel_at`'s array arm — so collapsing it is a refactor of the
+   store path with its own byte-identity risk, not the deletion §1.4 advertises.
+   The measured deletion available there is on the order of 60 lines, against
+   `rel_for`'s 48 plus the enum's declaration, and it is not what the −900 is
+   made of.
+4. **`own`'s `DropKind::Deep` is not always concrete, even in a function with no
+   type parameters.** A step was linted for concreteness the way a row's type is,
+   and `examples/fnvalarg.vyrn` refused on the first run:
+   `let viaFn = defer(label)` in `main` carries `Deep({ run: fn(P) -> T })`,
+   because `own` records a declared type's base RECORD SHAPE and the shape keeps
+   the declaration's parameters rather than the application's arguments. Both
+   backends read the same kind and resolve it the same way, so this is not a
+   difference between engines — it is a question `own` leaves half-answered, and
+   the walk it produces stops silently at a `Param` field. The lint was dropped
+   rather than the finding.
+5. **A rule was written and deleted because it could not fire, which is §3 M2's
+   precedent applied to itself.** Both compiled backends lower a lifted lambda
+   under a shell that owns no release rows (`f_shell`, and `direct.rs`'s comment
+   saying so) while `own` records rows inside a lambda like it does anywhere
+   else, so a `LiftedBody` rule was written for the difference. **The corpus
+   places zero release steps inside a lambda body**, so the difference is real in
+   the code and unreachable from the gate. The rule went; the number is here.
+6. **The trace had to cross a thread boundary.** The interpreter runs its program
+   on a stack of its own (`on_deep_stack`, because a Windows main thread is ~1 MB
+   and `CALL_DEPTH_LIMIT` needs more), so a thread-local sink is left behind on
+   it. The recording stays per-thread — two tests in one binary run in parallel
+   and a global would interleave them — and the thread that made the stack hands
+   its rows back.
+
+**`ImplicitDispatch` is still named, and this phase says exactly what closes it.**
+It is 24 instantiations: the `release` a scope exit reaches through
+`impl Owned for Slots<T>`, the `size` a `for` reaches through `impl Iterate`. §3
+M2 parented it here on the reasoning that "the instantiation then comes from the
+step" — and the step exists now, so the remaining half is that nothing CONSUMES
+it. A worklist entry can only come from a step a backend is reading; while both
+backends still derive their own releases, the receiver is still an `Expr::Var`
+built at an emit site. It closes with the consumption, not with the placement.
+
+**Byte identity.** Every hook this phase adds is behind `own::trace::on()`, off
+outside the gate, and nothing in either emitter's decision path changed. All 161
+examples `main` has, both backends, `emit-ir` and `emit-wat` hashed against it:
+**322 of 322 identical, raw.** `rest.vyrn` matched too, and the reason is worth
+a line because M3b recorded it as the one tolerated artifact: its symbol map
+embeds the path the compiler was GIVEN, so a run from inside `examples/` with a
+relative filename embeds a relative one and the worktree stops being in the
+answer. The artifact is a property of how the emitter is invoked, not of the
+emitter. The one extra row on this side is
+`examples/releaseacrosstry.vyrn`, which `main` does not have. Full parity is
+green, `reproducible.rs` is green, and the blessed dumps moved by one file:
+`ownedcontainer.lowered`, added deliberately.
 
 **M5 — traps and the boundary ladder.** One trap table in `vyrn-lower`, below all
 three engines, holding the 20 wordings and their conditions. `coerce`'s ladder is
