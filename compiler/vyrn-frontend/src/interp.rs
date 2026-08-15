@@ -1049,14 +1049,32 @@ pub fn run_with_args(program: &Program, args: &[String]) -> Result<i64, String> 
 /// main-thread stack is only ~1 MB on Windows.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, String> {
-    std::thread::scope(|s| {
+    // RFC-0101 M4's release trace is per thread, and the program runs on this
+    // one. Nothing is carried unless a caller asked for the trace, which is the
+    // corpus gate and nothing else.
+    let tracing = crate::own::trace::on();
+    let carried = std::sync::Mutex::new(Vec::new());
+    let out = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(INTERP_STACK_BYTES)
-            .spawn_scoped(s, f)
+            .spawn_scoped(s, || {
+                if tracing {
+                    crate::own::trace::start();
+                }
+                let r = f();
+                if tracing {
+                    *carried.lock().unwrap() = crate::own::trace::take();
+                }
+                r
+            })
             .expect("failed to spawn interpreter thread")
             .join()
             .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
-    })
+    });
+    if tracing {
+        crate::own::trace::adopt(carried.into_inner().unwrap_or_default());
+    }
+    out
 }
 
 /// `wasm32-unknown-unknown` has one thread and cannot make another, so the room
@@ -2716,7 +2734,12 @@ impl<'a> Interp<'a> {
         // A binding is frozen early only when a later `let` in this same block
         // rebinds the name: the slot stops being this binding's there, and
         // reading it at exit would release one value twice and the other never.
-        let mut drops: Vec<(&str, Option<Val>, Option<String>)> = Vec::new();
+        //
+        // The fourth field is the `Stmt::Let`'s node address — `own`'s own key
+        // for the binding, and what RFC-0101 M4's shadow trace reports so that
+        // one gate can assert this engine's order against the other two.
+        let mut drops: Vec<(&str, Option<Val>, Option<String>, usize)> = Vec::new();
+        let blk = block as *const Block as usize;
         for stmt in &block.stmts {
             if let Stmt::Let { name, .. } = stmt {
                 for d in drops.iter_mut().filter(|d| d.0 == name && d.1.is_none()) {
@@ -2734,7 +2757,7 @@ impl<'a> Interp<'a> {
                 // does (RFC-0060: break/continue drop what a normal iteration
                 // end would). The signal then propagates to the enclosing loop.
                 Ok(flow @ (Flow::Return(_) | Flow::Break | Flow::Continue)) => {
-                    self.run_drops(&drops, scope)?;
+                    self.run_drops(None, &drops, scope)?;
                     scope.pop();
                     return Ok(flow);
                 }
@@ -2754,7 +2777,7 @@ impl<'a> Interp<'a> {
                             _ => None,
                         };
                         if let Some(f) = release {
-                            drops.push((name.as_str(), None, f));
+                            drops.push((name.as_str(), None, f, stmt as *const Stmt as usize));
                         }
                     }
                 }
@@ -2773,14 +2796,14 @@ impl<'a> Interp<'a> {
                 // neither backend reclaims anything on the way out of a trap.
                 Err(e) => {
                     if matches!(e, Ctrl::Return(_)) {
-                        self.run_drops(&drops, scope)?;
+                        self.run_drops(None, &drops, scope)?;
                     }
                     scope.pop();
                     return Err(e);
                 }
             }
         }
-        let r = self.run_drops(&drops, scope);
+        let r = self.run_drops(Some(blk), &drops, scope);
         scope.pop();
         r?;
         Ok(Flow::Normal)
@@ -2800,10 +2823,16 @@ impl<'a> Interp<'a> {
     /// load. A name with no slot left is skipped rather than released as `Unit`.
     fn run_drops(
         &self,
-        drops: &[(&str, Option<Val>, Option<String>)],
+        blk: Option<usize>,
+        drops: &[(&str, Option<Val>, Option<String>, usize)],
         scope: &[Frame],
     ) -> Result<(), Ctrl> {
-        for (name, frozen, release) in drops.iter().rev() {
+        // RFC-0101 M4's shadow: the sequence this engine walks, made readable so
+        // one gate can assert it against the other two and against the placement
+        // `vyrn_lower` computes. Built only while the trace is on, and a drop
+        // that fails mid-walk records nothing — the program is already leaving.
+        let mut walked = Vec::new();
+        for (name, frozen, release, binding) in drops.iter().rev() {
             let v = match frozen {
                 Some(v) => v.clone(),
                 None => match scope.last().and_then(|f| f.get(*name)) {
@@ -2811,6 +2840,9 @@ impl<'a> Interp<'a> {
                     None => continue,
                 },
             };
+            if blk.is_some() && crate::own::trace::on() {
+                walked.push(*binding);
+            }
             match release {
                 Some(f) => {
                     self.call(f, std::slice::from_ref(&v))?;
@@ -2819,6 +2851,9 @@ impl<'a> Interp<'a> {
                 // may declare one — RFC-0092 M4.
                 None => self.release_nested(&v)?,
             }
+        }
+        if let Some(blk) = blk {
+            crate::own::trace::note(crate::own::trace::Site::Interp, blk, walked);
         }
         Ok(())
     }

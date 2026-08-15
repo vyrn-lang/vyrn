@@ -92,3 +92,12 @@ fn fib_lowers_to_its_blessed_dump() {
 fn option_lowers_to_its_blessed_dump() {
     check("examples/option.vyrn", "option.lowered");
 }
+
+/// The third, added by M4: neither of the two above owns any heap, so neither
+/// prints a `release` line and the placement would ship ungated. This one
+/// declares `impl Owned` twice and binds both, so every release kind the phase
+/// places has a blessed line.
+#[test]
+fn ownedcontainer_lowers_to_its_blessed_dump() {
+    check("examples/ownedcontainer.vyrn", "ownedcontainer.lowered");
+}
