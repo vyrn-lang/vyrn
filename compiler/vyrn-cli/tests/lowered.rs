@@ -330,21 +330,18 @@ enum InstRule {
     /// time and is never called in a shipped binary, so neither backend emits a
     /// body for it. The lowering has one, because the program does.
     GenFn,
-    /// A flattened protocol-impl method the SOURCE never calls: the `release` a
-    /// scope exit reaches through `impl Owned for Slots<T>`, the `size` a
-    /// `for x in s` reaches through `impl Iterate`. The lowering's worklist
-    /// follows the calls the program writes; these are calls the LANGUAGE
-    /// writes, placed by the release walk and by the loop lowering.
-    ///
-    /// This is the only class in either direction that goes the wrong way — a
-    /// backend has an instance the lowering does not — and it is deliberately
-    /// not closed here. Guessing it ahead of the pass that PLACES the release
-    /// would be a second source of truth about where a release happens, which is
-    /// the failure mode `direct.rs`'s own worklist comment warns about. RFC-0101
-    /// M4 puts the release steps in the form; the instantiation then comes from
-    /// the step, and this rule goes with it.
-    ImplicitDispatch,
 }
+
+// `InstRule::ImplicitDispatch` was here and is RETIRED — RFC-0101 M5. It named
+// the flattened protocol-impl method the SOURCE never calls: the `release` a
+// scope exit reaches through `impl Owned for Slots<T>`. M2 wrote it, M4 measured
+// it at 24 and said it "closes with the consumption"; the consumption landed and
+// it stayed 24, because `own::release_kind` threw the receiver type away and a
+// name alone does not say which instance a generic release reaches. The step
+// carries the type now (`DropKind::Release(name, receiver)`) and `vyrn_lower`
+// solves the instance from it, so the class is empty and the rule goes rather
+// than firing zero times — §3 M2's own precedent, applied to itself for the
+// second time.
 
 /// Why the interpreter's release sequence differs from the placement both
 /// compiled backends now read — RFC-0101 M4.
@@ -388,7 +385,7 @@ fn rel_rule(
         .collect();
     if skipped
         .iter()
-        .all(|k| !matches!(k, DropKind::Release(_) | DropKind::Deep(_)))
+        .all(|k| !matches!(k, DropKind::Release(..) | DropKind::Deep(_)))
     {
         return Some(RelRule::HostReclaims);
     }
@@ -856,28 +853,11 @@ fn gate() {
         // have is a hole in the lowering; a body the lowering has that a backend
         // does not is a target fact, and every one of them has to name its rule.
         let mut backend: std::collections::BTreeSet<(Site, String)> = Default::default();
-        // Every flattened protocol-impl method this program declares, by name.
-        let impl_methods: std::collections::HashSet<String> = program
-            .impls
-            .iter()
-            .filter_map(|i| vyrn_frontend::types::type_key(&i.ty).map(|k| (i.protocol.clone(), k)))
-            .flat_map(|(p, k)| {
-                program
-                    .functions
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .filter(move |n| n.starts_with(&format!("{p}__{k}__")))
-            })
-            .collect();
         for i in &insts {
             let k = inst_key(&i.name, &i.args, &decls);
             if !lowering.contains(&k) {
-                if impl_methods.contains(&i.name) {
-                    *inst_rules.entry(InstRule::ImplicitDispatch).or_insert(0) += 1;
-                } else {
-                    t.missing += 1;
-                    missing.entry((i.site, k.clone())).or_insert(name.clone());
-                }
+                t.missing += 1;
+                missing.entry((i.site, k.clone())).or_insert(name.clone());
             }
             backend.insert((i.site, k));
         }

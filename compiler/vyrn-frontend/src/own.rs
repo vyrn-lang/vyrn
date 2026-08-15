@@ -273,7 +273,8 @@ pub struct Release {
 /// How a droppable binding is reclaimed at block exit.
 ///
 /// Not `Copy`: [`DropKind::Release`] carries the name of the method the type
-/// declared, which is the point of RFC-0086 M1.
+/// declared, which is the point of RFC-0086 M1, and the receiver type it was
+/// decided for, which is RFC-0101 M5.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DropKind {
     /// A dynamic `String` — `free` the buffer (Path A).
@@ -307,7 +308,20 @@ pub enum DropKind {
     /// `release`, whose flattened name this carries. The compiler emits an
     /// ordinary call, so a third party's container is reclaimed by the same
     /// mechanism a built-in is, in the same words, with no compiler patch.
-    Release(String),
+    ///
+    /// It carries the RECEIVER TYPE the name was decided for, and that second
+    /// member is RFC-0101 M5. A flattened `impl<T> Owned for Slots<T>` is a
+    /// GENERIC function, so the name alone does not say which instance a step
+    /// reaches: an emitter parked the value under a reserved binding and went
+    /// through the ordinary call path to have the parameters solved from the
+    /// receiver, and nothing above a backend could work out that the body was
+    /// wanted. That was the whole of the `ImplicitDispatch` class M2 named and
+    /// M4 measured at 24 — every one of them `Owned__Slots__release<…>`.
+    /// The type is the one [`Owned::release_kind`] was ASKED about, unresolved
+    /// and unsubstituted, which is exactly what both backends already pass
+    /// beside the name (`Rel::Call`, `Gen::call_release`); a reader that wants
+    /// it per instance substitutes it, as it already does for [`DropKind::Deep`].
+    Release(String, Type),
 }
 
 impl DropKind {
@@ -324,7 +338,7 @@ impl DropKind {
             DropKind::FreeMap => "freeing both map buffers".into(),
             DropKind::CloseStream => "closing the stream".into(),
             DropKind::Deep(ty) => format!("releasing what the {ty} holds"),
-            DropKind::Release(f) => format!("calling `{f}`"),
+            DropKind::Release(f, _) => format!("calling `{f}`"),
         }
     }
 }
@@ -537,7 +551,7 @@ impl Owned {
     /// to be silently unreclaimed; it has to say so.
     pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
         if let Some(f) = crate::types::type_key(ty).and_then(|k| self.impls.get(&k)) {
-            return Some(DropKind::Release(f.clone()));
+            return Some(DropKind::Release(f.clone(), ty.clone()));
         }
         match crate::types::resolve(ty, &self.types) {
             // ---- the seeded built-in rows ----------------------------------
@@ -1853,7 +1867,7 @@ impl Emit<'_> {
         paths.iter().all(|p| {
             let mut cur = ty.clone();
             for seg in p.split('.') {
-                if matches!(self.proto.release_kind(&cur), Some(DropKind::Release(_))) {
+                if matches!(self.proto.release_kind(&cur), Some(DropKind::Release(..))) {
                     return false;
                 }
                 let Type::Record(fields) = crate::types::resolve(&cur, &self.proto.types) else {
@@ -2498,11 +2512,17 @@ pub(crate) mod tests {
         let (o, _) = analyze_src(src);
         assert_eq!(
             o.owned_fns.get("make"),
-            Some(&DropKind::Release("Owned__Ring__release".to_string()))
+            Some(&DropKind::Release(
+                "Owned__Ring__release".to_string(),
+                Type::Named("Ring".into())
+            ))
         );
         assert_eq!(
             drop_kinds(src, "main"),
-            vec![DropKind::Release("Owned__Ring__release".to_string())]
+            vec![DropKind::Release(
+                "Owned__Ring__release".to_string(),
+                Type::Named("Ring".into())
+            )]
         );
     }
 
@@ -2637,7 +2657,10 @@ pub(crate) mod tests {
         let (o, _) = analyze_src(&src);
         assert_eq!(
             o.proto.release_kind(&Type::Named("Node".into())),
-            Some(DropKind::Release("Owned__Node__release".to_string()))
+            Some(DropKind::Release(
+                "Owned__Node__release".to_string(),
+                Type::Named("Node".into())
+            ))
         );
         // The container and the record above the declaration walk again.
         assert!(matches!(

@@ -2247,3 +2247,184 @@ mod json_schema_tests {
         );
     }
 }
+
+/// Bind type parameters by matching a (possibly generic) parameter type against
+/// a concrete argument type. Mirrors the checker's `unify`, minus error checks
+/// (the checker already validated the call).
+/// The rule is mechanical, and RFC-0086 M1 said so when it decided this is
+/// exhaustiveness rather than a protocol: **same constructor, recurse on the
+/// children; different constructors, bind nothing.** Nothing is declared here
+/// and no third party could declare it — "how do two type constructors match"
+/// has no author but the compiler.
+///
+/// So the match is over `pty` with **no `_` arm**, and a new [`Type`] variant
+/// has to answer. It used to pair the two types and fall through, which meant
+/// four constructors — `Record`, `Enum`, `Lazy`, `Task` — walked past a type
+/// parameter they contained and left it for `applied_type` to fill with `Unit`.
+/// The inner match on `aty` keeps its `_`: that one is the rule's second half.
+pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
+    match pty {
+        Type::Param(t) => {
+            subst.entry(t.clone()).or_insert_with(|| aty.clone());
+        }
+        Type::Option(p) => {
+            if let Type::Option(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::Result(p1, p2) => {
+            if let Type::Result(a1, a2) = aty {
+                solve_param(p1, a1, subst);
+                solve_param(p2, a2, subst);
+            }
+        }
+        Type::App(pn, pa) => {
+            if let Type::App(an, aa) = aty {
+                if pn == an && pa.len() == aa.len() {
+                    for (p, a) in pa.iter().zip(aa) {
+                        solve_param(p, a, subst);
+                    }
+                }
+            }
+        }
+        // Generic collection/reference element inference (RFC-0023): bind the
+        // element type parameter from the concrete argument.
+        // A LITERAL is a fixed `[N x T]` here whatever slot it is headed for —
+        // the growable and small-buffer shapes are reached by the reshape in
+        // `coerce`, after this solve names the element. So a growable or
+        // small-buffer parameter binds from a fixed actual too: without it
+        // `Deque { front: [2, 1] }` solved nothing, and the reshape then
+        // compared `Int64` against the unsolved `T` (whose `llt` is `void`),
+        // declined, and handed a `[2 x i64]` to a `{ptr,len,cap}` field.
+        Type::Array(p) => match aty {
+            Type::Array(a) | Type::ArrayN(a, _) => solve_param(p, a, subst),
+            _ => {}
+        },
+        Type::ArrayN(p, _) => {
+            if let Type::ArrayN(a, _) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::SmallArray(p, _) => match aty {
+            Type::SmallArray(a, _) | Type::ArrayN(a, _) => solve_param(p, a, subst),
+            _ => {}
+        },
+        // A `Stream<T>` (RFC-0075) binds its element exactly as an `Array<T>`
+        // does — it is the same three words. M2's combinators are the first
+        // signatures with a type parameter inside a stream, and without this the
+        // direct backend refused `take` outright while the LLVM emitter quietly
+        // substituted `Unit`, i.e. the two backends specialized different
+        // functions for one call site.
+        Type::Stream(p) => {
+            if let Type::Stream(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::Map(pk, pv) => {
+            if let Type::Map(ak, av) = aty {
+                solve_param(pk, ak, subst);
+                solve_param(pv, av, subst);
+            }
+        }
+        // A `fn` type (RFC-0023/RFC-0037), parameter-wise then on the return.
+        // Without this a generic record holding a `fn` whose parameter is the
+        // record's own type parameter — `Deferred<P, T> = { run: fn(P) -> T }`,
+        // the `std/ui` `ParamQuery` shape — solves NOTHING from its field, and
+        // `applied_type` fills both in with `Unit`.
+        Type::Fn(pp, pr) => {
+            if let Type::Fn(ap, ar) = aty {
+                if pp.len() == ap.len() {
+                    for (p, a) in pp.iter().zip(ap) {
+                        solve_param(p, a, subst);
+                    }
+                    solve_param(pr, ar, subst);
+                }
+            }
+        }
+        // A record matches FIELD BY NAME, not by position: width subtyping
+        // (RFC-0002) lets the concrete side carry fields the pattern does not
+        // ask for, and its order is its own.
+        Type::Record(pf) => {
+            if let Type::Record(af) = aty {
+                for p in pf {
+                    if let Some(a) = af.iter().find(|a| a.name == p.name) {
+                        solve_param(&p.ty, &a.ty, subst);
+                    }
+                }
+            }
+        }
+        // An enum matches VARIANT BY NAME, then payload-wise.
+        Type::Enum(pv) => {
+            if let Type::Enum(av) = aty {
+                for p in pv {
+                    if let Some(a) = av.iter().find(|a| a.name == p.name) {
+                        for (pp, ap) in p.payload.iter().zip(&a.payload) {
+                            solve_param(pp, ap, subst);
+                        }
+                    }
+                }
+            }
+        }
+        // `lazy T` IS `fn() -> T` at runtime (RFC-0085 M4a) and
+        // `types::resolve` answers that, so the concrete side reaches here in
+        // either spelling and both bind the same `T`.
+        Type::Lazy(p) => match aty {
+            Type::Lazy(a) => solve_param(p, a, subst),
+            Type::Fn(ap, ar) if ap.is_empty() => solve_param(p, ar, subst),
+            _ => {}
+        },
+        Type::Task(p) => {
+            if let Type::Task(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        // The compile-time record transformers (RFC-0002 §7). The checker
+        // expands one before codegen sees it, so these arms are the rule
+        // written down rather than a path anything takes today.
+        Type::Partial(p) => {
+            if let Type::Partial(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::Omit(p, pk) => {
+            if let Type::Omit(a, ak) = aty {
+                if pk == ak {
+                    solve_param(p, a, subst);
+                }
+            }
+        }
+        Type::Pick(p, pk) => {
+            if let Type::Pick(a, ak) = aty {
+                if pk == ak {
+                    solve_param(p, a, subst);
+                }
+            }
+        }
+        Type::Merge(p1, p2) => {
+            if let Type::Merge(a1, a2) = aty {
+                solve_param(p1, a1, subst);
+                solve_param(p2, a2, subst);
+            }
+        }
+        // Nothing inside to descend into: a scalar, a SIMD value, a nominal
+        // name, a logger handle, a const type argument, and the two types no
+        // signature can spell (`Never`, `Err`).
+        Type::Int
+        | Type::IntN { .. }
+        | Type::Float
+        | Type::Float32
+        | Type::F32x4
+        | Type::I32x4
+        | Type::F64x2
+        | Type::Mask32x4
+        | Type::Mask64x2
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Named(_)
+        | Type::ConstInt(_)
+        | Type::Logger
+        | Type::Never
+        | Type::Err => {}
+    }
+}

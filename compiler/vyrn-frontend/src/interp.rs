@@ -2786,7 +2786,7 @@ impl<'a> Interp<'a> {
                             // print, so this engine has to run it too — it is the
                             // only auto-reclamation that is observable from inside
                             // the language.
-                            Some(crate::own::DropKind::Release(f)) => Some(Some(f.clone())),
+                            Some(crate::own::DropKind::Release(f, _)) => Some(Some(f.clone())),
                             // RFC-0092 M4: the binding declares no release, and
                             // what it HOLDS may. `Some(None)` asks `run_drops`
                             // for the walk. A program with no `impl Owned` in it
@@ -2927,7 +2927,7 @@ impl<'a> Interp<'a> {
         let slot = unwound.then(crate::own::trace::joining);
         let mut walked = Vec::new();
         match self.droppable.get(&key) {
-            Some(crate::own::DropKind::Release(f)) => {
+            Some(crate::own::DropKind::Release(f, _)) => {
                 walked.push(key);
                 self.call(f, std::slice::from_ref(sv))?;
             }

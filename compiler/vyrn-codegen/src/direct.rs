@@ -2406,7 +2406,7 @@ impl<'p> Fn_<'_, 'p> {
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
         // A declared row (RFC-0086 M1) answers before any built-in shape does,
         // and it is keyed by the type's NAME — which resolving away would lose.
-        if let Some(DropKind::Release(f)) = self.cx.owned.release_kind(ty) {
+        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
             return Ok(Some(Rel::Call(f, ty.clone())));
         }
         let t = self.cx.resolve(ty);
@@ -2492,7 +2492,7 @@ impl<'p> Fn_<'_, 'p> {
         // RFC-0092 M4 is where the gap is observable: a container carries its
         // element's obligation now, so the compiler demands a discharge the
         // discharge did not perform.
-        if let Some(DropKind::Release(f)) = self.cx.owned.release_kind(ty) {
+        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
             // `emit_rel`'s `Rel::Call` arm frees the payload boxes after the
             // call (RFC-0096), so this reaches them too.
             return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
@@ -2715,7 +2715,7 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         match self.cx.owned.release_kind(ty) {
-            None | Some(DropKind::CloseStream) | Some(DropKind::Release(_)) => Ok(()),
+            None | Some(DropKind::CloseStream) | Some(DropKind::Release(..)) => Ok(()),
             _ => self.rel_at(m, b, a, ty, line),
         }
     }
