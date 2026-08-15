@@ -1462,7 +1462,13 @@ struct Fn_<'a, 'p> {
     /// backend's `drop_stack` uses. A `Ref` releases its cell; a `Stream`
     /// (RFC-0075 M2b) releases the cursor cell it owns IF it holds a producer
     /// rather than a buffer, which is a runtime tag rather than a static fact.
-    releases: Vec<Vec<(Place, Rel)>>,
+    /// Per-block stack of (place, kind, binding node) to release when the block
+    /// exits. The third field is the `Stmt::Let`'s node address — `own`'s own
+    /// key for the binding, and what RFC-0101 M4's shadow trace reports so that
+    /// one gate can assert this engine's order against the other two. It is `0`
+    /// for an entry with no `let` behind it: a match scrutinee temporary, a
+    /// `for`-in iterable, a stream cursor.
+    releases: Vec<Vec<(Place, Rel, usize)>>,
     /// Lexical `region` nesting depth within this body, so an exit edge knows how
     /// many arena scopes it is leaving. The runtime counter is dynamic (a callee's
     /// region nests inside its caller's); this is only the part one body can see,
@@ -2093,6 +2099,17 @@ impl<'p> Fn_<'_, 'p> {
         // same frames before its branch, so this runs after a branch only in code
         // wasm has already marked unreachable.
         let boundary = self.releases.len() - 1;
+        // RFC-0101 M4's shadow: this engine's block-exit sequence, made readable
+        // so one gate can assert it against the other two.
+        vyrn_frontend::own::trace::note(
+            vyrn_frontend::own::trace::Site::Wasm,
+            blk as *const Block as usize,
+            self.releases[boundary]
+                .iter()
+                .rev()
+                .map(|(_, _, i)| *i)
+                .collect(),
+        );
         self.emit_releases_above(m, b, boundary)?;
         self.releases.pop();
         self.scope.truncate(mark);
@@ -2111,10 +2128,10 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         boundary: usize,
     ) -> Result<(), String> {
-        let frames: Vec<Vec<(Place, Rel)>> =
+        let frames: Vec<Vec<(Place, Rel, usize)>> =
             self.releases[boundary..].iter().rev().cloned().collect();
         for frame in frames {
-            for (p, k) in frame.into_iter().rev() {
+            for (p, k, _) in frame.into_iter().rev() {
                 self.emit_rel(m, b, p, &k, 0)?;
             }
         }
@@ -2745,7 +2762,7 @@ impl<'p> Fn_<'_, 'p> {
     fn place_owns(&self, p: Place) -> bool {
         self.region_depth == 0
             && (matches!(p, Place::Static(_))
-                || self.releases.iter().flatten().any(|(q, _)| *q == p))
+                || self.releases.iter().flatten().any(|(q, ..)| *q == p))
     }
 
     /// The address of `p` plus `off`, in a fresh local. A wasm local holding an
@@ -3043,7 +3060,7 @@ impl<'p> Fn_<'_, 'p> {
                         self.releases
                             .last_mut()
                             .expect("a `let` outside any block")
-                            .push((place, r));
+                            .push((place, r, s as *const Stmt as usize));
                     }
                 }
             }
@@ -3278,7 +3295,7 @@ impl<'p> Fn_<'_, 'p> {
                         self.releases
                             .last_mut()
                             .unwrap()
-                            .push((Place::Slot(own), r));
+                            .push((Place::Slot(own), r, 0));
                     }
                 }
                 self.tag_test(b, addr, &sum, pattern, *line)?;
@@ -3406,7 +3423,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => return unsupported("a `for` over a Unit value", *line),
                         }
-                        self.releases.last_mut().unwrap().push((place, r));
+                        self.releases.last_mut().unwrap().push((place, r, 0));
                         b.ins(&Instruction::LocalGet(src));
                     }
                 }
@@ -9034,7 +9051,7 @@ impl<'p> Fn_<'_, 'p> {
         // The stream's own release frame, so a `break` or an early `return` out
         // of the body leaves through it — `emit_releases_above` walks it.
         self.releases
-            .push(vec![(Place::Local(s), Rel::Stream(elem.clone()))]);
+            .push(vec![(Place::Local(s), Rel::Stream(elem.clone()), 0)]);
         let cont = self.depth;
         b.ins(&Instruction::Block(BlockType::Empty));
         self.depth += 1;
@@ -10710,7 +10727,7 @@ impl<'p> Fn_<'_, 'p> {
                 self.releases
                     .last_mut()
                     .unwrap()
-                    .push((Place::Slot(own), r));
+                    .push((Place::Slot(own), r, 0));
             }
         }
         // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a

@@ -6,8 +6,11 @@
 //! M1 builds the value and nothing consumes it in anger. What it holds today is
 //! the first item on RFC-0101 §2.1's list and the second and the sixth: concrete
 //! function bodies one per instantiation, a type on every expression node, and
-//! the line each node came from. Release steps, resolved traps and resolved
-//! dispatch (items 3, 4 and 5) arrive in M4 and M5.
+//! the line each node came from, and — since M4's first phase — the block-exit
+//! release steps of item 3, in the order they run. Resolved traps and resolved
+//! dispatch (items 4 and 5) arrive in M5, and the other exit kinds
+//! (`break` / `continue` / `return`, then `?` and the match-arm handover) in the
+//! phases after this one.
 //!
 //! **It borrows.** Open question 6.1 is answered "borrow, during the migration":
 //! a lowered node carries the `&Expr` it came from, which is the only thing that
@@ -32,6 +35,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use vyrn_frontend::ast::{Block, Expr, Function, LambdaBody, Program, Stmt, Type};
 use vyrn_frontend::checker;
+use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types::{
     expanded_size, mentions_param, substitute, type_depth, MONO_DEPTH_LIMIT, MONO_SIZE_LIMIT,
 };
@@ -142,6 +146,58 @@ impl Row<'_> {
     }
 }
 
+/// Which exit a release step belongs to — RFC-0101 §3 [A9]'s axis.
+///
+/// M4 moves the exits one kind at a time, and this names which kind a step has
+/// been moved for. A construct can be half-migrated: an engine keeps its own
+/// walk for the kinds that are not here yet, which is what §6.1's borrow answer
+/// buys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// The fall-through end of a block. The only kind the form places today;
+    /// `break` / `continue` / `return` and then `?` and the match-arm handover
+    /// are the phases after this one.
+    Block,
+}
+
+/// One reclamation the LANGUAGE runs, PLACED rather than asked for — RFC-0101
+/// §2.1 item 3.
+///
+/// `own`'s `droppable` map answers "is this binding droppable, and nominally
+/// how", keyed by node address, and every engine then decides for itself where
+/// the answer applies and in what order. rustc's `MirPhase` names the
+/// difference: an unelaborated drop is a QUESTION and an elaborated one is an
+/// INSTRUCTION. This is the instruction — a place, a kind and an exit, in the
+/// order it runs.
+#[derive(Debug, Clone)]
+pub struct Release<'a> {
+    /// The block whose exit runs this step; the identity is the node address,
+    /// which is what `own` and `movecheck` key on already (§2.5).
+    pub block: &'a Block,
+    /// The `Stmt::Let` that owns the value — `own`'s own key for the binding,
+    /// and the one identity all three engines already share.
+    pub binding: &'a Stmt,
+    /// The binding's name, so a dump reads as the source does.
+    pub name: String,
+    /// `own`'s answer, substituted for this instance.
+    ///
+    /// **It is not always concrete, and that is a fact about `own` rather than
+    /// about this lowering.** A step was linted for concreteness the way a row's
+    /// type is, and `examples/fnvalarg.vyrn` refused immediately:
+    /// `let viaFn = defer(label)` in a NON-generic function carries
+    /// `Deep({ run: fn(P) -> T })`, because `own` records a declared type's base
+    /// record shape and the shape keeps the DECLARATION's parameters, not the
+    /// application's arguments. Both backends read the same kind and resolve it
+    /// the same way, so this is not a difference between engines — it is a
+    /// question `own` leaves half-answered, and the walk it produces silently
+    /// stops at a `Param` field. Substituting the instance's arguments here
+    /// fixes the half that is a substitution; the other half needs `own` to keep
+    /// the application, and that is not this phase's to change.
+    pub kind: DropKind,
+    pub exit: Exit,
+    pub line: u32,
+}
+
 /// One function, instantiated. Zig's shape (RFC-0101 §2.1 item 1): no type
 /// parameter survives, and the identity is the type arguments rather than a
 /// mangled string, which is the defect #165 was.
@@ -153,6 +209,11 @@ pub struct Instance<'a> {
     /// The same thing keyed by name, which is what a substitution needs.
     pub subst: BTreeMap<String, Type>,
     pub rows: Vec<Row<'a>>,
+    /// The block-exit releases, in the order they run: contiguous per block,
+    /// innermost block first (a nested block's exit is reached before its
+    /// parent's), and newest binding first inside each. That order is the whole
+    /// content of the invariant three files assert separately.
+    pub releases: Vec<Release<'a>>,
 }
 
 impl Instance<'_> {
@@ -231,6 +292,19 @@ pub struct Lowered<'a> {
     /// [`Why::PastTheLimit`] — the bound refusing an instantiation, which is the
     /// bound working rather than a hole.
     pub unresolved: Vec<Unresolved>,
+    /// Every `Block` that is a lambda's body, by node address.
+    ///
+    /// A structural fact about the program, not a target one. It is here because
+    /// M4's first phase expected a difference at these blocks — both compiled
+    /// backends lower a lifted lambda under a shell that owns no release rows
+    /// (`f_shell`, and `direct.rs`'s comment saying so) while `own` records rows
+    /// inside a lambda like it does anywhere else. **Measured, the corpus places
+    /// ZERO release steps inside a lambda body**, so the difference is real in
+    /// the code and unreachable from the gate, and the rule that would have named
+    /// it was deleted rather than left unable to fire (§3 M2's precedent). The
+    /// set stays so the next engine that walks a lambda body can say which blocks
+    /// those are without a second AST walk.
+    pub lambda_bodies: std::collections::HashSet<usize>,
 }
 
 impl<'a> Lowered<'a> {
@@ -253,7 +327,10 @@ impl<'a> Lowered<'a> {
 /// is only true if they are in the program when the checker runs over it here.
 pub fn lower(program: &Program) -> Lowered<'_> {
     let recorded = checker::record(program);
-    let mut lowered = build(program, &recorded);
+    // The same analysis all three engines already share, asked once here so the
+    // placement below is the only new thing in the form (RFC-0101 §1.4).
+    let ownership = vyrn_frontend::own::analyze(program);
+    let mut lowered = build(program, &recorded, &ownership);
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });
@@ -278,6 +355,47 @@ struct Walk<'a, 'r> {
     rows: Vec<Row<'a>>,
     /// `(callee, its solved type arguments by name)`, already concrete.
     calls: Vec<(&'r str, HashMap<String, Type>)>,
+    /// What `own` decided about this body's `let`s, keyed by node address. The
+    /// placement below is the only thing this lowering adds to it: `own` says
+    /// WHETHER and HOW, and the steps say WHERE and IN WHAT ORDER.
+    droppable: &'r HashMap<usize, DropKind>,
+    releases: Vec<Release<'a>>,
+    lambda_bodies: std::collections::HashSet<usize>,
+}
+
+/// The steps this block runs at its fall-through exit: every droppable `let` of
+/// the block, newest first.
+///
+/// The order is the whole of what three engines assert separately. It is derived
+/// here from source order and `own`'s map, and nowhere else — which is what makes
+/// "newest binding first" a fact of the form rather than an invariant a comment
+/// asks three files to keep.
+fn block_exit<'a>(b: &'a Block, chain: &Chain, w: &Walk<'a, '_>) -> Vec<Release<'a>> {
+    let mut steps = Vec::new();
+    for s in &b.stmts {
+        let Stmt::Let { name, line, .. } = s else {
+            continue;
+        };
+        let Some(kind) = w.droppable.get(&(s as *const Stmt as usize)) else {
+            continue;
+        };
+        steps.push(Release {
+            block: b,
+            binding: s,
+            name: name.clone(),
+            // A `Deep` carries the type it walks, and a walk over a `T` is not a
+            // walk. Both backends substitute this for themselves at the emit
+            // site; an instance's step is concrete here instead.
+            kind: match kind {
+                DropKind::Deep(t) => DropKind::Deep(apply(t, chain)),
+                k => k.clone(),
+            },
+            exit: Exit::Block,
+            line: *line as u32,
+        });
+    }
+    steps.reverse();
+    steps
 }
 
 /// The substitutions in scope at a node, outermost first.
@@ -295,7 +413,12 @@ fn apply(ty: &Type, chain: &Chain) -> Type {
     chain.iter().fold(ty.clone(), |t, s| substitute(&t, s))
 }
 
-fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> {
+fn build<'a>(
+    program: &'a Program,
+    recorded: &checker::Recorded,
+    ownership: &vyrn_frontend::own::Ownership,
+) -> Lowered<'a> {
+    let no_drops: HashMap<usize, DropKind> = HashMap::new();
     let by_name: HashMap<&str, &Function> = program
         .functions
         .iter()
@@ -319,16 +442,23 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
 
     let mut instances: Vec<Instance<'a>> = Vec::new();
     let mut unresolved: Vec<Unresolved> = Vec::new();
+    let mut lambda_bodies: std::collections::HashSet<usize> = Default::default();
 
     // The worklist's second root: module state. A `let` at module scope is an
     // ordinary expression the backends run inside a synthesized initializer, and
     // it instantiates generics like any other body — `std/stream`'s
     // `let mut cells: Slots<CursorCell> = newSlots()` is the corpus's proof.
+    // A module-state initializer is an expression, not a block: it has no exit
+    // to place a release at, and both backends run it inside a synthesized
+    // function whose bindings are the module's own.
     let mut gw = Walk {
         recorded,
         impls: &program.impls,
         rows: Vec::new(),
         calls: Vec::new(),
+        droppable: &no_drops,
+        releases: Vec::new(),
+        lambda_bodies: std::collections::HashSet::new(),
     };
     for g in &program.globals {
         let mut chain: Chain = vec![HashMap::new()];
@@ -359,6 +489,9 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
             impls: &program.impls,
             rows: Vec::new(),
             calls: Vec::new(),
+            droppable: ownership.droppable.get(&func.name).unwrap_or(&no_drops),
+            releases: Vec::new(),
+            lambda_bodies: std::collections::HashSet::new(),
         };
         let mut chain: Chain = vec![flat];
         block(&func.body, 0, &mut chain, &mut w);
@@ -373,11 +506,13 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
             &mut unresolved,
         );
 
+        lambda_bodies.extend(w.lambda_bodies);
         instances.push(Instance {
             func,
             type_args,
             subst,
             rows: w.rows,
+            releases: w.releases,
         });
     }
 
@@ -385,6 +520,7 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
         instances,
         globals,
         unresolved,
+        lambda_bodies,
     }
 }
 
@@ -462,6 +598,10 @@ fn block<'a>(b: &'a Block, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) 
     for s in &b.stmts {
         stmt(s, depth, chain, w);
     }
+    // After the statements, so a nested block's exit steps precede its parent's
+    // — which is "innermost frame first" written as the order they are in.
+    let steps = block_exit(b, chain, w);
+    w.releases.extend(steps);
 }
 
 fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
@@ -654,7 +794,10 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
         }
         Expr::Lambda { body, .. } => match body {
             LambdaBody::Expr(b) => kids.push(expr(b, d, chain, w)),
-            LambdaBody::Block(b) => block(b, d, chain, w),
+            LambdaBody::Block(b) => {
+                w.lambda_bodies.insert(b as *const Block as usize);
+                block(b, d, chain, w)
+            }
         },
     }
     let own = has_of(e, &kids, w);
@@ -905,6 +1048,10 @@ pub fn lint(l: &Lowered) -> Vec<String> {
             }
             depth = Some(r.depth);
         }
+        // A row's type is linted for concreteness above, and a step's is
+        // DELIBERATELY not — see [`Release::kind`]. The first version of this
+        // lint asserted it and `examples/fnvalarg.vyrn` refused on the spot,
+        // which is the finding rather than the failure.
     }
     bad
 }
