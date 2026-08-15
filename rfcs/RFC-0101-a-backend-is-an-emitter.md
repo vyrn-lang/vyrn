@@ -1,7 +1,7 @@
 # RFC-0101 — A Backend Is an Emitter
 
-- **Status:** **M1 implemented; M2, M2c and M3 each half implemented and each
-  failing its own line gate**; M4–M6 proposed. M3's shadow half landed — the form
+- **Status:** **M1 implemented; M2, M2c, M2d and M3 each half implemented and
+  each failing its own line gate**; M4–M6 proposed. M3's shadow half landed — the form
   carries the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the
   two engines answering different questions. Its delete half did not, and §3 M3
   records why in one sentence: a backend clones the AST before it lowers a
@@ -10,10 +10,17 @@
   milestone that moves the bodies. **M2c then measured that sentence and it was
   half true**: the native backend never cloned, the direct one cloned twice and
   read neither copy, and borrowing the callee's own block took the residue from
-  9,505 to 4,547 with the emitted bytes unchanged. What is left is `vyrn_frontend`'s
-  own desugars run at lowering time — `project::inline` above all — so M3's delete
-  half now waits on §2.1's own words, "and the sugar gone", rather than on
-  monomorphization. §3 M2 records what landed, what did not, and the
+  9,505 to 4,547 with the emitted bytes unchanged. It named what was left as
+  `vyrn_frontend`'s own desugars — `project::inline` above all — and **M2d then
+  expanded each of those exactly once, for all three walks, and measured that
+  attribution to be a third right**: 4,547 to 3,294..3,484, and everything that
+  remains halved rather than vanished, because the other source is the receiver a
+  backend builds on the stack to reach an implicitly dispatched `release` or
+  `size`. That class is M4's and was already named. The desugar-once move also
+  found that "the sugar gone" cannot mean gone from the tree — a projection's
+  prologue runs mid-expression, and hoisting it is a different program — so the
+  form holds the expansion instead, with no type on it yet. §3 M2 records what
+  landed, what did not, and the
   measurement that says why: M1's residue was attributed to a missing worklist
   and is 9,355-to-7 a missing *body* — a backend clones the AST before it lowers
   a specialization, so no list a lowering hands over can close it. M2 landed the
@@ -1093,6 +1100,172 @@ borrowed, and M1 answered "borrow, during the migration" with an owned cost of
 memory cost of **zero** — the copies deleted here were pure waste, so the saving
 is 1.0× rather than a trade. The 256 MiB threshold is untouched and unreached.
 
+**M2d — the sugar is expanded once. IMPLEMENTED, AND ITS OWN MEASUREMENT SAYS
+THE SUGAR IT WAS BRIEFED FOR IS A THIRD OF WHAT WAS LEFT.**
+
+§2.1 says the form is "the checked program with the answers written on it **and
+the sugar gone**", and M2c ended by naming the sugar that is not gone:
+`project::inline` (`project.rs`), which inlines a `place at` projection AT its
+access site. Nobody wrote those nodes. Each engine built its own copy of them,
+after `lower` had run, so 4,547 backend answers were about AST no side table
+could reach.
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M2d-a | the access site asks the LOOKUP, not the expansion; one `store_index` for both backends | 293 | 3 |
+| M2d-b | one expansion, shared by the lowering and both backends; the lowering walks it; the ceiling drops; this text | 354 | 5 |
+
+**M2d-a, measured before it was written.** Every engine asked
+`project::for_site`, which falls back to the SEEDED row for a builtin
+container — `yield @slot(self, i)` — inlined it, compared the result to the
+nodes it already had, found the substitution was the identity, threw the copy
+away and lowered the originals. Over the corpus that is **20,205
+clone-rename-substitute rounds, every one discarded**, against 164 that were
+real. The interpreter never did it: it looks the receiver's key up and answers
+`None`. `project::site` is that shape, shared; `for_site`, `resolve`, `seeded`
+and `Projection::is_identity` went with the question they existed to ask. The
+two backends' `store_index` was the same thirty lines twice, refusal wording
+included (§1.1's shape), and is one function now.
+
+**M2d-b: what "desugar once" turned out to mean.** The brief said desugar below
+the checker and above the emitters, so that every node an emitter walks is a
+node the lowering recorded. **The first half of that is not available at the
+price it sounds like, and the reason is placement.** A backend emits a
+projection's prologue *at the point in the expression walk where the access site
+is reached* — in `f() + xs[i]`, after `f()`. Rewriting the program's AST to
+hoist that prologue to the enclosing statement moves side effects, which is a
+different program, which the byte-identity invariant refuses. So the sugar
+cannot be *removed* from the tree without changing evaluation order; what it can
+be is **expanded once**. `project::Memo` is a value that shares every expansion
+built while it is alive, keyed by `(receiver node address, receiver type key,
+method)` and verified on a hit by comparing the receiver and the arguments — a
+node address is handed out again after its node dies, and a memo that answers
+from a dead key is a miscompile rather than a slow path. The tree is leaked
+deliberately: `own`, `movecheck` and this RFC's own rows all key by node
+address, so an expansion has to outlive every walk that records against it.
+
+The lowering walks the same expansion, at the site it belongs to, and
+`vyrn emit-lowered` renders it — §2.7's dump showing a decision the source does
+not contain:
+
+```text
+call @at : Int64                        @1
+  var w : Window                        @1
+  int 0 : Int64                         @60
+  call @at                              @20
+    field .data                         @20
+      var w                             @1
+    binary Add                          @20
+      field .start                      @20
+        var w                           @1
+      int 0 : Int64                     @60
+```
+
+`for x in c` over a user container is the same thing one level up —
+`project::iterate_loop` clones the user's whole loop body into the shape the
+projection needs — and is shared the same way.
+
+**The rows carry no type, and that is a statement rather than an omission.** The
+checker holds no answer at a node it never saw, and deriving one here would be
+the sixth copy of the derivation §1.2 counts five of. So this milestone moves
+answers out of the "no row at all" column and into the "row with no type"
+column: **`synthesized` 4,605 to 3,294..3,484, `unrecorded` 526 to 4,707.** A
+row with no type is a place a type can go; no row at all is not. Typing them
+needs the correspondence between an expansion's nodes and the projection body's
+— which the checker HAS typed, at `checker.rs:1191` — and that is the next PR,
+not this one.
+
+**And here is the measurement that corrects the brief that ordered this work.**
+M2c wrote: "these are not backend AST at all — they are `vyrn_frontend`'s own
+desugars". Re-measured with the desugars shared, **that sentence is a third
+right.** The residue is printed by engine and by expression kind now, and its
+shape is:
+
+| class | M2c | after M2d |
+|---|---|---|
+| `Wasm/var` | 1,917 | 1,458 |
+| `Native/var` | 1,184 | 590 |
+| `Wasm/field` | 934 | 367 |
+| `Wasm/binary` | 689 | 349 |
+| `Native/field` | 858 | 313 |
+
+Everything halved and nothing vanished, which is the signature of a *second*
+source rather than a remnant of the first. It is the **receiver a backend builds
+on the stack to reach an implicitly dispatched call** — the `release` a scope
+exit reaches through `impl Owned`, the `size` a `for` reaches through
+`impl Iterate`, the `success` a `?` reaches through `Fallible`. `direct.rs`
+alone constructs an `Expr::Var` at nine such sites. That is the
+`ImplicitDispatch` class §3 M2 already named and already parented onto **M4**,
+which puts the release steps in the form; the rest is the lifted lambda, which
+§3 M2c measured at 532. So the desugar-once milestone reaches the sugar the
+SOURCE writes, and the sugar the LANGUAGE writes is M4's, as M2 said it would
+be.
+
+**One measurement that came free, and one comment it falsifies.** `project.rs`
+said of the `@b{tag}` / `@p{tag}` names an inline gives its temporaries: "The
+names never reach the emitted output (a slot is `%tN`)". True of wasm, false of
+LLVM — the native backend mangles them into its alloca names (`@p3.h` becomes
+`%_p3_h`). The tag is a process-global counter, so deleting 20,205 inlines
+renumbers it, and 12 of the 322 example/backend outputs differ in exactly those
+names.
+
+**Byte identity.** All 161 examples, both backends, `emit-ir` and `emit-wat`
+hashed against `main`: **322 of 322 identical once `_pN_` / `_bN_` is
+normalized, and 310 of 322 identical raw** — the 12 are the rename above, and
+normalizing is a mechanical check rather than a judgement. M2d-b changes nothing
+at all: its output is byte-identical to M2d-a's, raw, because the `Memo` is
+opened by the corpus gate and not by the CLI. A `vyrn build` runs one backend
+and no lowering, so it has nothing to share with; the sharing matters where a
+program is lowered AND emitted in one process, which is the gate today and every
+consumer once M3's delete half lands. Full parity is green at both PRs.
+
+**The gate, and the verdict.** This milestone's gate is §3.0's: net negative
+across the engines. **M2d-a is 124 added and 169 removed — a net of −45 — and
+M2d-b is 354 changed with 25 removed, so the pair is +284 and does not meet it,
+and this paragraph is where it says so** (§3's rule; RFC-0094 M1 is the
+precedent). The split is honest rather than excused: the deletion is real and
+small (the seeded inline, one duplicated `store_index`, four call-site triples),
+and the addition is a mechanism plus the prose that says why it exists — about
+90 lines of M2d-b are doc comments recording the address-reuse hazard and the
+leak, and 60 more are the gate's new residue report. The deletion this arc was
+promised still belongs to M3, and M3's blocker moved rather than cleared: it was
+"a backend cannot read a type at a node the program does not have", and it is
+now "a backend cannot read a type at a node the form holds but has not typed".
+
+**Three places this milestone's brief did not survive contact with the code.**
+
+1. **Desugaring "before `lower`" and desugaring "into the program" are not the
+   same move, and only the first one is available.** The brief and §2.1 both
+   read as the second. The prologue's placement is mid-expression; see above.
+2. **`a[i] = v` is not shared, and the reason is a type the checker has and
+   throws away.** An `IndexSet` names a variable, not an expression, so there is
+   no node `checker::record` could have written a type on, and the lowering
+   cannot work out the receiver's type at that statement. Both backends work it
+   out for themselves and pass it in. 32 sites and 286 nodes over the corpus —
+   the smallest of the three — and closing it means the checker recording the
+   binding type it already computed at `checker.rs:3251`, which is §1.2's
+   complaint word for word and belongs with the milestone that adds the types.
+3. **The interpreter consumed the form without being asked to.** §2.4 allows a
+   named difference here and the brief allowed one; none was needed.
+   `project::site` and `project::iterate_loop` are what the interpreter already
+   called, so it shares the same expansion when a `Memo` is open. It keeps one
+   copy the backends do not have — `Interp::project_store`, the `a[i] = v` path
+   of finding 2, which looks its receiver up by the runtime value's key rather
+   than by a static type.
+
+**A hazard this milestone found in the recording, which is not about
+projections.** The lowering's first version read `checker::record`'s answer at
+expansion nodes, and the corpus gate came back with 192 classes of disagreement
+— `Float32` recorded where a backend said `Handle<Person>`. The cause is that
+`checker::record` keys by node address and types AST that does NOT outlive the
+check: `prelude::all()` builds its seeded rows fresh, a schema builds a
+predicate. Those addresses are freed, the allocator hands them out again for an
+expansion's own nodes, and a lookup then answers with a dead node's type. The
+fix is that an expansion asks for no recorded type at all, but the hazard is
+general: **any future consumer that looks a node up in `Recorded` by an address
+it did not get from the program can be answered by a corpse.** It is written
+here because the next milestone is exactly such a consumer.
+
 **M3 — the backends read types. THE SHADOW HALF IS IMPLEMENTED; THE DELETE HALF
 IS NOT, AND M3 FAILS ITS OWN LINE GATE.**
 
@@ -1201,6 +1374,16 @@ and `Pending` now borrows the callee's block. The half that is left is
 **desugared** AST rather than specialized AST, and the lifted lambda, which this
 paragraph named as the second mechanism, is **532 answers over the whole corpus**.
 §3 M2c has the classification and the reason borrowing stops where it does.
+
+**M2d then expanded the desugars once and the blocker MOVED rather than
+cleared.** The lowering and both backends walk one expansion per access site
+now, so the form holds those nodes — but it holds them with no type, because the
+checker never saw them and a second derivation here is the thing this RFC
+exists to delete. M3's sentence is therefore "a backend cannot read a type at a
+node the form holds but has not typed", which is a smaller and better-defined
+blocker than the one above and has a named route: the projection's own body IS
+checked (`checker.rs:1191`), so the types exist and want carrying across the
+inline. §3 M2d has the numbers and the two remaining sources.
 
 **The gate, and the verdict.** M3's gate was −1,200 lines across the two
 backends. **M3a is 444 changed lines and deletes nothing, so M3 misses its gate

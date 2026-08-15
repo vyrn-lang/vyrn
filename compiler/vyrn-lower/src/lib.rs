@@ -279,6 +279,23 @@ pub fn lower(program: &Program) -> Lowered<'_> {
 /// calls the worklist has to follow out of this body.
 struct Walk<'a, 'r> {
     recorded: &'r checker::Recorded,
+    /// The program's `impl` blocks, for the one thing the form has to expand
+    /// rather than read: a `place at` projection is inlined at its access site,
+    /// so the nodes an engine walks there are not the nodes the source wrote.
+    /// The lowering asks [`vyrn_frontend::project::site`] for them, and so do
+    /// both backends — one expansion, one set of addresses, one row each.
+    impls: &'a [vyrn_frontend::ast::ImplBlock],
+    /// Inside an expansion, where the checker has no answer to read.
+    ///
+    /// It is not enough to look one up and find nothing: `checker::record`
+    /// keys by node address, and it types AST that does not outlive the check
+    /// — `prelude::all()`'s rows, a schema's synthesized predicate. Those
+    /// addresses are freed, the allocator hands them out again for an
+    /// expansion's own nodes, and a lookup then answers with a dead node's
+    /// type. Measured, on the first run of this walk: 192 classes of
+    /// disagreement, `Float32` recorded at a `Handle<Person>`. An expansion
+    /// node has no checker answer by construction, so it asks for none.
+    in_desugar: bool,
     rows: Vec<Row<'a>>,
     /// `(callee, its solved type arguments by name)`, already concrete.
     calls: Vec<(&'r str, HashMap<String, Type>)>,
@@ -330,6 +347,8 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
     // `let mut cells: Slots<CursorCell> = newSlots()` is the corpus's proof.
     let mut gw = Walk {
         recorded,
+        impls: &program.impls,
+        in_desugar: false,
         rows: Vec::new(),
         calls: Vec::new(),
     };
@@ -359,6 +378,8 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
 
         let mut w = Walk {
             recorded,
+            impls: &program.impls,
+            in_desugar: false,
             rows: Vec::new(),
             calls: Vec::new(),
         };
@@ -530,9 +551,19 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
             expr(cond, d, chain, w);
             block(body, d, chain, w);
         }
-        Stmt::ForIn { iter, body, .. } => {
+        Stmt::ForIn {
+            var, iter, body, ..
+        } => {
             expr(iter, d, chain, w);
             block(body, d, chain, w);
+            // A `for` over a user container is a desugar too: the loop the
+            // engines walk is `place nth` inlined per turn around a COPY of the
+            // body above. Same expansion, same nodes, one walk each.
+            if let Some(blk) = iterate(var, iter, body, chain, w) {
+                w.in_desugar = true;
+                block(blk, d, chain, w);
+                w.in_desugar = false;
+            }
         }
         Stmt::Expr(e) => {
             expr(e, d, chain, w);
@@ -552,7 +583,10 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
 
 fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) -> usize {
     let key = e as *const Expr as usize;
-    let ty = w.recorded.node_types.get(&key).map(|t| apply(t, chain));
+    let ty = match w.in_desugar {
+        true => None,
+        false => w.recorded.node_types.get(&key).map(|t| apply(t, chain)),
+    };
     let here = w.rows.len();
     w.rows.push(Row {
         depth,
@@ -563,7 +597,10 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
     });
     // A generic call solves its callee's parameters, and the answer governs the
     // subtree it was solved from — see [`Chain`].
-    let pushed = match w.recorded.node_substs.get(&key) {
+    let pushed = match (!w.in_desugar)
+        .then(|| w.recorded.node_substs.get(&key))
+        .flatten()
+    {
         Some((callee, args)) => {
             let solved: HashMap<String, Type> = args
                 .iter()
@@ -593,6 +630,17 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
         Expr::Binary { lhs, rhs, .. } => {
             kids.push(expr(lhs, d, chain, w));
             kids.push(expr(rhs, d, chain, w));
+        }
+        Expr::Call { name, args, .. } if name == vyrn_frontend::project::AT => {
+            for a in args {
+                kids.push(expr(a, d, chain, w));
+            }
+            // …and the expansion, which is the rest of what this site MEANS.
+            // Not a child: `has_of` derives an `@at`'s has-type from the
+            // receiver, and the expansion is the same answer arrived at the
+            // long way. The rows are here so a backend walking those nodes is
+            // walking nodes this form has answers for.
+            desugar(e, args, d, chain, w);
         }
         Expr::Call { args, .. } | Expr::TryConstruct { args, .. } | Expr::Spawn { args, .. } => {
             for a in args {
@@ -731,6 +779,52 @@ fn has_of(e: &Expr, kids: &[usize], w: &Walk<'_, '_>) -> Option<Type> {
         },
         _ => return None,
     })
+}
+
+/// Walk the expansion of an `@at` access site, if the receiver has a user
+/// `place at`.
+///
+/// The receiver's type is the checker's own answer at the receiver node, which
+/// is what both backends work out for themselves at the same site — one with
+/// `static_ty`, the other with `peek`. All three then ask
+/// [`vyrn_frontend::project::site`], which expands once and hands the same tree
+/// to each of them (RFC-0101's desugar-once milestone).
+fn desugar<'a>(e: &'a Expr, args: &'a [Expr], depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
+    if args.len() != 2 || w.impls.is_empty() {
+        return;
+    }
+    let key = &args[0] as *const Expr as usize;
+    let Some(recv) = w.recorded.node_types.get(&key).map(|t| apply(t, chain)) else {
+        return;
+    };
+    let Ok(Some(p)) =
+        vyrn_frontend::project::site(w.impls, Some(&recv), "at", &args[0], &args[1..], e.line())
+    else {
+        return;
+    };
+    w.in_desugar = true;
+    for s in &p.prologue {
+        stmt(s, depth, chain, w);
+    }
+    expr(&p.place, depth, chain, w);
+    w.in_desugar = false;
+}
+
+/// The loop a `for x in c` over a user container expands to, if it does.
+fn iterate<'a>(
+    var: &str,
+    iter: &'a Expr,
+    body: &'a Block,
+    chain: &mut Chain,
+    w: &mut Walk<'a, '_>,
+) -> Option<&'static Block> {
+    if w.impls.is_empty() {
+        return None;
+    }
+    let key = iter as *const Expr as usize;
+    let ty = apply(w.recorded.node_types.get(&key)?, chain);
+    let (size_fn, nth) = vyrn_frontend::types::iterate_impl(w.impls, &ty)?;
+    vyrn_frontend::project::iterate_loop(&size_fn, nth, var, iter, body, iter.line()).ok()
 }
 
 fn stmt_line(s: &Stmt) -> usize {

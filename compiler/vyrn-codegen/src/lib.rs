@@ -774,6 +774,7 @@ pub mod observe {
     #[derive(Debug, Clone)]
     pub struct Row {
         pub site: Site,
+        pub kind: &'static str,
         /// The AST node's address — the identity `own` and `movecheck` use.
         pub node: usize,
         /// The instantiation the emitter was inside, sorted by parameter name.
@@ -843,8 +844,41 @@ pub mod observe {
         ON.with(|o| o.get())
     }
 
+    pub fn kind_of(e: &vyrn_frontend::ast::Expr) -> &'static str {
+        use vyrn_frontend::ast::Expr as E;
+        match e {
+            E::Int(_) => "int",
+            E::Byte(_) => "byte",
+            E::Float(_) => "float",
+            E::Bool(_) => "bool",
+            E::Str(_) => "str",
+            E::Var { .. } => "var",
+            E::Unary { .. } => "unary",
+            E::Binary { .. } => "binary",
+            E::Call { name, .. } => {
+                if name.starts_with('@') {
+                    "call@"
+                } else {
+                    "call"
+                }
+            }
+            E::Match { .. } => "match",
+            E::IfExpr { .. } => "ifexpr",
+            E::Try { .. } => "try",
+            E::StructLit { .. } => "record",
+            E::Field { .. } => "field",
+            E::TryConstruct { .. } => "tryconstruct",
+            E::ArrayLit { .. } => "array",
+            E::MapLit { .. } => "map",
+            E::Spawn { .. } => "spawn",
+            E::Lambda { .. } => "lambda",
+            E::Consume { .. } => "consume",
+        }
+    }
+
     pub(crate) fn record(
         site: Site,
+        kind: &'static str,
         node: usize,
         subst: &std::collections::HashMap<String, Type>,
         ty: &Type,
@@ -855,6 +889,7 @@ pub mod observe {
         ROWS.with(|r| {
             r.borrow_mut().push(Row {
                 site,
+                kind,
                 node,
                 subst,
                 ty: ty.clone(),
@@ -5386,6 +5421,7 @@ impl<'a> Gen<'a> {
         if crate::observe::on() {
             crate::observe::record(
                 crate::observe::Site::Native,
+                crate::observe::kind_of(expr),
                 expr as *const Expr as usize,
                 self.subst,
                 &r.1,
