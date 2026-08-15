@@ -159,6 +159,12 @@ pub fn lookup_impl_by_key<'a>(
 /// checks, the lambda monomorphization keys, and since RFC-0101 the lowering's
 /// own answers. A copy has an address of its own and loses whatever was
 /// recorded against the original.
+/// **`Some` is expanded once and shared** while a [`Memo`] is open (RFC-0101's
+/// desugar-once milestone). The expansion is a function of the projection, the
+/// receiver and the arguments, so building it per engine produced two or three
+/// structurally identical trees at three different addresses — trees the
+/// checker never saw, the lowering never recorded, and no side table could
+/// reach. One tree, one set of addresses, one answer per node.
 pub fn site(
     impls: &[ImplBlock],
     recv: Option<&Type>,
@@ -166,11 +172,112 @@ pub fn site(
     recv_expr: &Expr,
     args: &[Expr],
     line: usize,
-) -> Result<Option<Projection>, String> {
-    let Some(f) = recv.and_then(|t| lookup_in(impls, t, method)) else {
+) -> Result<Option<&'static Projection>, String> {
+    let Some(t) = recv.filter(|t| !is_builtin_container(t)) else {
         return Ok(None);
     };
-    inline(f, recv_expr, args, line).map(Some)
+    let Some(key) = crate::types::type_key(t) else {
+        return Ok(None);
+    };
+    let Some(f) = lookup_by_key(impls, &key, method) else {
+        return Ok(None);
+    };
+    memo(
+        (recv_expr as *const Expr as usize, key, method.to_string()),
+        recv_expr,
+        args,
+        || inline(f, recv_expr, args, line),
+    )
+    .map(Some)
+}
+
+// ---------------------------------------------------------------------------
+// Desugar once
+// ---------------------------------------------------------------------------
+
+/// One expansion, and the site inputs it was built from.
+///
+/// The inputs are kept so a hit can be VERIFIED. The key holds a node address,
+/// a freed node's address is handed out again, and a memo that answers from a
+/// dead key is a miscompile rather than a slow path. Comparing the receiver and
+/// the arguments costs a walk over two small expressions; being wrong here
+/// costs a program that indexes with somebody else's index.
+struct Expansion {
+    recv: Expr,
+    args: Vec<Expr>,
+    tree: &'static Projection,
+}
+
+thread_local! {
+    #[allow(clippy::type_complexity)]
+    static LOOPS: std::cell::RefCell<
+        Option<HashMap<(usize, String, String), (Expr, Block, &'static Block)>>,
+    > = const { std::cell::RefCell::new(None) };
+    static MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), Expansion>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Share every desugar built while this value is alive.
+///
+/// Open one around a compile — the point where a program is lowered and then
+/// emitted, once or twice — so the lowering and both backends walk the SAME
+/// nodes. Outside a `Memo` every caller expands for itself, which is what the
+/// engines did before this existed and what the LSP still wants: it re-checks
+/// a program per keystroke, and a memo keyed by node address over programs it
+/// throws away is a leak with a verification bill attached.
+///
+/// An expansion is leaked deliberately. The nodes it holds are keyed by
+/// address by `own`, by `movecheck` and by the lowering, so they must outlive
+/// every walk that could record against them, and a compile is a process here.
+/// The bound is one tree per user-projection site per program, which the corpus
+/// measures at 164 trees of about 4,800 nodes for 161 examples.
+pub struct Memo(());
+
+impl Memo {
+    pub fn open() -> Self {
+        MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
+        LOOPS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
+        Memo(())
+    }
+}
+
+impl Drop for Memo {
+    fn drop(&mut self) {
+        MEMO.with(|m| *m.borrow_mut() = None);
+        LOOPS.with(|m| *m.borrow_mut() = None);
+    }
+}
+
+/// The shared expansion for `key`, or `build`'s, leaked so its addresses outlive
+/// every consumer.
+fn memo(
+    key: (usize, String, String),
+    recv: &Expr,
+    args: &[Expr],
+    build: impl FnOnce() -> Result<Projection, String>,
+) -> Result<&'static Projection, String> {
+    let hit = MEMO.with(|m| {
+        let m = m.borrow();
+        let e = m.as_ref()?.get(&key)?;
+        (e.recv == *recv && e.args == args).then_some(e.tree)
+    });
+    if let Some(t) = hit {
+        return Ok(t);
+    }
+    let tree: &'static Projection = Box::leak(Box::new(build()?));
+    MEMO.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            m.insert(
+                key,
+                Expansion {
+                    recv: recv.clone(),
+                    args: args.to_vec(),
+                    tree,
+                },
+            );
+        }
+    });
+    Ok(tree)
 }
 
 /// The statements `a[i] = v` lowers as, after `place atSet` has had its say
@@ -211,7 +318,7 @@ pub fn store_index(
             "line {line}: `{name}[..] = v` goes through a `place atSet` that yields              something with no address — a call result or a temporary. A projection              yields a place: a binding, a field of one, or an element of one"
         ));
     };
-    let mut out = p.prologue;
+    let mut out = p.prologue.clone();
     out.extend(store);
     Ok(Some(out))
 }
@@ -430,6 +537,41 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
 /// The three bindings are unspellable (`@` does not lex), so a nested loop's
 /// pair shadows its outer pair and no source name can collide with either.
 pub fn iterate_loop(
+    size_fn: &str,
+    nth: &Function,
+    var: &str,
+    iter: &Expr,
+    body: &Block,
+    line: usize,
+) -> Result<&'static Block, String> {
+    // Expanded once and shared, like [`site`] — and this one carries the user's
+    // whole loop body, cloned into the shape the projection needs, so an engine
+    // that expands for itself makes every node of that body phantom too.
+    let key = (
+        iter as *const Expr as usize,
+        size_fn.to_string(),
+        var.to_string(),
+    );
+    let hit = LOOPS.with(|m| {
+        let m = m.borrow();
+        let (i, b, blk) = m.as_ref()?.get(&key)?;
+        (i == iter && b == body).then_some(*blk)
+    });
+    if let Some(b) = hit {
+        return Ok(b);
+    }
+    let blk: &'static Block = Box::leak(Box::new(iterate_loop_build(
+        size_fn, nth, var, iter, body, line,
+    )?));
+    LOOPS.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            m.insert(key, (iter.clone(), body.clone(), blk));
+        }
+    });
+    Ok(blk)
+}
+
+fn iterate_loop_build(
     size_fn: &str,
     nth: &Function,
     var: &str,
