@@ -1,7 +1,13 @@
 # RFC-0101 — A Backend Is an Emitter
 
-- **Status:** **M1 implemented; M2 partially implemented and failing its own line
-  gate**; M3–M6 proposed. §3 M2 records what landed, what did not, and the
+- **Status:** **M1 implemented; M2 and M3 each half implemented and each failing
+  its own line gate**; M4–M6 proposed. M3's shadow half landed — the form carries
+  the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the two
+  engines answering different questions. Its delete half did not, and §3 M3
+  records why in one sentence: a backend clones the AST before it lowers a
+  specialization, so 9,187 of the answers are about nodes the program does not
+  have, and no recorded type can reach them. The −1,200 is re-parented onto the
+  milestone that moves the bodies. §3 M2 records what landed, what did not, and the
   measurement that says why: M1's residue was attributed to a missing worklist
   and is 9,355-to-7 a missing *body* — a backend clones the AST before it lowers
   a specialization, so no list a lowering hands over can close it. M2 landed the
@@ -435,6 +441,20 @@ checked — and a future reader who finds this form wrong knows where to look.
    handing it the checker's contextual answer: the form must carry the node's own
    type and the type its context requires, and the pair of them is what makes
    `coerce`'s 505-line ladder (§1.5) a decision the lowering can own in M5.
+
+   **Shipped in M3a, and the amendment needed one of its own: the checker cannot
+   answer the has-question, so the FORM derives it.** This item says `peek` reads
+   the type "instead of deriving it", and [A16] then asked the form to carry the
+   node's own type — but `Checker::expr` types every expression against its
+   destination and holds no second answer to read out. So `Row::has` is derived
+   in `vyrn-lower`, from the node's own shape and its children's, in a closed
+   table of nine arms (`has_of`). That is a derivation the lowering performs, and
+   the module doc that said it derives nothing is corrected where it stood: it is
+   the derivation `peek` and `static_ty` ARE, written once below both backends
+   instead of twice inside them, which is this RFC's sentence rather than an
+   exception to it. `Row::ty` is still the checker's own answer, unchanged.
+   Measured: the pair explains **21,154 of the 22,321** answers that differ from
+   the destination type (§3 M3).
 3. **Explicit release steps.** `own`'s rows stop being a `HashMap` a backend
    must place and become `Release(place, kind)` steps already in the body, in
    order, at every exit they belong at — every scope exit, every `break`,
@@ -968,19 +988,119 @@ behind `observe::on()`, off outside the corpus gate, and nothing in either
 emitter's decision path changed. Symbols keep the readable mangle and #165's
 structural hash, untouched. Full parity is green at both PRs.
 
-**M3 — the backends read types.** `peek` (510), its four satellites, `static_ty`,
-both `expect` stacks, both copies of `expected_fn_sig` / `fn_arg_param_types` /
-`resolve_fn_arg`, `declared::type_of` and `solve_param`'s backend call sites are
-deleted. The `(String, Type)` convention in `lib.rs` becomes `String`. Gate: at
-least −1,200 lines across the two backends.
+**M3 — the backends read types. THE SHADOW HALF IS IMPLEMENTED; THE DELETE HALF
+IS NOT, AND M3 FAILS ITS OWN LINE GATE.**
+
+M3 asked for `peek` (510), its four satellites, `static_ty`, both `expect`
+stacks, both copies of `expected_fn_sig` / `fn_arg_param_types` /
+`resolve_fn_arg`, `declared::type_of` and `solve_param`'s backend call sites to
+be deleted, for the `(String, Type)` convention in `lib.rs` to become `String`,
+and for at least **−1,200 lines** across the two backends. **PR A landed and
+nothing was deleted, so the gate is missed by the whole of it** — §3's rule, and
+RFC-0094's precedent. Why, and what has to happen first, is below.
 
 **[A10] And the size of that convention change is 16 functions, not ~300.**
 `Result<(String, Type), String>` is returned by **16 functions** and the spelling
 appears **40 times**, in a file with 400 `fn`s; §1.2 records where the wrong
-number came from. So M3 is smaller than advertised on the signature axis and
-larger on the other one: `peek`'s **49 call sites**, verified exactly, are the
-work. The split follows §3.0 — PR A records the type and gates it against `peek`
-and the threaded answer; PR B deletes `peek`, its satellites and the convention.
+number came from. Re-measured at M3: the exact return spelling is **33** and
+`(String, Type)` anywhere in `lib.rs` is **44**, so the axis is right and the
+figure has drifted by a few sites since `dd3a9fe`. So M3 is smaller than advertised on the signature
+axis and larger on the other one: `peek`'s **49 call sites**, verified exactly,
+are the work.
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M3a | [A16]: the form carries the type pair, the gate asserts membership, this text | 444 | 5 |
+
+**What landed: the pair, and the gate's five rules collapsing into it.**
+
+A row carries `ty` — the checker's own answer, the type the value must END UP as
+— and `has`, the type it HAS when the node's code has run. `has` is `None`
+wherever the two are one answer, which is most nodes. The gate's assertion is no
+longer "the backend's answer equals the recorded type" but **"the backend's
+answer is one member of the pair"**, and what it measures is:
+
+| Rule | M1 | after [A16] |
+|---|---|---|
+| *answered the pair's has-type* | — | **21,154** |
+| `DefaultedPosition` | 21,148 | 2,114 |
+| `ArrayShape` | 3,449 | 1,408 |
+| `SameAfterResolve` | 384 | 356 |
+| `LessSpecific` | 676 | 676 |
+| `Diverges` | 55 | 4 |
+
+Of the **22,321** answers that differed from the destination type, **21,154 are
+the has-type** — the other member, which is a different question and not a
+disagreement. **1,167 are left.** The rule counts above cover both halves of the
+gate, and 3,391 of the 4,558 remaining are the backend-against-backend half,
+which a pair cannot arbitrate: two engines disagreeing with each other about one
+node is not answered by giving the node two types. The largest class of the
+1,167 is `LessSpecific` — the native backend's own substitution keeping a `T`
+the recorded answer does not have (`Slots<T>` for `Slots<Int64>`, 143 in one
+class) — which §3 M1 already named as the class M3 **deletes** rather than
+reconciles, and which is therefore exactly the right residue for a shadow PR to
+leave.
+
+**Three things the amendment did not survive contact with.**
+
+1. **The has-type is derived, not read.** [A16] said the form "must carry the
+   node's own type"; the checker does not compute one, because it types every
+   expression against its destination. So `vyrn-lower` derives it — §2.1 item 2
+   records the correction where the item stands.
+2. **The largest single class was not the checker's context. It was the
+   backends' word size.** 14,564 of `DefaultedPosition`'s 21,148 are
+   `Expr::Byte`: the checker answers `UInt8` with or without a destination, and
+   both backends answer `Int64` (`lib.rs:5445`, `direct.rs:4790`), because a byte
+   literal is an `i64` immediate that narrows at its use. So the pair explains
+   these only because **the form's has-type is the backends' `Int64` and not the
+   checker's `UInt8`** — a representation answer where the checker gives a type
+   answer. That is the right recording, and the reason is the whole point of the
+   pair: `coerce(has → needs)` has to be the code the backend actually emits, and
+   recording `UInt8` would make the narrowing disappear. It is also a decision
+   M5 inherits, because M5 is where `coerce` moves.
+3. **`ArrayShape` halved rather than collapsed.** An array literal HAS a
+   fixed-size array — `ArrayN(elem, n)` — and ENDS UP whatever it is stored as,
+   which is [A16] again one level down. The 1,408 that remain are almost all the
+   backend-against-backend half.
+
+`vyrn emit-lowered` prints the pair as `Int64 => Int32` where it has two
+members, and the whole corpus of blessed dumps moved **one line**:
+`call Err : Result<Int64, Int64> => Result<Age, Int64>` in `option.lowered`,
+which is the amendment rendered. Emitted output is byte-identical by
+construction: nothing in either emitter changed, and full parity is green.
+
+**What did not land, and the measurement that says why.**
+
+The delete half is blocked on M2's finding 1, and this milestone is where the
+brief that ordered it and the code disagree. **9,187 backend answers are about
+AST that is not in the program** — a `Function` a backend `clone()`s before it
+lowers an RFC-0023 specialization or lifts an RFC-0037 lambda. Those nodes have
+no address in the program, so no recorded type exists at them. Deleting `peek`
+around them means keeping a second lookup for the bodies the backend
+synthesizes, which is two type mechanisms where there was one and is worse than
+the duplication it replaces.
+
+So the delete half needs the milestone M2 named: **the lowering owns
+specialization and lambda lifting**, and hands each backend a body rather than a
+name. That was priced here rather than attempted: `direct.rs`'s `Pending` carries
+an `Rc<Function>` plus a per-target `Sig` and **a wasm function index reserved at
+discovery — `direct.rs:857` says the order IS the numbering** — and `lib.rs`'s
+`HoInst` carries a resolved `target_sym` that exists only after a lambda has been
+lifted. 158 lines across the two files mention the mechanism by name. Moving it
+is a milestone with its own PR pairs and its own byte-identity risk, not the
+second half of this one.
+
+**The gate, and the verdict.** M3's gate was −1,200 lines across the two
+backends. **M3a is 444 changed lines and deletes nothing, so M3 misses its gate
+by the whole of it, and this paragraph is where it says so.** Nothing on the
+deletion list moved: `peek`, `peek_arm`, `peek_ho`, `gen_peek`, `match_ty`,
+`join`, `static_ty`, both `expect` stacks, both copies of `expected_fn_sig` /
+`fn_arg_param_types` / `resolve_fn_arg`, `declared::type_of`, `solve_param`'s
+backend call sites and the `(String, Type)` convention are all still there, and
+each is still there for the same reason: a backend cannot read a type at a node
+the program does not have. **The −1,200 is not withdrawn — it is re-parented**
+onto the milestone that moves the bodies, which is where the deletion becomes
+possible rather than merely large.
 
 **M4 — release placement.** The lowering emits ordered `Release` steps at the
 exits `own` computes, and the backends encode them. The three scope-frame stacks,

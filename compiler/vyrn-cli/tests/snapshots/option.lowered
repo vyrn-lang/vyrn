@@ -67,7 +67,7 @@ fn parseAge(n: Int64) -> Result<Age, Int64>                              @24
         call Age : Age                                                   @26
           var n : Int64                                                  @26
   return                                                                 @28
-    call Err : Result<Age, Int64>                                        @28
+    call Err : Result<Int64, Int64> => Result<Age, Int64>                @28
       var n : Int64                                                      @28
 
 fn safeDiv(a: Int64, b: Int64) -> Option<Int64>                          @8

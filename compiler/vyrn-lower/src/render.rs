@@ -5,6 +5,9 @@
 //!
 //! 1. **One decision per line**, and indentation is the only structure.
 //! 2. **A type on every expression**, so `grep ': Array<'` is a whole query.
+//!    Two, where the node's own answer and its destination differ: `Int64 =>
+//!    Int32` is a value that HAS an `Int64` and must END UP an `Int32`, which is
+//!    the pair of RFC-0101 §2.1 item 2 [A16] and the thing `coerce` is for.
 //! 3. **The position is the last column**, so a diff that only moves lines looks
 //!    different from a diff that changes a decision, at a glance.
 //! 4. **Instantiations are spelled, symbols are not** — `map<Int64, String>`,
@@ -51,7 +54,7 @@ pub fn render(lowered: &Lowered, source: &str) -> String {
             for _ in 0..=row.depth {
                 line.push_str("  ");
             }
-            line.push_str(&row_text(row.node, row.ty.as_ref()));
+            line.push_str(&row_text(row.node, row.ty.as_ref(), row.has.as_ref()));
             pos(&mut out, line, row.line);
         }
     }
@@ -90,14 +93,20 @@ fn pos(out: &mut String, text: String, line: u32) {
 }
 
 /// One row's head: what the node is, what it names, and what type it has.
-fn row_text(node: Node, ty: Option<&vyrn_frontend::ast::Type>) -> String {
+fn row_text(
+    node: Node,
+    ty: Option<&vyrn_frontend::ast::Type>,
+    has: Option<&vyrn_frontend::ast::Type>,
+) -> String {
     let mut s = node.kind().to_string();
     if let Some(name) = names(node) {
         s.push(' ');
         s.push_str(&name);
     }
-    if let Some(t) = ty {
-        s.push_str(&format!(" : {t}"));
+    match (has, ty) {
+        (Some(h), Some(t)) => s.push_str(&format!(" : {h} => {t}")),
+        (None, Some(t)) | (Some(t), None) => s.push_str(&format!(" : {t}")),
+        (None, None) => {}
     }
     s
 }

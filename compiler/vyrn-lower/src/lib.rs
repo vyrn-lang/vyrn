@@ -1,4 +1,4 @@
-//! The lowered form — RFC-0101 M1.
+//! The lowered form — RFC-0101 M1, amended by M3.
 //!
 //! > The checker's answers become a value. One lowering produces it. A backend
 //! > reads it and encodes it, and decides nothing the lowering already decided.
@@ -15,10 +15,15 @@
 //! the rest. The cost of the owned form against this one is measured in
 //! `vyrn-cli/tests/lowered.rs` and written into the RFC.
 //!
-//! **It derives nothing.** Every type here is the checker's own answer, read out
-//! of [`vyrn_frontend::checker::record`] and substituted through the
-//! instantiation the body is being lowered for. A lowering that re-derived types
-//! would be a sixth copy of the derivation RFC-0101 §1.2 counts five of.
+//! **It derives one thing, and M3 is where that stopped being none.** Every
+//! [`Row::ty`] is the checker's own answer, read out of
+//! [`vyrn_frontend::checker::record`] and substituted through the instantiation
+//! the body is being lowered for — a lowering that re-derived THAT would be a
+//! sixth copy of the derivation RFC-0101 §1.2 counts five of. [`Row::has`] is
+//! the other question, and the checker holds no answer to it: it types every
+//! expression against its destination. So [`has_of`] derives it, in one closed
+//! table, which is the derivation `peek` and `static_ty` are — written once
+//! below both backends instead of twice inside them.
 
 mod render;
 pub use render::render;
@@ -112,7 +117,28 @@ pub struct Row<'a> {
     /// instantiation this body is. `None` for a statement row, and for an
     /// expression the checker never routed through `Checker::expr` — see
     /// [`Instance::untyped`].
+    ///
+    /// This is the type the value must END UP as: the destination the checker
+    /// validated the node against. See [`Row::has`] for the other half.
     pub ty: Option<Type>,
+    /// The type the value HAS when this node's code has run, before the
+    /// `coerce` that follows — RFC-0101 §2.1 item 2, amendment **[A16]**.
+    ///
+    /// `None` means "the same as [`Row::ty`]", which is the ordinary case: the
+    /// two questions have one answer at every node whose own form settles its
+    /// type. Where they differ, the difference is the context: `1` under an
+    /// `Int32` destination HAS an `Int64` and must END UP an `Int32`, and both
+    /// engines are right about a different question. M1 measured that single
+    /// difference as 21,140 of its 22,283 disagreements.
+    pub has: Option<Type>,
+}
+
+impl Row<'_> {
+    /// The pair, as a backend reads it: what the value has, and what it must end
+    /// up as. Either may be absent for a node the checker never typed.
+    pub fn pair(&self) -> (Option<&Type>, Option<&Type>) {
+        (self.has.as_ref().or(self.ty.as_ref()), self.ty.as_ref())
+    }
 }
 
 /// One function, instantiated. Zig's shape (RFC-0101 §2.1 item 1): no type
@@ -448,6 +474,7 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
         line,
         node: Node::Stmt(s),
         ty: None,
+        has: None,
     });
     let d = depth + 1;
     match s {
@@ -462,7 +489,9 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
                 None => w.rows.get(here + 1).and_then(|r| r.ty.clone()),
             };
         }
-        Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => expr(value, d, chain, w),
+        Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
+            expr(value, d, chain, w);
+        }
         Stmt::IndexSet { index, value, .. } => {
             expr(index, d, chain, w);
             expr(value, d, chain, w);
@@ -505,7 +534,9 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
             expr(iter, d, chain, w);
             block(body, d, chain, w);
         }
-        Stmt::Expr(e) => expr(e, d, chain, w),
+        Stmt::Expr(e) => {
+            expr(e, d, chain, w);
+        }
         Stmt::Region { body, .. } => block(body, d, chain, w),
     }
     // A literal carries no line of its own — `ast::Expr::line` returns 0 for the
@@ -519,14 +550,16 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
     }
 }
 
-fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
+fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) -> usize {
     let key = e as *const Expr as usize;
     let ty = w.recorded.node_types.get(&key).map(|t| apply(t, chain));
+    let here = w.rows.len();
     w.rows.push(Row {
         depth,
         line: e.line() as u32,
         node: Node::Expr(e),
         ty,
+        has: None,
     });
     // A generic call solves its callee's parameters, and the answer governs the
     // subtree it was solved from — see [`Chain`].
@@ -547,28 +580,31 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
         None => false,
     };
     let d = depth + 1;
+    // The direct children's row indices, in written order — what the has-type
+    // below is derived from, and the only reason this walk returns an index.
+    let mut kids: Vec<usize> = Vec::new();
     match e {
         Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
         Expr::Var { .. } => {}
         Expr::Unary { expr: inner, .. }
         | Expr::Try { expr: inner, .. }
-        | Expr::Field { expr: inner, .. } => expr(inner, d, chain, w),
-        Expr::Consume { place, .. } => expr(place, d, chain, w),
+        | Expr::Field { expr: inner, .. } => kids.push(expr(inner, d, chain, w)),
+        Expr::Consume { place, .. } => kids.push(expr(place, d, chain, w)),
         Expr::Binary { lhs, rhs, .. } => {
-            expr(lhs, d, chain, w);
-            expr(rhs, d, chain, w);
+            kids.push(expr(lhs, d, chain, w));
+            kids.push(expr(rhs, d, chain, w));
         }
         Expr::Call { args, .. } | Expr::TryConstruct { args, .. } | Expr::Spawn { args, .. } => {
             for a in args {
-                expr(a, d, chain, w);
+                kids.push(expr(a, d, chain, w));
             }
         }
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            expr(scrutinee, d, chain, w);
+            kids.push(expr(scrutinee, d, chain, w));
             for arm in arms {
-                expr(&arm.body, d, chain, w);
+                kids.push(expr(&arm.body, d, chain, w));
             }
         }
         Expr::IfExpr {
@@ -577,36 +613,124 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
             else_branch,
             ..
         } => {
-            expr(cond, d, chain, w);
-            expr(then_branch, d, chain, w);
+            kids.push(expr(cond, d, chain, w));
+            kids.push(expr(then_branch, d, chain, w));
             if let Some(b) = else_branch {
-                expr(b, d, chain, w);
+                kids.push(expr(b, d, chain, w));
             }
         }
         Expr::StructLit { fields, .. } => {
             for (_, v) in fields {
-                expr(v, d, chain, w);
+                kids.push(expr(v, d, chain, w));
             }
         }
         Expr::ArrayLit { elems, .. } => {
             for el in elems {
-                expr(el, d, chain, w);
+                kids.push(expr(el, d, chain, w));
             }
         }
         Expr::MapLit { entries, .. } => {
             for (k, v) in entries {
-                expr(k, d, chain, w);
-                expr(v, d, chain, w);
+                kids.push(expr(k, d, chain, w));
+                kids.push(expr(v, d, chain, w));
             }
         }
         Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(b) => expr(b, d, chain, w),
+            LambdaBody::Expr(b) => kids.push(expr(b, d, chain, w)),
             LambdaBody::Block(b) => block(b, d, chain, w),
         },
+    }
+    let own = has_of(e, &kids, w);
+    if own.as_ref() != w.rows[here].ty.as_ref() {
+        w.rows[here].has = own;
     }
     if pushed {
         chain.pop();
     }
+    here
+}
+
+/// The default an unconstrained position gets. Both compiled backends write
+/// `Int64` there — the element of an empty container, the unused side of a
+/// `Result`, a `None` whose payload nothing names — because an integer is what
+/// a machine word is, and nothing else in the program constrains it.
+const UNCONSTRAINED: Type = Type::Int;
+
+/// The type this node's own code produces, ignoring the destination — RFC-0101
+/// §2.1 item 2 [A16].
+///
+/// The checker cannot answer this: it types an expression against the type the
+/// context wants, and that answer is the OTHER half of the pair. So the form
+/// derives this half, from the node's own shape and its children's, in one
+/// place. That derivation is the one M3 deletes `peek` and `static_ty` in favour
+/// of, which is why it is a closed table here and not a second checker: every
+/// arm below is a node whose form settles its type without asking the context,
+/// and everything not in it answers `ty`.
+fn has_of(e: &Expr, kids: &[usize], w: &Walk<'_, '_>) -> Option<Type> {
+    let kid = |i: usize| -> Option<Type> {
+        let r = w.rows.get(kids.get(i).copied()?)?;
+        r.has.clone().or_else(|| r.ty.clone())
+    };
+    Some(match e {
+        // A numeric literal is its own width, and the destination is a coercion
+        // away. `Byte` too: both backends spell `'a'` as an `i64` immediate and
+        // narrow at the use, which the checker does not — it answers `UInt8`.
+        Expr::Int(_) | Expr::Byte(_) => Type::Int,
+        Expr::Float(_) => Type::Float,
+        // A pass-through: the node emits its child's value.
+        Expr::Consume { .. } | Expr::Unary { .. } => kid(0)?,
+        // A join carries the type of a branch, not of its destination. `panic`
+        // in the then-branch makes it `Never`, and the else answers.
+        Expr::IfExpr { .. } => match kid(1)? {
+            Type::Never => kid(2)?,
+            t => t,
+        },
+        // A `match` is typed by its arms, and a `match` whose every arm leaves
+        // the function produces no value to have a type — the bottom, which is
+        // what both backends answer and the checker cannot, because the checker
+        // is answering about the destination.
+        Expr::Match { arms, .. } => {
+            let mut t = Type::Never;
+            for i in 0..arms.len() {
+                match kid(i + 1) {
+                    Some(Type::Never) => {}
+                    Some(x) => {
+                        t = x;
+                        break;
+                    }
+                    None => return None,
+                }
+            }
+            t
+        }
+        // A literal container is its elements' type, and an empty one has no
+        // element to be typed by at all. A written array is a FIXED-size one
+        // until something stores it somewhere growable.
+        Expr::ArrayLit { elems, .. } => {
+            if elems.is_empty() {
+                Type::Array(Box::new(UNCONSTRAINED))
+            } else {
+                Type::ArrayN(Box::new(kid(0)?), elems.len())
+            }
+        }
+        Expr::MapLit { entries, .. } => Type::Map(
+            Box::new(Type::Str),
+            Box::new(if entries.is_empty() {
+                UNCONSTRAINED
+            } else {
+                kid(1)?
+            }),
+        ),
+        // A sum constructor names one side, and the other is unconstrained.
+        Expr::Var { name, .. } if name == "None" => Type::Option(Box::new(UNCONSTRAINED)),
+        Expr::Call { name, args, .. } if args.len() == 1 => match name.as_str() {
+            "Some" => Type::Option(Box::new(kid(0)?)),
+            "Ok" => Type::Result(Box::new(kid(0)?), Box::new(UNCONSTRAINED)),
+            "Err" => Type::Result(Box::new(UNCONSTRAINED), Box::new(kid(0)?)),
+            _ => return None,
+        },
+        _ => return None,
+    })
 }
 
 fn stmt_line(s: &Stmt) -> usize {
@@ -673,7 +797,10 @@ pub fn lint(l: &Lowered) -> Vec<String> {
         }
         let mut depth = None;
         for r in &i.rows {
-            if let Some(t) = &r.ty {
+            // Both members of the pair, because a has-type that still names a
+            // parameter is the same defect as a destination that does — and the
+            // has-type is the half a backend will read.
+            for t in [&r.ty, &r.has].into_iter().flatten() {
                 if matches!(t, Type::Err) {
                     bad.push(format!(
                         "{} @{}: an expression is typed `<type error>`, and a \
@@ -751,6 +878,47 @@ mod tests {
             let tys: Vec<&Type> = inst.rows.iter().filter_map(|r| r.ty.as_ref()).collect();
             assert_eq!(tys, vec![&want], "{}", inst.spelling());
         }
+    }
+
+    /// [A16]: a node carries what the value HAS and what it must END UP as, and
+    /// the two are one answer everywhere the node's own form settles it. `1`
+    /// under an `Int32` destination is the smallest program where they are two.
+    #[test]
+    fn a_literal_under_a_sized_destination_carries_both_types() {
+        let p =
+            program("fn main() -> Int64 {\n    let a: Int32 = 1\n    let b = 2\n    return 0\n}\n");
+        let l = lower(&p);
+        let pairs: Vec<(String, String)> = l.instances[0]
+            .rows
+            .iter()
+            .filter(|r| matches!(r.node, Node::Expr(Expr::Int(_))))
+            .map(|r| {
+                let (has, ty) = r.pair();
+                (
+                    has.map(|t| t.to_string()).unwrap_or_default(),
+                    ty.map(|t| t.to_string()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        // `1` has an Int64 and must end up an Int32; `2` and `0` have and end up
+        // the same type, and carry no second answer.
+        assert_eq!(
+            pairs,
+            vec![
+                ("Int64".to_string(), "Int32".to_string()),
+                ("Int64".to_string(), "Int64".to_string()),
+                ("Int64".to_string(), "Int64".to_string()),
+            ]
+        );
+        assert_eq!(
+            l.instances[0]
+                .rows
+                .iter()
+                .filter(|r| r.has.is_some())
+                .count(),
+            1,
+            "only the constrained literal carries a second type"
+        );
     }
 
     /// The lint is the gate, so it has to be able to fail. A type argument that
