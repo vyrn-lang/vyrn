@@ -1,0 +1,88 @@
+// A declared `release` carried across a `?` early return — RFC-0101 M4's
+// prediction, written before anything else in that milestone.
+//
+// The interpreter runs no drops on the `?` path: `Expr::Try` raises
+// `Ctrl::Return`, which `Interp::block` propagates through its `Err` arm without
+// touching the frame's pending drops, while a `return` statement goes through
+// `Flow::Return` and does run them. Both compiled backends emit the full
+// early-exit walk before the propagating `ret`. A `release` declared by a user
+// type is ordinary Vyrn and can print — so if the three engines really disagree
+// here, the disagreement is observable, and the corpus simply never reached it.
+//
+// This file is the pin. Whatever the three engines do at a `?` that steps over a
+// declared owner, they now do it in the parity gate.
+
+/// A type that owns heap and can say how to give it back (RFC-0086 M1).
+protocol Owned {
+    fn release(consume self)
+}
+
+type Ring = {
+    label: String
+}
+
+impl Owned for Ring {
+    fn release(consume self) {
+        print("release " + self.label)
+    }
+}
+
+fn ringOf(label: String) -> Ring {
+    return Ring { label: label.copy() }
+}
+
+fn missing() -> Option<Int64> {
+    return None
+}
+
+fn failing() -> Result<Int64, String> {
+    return Err("no")
+}
+
+/// The prediction, in its smallest form: an owner is live, and `?` leaves the
+/// function past it.
+fn overOption() -> Option<Int64> {
+    let r = ringOf("option")
+    let v = missing()?
+    return Some(v)
+}
+
+/// The same over `Result`, whose `?` takes a different arm of the interpreter's
+/// `Try` and the same early-exit walk in both backends.
+fn overResult() -> Result<Int64, String> {
+    let r = ringOf("result")
+    let v = failing()?
+    return Ok(v)
+}
+
+/// Two frames deep, so an exit that skips one frame and not the other is visible
+/// as a missing line rather than as a reordering.
+fn nested() -> Option<Int64> {
+    let outer = ringOf("outer")
+    if true {
+        let inner = ringOf("inner")
+        let v = missing()?
+        return Some(v)
+    }
+    return Some(0)
+}
+
+/// The control: the same shape with an explicit `return` instead of a `?`. All
+/// three engines have always agreed here, and the pair is what makes the `?`
+/// lines above readable.
+fn overReturn() -> Option<Int64> {
+    let r = ringOf("return")
+    return None
+}
+
+fn main() -> Int64 {
+    let a = overOption()
+    print("after option")
+    let b = overResult()
+    print("after result")
+    let c = nested()
+    print("after nested")
+    let d = overReturn()
+    print("after return")
+    return 0
+}

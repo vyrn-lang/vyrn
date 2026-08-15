@@ -2702,8 +2702,9 @@ impl<'a> Interp<'a> {
 
     fn block(&self, block: &Block, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
         scope.push(Frame::default());
-        // Values reclaimed when this frame exits (normally or via `return`),
-        // mirroring the native backend's block-exit drops. Only a reference
+        // Values reclaimed when this frame exits — normally, via `return`,
+        // `break` or `continue`, or via a propagating `?` — mirroring the native
+        // backend's block-exit drops. Only a reference
         // release is observable here (the slab slot is recycled and stale
         // aliases must trap); string/array buffers are host-reclaimed.
         //
@@ -2757,7 +2758,23 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
+                // A `?` leaves the function through the error channel
+                // (`Ctrl::Return`), and a propagating `?` is a function exit like
+                // any other: both compiled backends emit the whole early-exit
+                // walk before the `ret` they propagate through
+                // (`Gen::emit_all_drops`, `Fn_::emit_releases_above`). This arm
+                // used to skip it, and RFC-0101 M4 wrote the program that made
+                // the skip visible: a declared `release` is ordinary Vyrn and can
+                // print, so the three engines printed different output for
+                // `examples/releaseacrosstry.vyrn` and the corpus had never
+                // reached it.
+                //
+                // A genuine error (`Ctrl::Err`) is not an exit — it traps, and
+                // neither backend reclaims anything on the way out of a trap.
                 Err(e) => {
+                    if matches!(e, Ctrl::Return(_)) {
+                        self.run_drops(&drops, scope)?;
+                    }
                     scope.pop();
                     return Err(e);
                 }
