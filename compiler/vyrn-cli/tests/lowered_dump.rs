@@ -115,3 +115,19 @@ fn releaseacrossexit_lowers_to_its_blessed_dump() {
         "releaseacrossexit.lowered",
     );
 }
+
+/// The fifth, added by M6's second phase, and it is a gate on the SHARING
+/// rather than on the format.
+///
+/// A `place at` is inlined at its access site, so the nodes under `call @at`
+/// are nodes the source does not contain. Until the driver opened a
+/// [`vyrn_frontend::project::Memo`] the checker `vyrn_lower::lower` runs
+/// expanded one tree and the lowering's own walk expanded another, and the
+/// second one asked `Recorded` for a type at an address the first one's dead
+/// tree had been freed from — so this dump printed `var w : String` for a
+/// `Window`. Nothing in the other four reaches a projection, so nothing here
+/// held it. A dump that renders an expansion is the cheapest thing that does.
+#[test]
+fn projection_lowers_to_its_blessed_dump() {
+    check("examples/projection.vyrn", "projection.lowered");
+}

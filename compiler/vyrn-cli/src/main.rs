@@ -401,16 +401,19 @@ fn real_main() -> ExitCode {
         // so `check` emits and throws the code away, and reports the depth
         // refusal alone — every other codegen error stays `build`'s.
         "check" => match load_program(path, &source) {
-            Ok(program) => match vyrn_codegen::check_instantiations(&program) {
-                Ok(()) => {
-                    println!("ok");
-                    ExitCode::SUCCESS
+            Ok(program) => {
+                let _memo = shared_desugars();
+                match vyrn_codegen::check_instantiations(&program) {
+                    Ok(()) => {
+                        println!("ok");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        ExitCode::FAILURE
+                    }
                 }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    ExitCode::FAILURE
-                }
-            },
+            }
             Err(code) => code,
         },
         "run" => {
@@ -418,6 +421,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
+            let _memo = shared_desugars();
             match vyrn_frontend::interp::run_with_args(&program, &prog_args) {
                 Ok(code) => {
                     // main's return value becomes the process exit code (0..=255).
@@ -434,6 +438,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
+            let _memo = shared_desugars();
             match vyrn_codegen::emit(&program) {
                 Ok(ir) => {
                     print!("{ir}");
@@ -453,6 +458,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
+            let _memo = shared_desugars();
             match vyrn_codegen::direct::wat(&program) {
                 Ok(wat) => {
                     print!("{wat}");
@@ -474,6 +480,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
+            let _memo = shared_desugars();
             let lowered = vyrn_lower::lower(&program);
             print!("{}", vyrn_lower::render(&lowered, path));
             ExitCode::SUCCESS
@@ -2515,6 +2522,30 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
     }
 }
 
+/// Share every projection expansion for the rest of this command
+/// ([`vyrn_frontend::project::Memo`], RFC-0101 M2d).
+///
+/// `a[i]` and `for x in c` over a user container inline a `place at` / `place
+/// nth` AT the access site, so the nodes an engine walks there are nodes the
+/// source does not contain. Without this every engine expands for itself: the
+/// lowering, the interpreter and each backend land on three sets of addresses,
+/// and a side table keyed by address — `own`'s rows, `movecheck`'s, the
+/// lowering's own — cannot reach any but its own. With it there is one tree per
+/// site, typed by the checker `vyrn_lower::lower` runs, and every engine reads
+/// the same answers. Until RFC-0101 M6's second phase this was opened by the
+/// corpus gate only, so every residue number the RFC records was measured under
+/// a sharing a released compiler did not do.
+///
+/// **After the load, deliberately.** The loader runs generators (RFC-0021) by
+/// loading and checking whole programs of their own and throwing them away, and
+/// a memo keyed by node address over a program that dies is the leak the
+/// `Memo` doc warns about — with the verification bill still attached. What
+/// this covers is the one program the command is about, from the point it is
+/// linked to the point it has been lowered and emitted.
+fn shared_desugars() -> vyrn_frontend::project::Memo {
+    vyrn_frontend::project::Memo::open()
+}
+
 /// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
 /// use with a `warning: ` marker. Returns whether the run should FAIL — only
 /// under `--deny-warnings`, and never otherwise (RFC-0071 M2b).
@@ -2800,6 +2831,7 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    let _memo = shared_desugars();
     // A file with no root-module tests: nothing to run.
     let has_tests = program.tests.iter().any(|t| t.module.is_none());
     if !has_tests {
@@ -2913,6 +2945,7 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    let _memo = shared_desugars();
 
     // Root-file benches only (RFC-0055), in declaration order, name-filtered.
     let matches = |name: &str| filter.as_deref().is_none_or(|sub| name.contains(sub));
@@ -3501,6 +3534,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    let _memo = shared_desugars();
 
     // `vyrn serve` requires `fn handle(req: Request) -> Response` (exactly this
     // signature — the checker's no-`main` exemption uses the same rule).
@@ -3732,6 +3766,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    let _memo = shared_desugars();
     use vyrn_frontend::ast::Type;
     let has_handle = program.functions.iter().any(|f| {
         f.name == "handle"
@@ -4595,6 +4630,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
+    let _memo = shared_desugars();
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)
     let stem = Path::new(path)
         .file_stem()

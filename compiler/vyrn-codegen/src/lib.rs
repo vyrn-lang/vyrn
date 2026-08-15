@@ -745,6 +745,27 @@ pub mod observe {
     pub struct Row {
         pub site: Site,
         pub kind: &'static str,
+        /// The tree the answer was given inside, when it is one an engine
+        /// CLONED rather than one the program holds (RFC-0101 M6's second
+        /// phase). `""` for an ordinary node.
+        ///
+        /// Two clones are left in the compiler and this is what sizes each:
+        ///
+        /// - `"lambda"` — `Fn_::lift_lambda` copies a lambda's body, so every
+        ///   node in it, and in every projection expansion built while walking
+        ///   it, is off-program by construction. The textual backend never sets
+        ///   this: it lifts by walking the literal's OWN nodes.
+        /// - `"pred"` — a `where` predicate lives on a `TypeDecl`, both
+        ///   backends read theirs out of a cloned `types::decl_map`, and each
+        ///   validation site then clones the predicate again to get past the
+        ///   borrow checker. Two levels of copy, at every value boundary a
+        ///   refined type crosses.
+        ///
+        /// M6's first phase named the first class and could not size it, and
+        /// did not know the second existed. A bucket priced by size is the
+        /// mistake its own ledger catches, so both are counted rather than
+        /// argued.
+        pub ctx: &'static str,
         /// The AST node's address — the identity `own` and `movecheck` use.
         pub node: usize,
         /// The instantiation the emitter was inside, sorted by parameter name.
@@ -774,6 +795,7 @@ pub mod observe {
 
     thread_local! {
         static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static CTX: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
         static ROWS: std::cell::RefCell<Vec<Row>> = const { std::cell::RefCell::new(Vec::new()) };
         static INSTS: std::cell::RefCell<Vec<Inst>> = const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -812,6 +834,12 @@ pub mod observe {
 
     pub(crate) fn on() -> bool {
         ON.with(|o| o.get())
+    }
+
+    /// Mark the rows recorded from here on as being inside a cloned tree, and
+    /// give back what the mark was so the caller can put it back.
+    pub(crate) fn set_ctx(v: &'static str) -> &'static str {
+        CTX.with(|f| f.replace(v))
     }
 
     /// The expression kind a row is reported under — and for a variable, the
@@ -888,6 +916,7 @@ pub mod observe {
             r.borrow_mut().push(Row {
                 site,
                 kind,
+                ctx: CTX.with(|f| f.get()),
                 node,
                 subst,
                 ty: ty.clone(),
@@ -5937,7 +5966,10 @@ impl<'a> Gen<'a> {
                 self.scope.push(Vec::new());
                 let slot = self.declare("value", &decl.base);
                 self.emit(format!("store {base_ll} {v}, ptr {slot}"));
-                let (cond, _) = self.gen_expr(pred)?;
+                let was = crate::observe::set_ctx("pred");
+                let cond = self.gen_expr(pred);
+                crate::observe::set_ctx(was);
+                let (cond, _) = cond?;
                 self.scope.pop();
                 cond
             }
@@ -11648,7 +11680,10 @@ impl<'a> Gen<'a> {
             let ll = self.llt(&ty);
             self.emit(format!("store {ll} {val}, ptr {slot}"));
         }
-        let (cond, _) = self.gen_expr(&pred)?;
+        let was = crate::observe::set_ctx("pred");
+        let cond = self.gen_expr(&pred);
+        crate::observe::set_ctx(was);
+        let (cond, _) = cond?;
         self.scope.pop();
         Ok(cond)
     }

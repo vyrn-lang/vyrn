@@ -319,6 +319,21 @@ struct Tally {
     /// still answer 501 questions cannot be deleted, and a lookup added beside
     /// it is the second type mechanism RFC-0101 §1.2 exists to remove.
     synthesized: usize,
+    /// …of which this many were answered while the direct backend was lowering
+    /// a LIFTED LAMBDA's body (RFC-0101 M6's second phase).
+    ///
+    /// M6's first phase ended by saying the residue's address is
+    /// `Fn_::lift_lambda`'s clone and that "what is still owed before that
+    /// phase starts is one measurement this one did not make: which of the 299
+    /// are inside a lifted body and which are not". This is that measurement,
+    /// kept rather than taken once.
+    in_lambda: usize,
+    /// …and this many while it was walking a `where` predicate — a tree BOTH
+    /// backends clone twice over (`types::decl_map` copies the `TypeDecl`, then
+    /// each validation site copies its predicate again). RFC-0101 has never
+    /// named this clone; M6's second phase found it by measuring the class it
+    /// expected to be the lambda's and finding the class was not there.
+    in_predicate: usize,
     /// Instantiations one backend emitted that the lowering's worklist does not
     /// have. This is M2's gate and it is zero.
     missing: usize,
@@ -901,13 +916,13 @@ fn gate() {
         // Half one: the two compiled backends against EACH OTHER. This is the
         // sentence RFC-0101 §1.1 says nothing checks — "the two copies agree" —
         // and it needs no interpretation to gate.
-        let mut per_node: HashMap<(usize, String), Vec<(Site, Type, &'static str)>> =
+        let mut per_node: HashMap<(usize, String), Vec<(Site, Type, &'static str, &'static str)>> =
             HashMap::new();
         for row in &rows {
             per_node
                 .entry((row.node, subst_key(&row.subst)))
                 .or_default()
-                .push((row.site, row.ty.clone(), row.kind));
+                .push((row.site, row.ty.clone(), row.kind, row.ctx));
         }
         for (key, answers) in &per_node {
             // Only nodes the lowering recorded. A backend also types AST it
@@ -920,19 +935,31 @@ fn gate() {
                     t.uninstantiated += 1;
                 } else {
                     t.synthesized += 1;
-                    for (site, _, kind) in answers {
-                        *residue.entry(format!("{site:?}/{kind}")).or_insert(0) += 1;
-                        residue_ex
-                            .entry(format!("{site:?}/{kind}"))
-                            .or_insert_with(|| name.clone());
+                    for (site, _, kind, ctx) in answers {
+                        match *ctx {
+                            "lambda" => t.in_lambda += 1,
+                            "pred" => t.in_predicate += 1,
+                            _ => {}
+                        }
+                        // The `~` half is RFC-0101 M6's second phase: which
+                        // CLONE the answer was given inside. Both are engine
+                        // copies of a tree the program holds, so the split says
+                        // how much of the residue a sharing move can reach and
+                        // which move it is.
+                        let k = format!(
+                            "{site:?}/{kind}{}{ctx}",
+                            if ctx.is_empty() { "" } else { "~" }
+                        );
+                        *residue.entry(k.clone()).or_insert(0) += 1;
+                        residue_ex.entry(k).or_insert_with(|| name.clone());
                     }
                 }
                 continue;
             };
-            let Some((_, first, _)) = answers.first() else {
+            let Some((_, first, ..)) = answers.first() else {
                 continue;
             };
-            for (site, ty, _) in answers.iter().skip(1) {
+            for (site, ty, ..) in answers.iter().skip(1) {
                 if ty == first {
                     continue;
                 }
@@ -1020,14 +1047,21 @@ fn gate() {
     );
 
     eprintln!("  RFC-0101 M4: {rel_lambda} release steps placed inside a lambda body");
+    eprintln!(
+        "  RFC-0101 M6: of {} off-program answers, {} were given inside a lifted          lambda's cloned body and {} inside a cloned `where` predicate",
+        t.synthesized, t.in_lambda, t.in_predicate
+    );
 
     let mut top: Vec<_> = residue.into_iter().collect();
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     let mut per_site: std::collections::BTreeMap<String, usize> = Default::default();
     for (k, n) in &top {
-        *per_site
-            .entry(k.split('/').next().unwrap().to_string())
-            .or_insert(0) += n;
+        let engine = k.split('/').next().unwrap();
+        let suffix = match k.rsplit_once('~') {
+            Some((_, tail)) => &k[k.len() - tail.len() - 1..],
+            None => "",
+        };
+        *per_site.entry(format!("{engine}{suffix}")).or_insert(0) += n;
     }
     eprintln!("  the residue, by engine: {per_site:?}");
     // …and by name, with an example to open. M5 measured this axis by editing

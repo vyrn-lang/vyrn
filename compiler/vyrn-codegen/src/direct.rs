@@ -532,7 +532,17 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             // specialization; the synthesized one inside the shell for a lifted
             // lambda, which is the one kind with nothing to borrow.
             let stmts = p.body.unwrap_or(&p.f.body);
-            let body = lower_body(&mut m, &p.f, stmts, &p.sig, &cx, p.binds.clone())?;
+            // RFC-0101 M6's second phase: the one body in this backend that is
+            // still a clone is the lifted lambda's, so the answers given while
+            // walking one are off-program by construction. The flag is what
+            // turns that sentence into a count.
+            let was = crate::observe::set_ctx(match p.key {
+                Key::Lambda(..) => "lambda",
+                _ => "",
+            });
+            let body = lower_body(&mut m, &p.f, stmts, &p.sig, &cx, p.binds.clone());
+            crate::observe::set_ctx(was);
+            let body = body?;
             cx.subst = HashMap::new();
             m.fill(p.sig.index, body);
             cx.mono.borrow_mut().done += 1;
@@ -4228,7 +4238,10 @@ impl<'p> Fn_<'_, 'p> {
                 );
             }
         };
-        let cond = self.expr(m, b, &pred)?;
+        let was = crate::observe::set_ctx("pred");
+        let cond = self.expr(m, b, &pred);
+        crate::observe::set_ctx(was);
+        let cond = cond?;
         self.scope.truncate(mark);
         if self.cx.resolve(&cond) != Type::Bool {
             return unsupported("a `where` clause that is not a Bool", line);
