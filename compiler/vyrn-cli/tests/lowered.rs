@@ -60,6 +60,16 @@
 //! [`Tally::synthesized`] and 526 → 4,707 into [`Tally::unrecorded`] — the form
 //! HOLDING a node it had no answer for.
 //!
+//! **M6 shares and types the WRITING half, and it is 40% of what was left.**
+//! `a[i] = v` expands a `place atSet` the same way `a[i]` expands a `place at`
+//! — but its receiver is a NAME, so the expansion was keyed on a synthesized
+//! `Expr::Var` sitting on the stack, and a stack address is not an identity.
+//! Each engine therefore built its own tree, of the projection's body AND the
+//! move-out/mutate/move-back group around the stored value. Keyed on the INDEX
+//! node instead ([`vyrn_frontend::project::stored`]) it is one tree, the
+//! checker types it, and [`Tally::synthesized`] is **3,266 -> 1,955** with
+//! `peek`'s own share **501 -> 299**.
+//!
 //! **M3b types them, and the typing is the checker's own.** An expansion is
 //! leaked, so its addresses are immortal and can be a key; and it is checked in
 //! the CALLER's scope, which is the only place the answer is concrete —
@@ -714,6 +724,7 @@ fn gate() {
     // (see [`Tally::synthesized`]), and the shape is what the next milestone is
     // briefed from.
     let mut residue: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut residue_ex: std::collections::BTreeMap<String, String> = Default::default();
     // …and the rows the form HOLDS and has no type for, on the same axis. This
     // is the half M3 moved: the checker types an expansion now, so what is left
     // here is a node class the checker itself never routes through
@@ -911,6 +922,9 @@ fn gate() {
                     t.synthesized += 1;
                     for (site, _, kind) in answers {
                         *residue.entry(format!("{site:?}/{kind}")).or_insert(0) += 1;
+                        residue_ex
+                            .entry(format!("{site:?}/{kind}"))
+                            .or_insert_with(|| name.clone());
                     }
                 }
                 continue;
@@ -1009,8 +1023,21 @@ fn gate() {
 
     let mut top: Vec<_> = residue.into_iter().collect();
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    top.truncate(8);
-    eprintln!("  the residue, by engine and expression kind: {top:?}");
+    let mut per_site: std::collections::BTreeMap<String, usize> = Default::default();
+    for (k, n) in &top {
+        *per_site
+            .entry(k.split('/').next().unwrap().to_string())
+            .or_insert(0) += n;
+    }
+    eprintln!("  the residue, by engine: {per_site:?}");
+    // …and by name, with an example to open. M5 measured this axis by editing
+    // `observe::kind_of` by hand and RFC-0101 M6 was briefed from the result;
+    // the edit is in the compiler now, so the ledger for the next milestone is
+    // a test run rather than a patch.
+    top.truncate(24);
+    for (k, n) in &top {
+        eprintln!("  residue {k}: {n}  (first: {})", residue_ex[k]);
+    }
     let mut untop: Vec<_> = untyped.into_iter().collect();
     untop.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     untop.truncate(8);
@@ -1102,19 +1129,22 @@ fn gate() {
     // again, so two of them collide — or do not — per run), and M2 measured that
     // spread at about ±200 on 9,500.
     //
-    // 9,505 -> 4,547 (M2c, by borrowing the callee's block) -> 3,294..3,484 here,
-    // by expanding a `place` projection ONCE for all three walks. The ceiling is
-    // just above the highest of the runs measured: a backend that goes back to
-    // expanding for itself, or to cloning a callee before it lowers it, fails
-    // here. What the number is now is NOT mostly desugars — see the residue line
-    // the run prints, which is `var`, `field` and `call` under both engines: the
-    // receivers a backend synthesizes to reach an implicitly dispatched
-    // `release`, `size` or `success`, and the body of a lifted lambda. The first
-    // class is M4's (the release steps move into the form); the second is the
-    // milestone that moves lambda lifting.
+    // 9,505 -> 4,547 (M2c, by borrowing the callee's block) -> 3,294..3,484
+    // (desugar-once, by expanding a `place at` projection ONCE for all three
+    // walks) -> 1,955 here, by sharing and typing the WRITING half as well:
+    // `a[i] = v` expands a `place atSet`, and that expansion was built by each
+    // backend for itself because its receiver is a name rather than a node.
+    // The ceiling is just above the highest of the runs measured: a backend
+    // that goes back to expanding for itself, or to cloning a callee before it
+    // lowers it, fails here. What is LEFT is named on the residue lines the run
+    // prints — the receivers a backend parks under a reserved name to reach its
+    // own call path (`@rel`, `@try`, `@a0`, `@c0`), a validation predicate's
+    // `value` (which lives on a type declaration, not in any body), and the
+    // body of a lifted lambda, which is the milestone that moves lambda
+    // lifting.
     assert!(
-        t.synthesized < 3_500,
-        "{} backend answers are about AST no instantiation of the program holds.          The desugar-once milestone brought that to 3,484 by expanding each          `place` projection once and handing the same nodes to the lowering and          to both backends, and M3 to 3,218 by typing those nodes; a number back          near 4,600 means an engine is expanding for itself again",
+        t.synthesized < 2_100,
+        "{} backend answers are about AST no instantiation of the program holds.          RFC-0101 M6 brought that to 1,955 by sharing and typing the `place atSet`          expansion; a number back near 3,300 means the store half is being          expanded per engine again, and one near 4,600 means the read half is too",
         t.synthesized
     );
 

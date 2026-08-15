@@ -3565,10 +3565,10 @@ impl<'p> Fn_<'_, 'p> {
                 // the seeded row yields this binding's own element.
                 // A user container's store is its own statement group, lowered
                 // by the statements this backend already has.
-                if let Some(stmts) =
+                if let Some(blk) =
                     vyrn_frontend::project::store_index(&self.cx.impls, name, index, value, &ty)?
                 {
-                    return self.block(m, b, &Block { stmts });
+                    return self.block(m, b, blk);
                 }
                 place
                     .addr(b, 0)

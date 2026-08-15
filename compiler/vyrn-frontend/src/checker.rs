@@ -3324,6 +3324,21 @@ impl<'a> Checker<'a> {
                 self.prove_coercion(value, &elem, *line)?;
                 self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
                 self.region_store_guard(name, &elem, scope, *line)?;
+                // …and the nodes the store LOWERS through, which are the
+                // `place atSet` projection inlined here plus the move-out /
+                // mutate / move-back group around it. The reading half has been
+                // typed since RFC-0101 M3b; the writing half was expanded by
+                // each backend for itself, so its nodes were AST the checker
+                // never saw. See [`record_desugar`].
+                if recording() {
+                    if let Ok(Some(blk)) =
+                        crate::project::store_index(self.impl_blocks, name, index, value, &b.ty)
+                    {
+                        self.record_desugar(scope, |c, sc| {
+                            c.block(blk, ret, sc);
+                        });
+                    }
+                }
                 Ok(false)
             }
             Stmt::Return { value, line } => {

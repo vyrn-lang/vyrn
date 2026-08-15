@@ -1,7 +1,20 @@
 # RFC-0101 — A Backend Is an Emitter
 
 - **Status:** **M1 implemented; M2, M2c, M2d, M3 and M4's first phase each half
-  implemented and each failing its own line gate**; M5–M6 proposed. **M4's step 0
+  implemented and each failing its own line gate; M5 implemented but for its
+  `coerce` half; M6's first phase implemented.** **M6's first phase shared the
+  WRITING half of a projection** — `a[i] = v` expands a `place atSet` whose
+  receiver is a name rather than a node, so its memo was keyed on a stack
+  temporary and every engine built its own tree — and the off-program residue
+  fell 3,266 → 1,955, `peek`'s share 501 → 299, with 326 of 326 emitted files
+  byte-identical. It also read M5's eleven-site ledger one site at a time and
+  **found ten sites of a different shape than the count implied**: each is a
+  one-node `Expr::Var` naming a value the backend parked in its own locals table,
+  which §2.3 keeps in a backend. So M3's −1,200 is not re-parented a fifth time;
+  it has an address, `Fn_::lift_lambda`'s cloned body, and §3 M6 states what is
+  still owed before that phase can start. §2.4 now carries **the list** of every
+  declared difference, which is the promise that section has been making since
+  [A2]. **M4's step 0
   is this arc's first real defect find, and it is in the invariant the RFC calls
   the best thing the project has built**: the milestone predicted that a declared
   `release` carried across a `?` would print in the two backends and not in the
@@ -331,6 +344,13 @@ The ladder is the function; the target vocabulary is its leaves — each decisio
 emits one to four instructions. `direct.rs:3797` names its referee out loud:
 "that is what the interpreter does".
 
+**This table adds up to one number and two functions, and M6's first phase
+measured which.** The two compiled ladders take a type PAIR; the interpreter's
+takes a value and a target and has no `from` at all, because it walks an untyped
+`Val`. So the 505 is 344 lines of one decision and 161 of a different one, and a
+shared plan can serve two engines before M6 and three after it. §2.4's list row 4
+is where that lives.
+
 **A correction to the brief this RFC was written from, and to §5 of the census.**
 Both said the *validation* ladder — which predicate is checked in what order — is
 duplicated. It is not. The min/max/multipleOf/minLength/maxLength/pattern order is
@@ -644,6 +664,26 @@ It is also the phase with the largest cost, which is why it is last (§3, M6).
 `interp::expr` is 1,847 lines and `interp::stmt` is 775; they walk `Expr` and
 `Stmt` today, and pointing them at `Lowered` is a rewrite of the walk even though
 it is not a rewrite of the semantics.
+
+**THE LIST. Every place an engine deliberately does not run what the form says,
+in one place, because "few enough of them to list" is a promise and this is the
+list.** M6's first phase writes it; a milestone that adds a difference adds a row
+here, and a difference NOT here is a bug rather than a decision — which is the
+whole of what the paragraph above promises.
+
+| # | The engine | What it does instead | Why | What holds it |
+|---|---|---|---|---|
+| 1 | interp | runs 2 of `own`'s 7 `DropKind`s | a `String` or an array buffer is reclaimed by the host at exit; the two it runs are the two a program can observe — a declared `release` and the walk that reaches one | `RelRule::HostReclaims` in `vyrn-cli/tests/lowered.rs`, a **subsequence** test: this engine may run fewer steps, never a different order |
+| 2 | interp | derives its own release ORDER rather than reading the placement | `run_drops` looks a binding's value up by name across the frames being popped, which is what `frozen` disambiguates; consuming the placement there is a rewrite of the unwinding for a deletion of one line (M4d's ledger) | the same gate, plus the nine per-exit-kind fixtures |
+| 3 | interp | never reaches `RelRule::Terminated` or `RelRule::StreamCursor` | a stream cursor is frame structure both compiled backends splice and this engine has no frame to splice it into (M4d, finding 1) | both rules were deleted rather than left to fire zero times |
+| 4 | interp | reconciles a boundary from the VALUE, not from a type pair | `Interp::coerce(v, ty)` has no `from` argument at all: it matches on the target type and the runtime `Val`. The two compiled backends match on `(from, to)`. §1.5 priced one ladder across three engines and it is two ladders — a shared plan can serve two of the three, and the third can consume one only once it runs the form, which is this milestone | measured in M6's first phase; nothing gates it yet, because there is nothing shared for it to disagree with |
+| 5 | interp | does not monomorphize | it substitutes at the call and walks the one generic body; §2.1 item 1 chose Zig's instantiation for the engines that EMIT | the instance-list half of the corpus gate compares the lowering against the two backends only |
+
+**Two things are deliberately NOT on this list.** The `?` path — §1.4 recorded it
+as an intentional difference and M4's step 0 proved it was a defect, so it is
+fixed and pinned by `examples/releaseacrosstry.vyrn` rather than declared. And
+trap wordings — M5b put every one of them below all three engines, and
+`vyrn-cli/tests/traps.rs` asserts nobody re-spells one.
 
 ### 2.5 What the census asked for, and what is not needed
 
@@ -2339,6 +2379,203 @@ substitution. Release placement is second-to-last among the semantic moves becau
 it is where the bugs are and it wants the most gate coverage under it. Traps are
 late because they are cheap and independent — the one milestone that could be
 pulled forward if M3 turns out to be bigger than measured.
+
+### M6 first phase — the WRITING half of the projection. THE `place atSet` EXPANSION IS ONE SHARED, CHECKER-TYPED TREE AND THE OFF-PROGRAM RESIDUE FALLS 3,266 → 1,955; AND THE SITES M5 HANDED OVER AS THIS MILESTONE'S LEDGER ARE NOT TYPE DERIVATIONS AT ALL, WHICH IS WHY MEASURING THEM FIRST WAS THE WHOLE OF STEP 1
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M6a | `place atSet` shares one expansion and the checker types it; the lowering walks it; the residue gate reports by NAME; §2.4's list; this text | 169 code + this text | 6 + this file |
+
+#### The ledger M5 handed over, read one site at a time
+
+M5's residue table said the `−1,200` lives where "both compiled backends
+synthesize AST during their walk at more than a dozen sites", and named
+"eleven further `Expr::Var` sites" in `direct.rs` as the address. **Read one by
+one they are ten, not eleven, and every one of them is the same shape — which is
+a different shape from the one the sentence implies.**
+
+| site | the name it spells | what it is |
+|---|---|---|
+| `direct.rs:1983` | `@a{i}` | the defunctionalized dispatcher's own parameters (RFC-0037) |
+| `:2048` | `@c{i}` | the same dispatcher's captures, copied out of the heap block |
+| `:2288` | `@rel` | the release receiver, parked so `Rel::Call` reaches `call` |
+| `:4414` | `@lazy` | a `lazy T` field being forced through `fnval_call` |
+| `:7052` | the receiver's own name | a call through a stored `fn` value |
+| `:7661` | `bnd.cap_srcs` | the capture sources of a `fn`-typed parameter, at `target_call` |
+| `:7686` | `bnd.cap_srcs` | the same, at `resolve_fn_arg` |
+| `:8040` | `cap_names` | the same, at `lift_lambda`'s return |
+| `:8253` | `bnd.cap_srcs` | the same, at `fnval_binding` |
+| `:11003` | `@try` | the `?` receiver, parked so `Fallible`'s methods reach `call` |
+
+**Every one is a ONE-NODE tree whose type the backend wrote down one line
+earlier.** The pattern is identical at all ten: `scope.push((name, place, ty))`
+and then an `Expr::Var` naming it, because `call` / `emit_call` / `fnval_call`
+take `&[Expr]` and passing a raw address instead would be a second
+argument-passing convention beside the one that exists. `peek`'s arm for such a
+node is `self.lookup(name, line)?.1` — **the backend's own locals table**, which
+§2.3 assigns to the backend in as many words ("Locals. SSA temps and `alloca` on
+one side; wasm locals and the shadow stack on the other").
+
+So the answer to step 1's question is the third option and not the first two:
+these sites are an encoder concern, they keep their leaf, and no recorded type
+could reach them because there is nothing recorded to reach — the type is a fact
+about a wasm local, not about a program. **They are ledgered closed by §2.3, and
+the `−1,200` does not live here.** What the sentence in M5's record got right is
+the class; what it got wrong is which members of it matter, and the way to find
+out was to read all ten rather than to price the bucket.
+
+#### Where it did live, and it is one key
+
+The residue's other half is named program bindings — `value`, `cells`, `nums`,
+`strs`, `self` — inside trees that carry expressions the SOURCE wrote. M2d closed
+one such class by sharing the expansion of a `place at`. **Its writing half was
+never shared, and the reason is one line.**
+
+`a[i] = v` expands a `place atSet` exactly as `a[i]` expands a `place at`, but
+`Stmt::IndexSet` names its receiver rather than holding a node for it. So
+`project::store_index` synthesized an `Expr::Var` on the stack and handed it to
+`site`, whose memo is keyed by the receiver's ADDRESS — and a stack temporary's
+address is not an identity. The memo therefore missed on every call, each engine
+built its own tree of the projection's body AND the move-out/mutate/move-back
+group around the stored value, and the checker never saw any of them.
+
+**Keyed on the INDEX node instead** — a node of the program, alive for the whole
+compile, verified against the whole site (`name`, `index`, `value`) the way
+`Expansion` verifies its own — it is one tree. `Checker::stmt` types it at the
+store site with `record_desugar`, which is M3b's move applied to the half M3b
+did not reach; `vyrn_lower` reads it by anchor through `project::stored`, because
+the lowering stands at a `Stmt::IndexSet` with a NAME and has no scope of binding
+types to find the `place atSet` with; and both backends walk the shared block
+instead of a `Block` they built.
+
+#### Measured
+
+| | before | after |
+|---|---|---|
+| NODES no instantiation of the program holds (`Tally::synthesized`) | 3,266 | **1,955** |
+| the ANSWERS about them, by engine — `Peek` | 501 | **299** |
+| — `Native` | 1,498 | **798** |
+| — `Wasm` | 2,834 | **2,152** |
+| rows the form holds with no type (`Tally::unrecorded`) | 78 | **78** |
+| rows | 353,321 | 354,154 |
+
+The last two are the ones that had to hold. **78 → 78** is the sentence "the
+checker types it": a shared expansion the checker did NOT type would have moved
+those 833 new rows into `Tally::unrecorded` instead, which is sharing without
+deciding and is worse than not sharing. And `answered_has` (21,345), `differed`
+(1,327), the cross-backend count (4,503) and every rule tally are unchanged to
+the answer, which is what "this deletes nothing on purpose" looks like when the
+thing that moved is an identity rather than a decision.
+
+#### `peek`'s off-program answers are 299, and M3's `−1,200` is NOT re-parented a fifth time
+
+**The gate is not met and this is the terminal reason rather than a fifth
+schedule.** `peek` can read a recorded type only at a node the lowering
+recorded. After this phase 299 answers are at nodes it cannot, and they are two
+classes and no more:
+
+- **26 are `@rel`**, and the rest of the reserved-name class shows up under the
+  two emitting sites rather than under `peek` (`Wasm/var[@a0]` 74,
+  `Wasm/var[@c0]` 25, `Wasm/var[@a1]` 19). They are §2.3's, permanently. A `peek`
+  that read the form would still need this arm, so the class does not shrink; it
+  is simply not `peek`'s to delete. It is `lookup`'s.
+- **The rest are downstream of the one clone this arc has not shared.**
+  `Fn_::lift_lambda` clones a lambda's body (`direct.rs:7986`: `b.clone()`, and
+  `(**e).clone()` for the expression form), and a clone has addresses of its own —
+  so every node inside a lifted lambda is phantom by construction, and so is
+  every expansion built while walking one. The remaining buckets are consistent
+  with that and with nothing else this phase can point at:
+  `Peek/int` 168, `Peek/call` 50, `Native/var[value]` and `Wasm/var[value]` 132
+  each. **`value` is worth naming separately**, because it is not a lambda: it is
+  the binding a scalar `where` predicate uses, and a predicate lives on a
+  `TypeDecl` rather than in any function body, so no instance of the program
+  holds it. That one is a third class and a small one.
+
+**So the `−1,200` has an address now, and it is a body rather than a class of
+node.** Sharing a lifted lambda's body is the move this phase made, one level up:
+leak it, key it by the `Expr::Lambda` node, let the checker type it in the
+caller's scope. It is a phase of its own, with a hazard neither M2d nor this
+phase had — a lambda body is lowered under a SUBSTITUTION per specialization, so
+one shared tree needs the row-per-instantiation the form already carries and the
+`@pN` renaming does not. **What is still owed before that phase starts is one
+measurement this one did not make: which of the 299 are inside a lifted body and
+which are not.** The instrument now exists (the gate reports by name); the
+attribution does not, and writing the brief from the bucket instead is the
+mistake this section's own ledger catches M5 making.
+
+#### `coerce` did not move, and this time the reason is a signature rather than a size
+
+M5 recorded the ladder as "not started, not blocked, a phase". This phase did not
+start it either, and the reason is not the budget: reading the three functions
+BEFORE writing the shadow found something §1.5 did not have —
+**`Interp::coerce` is a different function.**
+
+| engine | signature | dispatches on |
+|---|---|---|
+| interp (`interp.rs:6411`) | `coerce(&self, v: Val, ty: &Type)` | the TARGET type and the runtime value's shape |
+| native (`lib.rs:2569`) | `coerce(&mut self, op: String, from: &Type, to: &Type)` | the type PAIR |
+| wasm (`direct.rs:3902`) | `coerce(&mut self, .., from: &Type, to: &Type, ..)` | the type PAIR |
+
+§1.5 counted 161 + 146 + 198 lines and called it "505 lines of the same
+decision". It is 344 lines of one decision and 161 lines of a different one. The
+interpreter has no `from` at a boundary because it walks an untyped `Val` — the
+static type of what it is holding is exactly the thing this RFC is moving into
+the form, so **the ladder can be shared by two engines now and by the third only
+once it runs the form**, which is this milestone and not a prerequisite of it.
+That is not a reason to defer the move; it is a correction to what the move buys,
+and the shadow that lands it should gate two engines and say so rather than gate
+three and discover this in its own step 0.
+
+#### Byte identity
+
+All 163 examples, both backends, `emit-ir` and `emit-wat` hashed against `main`
+at `46a6a43`, run from `examples/` with a relative filename: **326 of 326
+identical, raw** (34 of them pairs where both sides emit nothing — an expected
+check failure, a generator needing a cache — and those are identical too). This
+is the check that mattered most, because sharing an expansion changes WHICH nodes
+an emitter walks: the `@pN.x` temporaries `project::inline` mints now get one tag
+per site instead of one per engine, and the reason that is safe is written where
+it always was — "the names never reach the emitted output (a slot is `%tN`)", now
+verified rather than asserted.
+
+#### Three places this phase's brief did not survive contact with the code
+
+1. **"The gate prints it" — it did not.** The brief said to re-derive the
+   eleven-site list from the corpus gate's residue-by-name output. The gate prints
+   the residue by expression KIND; M5 got the names by hand-editing
+   `observe::kind_of` and the edit did not ship, so the next milestone's ledger
+   was a patch rather than a test run. It ships this time: `kind_of` interns
+   `var[name]`, the gate prints per-engine totals and the top rows with an example
+   to open, and the pool is bounded by the distinct variable names in one corpus.
+2. **The count was ten, not eleven, and the shape was not the one the count
+   implied.** Recorded above. A bucket priced by size said "trees the backends
+   rebuild"; ten reads said "the backend's locals table". Both sentences are about
+   `Expr::Var`, and only one of them names something a milestone can close.
+3. **The desugar-once sharing is ON only where the gate opens it, and this
+   phase inherits that rather than fixing it.** `project::Memo::open()` has
+   exactly one caller in the whole workspace and it is
+   `vyrn-cli/tests/lowered.rs`. A `vyrn build`, a `vyrn check` and
+   `vyrn emit-lowered` open none, so in production every engine still expands for
+   itself — including the lowering, whose `desugar` then records against addresses
+   the checker's own expansion does not have. The numbers M2d, M3b and this phase
+   report are therefore all measured with the sharing on, and they are honest
+   about what they measure; what is not yet true is that a released compiler
+   behaves that way. The remedy is one `Memo` held across the driver's
+   check-lower-emit sequence rather than around the gate, and it is not free:
+   the two compiled backends would then walk each other's nodes for the first
+   time, and the blessed `emit-lowered` dumps would gain the types the expansion
+   rows do not have today. **That is a phase, it is named here, and no milestone
+   above should be read as having shipped it.**
+
+#### The gate, and the verdict
+
+**169 changed lines across 6 files** — 147 added and 22 removed — against §3.0's
+≤ 800 / ≤ 15, plus this text. The corpus gate's `synthesized` ceiling moves
+3,500 → 2,100 and its comment says which sharing each step of 9,505 → 4,547 →
+3,484 → 1,955 bought. Full parity green, workspace green, `vyrn-lsp` green,
+`cargo fmt --check` clean on all three manifests. M3's `−1,200` is **not met**,
+its address is `lift_lambda`, and M5's coerce phase is **not started** for the
+reason above.
 
 ---
 
